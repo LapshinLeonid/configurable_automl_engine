@@ -13,6 +13,7 @@ import logging
 import pickle
 from pathlib import Path
 from typing import Any
+import threading
 
 import numpy as np
 import pandas as pd
@@ -106,6 +107,20 @@ class ModelTrainer:
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove unpicklable entries
+        if 'lock' in state:
+            del state['lock']
+        if 'logger' in state:
+            del state['logger']
+        return state
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Re-initialize the lock after unpickling
+        self.lock = threading.RLock()
+        # Re-initialize logger if necessary
+    
     def fit(self, X: Any, y: Any) -> ModelTrainer:
         """
         Обучает модель на данных (X, y).
