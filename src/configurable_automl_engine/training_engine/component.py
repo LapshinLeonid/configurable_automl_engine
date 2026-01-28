@@ -7,7 +7,6 @@ Training-engine: coarse HPO → accurate HPO → финальный fit & save.
 * поддержан новый параметр `general.n_folds` (кол-во сплитов для k-fold CV).
   Если стратегия валидации -- `k_fold`, значение прокидывается в hyperopt-модули.
 * ничего не меняется для `loo` и `train_test_split`.
-* код совместим с дробным oversampling (`DataOversampler`).
 """
 
 import importlib
@@ -32,8 +31,6 @@ from .metrics import (
 )
 from .thread_pool import run_parallel
 
-# ───────────────────────── oversampler ───────────────────────── #
-from configurable_automl_engine.oversampling import DataOversampler
 
 # ───────────────────────── canonical IAE ─────────────────────── #
 from ..hyperopt_module import InvalidAlgorithmError as _CanonicalIAE
@@ -124,6 +121,7 @@ def _fit_and_save(
     y: pd.Series,
     best_params: Dict[str, Any],
     model_path: Path,
+    cfg: Config,
 ):
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
@@ -132,7 +130,12 @@ def _fit_and_save(
         )
 
     trainer = getattr(trainer_module, "ModelTrainer")(
-        algorithm=algo_name, model_params=best_params
+        algorithm=algo_name, 
+        model_params=best_params,
+        # Пробрасываем настройки оверсэмплинга из конфига в тренер
+        data_oversampling=cfg.oversampling.enable,
+        data_oversampling_multiplier=cfg.oversampling.multiplier,
+        data_oversampling_algorithm=cfg.oversampling.algorithm
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,25 +162,6 @@ def train_best_model(
     target_col = target or "target"
     if target_col not in df.columns:
         raise ValueError(f"Target column '{target_col}' not present in DataFrame")
-
-    # ──────────────── oversampling ──────────────── #
-    if cfg.oversampling.enable:
-        dos = DataOversampler(
-            n_jobs=cfg.general.max_workers,
-            log_dir="logs",
-        )
-        df = dos.oversample(
-            data=df,
-            multiplier=cfg.oversampling.multiplier,
-            algorithm="random",  # можно вынести в конфиг
-            add_noise=False,
-            target=target_col,
-        )
-        _LOG.info(
-            "Oversampling applied: ×%.2f → %d rows",
-            cfg.oversampling.multiplier,
-            len(df),
-        )
 
     X, y = df.drop(columns=[target_col]), df[target_col]
 
@@ -265,7 +249,7 @@ def train_best_model(
 
     # ------------------ FINAL FIT & SAVE -------------------------- #
     model_path = Path(cfg.general.path_to_model)
-    _fit_and_save(winner_algo, winner_cfg, X, y, final_params, model_path)
+    _fit_and_save(winner_algo, winner_cfg, X, y, final_params, model_path,cfg)
     _LOG.info("Model saved to %s", model_path.resolve())
 
     return {

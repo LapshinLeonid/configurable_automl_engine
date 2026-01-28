@@ -15,6 +15,7 @@ Hyperparameter optimisation module (CF-17 + CF-18 + CF-19).
 """
 from __future__ import annotations
 
+
 # ─────────────────────────────── stdlib
 import importlib
 import logging as _logging
@@ -52,6 +53,9 @@ from sklearn.model_selection import (
 from configurable_automl_engine.common.definitions import ValidationStrategy
 
 from configurable_automl_engine.validation import norm_val_method,make_cv
+
+from imblearn.pipeline import Pipeline as ImbPipeline
+from configurable_automl_engine.oversampling import DataOversampler
 
 # ═════════════════════════════ pseudo-safe logging init ══════════════════════
 if not hasattr(_logging, "handlers"):  # edge-case в Jupyter
@@ -383,6 +387,9 @@ def optimize(
     X,
     y,
     *,
+    data_oversampling: bool = False,
+    data_oversampling_multiplier: float = 1.0,
+    data_oversampling_algorithm: str = "random",
     metric: str = "r2",
     # старый аргумент оставляем-для-совместимости
     val_method: ValidationStrategy | str = "k_fold",
@@ -401,6 +408,16 @@ def optimize(
         best_params – словарь лучших гиперпараметров
         best_score  – метрика на валидации
     """
+    # --- Формируем конфиг для использования внутри _objective ---
+    oversampling_config = {
+        "active": data_oversampling,
+        "params": {
+            "sampling_strategy": data_oversampling_multiplier,
+            "algorithm": data_oversampling_algorithm,
+            "random_state": random_state
+        }
+    }
+
     # -------------------- 0. нормализация входа -------------------- #
     if validation_strategy is not None:       # alias имеет приоритет
         val_method = validation_strategy
@@ -440,31 +457,42 @@ def optimize(
         params = space_fn(trial)
         model = Estimator(**params)
 
+        # --- ШАГ 2: ПОДГОТОВКА ОБЕРТКИ (WRAPPER) ---
+        if oversampling_config["active"]:
+            # Важно: используем DataOversampler
+            sampler = DataOversampler(**oversampling_config["params"])
+            current_estimator = ImbPipeline([
+                ('sampler', sampler),
+                ('model', model)
+            ])
+        else:
+            current_estimator = model
+
+        # -------------------------------------------
+
         # 2. train / test split (если CV заменён на hold-out)
         if val_method_eff == "train_test_split":
             X_tr, X_te, y_tr, y_te = _split_train_test(
                 X, y, test_size=0.2, random_state=random_state
             )
-            model.fit(X_tr, y_tr)
-            return float(scorer(model, X_te, y_te))
+            current_estimator.fit(X_tr, y_tr)
+            return float(scorer(current_estimator, X_te, y_te))
 
         # 3. k-fold или Leave-One-Out
         try:
             scores = model_selection.cross_val_score(
-                model,
+                current_estimator, # Передаем подготовленную обертку
                 X,
                 y,
                 cv=cv_obj,
                 scoring=scorer,
                 n_jobs=-1,
-                error_score="raise",       # ← не затираем NaN/Inf
+                error_score="raise",
             )
             return float(np.mean(scores))
-
         except ValueError as err:
-            # Деление на 0, non-finite predictions, «all fits failed» и т.д.
             trial.set_user_attr("fail_reason", str(err))
-            raise optuna.TrialPruned()  
+            raise optuna.TrialPruned()
 
     # -------------------- 4. запуск Optuna ------------------------- #
     study = optuna.create_study(
@@ -473,9 +501,22 @@ def optimize(
     )
     study.optimize(_objective, n_trials=n_trials)
 
+
     best_params = study.best_params
     best_score = study.best_value
-    best_model = Estimator(**best_params).fit(X, y)
+
+    # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
+    # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!
+    if oversampling_config["active"]:
+        best_sampler = DataOversampler(**oversampling_config["params"])
+        best_model = ImbPipeline([
+            ('sampler', best_sampler),
+            ('model', Estimator(**study.best_params))
+        ])
+    else:
+        best_model = Estimator(**study.best_params)
+
+    best_model.fit(X, y)
 
     log.info(
         "Hyperopt: algo=%s | val=%s | score=%.5f | params=%s",
