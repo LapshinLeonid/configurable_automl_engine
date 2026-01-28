@@ -23,7 +23,11 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import (
+    RandomForestRegressor,
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    AdaBoostRegressor)
 
 try:
     from xgboost import XGBRegressor  # type: ignore
@@ -40,6 +44,9 @@ _FACTORY: dict[str, type[RegressorMixin]] = {
     "sgdregressor": SGDRegressor,
     "decision_tree": DecisionTreeRegressor,
     "random_forest": RandomForestRegressor,
+    "extra_trees": ExtraTreesRegressor,
+    "gradient_boosting": GradientBoostingRegressor,
+    "adaboost": AdaBoostRegressor,
     "poissonregressor": PoissonRegressor,
     "gammaregressor": GammaRegressor,
     "tweedieregressor": TweedieRegressor,
@@ -59,6 +66,9 @@ _FACTORY: dict[str, type[RegressorMixin]] = {
 _ALIASES: dict[str, str] = {
     "dt": "decision_tree",
     "rf": "random_forest",
+    "et": "extra_trees",
+    "gb": "gradient_boosting",
+    "ab": "adaboost",
     "elasticnet": "elasticnet",
     "sgd": "sgdregressor",
     "knn": "nearest_neighbors_regression",
