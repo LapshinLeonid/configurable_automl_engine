@@ -13,11 +13,12 @@ import logging
 import pickle
 from pathlib import Path
 from typing import Any
+import threading
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
-from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from configurable_automl_engine.oversampling import DataOversampler
@@ -106,19 +107,20 @@ class ModelTrainer:
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
 
-    def _apply_oversampling(
-        self, X: pd.DataFrame, y: pd.Series
-    ) -> tuple[pd.DataFrame, pd.Series]:
-        """Если oversampling включён — балансируем только train‑часть."""
-        if not self.os_enable:
-            return X, y
-        sampler = DataOversampler(
-            multiplier=self.os_multiplier,
-            algorithm=self.os_algorithm,
-            log_dir="logs",
-        )
-        return sampler.fit_resample(X, y)
-
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove unpicklable entries
+        if 'lock' in state:
+            del state['lock']
+        if 'logger' in state:
+            del state['logger']
+        return state
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Re-initialize the lock after unpickling
+        self.lock = threading.RLock()
+        # Re-initialize logger if necessary
+    
     def fit(self, X: Any, y: Any) -> ModelTrainer:
         """
         Обучает модель на данных (X, y).
@@ -243,7 +245,15 @@ class ModelTrainer:
             raise TrainingError(f"Ошибка при создании модели: {e}")
 
         # 7) Собираем полный sklearn Pipeline
-        self.pipeline = Pipeline(steps=[("preprocessor", preprocessor), ("regressor", base_model)])
+        # 7) Собираем imblearn Pipeline с шагом оверсэмплинга
+        steps = [("preprocessor", preprocessor)]
+        if self.os_enable:
+            steps.append(("oversampler", DataOversampler(
+                multiplier=self.os_multiplier,
+                algorithm=self.os_algorithm
+            )))
+        steps.append(("regressor", base_model))
+        self.pipeline = Pipeline(steps=steps)
 
         # 8) Разбиваем выборку на train/validation
         try:
@@ -259,7 +269,6 @@ class ModelTrainer:
                     random_state=self.random_state
                 )
             )
-            X_train, y_train = self._apply_oversampling(X_train, y_train)
             # сохраняем для тестов / дебага
             self._last_train_y = y_train
             self._last_val_y = y_val
