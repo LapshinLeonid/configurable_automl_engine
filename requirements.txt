@@ -1,0 +1,5 @@
+numpy==1.26.4
+pandas==2.2.2
+imbalanced-learn==0.12.3
+scikit-learn==1.5.1
+threadpoolctl==3.5.0

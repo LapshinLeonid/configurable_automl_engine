@@ -1,0 +1,132 @@
+from pathlib import Path
+import pytest
+import pandas as pd
+
+# Исправленные импорты согласно структуре src/
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.hyperopt_module import InvalidAlgorithmError
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Базовый YAML для happy-path: поддерживаемых алгоритмов.
+# ─────────────────────────────────────────────────────────────────────────────
+HAPPY_CFG = """
+general:
+  comparison_metric: rmse
+  n_rude_tries: 3
+  n_accurate_tries: 5
+  path_to_model: '{model_path}'
+algorithms:
+  random_forest:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ n_estimators: [10, 20] }}
+  extra_trees:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ n_estimators: [10, 20] }}
+  decision_tree:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ max_depth: [2, 3] }}
+  elasticnet:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ alpha: [0.1, 1.0], l1_ratio: [0.2, 0.8] }}
+  lasso:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ alpha: [0.1, 1.0] }}
+  ridge:
+    enable: False
+    limit_hyperparameters: true
+    hyperparameters: {{ alpha: [0.1, 1.0] }}
+  knn:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ n_neighbors: [3, 5] }}
+  svr:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {{ C: [0.1, 1.0], kernel: [linear] }}
+  xgboost:
+    enable: false     
+"""
+
+# Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в hyperopt_module)
+BROKEN_CFG = HAPPY_CFG.replace("enable: false", "enable: true")
+
+# --------------------------------------------------------------------------- #
+#  HAPPY PATH
+# --------------------------------------------------------------------------- #
+def test_happy_path(tmp_path: Path, small_dataset):
+    """
+    Проверка успешного цикла обучения на синтетических данных из фикстуры.
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    model_path = tmp_path / "model.pkl"
+    cfg_file.write_text(HAPPY_CFG.format(model_path=model_path), "utf-8")
+    
+    # Используем фикстуру small_dataset вместо локальной функции
+    res = train_best_model(cfg_file, small_dataset)
+    
+    assert Path(res["model_path"]).exists()
+    assert res["algorithm"] in {
+        "random_forest",
+        "extra_trees",
+        "decision_tree",
+        "elasticnet",
+        "lasso",
+        "ridge",
+        "knn",
+        "svr",
+    }
+    assert isinstance(res["score"], float)
+
+# --------------------------------------------------------------------------- #
+#  BAD INPUT TYPE
+# --------------------------------------------------------------------------- #
+def test_bad_input_type(tmp_path: Path):
+    """
+    Проверка, что передача не-DataFrame вызывает TypeError.
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(HAPPY_CFG.format(model_path=tmp_path / "m.pkl"), "utf-8")
+    
+    with pytest.raises(TypeError):
+        # Передаем список вместо pandas.DataFrame
+        train_best_model(cfg_file, ["not", "a", "df"])
+
+# --------------------------------------------------------------------------- #
+#  NO ALGORITHMS ENABLED
+# --------------------------------------------------------------------------- #
+def test_no_algorithms_enabled(tmp_path: Path, small_dataset):
+    """
+    Проверка падения, если в конфиге не включен ни один алгоритм.
+    """
+    empty_cfg = """
+general:
+  comparison_metric: rmse
+  path_to_model: 'm.pkl'
+algorithms:
+  rf:
+    enable: false
+"""
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(empty_cfg, "utf-8")
+    
+    with pytest.raises(ValueError):
+        train_best_model(cfg_file, small_dataset)
+
+# --------------------------------------------------------------------------- #
+#  UNSUPPORTED ALGORITHM SHOULD RAISE
+# --------------------------------------------------------------------------- #
+def test_unsupported_algorithm(tmp_path: Path, small_dataset):
+    """
+    Проверка вызова InvalidAlgorithmError при попытке использовать 
+    неподдерживаемый алгоритм (XGBoost в данном BROKEN_CFG).
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(BROKEN_CFG.format(model_path=tmp_path / "m.pkl"), "utf-8")
+    
+    with pytest.raises(InvalidAlgorithmError):
+        train_best_model(cfg_file, small_dataset)
