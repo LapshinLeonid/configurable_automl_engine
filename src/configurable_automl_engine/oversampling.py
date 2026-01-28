@@ -70,6 +70,19 @@ class DataOversampler(BaseSampler):
     def _add_gaussian_noise(self, X: np.ndarray, noise_level: float = 0.01) -> np.ndarray:
         return X + np.random.normal(scale=noise_level, size=X.shape)
 
+    def __getstate__(self):
+            # Копируем состояние объекта
+            state = self.__dict__.copy()
+            # Удаляем несериализуемый объект lock по правильному имени
+            if '_lock' in state:
+                del state['_lock']
+            return state
+    def __setstate__(self, state):
+        # Восстанавливаем состояние
+        self.__dict__.update(state)
+        # Заново инициализируем lock после десериализации
+        self._lock = threading.RLock()
+
     # ------------------------------------------------------------------ #
     #  Пункт 2: Реализация защищенного метода _fit_resample              #
     # ------------------------------------------------------------------ #
@@ -77,10 +90,12 @@ class DataOversampler(BaseSampler):
         """
         Внутренняя логика ресемплирования с использованием валидации sklearn/imblearn.
         """
+        if self.multiplier <= 0:
+            raise ValueError("multiplier must be > 0")
         try:
             # 1. Стандартная валидация входных данных
             # accept_sparse=False, так как SMOTE/ADASYN требуют плотных матриц в текущей реализации
-            X_validated, y_validated = self._check_X_y(X, y)
+            X_validated, y_validated, *rest = self._check_X_y(X, y)
             
             # Сохраняем названия колонок, если X был DataFrame
             feature_names = X.columns if hasattr(X, "columns") else None
@@ -96,7 +111,7 @@ class DataOversampler(BaseSampler):
             if self.algorithm in ("random", "random_with_noise"):
                 # Если multiplier > 1, сначала используем стратегию увеличения
                 # Если multiplier = 1, RandomOverSampler просто сбалансирует классы
-                sampling_strategy = "auto" if self.multiplier <= 1.0 else self._strategy(y_s)
+                sampling_strategy = self._strategy(y_s) if self.multiplier >= 1.0 else "auto"
                 
                 ros = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=None)
                 X_res, y_res = ros.fit_resample(X_df, y_s)
@@ -138,21 +153,25 @@ class DataOversampler(BaseSampler):
         Высокоуровневая обертка для работы с DataFrame.
         Использует публичный fit_resample(), который сам вызовет _fit_resample().
         """
-        if target:
-            y = data[target]
-            X = data.drop(target, axis=1)
-        else:
-            X = data.iloc[:, :-1]
-            y = data.iloc[:, -1]
-            target = data.columns[-1]
+        try:
+            if target:
+                y = data[target]
+                X = data.drop(target, axis=1)
+            else:
+                X = data.iloc[:, :-1]
+                y = data.iloc[:, -1]
+                target = data.columns[-1]
 
-        # Вызываем публичный метод (он сделает дополнительные проверки)
-        X_res, y_res = self.fit_resample(X, y)
-        
-        # Сборка итогового DataFrame
-        res_df = pd.DataFrame(X_res, columns=X.columns)
-        res_df[target] = y_res
-        return res_df.reset_index(drop=True)
+            # Вызываем публичный метод (он сделает дополнительные проверки)
+            X_res, y_res = self.fit_resample(X, y)
+            
+            # Сборка итогового DataFrame
+            res_df = pd.DataFrame(X_res, columns=X.columns)
+            res_df[target] = y_res
+            return res_df.reset_index(drop=True)
+        except Exception as e:
+            self._log(f"Ошибка в oversample: {e}", error=True)
+            raise
 
 # ------------------------------------------------------------------ #
 #  Функциональные интерфейсы                                         #
