@@ -135,7 +135,8 @@ def _fit_and_save(
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
         data_oversampling=cfg.oversampling.enable,
         data_oversampling_multiplier=cfg.oversampling.multiplier,
-        data_oversampling_algorithm=cfg.oversampling.algorithm
+        data_oversampling_algorithm=cfg.oversampling.algorithm,
+        serialization_format=cfg.general.serialization_format
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)

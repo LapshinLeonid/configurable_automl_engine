@@ -27,6 +27,8 @@ from sklearn.compose import ColumnTransformer
 from .models import create_model, _ALIASES
 
 from configurable_automl_engine.validation import make_cv, iter_splits
+from configurable_automl_engine.common.definitions import SerializationFormat
+from configurable_automl_engine.common.serialization_utils import save_artifact, load_artifact
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
@@ -68,6 +70,7 @@ class ModelTrainer:
         data_oversampling: bool = False,
         data_oversampling_multiplier: float = 1.0,
         data_oversampling_algorithm: str = "random",
+        serialization_format: SerializationFormat = SerializationFormat.pickle,
     ):
         # Проверка алгоритма
         if not isinstance(algorithm, str):
@@ -90,6 +93,7 @@ class ModelTrainer:
         self.test_size = test_size
         self.metric = metric.lower()
         self.random_state = random_state
+        self.serialization_format = serialization_format
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -337,27 +341,41 @@ class ModelTrainer:
 
     def save(self, path: str | Path) -> None:
         """
-        Сохраняет объект ModelTrainer (пайплайн + параметры) в указанный файл.
+        Сохраняет объект ModelTrainer (пайплайн + параметры) в указанный файл,
+        используя заданный формат сериализации.
         """
         if self.pipeline is None and self.base_model is None:
             raise TrainingError("Нечего сохранять: модель не обучена")
+        
         path_obj = Path(path)
+        # Создаем директории, если они не существуют
         path_obj.parent.mkdir(parents=True, exist_ok=True)
-        with path_obj.open("wb") as f:
-            pickle.dump(self, f)
+        
+        # Вызываем новую утилиту вместо pickle.dump
+        save_artifact(
+            obj=self, 
+            path=path_obj, 
+            fmt=self.serialization_format
+        )
 
     @classmethod
-    def load(cls, path: str | Path) -> ModelTrainer:
+    def load(cls, path: str | Path, fmt: SerializationFormat = SerializationFormat.pickle) -> ModelTrainer:
         """
-        Загружает сохранённый объект ModelTrainer из файла.
+        Загружает сохранённый объект ModelTrainer из файла, используя указанный формат.
         """
         path_obj = Path(path)
-        if not path_obj.exists():
+        
+        # Попытка загрузки через утилиту
+        try:
+            obj = load_artifact(path=path_obj, fmt=fmt)
+        except FileNotFoundError:
             raise TrainingError(f"Файл не найден: {path}")
-        with path_obj.open("rb") as f:
-            obj = pickle.load(f)
+        except Exception as e:
+            raise TrainingError(f"Ошибка при загрузке артефакта: {e}")
+        # Проверка типа загруженного объекта
         if not isinstance(obj, cls):
             raise TrainingError(f"Загруженный объект не является ModelTrainer: {path}")
+            
         return obj
 
 

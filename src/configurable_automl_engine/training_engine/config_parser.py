@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Annotated
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
-from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
 
 # ─────────────────── general ─────────────────── #
@@ -23,6 +23,8 @@ class GeneralCfg(BaseModel):
     # ── базовые параметры ── #
     comparison_metric: str = "r2"
     path_to_model: Path = Path("model.pkl")
+
+    serialization_format: SerializationFormat = SerializationFormat.pickle
 
     n_rude_tries: int = 20
     n_accurate_tries: int = 200
