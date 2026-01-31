@@ -200,13 +200,21 @@ def train_best_model(
         except _CanonicalIAE:
             raise
         except Exception as err:  # pragma: no cover
-            _LOG.warning("Skip %s: %s", algo, err)
+            # При использовании процессов стандартный логгер может не вывести 
+            # сообщение в основную консоль сразу. 
+            # Добавляем подробный вывод ошибки:
+            import traceback
+            error_msg = f"Error in worker process for {algo}: {str(err)}\n{traceback.format_exc()}"
+            _LOG.error(error_msg)
+            # Пробрасываем ошибку дальше, чтобы run_parallel увидел её через fut.result()
+            raise RuntimeError(error_msg) from err
 
     if cfg.general.parallel_strategy == "algorithms":
         run_parallel(
             _coarse,
             args_seq=[(n, a) for n, a in cfg.algorithms.items() if a.enable],
             max_workers=cfg.general.max_workers,
+            mode=cfg.general.parallel_mode,
         )
     else:
         for n, a in cfg.algorithms.items():
