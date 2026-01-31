@@ -13,7 +13,7 @@ import logging
 
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Annotated
+from typing import Any, Dict, Optional, Literal, Annotated
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
@@ -37,6 +37,8 @@ class GeneralCfg(BaseModel):
 
     parallel_strategy: str = "algorithms"  # "algorithms" | "trials"
     max_workers: Optional[int] = None
+
+    parallel_mode: Literal["threads", "processes"] = "threads" 
 
     # ──────────────── валидатор ──────────────── #
     @model_validator(mode="after")

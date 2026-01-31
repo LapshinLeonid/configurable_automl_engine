@@ -486,8 +486,8 @@ def optimize(
                 y,
                 cv=cv_obj,
                 scoring=scorer,
-                n_jobs=-1,
                 error_score="raise",
+                n_jobs=1
             )
             return float(np.mean(scores))
         except ValueError as err:
