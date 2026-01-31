@@ -4,6 +4,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import logging
 logger = logging.getLogger(__name__)
 
+from configurable_automl_engine.hyperopt_module import InvalidAlgorithmError
+
 TIMEOUT_SECONDS = 3600
 
 def run_parallel(
@@ -55,6 +57,8 @@ def run_parallel(
                     logger.error("Task timed out after %s s, marking as failed", effective_timeout)
                     fut.cancel()
                     results.append(None)
+                except InvalidAlgorithmError:
+                    raise  # Пробрасываем ошибку конфига выше, чтобы тест её поймал
                 except Exception as e:
                     logger.error("Task failed: %s", e)
                     results.append(None)
