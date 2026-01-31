@@ -207,6 +207,7 @@ def train_best_model(
             _coarse,
             args_seq=[(n, a) for n, a in cfg.algorithms.items() if a.enable],
             max_workers=cfg.general.max_workers,
+            mode=cfg.general.parallel_mode
         )
     else:
         for n, a in cfg.algorithms.items():
