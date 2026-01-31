@@ -12,7 +12,7 @@ os.chdir(test_dir)
 
 # Запускаем тесты в текущей директории
 pytest_args = ["-v","-s", 
-               "test_train_model.py",
+                "test_train_model.py",
                "test_algorithms_extended.py",
                "test_algorithms.py",
                "test_hyperopt_module.py",
@@ -24,7 +24,8 @@ pytest_args = ["-v","-s",
                "test_config_validation.py",
                "test_e2e_pipeline.py",
                "test_metrics.py",
-               "test_oversampling.py"
+               "test_oversampling.py",
+               "test_parallel.py"
                ]
 
 pytest.main(pytest_args)
