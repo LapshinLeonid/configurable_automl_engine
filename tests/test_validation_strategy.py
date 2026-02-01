@@ -4,13 +4,20 @@ from configurable_automl_engine.training_engine.config_parser import Config, Val
 
 BASE_CFG = """
 {
-  "general": {
-    "project_name": "demo",
-    "validation_strategy": "k_fold"
-  },
-  "algorithms": { "logreg": { "enable": true } }
+    "general": {
+        "project_name": "demo",
+        "validation_strategy": "k_fold",
+        "phases": [
+            {"name": "search", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "refine", "n_trials": 1, "action": "refine_winner"}
+        ]
+    },
+    "algorithms": {
+        "logreg": {"enable": true}
+    }
 }
 """
+
 
 @pytest.mark.parametrize("v", ["train_test_split", "k_fold", "loo"])
 def test_valid_values(v):

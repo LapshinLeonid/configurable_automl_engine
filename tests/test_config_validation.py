@@ -7,6 +7,10 @@ BASE = {
         "comparison_metric": "nrmse",
         "validation_strategy": "k_fold",
         "n_folds": 5,
+        "phases": [
+            {"name": "search", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "refine", "n_trials": 1, "action": "refine_winner"}
+        ]
     },
     "oversampling": {},
     "algorithms": {"lgbm": {"enable": True}},

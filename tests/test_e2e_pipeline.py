@@ -11,8 +11,10 @@ def test_full_pipeline(tmp_path):
     config_dict = {
         "general": {
             "comparison_metric": "rmse",
-            "n_rude_tries": 2,
-            "n_accurate_tries": 3,
+            "phases": [
+                {"name": "search", "n_trials": 1, "action": "all_algorithms"},
+                {"name": "refine", "n_trials": 1, "action": "refine_winner"}
+            ],
             "path_to_model": str(model_save_path)
         },
         "algorithms": {

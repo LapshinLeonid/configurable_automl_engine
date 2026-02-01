@@ -151,11 +151,14 @@ def _fit_and_save(
 # --------------------------------------------------------------------------- #
 #  Public API                                                                 #
 # --------------------------------------------------------------------------- #
+
+
 def train_best_model(
     config_path: str | Path,
     df: pd.DataFrame,
     target: str | None = None,
 ):
+
     if not isinstance(df, pd.DataFrame) or df.empty:
         raise TypeError("Input data must be non-empty pandas.DataFrame")
 
@@ -211,57 +214,56 @@ def train_best_model(
         except Exception as err:
             _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
             raise
-    
 
-    # ------------------ COARSE HPO ------------------------------- #
-    _LOG.info("=== Coarse HPO phase (%d tries) ===", cfg.general.n_rude_tries)
-    coarse_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-
-    def _coarse(algo: str, a_cfg: AlgoCfg):
-        if not a_cfg.enable:
-            return
-        # Используем новую обертку
-        override = a_cfg.hyperparameters if a_cfg.hyperparameters else None
-        try:
-            score, params = _execute_hpo_phase(
-                "Coarse HPO", algo, a_cfg, cfg.general.n_rude_tries, override
+    # Начальный список кандидатов (все включенные алгоритмы)
+    current_candidates = {n: a for n, a in cfg.algorithms.items() if a.enable}
+    phase_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    for phase in cfg.general.phases:
+        _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials} trials, action: {phase.action}) ---")
+        
+        # Если фаза требует только победителя, фильтруем кандидатов
+        if phase.action == "refine_winner":
+            if not phase_results:
+                raise RuntimeError(f"Phase '{phase.name}' requires a winner, but no previous results exist.")
+            
+            select = max if greater_is_better else min
+            winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
+            _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
+            current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
+        # Очищаем результаты для текущей фазы
+        phase_results = {}
+        def _worker(algo_name: str, algo_cfg: AlgoCfg):
+            override = algo_cfg.hyperparameters if algo_cfg.hyperparameters else None
+            try:
+                score, params = _execute_hpo_phase(
+                    phase.name, algo_name, algo_cfg, phase.n_trials, override
+                )
+                phase_results[algo_name] = (score, params)
+            except _CanonicalIAE:
+                raise
+            except Exception as e:
+                _LOG.warning(f"Algorithm {algo_name} failed in phase {phase.name}: {e}")
+        # Выполнение (параллельное или последовательное)
+        if cfg.general.parallel_strategy == "algorithms" and len(current_candidates) > 1:
+            run_parallel(
+                _worker,
+                args_seq=[(n, a) for n, a in current_candidates.items()],
+                max_workers=cfg.general.max_workers,
+                mode=cfg.general.parallel_mode
             )
-            coarse_results[algo] = (score, params)
-        except _CanonicalIAE:
-            raise  # Пробрасываем критическую ошибку для тестов
-        except Exception:
-            pass # Игнорируем только прочие ошибки (например, сбои обучения конкретной модели)
-
-
-    if cfg.general.parallel_strategy == "algorithms":
-        run_parallel(
-            _coarse,
-            args_seq=[(n, a) for n, a in cfg.algorithms.items() if a.enable],
-            max_workers=cfg.general.max_workers,
-            mode=cfg.general.parallel_mode
-        )
-    else:
-        for n, a in cfg.algorithms.items():
-            if a.enable:
-                _coarse(n, a)
-
-    if not coarse_results:
-        raise RuntimeError("No algorithms finished HPO (coarse phase)")
-
+        else:
+            for n, a in current_candidates.items():
+                _worker(n, a)
+        if not phase_results:
+            raise RuntimeError(f"No algorithms finished HPO in phase: {phase.name}")
+    # После завершения всех фаз определяем финального победителя
     select = max if greater_is_better else min
-    winner_algo = select(coarse_results.items(), key=lambda kv: kv[1][0])[0]
-    _LOG.info("Winner after coarse: %s", winner_algo)
-
+    winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
+    final_score, final_params = phase_results[winner_algo]
     winner_cfg = cfg.algorithms[winner_algo]
 
-    # ------------------ ACCURATE HPO ------------------------------ #
-    _LOG.info("=== Accurate HPO phase (%d tries) ===", cfg.general.n_accurate_tries)
-    override = (
-        winner_cfg.hyperparameters if winner_cfg.limit_hyperparameters else None
-    )
-    final_score, final_params = _execute_hpo_phase(
-        "Accurate HPO", winner_algo, winner_cfg, cfg.general.n_accurate_tries, override
-    )
+    
+    
     
     # ------------------ FINAL FIT & SAVE -------------------------- #
     model_path = Path(cfg.general.path_to_model)
@@ -278,5 +280,3 @@ def train_best_model(
         "params": final_params,
         "model_path": str(model_path),
     }
-
-
