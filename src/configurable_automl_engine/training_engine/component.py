@@ -95,10 +95,12 @@ def _run_hpo(
 
     # прокидываем кастомный search space, если предусмотрен
     if search_space_override is not None:
-        if "search_space_override" in sig.parameters:
-            kwargs["search_space_override"] = search_space_override
-        elif "space_override" in sig.parameters:
-            kwargs["space_override"] = search_space_override
+        # Мы передаем словарь {algo_name: hyperparameters_dict}
+        overrides = {algo_name: search_space_override}
+        if "space_overrides" in sig.parameters:
+            kwargs["space_overrides"] = overrides
+        elif "search_space_override" in sig.parameters: # для обратной совместимости
+            kwargs["search_space_override"] = overrides
 
     try:
         _model, best_params, best_score = hyperopt_module.optimize(**kwargs)
@@ -174,7 +176,7 @@ def train_best_model(
         if not a_cfg.enable:
             return
         try:
-            override = a_cfg.hyperparameters if a_cfg.limit_hyperparameters else None
+            override = a_cfg.hyperparameters if (a_cfg.enable and a_cfg.hyperparameters) else None
             score, params = _run_hpo(
                 algo_name=algo,
                 algo_cfg=a_cfg,
