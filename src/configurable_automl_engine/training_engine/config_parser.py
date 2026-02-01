@@ -129,10 +129,10 @@ class AlgoCfg(BaseModel):
     enable: bool = True
     limit_hyperparameters: bool = False
     hyperparameters: Dict[str, Union[SearchSpaceEntry, Any]] | None = None
-    hyperopt_module: str = "configurable_automl_engine.hyperopt_module"
+    tuner: str = "configurable_automl_engine.tuner"
     trainer_module: str = "configurable_automl_engine.trainer"
 
-    @field_validator("hyperopt_module", "trainer_module")
+    @field_validator("tuner", "trainer_module")
     @classmethod
     def _must_not_be_empty(cls, v: str) -> str:
         if not v:

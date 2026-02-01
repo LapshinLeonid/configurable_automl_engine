@@ -37,7 +37,7 @@ from configurable_automl_engine.trainer import ModelTrainer
 
 
 # ───────────────────────── canonical IAE ─────────────────────── #
-from ..hyperopt_module import InvalidAlgorithmError as _CanonicalIAE
+from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 
 _LOG = logging.getLogger("training_engine")
 
@@ -78,11 +78,11 @@ def _run_hpo(
     в функцию `optimize`, **только** если параметр поддерживается
     сигнатурой целевой функции.
     """
-    hyperopt_module = _load_module(algo_cfg.hyperopt_module)
-    if not hasattr(hyperopt_module, "optimize"):
-        raise AttributeError(f"Module {algo_cfg.hyperopt_module} lacks `optimize`")
+    tuner = _load_module(algo_cfg.tuner)
+    if not hasattr(tuner, "optimize"):
+        raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
 
-    sig = inspect.signature(hyperopt_module.optimize)
+    sig = inspect.signature(tuner.optimize)
     kwargs: Dict[str, Any] = {
         "algo_name": algo_name,
         "X": X,
@@ -110,7 +110,7 @@ def _run_hpo(
             kwargs["search_space_override"] = overrides
 
     try:
-        _model, best_params, best_score = hyperopt_module.optimize(**kwargs)
+        _model, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
 
     except Exception as err:  # noqa: BLE001

@@ -1,5 +1,5 @@
 """
-Параметризованные тесты для configurable_automl_engine.hyperopt_module.
+Параметризованные тесты для configurable_automl_engine.tuner.
 
 • Smoke-проверяем, что optimize отрабатывает на каждом алгоритме,
   для которого задан search-space (включая CF-18: SGD, GPR, Isotonic,
@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.datasets import make_regression
-from configurable_automl_engine import hyperopt_module as hyperopt
+from configurable_automl_engine import tuner as hyperopt
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. Делаем пакет видимым и импортируем модуль

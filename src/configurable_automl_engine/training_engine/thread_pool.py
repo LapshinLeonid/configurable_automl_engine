@@ -4,7 +4,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import logging
 logger = logging.getLogger(__name__)
 
-from configurable_automl_engine.hyperopt_module import InvalidAlgorithmError
+from configurable_automl_engine.tuner import InvalidAlgorithmError
 
 TIMEOUT_SECONDS = 3600
 

@@ -4,7 +4,7 @@ import pandas as pd
 
 # Исправленные импорты согласно структуре src/
 from configurable_automl_engine.training_engine.component import train_best_model
-from configurable_automl_engine.hyperopt_module import InvalidAlgorithmError
+from configurable_automl_engine.tuner import InvalidAlgorithmError
 
 HAPPY_CFG = """
 general:
@@ -64,7 +64,7 @@ algorithms:
     enable: false
 """
 
-# Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в hyperopt_module)
+# Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в tuner)
 BROKEN_CFG = HAPPY_CFG.replace("enable: false", "enable: true")
 
 # --------------------------------------------------------------------------- #
