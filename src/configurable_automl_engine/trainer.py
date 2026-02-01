@@ -155,21 +155,21 @@ class ModelTrainer:
     
     def _build_preprocessor(self, X_df: pd.DataFrame, algo_key: str) -> Any:
         """
-        Создает объект препроцессора в зависимости от алгоритма.
+        Создает объект препроцессора (Transformer) в зависимости от алгоритма 
+        и типов данных в X_df.
         """
-        # Случай IsotonicRegression: используем наш новый кастомный трансформер
+        # 1. Специальный случай: Изотоническая регрессия
         if algo_key == "isotonic_regression":
             return IsotonicDataTransformer()
-
-        # Стандартный случай (перенесено из оригинального fit)
+        # 2. Определение типов колонок для стандартных алгоритмов
         num_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
         cat_cols = X_df.select_dtypes(exclude=["number"]).columns.tolist()
-
+        # 3. Настройка обработки числовых признаков
         num_steps: list[tuple[str, Any]] = [
             ("impute", SimpleImputer(strategy="median"))
         ]
         
-        # Список алгоритмов, требующих масштабирования
+        # Список алгоритмов, чувствительных к масштабу признаков
         scaling_required = {
             "sgdregressor", 
             "elasticnet", 
@@ -181,11 +181,11 @@ class ModelTrainer:
             num_steps.append(("scale", StandardScaler()))
             
         num_pipeline = Pipeline(steps=num_steps)
-
+        # 4. Сборка трансформеров
         transformers: list[tuple[str, Pipeline, list[str]]] = [
             ("num", num_pipeline, num_cols)
         ]
-        
+        # 5. Настройка обработки категориальных признаков (если они есть)
         if cat_cols:
             cat_pipeline = Pipeline(
                 steps=[
@@ -194,117 +194,146 @@ class ModelTrainer:
                 ]
             )
             transformers.append(("cat", cat_pipeline, cat_cols))
-
+        # Возвращаем ColumnTransformer, который объединяет все ветки обработки
         return ColumnTransformer(transformers=transformers, remainder="drop")
 
-    def fit(self, X: Any, y: Any) -> ModelTrainer:
+    def _prepare_data(self, X: Any, y: Any) -> tuple[pd.DataFrame, pd.Series]:
         """
-        Обучает модель на данных (X, y).
-        Вычисляет R² (self.val_r2_) и возвращает self.
-        В случае ошибок бросает TrainingError, ValueError или TypeError.
+        Выполняет валидацию типов, приведение к pandas и проверку размеров.
+        Возвращает кортеж (X_df, y_s).
         """
-        # 1) Проверка типов X, y
+        # 1) Проверка типов входных данных
         if not isinstance(X, (pd.DataFrame, pd.Series, np.ndarray)) or not isinstance(
             y, (pd.Series, pd.DataFrame, np.ndarray)
         ):
             raise TrainingError("Неподдерживаемый тип данных для X или y")
-
-        # 2) Приведение к pandas
+        # 2) Приведение X к DataFrame
         try:
-            X_df = (
-                pd.DataFrame(X)
-                if not isinstance(X, (pd.DataFrame, pd.Series))
-                else X  # type: ignore
-            )
+            X_df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X
+            
+            # 3) Приведение y к Series
             if isinstance(y, pd.DataFrame):
-                y_s = pd.Series(y.iloc[:, 0])  # type: ignore
+                y_s = pd.Series(y.iloc[:, 0])
             else:
-                y_s = (
-                    pd.Series(y)
-                    if not isinstance(y, pd.Series)
-                    else y  # type: ignore
-                )
+                y_s = pd.Series(y) if not isinstance(y, pd.Series) else y
         except Exception as e:
             raise TrainingError(f"Ошибка при преобразовании данных: {e}")
-
-        # 3) Проверка пустоты и размеров
+        # 4) Проверка пустоты и соответствия размеров
         n_samples = len(X_df)
         if n_samples == 0 or len(y_s) == 0:
             raise TrainingError("Данные пусты")
         if n_samples != len(y_s):
             raise TrainingError("Число строк X и y различается")
         if n_samples < 2:
-            raise TrainingError("Недостаточно записей для обучения")
+            raise TrainingError("Недостаточно записей для обучения (нужно минимум 2)")
+        return X_df, y_s
 
-        # 4) Определение ключа алгоритма (перенесено выше для использования в препроцессоре)
+    def _fit_internal(
+        self, 
+        X_train: pd.DataFrame | np.ndarray, 
+        y_train: pd.Series | np.ndarray, 
+        preprocessor: Any, 
+        base_model: Any
+    ) -> Pipeline:
+        """
+        Создает и обучает итоговый пайплайн (включая препроцессор, 
+        возможный оверсэмплинг и модель).
+        """
+        # 1) Формируем шаги пайплайна
+        steps = [("preprocessor", preprocessor)]
+        # 2) Добавляем оверсэмплинг, если он активирован
+        if self.os_enable:
+            oversampler = DataOversampler(
+                algorithm=self.os_algorithm,
+                multiplier=self.os_multiplier,
+            )
+            steps.append(("oversampler", oversampler))
+        # 3) Добавляем саму модель
+        steps.append(("model", base_model))
+        # 4) Инициализируем пайплайн
+        # Используем Pipeline из imblearn, чтобы шаги ресэмплинга работали корректно
+        self.pipeline = Pipeline(steps=steps)
+        # 5) Выполняем обучение
+        #ВАЖНО: Сначала сохраняем пайплайн в self, чтобы он был доступен
+        # даже если обучение упадет (это позволит избежать NoneType ошибок)
+        try:
+            self.pipeline.fit(X_train, y_train)
+        except (ValueError, TypeError) as e:
+            # Пробрасываем валидационные ошибки напрямую, чтобы тесты могли их поймать
+            # Это критично для тестов, проверяющих некорректные гиперпараметры
+            raise e
+        except Exception as e:
+            # Все остальные системные ошибки оборачиваем в TrainingError
+            self.logger.error(f"Unexpected error in pipeline fit: {e}")
+            raise TrainingError(f"Internal training failure: {e}")
+        return self.pipeline
+
+    def fit(self, X: Any, y: Any) -> ModelTrainer:
+        """
+        Оркестрация процесса обучения: подготовка, сборка и валидация.
+        """
+        # Этап 1: Валидация и подготовка данных
+        X_df, y_s = self._prepare_data(X, y)
+
+        # Этап 2: Определение ключа алгоритма (перенесено выше для использования в препроцессоре)
         algo_key = _ALIASES.get(self.algorithm, self.algorithm)
-        # 5) Создаём препроцессор через делегирование (Task 1.2)
+
+        # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
         preprocessor = self._build_preprocessor(X_df, algo_key)
-        # 6) Создаём модель через фабрику
+
+        # Этап 4: Создаём модель через фабрику
         try:
             base_model = create_model(self.algorithm, **self.model_params)
         except (ValueError, ImportError) as e:
             raise TrainingError(f"Ошибка при создании модели: {e}")
-        # 7) Собираем полный Pipeline (теперь preprocessor универсален)
-        steps = [("preprocessor", preprocessor), ("model", base_model)]
-        self.pipeline = Pipeline(steps=steps)
+        
+        # Этап 5: Разбиение данных (используем iter_splits)
 
-        # 8) Разбиваем выборку на train/validation
         try:
-            # 1. Используем аргумент method вместо strategy
-            # 2. Помним, что функция возвращает Generator кортежей (X_tr, X_te, y_tr, y_te)
-            # 3. Переводим DataFrame в numpy (так как в validation.py стоит аннотация np.ndarray)
-            #    и забираем первый результат через next()
             X_train, X_val, y_train, y_val = next(
-                iter_splits(
-                    X_df, 
-                    y_s, 
-                    method='train_test_split', 
-                    random_state=self.random_state
-                )
+                iter_splits(X_df, y_s, method='train_test_split', random_state=self.random_state)
             )
-            # сохраняем для тестов / дебага
-            self._last_train_y = y_train
-            self._last_val_y = y_val
-        except ValueError:
-            raise
         except Exception as e:
             raise TrainingError(f"Ошибка при разбиении данных: {e}")
 
-        # 9) Обучаем пайплайн
-        try:
-            self.pipeline.fit(X_train, y_train)
-        except Exception as e:
-            raise TrainingError(f"Ошибка при обучении модели: {e}")
+        # Этап 6: Сборка и обучение пайплайна (Task 2.3)
+        # Здесь автоматически применится оверсэмплинг, если он включен
+        self.pipeline = self._fit_internal(X_train, y_train, preprocessor, base_model)
 
-        # 10) Предсказание и R² на validation
+        # Этап 7: Валидация и расчет метрик (финальный шаг)
         try:
             preds = self.pipeline.predict(X_val)
             self.val_r2_ = float(r2_score(y_val, preds))
-        except ValueError:
-            raise
         except Exception as e:
-            raise TrainingError(f"Ошибка при валидации модели: {e}")
-
+            raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
+        
         return self
+
 
     def predict(self, X: Any) -> np.ndarray:
         """
-        Предсказывает y для новых данных X, используя обученный пайплайн.
+        Предсказывает целевую переменную для новых данных X.
+        
+        Использует единый пайплайн, что исключает расхождения в подготовке 
+        данных для разных типов моделей.
         """
+        # 1) Проверка: обучена ли модель
         if self.pipeline is None:
-            raise TrainingError("Модель не обучена. Сначала вызовите метод fit().")
-            
+            raise TrainingError(
+                "Метод predict вызван для неообученной модели. "
+                "Сначала необходимо выполнить fit()."
+            )
         try:
-            # Приводим к pandas DataFrame, если это еще не он
+            # 2) Приведение входных данных к формату pandas (совместимость с трансформерами)
             X_df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X
             
-            # Просто вызываем predict у пайплайна. 
-            # Он сам прогонит данные через IsotonicDataTransformer (если это изотоническая регрессия)
-            # или через ColumnTransformer (для всех остальных моделей).
+            # 3) Выполнение предсказания через пайплайн
+            # Все кастомные шаги (IsotonicDataTransformer, ColumnTransformer) 
+            # выполнятся автоматически внутри вызова .predict()
             return self.pipeline.predict(X_df)
+            
         except Exception as e:
-            raise TrainingError(f"Ошибка при предсказании: {e}")
+            raise TrainingError(f"Ошибка при выполнении предсказания: {e}")
 
 
     def save(self, path: str | Path) -> None:
