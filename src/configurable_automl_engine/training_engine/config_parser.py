@@ -17,6 +17,12 @@ from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
+# ─────────────────── phases ──────────────────── #
+class HPOPhaseCfg(BaseModel):
+    """Конфигурация отдельной фазы поиска гиперпараметров."""
+    name: str
+    n_trials: int = Field(ge=1)
+    action: Literal["all_algorithms", "refine_winner"] = "all_algorithms"
 
 # ─────────────────── general ─────────────────── #
 class GeneralCfg(BaseModel):
@@ -26,8 +32,7 @@ class GeneralCfg(BaseModel):
 
     serialization_format: SerializationFormat = SerializationFormat.pickle
 
-    n_rude_tries: int = 20
-    n_accurate_tries: int = 200
+    phases: List[HPOPhaseCfg]
 
     validation_strategy: ValidationStrategy = Field(
         default=ValidationStrategy.k_fold,

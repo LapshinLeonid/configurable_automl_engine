@@ -6,50 +6,62 @@ import pandas as pd
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.hyperopt_module import InvalidAlgorithmError
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Базовый YAML для happy-path: поддерживаемых алгоритмов.
-# ─────────────────────────────────────────────────────────────────────────────
 HAPPY_CFG = """
 general:
   comparison_metric: rmse
-  n_rude_tries: 3
-  n_accurate_tries: 5
   path_to_model: '{model_path}'
+  phases:
+    - name: "Coarse Search"
+      n_trials: 3
+      action: "all_algorithms"
+    - name: "Fine Tuning"
+      n_trials: 5
+      action: "refine_winner"
 algorithms:
   random_forest:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ n_estimators: [10, 20] }}
+    hyperparameters:
+      n_estimators: [10, 20]  # Убрали фигурные скобки, используем отступы
   extra_trees:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ n_estimators: [10, 20] }}
+    hyperparameters:
+      n_estimators: [10, 20]
   decision_tree:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ max_depth: [2, 3] }}
+    hyperparameters:
+      max_depth: [2, 3]
   elasticnet:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ alpha: [0.1, 1.0], l1_ratio: [0.2, 0.8] }}
+    hyperparameters:
+      alpha: [0.1, 1.0]
+      l1_ratio: [0.2, 0.8]
   lasso:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ alpha: [0.1, 1.0] }}
+    hyperparameters:
+      alpha: [0.1, 1.0]
   ridge:
-    enable: False
+    enable: false
     limit_hyperparameters: true
-    hyperparameters: {{ alpha: [0.1, 1.0] }}
+    hyperparameters:
+      alpha: [0.1, 1.0]
   knn:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ n_neighbors: [3, 5] }}
+    hyperparameters:
+      n_neighbors: [3, 5]
   svr:
     enable: true
     limit_hyperparameters: true
-    hyperparameters: {{ C: [0.1, 1.0], kernel: [linear] }}
+    hyperparameters:
+      C: [0.1, 1.0]
+      kernel: [linear]
   xgboost:
-    enable: false     
+    enable: false
 """
 
 # Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в hyperopt_module)
