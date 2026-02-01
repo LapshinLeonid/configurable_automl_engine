@@ -31,7 +31,9 @@ class GeneralCfg(BaseModel):
     path_to_model: Path = Path("model.pkl")
 
     serialization_format: SerializationFormat = SerializationFormat.pickle
-
+    
+    log_to_file: Optional[Path] = None
+    
     phases: List[HPOPhaseCfg]
 
     validation_strategy: ValidationStrategy = Field(
