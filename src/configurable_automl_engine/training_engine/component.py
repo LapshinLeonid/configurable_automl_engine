@@ -24,6 +24,9 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
     read_config,
 )
+
+from .logger import setup_logging
+
 from .metrics import (
     is_greater_better,
     to_sklearn_name,
@@ -163,6 +166,10 @@ def train_best_model(
         raise TypeError("Input data must be non-empty pandas.DataFrame")
 
     cfg: Config = read_config(config_path)
+
+    # Если в конфиге указан путь к лог-файлу, настраиваем логирование
+    if cfg.general.log_to_file:
+        setup_logging(cfg.general.log_to_file)
 
     metric_user = cfg.general.comparison_metric
     metric_sklearn = to_sklearn_name(metric_user)

@@ -18,8 +18,6 @@ from __future__ import annotations
 # ─────────────────────────────── stdlib
 import importlib
 import logging as _logging
-import sys
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
 
@@ -57,10 +55,6 @@ from configurable_automl_engine.oversampling import DataOversampler
 
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
 
-# ═════════════════════════════ pseudo-safe logging init ══════════════════════
-if not hasattr(_logging, "handlers"):  # edge-case в Jupyter
-    sys.modules.pop("logging", None)
-    _logging = importlib.import_module("logging")
 logging = _logging  # alias
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
@@ -76,22 +70,7 @@ class InvalidDataError(HyperoptError):
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
-_ROOT = Path(__file__).resolve().parents[2]
-_LOG_FILE = _ROOT / "logs" / "hyperopt.log"
-_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-_handler = RotatingFileHandler(
-    _LOG_FILE, maxBytes=1_000_000, backupCount=10, encoding="utf-8", delay=True
-)
-_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-)
-
-log = logging.getLogger("hyperopt")
-log.setLevel(logging.INFO)
-log.propagate = False
-if not any(isinstance(h, RotatingFileHandler) for h in log.handlers):
-    log.addHandler(_handler)
+log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 

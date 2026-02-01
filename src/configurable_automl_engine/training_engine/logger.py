@@ -4,27 +4,30 @@ from pathlib import Path
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
+def get_logger(name: str) -> logging.Logger:
+    """
+    Возвращает логгер по имени. 
+    Настройка обработчиков (handlers) теперь должна производиться централизованно.
+    """
+    return logging.getLogger(name)
 
-def get_logger(name: str, logfile: Path | None = None) -> logging.Logger:
-    """Создаёт цветной консольный + файловый логгер."""
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-
-    if not logger.handlers:
-        # Console ↦ stderr
-        sh = logging.StreamHandler(sys.stderr)
-        sh.setLevel(logging.INFO)
-        sh.setFormatter(logging.Formatter(_LOG_FORMAT))
-        logger.addHandler(sh)
-
-        # File ↦ DEBUG-лог
-        if logfile:
-            logfile.parent.mkdir(parents=True, exist_ok=True)
-            fh = logging.FileHandler(logfile, encoding="utf-8")
-            fh.setLevel(logging.DEBUG)
-            fh.setFormatter(logging.Formatter(_LOG_FORMAT))
-            logger.addHandler(fh)
-
-    # Не даём вспухать дублями
-    logger.propagate = False
-    return logger
+def setup_logging(logfile: Path) -> None:
+    """
+    Настраивает логирование в файл для всей библиотеки.
+    Прикрепляет FileHandler к базовому логгеру 'configurable_automl_engine'.
+    """
+    base_logger = logging.getLogger("configurable_automl_engine")
+    
+    # Создаем директорию, если она не существует
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Настраиваем обработчик файла
+    fh = logging.FileHandler(logfile, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(_LOG_FORMAT)
+    fh.setFormatter(formatter)
+    
+    # Добавляем обработчик, если такой еще не добавлен
+    if not any(isinstance(h, logging.FileHandler) for h in base_logger.handlers):
+        base_logger.addHandler(fh)
+        base_logger.info(f"Логирование в файл инициализировано: {logfile}")
