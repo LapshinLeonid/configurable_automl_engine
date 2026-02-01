@@ -13,7 +13,7 @@ import importlib
 import inspect
 import logging
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Union
 from types import ModuleType
 
 import pandas as pd
@@ -157,7 +157,7 @@ def _fit_and_save(
 
 
 def train_best_model(
-    config_path: str | Path,
+    config: Union[str, Path, Config, dict],
     df: pd.DataFrame,
     target: str | None = None,
 ):
@@ -165,7 +165,15 @@ def train_best_model(
     if not isinstance(df, pd.DataFrame) or df.empty:
         raise TypeError("Input data must be non-empty pandas.DataFrame")
 
-    cfg: Config = read_config(config_path)
+    # Если передана строка или Path, читаем файл. Если объект Config или dict, обрабатываем их.
+    if isinstance(config, Config):
+        cfg = config
+    elif isinstance(config, dict):
+        cfg = Config.model_validate(config)
+    elif isinstance(config, (str, Path)):
+        cfg = read_config(config)
+    else:
+        raise TypeError(f"Unsupported config type: {type(config)}. Expected Config, dict, str, or Path.")
 
     # Если в конфиге указан путь к лог-файлу, настраиваем логирование
     if cfg.general.log_to_file:
