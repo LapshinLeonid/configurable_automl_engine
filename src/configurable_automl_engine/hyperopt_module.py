@@ -94,156 +94,6 @@ if not any(isinstance(h, RotatingFileHandler) for h in log.handlers):
     log.addHandler(_handler)
 
 # ═══════════════════════════════════ search spaces ═══════════════════════════
-def _space_elasticnet(t: Trial) -> dict[str, Any]:
-    return {
-        "alpha": t.suggest_float("alpha", 1e-4, 10.0, log=True),
-        "l1_ratio": t.suggest_float("l1_ratio", 0.0, 1.0),
-    }
-
-
-def _space_lasso(t: Trial) -> dict[str, Any]:
-    return {"alpha": t.suggest_float("alpha", 1e-4, 10.0, log=True)}
-
-
-def _space_ridge(t: Trial) -> dict[str, Any]:
-    return {"alpha": t.suggest_float("alpha", 1e-4, 10.0, log=True)}
-
-
-def _space_decision_tree(t: Trial) -> dict[str, Any]:
-    return {
-        "max_depth": t.suggest_int("max_depth", 2, 32, log=True),
-        "min_samples_leaf": t.suggest_int("min_samples_leaf", 1, 10),
-    }
-
-
-def _space_random_forest(t: Trial) -> dict[str, Any]:
-    return {
-        "n_estimators": t.suggest_int("n_estimators", 50, 500, step=50),
-        "max_depth": t.suggest_int("max_depth", 2, 32, log=True),
-        "min_samples_leaf": t.suggest_int("min_samples_leaf", 1, 10),
-        "bootstrap": t.suggest_categorical("bootstrap", [True, False]),
-    }
-
-
-def _space_extra_trees(t: Trial) -> dict[str, Any]:
-    return {
-        "n_estimators": t.suggest_int("n_estimators", 50, 500, step=50),
-        "max_depth": t.suggest_int("max_depth", 2, 32, log=True),
-        "min_samples_leaf": t.suggest_int("min_samples_leaf", 1, 10),
-    }
-
-
-def _space_gradient_boosting(t: Trial) -> dict[str, Any]:
-    return {
-        "n_estimators": t.suggest_int("n_estimators", 50, 500, step=50),
-        "learning_rate": t.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "max_depth": t.suggest_int("max_depth", 2, 5),
-        "subsample": t.suggest_float("subsample", 0.5, 1.0),
-    }
-
-
-def _space_adaboost(t: Trial) -> dict[str, Any]:
-    return {
-        "n_estimators": t.suggest_int("n_estimators", 50, 500, step=50),
-        "learning_rate": t.suggest_float("learning_rate", 0.01, 1.0, log=True),
-        "loss": t.suggest_categorical(
-            "loss", ["linear", "square", "exponential"]
-        ),
-    }
-
-
-def _space_svr(t: Trial) -> dict[str, Any]:
-    return {
-        "C": t.suggest_float("C", 1e-2, 100.0, log=True),
-        "epsilon": t.suggest_float("epsilon", 1e-3, 1.0, log=True),
-        "kernel": t.suggest_categorical("kernel", ["rbf", "poly", "sigmoid"]),
-        "gamma": t.suggest_categorical("gamma", ["scale", "auto"]),
-    }
-
-
-def _space_xgb(t: Trial) -> dict[str, Any]:
-    return {
-        "n_estimators": t.suggest_int("n_estimators", 100, 800, step=100),
-        "learning_rate": t.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "max_depth": t.suggest_int("max_depth", 3, 10),
-        "subsample": t.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": t.suggest_float("colsample_bytree", 0.5, 1.0),
-        "gamma": t.suggest_float("gamma", 0.0, 5.0),
-    }
-
-
-def _space_sgd(t: Trial) -> dict[str, Any]:
-    return {
-        "loss": t.suggest_categorical(
-            "loss",
-            [
-                "squared_error",
-                "huber",
-                "epsilon_insensitive",
-                "squared_epsilon_insensitive",
-            ],
-        ),
-        "penalty": t.suggest_categorical("penalty", ["l2", "l1", "elasticnet"]),
-        "alpha": t.suggest_float("alpha", 1e-6, 1e-1, log=True),
-        "learning_rate": t.suggest_categorical(
-            "learning_rate",
-            ["constant", "optimal", "invscaling", "adaptive"],
-        ),
-        "eta0": t.suggest_float("eta0", 1e-4, 1e-1, log=True),
-        "l1_ratio": t.suggest_float("l1_ratio", 0.0, 1.0),
-        "max_iter": t.suggest_int("max_iter", 500, 5000, step=500),
-    }
-
-
-def _space_gpr(t: Trial) -> dict[str, Any]:
-    return {
-        "alpha": t.suggest_float("alpha", 1e-12, 1e-3, log=True),
-        "n_restarts_optimizer": t.suggest_int("n_restarts_optimizer", 0, 10),
-        "normalize_y": t.suggest_categorical("normalize_y", [True, False]),
-    }
-
-
-def _space_isotonic(t: Trial) -> dict[str, Any]:
-    return {
-        "increasing": t.suggest_categorical("increasing", [True, False]),
-        "out_of_bounds": t.suggest_categorical(
-            "out_of_bounds", ["nan", "clip", "raise"]
-        ),
-    }
-
-
-def _space_ard(t: Trial) -> dict[str, Any]:
-    return {
-        "max_iter": t.suggest_int("max_iter", 300, 1500, step=100),
-        "alpha_1": t.suggest_float("alpha_1", 1e-6, 1e-1, log=True),
-        "alpha_2": t.suggest_float("alpha_2", 1e-6, 1e-1, log=True),
-        "lambda_1": t.suggest_float("lambda_1", 1e-6, 1e-1, log=True),
-        "lambda_2": t.suggest_float("lambda_2", 1e-6, 1e-1, log=True),
-    }
-
-
-def _space_glm_common(t: Trial) -> dict[str, Any]:
-    return {
-        "alpha": t.suggest_float("alpha", 1e-6, 1e-1, log=True),
-        "fit_intercept": t.suggest_categorical("fit_intercept", [True, False]),
-        "max_iter": t.suggest_int("max_iter", 50, 1000, step=50),
-    }
-
-
-def _space_poisson(t: Trial) -> dict[str, Any]:
-    return _space_glm_common(t)
-
-
-def _space_gamma(t: Trial) -> dict[str, Any]:
-    return _space_glm_common(t)
-
-
-def _space_tweedie(t: Trial) -> dict[str, Any]:
-    d = _space_glm_common(t)
-    d["power"] = t.suggest_float("power", 1.0, 1.9)
-    d["link"] = t.suggest_categorical("link", ["auto", "identity", "log"])
-    return d
-
 
 # ══════════ KNN-space зависит от размера выборки ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
@@ -260,26 +110,7 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
     return _space
 
 
-ALGO_SPACES: dict[str, Callable[[Trial], dict[str, Any]]] = {
-    "elasticnet": _space_elasticnet,
-    "lasso": _space_lasso,
-    "ridge": _space_ridge,
-    # knn — динамический, см. optimize()
-    "decision_tree": _space_decision_tree,
-    "random_forest": _space_random_forest,
-    "extra_trees": _space_extra_trees,
-    "gradient_boosting": _space_gradient_boosting,
-    "adaboost": _space_adaboost,
-    "svr": _space_svr,
-    "xgb": _space_xgb,
-    "sgdregressor": _space_sgd,
-    "gaussianprocessregressor": _space_gpr,
-    "isotonicregression": _space_isotonic,
-    "ardregression": _space_ard,
-    "poissonregressor": _space_poisson,
-    "gammaregressor": _space_gamma,
-    "tweedieregressor": _space_tweedie,
-}
+ALGO_SPACES: dict[str, Callable[[Trial], dict[str, Any]]] = {}
 
 # ═══════════════════════ fallback-фабрика моделей ════════════════════════════
 _FALLBACK_FACTORY: dict[str, Any] = {
@@ -310,6 +141,33 @@ except ModuleNotFoundError:  # pragma: no cover
     pass
 
 # ═════════════════════════════ helper-utilities ═════════════════════════════
+
+def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Преобразует словарь из конфига в параметры для модели через trial.suggest_*.
+    Поддерживает как SearchSpaceEntry (объекты с полем bounds), так и константы.
+    """
+    params = {}
+    for key, value in space_dict.items():
+        # Если это SearchSpaceEntry (у него есть атрибут bounds после валидации Pydantic)
+        if hasattr(value, "bounds"):
+            b = value.bounds
+            low, high = b[0], b[1]
+            dist_type = b[2] if len(b) > 2 else "float"
+            if dist_type == "int":
+                params[key] = trial.suggest_int(key, int(low), int(high))
+            elif dist_type == "float":
+                params[key] = trial.suggest_float(key, float(low), float(high))
+            elif dist_type == "float_log":
+                params[key] = trial.suggest_float(key, float(low), float(high), log=True)
+            elif dist_type == "categorical":
+                # В случае категориального, bounds[0] должен быть списком опций
+                params[key] = trial.suggest_categorical(key, low if isinstance(low, list) else b[:-1])
+        else:
+            # Если это просто значение (константа), используем как есть
+            params[key] = value
+    return params
+
 def _validate_data(X: Any, y: Any) -> None:
     ok_types = (np.ndarray, pd.DataFrame)
     if not isinstance(X, ok_types):
@@ -417,7 +275,10 @@ def optimize(
             "random_state": random_state
         }
     }
-
+    
+    if not isinstance(n_trials, int) or n_trials <= 0:
+        raise ValueError(f"n_trials must be a positive integer, got {n_trials}")
+    
     # -------------------- 0. нормализация входа -------------------- #
     if validation_strategy is not None:       # alias имеет приоритет
         val_method = validation_strategy
@@ -443,7 +304,19 @@ def optimize(
     else:
         base_space_fn = ALGO_SPACES.get(algo)
 
-    space_fn = (space_overrides or {}).get(algo) or base_space_fn
+    # Приоритет 1: Прямые переопределения (функции)
+    # Приоритет 2: Динамический конфиг из YAML (dict с SearchSpaceEntry)
+    # Приоритет 3: Хардкод из ALGO_SPACES
+    external_config = (space_overrides or {}).get(algo)
+    
+    # Если пришла функция (старый механизм) — используем её
+    if callable(external_config):
+        space_fn = external_config
+    # Если пришел словарь (новый механизм из YAML) — создаем обертку
+    elif isinstance(external_config, dict):
+        space_fn = lambda t: _apply_dynamic_space(t, external_config)
+    else:
+        space_fn = base_space_fn
     if space_fn is None:
         raise HyperoptError(f"Для «{algo}» нет search-space")
 

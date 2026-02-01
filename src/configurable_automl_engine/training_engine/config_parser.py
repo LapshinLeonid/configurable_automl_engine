@@ -13,7 +13,7 @@ import logging
 
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, Annotated
+from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
@@ -97,13 +97,31 @@ class OversamplingCfg(BaseModel):
             )
         return v
 
-
+# ───────────────── hyperopt ───────────────── #
+class SearchSpaceEntry(BaseModel):
+    """
+    Валидация записи пространства поиска гиперпараметра.
+    Пример в YAML: [50, 500, "int"] или [0.01, 0.1, "float_log"]
+    """
+    bounds: Annotated[
+        List[Union[float, int, str, bool]], 
+        Field(min_length=2, max_length=3)
+    ]
+    @model_validator(mode="after")
+    def _validate_structure(self) -> SearchSpaceEntry:
+        # Если 3 элемента, последний должен быть типом распределения
+        if len(self.bounds) == 3:
+            dist_type = self.bounds[2]
+            valid_types = ["int", "float", "float_log", "categorical"]
+            if dist_type not in valid_types:
+                raise ValueError(f"Type must be one of {valid_types}, got {dist_type}")
+        return self
 
 # ───────────────── algorithms ───────────────── #
 class AlgoCfg(BaseModel):
     enable: bool = True
     limit_hyperparameters: bool = False
-    hyperparameters: Dict[str, Any] | None = None
+    hyperparameters: Dict[str, Union[SearchSpaceEntry, Any]] | None = None
     hyperopt_module: str = "configurable_automl_engine.hyperopt_module"
     trainer_module: str = "configurable_automl_engine.trainer"
 
