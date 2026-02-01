@@ -10,7 +10,6 @@ Hyperparameter optimisation module (CF-17 + CF-18 + CF-19).
   leave-one-out. Если наблюдений мало для k-fold (< 2 × k), автоматически
   переключаемся на train_test_split.
 • По умолчанию метрика R², но можно указать любую
-  (sklearn.metrics.get_scorer).
 • Логи: logs/hyperopt.log (ro-rotation 10 × 1 MB).
 """
 from __future__ import annotations
@@ -29,7 +28,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from optuna.trial import Trial
-from sklearn import ensemble, metrics, model_selection, neighbors, svm, tree
+from sklearn import ensemble, model_selection, neighbors, svm, tree
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import (
@@ -42,7 +41,6 @@ from sklearn.linear_model import (
     SGDRegressor,
     TweedieRegressor,
 )
-from sklearn.metrics import accuracy_score
 from sklearn.model_selection import (
     KFold,
     LeaveOneOut,
@@ -56,6 +54,8 @@ from configurable_automl_engine.validation import norm_val_method,make_cv
 
 from imblearn.pipeline import Pipeline as ImbPipeline
 from configurable_automl_engine.oversampling import DataOversampler
+
+from configurable_automl_engine.training_engine.metrics import get_scorer_object
 
 # ═════════════════════════════ pseudo-safe logging init ══════════════════════
 if not hasattr(_logging, "handlers"):  # edge-case в Jupyter
@@ -198,8 +198,9 @@ def _get_estimator(algo: str) -> Any:
 
 def _build_scorer(name: str):
     try:
-        return metrics.get_scorer(name)
-    except ValueError as err:
+        # Используем новый API, который возвращает либо объект make_scorer, либо строку
+        return get_scorer_object(name)
+    except Exception as err:
         raise HyperoptError(f"Неизвестная метрика «{name}»") from err
 
 

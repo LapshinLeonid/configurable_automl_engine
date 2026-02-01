@@ -35,10 +35,11 @@ def test_every_algorithm_can_fit_and_predict(algo, small_dataset):
     # 5. Предсказание
     preds = trainer.predict(X)
     # 6. Проверки (Assertions)
+# 6. Проверки (Assertions)
     assert preds.shape[0] == y.shape[0], f"Алгоритм {algo}: несоответствие размера предсказаний"
     assert not np.isnan(preds).any(), f"Алгоритм {algo} вернул NaN в предсказаниях"
     
-    # Проверка наличия рассчитанной метрики R2 после фита
-    assert hasattr(trainer, 'val_r2_'), f"Алгоритм {algo} не установил атрибут val_r2_"
-    assert trainer.val_r2_ is not None
+    # Проверка наличия рассчитанной метрики в универсальном атрибуте val_score
+    assert hasattr(trainer, 'val_score'), f"Алгоритм {algo} не установил атрибут val_score"
+    assert trainer.val_score is not None, f"Алгоритм {algo}: val_score пуст после обучения"
 

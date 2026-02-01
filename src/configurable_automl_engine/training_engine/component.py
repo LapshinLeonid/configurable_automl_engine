@@ -25,7 +25,6 @@ from configurable_automl_engine.training_engine.config_parser import (
     read_config,
 )
 from .metrics import (
-    get_metric,           # noqa: F401  — зарезервировано «на будущее»
     is_greater_better,
     to_sklearn_name,
 )

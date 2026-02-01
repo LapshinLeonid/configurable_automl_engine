@@ -17,7 +17,6 @@ import threading
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import r2_score
 from imblearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -31,6 +30,7 @@ from .models import create_model, _ALIASES
 from configurable_automl_engine.validation import make_cv, iter_splits
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import save_artifact, load_artifact
+from configurable_automl_engine.training_engine.metrics import get_scorer_object
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
@@ -135,7 +135,7 @@ class ModelTrainer:
         # Поля, которые заполняются после fit(...)
         self.pipeline: Pipeline | None = None
         self.base_model: Any = None 
-        self.val_r2_: float | None = None
+        self.val_score: float | None = None
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
 
@@ -302,8 +302,14 @@ class ModelTrainer:
 
         # Этап 7: Валидация и расчет метрик (финальный шаг)
         try:
-            preds = self.pipeline.predict(X_val)
-            self.val_r2_ = float(r2_score(y_val, preds))
+            # 1. Получаем объект-скорер (наш кастомный или стандартный sklearn)
+            scorer = get_scorer_object(self.metric)
+            
+            # 2. Вычисляем значение. 
+            # Scorer сам внутри сделает predict и сравнит с y_val.
+            # Мы переименовываем атрибут в универсальный val_score, 
+            # чтобы он подходил для любой метрики (RMSE, MAE и т.д.)
+            self.val_score = float(scorer(self.pipeline, X_val, y_val))
         except Exception as e:
             raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
         
@@ -424,10 +430,6 @@ def train_model(
         raise TrainingError("Неверный алгоритм")
     algo_key = algo.lower()
 
-    # Проверка метрики (только "r2")
-    if not isinstance(metric, str) or metric.lower() != "r2":
-        raise TrainingError("Неподдерживаемая метрика")
-
     # Проверка model_params
     if not isinstance(model_params, dict) or len(model_params) == 0:
         raise TrainingError("Параметры модели не заданы")
@@ -474,7 +476,7 @@ def train_model(
             data_oversampling_algorithm=data_os_alg,
         )
         trainer.fit(X_df, y_s)
-        val_score = trainer.val_r2_
+        val_score = trainer.val_score
     except TrainingError:
         raise
     except ValueError:
@@ -490,6 +492,6 @@ def train_model(
         fh = logging.FileHandler(log_file)
         fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logger.addHandler(fh)
-        logger.debug(f"Алгоритм: {algo_key}; R2: {val_score:.4f}")
+        logger.debug(f"Алгоритм: {algo_key}; Score ({metric.upper()}): {val_score:.4f}")
 
     return float(val_score)

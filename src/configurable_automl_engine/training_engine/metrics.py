@@ -22,16 +22,7 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 import numpy as np
-from sklearn.metrics import mean_squared_error, r2_score, make_scorer
-
-# --------------------------------------------------------------------------- #
-#  Достаём внутренний реестр scorers (имя модуля менялось в sklearn 1.3)
-# --------------------------------------------------------------------------- #
-try:  # scikit-learn ≤ 1.2
-    from sklearn.metrics._scorer import SCORERS as _SK_SCORERS
-except ImportError:  # scikit-learn ≥ 1.3
-    from sklearn.metrics._scorer import _SCORERS as _SK_SCORERS  # type: ignore
-
+from sklearn.metrics import mean_squared_error, r2_score, make_scorer, get_scorer as sklearn_get_scorer
 
 # --------------------------------------------------------------------------- #
 #  Сами метрики
@@ -78,22 +69,24 @@ _METRICS: Dict[str, Callable] = {
     "neg_root_mean_squared_error": lambda y_t, y_p: -_rmse(y_t, y_p),
 }
 
+# --------------------------------------------------------------------------- #
+#  Реестр готовых объектов-скореров для использования в sklearn API
+# --------------------------------------------------------------------------- #
+_SCORER_OBJECTS: Dict[str, Callable] = {
+    "nrmse": make_scorer(_nrmse, greater_is_better=False),
+    "neg_root_mean_squared_error": make_scorer(
+        lambda y_t, y_p: -_rmse(y_t, y_p),
+        greater_is_better=True,
+    ),
+    "rmse": make_scorer(
+        lambda y_t, y_p: -_rmse(y_t, y_p),
+        greater_is_better=True,
+    ),
+}
+
 # Какие метрики интерпретируются как «больше — тем лучше»
 _GREATER_IS_BETTER = {"r2", "neg_root_mean_squared_error"}
 
-# --------------------------------------------------------------------------- #
-#  Регистрируем в SCORERS всё, чего там ещё нет
-# --------------------------------------------------------------------------- #
-if "nrmse" not in _SK_SCORERS:
-    _SK_SCORERS["nrmse"] = make_scorer(_nrmse, greater_is_better=False)
-
-# Честный отрицательный RMSE (у sklearn уже есть встроенный,
-# но добавим на всякий случай, если его переименуют)
-if "neg_root_mean_squared_error" not in _SK_SCORERS:
-    _SK_SCORERS["neg_root_mean_squared_error"] = make_scorer(
-        lambda y_t, y_p: -_rmse(y_t, y_p),
-        greater_is_better=True,
-    )
 
 # --------------------------------------------------------------------------- #
 #  Public helpers — могут пригодиться снаружи
@@ -121,6 +114,18 @@ def is_greater_better(name: str) -> bool:
     """
     return name.lower() in _GREATER_IS_BETTER
 
+def get_scorer_object(name: str) -> Callable | str:
+    """
+    Возвращает объект-скорер для использования в GridSearchCV или cross_validate.
+    Для кастомных метрик возвращает Scorer-объект, для стандартных — строку.
+    """
+    lname = name.lower()
+    # Если это наша кастомная метрика (nrmse, rmse и т.д.)
+    if lname in _SCORER_OBJECTS:
+        return _SCORER_OBJECTS[lname]
+    
+    # В остальных случаях возвращаем имя как есть (sklearn сам найдет встроенную метрику)
+    return sklearn_get_scorer(lname)
 
 # --------------------------------------------------------------------------- #
 #  Приведение пользовательских alias-ов к тому, что понимает sklearn
