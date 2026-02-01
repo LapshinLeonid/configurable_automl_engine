@@ -18,7 +18,7 @@ from types import ModuleType
 
 import pandas as pd
 
-from .config_parser import (
+from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
     ValidationStrategy,
@@ -30,6 +30,8 @@ from .metrics import (
     to_sklearn_name,
 )
 from .thread_pool import run_parallel
+
+from configurable_automl_engine.trainer import ModelTrainer
 
 
 # ───────────────────────── canonical IAE ─────────────────────── #
@@ -63,6 +65,9 @@ def _run_hpo(
     validation_strategy: ValidationStrategy,
     n_folds: int | None = None,
     search_space_override: Dict[str, Any] | None = None,
+    data_oversampling: bool = False,
+    data_oversampling_multiplier: float = 1.0,
+    data_oversampling_algorithm: str = "random",
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Запускает hyperopt-модуль и возвращает (score, best_params).
@@ -144,7 +149,6 @@ def _fit_and_save(
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
 
-
 # --------------------------------------------------------------------------- #
 #  Public API                                                                 #
 # --------------------------------------------------------------------------- #
@@ -163,46 +167,72 @@ def train_best_model(
     greater_is_better = is_greater_better(metric_sklearn)
 
     target_col = target or "target"
-    if target_col not in df.columns:
-        raise ValueError(f"Target column '{target_col}' not present in DataFrame")
 
-    X, y = df.drop(columns=[target_col]), df[target_col]
+    def _prepare_data(df, target):
+        """
+        Валидация наличия целевой переменной и разделение на признаки и таргет.
+        """
+        if target not in df.columns:
+            raise ValueError(f"Target column '{target}' not found in dataframe.")
+        
+        X = df.drop(columns=[target])
+        y = df[target]
+        return X, y
 
-    # ------------------ COARSE HPO ------------------------------- #
-    _LOG.info("=== Coarse HPO phase (%d tries) ===", cfg.general.n_rude_tries)
-    coarse_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    X, y = _prepare_data(df, target_col)
 
-    def _coarse(algo: str, a_cfg: AlgoCfg):  # noqa: D401
-        if not a_cfg.enable:
-            return
+    def _execute_hpo_phase(phase_name, algo, a_cfg, n_trials, search_space=None):
+        """
+        Универсальная обертка для выполнения фазы HPO с логированием и обработкой метрик.
+        """
+        _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
+        
+        # Обращаемся к полям согласно определению в config_parser.py
+        ovr = cfg.oversampling 
+        
         try:
-            override = a_cfg.hyperparameters if (a_cfg.enable and a_cfg.hyperparameters) else None
             score, params = _run_hpo(
                 algo_name=algo,
                 algo_cfg=a_cfg,
                 X=X,
                 y=y,
                 metric_name_sklearn=metric_sklearn,
-                n_trials=cfg.general.n_rude_tries,
+                n_trials=n_trials,
                 validation_strategy=cfg.general.validation_strategy,
                 n_folds=cfg.general.n_folds,
-                search_space_override=override,
+                search_space_override=search_space,
+                data_oversampling=ovr.enable,
+                data_oversampling_multiplier=ovr.multiplier,
+                data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
+            )
+            
+            disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score
+            _LOG.info(f"{phase_name} {algo:15} | score {disp:.5f} | params {params}")
+            return score, params
+        except Exception as err:
+            _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
+            raise
+    
+
+    # ------------------ COARSE HPO ------------------------------- #
+    _LOG.info("=== Coarse HPO phase (%d tries) ===", cfg.general.n_rude_tries)
+    coarse_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+    def _coarse(algo: str, a_cfg: AlgoCfg):
+        if not a_cfg.enable:
+            return
+        # Используем новую обертку
+        override = a_cfg.hyperparameters if a_cfg.hyperparameters else None
+        try:
+            score, params = _execute_hpo_phase(
+                "Coarse HPO", algo, a_cfg, cfg.general.n_rude_tries, override
             )
             coarse_results[algo] = (score, params)
-               # вычисляем отображаемое значение score
-            disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score
-
-            # выводим лог
-            _LOG.info(
-                "Coarse HPO %-15s | score %.5f | params %s",
-                algo,
-                disp,
-                params
-            )     
         except _CanonicalIAE:
-            raise
-        except Exception as err:  # pragma: no cover
-            _LOG.warning("Skip %s: %s", algo, err)
+            raise  # Пробрасываем критическую ошибку для тестов
+        except Exception:
+            pass # Игнорируем только прочие ошибки (например, сбои обучения конкретной модели)
+
 
     if cfg.general.parallel_strategy == "algorithms":
         run_parallel(
@@ -230,35 +260,24 @@ def train_best_model(
     override = (
         winner_cfg.hyperparameters if winner_cfg.limit_hyperparameters else None
     )
-    final_score, final_params = _run_hpo(
-        algo_name=winner_algo,
-        algo_cfg=winner_cfg,
-        X=X,
-        y=y,
-        metric_name_sklearn=metric_sklearn,
-        n_trials=cfg.general.n_accurate_tries,
-        validation_strategy=cfg.general.validation_strategy,
-        n_folds=cfg.general.n_folds,
-        search_space_override=override,
+    final_score, final_params = _execute_hpo_phase(
+        "Accurate HPO", winner_algo, winner_cfg, cfg.general.n_accurate_tries, override
     )
-    # вычисляем отображаемое значение финального score
-    disp_final = -final_score if metric_sklearn == "neg_root_mean_squared_error" else final_score
-
-    # выводим лог
-    _LOG.info(
-       "Accurate HPO done | score %.5f | params %s",
-        disp_final,
-        final_params
-    )
-
+    
     # ------------------ FINAL FIT & SAVE -------------------------- #
     model_path = Path(cfg.general.path_to_model)
-    _fit_and_save(winner_algo, winner_cfg, X, y, final_params, model_path,cfg)
-    _LOG.info("Model saved to %s", model_path.resolve())
 
+    try:
+        _fit_and_save(winner_algo,winner_cfg, X,y, final_params, model_path, cfg)
+        _LOG.info("Model saved to %s", model_path.resolve())
+    except Exception as e:
+        _LOG.error(f"Failed to save final model: {e}")
+        raise
     return {
         "algorithm": winner_algo,
         "score": final_score,
         "params": final_params,
         "model_path": str(model_path),
     }
+
+
