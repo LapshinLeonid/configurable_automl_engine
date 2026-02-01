@@ -24,6 +24,8 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from configurable_automl_engine.oversampling import DataOversampler
 from sklearn.compose import ColumnTransformer
 
+from sklearn.base import BaseEstimator, TransformerMixin
+
 from .models import create_model, _ALIASES
 
 from configurable_automl_engine.validation import make_cv, iter_splits
@@ -37,6 +39,32 @@ class TrainingError(RuntimeError):
     """Ошибки, связанные с некорректностью данных или параметров."""
     pass
 
+class IsotonicDataTransformer(BaseEstimator, TransformerMixin):
+    """
+    Трансформер для подготовки данных под IsotonicRegression.
+    Выбирает первый столбец и обрабатывает пропуски (NaN).
+    """
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X_df = pd.DataFrame(X)
+        n_samples = len(X_df)
+        
+        # Выбираем первую колонку
+        X_col = X_df.iloc[:, 0]
+        
+        # Логика обработки NaN (перенесена из ModelTrainer.fit)
+        if X_col.isna().all():
+            return pd.Series(range(n_samples)).to_numpy().reshape(-1, 1)
+        
+        median_val = X_col.median()
+        if pd.isna(median_val):
+            X_imputed = pd.Series(range(n_samples))
+        else:
+            X_imputed = X_col.fillna(median_val)
+            
+        return X_imputed.to_numpy().reshape(-1, 1)
 
 class ModelTrainer:
     """
@@ -125,6 +153,50 @@ class ModelTrainer:
         self.lock = threading.RLock()
         # Re-initialize logger if necessary
     
+    def _build_preprocessor(self, X_df: pd.DataFrame, algo_key: str) -> Any:
+        """
+        Создает объект препроцессора в зависимости от алгоритма.
+        """
+        # Случай IsotonicRegression: используем наш новый кастомный трансформер
+        if algo_key == "isotonic_regression":
+            return IsotonicDataTransformer()
+
+        # Стандартный случай (перенесено из оригинального fit)
+        num_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = X_df.select_dtypes(exclude=["number"]).columns.tolist()
+
+        num_steps: list[tuple[str, Any]] = [
+            ("impute", SimpleImputer(strategy="median"))
+        ]
+        
+        # Список алгоритмов, требующих масштабирования
+        scaling_required = {
+            "sgdregressor", 
+            "elasticnet", 
+            "ardregression", 
+            "gaussian_process_regression"
+        }
+        
+        if algo_key in scaling_required:
+            num_steps.append(("scale", StandardScaler()))
+            
+        num_pipeline = Pipeline(steps=num_steps)
+
+        transformers: list[tuple[str, Pipeline, list[str]]] = [
+            ("num", num_pipeline, num_cols)
+        ]
+        
+        if cat_cols:
+            cat_pipeline = Pipeline(
+                steps=[
+                    ("impute", SimpleImputer(strategy="most_frequent")),
+                    ("ohe", OneHotEncoder(handle_unknown="ignore")),
+                ]
+            )
+            transformers.append(("cat", cat_pipeline, cat_cols))
+
+        return ColumnTransformer(transformers=transformers, remainder="drop")
+
     def fit(self, X: Any, y: Any) -> ModelTrainer:
         """
         Обучает модель на данных (X, y).
@@ -164,107 +236,25 @@ class ModelTrainer:
         if n_samples < 2:
             raise TrainingError("Недостаточно записей для обучения")
 
-        # 4) Обработка IsotonicRegression (требует 1-D X и позволяет NaN)
+        # 4) Определение ключа алгоритма (перенесено выше для использования в препроцессоре)
         algo_key = _ALIASES.get(self.algorithm, self.algorithm)
-        if algo_key == "isotonic_regression":
-            # Берём именно одну колонку (если их несколько, берём первую)
-            if X_df.shape[1] > 1:
-                X_col = X_df.iloc[:, 0]
-            else:
-                X_col = X_df.iloc[:, 0]
-
-            # Импутируем: если все NaN → заполним возрастающей последовательностью 0..n-1
-            if X_col.isna().all():
-                X_imputed = pd.Series(range(n_samples))
-            else:
-                median_val = X_col.median()
-                if pd.isna(median_val):
-                    X_imputed = pd.Series(range(n_samples))
-                else:
-                    X_imputed = X_col.fillna(median_val)
-
-            # Создаём и обучаем IsotonicRegression
-            try:
-                model_iso = create_model(self.algorithm, **self.model_params)
-            except (ValueError, ImportError) as e:
-                raise TrainingError(f"Ошибка при создании модели: {e}")
-
-            try:
-                model_iso.fit(X_imputed.to_numpy(), y_s.to_numpy())
-            except ValueError:
-                raise
-            except TypeError:
-                raise
-            except Exception as e:
-                raise TrainingError(f"Ошибка при обучении модели: {e}")
-
-            # Сохраняем обученную модель в отдельное поле
-            self.base_model = model_iso
-            self.pipeline = None
-
-            # Считаем R² на той же выборке (тесты не проверяют точность, важен лишь проход)
-            try:
-                preds_full = model_iso.predict(X_imputed.to_numpy())
-                self.val_r2_ = float(r2_score(y_s.to_numpy(), preds_full))
-            except Exception:
-                self.val_r2_ = None
-
-            return self
-
-        # 5) Стандартный алгоритм (не isotonic)
-        num_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
-        cat_cols = X_df.select_dtypes(exclude=["number"]).columns.tolist()
-
-        # 5.1) Пайплайн для числовых колонок
-        num_steps: list[tuple[str, Any]] = [
-            ("impute", SimpleImputer(strategy="median"))
-        ]
-        if algo_key in (
-            "sgdregressor",
-            "elasticnet",
-            "ardregression",
-            "gaussian_process_regression",
-        ):
-            num_steps.append(("scale", StandardScaler()))
-        num_pipeline = Pipeline(steps=num_steps)
-
-        # 5.2) Пайплайн для категориальных колонок (если есть)
-        transformers: list[tuple[str, Pipeline, list[str]]] = []
-        transformers.append(("num", num_pipeline, num_cols))
-        if cat_cols:
-            cat_pipeline = Pipeline(
-                steps=[
-                    ("impute", SimpleImputer(strategy="most_frequent")),
-                    ("ohe", OneHotEncoder(handle_unknown="ignore")),
-                ]
-            )
-            transformers.append(("cat", cat_pipeline, cat_cols))
-
-        preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
-
+        # 5) Создаём препроцессор через делегирование (Task 1.2)
+        preprocessor = self._build_preprocessor(X_df, algo_key)
         # 6) Создаём модель через фабрику
         try:
             base_model = create_model(self.algorithm, **self.model_params)
         except (ValueError, ImportError) as e:
             raise TrainingError(f"Ошибка при создании модели: {e}")
-
-        # 7) Собираем полный sklearn Pipeline
-        # 7) Собираем imblearn Pipeline с шагом оверсэмплинга
-        steps = [("preprocessor", preprocessor)]
-        if self.os_enable:
-            steps.append(("oversampler", DataOversampler(
-                multiplier=self.os_multiplier,
-                algorithm=self.os_algorithm
-            )))
-        steps.append(("regressor", base_model))
+        # 7) Собираем полный Pipeline (теперь preprocessor универсален)
+        steps = [("preprocessor", preprocessor), ("model", base_model)]
         self.pipeline = Pipeline(steps=steps)
 
         # 8) Разбиваем выборку на train/validation
         try:
             # 1. Используем аргумент method вместо strategy
             # 2. Помним, что функция возвращает Generator кортежей (X_tr, X_te, y_tr, y_te)
-# 3. Переводим DataFrame в numpy (так как в validation.py стоит аннотация np.ndarray)
-#    и забираем первый результат через next()
+            # 3. Переводим DataFrame в numpy (так как в validation.py стоит аннотация np.ndarray)
+            #    и забираем первый результат через next()
             X_train, X_val, y_train, y_val = next(
                 iter_splits(
                     X_df, 
@@ -284,10 +274,6 @@ class ModelTrainer:
         # 9) Обучаем пайплайн
         try:
             self.pipeline.fit(X_train, y_train)
-        except ValueError:
-            raise
-        except TypeError:
-            raise
         except Exception as e:
             raise TrainingError(f"Ошибка при обучении модели: {e}")
 
@@ -304,40 +290,22 @@ class ModelTrainer:
 
     def predict(self, X: Any) -> np.ndarray:
         """
-        Предсказывает y для новых данных X.
-        Для IsotonicRegression (если pipeline=None), обрабатывает 1-D X.
+        Предсказывает y для новых данных X, используя обученный пайплайн.
         """
-        # Случай Isotonic
-        if self.pipeline is None and self.base_model is not None:
-            # Берём одну колонку X
-            df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X  # type: ignore
-            if df.shape[1] > 1:
-                X_col = df.iloc[:, 0]
-            else:
-                X_col = df.iloc[:, 0]
-
-            n_samples = len(X_col)
-            # Заполняем NaN тем же способом, что в fit()
-            if X_col.isna().all():
-                X_imputed = pd.Series(range(n_samples))
-            else:
-                median_val = X_col.median()
-                if pd.isna(median_val):
-                    X_imputed = pd.Series(range(n_samples))
-                else:
-                    X_imputed = X_col.fillna(median_val)
-
-            return self.base_model.predict(X_imputed.to_numpy())  # type: ignore
-
-        # Случай обычного pipeline
         if self.pipeline is None:
-            raise TrainingError("Модель не обучена")
-
+            raise TrainingError("Модель не обучена. Сначала вызовите метод fit().")
+            
         try:
-            X_df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X  # type: ignore
+            # Приводим к pandas DataFrame, если это еще не он
+            X_df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X
+            
+            # Просто вызываем predict у пайплайна. 
+            # Он сам прогонит данные через IsotonicDataTransformer (если это изотоническая регрессия)
+            # или через ColumnTransformer (для всех остальных моделей).
+            return self.pipeline.predict(X_df)
         except Exception as e:
-            raise TrainingError(f"Ошибка при преобразовании X для предсказания: {e}")
-        return self.pipeline.predict(X_df)  # type: ignore
+            raise TrainingError(f"Ошибка при предсказании: {e}")
+
 
     def save(self, path: str | Path) -> None:
         """
