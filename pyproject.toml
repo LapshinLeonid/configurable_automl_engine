@@ -1,11 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
-
+requires = ["setuptools>=64","setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "configurable-automl-engine"              # имя на PyPI (может отличаться от модуля)
-version = "0.1.0"
+dynamic = ["version"]
 description = "A configuration-driven AutoML orchestrator for automated model selection and two-stage hyperparameter optimization."
 readme = "README.md"
 license = {text = "BSD 3-Clause"}
@@ -19,8 +18,18 @@ dependencies = [
     "imbalanced-learn>=0.12.3",
     "scikit-learn>=1.5.1",
     "threadpoolctl>=3.5.0"
+    "joblib>=1.4.2",
+    "pyyaml>=6.0.1"
     ]
+
+[project.optional-dependencies]
+xgboost = [
+    "xgboost>=2.0.0"
+]
 
 [project.urls]
 Homepage = "https://github.com/username/my-lib"
 Issues = "https://github.com/username/my-lib/issues"
+
+[tool.setuptools_scm]
+write_to = "src/configurable_automl_engine/_version.py"
