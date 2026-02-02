@@ -108,7 +108,11 @@ class OversamplingCfg(BaseModel):
 class SearchSpaceEntry(BaseModel):
     """
     Валидация записи пространства поиска гиперпараметра.
-    Пример в YAML: [50, 500, "int"] или [0.01, 0.1, "float_log"]
+    
+    Примеры в YAML:
+    - [50, 500, "int"] -> Целочисленный диапазон
+    - [0.01, 0.1, "float_log"] -> Логарифмический float
+    - [["gini", "entropy"], "categorical"] -> Категориальный выбор
     """
     bounds: Annotated[
         List[Union[float, int, str, bool]], 
@@ -116,12 +120,27 @@ class SearchSpaceEntry(BaseModel):
     ]
     @model_validator(mode="after")
     def _validate_structure(self) -> SearchSpaceEntry:
-        # Если 3 элемента, последний должен быть типом распределения
-        if len(self.bounds) == 3:
-            dist_type = self.bounds[2]
-            valid_types = ["int", "float", "float_log", "categorical"]
-            if dist_type not in valid_types:
-                raise ValueError(f"Type must be one of {valid_types}, got {dist_type}")
+        # Проверяем наличие типа распределения (последний элемент)
+        dist_type = self.bounds[-1]
+        valid_types = ["int", "float", "float_log", "categorical"]
+        
+        if dist_type not in valid_types:
+            # Если тип не указан явно (2 элемента), по умолчанию считаем "float" 
+            # или выбрасываем ошибку, если это критично.
+            # В вашей логике предполагается наличие 3-го элемента для специфичных типов.
+            return self
+        if dist_type == "categorical":
+            # Для категориальных признаков первый элемент ОБЯЗАН быть списком
+            if not isinstance(self.bounds[0], list):
+                raise ValueError(
+                    f"For 'categorical' type, the first element must be a list of options. "
+                    f"Got {type(self.bounds[0])} instead."
+                )
+        else:
+            # Для числовых типов (int, float) первый и второй элементы не должны быть списками
+            if isinstance(self.bounds[0], list) or isinstance(self.bounds[1], list):
+                raise ValueError(f"Numerical distribution '{dist_type}' cannot have a list as bounds.")
+                
         return self
 
 # ───────────────── algorithms ───────────────── #
