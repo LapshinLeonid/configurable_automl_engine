@@ -19,6 +19,14 @@ class DataOversampler(BaseSampler):
     """
     _sampling_type = "over-sampling"
 
+    _parameter_constraints: dict = {
+        "multiplier": [float, int],
+        "algorithm": [str],
+        "add_noise": ["boolean"],
+        "n_jobs": [int, None],
+        "log_dir": [str, None],
+    }
+
     def __init__(
         self,
         *,
@@ -132,9 +140,9 @@ class DataOversampler(BaseSampler):
             k_neighbors = max(1, min(5, min_samples - 1))
             
             if self.algorithm == "smote":
-                sampler = SMOTE(sampling_strategy=strategy, k_neighbors=k_neighbors, n_jobs=self.n_jobs)
+                sampler = SMOTE(sampling_strategy=strategy, k_neighbors=k_neighbors)
             elif self.algorithm == "adasyn":
-                sampler = ADASYN(sampling_strategy=strategy, n_neighbors=k_neighbors, n_jobs=self.n_jobs)
+                sampler = ADASYN(sampling_strategy=strategy, n_neighbors=k_neighbors)
             else:
                 raise ValueError(f"Неподдерживаемый алгоритм: {self.algorithm}")
 

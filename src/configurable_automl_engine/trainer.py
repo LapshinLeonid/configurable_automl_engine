@@ -100,6 +100,8 @@ class ModelTrainer:
         data_oversampling_algorithm: str = "random",
         serialization_format: SerializationFormat = SerializationFormat.pickle,
     ):
+        self.logger = logging.getLogger(__name__)
+
         # Проверка алгоритма
         if not isinstance(algorithm, str):
             raise TrainingError(f"Некорректный алгоритм: {algorithm!r}")

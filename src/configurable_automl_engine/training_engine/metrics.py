@@ -46,7 +46,7 @@ def _nrmse(y_true, y_pred):
     NRMSEZeroRangeError
         If max(y_true) == min(y_true);  раньше возвращали 0.0.
     """
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     denom = np.max(y_true) - np.min(y_true)
 
     if denom < 1e-6:
