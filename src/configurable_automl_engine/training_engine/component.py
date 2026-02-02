@@ -161,9 +161,18 @@ def train_best_model(
     df: pd.DataFrame,
     target: str | None = None,
 ):
-
+    # Мгновенная валидация входных данных
     if not isinstance(df, pd.DataFrame) or df.empty:
         raise TypeError("Input data must be non-empty pandas.DataFrame")
+
+    # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
+    target_col = target or "target"
+
+    #Проверка наличия таргета до инициализации тяжелых ресурсов
+    if target_col not in df.columns:
+        raise ValueError(
+            f"Target column '{target_col}' not found in dataframe columns: {list(df.columns)}"
+        )
 
     # Если передана строка или Path, читаем файл. Если объект Config или dict, обрабатываем их.
     if isinstance(config, Config):
@@ -183,15 +192,11 @@ def train_best_model(
     metric_sklearn = to_sklearn_name(metric_user)
     greater_is_better = is_greater_better(metric_sklearn)
 
-    target_col = target or "target"
-
     def _prepare_data(df, target):
         """
-        Валидация наличия целевой переменной и разделение на признаки и таргет.
+        Разделение на признаки и таргет.
         """
-        if target not in df.columns:
-            raise ValueError(f"Target column '{target}' not found in dataframe.")
-        
+              
         X = df.drop(columns=[target])
         y = df[target]
         return X, y

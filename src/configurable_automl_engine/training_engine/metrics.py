@@ -22,7 +22,10 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 import numpy as np
+import logging
 from sklearn.metrics import mean_squared_error, r2_score, make_scorer, get_scorer as sklearn_get_scorer
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 #  Сами метрики
@@ -46,12 +49,12 @@ def _nrmse(y_true, y_pred):
     rmse = mean_squared_error(y_true, y_pred, squared=False)
     denom = np.max(y_true) - np.min(y_true)
 
-    if denom < 1e-6:          # раньше просто отдавали 0.0
-        raise NRMSEZeroRangeError(
-            "Cannot compute NRMSE: target is constant within the split "
-            f"(len={len(y_true)}, value={y_true[0]!r})."
+    if denom < 1e-6:
+        logger.warning(
+            f"NRMSE: target is constant (range < 1e-6) for split of size {len(y_true)}. "
+            "Returning inf to avoid crashing HPO."
         )
-
+        return float('inf')
     return rmse / denom
 
 # --------------------------------------------------------------------------- #
