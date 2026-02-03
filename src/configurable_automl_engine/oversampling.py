@@ -36,12 +36,14 @@ class DataOversampler(BaseSampler):
         n_jobs: int = 1,
         log_dir: Optional[str] = None,
     ):
-        super().__init__()
-        self.multiplier = float(multiplier)
-        self.algorithm = algorithm.lower().replace(" ", "_")
+        # Сохраняем ровно то, что пришло, чтобы потом работал clone
+        self.multiplier = multiplier
+        self.algorithm = algorithm
         self.add_noise = add_noise
         self.n_jobs = n_jobs
         self.log_dir = log_dir
+
+        super().__init__()
         self._lock = threading.RLock()
         self._init_logging()
 
@@ -98,6 +100,9 @@ class DataOversampler(BaseSampler):
         """
         Внутренняя логика ресемплирования с использованием валидации sklearn/imblearn.
         """
+        self.multiplier = float(self.multiplier)
+        self.algorithm = self.algorithm.lower().replace(" ", "_")
+
         if self.multiplier <= 0:
             raise ValueError("multiplier must be > 0")
         try:

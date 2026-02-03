@@ -15,7 +15,8 @@ from sklearn.linear_model import (
     PoissonRegressor,
     GammaRegressor,
     TweedieRegressor,
-    Ridge
+    Ridge,
+    Lasso
 )
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF
@@ -57,7 +58,8 @@ _FACTORY: dict[str, type[RegressorMixin]] = {
     "ardregression": ARDRegression,
     "glm": TweedieRegressor,
     "xgboosting": XGBRegressor,
-    "ridge": Ridge
+    "ridge": Ridge,
+    "lasso": Lasso
 }
 
 # ----------------------------------------------------------------------------- #
@@ -79,7 +81,8 @@ _ALIASES: dict[str, str] = {
     "ard": "ardregression",
     "glm": "glm",
     "xgboost": "xgboosting",
-    'ridge_regression': 'ridge'
+    "ridge_regression": "ridge",
+    "lasso": "lasso"
 }
 
 

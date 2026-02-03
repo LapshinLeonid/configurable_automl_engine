@@ -2,7 +2,6 @@ from pathlib import Path
 import pytest
 import pandas as pd
 
-# Исправленные импорты согласно структуре src/
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
@@ -65,7 +64,19 @@ algorithms:
 """
 
 # Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в tuner)
-BROKEN_CFG = HAPPY_CFG.replace("enable: false", "enable: true")
+BROKEN_CFG = BROKEN_CFG = """
+general:
+  comparison_metric: rmse
+  path_to_model: '{model_path}'
+  phases:
+    - name: "Coarse Search"
+      n_trials: 1
+      action: "all_algorithms"
+
+algorithms:
+  totally_unknown_algo:
+    enable: true
+"""
 
 # --------------------------------------------------------------------------- #
 #  HAPPY PATH

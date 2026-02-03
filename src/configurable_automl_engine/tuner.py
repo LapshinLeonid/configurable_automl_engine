@@ -26,22 +26,10 @@ import numpy as np
 import optuna
 import pandas as pd
 from optuna.trial import Trial
-from sklearn import ensemble, model_selection, neighbors, svm, tree
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import (
-    ARDRegression,
-    ElasticNet,
-    GammaRegressor,
-    Lasso,
-    PoissonRegressor,
-    Ridge,
-    SGDRegressor,
-    TweedieRegressor,
-)
+
+from sklearn import model_selection
+
 from sklearn.model_selection import (
-    KFold,
-    LeaveOneOut,
     train_test_split,
 )
 
@@ -54,6 +42,8 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from configurable_automl_engine.oversampling import DataOversampler
 
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
+
+from configurable_automl_engine.models import create_model
 
 logging = _logging  # alias
 
@@ -90,34 +80,6 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
 
 
 ALGO_SPACES: dict[str, Callable[[Trial], dict[str, Any]]] = {}
-
-# ═══════════════════════ fallback-фабрика моделей ════════════════════════════
-_FALLBACK_FACTORY: dict[str, Any] = {
-    "elasticnet": ElasticNet,
-    "lasso": Lasso,
-    "ridge": Ridge,
-    "knn": neighbors.KNeighborsRegressor,
-    "decision_tree": tree.DecisionTreeRegressor,
-    "random_forest": ensemble.RandomForestRegressor,
-    "extra_trees": ensemble.ExtraTreesRegressor,
-    "gradient_boosting": ensemble.GradientBoostingRegressor,
-    "adaboost": ensemble.AdaBoostRegressor,
-    "svr": svm.SVR,
-    "sgdregressor": SGDRegressor,
-    "gaussianprocessregressor": GaussianProcessRegressor,
-    "isotonicregression": IsotonicRegression,
-    "ardregression": ARDRegression,
-    "poissonregressor": PoissonRegressor,
-    "gammaregressor": GammaRegressor,
-    "tweedieregressor": TweedieRegressor,
-}
-
-try:  # опциональный XGBoost
-    import xgboost as _xgb  # type: ignore
-
-    _FALLBACK_FACTORY["xgb"] = _xgb.XGBRegressor
-except ModuleNotFoundError:  # pragma: no cover
-    pass
 
 # ═════════════════════════════ helper-utilities ═════════════════════════════
 
@@ -160,19 +122,17 @@ def _validate_data(X: Any, y: Any) -> None:
 
 
 def _get_estimator(algo: str) -> Any:
-    """Сначала ищем в configurable_automl_engine.models.MODELS, иначе fallback."""
+    """
+    Проверяет валидность алгоритма через models.py.
+    Возвращает True, если алгоритм поддерживается, иначе кидает исключение.
+    """
     try:
-        models_mod = importlib.import_module("configurable_automl_engine.models")
-        factory = getattr(models_mod, "MODELS", {})
-        if algo in factory and factory[algo].get("use", True):
-            return factory[algo]["class"]
-    except ModuleNotFoundError:
-        pass
-
-    if algo in _FALLBACK_FACTORY:
-        return _FALLBACK_FACTORY[algo]
-
-    raise InvalidAlgorithmError(f"Алгоритм «{algo}» не поддерживается")
+        # Пробуем создать модель с минимальными параметрами для проверки существования
+        create_model(algo)
+        return True
+    except (ValueError, ImportError) as err:
+        # Если в models.py алгоритм не найден или не установлен пакет (например, XGBoost)
+        raise InvalidAlgorithmError(f"Алгоритм «{algo}» не поддерживается: {err}")
 
 
 def _build_scorer(name: str):
@@ -250,9 +210,8 @@ def optimize(
     oversampling_config = {
         "active": data_oversampling,
         "params": {
-            "sampling_strategy": data_oversampling_multiplier,
+            "multiplier": data_oversampling_multiplier,
             "algorithm": data_oversampling_algorithm,
-            "random_state": random_state
         }
     }
     
@@ -266,7 +225,7 @@ def optimize(
     algo = algo_name.lower()
     _validate_data(X, y)
 
-    Estimator = _get_estimator(algo)
+    _get_estimator(algo)
 
     # -------------------- 1. стратегия CV -------------------------- #
     n_samples = len(y)
@@ -308,7 +267,7 @@ def optimize(
 
         # 1. гиперпараметры и модель
         params = space_fn(trial)
-        model = Estimator(**params)
+        model = create_model(algo, **params)
 
         # --- ШАГ 2: ПОДГОТОВКА ОБЕРТКИ (WRAPPER) ---
         if oversampling_config["active"]:
@@ -364,10 +323,10 @@ def optimize(
         best_sampler = DataOversampler(**oversampling_config["params"])
         best_model = ImbPipeline([
             ('sampler', best_sampler),
-            ('model', Estimator(**study.best_params))
+            ('model', create_model(algo, **study.best_params))
         ])
     else:
-        best_model = Estimator(**study.best_params)
+        best_model = create_model(algo, **study.best_params)
 
     best_model.fit(X, y)
 
