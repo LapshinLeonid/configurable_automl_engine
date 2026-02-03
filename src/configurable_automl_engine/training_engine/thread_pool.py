@@ -59,6 +59,9 @@ def run_parallel(
                     results.append(None)
                 except InvalidAlgorithmError:
                     raise  # Пробрасываем ошибку конфига выше, чтобы тест её поймал
+                except KeyboardInterrupt:
+                    logger.error("Interrupted by user (KeyboardInterrupt)")
+                    raise
                 except Exception as e:
                     logger.error("Task failed: %s", e)
                     results.append(None)
