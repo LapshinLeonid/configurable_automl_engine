@@ -160,6 +160,7 @@ def train_best_model(
     config: Union[str, Path, Config, dict],
     df: pd.DataFrame,
     target: str | None = None,
+    model_path_override: str | Path | None = None,
 ):
     # Мгновенная валидация входных данных
     if not isinstance(df, pd.DataFrame) or df.empty:
@@ -286,7 +287,7 @@ def train_best_model(
     
     
     # ------------------ FINAL FIT & SAVE -------------------------- #
-    model_path = Path(cfg.general.path_to_model)
+    model_path = Path(model_path_override or cfg.general.path_to_model)
 
     try:
         _fit_and_save(winner_algo,winner_cfg, X,y, final_params, model_path, cfg)

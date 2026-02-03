@@ -76,10 +76,10 @@ def test_happy_path(tmp_path: Path, small_dataset):
     """
     cfg_file = tmp_path / "cfg.yaml"
     model_path = tmp_path / "model.pkl"
-    cfg_file.write_text(HAPPY_CFG.format(model_path=model_path), "utf-8")
+    cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
     
     # Используем фикстуру small_dataset вместо локальной функции
-    res = train_best_model(cfg_file, small_dataset)
+    res = train_best_model(cfg_file, small_dataset, model_path_override=model_path)
     
     assert Path(res["model_path"]).exists()
     assert res["algorithm"] in {
@@ -102,11 +102,11 @@ def test_bad_input_type(tmp_path: Path):
     Проверка, что передача не-DataFrame вызывает TypeError.
     """
     cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(HAPPY_CFG.format(model_path=tmp_path / "m.pkl"), "utf-8")
+    cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
     
     with pytest.raises(TypeError):
         # Передаем список вместо pandas.DataFrame
-        train_best_model(cfg_file, ["not", "a", "df"])
+        train_best_model(cfg_file, ["not", "a", "df"], model_path_override=tmp_path / "m.pkl")
 
 # --------------------------------------------------------------------------- #
 #  NO ALGORITHMS ENABLED
@@ -138,7 +138,7 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     неподдерживаемый алгоритм (XGBoost в данном BROKEN_CFG).
     """
     cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(BROKEN_CFG.format(model_path=tmp_path / "m.pkl"), "utf-8")
+    cfg_file.write_text(BROKEN_CFG.format(model_path="dummy_path"), "utf-8")
     
     with pytest.raises(InvalidAlgorithmError):
-        train_best_model(cfg_file, small_dataset)
+        train_best_model(cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl")
