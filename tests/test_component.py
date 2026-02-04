@@ -153,3 +153,30 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     
     with pytest.raises(InvalidAlgorithmError):
         train_best_model(cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl")
+
+from unittest.mock import patch
+from configurable_automl_engine import train_best_model
+
+
+from unittest.mock import patch
+from configurable_automl_engine.training_engine import train_best_model
+
+
+def test_train_best_model_lazy_proxy():
+    """
+    Проверяет, что train_best_model:
+    - лениво импортирует training_engine.component.train_best_model
+    - корректно проксирует аргументы
+    - возвращает результат вызова
+    """
+    expected_result = "mocked_result"
+
+    with patch(
+        "configurable_automl_engine.training_engine.component.train_best_model",
+        return_value=expected_result
+    ) as mocked_tbm:
+
+        result = train_best_model(1, 2, foo="bar")
+
+        mocked_tbm.assert_called_once_with(1, 2, foo="bar")
+        assert result == expected_result
