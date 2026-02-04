@@ -25,7 +25,8 @@ pytest_args = ["-v","-s",
                "test_e2e_pipeline.py",
                "test_metrics.py",
                "test_oversampling.py",
-               "test_parallel.py"
+               "test_parallel.py",
+               "test_logger.py"
                ]
 
 pytest.main(pytest_args)
