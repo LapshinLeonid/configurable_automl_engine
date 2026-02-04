@@ -27,7 +27,8 @@ pytest_args = ["-v","-s",
                "test_oversampling.py",
                "test_parallel.py",
                "test_logger.py",
-               "test_serialization.py"
+               "test_serialization.py",
+               "test_model.py"
                ]
 
 pytest.main(pytest_args)
