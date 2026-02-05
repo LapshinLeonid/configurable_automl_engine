@@ -106,8 +106,8 @@ def _run_hpo(
         overrides = {algo_name: search_space_override}
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
-        elif "search_space_override" in sig.parameters: # для обратной совместимости
-            kwargs["search_space_override"] = overrides
+
+
 
     try:
         _model, best_params, best_score = tuner.optimize(**kwargs)
