@@ -1,16 +1,15 @@
-import sys
-import os
 import pytest
 import pandas as pd
 import numpy as np
 import threading
 import pickle
-from pathlib import Path
-
-from unittest.mock import patch
+import logging
 
 # Импорты согласно вашей структуре
-from configurable_automl_engine.oversampling import DataOversampler, oversample as functional_oversample
+from configurable_automl_engine.oversampling import (
+    DataOversampler,
+      oversample as functional_oversample
+)
 
 class TestDataOversampler:
     """Полный набор тестов для DataOversampler (20 сценариев)"""
@@ -35,7 +34,8 @@ class TestDataOversampler:
         assert result.notna().all().all()
 
     def test_basic_oversampling_adasyn(self):
-        # Создаем больше данных, чтобы у миноритарного класса были соседи из мажоритарного
+        # Создаем больше данных, чтобы у миноритарного класса 
+        # были соседи из мажоритарного
         data = pd.DataFrame({
             'f1': np.arange(20),
             'target': [0]*15 + [1]*5
@@ -107,7 +107,8 @@ class TestDataOversampler:
 
     def test_invalid_multiplier(self, sample_data):
         sampler = DataOversampler(multiplier=-1.0)
-        # Ошибка вылетит внутри fit_resample -> _strategy -> ValueError при создании словаря стратегии
+        # Ошибка вылетит внутри fit_resample -> _strategy -> ValueError 
+        # при создании словаря стратегии
         with pytest.raises(Exception): 
             sampler.oversample(sample_data)
 
@@ -140,36 +141,35 @@ class TestDataOversampler:
 
     def test_find_target_in_middle(self):
         """Поиск таргета, если он не последний"""
-        df = pd.DataFrame({'f1': [1, 2, 3, 4], 'target': [0, 0, 1, 1], 'f2': [5, 6, 7, 8]})
+        df = pd.DataFrame(
+            {'f1': [1, 2, 3, 4], 
+             'target': [0, 0, 1, 1], 
+             'f2': [5, 6, 7, 8]
+             }
+             )
         sampler = DataOversampler(multiplier=2)
         result = sampler.oversample(df, target='target')
-        assert list(result.columns) == ['f1', 'f2', 'target'] # Сборка в oversample() переносит таргет в конец
+        # Сборка в oversample() переносит таргет в конец
+        assert list(result.columns) == ['f1', 'f2', 'target'] 
         assert len(result) == 8
 
     # --- 5. СИСТЕМНЫЕ ТЕСТЫ ---
 
-    def test_logging_creation(self, tmp_path, sample_data):
+    def test_logging_creation(self, caplog, sample_data):
         """Проверка логов и их структуры"""
-        log_dir = tmp_path / "logs"
-        sampler = DataOversampler(log_dir=str(log_dir), algorithm='random')
-        sampler.oversample(sample_data)
-        
-        log_file = log_dir / "oversampler.log"
-        assert log_file.exists()
-        content = log_file.read_text()
-        assert "INFO" in content
-        assert "Random resample" in content
+        with caplog.at_level(logging.INFO):
+            sampler = DataOversampler(algorithm='random')
+            sampler.oversample(sample_data)
+        assert "Random resample" in caplog.text
+        assert "INFO" in caplog.text
 
-    def test_logging_error(self, tmp_path):
-        # Указываем путь к файлу внутри существующей временной папки
-        log_dir = str(tmp_path)
-        sampler = DataOversampler(log_dir=log_dir)
-        with pytest.raises(Exception):
-            # Передаем невалидный объект, чтобы вызвать ошибку в _fit_resample
-            sampler.oversample(None)
-        
-        assert os.path.exists(sampler.log_path_)
-        assert "ERROR" in Path(sampler.log_path_).read_text()
+    def test_logging_error(self, caplog):
+        sampler = DataOversampler()
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(Exception):
+                sampler.oversample(None)
+        assert "ERROR" in caplog.text
+        assert "Ошибка в oversample" in caplog.text
 
     def test_pickle_compatibility(self):
         """Pickle (важно для мультипроцессинга в GridSearchCV)"""
@@ -192,17 +192,17 @@ class TestDataOversampler:
             if acquired:
                 load._lock.release()
 
-    def test_multithreading_safety(self, sample_data, tmp_path):
+    def test_multithreading_safety(self, sample_data):
         """Проверка lock при записи в лог из разных потоков"""
-        sampler = DataOversampler(log_dir=str(tmp_path))
+        sampler = DataOversampler()
         def run():
-            for _ in range(5): sampler.oversample(sample_data)
-        
+            for _ in range(5): 
+                sampler.oversample(sample_data)
         threads = [threading.Thread(target=run) for _ in range(4)]
-        for t in threads: t.start()
-        for t in threads: t.join()
-        
-        assert os.path.exists(sampler.log_path_)
+        for t in threads: 
+            t.start()
+        for t in threads: 
+            t.join()
 
     def test_functional_interface(self, sample_data):
         """Проверка быстрой функции-обертки"""
@@ -217,65 +217,4 @@ def sample_data():
         'feature1': np.random.rand(10),
         'target': [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
     })
-# --- Тесты для строк 66-67 (Ошибка при получении фрейма стека) ---
-def test_log_frame_error(sample_data, tmp_path):
-    """Тестирует случай, когда sys._getframe вызывает ValueError/AttributeError (строки 66-67)."""
-    log_dir = str(tmp_path / "logs")
-    sampler = DataOversampler(log_dir=log_dir)
-    
-    # Патчим sys._getframe, чтобы он выбрасывал ValueError
-    with patch('sys._getframe', side_effect=ValueError("Frame not found")):
-        # Вызываем метод, который инициирует логирование
-        sampler._log("Test message")
-        
-    # Проверяем, что в лог записалось 'unknown' вместо имени файла/функции
-    with open(sampler.log_path_, 'r') as f:
-        content = f.read()
-        assert "unknown:unknown" in content
-        assert "Test message" in content
-# --- Тесты для строк 73-74 (Ошибка записи в файл лога) ---
 
-def test_fit_resample_exception_logging(sample_data, tmp_path):
-    log_dir = str(tmp_path / "logs_fit")
-    # Передаем корректный multiplier, но ломаем алгоритм, чтобы вызвать исключение внутри блока try
-    sampler = DataOversampler(multiplier=1.0, algorithm="invalid_algo", log_dir=log_dir)
-    
-    X = sample_data.drop('target', axis=1)
-    y = sample_data['target']
-    # Это вызовет ValueError("Неподдерживаемый алгоритм...") внутри блока try
-    with pytest.raises(ValueError, match="Неподдерживаемый алгоритм"):
-        sampler._fit_resample(X, y)
-        
-    # Теперь файл точно существует, так как _log был вызван в блоке except
-    assert os.path.exists(sampler.log_path_)
-    with open(sampler.log_path_, 'r', encoding='utf-8') as f:
-        content = f.read()
-        assert "ERROR: Ошибка в _fit_resample" in content
-        assert "Неподдерживаемый алгоритм" in content
-
-def test_log_write_exception_coverage(tmp_path, capsys):
-    """
-    Тест специально для покрытия строк 73-74:
-    Имитация ошибки при записи в файл лога и проверка вывода в stderr.
-    """
-    # 1. Инициализируем оверсемплер
-    log_dir = str(tmp_path / "crash_test_logs")
-    sampler = DataOversampler(log_dir=log_dir)
-    
-    # Сообщение, которое мы попытаемся отправить в лог
-    error_msg = "Critical disk failure simulation"
-    
-    # 2. Патчим 'builtins.open'. 
-    # Мы выбрасываем RuntimeError (или любое Exception), чтобы попасть в блок 'except Exception as e'
-    with patch("builtins.open", side_effect=RuntimeError("Simulated OS Error")):
-        # Вызываем метод логирования напрямую
-        sampler._log(error_msg)
-    
-    # 3. Проверяем, что сработал print(..., file=sys.stderr)
-    captured = capsys.readouterr()
-    
-    # Строка 74: print(f"Не удалось записать лог: {e}", file=sys.stderr)
-    assert "Не удалось записать лог: Simulated OS Error" in captured.err
-    
-    # Дополнительно убеждаемся, что программа не «упала», а просто вывела ошибку
-    assert True

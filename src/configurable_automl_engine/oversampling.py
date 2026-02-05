@@ -4,13 +4,16 @@ import numpy as np
 import pandas as pd
 import threading
 from collections import Counter
-from typing import Union, Any, Optional, Dict
-from datetime import datetime
-from pathlib import Path
+from typing import Any, Optional, Dict
+
 from math import ceil
-from sklearn.neighbors import NearestNeighbors
+import logging
+
 from imblearn.base import BaseSampler
 from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
+
+
+logger = logging.getLogger(__name__)
 
 class DataOversampler(BaseSampler):
     """
@@ -34,44 +37,15 @@ class DataOversampler(BaseSampler):
         algorithm: str = "random",
         add_noise: bool = False,
         n_jobs: int = 1,
-        log_dir: Optional[str] = None,
     ):
         # Сохраняем ровно то, что пришло, чтобы потом работал clone
         self.multiplier = multiplier
         self.algorithm = algorithm
         self.add_noise = add_noise
         self.n_jobs = n_jobs
-        self.log_dir = log_dir
 
         super().__init__()
         self._lock = threading.RLock()
-        self._init_logging()
-
-    def _init_logging(self):
-        log_dir = self.log_dir or self._get_default_log_dir()
-        os.makedirs(log_dir, exist_ok=True)
-        self.log_path_ = os.path.join(log_dir, "oversampler.log")
-
-    def _get_default_log_dir(self) -> str:
-        root = Path(__file__).resolve().parents[2]
-        return str(root / "logs")
-
-    def _log(self, message: str, error: bool = False) -> None:
-        level = "ERROR" if error else "INFO"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            frame = sys._getframe(2)
-            fname = os.path.basename(frame.f_code.co_filename)
-            func = frame.f_code.co_name
-        except (ValueError, AttributeError):
-            fname, func = "unknown", "unknown"
-        line = f"[{ts}] [{fname}:{func}] {level}: {message}\n"
-        with self._lock:
-            try:
-                with open(self.log_path_, "a", encoding="utf-8") as f:
-                    f.write(line)
-            except Exception as e:
-                print(f"Не удалось записать лог: {e}", file=sys.stderr)
 
     def _strategy(self, y: pd.Series) -> Dict[Any, int]:
         counts = Counter(y)
@@ -133,7 +107,7 @@ class DataOversampler(BaseSampler):
                     arr = self._add_gaussian_noise(X_res.to_numpy())
                     X_res = pd.DataFrame(arr, columns=X_df.columns)
                 
-                self._log(f"Random resample: {len(X_validated)} -> {len(X_res)}")
+                logger.info(f"Random resample: {len(X_validated)} -> {len(X_res)}")
                 return X_res.to_numpy(), y_res.to_numpy()
 
             # Случай SMOTE / ADASYN
@@ -152,13 +126,13 @@ class DataOversampler(BaseSampler):
                 raise ValueError(f"Неподдерживаемый алгоритм: {self.algorithm}")
 
             X_res, y_res = sampler.fit_resample(X_df, y_s)
-            self._log(f"{self.algorithm.upper()} resample: {len(X_validated)} -> {len(X_res)}")
+            logger.info(f"{self.algorithm.upper()} resample: {len(X_validated)} -> {len(X_res)}")
             
             # Возвращаем numpy массивы (стандарт для внутренних методов sklearn/imblearn)
             return X_res.to_numpy(), y_res.to_numpy()
 
         except Exception as e:
-            self._log(f"Ошибка в _fit_resample: {e}", error=True)
+            logger.error(f"Ошибка в _fit_resample: {e}", exc_info=True)
             raise
 
     def oversample(self, data: pd.DataFrame, target: Optional[str] = None) -> pd.DataFrame:
@@ -183,7 +157,7 @@ class DataOversampler(BaseSampler):
             res_df[target] = y_res
             return res_df.reset_index(drop=True)
         except Exception as e:
-            self._log(f"Ошибка в oversample: {e}", error=True)
+            logger.error(f"Ошибка в oversample: {e}", exc_info=True)
             raise
 
 # ------------------------------------------------------------------ #
