@@ -1,10 +1,14 @@
 import pytest
 import time
 import hashlib
-from unittest.mock import patch, MagicMock
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, TimeoutError
+import logging
+
+from unittest.mock import PropertyMock, MagicMock,patch
+from configurable_automl_engine.tuner import InvalidAlgorithmError
+
 
 from configurable_automl_engine.training_engine.thread_pool import run_parallel
+from configurable_automl_engine.training_engine import thread_pool
 
 # --- Тестовые функции ---
 def cpu_bound_task(n: int) -> str:
@@ -77,3 +81,103 @@ def test_run_parallel_validation_error():
             args_seq=[(1,)], 
             kwargs_seq=[{}, {}] # Разная длина
         )
+
+def test_run_parallel_timeout_error_coverage(caplog):
+    # Мокаем ThreadPoolExecutor, чтобы его футуры всегда кидали TimeoutError
+    with patch("configurable_automl_engine.training_engine.thread_pool.ThreadPoolExecutor") as mock_executor:
+        mock_pool = MagicMock()
+        mock_executor.return_value.__enter__.return_value = mock_pool
+        
+        # Создаем фейковую футуру
+        mock_future = MagicMock()
+        # При вызове fut.result(timeout=...) кидаем TimeoutError из concurrent.futures
+        from concurrent.futures import TimeoutError
+        mock_future.result.side_effect = TimeoutError()
+        
+        mock_pool.submit.return_value = mock_future
+        
+        # as_completed должен вернуть список наших моков
+        with patch("configurable_automl_engine.training_engine.thread_pool.as_completed", return_value=[mock_future]):
+            with caplog.at_level(logging.ERROR):
+                results = run_parallel(lambda: None, args_seq=[()])
+    assert results == [None]
+    assert any("Task timed out after" in rec.getMessage() for rec in caplog.records)
+
+def raise_invalid():
+    raise InvalidAlgorithmError("bad algo")
+
+def test_run_parallel_invalid_algorithm_error_propagates():
+    with pytest.raises(InvalidAlgorithmError):
+        run_parallel(raise_invalid, args_seq=[()])
+
+def raise_keyboard_interrupt():
+    raise KeyboardInterrupt()
+def test_run_parallel_keyboard_interrupt_propagates(caplog):
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(KeyboardInterrupt):
+            run_parallel(raise_keyboard_interrupt, args_seq=[()])
+    # Проверяем, что было залогировано сообщение
+    assert any("Interrupted by user (KeyboardInterrupt)" in rec.getMessage() for rec in caplog.records)
+
+def raise_value_error():
+    raise ValueError("boom")
+def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(raise_value_error, args_seq=[()])
+    assert results == [None]
+    assert any("Task failed: boom" in rec.getMessage() for rec in caplog.records)
+
+class FailingExecutor:
+    def __init__(self, *args, **kwargs):
+        # Важно: этот текст должен совпадать с тем, что мы ищем в логах
+        raise RuntimeError("init failed")
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+def test_run_parallel_fallback_from_processes_to_threads(monkeypatch, caplog):
+    # Подменяем ProcessPoolExecutor
+    monkeypatch.setattr(thread_pool, "ProcessPoolExecutor", FailingExecutor)
+    
+    def simple_func(x):
+        return x + 10
+    with caplog.at_level(logging.ERROR):
+        results = thread_pool.run_parallel(
+            simple_func, 
+            args_seq=[(5,)], 
+            mode="processes"
+        )
+    # 1. Результат должен быть успешным за счет рекурсивного вызова в threads
+    assert results == [15]
+    
+    # 2. Проверяем лог. Текст ошибки берется из e (RuntimeError("init failed"))
+    assert any("Falling back to threads due to: init failed" in rec.getMessage() 
+               for rec in caplog.records)
+    
+def test_run_parallel_init_section_coverage(monkeypatch, caplog):
+    """
+    Тест для покрытия строк 43-45 (инициализация в начале функции).
+    Мы удаляем ProcessPoolExecutor из модуля, чтобы попытка доступа к нему 
+    вызвала ошибку в блоке try.
+    """
+    
+    # 1. Удаляем атрибут из модуля thread_pool
+    # Это заставит строку 'executor_cls = ProcessPoolExecutor' выбросить NameError или AttributeError
+    monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
+    with caplog.at_level(logging.ERROR):
+        # 2. Вызываем функцию. Теперь она споткнется прямо на входе в блок "processes"
+        results = thread_pool.run_parallel(
+            lambda x: x + 100,
+            args_seq=[(1,)],
+            mode="processes"
+        )
+    # ПРОВЕРКИ:
+    # 1. Результат должен быть 101, так как сработал fallback на ThreadPool
+    assert results == [101]
+    
+    # 2. Проверяем наличие лога именно из строки 44.
+    # В этом блоке текст ошибки обычно: "Could not initialize ProcessPoolExecutor"
+    log_messages = [rec.getMessage() for rec in caplog.records]
+    
+    # Ищем специфичное сообщение
+    found = any("Could not initialize ProcessPoolExecutor" in msg for msg in log_messages)
+    
+    assert found, f"Ожидаемый лог 'Could not initialize...' не найден. В логах: {log_messages}"
