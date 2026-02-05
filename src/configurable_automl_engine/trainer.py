@@ -59,10 +59,8 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):
             return pd.Series(range(n_samples)).to_numpy().reshape(-1, 1)
         
         median_val = X_col.median()
-        if pd.isna(median_val):
-            X_imputed = pd.Series(range(n_samples))
-        else:
-            X_imputed = X_col.fillna(median_val)
+
+        X_imputed = X_col.fillna(median_val)
             
         return X_imputed.to_numpy().reshape(-1, 1)
 
