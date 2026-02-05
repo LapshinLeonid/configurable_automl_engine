@@ -6,7 +6,8 @@ import numpy as np
 import threading
 import pickle
 from pathlib import Path
-from collections import Counter
+
+from unittest.mock import patch
 
 # Импорты согласно вашей структуре
 from configurable_automl_engine.oversampling import DataOversampler, oversample as functional_oversample
@@ -207,3 +208,74 @@ class TestDataOversampler:
         """Проверка быстрой функции-обертки"""
         result = functional_oversample(sample_data, multiplier=2, algorithm='random')
         assert len(result) == 10
+
+
+@pytest.fixture
+def sample_data():
+    """Создает минимальный DataFrame для тестов."""
+    return pd.DataFrame({
+        'feature1': np.random.rand(10),
+        'target': [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+    })
+# --- Тесты для строк 66-67 (Ошибка при получении фрейма стека) ---
+def test_log_frame_error(sample_data, tmp_path):
+    """Тестирует случай, когда sys._getframe вызывает ValueError/AttributeError (строки 66-67)."""
+    log_dir = str(tmp_path / "logs")
+    sampler = DataOversampler(log_dir=log_dir)
+    
+    # Патчим sys._getframe, чтобы он выбрасывал ValueError
+    with patch('sys._getframe', side_effect=ValueError("Frame not found")):
+        # Вызываем метод, который инициирует логирование
+        sampler._log("Test message")
+        
+    # Проверяем, что в лог записалось 'unknown' вместо имени файла/функции
+    with open(sampler.log_path_, 'r') as f:
+        content = f.read()
+        assert "unknown:unknown" in content
+        assert "Test message" in content
+# --- Тесты для строк 73-74 (Ошибка записи в файл лога) ---
+
+def test_fit_resample_exception_logging(sample_data, tmp_path):
+    log_dir = str(tmp_path / "logs_fit")
+    # Передаем корректный multiplier, но ломаем алгоритм, чтобы вызвать исключение внутри блока try
+    sampler = DataOversampler(multiplier=1.0, algorithm="invalid_algo", log_dir=log_dir)
+    
+    X = sample_data.drop('target', axis=1)
+    y = sample_data['target']
+    # Это вызовет ValueError("Неподдерживаемый алгоритм...") внутри блока try
+    with pytest.raises(ValueError, match="Неподдерживаемый алгоритм"):
+        sampler._fit_resample(X, y)
+        
+    # Теперь файл точно существует, так как _log был вызван в блоке except
+    assert os.path.exists(sampler.log_path_)
+    with open(sampler.log_path_, 'r', encoding='utf-8') as f:
+        content = f.read()
+        assert "ERROR: Ошибка в _fit_resample" in content
+        assert "Неподдерживаемый алгоритм" in content
+
+def test_log_write_exception_coverage(tmp_path, capsys):
+    """
+    Тест специально для покрытия строк 73-74:
+    Имитация ошибки при записи в файл лога и проверка вывода в stderr.
+    """
+    # 1. Инициализируем оверсемплер
+    log_dir = str(tmp_path / "crash_test_logs")
+    sampler = DataOversampler(log_dir=log_dir)
+    
+    # Сообщение, которое мы попытаемся отправить в лог
+    error_msg = "Critical disk failure simulation"
+    
+    # 2. Патчим 'builtins.open'. 
+    # Мы выбрасываем RuntimeError (или любое Exception), чтобы попасть в блок 'except Exception as e'
+    with patch("builtins.open", side_effect=RuntimeError("Simulated OS Error")):
+        # Вызываем метод логирования напрямую
+        sampler._log(error_msg)
+    
+    # 3. Проверяем, что сработал print(..., file=sys.stderr)
+    captured = capsys.readouterr()
+    
+    # Строка 74: print(f"Не удалось записать лог: {e}", file=sys.stderr)
+    assert "Не удалось записать лог: Simulated OS Error" in captured.err
+    
+    # Дополнительно убеждаемся, что программа не «упала», а просто вывела ошибку
+    assert True
