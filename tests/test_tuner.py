@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import importlib
 import sys
 from pathlib import Path
 from typing import Tuple
@@ -23,13 +22,17 @@ from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.oversampling import DataOversampler
 from imblearn.pipeline import Pipeline as ImbPipeline
 
-from unittest.mock import MagicMock
-from configurable_automl_engine.tuner import _apply_dynamic_space
-from configurable_automl_engine.tuner import _build_scorer, HyperoptError
+from unittest.mock import MagicMock, patch
+from configurable_automl_engine.tuner import (
+    _apply_dynamic_space,
+    _build_scorer, 
+    HyperoptError
+    )
 
+import optuna
 from optuna.trial import FixedTrial
 
-from configurable_automl_engine.tuner import _get_estimator
+
 from configurable_automl_engine.tuner import _can_stratify
 from configurable_automl_engine.tuner import optimize
 
@@ -334,3 +337,75 @@ def test_optimize_raises_when_no_search_space(monkeypatch):
             y,
             n_trials=1
         )
+
+
+class TestTunerObjective:
+    @pytest.fixture
+    def dummy_data(self):
+        return pd.DataFrame({'a': [1, 2, 3, 4, 5]}), pd.Series([1, 0, 1, 0, 1])
+    @pytest.fixture
+    def mock_space(self):
+        return {"rf": lambda trial: {"n_estimators": 10}}
+    def test_objective_trigger_fallback(self, dummy_data, mock_space):
+        """
+        Тест принудительно заставляет np.isfinite вернуть False,
+        чтобы проверить возврат константы.
+        """
+        X, y = dummy_data
+        EXPECTED_FALLBACK = -3.4028235e+38
+        # 1. Патчим ВСЁ окружение, чтобы ни одна реальная функция не выполнилась
+        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
+             patch('configurable_automl_engine.tuner.create_model') as mock_create, \
+             patch('configurable_automl_engine.tuner._build_scorer') as mock_scorer_factory, \
+             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
+             patch('configurable_automl_engine.tuner.np.isfinite') as mock_finite, \
+             patch('configurable_automl_engine.tuner._validate_data'), \
+             patch('configurable_automl_engine.tuner._get_estimator'):
+            # ГАРАНТИРУЕМ:
+            # 1. Мы в ветке k-fold
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            # 2. cross_val_score возвращает что-то
+            mock_cv.return_value = np.array([0.5])
+            # 3. КРИТИЧЕСКИЙ МОМЕНТ: Любое число НЕ конечное
+            mock_finite.return_value = False 
+            
+            # Остальные заглушки
+            mock_create.return_value = MagicMock()
+            mock_scorer_factory.return_value = MagicMock()
+            # Вызываем
+            _, _, best_score = optimize(
+                algo_name="rf",
+                X=X,
+                y=y,
+                n_trials=1,
+                space_overrides=mock_space
+            )
+            # Проверяем
+            assert best_score == EXPECTED_FALLBACK
+            assert mock_finite.called
+    def test_objective_via_actual_nan(self, dummy_data, mock_space):
+        """
+        Тест через подмену np.mean (более естественный путь).
+        Если в tuner.py: 'import numpy as np', патчим 'np.mean'.
+        Если 'from numpy import mean', патчим 'mean'.
+        """
+        X, y = dummy_data
+        
+        # Попробуем запатчить mean в пространстве имен модуля tuner
+        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
+             patch('configurable_automl_engine.tuner.create_model'), \
+             patch('configurable_automl_engine.tuner._build_scorer'), \
+             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
+             patch('configurable_automl_engine.tuner.np.mean', return_value=np.nan), \
+             patch('configurable_automl_engine.tuner._validate_data'), \
+             patch('configurable_automl_engine.tuner._get_estimator'):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_cv.return_value = np.array([1.0]) # значение не важно, так как mean вернет nan
+            _, _, best_score = optimize(
+                algo_name="rf",
+                X=X,
+                y=y,
+                n_trials=1,
+                space_overrides=mock_space
+            )
+            assert best_score == -3.4028235e+38

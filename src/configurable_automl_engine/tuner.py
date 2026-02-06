@@ -1,5 +1,5 @@
 """
-Hyperparameter optimisation module (CF-17 + CF-18 + CF-19).
+Hyperparameter optimisation module
 
 • Поддерживает все «классические» алгоритмы из configurable_automl_engine.models,
   где MODELS[key]["use"] is True,
@@ -10,16 +10,13 @@ Hyperparameter optimisation module (CF-17 + CF-18 + CF-19).
   leave-one-out. Если наблюдений мало для k-fold (< 2 × k), автоматически
   переключаемся на train_test_split.
 • По умолчанию метрика R², но можно указать любую
-• Логи: logs/hyperopt.log (ro-rotation 10 × 1 MB).
 """
 from __future__ import annotations
-
+from functools import partial
 
 # ─────────────────────────────── stdlib
-import importlib
 import logging as _logging
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 # ──────────────────────────── third-party
 import numpy as np
@@ -36,7 +33,7 @@ from sklearn.model_selection import (
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
 
-from configurable_automl_engine.validation import norm_val_method,make_cv
+from configurable_automl_engine.validation import make_cv
 
 from imblearn.pipeline import Pipeline as ImbPipeline
 from configurable_automl_engine.oversampling import DataOversampler
@@ -67,7 +64,7 @@ log = logging.getLogger(__name__)
 # ══════════ KNN-space зависит от размера выборки ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
     def _space(t: Trial) -> dict[str, Any]:
-        max_k = max(1, min(30, int(n_samples * 0.8)))  # ≥1 и ≤30
+        max_k = int(max(1, min(30, int(n_samples * 0.8))))  # ≥1 и ≤30
         return {
             "n_neighbors": t.suggest_int("n_neighbors", 1, max_k),
             "weights": t.suggest_categorical(
@@ -88,22 +85,40 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
     Преобразует словарь из конфига в параметры для модели через trial.suggest_*.
     Поддерживает как SearchSpaceEntry (объекты с полем bounds), так и константы.
     """
-    params = {}
+    params: dict[str, Any] = {}
     for key, value in space_dict.items():
-        # Если это SearchSpaceEntry (у него есть атрибут bounds после валидации Pydantic)
+        # Если это SearchSpaceEntry 
+        # (у него есть атрибут bounds после валидации Pydantic)
         if hasattr(value, "bounds"):
             b = value.bounds
             low, high = b[0], b[1]
             dist_type = b[2] if len(b) > 2 else "float"
             if dist_type == "int":
-                params[key] = trial.suggest_int(key, int(low), int(high))
+                low_val, high_val = int(cast(float, low)), int(cast(float, high))
+                params[key] = trial.suggest_int(
+                    key, 
+                    low_val, 
+                    high_val
+                    )
             elif dist_type == "float":
-                params[key] = trial.suggest_float(key, float(low), float(high))
+                params[key] = trial.suggest_float(
+                    key, 
+                    float(low), 
+                    float(high)
+                    )
             elif dist_type == "float_log":
-                params[key] = trial.suggest_float(key, float(low), float(high), log=True)
+                params[key] = trial.suggest_float(
+                    key, 
+                    float(low), 
+                    float(high), 
+                    log=True
+                    )
             elif dist_type == "categorical":
                 # В случае категориального, bounds[0] должен быть списком опций
-                params[key] = trial.suggest_categorical(key, low if isinstance(low, list) else b[:-1])
+                params[key] = trial.suggest_categorical(
+                    key, 
+                    low if isinstance(low, list) 
+                    else b[:-1])
         else:
             # Если это просто значение (константа), используем как есть
             params[key] = value
@@ -131,11 +146,12 @@ def _get_estimator(algo: str) -> Any:
         create_model(algo)
         return True
     except (ValueError, ImportError) as err:
-        # Если в models.py алгоритм не найден или не установлен пакет (например, XGBoost)
+        # Если в models.py алгоритм не найден или не установлен пакет
+        #  (например, XGBoost)
         raise InvalidAlgorithmError(f"Алгоритм «{algo}» не поддерживается: {err}")
 
 
-def _build_scorer(name: str):
+def _build_scorer(name: str)-> Any:
     try:
         # Используем новый API, который возвращает либо объект make_scorer, либо строку
         return get_scorer_object(name)
@@ -143,7 +159,7 @@ def _build_scorer(name: str):
         raise HyperoptError(f"Неизвестная метрика «{name}»") from err
 
 
-def _can_stratify(y) -> bool:
+def _can_stratify(y: Any) -> bool:
     """Можно ли безопасно stratify=y в train_test_split?"""
     if isinstance(y, (pd.Series, pd.DataFrame)):
         arr = y.values
@@ -160,30 +176,36 @@ def _can_stratify(y) -> bool:
     )
 
 
-def _split_train_test(X, y, *, test_size=0.2, random_state=42):
+def _split_train_test(
+        X: Any, 
+        y: Any,
+        *,
+        test_size: float =0.2,
+        random_state: int | None =42
+        ) -> tuple[Any, Any, Any, Any]:
     """train_test_split с попыткой стратификации."""
     strat = y if _can_stratify(y) else None
     try:
-        return train_test_split(
+        return cast(tuple[Any, Any, Any, Any], train_test_split(
             X,
             y,
             test_size=test_size,
             shuffle=True,
             random_state=random_state,
             stratify=strat,
-        )
+        ))
     except ValueError:
-        return train_test_split(
+        return cast(tuple[Any, Any, Any, Any], train_test_split(
             X, y, test_size=test_size, shuffle=True, random_state=random_state
-        )
+        ))
 
 
 
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
 def optimize(
     algo_name: str,
-    X,
-    y,
+    X:Any,
+    y:Any,
     *,
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
@@ -207,7 +229,7 @@ def optimize(
         best_score  – метрика на валидации
     """
     # --- Формируем конфиг для использования внутри _objective ---
-    oversampling_config = {
+    oversampling_config: dict[str, Any] = {
         "active": data_oversampling,
         "params": {
             "multiplier": data_oversampling_multiplier,
@@ -239,7 +261,9 @@ def optimize(
     # -------------------- 2. estimator + поисковое пространство ---- #
 
     if algo == "knn":
-        base_space_fn = _make_knn_space(n_samples)
+        base_space_fn: (
+            Callable[[Trial], dict[str, Any]] | None
+            ) = _make_knn_space(n_samples)
     else:
         base_space_fn = ALGO_SPACES.get(algo)
 
@@ -250,10 +274,10 @@ def optimize(
     
     # Если пришла функция (старый механизм) — используем её
     if callable(external_config):
-        space_fn = external_config
+        space_fn : Callable[[Trial], dict[str, Any]] | None = external_config
     # Если пришел словарь (новый механизм из YAML) — создаем обертку
     elif isinstance(external_config, dict):
-        space_fn = lambda t: _apply_dynamic_space(t, external_config)
+        space_fn  = partial(_apply_dynamic_space, space_dict=external_config)
     else:
         space_fn = base_space_fn
     if space_fn is None:
@@ -301,7 +325,11 @@ def optimize(
                 error_score="raise",
                 n_jobs=1
             )
-            return float(np.mean(scores))
+            avg_score = float(np.mean(scores))
+            # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
+            if not np.isfinite(avg_score):
+                return -3.4028235e+38 # аналог минимального float32 или float('-inf')
+            return avg_score
         except ValueError as err:
             trial.set_user_attr("fail_reason", str(err))
             raise optuna.TrialPruned()

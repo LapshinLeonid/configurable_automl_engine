@@ -27,6 +27,8 @@ from sklearn.metrics import mean_squared_error, r2_score, make_scorer, get_score
 
 logger = logging.getLogger(__name__)
 
+
+
 # --------------------------------------------------------------------------- #
 #  Сами метрики
 # --------------------------------------------------------------------------- #
@@ -52,7 +54,7 @@ def _nrmse(y_true, y_pred):
     if denom < 1e-6:
         logger.warning(
             f"NRMSE: target is constant (range < 1e-6) for split of size {len(y_true)}. "
-            "Returning inf to avoid crashing HPO."
+            "Returning +inf (will be inverted to -inf by scorer)."
         )
         return float('inf')
     return rmse / denom
@@ -72,6 +74,7 @@ _METRICS: Dict[str, Callable] = {
     "neg_root_mean_squared_error": lambda y_t, y_p: -_rmse(y_t, y_p),
 }
 
+
 # --------------------------------------------------------------------------- #
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
@@ -88,6 +91,7 @@ _SCORER_OBJECTS: Dict[str, Callable] = {
 }
 
 # Какие метрики интерпретируются как «больше — тем лучше»
+# nrmse сюда НЕ входит, так как Scorer инвертирует её в отрицательную
 _GREATER_IS_BETTER = {"r2", "neg_root_mean_squared_error"}
 
 
