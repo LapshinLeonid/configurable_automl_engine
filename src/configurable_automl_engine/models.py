@@ -30,37 +30,42 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
     AdaBoostRegressor)
 
-try:
-    from xgboost import XGBRegressor  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover
-    XGBRegressor = None  # type: ignore
+from configurable_automl_engine.common.dependency_utils import is_installed
 
 Algorithm = str
 
 # ----------------------------------------------------------------------------- #
 #                       Карта алгоритмов (длинные ключи)                       #
 # ----------------------------------------------------------------------------- #
-_FACTORY: dict[str, type[RegressorMixin]] = {
-    "elasticnet": ElasticNet,
-    "sgdregressor": SGDRegressor,
-    "decision_tree": DecisionTreeRegressor,
-    "random_forest": RandomForestRegressor,
-    "extra_trees": ExtraTreesRegressor,
-    "gradient_boosting": GradientBoostingRegressor,
-    "adaboost": AdaBoostRegressor,
-    "poissonregressor": PoissonRegressor,
-    "gammaregressor": GammaRegressor,
-    "tweedieregressor": TweedieRegressor,
-    "gaussian_process_regression": GaussianProcessRegressor,
-    "isotonic_regression": IsotonicRegression,
-    "nearest_neighbors_regression": KNeighborsRegressor,
-    "svr": SVR,
-    "ardregression": ARDRegression,
-    "glm": TweedieRegressor,
-    "xgboosting": XGBRegressor,
-    "ridge": Ridge,
-    "lasso": Lasso
-}
+
+def _get_factory() -> dict[str, Any]:
+    factory = {
+        "elasticnet": ElasticNet,
+        "sgdregressor": SGDRegressor,
+        "decision_tree": DecisionTreeRegressor,
+        "random_forest": RandomForestRegressor,
+        "extra_trees": ExtraTreesRegressor,
+        "gradient_boosting": GradientBoostingRegressor,
+        "adaboost": AdaBoostRegressor,
+        "poissonregressor": PoissonRegressor,
+        "gammaregressor": GammaRegressor,
+        "tweedieregressor": TweedieRegressor,
+        "gaussian_process_regression": GaussianProcessRegressor,
+        "isotonic_regression": IsotonicRegression,
+        "nearest_neighbors_regression": KNeighborsRegressor,
+        "svr": SVR,
+        "ardregression": ARDRegression,
+        "glm": TweedieRegressor,
+        "ridge": Ridge,
+        "lasso": Lasso
+    }
+        
+    if is_installed("xgboost"):
+        from xgboost import XGBRegressor
+        factory["xgboosting"] = XGBRegressor
+    return factory
+
+_FACTORY = _get_factory()
 
 # ----------------------------------------------------------------------------- #
 #                       Короткие псевдонимы (алиасы)                            #

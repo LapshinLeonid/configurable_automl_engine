@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
+from configurable_automl_engine.common.dependency_utils import is_installed
 
 # ─────────────────── phases ──────────────────── #
 
@@ -79,6 +80,13 @@ class GeneralCfg(BaseModel):
     @model_validator(mode="after")
     def _check_n_folds(self):
         # Базовая проверка на здравый смысл (для всех стратегий)
+        if (
+            self.serialization_format == SerializationFormat.joblib
+            and not is_installed("joblib")
+        ):
+            raise ValueError(
+                "serialization_format='joblib' требует установленный пакет 'joblib'"
+            )
         if self.n_folds < 1:
             raise ValueError("`n_folds` must be at least 1")
         
@@ -227,7 +235,26 @@ class Config(BaseModel):
         if not any(a.enable for a in v.values()):
             raise ValueError("no algorithms enabled in config")
         return v
+    @model_validator(mode="after")
+    def _check_algorithm_dependencies(self):
+        """
+        Проверяет, что для включённых алгоритмов установлены необходимые библиотеки.
+        """
+        algo_dependencies: Dict[str, str] = {
+            "xgboost": "xgboost",
+            "lightgbm": "lightgbm",
+            "catboost": "catboost",
+        }
 
+        for algo_name, algo_cfg in self.algorithms.items():
+            if not algo_cfg.enable:
+                continue
+            required_pkg = algo_dependencies.get(algo_name)
+            if required_pkg and not is_installed(required_pkg):
+                raise ValueError(
+                    f"Алгоритм '{algo_name}' включён, но пакет '{required_pkg}' не установлен"
+                )
+        return self
 # ────────────────── API ────────────────────── #
 
 def read_config(path: str | Path) -> Config:

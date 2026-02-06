@@ -7,6 +7,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
+from unittest.mock import patch
 
 BASE = {
     "general": {
@@ -36,17 +37,17 @@ def test_n_folds_ignored_for_loo():
     cfg = Config.model_validate(loo)  # не должно падать
     assert cfg.general.validation_strategy == ValidationStrategy.loo
 
-# --- Тесты для OversamplingCfg (Строка 130 - логирование) ---
+# --- Тесты для OversamplingCfg ---
 def test_oversampling_warn_useless_multiplier(caplog):
-    # Покрытие строки 130: предупреждение при multiplier=1 и enable=True
+    # Предупреждение при multiplier=1 и enable=True
     with caplog.at_level(logging.WARNING):
         OversamplingCfg(enable=True, multiplier=1.0)
     
     assert "Oversampling multiplier = 1 ➜ баланс классов не изменится" in caplog.text
 
-# --- Тесты для AlgoCfg (Строки 203-205) ---
+# --- Тесты для AlgoCfg ---
 def test_algo_cfg_empty_paths():
-    # Покрытие строк 203-205: пустые пути модулей
+    # Пустые пути модулей
     with pytest.raises(ValidationError, match="module path must be non-empty"):
         AlgoCfg(tuner="")
     
@@ -87,7 +88,7 @@ def test_read_config_integration(tmp_path):
 
 # Тесты для (Успешная валидация GeneralCfg)
 def test_general_cfg_valid_n_folds():
-    """Покрывает строку 83: успешное завершение валидатора _check_n_folds."""
+    """Успешное завершение валидатора _check_n_folds."""
     cfg = GeneralCfg(
         phases=[HPOPhaseCfg(name="test", n_trials=1)],
         validation_strategy=ValidationStrategy.k_fold,
@@ -95,22 +96,22 @@ def test_general_cfg_valid_n_folds():
     )
     assert cfg.n_folds == 3
 
-# Тесты для строк 159-173 (SearchSpaceEntry)
+# Тесты для SearchSpaceEntry
 def test_search_space_unknown_type():
-    """Покрывает строки 159-160: неизвестный тип распределения."""
+    """Неизвестный тип распределения."""
     # Валидатор возвращает self, если тип не в ['int', 'float', 'float_log', 'categorical']
     entry = SearchSpaceEntry(bounds=[1, 10, "unknown_type"])
     assert entry.bounds[-1] == "unknown_type"
 
 def test_search_space_categorical_invalid_structure():
-    """Покрывает строки 161-167: ошибка, если для categorical первый элемент не list."""
+    """Ошибка, если для categorical первый элемент не list."""
     with pytest.raises(ValueError, match="For 'categorical' type, the first element must be a list"):
         # Первый элемент "option" (str) валиден для Union, но невалиден для логики categorical
         SearchSpaceEntry(bounds=["option", "categorical"])
 
 def test_search_space_numerical_with_list_bounds():
     """
-    Покрывает строки 168-173: ошибка, если в численном типе есть список.
+    Ошибка, если в численном типе есть список.
     Используем model_construct, чтобы обойти предварительную проверку типов Pydantic.
     """
     # Создаем объект в обход валидации типов Union
@@ -122,9 +123,9 @@ def test_search_space_numerical_with_list_bounds():
     with pytest.raises(ValueError, match="Numerical distribution 'int' cannot have a list"):
         invalid_entry._validate_structure()
 
-# 3. Тесты для строки 205 (AlgoCfg._must_not_be_empty)
+# 3. Тесты для AlgoCfg._must_not_be_empty
 def test_algo_cfg_empty_paths():
-    """Покрывает строку 205: проверка на пустую строку в путях модулей."""
+    """ Проверка на пустую строку в путях модулей."""
     with pytest.raises(ValueError, match="module path must be non-empty"):
         AlgoCfg(tuner="", hyperparameters={})
     
@@ -141,10 +142,9 @@ def test_general_cfg_invalid_n_folds_kfold():
             n_folds=1
         )
 
-# Покрытие строки 83: Вызов исключения ValueError
+# Вызов исключения ValueError
 def test_general_cfg_coverage_line_83():
     """
-    Покрывает строку 83.
     Мы передаем n_folds=0, что должно вызвать первое исключение в _check_n_folds
     вне зависимости от выбранной стратегии валидации.
     """
@@ -158,9 +158,9 @@ def test_general_cfg_coverage_line_83():
             n_folds=0  # Это активирует raise на строке 83
         )
 
-# Покрытие строки 173: Успешный возврат return self в SearchSpaceEntry
+# Успешный возврат return self в SearchSpaceEntry
 def test_search_space_coverage_line_173():
-    """Покрывает строку 173: успешный проход валидатора распределения."""
+    """ Успешный проход валидатора распределения."""
     # Создаем корректную запись (например, для int), чтобы пройти все проверки
     # и достичь финального return self на строке 173
     entry = SearchSpaceEntry(bounds=[1, 10, "int"])
@@ -168,9 +168,9 @@ def test_search_space_coverage_line_173():
     # Вызов метода напрямую для гарантии покрытия, если pydantic v2 оптимизирует вызовы
     result = entry._validate_structure()
     assert result == entry
-# Покрытие строки 205: Успешный возврат return v в AlgoCfg
+# Успешный возврат return v в AlgoCfg
 def test_algo_cfg_coverage_line_205():
-    """Покрывает строку 205: успешный возврат значения пути модуля."""
+    """Успешный возврат значения пути модуля."""
     # При создании корректного AlgoCfg, валидатор _must_not_be_empty 
     # должен вернуть значение v (строка 205)
     algo = AlgoCfg(
@@ -179,3 +179,43 @@ def test_algo_cfg_coverage_line_205():
     )
     assert algo.tuner == "path.to.tuner"
     assert algo.trainer_module == "path.to.trainer"
+
+@patch("configurable_automl_engine.training_engine.config_parser.is_installed")
+def test_joblib_not_installed_raises_error(mock_is_installed):
+    """Тест исключения при отсутствии joblib."""
+    # Имитируем отсутствие пакета
+    mock_is_installed.return_value = False
+    
+    data = {
+        "general": {
+            "phases": [{"name": "search", "n_trials": 10}],
+            "serialization_format": "joblib",
+            "validation_strategy": "k_fold",
+            "n_folds": 5
+        },
+        "algorithms": {
+            "any_algo": {"enable": True}
+        }
+    }
+    
+    with pytest.raises(ValueError, match="serialization_format='joblib' требует установленный пакет 'joblib'"):
+        Config.model_validate(data)
+@patch("configurable_automl_engine.training_engine.config_parser.is_installed")
+def test_missing_algorithm_dependency_raises_error(mock_is_installed):
+    """Тест исключения при отсутствии библиотеки алгоритма."""
+    mock_is_installed.return_value = False
+    
+    data = {
+        "general": {
+            "phases": [{"name": "search", "n_trials": 10}],
+            # ИСПРАВЛЕНО: 'hold_out' заменен на 'train_test_split' (согласно тексту ошибки)
+            "validation_strategy": "train_test_split" 
+        },
+        "algorithms": {
+            "xgboost": {"enable": True}
+        }
+    }
+    
+    expected_msg = "Алгоритм 'xgboost' включён, но пакет 'xgboost' не установлен"
+    with pytest.raises(ValueError, match=expected_msg):
+        Config.model_validate(data)

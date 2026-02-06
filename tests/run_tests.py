@@ -28,7 +28,8 @@ pytest_args = ["-v","-s",
                "test_parallel.py",
                "test_logger.py",
                "test_serialization.py",
-               "test_model.py"
+               "test_model.py",
+               "test_dependency_utils.py"
                ]
 
 pytest.main(pytest_args)
