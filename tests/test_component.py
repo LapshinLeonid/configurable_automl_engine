@@ -226,7 +226,6 @@ def base_config_dict():
     }
 
 class TestTrainingEngineCoverage:
-    # Исправленный тест на InvalidAlgorithmError
     @patch("configurable_automl_engine.training_engine.component._load_module")
     def test_run_hpo_invalid_algorithm_error(self, mock_load, mock_algo_cfg, sample_df):
         mock_tuner = MagicMock()

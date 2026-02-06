@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import pickle
 import logging
+from unittest.mock import MagicMock, patch
 
 # Импорты согласно вашей структуре
 from configurable_automl_engine.oversampling import (
@@ -218,3 +219,54 @@ def sample_data():
         'target': [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
     })
 
+
+def test_critical_error_logging():
+    # 1. Готовим данные
+    X = pd.DataFrame(np.random.rand(10, 2), columns=['f1', 'f2'])
+    y = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1]) # Сбалансированные данные
+    
+    # 2. Создаем экземпляр
+    sampler = DataOversampler(algorithm="random")
+    
+    # 3. Патчим только логгер в модуле oversampling
+    with patch("configurable_automl_engine.oversampling.logger") as mock_logger:
+        
+        # 4. Имитируем "непредвиденную" ошибку через метод _strategy
+        # Этот метод вызывается внутри вашего _fit_resample СРАЗУ ПОСЛЕ _check_X_y
+        error_text = "Unexpected Crash during Strategy"
+        
+        with patch.object(sampler, "_strategy", side_effect=AttributeError(error_text)):
+            
+            # Проверяем, что ошибка (AttributeError) пробрасывается наружу
+            with pytest.raises(AttributeError, match=error_text):
+                sampler.fit_resample(X, y)
+        
+        # 5. ПРОВЕРКА ЛОГОВ (те самые строки 136-139)
+        
+        # Проверяем logger.debug(..., exc_info=True)
+        mock_logger.debug.assert_called_once_with(
+            "Unexpected error trace in _fit_resample:",
+            exc_info=True
+        )
+        
+        # Проверяем logger.error(f"Critical error...")
+        mock_logger.error.assert_called_once_with(
+            f"Critical error during data oversampling: {error_text}"
+        )
+
+def test_catch_generic_exception_only():
+    """
+    Проверяет, что блок ловит именно Exception, 
+    который не входит в список (ValueError, TypeError и т.д.)
+    """
+    with patch("configurable_automl_engine.oversampling.logger") as mock_log:
+        sampler = DataOversampler()
+        
+        # Вызываем ошибку, которая НЕ должна логироваться этим блоком (ValueError)
+        # так как она перехватывается выше и просто пробрасывается (re-raise)
+        with patch.object(sampler, "_check_X_y", side_effect=ValueError("Standard Data Error")):
+            with pytest.raises(ValueError):
+                sampler.fit_resample(None, None)
+        
+        # Logger не должен был вызваться, так как ValueError ушел в первый except
+        assert mock_log.error.call_count == 0

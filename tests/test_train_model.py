@@ -5,6 +5,8 @@ import threading
 
 from sklearn.preprocessing import StandardScaler
 
+from sklearn.base import BaseEstimator, TransformerMixin
+
 from configurable_automl_engine import trainer
 from configurable_automl_engine.trainer import (
     ModelTrainer, 
@@ -562,3 +564,37 @@ def test_train_model_empty_data_coverage():
         )
     # Верификация
     assert str(excinfo.value) == "Данные пусты"
+
+def test_fit_internal_rethrows_training_error():
+    """
+    Тест проверяет, что если внутри pipeline.fit возникает TrainingError,
+    он пробрасывается (raise) без изменений.
+    """
+    
+    # 1. Подготовка данных
+    X_train = pd.DataFrame({'feature1': [1, 2, 3], 'feature2': [4, 5, 6]})
+    y_train = pd.Series([10, 20, 30])
+    # 2. Создание "сломанного" препроцессора, который выкидывает TrainingError
+    class BrokenPreprocessor(BaseEstimator, TransformerMixin):
+        def fit(self, X, y=None):
+            # Имитируем специфическую ошибку обучения
+            raise TrainingError("Специфическая ошибка в процессе подготовки данных")
+        def transform(self, X):
+            return X
+    # 3. Инициализация тренера
+    trainer = ModelTrainer(algorithm="elasticnet")
+    
+    # Заменяем стандартную модель на заглушку
+    mock_model = MagicMock()
+    
+    # 4. Проверка: перехватываем именно TrainingError
+    with pytest.raises(TrainingError) as exc_info:
+        trainer._fit_internal(
+            X_train=X_train,
+            y_train=y_train,
+            preprocessor=BrokenPreprocessor(),
+            base_model=mock_model
+        )
+    
+    # Проверяем, что сообщение осталось оригинальным
+    assert "Специфическая ошибка в процессе подготовки данных" in str(exc_info.value)

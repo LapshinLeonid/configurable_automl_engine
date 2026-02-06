@@ -130,9 +130,12 @@ class DataOversampler(BaseSampler):
             
             # Возвращаем numpy массивы (стандарт для внутренних методов sklearn/imblearn)
             return X_res.to_numpy(), y_res.to_numpy()
-
+        except (ValueError, TypeError, ImportError, RuntimeError):
+            # Re-raise known data-related or configuration errors directly
+            raise
         except Exception as e:
-            logger.error(f"Ошибка в _fit_resample: {e}", exc_info=True)
+            logger.debug("Unexpected error trace in _fit_resample:", exc_info=True)
+            logger.error(f"Critical error during data oversampling: {e}")
             raise
 
     def oversample(self, data: pd.DataFrame, target: Optional[str] = None) -> pd.DataFrame:

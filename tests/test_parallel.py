@@ -132,7 +132,7 @@ def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
     with caplog.at_level(logging.ERROR):
         results = run_parallel(raise_value_error, args_seq=[()])
     assert results == [None]
-    assert any("Task failed: boom" in rec.getMessage() for rec in caplog.records)
+    assert any("Task failed with an unexpected error: boom" in rec.getMessage() for rec in caplog.records)
 
 class FailingExecutor:
     def __init__(self, *args, **kwargs):

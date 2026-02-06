@@ -55,7 +55,7 @@ class DiskPersistenceManager:
             try:
                 if os.path.exists(path):
                     os.remove(path)
-            except Exception as e:
+            except (OSError, FileNotFoundError) as e:
                 logger.warning(f"Failed to delete temp file {path}: {e}")
 
 def _worker_proxy(func, args, kwargs, disk_indices, shm_indices):
@@ -162,13 +162,17 @@ def run_parallel(
                     logger.error("Task timed out after %s s, marking as failed", effective_timeout)
                     fut.cancel()
                     results.append(None)
-                except InvalidAlgorithmError:
-                    raise  # Пробрасываем ошибку конфига выше, чтобы тест её поймал
                 except KeyboardInterrupt:
                     logger.error("Interrupted by user (KeyboardInterrupt)")
                     raise
+                except InvalidAlgorithmError:
+                    raise  # Пробрасываем ошибку конфига выше, чтобы тест её поймал
                 except Exception as e:
-                    logger.error("Task failed: %s", e)
+                    logger.error(
+                        "Task failed with an unexpected error: %s", 
+                        e, 
+                        exc_info=True
+                    )
                     results.append(None)
         return results
     except Exception as e:

@@ -262,8 +262,11 @@ class ModelTrainer:
             # Пробрасываем валидационные ошибки напрямую, чтобы тесты могли их поймать
             # Это критично для тестов, проверяющих некорректные гиперпараметры
             raise e
+        except TrainingError:
+            raise
         except Exception as e:
             # Все остальные системные ошибки оборачиваем в TrainingError
+            self.logger.debug("Unexpected pipeline fit failure trace:", exc_info=True)
             self.logger.error(f"Unexpected error in pipeline fit: {e}")
             raise TrainingError(f"Internal training failure: {e}")
         return self.pipeline
