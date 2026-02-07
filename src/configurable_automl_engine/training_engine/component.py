@@ -25,6 +25,12 @@ from configurable_automl_engine.training_engine.config_parser import (
     read_config,
 )
 
+from configurable_automl_engine.common.validation_utils import (
+    validate_df_not_empty,
+    check_target_exists,
+    prepare_X_y
+)
+
 from .logger import setup_logging
 
 from .metrics import (
@@ -162,18 +168,13 @@ def train_best_model(
     target: str | None = None,
     model_path_override: str | Path | None = None,
 ):
-    # Мгновенная валидация входных данных
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        raise TypeError("Input data must be non-empty pandas.DataFrame")
-
+    # Centralized validation
+    validate_df_not_empty(df)
     # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
     target_col = target or "target"
 
     #Проверка наличия таргета до инициализации тяжелых ресурсов
-    if target_col not in df.columns:
-        raise ValueError(
-            f"Target column '{target_col}' not found in dataframe columns: {list(df.columns)}"
-        )
+    check_target_exists(df, target_col)
 
     # Если передана строка или Path, читаем файл. Если объект Config или dict, обрабатываем их.
     if isinstance(config, Config):
@@ -193,16 +194,8 @@ def train_best_model(
     metric_sklearn = to_sklearn_name(metric_user)
     greater_is_better = is_greater_better(metric_sklearn)
 
-    def _prepare_data(df, target):
-        """
-        Разделение на признаки и таргет.
-        """
-              
-        X = df.drop(columns=[target])
-        y = df[target]
-        return X, y
-
-    X, y = _prepare_data(df, target_col)
+    # Centralized splitting
+    X, y = prepare_X_y(df, target_col)
 
     def _execute_hpo_phase(phase_name, algo, a_cfg, n_trials, search_space=None):
         """

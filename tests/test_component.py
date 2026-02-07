@@ -298,7 +298,7 @@ class TestTrainingEngineCoverage:
             
     # Пустой DataFrame
     def test_train_best_model_empty_df(self):
-        with pytest.raises(TypeError, match="must be non-empty"):
+        with pytest.raises(ValueError, match="Input dataframe is empty"):
             train_best_model(config={}, df=pd.DataFrame())
 
 # Проверка отсутствия функции optimize в тюнере

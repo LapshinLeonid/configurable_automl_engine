@@ -314,21 +314,19 @@ def test_coverage_prepare_data_exception_line():
 
 def test_prepare_data_empty_input_coverage():
     """
-    Тест для покрытия строк: 
-    if n_samples == 0 or len(y_s) == 0:
-        raise TrainingError("Данные пусты")
+    Тест для проверки обработки пустых входных данных.
+    После рефакторинга ожидается ValueError, так как это стандарт 
+    для централизованной валидации в проекте.
     """
     trainer = ModelTrainer(algorithm="elasticnet")
     
-    # Создаем пустые корректные объекты
+    # Создаем пустые объекты (DataFrame и Series)
     X_empty = pd.DataFrame()
     y_empty = pd.Series([], dtype=float)
     
-    with pytest.raises(TrainingError) as excinfo:
+    # Теперь ожидаем ValueError вместо TrainingError
+    with pytest.raises(ValueError, match="Данные пусты"):
         trainer._prepare_data(X_empty, y_empty)
-    
-    # Проверяем текст ошибки
-    assert "Данные пусты" in str(excinfo.value)
     
 def test_fit_internal_unexpected_error():
     """
@@ -598,3 +596,21 @@ def test_fit_internal_rethrows_training_error():
     
     # Проверяем, что сообщение осталось оригинальным
     assert "Специфическая ошибка в процессе подготовки данных" in str(exc_info.value)
+
+def test_prepare_data_index_error_coverage():
+    """
+    Тест для покрытия блока except (TypeError, IndexError).
+    Передаем DataFrame без колонок. 
+    isinstance(y, pd.DataFrame) вернет True, но y.iloc[:, 0] вызовет IndexError.
+    """
+    trainer = ModelTrainer(algorithm="elasticnet")
+    
+    # X — корректный (2 строки, 1 колонка)
+    X = np.array([[1], [2]])
+    
+    # y — DataFrame, у которого есть строки (индексы), но НЕТ столбцов.
+    # Это вызовет IndexError: single positional indexer is out-of-bounds
+    y_no_columns = pd.DataFrame(index=[0, 1]) 
+    
+    with pytest.raises(TrainingError, match="Ошибка при преобразовании данных"):
+        trainer._prepare_data(X, y_no_columns)
