@@ -88,23 +88,25 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
     params: dict[str, Any] = {}
     for key, value in space_dict.items():
         # Если это SearchSpaceEntry 
-        # (у него есть атрибут bounds после валидации Pydantic)
-        if hasattr(value, "bounds"):
-            b = value.bounds
-            low, high = b[0], b[1]
-            dist_type = b[2] if len(b) > 2 else "float"
+         # (используем свойства low, high, dist_type, step)
+        if hasattr(value, "dist_type"):
+            low, high = value.low, value.high
+            dist_type = value.dist_type
+            step = value.step
             if dist_type == "int":
                 low_val, high_val = int(cast(float, low)), int(cast(float, high))
                 params[key] = trial.suggest_int(
                     key, 
                     low_val, 
-                    high_val
+                    high_val,
+                    step=int(step) if step is not None else 1
                     )
             elif dist_type == "float":
                 params[key] = trial.suggest_float(
                     key, 
                     float(low), 
-                    float(high)
+                    float(high),
+                    step=float(step) if step is not None else None
                     )
             elif dist_type == "float_log":
                 params[key] = trial.suggest_float(
@@ -114,11 +116,8 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     log=True
                     )
             elif dist_type == "categorical":
-                # В случае категориального, bounds[0] должен быть списком опций
-                params[key] = trial.suggest_categorical(
-                    key, 
-                    low if isinstance(low, list) 
-                    else b[:-1])
+                options = low
+                params[key] = trial.suggest_categorical(key,options)
         else:
             # Если это просто значение (константа), используем как есть
             params[key] = value

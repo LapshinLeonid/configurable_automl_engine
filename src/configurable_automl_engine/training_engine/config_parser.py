@@ -152,32 +152,72 @@ class SearchSpaceEntry(BaseModel):
         List[Union[float, int, str, bool]], 
         Field(
             min_length=2, 
-            max_length=3,
+            max_length=4,
             description=(
                 "Параметры распределения гиперпараметра. "
-                "Для чисел (int, float): [min, max, type]. "
+                "Для чисел (int, float): [min, max, type] или [min, max, type, step]. "
                 "Для логарифмических шкал: [min, max, 'float_log']. "
                 "Для категорий: [[val1, val2], 'categorical'] или [val1, val2, 'categorical']."
             )
         )
     ]
 
+    @property
+    def low(self) -> Any:
+        return self.bounds[0]
+
+    @property
+    def high(self) -> Any:
+        return self.bounds[1]
+
+    @property
+    def dist_type(self) -> str:
+        if len(self.bounds) >= 2 and self.bounds[1] == "categorical":
+            return "categorical"
+        elif len(self.bounds) >= 3:
+            return str(self.bounds[2])
+        return "float"
+
+    @property
+    def step(self) -> Optional[float]:
+        if len(self.bounds) == 4:
+            return float(self.bounds[3])  # type: ignore
+        return None
+
     @model_validator(mode="after")
     def _validate_structure(self) -> SearchSpaceEntry:
-        dist_type = self.bounds[-1]
+        dist_type = self.dist_type
+        
         valid_types = ["int", "float", "float_log", "categorical"]
         if dist_type not in valid_types:
             return self
         
         if dist_type == "categorical":
-            if not isinstance(self.bounds[0], list):
+            if not isinstance(self.low, list):
                 raise ValueError(
                     f"For 'categorical' type, the first element must be a list of options. "
-                    f"Got {type(self.bounds[0])} instead."
+                    f"Got {type(self.low)} instead."
                 )
         else:
-            if isinstance(self.bounds[0], list) or isinstance(self.bounds[1], list):
-                raise ValueError(f"Numerical distribution '{dist_type}' cannot have a list as bounds.")
+            # Валидация границ диапазона
+            if not isinstance(self.low, (int, float)) or not isinstance(self.high, (int, float)):
+                raise ValueError(f"Bounds for '{dist_type}' must be numerical. Got {type(self.low)} and {type(self.high)}.")
+            if self.low > self.high:
+                raise ValueError(f"Lower bound ({self.low}) must be less than or equal to upper bound ({self.high}).")
+            # Валидация step для числовых типов
+            if self.step is not None:
+                if dist_type == "float_log":
+                    raise ValueError("The 'step' parameter is not supported for 'float_log' distribution.")
+                
+                if dist_type == "int":
+                    if not float(self.step).is_integer():
+                        raise ValueError(f"Step for 'int' distribution must be an integer. Got {self.step}.")
+                    if self.step <= 0:
+                        raise ValueError(f"Step for 'int' distribution must be positive. Got {self.step}.")
+                
+                if dist_type == "float" and self.step <= 0:
+                    raise ValueError(f"Step for 'float' distribution must be positive. Got {self.step}.")
+
         return self
 
 # ───────────────── algorithms ───────────────── #

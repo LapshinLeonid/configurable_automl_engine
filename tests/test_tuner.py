@@ -145,6 +145,14 @@ def test_apply_dynamic_space_types(toy_data):
     class MockEntry:
         def __init__(self, bounds):
             self.bounds = bounds
+        @property
+        def low(self): return self.bounds[0]
+        @property
+        def high(self): return self.bounds[1]
+        @property
+        def dist_type(self): return self.bounds[2]
+        @property
+        def step(self): return self.bounds[3] if len(self.bounds) > 3 else None
     # Имитируем структуру из YAML для KNN
     # Это покроет ветки int, float, float_log, categorical и константы
     dynamic_config = {
@@ -261,20 +269,28 @@ def test_knn_space_dynamic_limit():
 
 def test_apply_dynamic_space_floats():
     trial = MagicMock()
-    
-    # Имитируем структуру SearchSpaceEntry из Pydantic
     class MockEntry:
         def __init__(self, bounds):
             self.bounds = bounds
+        @property
+        def low(self): return self.bounds[0]
+        @property
+        def high(self): return self.bounds[1]
+        @property
+        def dist_type(self): return self.bounds[2]
+        @property
+        def step(self): return self.bounds[3] if len(self.bounds) > 3 else None
     space_dict = {
         "learning_rate": MockEntry([0.01, 0.1, "float"]),
         "gamma": MockEntry([1e-5, 1e-1, "float_log"]),
         "constant": 42
     }
+    
     _apply_dynamic_space(trial, space_dict)
-    # Проверяем вызовы Optuna
-    trial.suggest_float.assert_any_call("learning_rate", 0.01, 0.1)
-    trial.suggest_float.assert_any_call("gamma", 1e-5, 1e-1, log=True)
+    
+    # Проверяем вызовы
+    trial.suggest_float.assert_any_call("learning_rate", 0.01, 0.1, step=None)
+    trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
 
 def test_build_scorer_error():
     with pytest.raises(HyperoptError, match="Неизвестная метрика"):
