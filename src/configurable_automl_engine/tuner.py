@@ -42,6 +42,8 @@ from configurable_automl_engine.training_engine.metrics import get_scorer_object
 
 from configurable_automl_engine.models import create_model
 
+from configurable_automl_engine.validation import iter_splits
+
 logging = _logging  # alias
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
@@ -217,6 +219,7 @@ def optimize(
     n_folds: int = 5,
     n_trials: int = 50,
     random_state: int | None = 42,
+    train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
 ) -> tuple[Any, dict[str, Any], float]:
     """
@@ -255,6 +258,7 @@ def optimize(
         val_method=val_method,
         n_folds=n_folds,
         random_state=random_state,
+        test_size= train_test_split_test_size
     )
 
     # -------------------- 2. estimator + поисковое пространство ---- #
@@ -305,23 +309,25 @@ def optimize(
 
         # -------------------------------------------
 
-        # 2. train / test split (если CV заменён на hold-out)
         if val_method_eff == "train_test_split":
-            X_tr, X_te, y_tr, y_te = _split_train_test(
-                X, y, test_size=0.2, random_state=random_state
-            )
+            # Используем iter_splits для унификации
+            # Так как это генератор, берем next()
+            X_tr, X_te, y_tr, y_te = next(iter_splits(
+                X, y, method="train_test_split", 
+                test_size=0.2, random_state=random_state
+            ))
             current_estimator.fit(X_tr, y_tr)
             return float(scorer(current_estimator, X_te, y_te))
-
+            
         # 3. k-fold или Leave-One-Out
         try:
+            # cv_obj здесь гарантированно не None, 
+            # так как мы проверили final_method выше
             scores = model_selection.cross_val_score(
-                current_estimator, # Передаем подготовленную обертку
-                X,
-                y,
+                current_estimator,
+                X, y,
                 cv=cv_obj,
                 scoring=scorer,
-                error_score="raise",
                 n_jobs=1
             )
             avg_score = float(np.mean(scores))
