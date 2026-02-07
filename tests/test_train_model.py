@@ -15,7 +15,7 @@ from configurable_automl_engine.trainer import (
     train_model
 )
 from configurable_automl_engine.common.definitions import SerializationFormat
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Синтетические данные для тестирования
 X = pd.DataFrame({
@@ -614,3 +614,68 @@ def test_prepare_data_index_error_coverage():
     
     with pytest.raises(TrainingError, match="Ошибка при преобразовании данных"):
         trainer._prepare_data(X, y_no_columns)
+
+def test_fit_raises_error_when_scorer_returns_none():
+    """
+    Тест проверяет выброс TrainingError, если объект-скорер 
+    возвращает None вместо числового значения.
+    """
+    
+    # 1. Подготовка минимальных данных для обучения
+    X = pd.DataFrame({"feature1": [1, 2, 3, 4, 5]})
+    y = pd.Series([10, 20, 30, 40, 50])
+    
+    # 2. Настройка тренера
+    # Используем любой алгоритм, так как до обучения дело дойдет, 
+    # но упадет на расчете метрики
+    trainer = ModelTrainer(
+        algorithm="elasticnet",
+        model_params={"alpha": 0.1},
+        metric="r2"
+    )
+    
+    # 3. Мокаем (подменяем) get_scorer_object
+    # Нам нужно, чтобы get_scorer_object вернул функцию (callable), 
+    # которая при вызове возвращает None
+    mock_scorer = MagicMock(return_value=None)
+    
+    with patch("configurable_automl_engine.trainer.get_scorer_object", return_value=mock_scorer):
+        # Проверяем, что вызывается именно наше исключение с нужным текстом
+        with pytest.raises(TrainingError, match="Scorer returned None"):
+            trainer.fit(X, y)
+
+
+def test_train_model_raises_error_when_val_score_is_none():
+    """
+    Тест проверяет ситуацию в функции train_model, когда ModelTrainer.fit() 
+    отработал, но не установил значение val_score.
+    """
+    # 1. Данные для прохождения валидации (минимум 2 примера)
+    X = np.array([[1], [2], [3]])
+    y = np.array([1, 2, 3])
+    
+    algo = "elasticnet"
+    metric = "r2"
+    params = {"alpha": 0.5}
+    # 2. Мокаем класс ModelTrainer прямо в модуле trainer.py
+    # Это гарантирует, что train_model увидит именно Mock
+    with patch("configurable_automl_engine.trainer.ModelTrainer") as MockTrainer:
+        # Настраиваем поведение экземпляра
+        mock_instance = MagicMock()
+        MockTrainer.return_value = mock_instance
+        
+        # fit() возвращает self, имитируем успешное завершение
+        mock_instance.fit.return_value = mock_instance
+        
+        # ПРОВОКАЦИЯ ОШИБКИ: val_score остается None
+        mock_instance.val_score = None
+        
+        # 3. Проверяем, что функция train_model поймала этот None и выбросила исключение
+        with pytest.raises(TrainingError, match="Модель не вернула значение метрики"):
+            train_model(
+                algo, 
+                metric, 
+                params, 
+                X=X, 
+                y=y
+            )

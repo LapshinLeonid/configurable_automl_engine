@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 """
 Training-engine: coarse HPO → accurate HPO → финальный fit & save.
@@ -9,6 +8,7 @@ Training-engine: coarse HPO → accurate HPO → финальный fit & save.
 * ничего не меняется для `loo` и `train_test_split`.
 """
 
+from __future__ import annotations
 import importlib
 import inspect
 import logging
@@ -39,10 +39,10 @@ from .metrics import (
 )
 from .thread_pool import run_parallel
 
-from configurable_automl_engine.trainer import ModelTrainer
 
 
 # ───────────────────────── canonical IAE ─────────────────────── #
+
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 
 _LOG = logging.getLogger("training_engine")
@@ -137,7 +137,7 @@ def _fit_and_save(
     best_params: Dict[str, Any],
     model_path: Path,
     cfg: Config,
-):
+) -> None:
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
         raise AttributeError(
@@ -163,11 +163,11 @@ def _fit_and_save(
 
 
 def train_best_model(
-    config: Union[str, Path, Config, dict],
+    config: Union[str, Path, Config, Dict [str, Any]],
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
-):
+)-> Dict[str, Any]:
     # Centralized validation
     validate_df_not_empty(df)
     # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
@@ -176,7 +176,8 @@ def train_best_model(
     #Проверка наличия таргета до инициализации тяжелых ресурсов
     check_target_exists(df, target_col)
 
-    # Если передана строка или Path, читаем файл. Если объект Config или dict, обрабатываем их.
+    # Если передана строка или Path, читаем файл. 
+    # Если объект Config или dict, обрабатываем их.
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
@@ -184,7 +185,8 @@ def train_best_model(
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
     else:
-        raise TypeError(f"Unsupported config type: {type(config)}. Expected Config, dict, str, or Path.")
+        raise TypeError(f"Unsupported config type: {type(config)}. "
+                        f"Expected Config, dict, str, or Path.")
 
     # Если в конфиге указан путь к лог-файлу, настраиваем логирование
     if cfg.general.log_to_file:
@@ -197,9 +199,16 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
-    def _execute_hpo_phase(phase_name, algo, a_cfg, n_trials, search_space=None):
+    def _execute_hpo_phase(
+            phase_name: str, 
+            algo: str, 
+            a_cfg: AlgoCfg, 
+            n_trials: int, 
+            search_space: Dict[str, Any] | None = None
+            ) -> Tuple[float, Dict[str, Any]] :
         """
-        Универсальная обертка для выполнения фазы HPO с логированием и обработкой метрик.
+        Универсальная обертка для выполнения фазы HPO 
+        с логированием и обработкой метрик.
         """
         _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
         
@@ -233,12 +242,14 @@ def train_best_model(
     current_candidates = {n: a for n, a in cfg.algorithms.items() if a.enable}
     phase_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     for phase in cfg.general.phases:
-        _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials} trials, action: {phase.action}) ---")
+        _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials}"
+                  f" trials, action: {phase.action}) ---")
         
         # Если фаза требует только победителя, фильтруем кандидатов
         if phase.action == "refine_winner":
             if not phase_results:
-                raise RuntimeError(f"Phase '{phase.name}' requires a winner, but no previous results exist.")
+                raise RuntimeError(f"Phase '{phase.name}' requires a winner,"
+                                   f" but no previous results exist.")
             
             select = max if greater_is_better else min
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
@@ -246,7 +257,10 @@ def train_best_model(
             current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
-        def _worker(algo_name: str, algo_cfg: AlgoCfg):
+        def _worker(
+                algo_name: str, 
+                algo_cfg: AlgoCfg
+                ) -> None:
             override = algo_cfg.hyperparameters if algo_cfg.hyperparameters else None
             try:
                 score, params = _execute_hpo_phase(
@@ -258,7 +272,8 @@ def train_best_model(
             except Exception as e:
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {phase.name}: {e}")
         # Выполнение (параллельное или последовательное)
-        if cfg.general.parallel_strategy == "algorithms" and len(current_candidates) > 1:
+        if (cfg.general.parallel_strategy == "algorithms" 
+            and len(current_candidates) > 1):
             run_parallel(
                 _worker,
                 args_seq=[(n, a) for n, a in current_candidates.items()],

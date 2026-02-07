@@ -1,5 +1,3 @@
-import sys
-import os
 import numpy as np
 import pandas as pd
 import threading
@@ -15,14 +13,14 @@ from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN
 
 logger = logging.getLogger(__name__)
 
-class DataOversampler(BaseSampler):
+class DataOversampler(BaseSampler): # type: ignore[misc]
     """
     Потокобезопасный класс для увеличения объёма и / или балансировки данных.
     Совместим с scikit-learn Pipeline и imbalanced-learn API.
     """
     _sampling_type = "over-sampling"
 
-    _parameter_constraints: dict = {
+    _parameter_constraints: dict [str, list[Any]] = {
         "multiplier": [float, int],
         "algorithm": [str],
         "add_noise": ["boolean"],
@@ -51,17 +49,22 @@ class DataOversampler(BaseSampler):
         counts = Counter(y)
         return {cls: ceil(cnt * self.multiplier) for cls, cnt in counts.items()}
 
-    def _add_gaussian_noise(self, X: np.ndarray, noise_level: float = 0.01) -> np.ndarray:
+    def _add_gaussian_noise(self, 
+                            X: np.ndarray, 
+                            noise_level: float = 0.01
+                            ) -> np.ndarray:
         return X + np.random.normal(scale=noise_level, size=X.shape)
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
             # Копируем состояние объекта
             state = self.__dict__.copy()
             # Удаляем несериализуемый объект lock по правильному имени
             if '_lock' in state:
                 del state['_lock']
             return state
-    def __setstate__(self, state):
+    def __setstate__(self,
+                     state: dict[str, Any]
+                     )-> None:
         # Восстанавливаем состояние
         self.__dict__.update(state)
         # Заново инициализируем lock после десериализации
@@ -70,7 +73,11 @@ class DataOversampler(BaseSampler):
     # ------------------------------------------------------------------ #
     #  Пункт 2: Реализация защищенного метода _fit_resample              #
     # ------------------------------------------------------------------ #
-    def _fit_resample(self, X, y):
+    def _fit_resample(
+            self, 
+            X: Any,
+            y:Any
+            ) -> tuple[np.ndarray, np.ndarray]:
         """
         Внутренняя логика ресемплирования с использованием валидации sklearn/imblearn.
         """
@@ -81,7 +88,8 @@ class DataOversampler(BaseSampler):
             raise ValueError("multiplier must be > 0")
         try:
             # 1. Стандартная валидация входных данных
-            # accept_sparse=False, так как SMOTE/ADASYN требуют плотных матриц в текущей реализации
+            # accept_sparse=False, так как SMOTE/ADASYN требуют 
+            # плотных матриц в текущей реализации
             X_validated, y_validated, *rest = self._check_X_y(X, y)
             
             # Сохраняем названия колонок, если X был DataFrame
@@ -98,9 +106,11 @@ class DataOversampler(BaseSampler):
             if self.algorithm in ("random", "random_with_noise"):
                 # Если multiplier > 1, сначала используем стратегию увеличения
                 # Если multiplier = 1, RandomOverSampler просто сбалансирует классы
-                sampling_strategy = self._strategy(y_s) if self.multiplier >= 1.0 else "auto"
+                sampling_strategy = (self._strategy(y_s) if self.multiplier >= 1.0 
+                                     else "auto")
                 
-                ros = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=None)
+                ros = RandomOverSampler(sampling_strategy=sampling_strategy, 
+                                        random_state=None)
                 X_res, y_res = ros.fit_resample(X_df, y_s)
                 
                 if self.add_noise or self.algorithm == "random_with_noise":
@@ -114,7 +124,8 @@ class DataOversampler(BaseSampler):
             counts = Counter(y_s)
             strategy = self._strategy(y_s)
             
-            # Динамическая настройка k_neighbors (не может быть больше размера миноритарного класса - 1)
+            # Динамическая настройка k_neighbors 
+            # (не может быть больше размера миноритарного класса - 1)
             min_samples = min(counts.values())
             k_neighbors = max(1, min(5, min_samples - 1))
             
@@ -126,9 +137,15 @@ class DataOversampler(BaseSampler):
                 raise ValueError(f"Неподдерживаемый алгоритм: {self.algorithm}")
 
             X_res, y_res = sampler.fit_resample(X_df, y_s)
-            logger.info(f"{self.algorithm.upper()} resample: {len(X_validated)} -> {len(X_res)}")
+            logger.info(
+                "%s resample: %d -> %d", 
+                self.algorithm.upper(), 
+                len(X_validated), 
+                len(X_res)
+            )
             
-            # Возвращаем numpy массивы (стандарт для внутренних методов sklearn/imblearn)
+            # Возвращаем numpy массивы 
+            # (стандарт для внутренних методов sklearn/imblearn)
             return X_res.to_numpy(), y_res.to_numpy()
         except (ValueError, TypeError, ImportError, RuntimeError):
             # Re-raise known data-related or configuration errors directly
@@ -138,7 +155,10 @@ class DataOversampler(BaseSampler):
             logger.error(f"Critical error during data oversampling: {e}")
             raise
 
-    def oversample(self, data: pd.DataFrame, target: Optional[str] = None) -> pd.DataFrame:
+    def oversample(self, 
+                   data: pd.DataFrame, 
+                   target: Optional[str] = None
+                   ) -> pd.DataFrame:
         """
         Высокоуровневая обертка для работы с DataFrame.
         Использует публичный fit_resample(), который сам вызовет _fit_resample().

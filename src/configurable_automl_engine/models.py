@@ -6,7 +6,6 @@
 from __future__ import annotations
 from typing import Any
 
-import numpy as np
 from sklearn.base import RegressorMixin
 from sklearn.linear_model import (
     ElasticNet,
@@ -91,11 +90,14 @@ _ALIASES: dict[str, str] = {
 }
 
 
-def create_model(algorithm: Algorithm = "elasticnet", **model_params: Any) -> RegressorMixin:
+def create_model(algorithm: Algorithm = "elasticnet", 
+                 **model_params: Any
+                 ) -> RegressorMixin:
     """
     Возвращает экземпляр выбранного регрессора.
     Алгоритм задаётся строкой, не зависит от регистра. Поддерживаются алиасы.
-    Если алгоритм не найден или требует отсутствующий пакет, бросает ValueError/ImportError.
+    Если алгоритм не найден или требует отсутствующий пакет, 
+    бросает ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
         raise ValueError(f"Некорректный алгоритм: {algorithm!r}")
@@ -118,4 +120,4 @@ def create_model(algorithm: Algorithm = "elasticnet", **model_params: Any) -> Re
     if algo_key == "gaussian_process_regression" and "kernel" not in model_params:
         model_params["kernel"] = RBF(1.0)
 
-    return estimator_cls(**model_params)  # type: ignore[arg-type]
+    return estimator_cls(**model_params)

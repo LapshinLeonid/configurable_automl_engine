@@ -19,11 +19,15 @@ Metric registry + helper utils
 
 from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable, Dict, Any, cast, Union
 
 import numpy as np
 import logging
-from sklearn.metrics import mean_squared_error, r2_score, make_scorer, get_scorer as sklearn_get_scorer
+from sklearn.metrics import (mean_squared_error, 
+                             r2_score, 
+                             make_scorer, 
+                             get_scorer as sklearn_get_scorer
+                            )
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +36,20 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 #  Сами метрики
 # --------------------------------------------------------------------------- #
-def _rmse(y_true, y_pred) -> float:
+def _rmse(
+        y_true: Any, 
+        y_pred: Any
+        ) -> float:
     """Root Mean Squared Error (меньше → лучше)."""
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 
-def _nrmse(y_true, y_pred):
+def _nrmse(
+        y_true: Any,
+        y_pred: Any
+        ) -> float:
     """
     Normalised RMSE with *split-local* min–max-scale.
 
@@ -53,16 +63,16 @@ def _nrmse(y_true, y_pred):
 
     if denom < 1e-6:
         logger.warning(
-            f"NRMSE: target is constant (range < 1e-6) for split of size {len(y_true)}. "
-            "Returning +inf (will be inverted to -inf by scorer)."
+            f"NRMSE: target is constant (range < 1e-6) for split of size "
+            f"{len(y_true)}. Returning +inf (will be inverted to -inf by scorer)."
         )
         return float('inf')
-    return rmse / denom
+    return float(rmse / denom)
 
 # --------------------------------------------------------------------------- #
 #  Частный реестр «сырой» (без переворота знака и прочего)
 # --------------------------------------------------------------------------- #
-_METRICS: Dict[str, Callable] = {
+_METRICS: Dict[str, Callable[..., Any]] = {
     # «меньше → лучше»
     "rmse": _rmse,
     "nrmse": _nrmse,
@@ -78,7 +88,7 @@ _METRICS: Dict[str, Callable] = {
 # --------------------------------------------------------------------------- #
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
-_SCORER_OBJECTS: Dict[str, Callable] = {
+_SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
     "neg_root_mean_squared_error": make_scorer(
         lambda y_t, y_p: -_rmse(y_t, y_p),
@@ -98,7 +108,7 @@ _GREATER_IS_BETTER = {"r2", "neg_root_mean_squared_error"}
 # --------------------------------------------------------------------------- #
 #  Public helpers — могут пригодиться снаружи
 # --------------------------------------------------------------------------- #
-def get_metric(name: str) -> Callable:
+def get_metric(name: str) -> Callable[..., Any]:
     """
     Вернуть «сырую» функцию-метрику (без обёртки make_scorer).
 
@@ -121,7 +131,7 @@ def is_greater_better(name: str) -> bool:
     """
     return name.lower() in _GREATER_IS_BETTER
 
-def get_scorer_object(name: str) -> Callable | str:
+def get_scorer_object(name: str) -> Callable[..., Any] | str:
     """
     Возвращает объект-скорер для использования в GridSearchCV или cross_validate.
     Для кастомных метрик возвращает Scorer-объект, для стандартных — строку.
@@ -131,15 +141,18 @@ def get_scorer_object(name: str) -> Callable | str:
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname]
     
-    # В остальных случаях возвращаем имя как есть (sklearn сам найдет встроенную метрику)
-    return sklearn_get_scorer(lname)
+    # В остальных случаях возвращаем имя как есть 
+    # (sklearn сам найдет встроенную метрику)
+    scorer = sklearn_get_scorer(lname)
+    return cast("Union[Callable[..., Any], str]", scorer)
 
 # --------------------------------------------------------------------------- #
 #  Приведение пользовательских alias-ов к тому, что понимает sklearn
 # --------------------------------------------------------------------------- #
 _ALIAS_TO_SKLEARN = {
-    "rmse": "neg_root_mean_squared_error",  # т.к. sklearn оптимизирует «чем выше — тем лучше»
+    # т.к. sklearn оптимизирует «чем выше — тем лучше»
     # nrmse регистрируется напрямую
+    "rmse": "neg_root_mean_squared_error",  
 }
 
 

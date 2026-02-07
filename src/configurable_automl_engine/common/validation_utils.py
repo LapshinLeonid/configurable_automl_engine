@@ -18,7 +18,8 @@ def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
     """
     if target_col not in df.columns:
         raise ValueError(
-            f"Target column '{target_col}' not found in dataframe columns: {list(df.columns)}"
+            f"Target column '{target_col}' not found"
+            f" in dataframe columns: {list(df.columns)}"
         )
 
 def prepare_X_y(df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, pd.Series]:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Dict, cast, Optional, Union
 import threading
 
 import numpy as np
@@ -27,12 +27,11 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 from .models import create_model, _ALIASES
 
-from configurable_automl_engine.validation import make_cv, iter_splits
+from configurable_automl_engine.validation import iter_splits
 from configurable_automl_engine.common.definitions import SerializationFormat
-from configurable_automl_engine.common.serialization_utils import save_artifact, load_artifact
+from configurable_automl_engine.common.serialization_utils import (save_artifact,
+                                                                    load_artifact)
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
-from configurable_automl_engine.common.validation_utils import validate_df_not_empty, prepare_X_y
-
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
@@ -41,15 +40,21 @@ class TrainingError(RuntimeError):
     """Ошибки, связанные с некорректностью данных или параметров."""
     pass
 
-class IsotonicDataTransformer(BaseEstimator, TransformerMixin):
+class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """
     Трансформер для подготовки данных под IsotonicRegression.
     Выбирает первый столбец и обрабатывает пропуски (NaN).
-    """
-    def fit(self, X, y=None):
+    """ 
+    def fit(
+            self,
+            X:Any,
+            y:Any = None
+            )-> IsotonicDataTransformer:
         return self
 
-    def transform(self, X):
+    def transform(self,
+                  X: Any
+                  )-> np.ndarray:
         X_df = pd.DataFrame(X)
         n_samples = len(X_df)
         
@@ -58,13 +63,15 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):
         
         # Логика обработки NaN (перенесена из ModelTrainer.fit)
         if X_col.isna().all():
-            return pd.Series(range(n_samples)).to_numpy().reshape(-1, 1)
+            result_na = pd.Series(range(n_samples)).to_numpy().reshape(-1, 1)
+            return np.asarray(result_na)
         
-        median_val = X_col.median()
+        median_val = float(X_col.median())
 
         X_imputed = X_col.fillna(median_val)
             
-        return X_imputed.to_numpy().reshape(-1, 1)
+        result_imputed = X_imputed.to_numpy().reshape(-1, 1)
+        return np.asarray(result_imputed)
 
 class ModelTrainer:
     """
@@ -141,7 +148,7 @@ class ModelTrainer:
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         # Remove unpicklable entries
         if 'lock' in state:
@@ -149,7 +156,9 @@ class ModelTrainer:
         if 'logger' in state:
             del state['logger']
         return state
-    def __setstate__(self, state):
+    def __setstate__(self, 
+                     state: dict[str, Any]
+                     ) -> None:
         self.__dict__.update(state)
         # Re-initialize the lock after unpickling
         self.lock = threading.RLock()
@@ -205,10 +214,8 @@ class ModelTrainer:
         Возвращает кортеж (X_df, y_s).
         """
         try:
-            # 1) Проверка типов входных данных
-            if not isinstance(X, (pd.DataFrame, pd.Series, np.ndarray)) or not isinstance(
-                y, (pd.Series, pd.DataFrame, np.ndarray)
-            ):
+            valid_types = (pd.DataFrame, pd.Series, np.ndarray)
+            if not all(isinstance(obj, valid_types) for obj in (X, y)):
                 raise TrainingError("Неподдерживаемый тип данных для X или y")
             # Приведение X к DataFrame
             X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
@@ -219,7 +226,8 @@ class ModelTrainer:
                 y_s = y.iloc[:, 0]
             else:
                 y_s = pd.Series(y) if not isinstance(y, pd.Series) else y
-            # 2) Проверка на пустоту (выбрасывает ValueError для соответствия тесту и утилитам)
+            # 2) Проверка на пустоту 
+            # (выбрасывает ValueError для соответствия тесту и утилитам)
             if X_df.empty or y_s.empty:
                 raise ValueError("Данные пусты")
             # 3) Проверка соответствия размеров
@@ -227,13 +235,15 @@ class ModelTrainer:
             if n_samples != len(y_s):
                 raise TrainingError("Число строк X и y различается")
             if n_samples < 2:
-                raise TrainingError("Недостаточно записей для обучения (нужно минимум 2)")
+                raise TrainingError("Недостаточно записей для обучения"
+                                    " (нужно минимум 2)")
             return X_df, y_s
         except ValueError as e:
             # Если это наша ошибка про пустоту — пробрасываем как есть (для теста)
-            if str(e) == "Данные пусты":
+            if f"{e}" == "Данные пусты":
                 raise
-            # Если это техническая ошибка pandas (например, "Data must be 1-dimensional")
+            # Если это техническая ошибка pandas 
+            # (например, "Data must be 1-dimensional")
             # оборачиваем её в TrainingError для тестов на покрытие (exception line)
             raise TrainingError(f"Ошибка при преобразовании данных: {e}")
         except (TypeError, IndexError) as e:
@@ -290,7 +300,8 @@ class ModelTrainer:
         # Этап 1: Валидация и подготовка данных
         X_df, y_s = self._prepare_data(X, y)
 
-        # Этап 2: Определение ключа алгоритма (перенесено выше для использования в препроцессоре)
+        # Этап 2: Определение ключа алгоритма 
+        # (перенесено выше для использования в препроцессоре)
         algo_key = _ALIASES.get(self.algorithm, self.algorithm)
 
         # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
@@ -306,7 +317,10 @@ class ModelTrainer:
 
         try:
             X_train, X_val, y_train, y_val = next(
-                iter_splits(X_df, y_s, method='train_test_split', random_state=self.random_state)
+                iter_splits(X_df, 
+                            y_s, 
+                            method='train_test_split', 
+                            random_state=self.random_state)
             )
         except Exception as e:
             raise TrainingError(f"Ошибка при разбиении данных: {e}")
@@ -317,14 +331,17 @@ class ModelTrainer:
 
         # Этап 7: Валидация и расчет метрик (финальный шаг)
         try:
-            # 1. Получаем объект-скорер (наш кастомный или стандартный sklearn)
-            scorer = get_scorer_object(self.metric)
-            
-            # 2. Вычисляем значение. 
+            # Получаем объект-скорер (наш кастомный или стандартный sklearn)
+            scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
+            # Извлекаем значение и проверяем, что оно не None
+            raw_score = scorer(self.pipeline, X_val, y_val)
+            if raw_score is None:
+                raise TrainingError("Scorer returned None")
+            # Вычисляем значение. 
             # Scorer сам внутри сделает predict и сравнит с y_val.
             # Мы переименовываем атрибут в универсальный val_score, 
             # чтобы он подходил для любой метрики (RMSE, MAE и т.д.)
-            self.val_score = float(scorer(self.pipeline, X_val, y_val))
+            self.val_score = float(raw_score)
         except Exception as e:
             raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
         
@@ -345,13 +362,17 @@ class ModelTrainer:
                 "Сначала необходимо выполнить fit()."
             )
         try:
-            # 2) Приведение входных данных к формату pandas (совместимость с трансформерами)
-            X_df = pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) else X
+            # 2) Приведение входных данных к формату pandas 
+            # (совместимость с трансформерами)
+            X_df = (
+                pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) 
+                else X)
             
             # 3) Выполнение предсказания через пайплайн
             # Все кастомные шаги (IsotonicDataTransformer, ColumnTransformer) 
             # выполнятся автоматически внутри вызова .predict()
-            return self.pipeline.predict(X_df)
+            preds = self.pipeline.predict(X_df)
+            return np.asarray(preds)
             
         except Exception as e:
             raise TrainingError(f"Ошибка при выполнении предсказания: {e}")
@@ -377,7 +398,10 @@ class ModelTrainer:
         )
 
     @classmethod
-    def load(cls, path: str | Path, fmt: SerializationFormat = SerializationFormat.pickle) -> ModelTrainer:
+    def load(cls, 
+             path: str | Path, 
+             fmt: SerializationFormat = SerializationFormat.pickle
+             ) -> ModelTrainer:
         """
         Загружает сохранённый объект ModelTrainer из файла, используя указанный формат.
         """
@@ -398,19 +422,25 @@ class ModelTrainer:
 
 
 def train_model(
-    cfg_or_algo: dict | str,
+    cfg_or_algo: dict[str, Any] | str,
     metric_or_testsize: str | float,
-    params_or_metric: dict | str,
+    params_or_metric: dict[str, Any] | str,
     X: Any = None,
     y: Any = None,
     enable_logging: bool = False,
     random_state: int | None = 42,
     log_path: str | Path | None = None,
 ) -> float:
+    algo: str = ""
+    metric: str = ""
+    model_params: dict[str, Any] = {}
+    test_size: float = 0.3
+    rs: int | None = random_state
     """
     Старый API (необходим тестам):
       1) train_model(config_dict) → float (R²)
-      2) train_model(algo, metric, params_dict, X, y, enable_logging, random_state, log_path)
+      2) train_model
+      (algo, metric, params_dict, X, y, enable_logging, random_state, log_path)
 
     Возвращает float R² на validation.
 
@@ -419,21 +449,23 @@ def train_model(
     # Случай «config dict»
     if isinstance(cfg_or_algo, dict):
         cfg: dict = cfg_or_algo  # type: ignore
-        algo = cfg.get("algorithm")
-        metric = cfg.get("metric")
-        model_params = cfg.get("model_params", {})
-        test_size = cfg.get("test_size", 0.3)
-        rs = cfg.get("random_state", 42)
-        enable_logging = cfg.get("enable_logging", False)
-        log_path = cfg.get("log_path", None)
-        data_os = cfg.get("data_oversampling", False)
-        data_os_mult = cfg.get("data_oversampling_multiplier", 1.0)
-        data_os_alg = cfg.get("data_oversampling_algorithm", "random")
+        algo = str(cfg.get("algorithm",""))
+        metric = str(cfg.get("metric",""))
+        model_params = cast(Dict[str, Any], cfg.get("model_params", {}))
+        test_size = float(cfg.get("test_size", 0.3))
+        rs = cast(Optional[int], cfg.get("random_state", 42))
+        enable_logging = bool(cfg.get("enable_logging", False))
+        log_path = cast(Optional[Union[str, Path]], cfg.get("log_path", None))
+        data_os = bool(cfg.get("data_oversampling", False))
+        data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
+        data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
     else:
         # Простой API
-        algo = cfg_or_algo  # type: ignore
-        metric = metric_or_testsize  # type: ignore
-        model_params = params_or_metric  # type: ignore
+        # Если пришел None, мы НЕ превращаем его в строку "None" сразу,
+        # чтобы сохранить логику оригинальной валидации для тестов.
+        algo = cfg_or_algo if cfg_or_algo is not None else "" 
+        metric = str(metric_or_testsize)  
+        model_params = cast(Dict[str, Any], params_or_metric) 
         test_size = 0.3
         rs = random_state
         data_os = False
@@ -441,7 +473,7 @@ def train_model(
         data_os_alg = "random"
 
     # Проверка алгоритма
-    if not isinstance(algo, str):
+    if not isinstance(cfg_or_algo, (str, dict)):
         raise TrainingError("Неверный алгоритм")
     algo_key = algo.lower()
 
@@ -460,12 +492,12 @@ def train_model(
         X_df = (
             pd.DataFrame(X)
             if not isinstance(X, (pd.DataFrame, pd.Series))
-            else X  # type: ignore
+            else X  
         )
         if isinstance(y, pd.DataFrame):
-            y_s = pd.Series(y.iloc[:, 0])  # type: ignore
+            y_s = pd.Series(y.iloc[:, 0])  
         else:
-            y_s = pd.Series(y) if not isinstance(y, pd.Series) else y  # type: ignore
+            y_s = pd.Series(y) if not isinstance(y, pd.Series) else y  
     except Exception as e:
         raise TrainingError(f"Ошибка при преобразовании данных: {e}")
 
@@ -492,6 +524,8 @@ def train_model(
         )
         trainer.fit(X_df, y_s)
         val_score = trainer.val_score
+        if val_score is None:
+            raise TrainingError("Модель не вернула значение метрики")
     except TrainingError:
         raise
     except ValueError:

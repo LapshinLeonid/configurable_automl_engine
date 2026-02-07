@@ -12,16 +12,26 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
-from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
+from configurable_automl_engine.common.definitions import (ValidationStrategy, 
+                                                           SerializationFormat)
 from configurable_automl_engine.common.dependency_utils import is_installed
+
+__all__ = [
+    "AlgoCfg",
+    "Config",
+    "ValidationStrategy",
+    "read_config",
+] 
 
 # ─────────────────── phases ──────────────────── #
 
 class HPOPhaseCfg(BaseModel):
-    """Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization)."""
+    """Конфигурация отдельной фазы поиска гиперпараметров 
+    (Hyperparameter Optimization)."""
     name: str = Field(
         ..., 
-        description="Уникальное название фазы оптимизации (например, 'coarse_search' или 'fine_tuning')"
+        description=("Уникальное название фазы оптимизации"
+                     " (например, 'coarse_search' или 'fine_tuning')")
     )
     n_trials: int = Field(
         ge=1, 
@@ -29,7 +39,8 @@ class HPOPhaseCfg(BaseModel):
     )
     action: Literal["all_algorithms", "refine_winner"] = Field(
         default="all_algorithms",
-        description="Действие фазы: поиск по всем алгоритмам или уточнение гиперпараметров для победителя предыдущих этапов"
+        description=("Действие фазы: поиск по всем алгоритмам или уточнение "
+                     "гиперпараметров для победителя предыдущих этапов")
     )
 
 # ─────────────────── general ─────────────────── #
@@ -38,7 +49,8 @@ class GeneralCfg(BaseModel):
     """Общие настройки процесса AutoML и валидации."""
     comparison_metric: str = Field(
         default="r2",
-        description="Метрика для сравнения моделей и выбора лучшей (например, r2, rmse, accuracy)"
+        description=("Метрика для сравнения моделей"
+                     " и выбора лучшей (например, r2, rmse, accuracy)")
     )
     path_to_model: Path = Field(
         default=Path("model.pkl"),
@@ -50,7 +62,8 @@ class GeneralCfg(BaseModel):
     )
     log_to_file: Optional[Path] = Field(
         default=None,
-        description="Путь к файлу логов. Если не указан, логи выводятся только в консоль"
+        description=("Путь к файлу логов. Если не указан,"
+                     "логи выводятся только в консоль")
     )
     phases: List[HPOPhaseCfg] = Field(
         ..., 
@@ -58,27 +71,33 @@ class GeneralCfg(BaseModel):
     )
     validation_strategy: ValidationStrategy = Field(
         default=ValidationStrategy.k_fold,
-        description="Стратегия оценки качества: k-fold кросс-валидация или фиксированный hold-out",
+        description=("Стратегия оценки качества:"
+                     "k-fold кросс-валидация или фиксированный hold-out"),
     )
     n_folds: int = Field(
         default=5,
-        description="Количество блоков (фолдов) для кросс-валидации. Используется только если validation_strategy = 'k_fold'"
+        description=("Количество блоков (фолдов) для кросс-валидации." 
+                     "Используется только если validation_strategy = 'k_fold'")
     )
     parallel_strategy: str = Field(
         default="algorithms",
-        description="Стратегия распараллеливания. Сейчас поддерживается только 'algorithms' (каждый алгоритм в своем потоке/процессе)."
+        description=("Стратегия распараллеливания." 
+                     "Сейчас поддерживается только 'algorithms'"
+                     " (каждый алгоритм в своем потоке/процессе).")
     )
     max_workers: Optional[int] = Field(
         default=None,
-        description="Максимальное количество потоков/процессов. Если null, используется количество ядер CPU"
+        description=("Максимальное количество потоков/процессов."
+                     "Если null, используется количество ядер CPU")
     )
     parallel_mode: Literal["threads", "processes"] = Field(
         default="threads",
-        description="Режим многозадачности: потоки (для I/O задач) или процессы (для CPU-интенсивных вычислений)"
+        description=("Режим многозадачности: потоки (для I/O задач)"
+                     " или процессы (для CPU-интенсивных вычислений)")
     )
 
     @model_validator(mode="after")
-    def _check_n_folds(self):
+    def _check_n_folds(self) -> "GeneralCfg":
         # Базовая проверка на здравый смысл (для всех стратегий)
         if (
             self.serialization_format == SerializationFormat.joblib
@@ -115,25 +134,30 @@ class OversamplingCfg(BaseModel):
     model_config = ConfigDict(populate_by_name=True)  # принимать alias‑имена
 
     enable: bool = Field(
-        False,
+        default=False,
         alias="data_oversampling",
-        description="Флаг включения балансировки данных. Применяется только к обучающей выборке",
+        description=("Флаг включения балансировки данных." 
+                     "Применяется только к обучающей выборке"),
     )
     multiplier: float = Field(
-        1.0,
+        default=1.0,
         alias="data_oversampling_multiplier",
         ge=1.0,
         description="Во сколько раз увеличить количество примеров миноритарных классов",
     )
     algorithm: OversamplingAlgorithm = Field(
-        OversamplingAlgorithm.random,
+        default=OversamplingAlgorithm.random,
         alias="data_oversampling_algorithm",
         description="Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)",
     )
 
     @field_validator("multiplier")
     @classmethod
-    def _warn_useless_multiplier(cls, v, info):
+    def _warn_useless_multiplier(
+        cls,
+        v: float,
+        info: Any
+        )-> float:
         if v == 1 and info.data.get("enable"):
             logging.getLogger(__name__).warning(
                 "Oversampling multiplier = 1 ➜ баланс классов не изменится."
@@ -157,7 +181,8 @@ class SearchSpaceEntry(BaseModel):
                 "Параметры распределения гиперпараметра. "
                 "Для чисел (int, float): [min, max, type] или [min, max, type, step]. "
                 "Для логарифмических шкал: [min, max, 'float_log']. "
-                "Для категорий: [[val1, val2], 'categorical'] или [val1, val2, 'categorical']."
+                "Для категорий: "
+                "[[val1, val2], 'categorical'] или [val1, val2, 'categorical']."
             )
         )
     ]
@@ -181,7 +206,7 @@ class SearchSpaceEntry(BaseModel):
     @property
     def step(self) -> Optional[float]:
         if len(self.bounds) == 4:
-            return float(self.bounds[3])  # type: ignore
+            return float(self.bounds[3])
         return None
 
     @model_validator(mode="after")
@@ -195,28 +220,36 @@ class SearchSpaceEntry(BaseModel):
         if dist_type == "categorical":
             if not isinstance(self.low, list):
                 raise ValueError(
-                    f"For 'categorical' type, the first element must be a list of options. "
+                    f"For 'categorical' type, the first element "
+                    f"must be a list of options. "
                     f"Got {type(self.low)} instead."
                 )
         else:
             # Валидация границ диапазона
-            if not isinstance(self.low, (int, float)) or not isinstance(self.high, (int, float)):
-                raise ValueError(f"Bounds for '{dist_type}' must be numerical. Got {type(self.low)} and {type(self.high)}.")
+            if (not isinstance(self.low, (int, float)) 
+                or not isinstance(self.high, (int, float))):
+                raise ValueError(f"Bounds for '{dist_type}' must be numerical. " 
+                                 f"Got {type(self.low)} and {type(self.high)}.")
             if self.low > self.high:
-                raise ValueError(f"Lower bound ({self.low}) must be less than or equal to upper bound ({self.high}).")
+                raise ValueError(f"Lower bound ({self.low}) must be less "
+                                 f"than or equal to upper bound ({self.high}).")
             # Валидация step для числовых типов
             if self.step is not None:
                 if dist_type == "float_log":
-                    raise ValueError("The 'step' parameter is not supported for 'float_log' distribution.")
+                    raise ValueError("The 'step' parameter is not supported for"
+                                     " 'float_log' distribution.")
                 
                 if dist_type == "int":
                     if not float(self.step).is_integer():
-                        raise ValueError(f"Step for 'int' distribution must be an integer. Got {self.step}.")
+                        raise ValueError(f"Step for 'int' distribution must "
+                                         f"be an integer. Got {self.step}.")
                     if self.step <= 0:
-                        raise ValueError(f"Step for 'int' distribution must be positive. Got {self.step}.")
+                        raise ValueError(f"Step for 'int' distribution must "
+                                         f"be positive.Got {self.step}.")
                 
                 if dist_type == "float" and self.step <= 0:
-                    raise ValueError(f"Step for 'float' distribution must be positive. Got {self.step}.")
+                    raise ValueError(f"Step for 'float' distribution must be positive."
+                                     f"Got {self.step}.")
 
         return self
 
@@ -230,11 +263,15 @@ class AlgoCfg(BaseModel):
     )
     limit_hyperparameters: bool = Field(
         default=False,
-        description="Если True, ограничивает пространство поиска только базовыми параметрами (ускоряет работу)"
+        description=("Если True, ограничивает пространство поиска"
+                     "только базовыми параметрами (ускоряет работу)"
+        )
     )
     hyperparameters: Dict[str, Union[SearchSpaceEntry, Any]] | None = Field(
         default=None,
-        description="Переопределение пространства поиска гиперпараметров. Ключ — имя параметра"
+        description=("Переопределение пространства поиска гиперпараметров."
+                     "Ключ — имя параметра"
+        )
     )
     tuner: str = Field(
         default="configurable_automl_engine.tuner",
@@ -242,7 +279,10 @@ class AlgoCfg(BaseModel):
     )
     trainer_module: str = Field(
         default="configurable_automl_engine.trainer",
-        description="Dotted-path к модулю, содержащему класс `ModelTrainer` (например, 'configurable_automl_engine.trainer')."
+        description=(
+            "Dotted-path к модулю, содержащему класс `ModelTrainer`"
+            "(например, 'configurable_automl_engine.trainer')."
+            )
     )
 
     @field_validator("tuner", "trainer_module")
@@ -261,12 +301,15 @@ class Config(BaseModel):
         description="Общие настройки эксперимента и валидации"
     )
     oversampling: OversamplingCfg = Field(
-        default_factory=OversamplingCfg,
+        default = OversamplingCfg(),
         description="Настройки балансировки данных"
     )
     algorithms: Dict[str, AlgoCfg] = Field(
         ..., 
-        description="Словарь алгоритмов, где ключ — имя алгоритма (например, 'xgboost', 'random_forest')"
+        description=(
+            "Словарь алгоритмов, где ключ — имя алгоритма "
+            "(например, 'xgboost', 'random_forest')"
+        )
     )
 
     @field_validator("algorithms")
@@ -276,7 +319,7 @@ class Config(BaseModel):
             raise ValueError("no algorithms enabled in config")
         return v
     @model_validator(mode="after")
-    def _check_algorithm_dependencies(self):
+    def _check_algorithm_dependencies(self) -> "Config":
         """
         Проверяет, что для включённых алгоритмов установлены необходимые библиотеки.
         """
@@ -292,7 +335,8 @@ class Config(BaseModel):
             required_pkg = algo_dependencies.get(algo_name)
             if required_pkg and not is_installed(required_pkg):
                 raise ValueError(
-                    f"Алгоритм '{algo_name}' включён, но пакет '{required_pkg}' не установлен"
+                    f"Алгоритм '{algo_name}' включён, "
+                    f"но пакет '{required_pkg}' не установлен"
                 )
         return self
 # ────────────────── API ────────────────────── #

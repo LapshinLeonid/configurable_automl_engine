@@ -124,7 +124,8 @@ def iter_splits(
     random_state: int | None = 42,
 ) -> Generator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], None, None]:
     """
-    Генерирует пары (X_train, X_test, y_train, y_test) согласно выбранному способу валидации.
+    Генерирует пары (X_train, X_test, y_train, y_test) 
+    согласно выбранному способу валидации.
 
     Parameters
     ----------
