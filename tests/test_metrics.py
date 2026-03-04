@@ -1,8 +1,11 @@
 import numpy as np
 import pytest
+import logging
+from unittest.mock import MagicMock
 from configurable_automl_engine.training_engine.metrics import (
     _rmse, _nrmse, get_metric, is_greater_better, 
-    get_scorer_object, to_sklearn_name, NRMSEZeroRangeError
+    get_scorer_object, to_sklearn_name, NRMSEZeroRangeError,
+    _global_nrmse, get_global_nrmse_scorer
 )
 
 def test_nrmse():
@@ -98,3 +101,45 @@ def test_neg_rmse_lambda():
     y_pred = np.array([0, 0])
     # Ожидаемое значение: -sqrt((0^2 + 2^2)/2) = -sqrt(2) ≈ -1.414
     assert neg_rmse_func(y_true, y_pred) == pytest.approx(-np.sqrt(2.0))
+
+def test_global_nrmse_coverage(caplog):
+    """
+    Тест покрывает:
+    1. Исключение ValueError в get_scorer_object, если global_y не передан.
+    2. Успешное создание скорера через get_global_nrmse_scorer.
+    3. Ветку target_range < 1e-6 в _global_nrmse (защита от деления на ноль).
+    4. Стандартный расчет _global_nrmse.
+    """
+    
+    # 1. Проверка исключения: global_nrmse вызван без global_y
+    with pytest.raises(ValueError, match="For 'global_nrmse', 'global_y' must be passed"):
+        get_scorer_object("global_nrmse", global_y=None)
+    # 2. Проверка успешного создания скорера
+    y_full = np.array([10.0, 20.0, 30.0]) # range = 20.0
+    scorer = get_scorer_object("global_nrmse", global_y=y_full)
+    
+    # Проверяем, что это объект-скорер (Callable)
+    assert callable(scorer)
+    # 3. Проверка ветки target_range < 1e-6 в _global_nrmse
+    # Напрямую вызываем функцию с критически малым диапазоном
+    y_true = np.array([1.0, 2.0])
+    y_pred = np.array([1.1, 1.9])
+    
+    with caplog.at_level(logging.WARNING):
+        res_inf = _global_nrmse(y_true, y_pred, target_range=1e-7)
+        assert res_inf == float('inf')
+        assert "Global target_range is too small" in caplog.text
+    # 4. Проверка стандартного расчета (основная ветка возврата)
+    # RMSE для (1,2) и (1,2) = 0. Range = 10. Result = 0/10 = 0.0
+    res_zero = _global_nrmse(np.array([1.0, 2.0]), np.array([1.0, 2.0]), target_range=10.0)
+    assert res_zero == 0.0
+    # Расчет с конкретными значениями:
+    # y_true=[0, 2], y_pred=[0, 0] -> MSE = (0^2 + 2^2)/2 = 2 -> RMSE = sqrt(2) ≈ 1.4142
+    # target_range = 2
+    # Result = 1.4142 / 2 = 0.7071...
+    y_t = np.array([0.0, 2.0])
+    y_p = np.array([0.0, 0.0])
+    expected_rmse = np.sqrt(2.0)
+    expected_nrmse = expected_rmse / 2.0
+    
+    assert np.isclose(_global_nrmse(y_t, y_p, target_range=2.0), expected_nrmse)

@@ -154,7 +154,7 @@ class TestDataOversampler:
             with pytest.raises(Exception):
                 sampler.oversample(None)
         assert "ERROR" in caplog.text
-        assert "Ошибка в oversample" in caplog.text
+        assert "Oversampling error" in caplog.text
 
     def test_pickle_compatibility(self):
         """Pickle (важно для мультипроцессинга в GridSearchCV)"""
@@ -326,7 +326,7 @@ def test_type_restoration_error_handling(caplog):
     # Передаем некорректную серию типов для провокации исключения в блоке обработки
     with caplog.at_level(logging.WARNING):
         sampler._restore_dtypes(df, pd.Series({'feature': 'non_existent_type_object'}))
-    assert "Не удалось восстановить тип" in caplog.text
+    assert "Failed to restore type for column" in caplog.text
 def test_internal_resampling_mechanism_and_locks():
     """Тестирование защищенного метода ресемплирования и работы механизма блокировок."""
     sampler = DataOversampler(algorithm="random")

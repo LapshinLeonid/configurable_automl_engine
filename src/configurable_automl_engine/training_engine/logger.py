@@ -4,7 +4,8 @@
     безопасной многопроцессной записи и иерархической фильтрации.
     Ключевые возможности:
         1. Process-Safe Rolling: Интеграция `ConcurrentRotatingFileHandler` для 
-           предотвращения повреждения логов при одновременной записи из разных процессов.
+           предотвращения повреждения логов 
+           при одновременной записи из разных процессов.
         2. Seamless Fallback: Автоматический откат на стандартный `RotatingFileHandler` 
            при отсутствии сторонних зависимостей, обеспечивающий стабильность системы.
         3. Singleton-Like Hierarchy: Централизованная настройка базового логгера 
@@ -23,8 +24,10 @@ DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 try:
     from concurrent_log_handler import ConcurrentRotatingFileHandler
 except ImportError:
-    # Фолбэк на стандартный обработчик, если библиотека не установлена
-    from logging.handlers import RotatingFileHandler as ConcurrentRotatingFileHandler # type: ignore[assignment]
+    # Фолбэк на стандартный обработчик, 
+    # если библиотека не установлена
+    from logging.handlers import ( # type: ignore[assignment]
+        RotatingFileHandler as ConcurrentRotatingFileHandler) 
 
 def get_logger(name: str) -> logging.Logger:
     """Получить именованный логгер в рамках иерархии библиотеки.

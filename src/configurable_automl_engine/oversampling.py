@@ -220,7 +220,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
                     if not pd.Series(df[col]).isna().any():
                         df[col] = df[col].astype(dtype)
             except Exception as e:
-                logger.warning(f"Не удалось восстановить тип для колонки {col}: {e}")
+                logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
     
     def _fit_resample(
@@ -426,7 +426,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             return res_df.reset_index(drop=True)
         
         except Exception as e:
-            logger.error(f"Ошибка в oversample: {e}", exc_info=True)
+            logger.error(f"Oversampling error: {e}", exc_info=True)
             raise
 
 # ------------------------------------------------------------------ #
