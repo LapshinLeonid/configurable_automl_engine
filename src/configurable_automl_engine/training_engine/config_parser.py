@@ -1,9 +1,25 @@
 """
-Парсинг YAML-конфига (pydantic v2).
-Добавлено:
-* Подробные описания (description) для всех полей для генерации документации.
-* Поле `n_folds` в секции `general` — задаёт количество сплитов при стратегии k-fold.
-* Валидация логики n_folds.
+AutoML Config Engine: Валидация и парсинг иерархических YAML-конфигураций.
+Модуль реализует строго типизированную объектную модель конфигурации 
+на базе Pydantic v2, обеспечивая проверку целостности параметров 
+эксперимента, стратегий валидации и пространств поиска гиперпараметров 
+перед запуском пайплайна AutoML.
+Ключевые возможности:
+    1. Multi-Stage HPO Pipeline: Конфигурирование последовательных фаз 
+       оптимизации (Hyperparameter Optimization) с поддержкой различных 
+       действий: от глобального поиска до уточнения параметров победителя.
+    2. Intelligent Validation Logic: Автоматическая проверка согласованности 
+       настроек, включая контроль количества фолдов для k-fold стратегии 
+       и валидацию границ числовых диапазонов.
+    3. Flexible Search Space DSL: Поддержка компактного YAML-синтаксиса 
+       для определения пространств поиска (Categorical, Float, Int, Log) 
+       с автоматическим приведением типов из списочных структур.
+    4. Dependency Guard: Встроенный механизм проверки наличия необходимых 
+       сторонних пакетов (XGBoost, CatBoost и др.) для всех включенных 
+       в конфиг алгоритмов еще на этапе инициализации.
+    5. Data Balancing Schema: Управление стратегиями оверсэмплинга 
+       (SMOTE, ADASYN) с поддержкой псевдонимов полей (aliasing) 
+       для чистоты структуры YAML-файла.
 """
 from __future__ import annotations
 import yaml
@@ -13,21 +29,28 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import (ValidationStrategy, 
-                                                           SerializationFormat)
+                                                           SerializationFormat,
+                                                           ALGO_PACKAGE_MAPPING)
 from configurable_automl_engine.common.dependency_utils import is_installed
-
 __all__ = [
     "AlgoCfg",
     "Config",
     "ValidationStrategy",
     "read_config",
 ] 
-
 # ─────────────────── phases ──────────────────── #
-
 class HPOPhaseCfg(BaseModel):
-    """Конфигурация отдельной фазы поиска гиперпараметров 
-    (Hyperparameter Optimization)."""
+    """Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).
+    
+    Класс описывает параметры конкретного этапа оптимизации, позволяя 
+    выстраивать многоступенчатые стратегии поиска (например, сначала 
+    грубый поиск по всем моделям, затем тонкая настройка лучшей).
+    Attributes:
+        name (str): Уникальный идентификатор фазы.
+        n_trials (int): Лимит итераций (испытаний) для данной фазы.
+        action (str): Тип действия ('all_algorithms' или 'refine_winner'), 
+            определяющий область поиска.
+    """
     name: str = Field(
         ..., 
         description=("Уникальное название фазы оптимизации"
@@ -42,11 +65,25 @@ class HPOPhaseCfg(BaseModel):
         description=("Действие фазы: поиск по всем алгоритмам или уточнение "
                      "гиперпараметров для победителя предыдущих этапов")
     )
-
 # ─────────────────── general ─────────────────── #
-
 class GeneralCfg(BaseModel):
-    """Общие настройки процесса AutoML и валидации."""
+    """Общие настройки процесса AutoML, валидации и параллелизма.
+    
+    Центральный узел управления экспериментом, отвечающий за выбор 
+    метрик, стратегий оценки качества (Cross-Validation / Hold-out) 
+    и распределение вычислительных ресурсов.
+    Attributes:
+        comparison_metric (str): Основная метрика для ранжирования моделей.
+        path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.
+        serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
+        log_to_file (Path | None): Файл для записи логов работы движка.
+        phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.
+        validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).
+        n_folds (int): Количество разбиений для кросс-валидации.
+        parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).
+        max_workers (int | None): Лимит потоков или процессов.
+        parallel_mode (str): Технический режим исполнения ('threads' или 'processes').
+    """
     comparison_metric: str = Field(
         default="r2",
         description=("Метрика для сравнения моделей"
@@ -95,10 +132,22 @@ class GeneralCfg(BaseModel):
         description=("Режим многозадачности: потоки (для I/O задач)"
                      " или процессы (для CPU-интенсивных вычислений)")
     )
-
     @model_validator(mode="after")
     def _check_n_folds(self) -> "GeneralCfg":
-        # Базовая проверка на здравый смысл (для всех стратегий)
+        """Проверить логическую целостность настроек валидации и сериализации.
+        
+        Логика проверки:
+        1. Проверка доступности пакета `joblib`, если выбран соответствующий формат.
+        2. Гарантия, что `n_folds` является положительным числом для любых стратегий.
+        3. Строгая проверка для `k_fold`: количество блоков должно быть не менее 2.
+        
+        Returns:
+            GeneralCfg: Валидированный объект настроек.
+            
+        Raises:
+            ValueError: Если пакет 'joblib' не установлен или значение `n_folds` 
+                недопустимо для выбранной стратегии.
+        """
         if (
             self.serialization_format == SerializationFormat.joblib
             and not is_installed("joblib")
@@ -108,7 +157,6 @@ class GeneralCfg(BaseModel):
             )
         if self.n_folds < 1:
             raise ValueError("`n_folds` must be at least 1")
-        
         # Строгая проверка только для k-fold
         if (
             self.validation_strategy == ValidationStrategy.k_fold
@@ -116,23 +164,25 @@ class GeneralCfg(BaseModel):
         ):
             raise ValueError("`n_folds` must be ≥ 2 при k-fold валидации")
         return self
-
 # ──────────────── oversampling ──────────────── #
-
 class OversamplingAlgorithm(str, Enum):
     random = "random"
     random_with_noise = "random_with_noise"
     smote = "smote"
     adasyn = "adasyn"
-
 class OversamplingCfg(BaseModel):
+    """Параметры балансировки классов и синтеза данных.
+    
+    Обеспечивает конфигурацию методов устранения дисбаланса целевой переменной. 
+    Использует механизм псевдонимов (aliases) для маппинга плоских ключей 
+    YAML в структурированный объект.
+    Attributes:
+        enable (bool): Глобальный флаг включения оверсэмплинга.
+        multiplier (float): Целевой коэффициент увеличения выборки.
+        algorithm (OversamplingAlgorithm): Выбранный метод генерации 
+            (SMOTE, ADASYN и др.).
     """
-    Параметры балансировки классов (oversampling).
-    Настройки маппятся на ключи YAML с префиксом data_*.
-    """
-
     model_config = ConfigDict(populate_by_name=True)  # принимать alias‑имена
-
     enable: bool = Field(
         default=False,
         alias="data_oversampling",
@@ -150,113 +200,139 @@ class OversamplingCfg(BaseModel):
         alias="data_oversampling_algorithm",
         description="Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)",
     )
-
-    @field_validator("multiplier")
-    @classmethod
-    def _warn_useless_multiplier(
-        cls,
-        v: float,
-        info: Any
-        )-> float:
-        if v == 1 and info.data.get("enable"):
+    @model_validator(mode="after")
+    def _validate_oversampling_logic(self) -> "OversamplingCfg":
+        if self.enable and self.multiplier == 1.0:
             logging.getLogger(__name__).warning(
                 "Oversampling multiplier = 1 ➜ баланс классов не изменится."
             )
-        return v
-
+        return self
 # ───────────────── hyperopt ───────────────── #
-
+class BaseDistribution(BaseModel):
+    """Абстрактный базовый класс для распределений поиска."""
+    type: str
+class CategoricalSpace(BaseDistribution):
+    """Распределение для категориальных признаков: [options, 'categorical']."""
+    type: Literal["categorical"]
+    options: List[Any]
+class NumericSpace(BaseDistribution):
+    """Базовый класс для числовых диапазонов."""
+    low: float
+    high: float
+    @model_validator(mode="after")
+    def _validate_range(self) -> "NumericSpace":
+        if self.low > self.high:
+            raise ValueError(f"low ({self.low}) must be <= high ({self.high})")
+        return self
+class FloatSpace(NumericSpace):
+    """Распределение для чисел с плавающей точкой: [min, max, 'float', step?]."""
+    type: Literal["float", "float_log"]
+    step: Optional[float] = None
+    @model_validator(mode="after")
+    def _validate_float_constraints(self) -> "FloatSpace":
+        if self.type == "float_log" and self.step is not None:
+            raise ValueError("The 'step' parameter is not supported for 'float_log'")
+        if self.step is not None and self.step <= 0:
+            raise ValueError(f"Step must be positive. Got {self.step}")
+        return self
+class IntSpace(NumericSpace):
+    """Распределение для целых чисел: [min, max, 'int', step?]."""
+    type: Literal["int"]
+    low: int
+    high: int
+    step: Optional[int] = None
+    @model_validator(mode="after")
+    def _validate_int_constraints(self) -> "IntSpace":
+        if self.step is not None and self.step <= 0:
+            raise ValueError(f"Step must be positive. Got {self.step}")
+        return self
 class SearchSpaceEntry(BaseModel):
+    """Описание пространства поиска для отдельного гиперпараметра.
+    
+    Универсальный контейнер, поддерживающий как категориальные списки, 
+    так и числовые диапазоны. Реализует логику прозрачной конвертации 
+    из сокращенной YAML-записи в типизированные объекты распределений.
+    Attributes:
+        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный 
+            объект конкретного типа распределения.
     """
-    Описание пространства поиска для одного гиперпараметра.
-    Формат в YAML: [min, max, type] или [options, 'categorical'].
-    """
-
-    bounds: Annotated[
-        List[Union[float, int, str, bool]], 
-        Field(
-            min_length=2, 
-            max_length=4,
-            description=(
-                "Параметры распределения гиперпараметра. "
-                "Для чисел (int, float): [min, max, type] или [min, max, type, step]. "
-                "Для логарифмических шкал: [min, max, 'float_log']. "
-                "Для категорий: "
-                "[[val1, val2], 'categorical'] или [val1, val2, 'categorical']."
-            )
-        )
+    config: Annotated[
+        Union[CategoricalSpace, FloatSpace, IntSpace],
+        Field(discriminator="type")
     ]
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_list_to_dict(cls, data: Any) -> Any:
+        """Преобразовать краткую списочную запись YAML 
+        в структурированный словарь Pydantic.
+        
+        Логика парсинга:
+        1. Если входные данные не список, возвращает их "как есть" 
+            для стандартной обработки.
+        2. Определяет тип распределения по индексу [1] (categorical) или [2] (numeric).
+        3. Для числовых типов автоматически выводит подтип (int/float), 
+            если он не указан явно.
+        4. Формирует внутренний словарь с ключами `type`, `low`, `high`, `step` для 
+           последующей дискриминации моделей.
+        Args:
+            data (Any): Исходные данные из YAML (список или словарь).
+        Returns:
+            Any: Словарь, готовый для инициализации Pydantic-модели.
+        Raises:
+            ValueError: Если список содержит менее 2 элементов.
+        """
 
+        if not isinstance(data, list):
+            return data
+        if len(data) < 2:
+            raise ValueError("Search space list must have at least 2 elements")
+        if data[1] == "categorical":
+            return {"config": {"type": "categorical", "options": data[0]}}
+        if len(data) >= 3:
+            dist_type = str(data[2])
+            payload = {"type": dist_type, "low": data[0], "high": data[1]}
+            if len(data) == 4:
+                payload["step"] = data[3]
+            return {"config": payload}
+        # Infer type for 2-element numeric lists
+        if isinstance(data[0], int) and isinstance(data[1], int):
+            return {"config": {"type": "int", "low": data[0], "high": data[1]}}
+        return {"config": {"type": "float", "low": data[0], "high": data[1]}}
     @property
     def low(self) -> Any:
-        return self.bounds[0]
-
+        return getattr(self.config, "low", None)
     @property
     def high(self) -> Any:
-        return self.bounds[1]
-
+        return getattr(self.config, "high", None)
     @property
     def dist_type(self) -> str:
-        if len(self.bounds) >= 2 and self.bounds[1] == "categorical":
-            return "categorical"
-        elif len(self.bounds) >= 3:
-            return str(self.bounds[2])
-        return "float"
-
+        return self.config.type
     @property
-    def step(self) -> Optional[float]:
-        if len(self.bounds) == 4:
-            return float(self.bounds[3])
-        return None
-
-    @model_validator(mode="after")
-    def _validate_structure(self) -> SearchSpaceEntry:
-        dist_type = self.dist_type
-        
-        valid_types = ["int", "float", "float_log", "categorical"]
-        if dist_type not in valid_types:
-            return self
-        
-        if dist_type == "categorical":
-            if not isinstance(self.low, list):
-                raise ValueError(
-                    f"For 'categorical' type, the first element "
-                    f"must be a list of options. "
-                    f"Got {type(self.low)} instead."
-                )
-        else:
-            # Валидация границ диапазона
-            if (not isinstance(self.low, (int, float)) 
-                or not isinstance(self.high, (int, float))):
-                raise ValueError(f"Bounds for '{dist_type}' must be numerical. " 
-                                 f"Got {type(self.low)} and {type(self.high)}.")
-            if self.low > self.high:
-                raise ValueError(f"Lower bound ({self.low}) must be less "
-                                 f"than or equal to upper bound ({self.high}).")
-            # Валидация step для числовых типов
-            if self.step is not None:
-                if dist_type == "float_log":
-                    raise ValueError("The 'step' parameter is not supported for"
-                                     " 'float_log' distribution.")
-                
-                if dist_type == "int":
-                    if not float(self.step).is_integer():
-                        raise ValueError(f"Step for 'int' distribution must "
-                                         f"be an integer. Got {self.step}.")
-                    if self.step <= 0:
-                        raise ValueError(f"Step for 'int' distribution must "
-                                         f"be positive.Got {self.step}.")
-                
-                if dist_type == "float" and self.step <= 0:
-                    raise ValueError(f"Step for 'float' distribution must be positive."
-                                     f"Got {self.step}.")
-
-        return self
-
+    def step(self) -> Optional[Union[int, float]]:
+        return getattr(self.config, "step", None)
+    @property
+    def bounds(self) -> List[Any]:
+        """Backward compatibility alias for the raw list structure."""
+        if isinstance(self.config, CategoricalSpace):
+            return [self.config.options, "categorical"]
+        res = [self.low, self.high, self.dist_type]
+        if self.step is not None:
+            res.append(self.step)
+        return res
 # ───────────────── algorithms ───────────────── #
-
 class AlgoCfg(BaseModel):
-    """Конфигурация конкретного алгоритма машинного обучения."""
+    """Техническая конфигурация конкретного ML-алгоритма в пайплайне.
+    
+    Хранит настройки включения алгоритма, переопределенные пространства 
+    поиска и пути к программным модулям тренера и тюнера.
+    Attributes:
+        enable (bool): Флаг участия алгоритма в текущем эксперименте.
+        limit_hyperparameters (bool): Режим сокращенного пространства поиска.
+        hyperparameters (Dict | None): Кастомные границы параметров, 
+            перекрывающие значения по умолчанию.
+        tuner (str): Dotted-path к модулю оптимизатора.
+        trainer_module (str): Dotted-path к реализации обучения модели.
+    """
     enable: bool = Field(
         default=True, 
         description="Использовать ли данный алгоритм в пайплайне AutoML"
@@ -267,7 +343,7 @@ class AlgoCfg(BaseModel):
                      "только базовыми параметрами (ускоряет работу)"
         )
     )
-    hyperparameters: Dict[str, Union[SearchSpaceEntry, Any]] | None = Field(
+    hyperparameters: Dict[str, SearchSpaceEntry | Any] | None = Field(
         default=None,
         description=("Переопределение пространства поиска гиперпараметров."
                      "Ключ — имя параметра"
@@ -284,18 +360,38 @@ class AlgoCfg(BaseModel):
             "(например, 'configurable_automl_engine.trainer')."
             )
     )
-
+    def get_required_package(self, algo_name: str) -> Optional[str]:
+        """Определить имя внешнего Python-пакета, необходимого для работы алгоритма.
+        
+        Логика поиска:
+        1. Обращается к глобальному маппингу `ALGO_PACKAGE_MAPPING`.
+        2. Сопоставляет внутреннее имя алгоритма (например, 'xgboost') 
+            с названием в PyPI.
+        
+        Args:
+            algo_name (str): Уникальный идентификатор алгоритма.
+        Returns:
+            Optional[str]: Название пакета для установки через pip или None, 
+                если зависимость не определена.
+        """
+        return ALGO_PACKAGE_MAPPING.get(algo_name)
     @field_validator("tuner", "trainer_module")
     @classmethod
     def _must_not_be_empty(cls, v: str) -> str:
         if not v:
             raise ValueError("module path must be non-empty")
         return v
-
 # ─────────────────── root ──────────────────── #
-
 class Config(BaseModel):
-    """Корневой объект конфигурации всей системы AutoML."""
+    """Корневой объект всей системы конфигурации AutoML.
+    
+    Агрегирует все секции настроек и выполняет финальную валидацию 
+    целостности графа параметров, включая проверку системных зависимостей.
+    Attributes:
+        general (GeneralCfg): Общие параметры эксперимента.
+        oversampling (OversamplingCfg): Настройки предобработки данных.
+        algorithms (Dict[str, AlgoCfg]): Реестр доступных и активных алгоритмов.
+    """
     general: GeneralCfg = Field(
         ..., 
         description="Общие настройки эксперимента и валидации"
@@ -311,7 +407,6 @@ class Config(BaseModel):
             "(например, 'xgboost', 'random_forest')"
         )
     )
-
     @field_validator("algorithms")
     @classmethod
     def _must_have_enabled(cls, v: Dict[str, AlgoCfg]) -> Dict[str, AlgoCfg]:
@@ -320,29 +415,49 @@ class Config(BaseModel):
         return v
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> "Config":
+        """Проверить наличие установленных зависимостей для всех активных алгоритмов.
+        
+        Логика проверки:
+        1. Итерируется по словарю алгоритмов, пропуская отключенные (`enable=False`).
+        2. Для каждого активного алгоритма запрашивает имя требуемого пакета.
+        3. Использует `is_installed` для проверки окружения.
+        
+        Returns:
+            Config: Полностью провалидированный корневой объект конфигурации.
+        Raises:
+            ValueError: Если для включенного алгоритма 
+            отсутствует необходимая библиотека.
         """
-        Проверяет, что для включённых алгоритмов установлены необходимые библиотеки.
-        """
-        algo_dependencies: Dict[str, str] = {
-            "xgboost": "xgboost",
-            "lightgbm": "lightgbm",
-            "catboost": "catboost",
-        }
-
-        for algo_name, algo_cfg in self.algorithms.items():
+        for name, algo_cfg in self.algorithms.items():
             if not algo_cfg.enable:
                 continue
-            required_pkg = algo_dependencies.get(algo_name)
+            required_pkg = algo_cfg.get_required_package(name)
             if required_pkg and not is_installed(required_pkg):
                 raise ValueError(
-                    f"Алгоритм '{algo_name}' включён, "
-                    f"но пакет '{required_pkg}' не установлен"
+                    f"Алгоритм '{name}' включён, "
+                    f"но пакет '{required_pkg}' не установлен. "
+                    f"Пожалуйста, выполните: pip install {required_pkg}"
                 )
         return self
 # ────────────────── API ────────────────────── #
-
 def read_config(path: str | Path) -> Config:
-    """Загружает и валидирует YAML-конфигурацию."""
+    """Загрузить, распарсить и валидировать конфигурационный файл эксперимента.
+    
+    Логика работы:
+    1. Открывает файл по указанному пути в кодировке UTF-8.
+    2. Выполняет безопасную загрузку YAML-структуры в Python-словарь.
+    3. Инициирует каскадную валидацию Pydantic 
+        для создания типизированного объекта `Config`.
+    Args:
+        path (str | Path): Путь к файлу конфигурации в формате .yaml или .yml.
+    Returns:
+        Config: Корневой объект конфигурации, готовый к использованию в движке AutoML.
+        
+    Raises:
+        FileNotFoundError: Если файл по указанному пути не найден.
+        ValidationError: Если структура файла не соответствует схеме или 
+            нарушена логика параметров.
+    """
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
     return Config.model_validate(data)

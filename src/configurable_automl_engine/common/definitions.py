@@ -16,3 +16,10 @@ class SerializationFormat(str, Enum):
     """
     pickle = "pickle"
     joblib = "joblib"
+
+ALGO_PACKAGE_MAPPING: dict[str, str] = {
+    "xgboost": "xgboost",
+    "lightgbm": "lightgbm",
+    "catboost": "catboost",
+    "sklearn_rf": "scikit-learn",
+}
