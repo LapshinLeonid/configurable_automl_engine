@@ -1,9 +1,11 @@
 import pytest
 import logging
+import re
 from pathlib import Path
 from pydantic import ValidationError
 from configurable_automl_engine.training_engine.config_parser import (
-    GeneralCfg, OversamplingCfg, SearchSpaceEntry, AlgoCfg, Config, read_config, HPOPhaseCfg
+    GeneralCfg, OversamplingCfg, SearchSpaceEntry, AlgoCfg, Config, read_config, HPOPhaseCfg, 
+    NumericSpace, FloatSpace, IntSpace,
 )
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
 
@@ -96,33 +98,6 @@ def test_general_cfg_valid_n_folds():
     )
     assert cfg.n_folds == 3
 
-# Тесты для SearchSpaceEntry
-def test_search_space_unknown_type():
-    """Неизвестный тип распределения."""
-    # Валидатор возвращает self, если тип не в ['int', 'float', 'float_log', 'categorical']
-    entry = SearchSpaceEntry(bounds=[1, 10, "unknown_type"])
-    assert entry.bounds[-1] == "unknown_type"
-
-def test_search_space_categorical_invalid_structure():
-    """Ошибка, если для categorical первый элемент не list."""
-    with pytest.raises(ValueError, match="For 'categorical' type, the first element must be a list"):
-        # Первый элемент "option" (str) валиден для Union, но невалиден для логики categorical
-        SearchSpaceEntry(bounds=["option", "categorical"])
-
-def test_search_space_numerical_with_list_bounds():
-    """
-    Ошибка, если в численном типе есть список.
-    Используем model_construct, чтобы обойти предварительную проверку типов Pydantic.
-    """
-    # Создаем объект в обход валидации типов Union
-    invalid_entry = SearchSpaceEntry.model_construct(
-        bounds=[[1, 2], 10, "int"]
-    )
-
-    # Вручную вызываем валидатор, который теперь сработает и выбросит ValueError
-    with pytest.raises(ValueError, match="Bounds for 'int' must be numerical"):
-        invalid_entry._validate_structure()
-
 # 3. Тесты для AlgoCfg._must_not_be_empty
 def test_algo_cfg_empty_paths():
     """ Проверка на пустую строку в путях модулей."""
@@ -158,16 +133,6 @@ def test_general_cfg_coverage_line_83():
             n_folds=0  # Это активирует raise на строке 83
         )
 
-# Успешный возврат return self в SearchSpaceEntry
-def test_search_space_coverage_line_173():
-    """ Успешный проход валидатора распределения."""
-    # Создаем корректную запись (например, для int), чтобы пройти все проверки
-    # и достичь финального return self на строке 173
-    entry = SearchSpaceEntry(bounds=[1, 10, "int"])
-    assert entry.bounds[2] == "int"
-    # Вызов метода напрямую для гарантии покрытия, если pydantic v2 оптимизирует вызовы
-    result = entry._validate_structure()
-    assert result == entry
 # Успешный возврат return v в AlgoCfg
 def test_algo_cfg_coverage_line_205():
     """Успешный возврат значения пути модуля."""
@@ -219,122 +184,6 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
     with pytest.raises(ValueError, match=expected_msg):
         Config.model_validate(data)
 
-def test_search_space_entry_default_float_dist():
-    """
-    Тест проверяет ветку кода, когда len(bounds) == 2 
-    и dist_type должен вернуть "float" по умолчанию.
-    """
-    
-    # Создаем данные, где ровно 2 элемента и нет ключевого слова "categorical"
-    # Это заставит dist_type вернуть "float" (строка 179)
-    raw_data = {
-        "bounds": [0.0, 10.0]
-    }
-    
-    entry = SearchSpaceEntry(**raw_data)
-    
-    # 1. Проверяем, что dist_type определился как "float"
-    assert entry.dist_type == "float"
-    
-    # 2. Проверяем, что свойства low и high работают корректно
-    assert entry.low == 0.0
-    assert entry.high == 10.0
-    
-    # 3. Проверяем, что step при этом None (так как элементов всего 2)
-    assert entry.step is None
-def test_search_space_entry_explicit_vs_implicit_float():
-    """
-    Сравнение явного указания типа и неявного (по умолчанию).
-    """
-    # Явное указание (срабатывает ветка elif len(self.bounds) >= 3)
-    explicit_entry = SearchSpaceEntry(bounds=[0, 1, "float"])
-    
-    # Неявное указание (срабатывает целевая строка 179: return "float")
-    implicit_entry = SearchSpaceEntry(bounds=[0, 1])
-    
-    assert explicit_entry.dist_type == "float"
-    assert implicit_entry.dist_type == "float"
-    assert explicit_entry.dist_type == implicit_entry.dist_type
-def test_invalid_numerical_bounds_for_default_float():
-    """
-    Проверка валидации, если мы попали в "float" по умолчанию, 
-    но передали не числа.
-    """
-    with pytest.raises(ValidationError) as excinfo:
-        # Тип по умолчанию "float", но границы - строки
-        SearchSpaceEntry(bounds=["min_val", "max_val"])
-    
-    assert "Bounds for 'float' must be numerical" in str(excinfo.value)
-
-def test_search_space_step_return_value():
-    """
-    Тест проверяет корректную работу свойства step при наличии 4 элементов.
-    Покрывает строку: return float(self.bounds[3])
-    """
-    # 1. Тест для распределения 'int' с шагом
-    # Формат: [min, max, type, step]
-    entry_int = SearchSpaceEntry(bounds=[1, 10, "int", 2])
-    
-    assert len(entry_int.bounds) == 4
-    assert entry_int.step == 2.0  # float(2)
-    assert isinstance(entry_int.step, float)
-    # 2. Тест для распределения 'float' с шагом
-    entry_float = SearchSpaceEntry(bounds=[0.0, 1.0, "float", 0.1])
-    
-    assert entry_float.step == 0.1
-    assert entry_float.dist_type == "float"
-
-def test_search_space_bounds_order_validation():
-    """
-    Проверка выбрасывания ошибки, если нижняя граница больше верхней.
-    Покрывает: raise ValueError(f"Lower bound ({self.low}) must be less than or equal to...")
-    """
-    # Задаем границы, где low (10) > high (5)
-    invalid_data = {"bounds": [10, 5, "int"]}
-    
-    with pytest.raises(ValidationError) as excinfo:
-        SearchSpaceEntry(**invalid_data)
-    
-    # Проверяем наличие специфического сообщения об ошибке из кода
-    assert "Lower bound (10) must be less than or equal to upper bound (5)" in str(excinfo.value)
-
-def test_step_forbidden_for_float_log():
-    """
-    1. Покрывает: raise ValueError("The 'step' parameter is not supported for 'float_log'...")
-    """
-    # float_log не поддерживает 4-й элемент (step)
-    invalid_bounds = [1, 100, "float_log", 1.0]
-    
-    with pytest.raises(ValidationError, match="The 'step' parameter is not supported for 'float_log'"):
-        SearchSpaceEntry(bounds=invalid_bounds)
-def test_step_must_be_integer_for_int_dist():
-    """
-    2. Покрывает: raise ValueError(f"Step for 'int' distribution must be an integer. Got {self.step}.")
-    """
-    # Для типа 'int' шаг 1.5 недопустим
-    invalid_bounds = [1, 10, "int", 1.5]
-    
-    with pytest.raises(ValidationError, match="Step for 'int' distribution must be an integer"):
-        SearchSpaceEntry(bounds=invalid_bounds)
-def test_step_must_be_positive_for_int_dist():
-    """
-    3. Покрывает: raise ValueError(f"Step for 'int' distribution must be positive. Got {self.step}.")
-    """
-    # Для типа 'int' шаг 0 или отрицательный недопустим
-    invalid_bounds = [1, 10, "int", 0]
-    
-    with pytest.raises(ValidationError, match="Step for 'int' distribution must be positive"):
-        SearchSpaceEntry(bounds=invalid_bounds)
-def test_step_must_be_positive_for_float_dist():
-    """
-    4. Покрывает: raise ValueError(f"Step for 'float' distribution must be positive. Got {self.step}.")
-    """
-    # Для типа 'float' шаг -0.1 недопустим
-    invalid_bounds = [0.0, 1.0, "float", -0.1]
-    
-    with pytest.raises(ValidationError, match="Step for 'float' distribution must be positive"):
-        SearchSpaceEntry(bounds=invalid_bounds)
-
 def test_config_skips_disabled_algorithms_dependency_check():
     """
     Тест проверяет, что валидатор зависимостей игнорирует выключенные алгоритмы.
@@ -362,3 +211,95 @@ def test_config_skips_disabled_algorithms_dependency_check():
     
     assert config.algorithms["xgboost"].enable is False
     assert "xgboost" in config.algorithms
+
+# 1. Тест для: if self.low > self.high: raise ValueError(...)
+def test_numeric_space_range_validation():
+    # Ошибка: low > high
+    # Используем re.escape, чтобы скобки (10.0) не воспринимались как группа в regex
+    expected_msg = re.escape("low (10.0) must be <= high (5.0)")
+    
+    with pytest.raises(ValidationError, match=expected_msg):
+        NumericSpace(type="base", low=10.0, high=5.0)
+    
+    # Успех: low == high (допустимо)
+    n = NumericSpace(type="base", low=5.0, high=5.0)
+    assert n.low == 5.0
+# 2. Тест для: if self.type == "float_log" and self.step is not None:
+def test_float_log_step_forbidden():
+    with pytest.raises(ValidationError, match="The 'step' parameter is not supported for 'float_log'"):
+        FloatSpace(type="float_log", low=1.0, high=10.0, step=0.1)
+# 3. Тест для: if self.step is not None and self.step <= 0: (в FloatSpace и IntSpace)
+def test_step_positive_validation():
+    # Для FloatSpace
+    with pytest.raises(ValidationError, match="Step must be positive. Got -1.0"):
+        FloatSpace(type="float", low=0.0, high=1.0, step=-1.0)
+    
+    # Для IntSpace
+    with pytest.raises(ValidationError, match="Step must be positive. Got 0"):
+        IntSpace(type="int", low=1, high=10, step=0)
+# 4. Тест для: _parse_list_to_dict (валидация различных форматов списков)
+def test_parse_list_to_dict_logic():
+    # Проверка len(data) >= 3 и payload["step"] = data[3]
+    raw_data = [1, 10, "int", 2]
+    entry = SearchSpaceEntry.model_validate(raw_data)
+    assert entry.dist_type == "int"
+    assert entry.step == 2
+    
+    # Проверка случая, если передали не список (должен вернуть как есть)
+    # Pydantic выбросит ошибку валидации позже, если это не словарь, 
+    # но сам метод _parse_list_to_dict должен пропустить данные.
+    not_a_list = {"config": {"type": "int", "low": 1, "high": 5}}
+    entry_from_dict = SearchSpaceEntry.model_validate(not_a_list)
+    assert entry_from_dict.low == 1
+# 5. Тест для: property bounds (формирование списка из объекта)
+def test_search_space_bounds_property():
+    # Для числового с шагом
+    entry_int = SearchSpaceEntry.model_validate([1, 10, "int", 2])
+    assert entry_int.bounds == [1, 10, "int", 2]
+    
+    # Для категориального
+    cat_data = [["a", "b"], "categorical"]
+    entry_cat = SearchSpaceEntry.model_validate(cat_data)
+    assert entry_cat.bounds == [["a", "b"], "categorical"]
+# 6. Тест для: _check_algorithm_dependencies (проверка установленных пакетов)
+def test_algorithm_dependency_check():
+    # Мокаем маппинг и функцию проверки установки
+    with patch("configurable_automl_engine.training_engine.config_parser.ALGO_PACKAGE_MAPPING", {"xgboost": "xgboost_pkg"}), \
+         patch("configurable_automl_engine.training_engine.config_parser.is_installed") as mock_installed:
+        
+        # Ситуация: пакет НЕ установлен
+        mock_installed.return_value = False
+        
+        config_data = {
+            "general": {
+                "phases": [{"name": "p1", "n_trials": 1}],
+                "validation_strategy": "k_fold",
+                "n_folds": 2
+            },
+            "algorithms": {
+                "xgboost": {"enable": True}
+            }
+        }
+        
+        expected_msg = "Алгоритм 'xgboost' включён, но пакет 'xgboost_pkg' не установлен"
+        with pytest.raises(ValidationError, match=expected_msg):
+            Config.model_validate(config_data)
+        # Ситуация: пакет установлен
+        mock_installed.return_value = True
+        cfg = Config.model_validate(config_data)
+        assert cfg.algorithms["xgboost"].enable is True
+# 7. Дополнительный тест на n_folds (общая логика GeneralCfg)
+def test_general_cfg_n_folds():
+    base_phases = [{"name": "test", "n_trials": 1}]
+    
+    # Ошибка: n_folds < 1
+    with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
+        GeneralCfg(phases=base_phases, n_folds=0)
+        
+    # Ошибка: k_fold требует n_folds >= 2
+    with pytest.raises(ValidationError, match="`n_folds` must be ≥ 2 при k-fold"):
+        GeneralCfg(
+            phases=base_phases, 
+            validation_strategy="k_fold", 
+            n_folds=1
+        )
