@@ -108,6 +108,8 @@ class ModelTrainer:
     ):
         self.logger = logging.getLogger(__name__)
 
+        self.lock = threading.RLock()
+
         # Проверка алгоритма
         if not isinstance(algorithm, str):
             raise TrainingError(f"Некорректный алгоритм: {algorithm!r}")
@@ -162,6 +164,7 @@ class ModelTrainer:
         # Re-initialize the lock after unpickling
         self.lock = threading.RLock()
         # Re-initialize logger if necessary
+        self.logger = logging.getLogger(__name__)
     
     def _build_preprocessor(self, X_df: pd.DataFrame, algo_key: str) -> Any:
         """
@@ -297,57 +300,58 @@ class ModelTrainer:
         """
         Оркестрация процесса обучения: подготовка, сборка и валидация.
         """
-        # Этап 1: Валидация и подготовка данных
-        X_df, y_s = self._prepare_data(X, y)
+        with self.lock:
+            # Этап 1: Валидация и подготовка данных
+            X_df, y_s = self._prepare_data(X, y)
 
-        # Этап 2: Определение ключа алгоритма 
-        # (перенесено выше для использования в препроцессоре)
-        algo_key = _ALIASES.get(self.algorithm, self.algorithm)
+            # Этап 2: Определение ключа алгоритма 
+            # (перенесено выше для использования в препроцессоре)
+            algo_key = _ALIASES.get(self.algorithm, self.algorithm)
 
-        # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
-        preprocessor = self._build_preprocessor(X_df, algo_key)
+            # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
+            preprocessor = self._build_preprocessor(X_df, algo_key)
 
-        # Этап 4: Создаём модель через фабрику
-        try:
-            model_kwargs = self.model_params.copy()
-            model_kwargs.pop("feature_index", None)
-            base_model = create_model(self.algorithm, **model_kwargs)
-        except (ValueError, ImportError) as e:
-            raise TrainingError(f"Ошибка при создании модели: {e}")
-        
-        # Этап 5: Разбиение данных (используем iter_splits)
+            # Этап 4: Создаём модель через фабрику
+            try:
+                model_kwargs = self.model_params.copy()
+                model_kwargs.pop("feature_index", None)
+                base_model = create_model(self.algorithm, **model_kwargs)
+            except (ValueError, ImportError) as e:
+                raise TrainingError(f"Ошибка при создании модели: {e}")
+            
+            # Этап 5: Разбиение данных (используем iter_splits)
 
-        try:
-            X_train, X_val, y_train, y_val = next(
-                iter_splits(X_df, 
-                            y_s, 
-                            method='train_test_split', 
-                            random_state=self.random_state)
-            )
-        except Exception as e:
-            raise TrainingError(f"Ошибка при разбиении данных: {e}")
+            try:
+                X_train, X_val, y_train, y_val = next(
+                    iter_splits(X_df, 
+                                y_s, 
+                                method='train_test_split', 
+                                random_state=self.random_state)
+                )
+            except Exception as e:
+                raise TrainingError(f"Ошибка при разбиении данных: {e}")
 
-        # Этап 6: Сборка и обучение пайплайна (Task 2.3)
-        # Здесь автоматически применится оверсэмплинг, если он включен
-        self.pipeline = self._fit_internal(X_train, y_train, preprocessor, base_model)
+            # Этап 6: Сборка и обучение пайплайна (Task 2.3)
+            # Здесь автоматически применится оверсэмплинг, если он включен
+            self.pipeline = self._fit_internal(X_train, y_train, preprocessor, base_model)
 
-        # Этап 7: Валидация и расчет метрик (финальный шаг)
-        try:
-            # Получаем объект-скорер (наш кастомный или стандартный sklearn)
-            scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
-            # Извлекаем значение и проверяем, что оно не None
-            raw_score = scorer(self.pipeline, X_val, y_val)
-            if raw_score is None:
-                raise TrainingError("Scorer returned None")
-            # Вычисляем значение. 
-            # Scorer сам внутри сделает predict и сравнит с y_val.
-            # Мы переименовываем атрибут в универсальный val_score, 
-            # чтобы он подходил для любой метрики (RMSE, MAE и т.д.)
-            self.val_score = float(raw_score)
-        except Exception as e:
-            raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
-        
-        return self
+            # Этап 7: Валидация и расчет метрик (финальный шаг)
+            try:
+                # Получаем объект-скорер (наш кастомный или стандартный sklearn)
+                scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
+                # Извлекаем значение и проверяем, что оно не None
+                raw_score = scorer(self.pipeline, X_val, y_val)
+                if raw_score is None:
+                    raise TrainingError("Scorer returned None")
+                # Вычисляем значение. 
+                # Scorer сам внутри сделает predict и сравнит с y_val.
+                # Мы переименовываем атрибут в универсальный val_score, 
+                # чтобы он подходил для любой метрики (RMSE, MAE и т.д.)
+                self.val_score = float(raw_score)
+            except Exception as e:
+                raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
+            
+            return self
 
 
     def predict(self, X: Any) -> np.ndarray:
@@ -357,27 +361,28 @@ class ModelTrainer:
         Использует единый пайплайн, что исключает расхождения в подготовке 
         данных для разных типов моделей.
         """
-        # 1) Проверка: обучена ли модель
-        if self.pipeline is None:
-            raise TrainingError(
-                "Метод predict вызван для неообученной модели. "
-                "Сначала необходимо выполнить fit()."
-            )
-        try:
-            # 2) Приведение входных данных к формату pandas 
-            # (совместимость с трансформерами)
-            X_df = (
-                pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) 
-                else X)
-            
-            # 3) Выполнение предсказания через пайплайн
-            # Все кастомные шаги (IsotonicDataTransformer, ColumnTransformer) 
-            # выполнятся автоматически внутри вызова .predict()
-            preds = self.pipeline.predict(X_df)
-            return np.asarray(preds)
-            
-        except Exception as e:
-            raise TrainingError(f"Ошибка при выполнении предсказания: {e}")
+        with self.lock:
+            # 1) Проверка: обучена ли модель
+            if self.pipeline is None:
+                raise TrainingError(
+                    "Метод predict вызван для неообученной модели. "
+                    "Сначала необходимо выполнить fit()."
+                )
+            try:
+                # 2) Приведение входных данных к формату pandas 
+                # (совместимость с трансформерами)
+                X_df = (
+                    pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) 
+                    else X)
+                
+                # 3) Выполнение предсказания через пайплайн
+                # Все кастомные шаги (IsotonicDataTransformer, ColumnTransformer) 
+                # выполнятся автоматически внутри вызова .predict()
+                preds = self.pipeline.predict(X_df)
+                return np.asarray(preds)
+                
+            except Exception as e:
+                raise TrainingError(f"Ошибка при выполнении предсказания: {e}")
 
 
     def save(self, path: str | Path) -> None:
@@ -385,19 +390,20 @@ class ModelTrainer:
         Сохраняет объект ModelTrainer (пайплайн + параметры) в указанный файл,
         используя заданный формат сериализации.
         """
-        if self.pipeline is None and self.base_model is None:
-            raise TrainingError("Нечего сохранять: модель не обучена")
-        
-        path_obj = Path(path)
-        # Создаем директории, если они не существуют
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Вызываем новую утилиту вместо pickle.dump
-        save_artifact(
-            obj=self, 
-            path=path_obj, 
-            fmt=self.serialization_format
-        )
+        with self.lock:
+            if self.pipeline is None and self.base_model is None:
+                raise TrainingError("Нечего сохранять: модель не обучена")
+            
+            path_obj = Path(path)
+            # Создаем директории, если они не существуют
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Вызываем новую утилиту вместо pickle.dump
+            save_artifact(
+                obj=self, 
+                path=path_obj, 
+                fmt=self.serialization_format
+            )
 
     @classmethod
     def load(cls, 
