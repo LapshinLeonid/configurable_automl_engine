@@ -2,7 +2,7 @@
 trainer.py
 ----------
 Обёртка над sklearn-регрессорами: берёт данные (X, y), строит пайплайн,
-обучает модель и возвращает R². Содержит:
+обучает модель и возвращает . Содержит:
   - класс ModelTrainer
   - исключение TrainingError
   - функцию train_model (старый API, необходимый тестам).
@@ -89,7 +89,7 @@ class ModelTrainer:
     test_size: float
         Доля hold-out (по умолчанию 0.3).
     metric: str
-        Имя метрики (поддерживается только "r2").
+        Имя метрики.
     random_state: int | None
         random_state для train_test_split.
     """
@@ -535,12 +535,14 @@ def train_model(
 
     # Логирование (если enable_logging=True)
     if enable_logging:
-        log_file = log_path if log_path else "training.log"
+        # Используем централизованную настройку. 
+        # Она должна уметь проверять, настроен ли уже логгер.
+        
+        # Теперь просто получаем логгер и пишем сообщение
         logger = logging.getLogger(__name__)
-        logger.setLevel(logging.DEBUG)
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-        logger.addHandler(fh)
-        logger.debug(f"Алгоритм: {algo_key}; Score ({metric.upper()}): {val_score:.4f}")
+        logger.info(
+            f"Training finished: Algorithm={algo_key}, "
+            f"Metric={metric.upper()}, Score={val_score:.4f}"
+        )
 
     return float(val_score)

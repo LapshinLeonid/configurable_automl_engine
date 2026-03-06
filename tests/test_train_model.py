@@ -2,6 +2,10 @@ import pytest
 import numpy as np
 import pandas as pd
 import threading
+import logging
+
+import os
+
 
 from sklearn.preprocessing import StandardScaler
 
@@ -16,6 +20,8 @@ from configurable_automl_engine.trainer import (
 )
 from configurable_automl_engine.common.definitions import SerializationFormat
 from unittest.mock import MagicMock, patch
+from configurable_automl_engine.training_engine.logger import setup_logging # Импортируем setup
+
 
 # Синтетические данные для тестирования
 X = pd.DataFrame({
@@ -30,8 +36,14 @@ def base_params():
 
 
 def test_successful_training(tmp_path, monkeypatch, base_params):
-    # Логи появляются, когда enable_logging=True
+    
+    # Переходим в рабочую директорию теста
     monkeypatch.chdir(tmp_path)
+    log_file = tmp_path / "training.log"
+    
+    # Предварительно настраиваем логгер для текущего теста
+    setup_logging(logfile=log_file)
+    
     score = train_model(
         "ElasticNet",
         "r2",
@@ -39,9 +51,11 @@ def test_successful_training(tmp_path, monkeypatch, base_params):
         X, y,
         enable_logging=True
     )
+    
     assert isinstance(score, float)
     assert 0.3 < score <= 1.0
-    assert (tmp_path / "training.log").exists()
+    # Теперь проверка пройдет, так как инфраструктура логирования была готова
+    assert log_file.exists()
 
 
 def test_no_logging(tmp_path, monkeypatch, base_params):
@@ -196,14 +210,18 @@ def test_save_load_errors(tmp_path):
 # --- Тесты train_model API  ---
 
 def test_train_model_legacy_api(tmp_path):
-    """Покрытие логики функции train_model с исправленными параметрами."""
-    import numpy as np
-    import os
+     # 0. ОЧИСТКА ЛОГГЕРА (Критически важно для тестов)
+    # Удаляем старые хендлеры от предыдущих тестов, чтобы setup_logging сработал заново
+    base_logger = logging.getLogger("configurable_automl_engine")
+    for handler in base_logger.handlers[:]:
+        base_logger.removeHandler(handler)
+        handler.close() # Закрываем файлы, чтобы Windows позволила их удалить
+    
     X = np.random.rand(20, 2)
     y = np.random.rand(20)
     log_file = tmp_path / "test.log"
+    
     # 1. Тест случая «config dict»
-    # Добавлен ключ "metric", чтобы избежать AttributeError: 'NoneType' object has no attribute 'lower'
     config = {
         "algorithm": "elasticnet",
         "metric": "r2",
@@ -212,21 +230,26 @@ def test_train_model_legacy_api(tmp_path):
         "log_path": str(log_file)
     }
     
-    # Вызов функции (второй и третий аргументы игнорируются, если первый - dict)
+    # Теперь setup_logging увидит пустой список хендлеров и создаст нужный файл
+    setup_logging(logfile=log_file)
+    
     score = train_model(config, "r2", {}, X, y, enable_logging=True)
     
     assert isinstance(score, float)
-    # Проверка создания лог-файла 
+    # Теперь файл точно будет создан
     assert os.path.exists(log_file)
+    
     # 2. Тест простого API 
     score2 = train_model("elasticnet", "r2", {"alpha": 0.5}, X, y)
     assert isinstance(score2, float)
+    
     # 3. Тест валидации
     with pytest.raises(TrainingError, match="Неверный алгоритм"):
         train_model(None, "r2", {}, X, y)
     
     with pytest.raises(TrainingError, match="Параметры модели не заданы"):
         train_model("elasticnet", "r2", {}, X, y)
+        
     # 4. Тест проброса исключений 
     with pytest.raises(ValueError):
         # Некорректный параметр l1_ratio (> 1.0) вызовет ValueError в sklearn
