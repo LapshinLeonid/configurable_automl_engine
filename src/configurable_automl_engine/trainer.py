@@ -31,7 +31,10 @@ from configurable_automl_engine.validation import iter_splits
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (save_artifact,
                                                                     load_artifact)
-from configurable_automl_engine.training_engine.metrics import get_scorer_object
+from configurable_automl_engine.training_engine.metrics import (
+    get_scorer_object, 
+    is_greater_better
+)
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
@@ -337,17 +340,27 @@ class ModelTrainer:
 
             # Этап 7: Валидация и расчет метрик (финальный шаг)
             try:
-                # Получаем объект-скорер (наш кастомный или стандартный sklearn)
+                # 1. Получаем объект-скорер
                 scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
-                # Извлекаем значение и проверяем, что оно не None
+                
+                # 2. Вычисляем raw_score (для ошибок sklearn вернет отрицательное число)
                 raw_score = scorer(self.pipeline, X_val, y_val)
                 if raw_score is None:
                     raise TrainingError("Scorer returned None")
-                # Вычисляем значение. 
-                # Scorer сам внутри сделает predict и сравнит с y_val.
-                # Мы переименовываем атрибут в универсальный val_score, 
-                # чтобы он подходил для любой метрики (RMSE, MAE и т.д.)
-                self.val_score = float(raw_score)
+                
+                # 3. Инвертируем знак обратно, если это метрика-ошибка (RMSE, MAE и т.д.)
+                # Чтобы в val_score всегда лежало "честное" положительное значение ошибки
+                if not is_greater_better(self.metric):
+                    # Если sklearn вернул отрицательную ошибку (neg_rmse), берем модуль
+                    # Если вдруг вернул положительную (custom scorer), оставляем как есть
+                    self.val_score = float(abs(raw_score))
+                else:
+                    # Для R2 и прочих score-метрик оставляем как есть
+                    self.val_score = float(raw_score)
+                self.logger.debug(
+                    f"Metric calculation: raw={raw_score:.4f}, final val_score={self.val_score:.4f} "
+                    f"(greater_is_better={is_greater_better(self.metric)})"
+                )
             except Exception as e:
                 raise TrainingError(f"Ошибка при расчете метрик на валидации: {e}")
             
@@ -548,9 +561,13 @@ def train_model(
         
         # Теперь просто получаем логгер и пишем сообщение
         logger = logging.getLogger(__name__)
+        # Определяем тип метрики для понятного лога
+        metric_type = "Score" if is_greater_better(metric) else "Error (Natural)"
+
         logger.info(
             f"Training finished: Algorithm={algo_key}, "
-            f"Metric={metric.upper()}, Score={val_score:.4f}"
+            f"Metric={metric.upper()} ({metric_type}), "
+            f"Value={val_score:.4f}"
         )
 
     return float(val_score)
