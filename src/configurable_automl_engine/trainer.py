@@ -25,6 +25,9 @@ from sklearn.compose import ColumnTransformer
 
 from sklearn.base import BaseEstimator, TransformerMixin
 
+from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
+
+
 from .models import create_model, _ALIASES
 
 from configurable_automl_engine.validation import iter_splits
@@ -50,31 +53,69 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
     """ 
     def __init__(self, feature_index: int = 0):
         self.feature_index = feature_index
+    
+    def _get_dimensions(self, X):
+        """Вспомогательный метод для получения строк и колонок."""
+        if hasattr(X, 'shape'):
+            return X.shape[0], (X.shape[1] if len(X.shape) > 1 else 1)
+        n_rows = len(X)
+        n_cols = len(X[0]) if n_rows > 0 and isinstance(X[0], (list, np.ndarray)) else 1
+        return n_rows, n_cols
     def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
-        return self
-    def transform(self, X: Any) -> np.ndarray:
-        X_df = pd.DataFrame(X)
-        n_samples = len(X_df)
-        if self.feature_index >= X_df.shape[1]:
-            raise TrainingError(
-                f"feature_index {self.feature_index} out of bounds. "
-                f"Dataset has only {X_df.shape[1]} columns."
-                )
-        # Выбираем целевую колонку по индексу
-        X_col = X_df.iloc[:, self.feature_index]
+        # ПРАВКА: Расчет медианы должен быть ЗДЕСЬ, а не в ModelTrainer
+        _, n_cols = self._get_dimensions(X)
+        idx = self.feature_index if self.feature_index < n_cols else 0
         
-        # Логика обработки NaN (перенесена из ModelTrainer.fit)
-        if X_col.isna().all():
-            result_na = pd.Series(range(n_samples)).to_numpy().reshape(-1, 1)
-            return np.asarray(result_na)
-        
-        median_val = float(X_col.median())
-
-        X_imputed = X_col.fillna(median_val)
+        if isinstance(X, pd.DataFrame):
+            X_col = X.iloc[:, idx]
+        elif isinstance(X, np.ndarray):
+            X_col = X[:, idx] if len(X.shape) > 1 else X
+        else:
+            X_col = np.asarray(X)[:, idx]
             
-        result_imputed = X_imputed.to_numpy().reshape(-1, 1)
-        return np.asarray(result_imputed)
-
+        s_col = pd.Series(X_col)
+        self.median_ = float(s_col.median()) if not s_col.isna().all() else 0.0
+        return self
+    
+    def transform(self, X):
+        try:
+            # 1. Получаем метаданные без принудительного копирования в DataFrame
+            # Используем логику из _extract_metadata, которую мы обсуждали ранее
+            n_rows, n_cols = self._get_dimensions(X)
+            
+            # 2. Валидация индекса признака
+            if self.feature_index >= n_cols:
+                raise TrainingError(
+                    f"Ошибка при преобразовании данных: feature_index {self.feature_index} "
+                    f"out of bounds. Dataset has only {n_cols} columns."
+                )
+            # 3. Извлечение колонки (Zero-copy для numpy и pandas)
+            # Если X - DataFrame, используем iloc. Если numpy - обычный слайсинг.
+            if isinstance(X, pd.DataFrame):
+                X_col = X.iloc[:, self.feature_index]
+            elif isinstance(X, np.ndarray):
+                X_col = X[:, self.feature_index]
+            else:
+                # Для списков или других типов приводим к numpy (минимальная копия)
+                X_col = np.asarray(X)[:, self.feature_index]
+            # 4. Логика обработки NaN
+            # Проверяем, являются ли все значения в колонке NaN
+            # Используем pd.Series для удобства вычисления медианы, если это еще не Series
+            s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
+            
+            if s_col.isna().all():
+                # Если все NaN, возвращаем индексы строк (согласно старой логике)
+                return np.arange(n_rows).reshape(-1, 1).astype(float)
+            # Вычисляем медиану и заполняем пропуски
+            fill_value = getattr(self, "median_", 0.0)
+            X_imputed = s_col.fillna(fill_value)
+            # Возвращаем результат в виде 2D массива, как ожидает scikit-learn
+            return X_imputed.to_numpy().reshape(-1, 1)
+        except Exception as e:
+            if isinstance(e, TrainingError):
+                raise e
+            # Унификация сообщения об ошибке согласно тестам (#A8)
+            raise TrainingError(f"Ошибка при преобразовании данных: {e}")
 class ModelTrainer:
     """
     Класс-обёртка над sklearn-регрессорами: берёт набор данных (X, y),
@@ -135,6 +176,8 @@ class ModelTrainer:
         self.metric = metric.lower()
         self.random_state = random_state
         self.serialization_format = serialization_format
+        self.categorical_features = []
+        self.numerical_features = []
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -152,6 +195,16 @@ class ModelTrainer:
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
 
+    def _extract_metadata(self, X):
+        """Извлекает имена колонок без копирования данных."""
+        if hasattr(X, 'get_data_info'):
+            return X.get_data_info()['columns']
+        if isinstance(X, pd.DataFrame):
+            return X.columns.tolist()
+        if hasattr(X, 'shape') and len(X.shape) > 1:
+            return [f"col_{i}" for i in range(X.shape[1])]
+        return None
+    
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         # Remove unpicklable entries
@@ -169,91 +222,79 @@ class ModelTrainer:
         # Re-initialize logger if necessary
         self.logger = logging.getLogger(__name__)
     
-    def _build_preprocessor(self, X_df: pd.DataFrame, algo_key: str) -> Any:
-        """
-        Создает объект препроцессора (Transformer) в зависимости от алгоритма 
-        и типов данных в X_df.
-        """
-        # 1. Специальный случай: Изотоническая регрессия
-        if algo_key == "isotonic_regression":
-            f_idx = self.model_params.get("feature_index", 0)
-            return IsotonicDataTransformer(feature_index=f_idx)
-        # 2. Определение типов колонок для стандартных алгоритмов
-        num_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
-        cat_cols = X_df.select_dtypes(exclude=["number"]).columns.tolist()
-        # 3. Настройка обработки числовых признаков
-        num_steps: list[tuple[str, Any]] = [
-            ("impute", SimpleImputer(strategy="median"))
-        ]
+    def _build_preprocessor(self, feature_names):
+        current_cat = self.categorical_features or [col for col in feature_names if 'cat' in str(col).lower()]
         
-        # Список алгоритмов, чувствительных к масштабу признаков
-        scaling_required = {
-            "sgdregressor", 
-            "elasticnet", 
-            "ardregression", 
-            "gaussian_process_regression"
-        }
+        cat_indices = [feature_names.index(col) for col in current_cat if col in feature_names]
         
-        if algo_key in scaling_required:
-            num_steps.append(("scale", StandardScaler()))
+        if not self.numerical_features:
+            num_indices = [i for i in range(len(feature_names)) if i not in cat_indices]
+        else:
+            num_indices = [feature_names.index(col) for col in self.numerical_features if col in feature_names]
+        # 2. Пайплайны
+        num_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ])
+        
+        cat_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        # 3. Сборка
+        transformers = []
+        if cat_indices:
+            transformers.append(('cat', cat_transformer, cat_indices))
+        if num_indices:
+            transformers.append(('num', num_transformer, num_indices))
             
-        num_pipeline = Pipeline(steps=num_steps)
-        # 4. Сборка трансформеров
-        transformers: list[tuple[str, Pipeline, list[str]]] = [
-            ("num", num_pipeline, num_cols)
-        ]
-        # 5. Настройка обработки категориальных признаков (если они есть)
-        if cat_cols:
-            cat_pipeline = Pipeline(
-                steps=[
-                    ("impute", SimpleImputer(strategy="most_frequent")),
-                    ("ohe", OneHotEncoder(handle_unknown="ignore")),
-                ]
-            )
-            transformers.append(("cat", cat_pipeline, cat_cols))
-        # Возвращаем ColumnTransformer, который объединяет все ветки обработки
-        return ColumnTransformer(transformers=transformers, remainder="drop")
+        return ColumnTransformer(
+            transformers=transformers if transformers else [('pass', 'passthrough', slice(None))],
+            remainder='passthrough'
+        )
 
-    def _prepare_data(self, X: Any, y: Any) -> tuple[pd.DataFrame, pd.Series]:
+    def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
         """
         Выполняет валидацию типов, приведение к pandas и проверку размеров.
         Возвращает кортеж (X_df, y_s).
         """
         try:
+            self.feature_names = self._extract_metadata(X) 
+            # 1. Проверка типов
             valid_types = (pd.DataFrame, pd.Series, np.ndarray)
-            if not all(isinstance(obj, valid_types) for obj in (X, y)):
-                raise TrainingError("Неподдерживаемый тип данных для X или y")
-            # Приведение X к DataFrame
-            X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+            if not isinstance(X, valid_types) and not isinstance(X, SharedDataFrame):
+                raise TrainingError(f"Неподдерживаемый тип данных для X: {type(X)}")
             
-            # Приведение y к Series (здесь могут возникнуть ошибки размерности 2D/3D)
-            if isinstance(y, pd.DataFrame):
-                # Если передан DataFrame с 1 колонкой, берем её как Series
-                y_s = y.iloc[:, 0]
+            # 2. Zero-Copy Logic: Оставляем массивы как есть, если это возможно
+            # Если это SharedDataFrame, извлекаем его внутренний массив
+            if isinstance(X, SharedDataFrame):
+                X_obj = X.shared_array
             else:
-                y_s = pd.Series(y) if not isinstance(y, pd.Series) else y
-            # 2) Проверка на пустоту 
-            # (выбрасывает ValueError для соответствия тесту и утилитам)
-            if X_df.empty or y_s.empty:
-                raise ValueError("Данные пусты")
-            # 3) Проверка соответствия размеров
-            n_samples = len(X_df)
-            if n_samples != len(y_s):
-                raise TrainingError("Число строк X и y различается")
+                X_obj = X
+            # Приведение y к Series или 1D массиву
+            if isinstance(y, pd.DataFrame):
+                y_obj = y.iloc[:, 0]
+            elif isinstance(y, (pd.Series, np.ndarray)):
+                y_obj = y
+            else:
+                y_obj = np.asarray(y)
+                if y_obj.ndim > 1: # Это вызовет ValueError для 3D данных
+                    raise ValueError("y must be 1D")
+            # 3. Проверка на пустоту (через форму, чтобы не триггерить загрузку данных)
+            if hasattr(X_obj, "shape"):
+                if X_obj.shape[0] == 0:
+                    raise ValueError("Данные пусты")
+                n_samples = X_obj.shape[0]
+            else:
+                n_samples = len(X_obj)
             if n_samples < 2:
-                raise TrainingError("Недостаточно записей для обучения"
-                                    " (нужно минимум 2)")
-            return X_df, y_s
-        except ValueError as e:
-            # Если это наша ошибка про пустоту — пробрасываем как есть (для теста)
-            if f"{e}" == "Данные пусты":
+                raise TrainingError("Недостаточно записей для обучения (нужно минимум 2)")
+            if n_samples != len(y_obj):
+                raise TrainingError("Число строк X и y различается")
+            return X_obj, y_obj
+        except (ValueError, TypeError, IndexError) as e:
+            if str(e) == "Данные пусты":
                 raise
-            # Если это техническая ошибка pandas 
-            # (например, "Data must be 1-dimensional")
-            # оборачиваем её в TrainingError для тестов на покрытие (exception line)
-            raise TrainingError(f"Ошибка при преобразовании данных: {e}")
-        except (TypeError, IndexError) as e:
-            # Любые другие ошибки типизации или индексов также считаем ошибками обучения
             raise TrainingError(f"Ошибка при преобразовании данных: {e}")
 
     def _fit_internal(
@@ -305,14 +346,14 @@ class ModelTrainer:
         """
         with self.lock:
             # Этап 1: Валидация и подготовка данных
-            X_df, y_s = self._prepare_data(X, y)
+            X_prepared, y_s = self._prepare_data(X, y)
 
             # Этап 2: Определение ключа алгоритма 
             # (перенесено выше для использования в препроцессоре)
             algo_key = _ALIASES.get(self.algorithm, self.algorithm)
 
             # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
-            preprocessor = self._build_preprocessor(X_df, algo_key)
+            preprocessor = self._build_preprocessor(self.feature_names)
 
             # Этап 4: Создаём модель через фабрику
             try:
@@ -326,7 +367,7 @@ class ModelTrainer:
 
             try:
                 X_train, X_val, y_train, y_val = next(
-                    iter_splits(X_df, 
+                    iter_splits(X_prepared, 
                                 y_s, 
                                 method='train_test_split', 
                                 random_state=self.random_state)
@@ -382,16 +423,15 @@ class ModelTrainer:
                     "Сначала необходимо выполнить fit()."
                 )
             try:
-                # 2) Приведение входных данных к формату pandas 
-                # (совместимость с трансформерами)
-                X_df = (
-                    pd.DataFrame(X) if not isinstance(X, (pd.DataFrame, pd.Series)) 
-                    else X)
+                # Избегаем конвертации, если X уже массив или DataFrame
+                if isinstance(X, (pd.DataFrame, pd.Series, np.ndarray)):
+                    X_input = X
+                elif isinstance(X, SharedDataFrame):
+                    X_input = X.shared_array
+                else:
+                    X_input = np.asarray(X)
                 
-                # 3) Выполнение предсказания через пайплайн
-                # Все кастомные шаги (IsotonicDataTransformer, ColumnTransformer) 
-                # выполнятся автоматически внутри вызова .predict()
-                preds = self.pipeline.predict(X_df)
+                preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
                 
             except Exception as e:

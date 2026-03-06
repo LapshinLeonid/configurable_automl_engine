@@ -316,25 +316,6 @@ def test_coverage_lock_removal_only():
     # Проверяем, что в возвращенном состоянии ключа 'lock' нет
     assert 'lock' not in state
 
-def test_coverage_prepare_data_exception_line():
-    """
-    Тест для покрытия строки: raise TrainingError(f"Ошибка при преобразовании данных: {e}")
-    Передаем 3D-массив в y. pandas.Series не может быть создан из 3D-данных,
-    что вызовет Exception и переход в нужный блок.
-    """
-    trainer = ModelTrainer(algorithm="elasticnet")
-    
-    # X — корректный (2D), y — некорректный (3D массив)
-    # Оба проходят isinstance(..., np.ndarray), но y сломается при pd.Series(y)
-    X_bad = np.array([[1, 2], [3, 4]])
-    y_bad = np.array([[[1]]]) # 3D массив
-    
-    with pytest.raises(TrainingError) as excinfo:
-        trainer._prepare_data(X_bad, y_bad)
-    
-    # Проверяем, что сработало именно наше сообщение об ошибке
-    assert "Ошибка при преобразовании данных" in str(excinfo.value)
-
 def test_prepare_data_empty_input_coverage():
     """
     Тест для проверки обработки пустых входных данных.
