@@ -45,21 +45,20 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
     Трансформер для подготовки данных под IsotonicRegression.
     Выбирает первый столбец и обрабатывает пропуски (NaN).
     """ 
-    def fit(
-            self,
-            X:Any,
-            y:Any = None
-            )-> IsotonicDataTransformer:
+    def __init__(self, feature_index: int = 0):
+        self.feature_index = feature_index
+    def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
         return self
-
-    def transform(self,
-                  X: Any
-                  )-> np.ndarray:
+    def transform(self, X: Any) -> np.ndarray:
         X_df = pd.DataFrame(X)
         n_samples = len(X_df)
-        
-        # Выбираем первую колонку
-        X_col = X_df.iloc[:, 0]
+        if self.feature_index >= X_df.shape[1]:
+            raise TrainingError(
+                f"feature_index {self.feature_index} out of bounds. "
+                f"Dataset has only {X_df.shape[1]} columns."
+                )
+        # Выбираем целевую колонку по индексу
+        X_col = X_df.iloc[:, self.feature_index]
         
         # Логика обработки NaN (перенесена из ModelTrainer.fit)
         if X_col.isna().all():
@@ -171,7 +170,8 @@ class ModelTrainer:
         """
         # 1. Специальный случай: Изотоническая регрессия
         if algo_key == "isotonic_regression":
-            return IsotonicDataTransformer()
+            f_idx = self.model_params.get("feature_index", 0)
+            return IsotonicDataTransformer(feature_index=f_idx)
         # 2. Определение типов колонок для стандартных алгоритмов
         num_cols = X_df.select_dtypes(include=[np.number]).columns.tolist()
         cat_cols = X_df.select_dtypes(exclude=["number"]).columns.tolist()
@@ -309,7 +309,9 @@ class ModelTrainer:
 
         # Этап 4: Создаём модель через фабрику
         try:
-            base_model = create_model(self.algorithm, **self.model_params)
+            model_kwargs = self.model_params.copy()
+            model_kwargs.pop("feature_index", None)
+            base_model = create_model(self.algorithm, **model_kwargs)
         except (ValueError, ImportError) as e:
             raise TrainingError(f"Ошибка при создании модели: {e}")
         
