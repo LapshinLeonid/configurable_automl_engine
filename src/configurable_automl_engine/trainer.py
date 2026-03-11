@@ -62,7 +62,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         n_cols = len(X[0]) if n_rows > 0 and isinstance(X[0], (list, np.ndarray)) else 1
         return n_rows, n_cols
     def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
-        # ПРАВКА: Расчет медианы должен быть ЗДЕСЬ, а не в ModelTrainer
+        
         _, n_cols = self._get_dimensions(X)
         idx = self.feature_index if self.feature_index < n_cols else 0
         
@@ -149,6 +149,9 @@ class ModelTrainer:
         data_oversampling_multiplier: float = 1.0,
         data_oversampling_algorithm: str = "random",
         serialization_format: SerializationFormat = SerializationFormat.pickle,
+        categorical_features: list[str] | None = None,  
+        numerical_features: list[str] | None = None,  
+        id_column: str | None = None
     ):
         self.logger = logging.getLogger(__name__)
 
@@ -176,8 +179,9 @@ class ModelTrainer:
         self.metric = metric.lower()
         self.random_state = random_state
         self.serialization_format = serialization_format
-        self.categorical_features = []
-        self.numerical_features = []
+        self.categorical_features = categorical_features
+        self.numerical_features = numerical_features
+        self.id_column = id_column
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -194,6 +198,49 @@ class ModelTrainer:
         self.val_score: float | None = None
         self._last_train_y: pd.Series | None = None 
         self._last_val_y: pd.Series | None = None 
+
+        for attr_name, features in [("categorical_features", categorical_features), 
+                                ("numerical_features", numerical_features)]:
+            if features is not None:
+                if not isinstance(features, list) or not all(isinstance(f, str) for f in features):
+                    raise TrainingError(f"Параметр {attr_name} должен быть списком строк (имен колонок)")
+
+    def _validate_features(self, X: pd.DataFrame) -> None:
+        """Проверяет наличие всех указанных колонок в датафрейме."""
+        specified_features = (self.categorical_features or []) + (self.numerical_features or [])
+        missing = [col for col in specified_features if col not in X.columns]
+        if missing:
+            raise TrainingError(f"Указанные колонки не найдены в данных: {missing}")
+    def _detect_feature_types(self, X: pd.DataFrame, target_column: str) -> None:
+        """
+        Автоматически разделяет признаки на типы, исключая целевую переменную и ID.
+        Вызывается, если categorical_features или numerical_features не заданы.
+        """
+        with self.lock:
+            # Если оба списка уже заполнены пользователем — просто валидируем
+            if self.categorical_features is not None and self.numerical_features is not None:
+                self._validate_features(X)
+                return
+            # Определяем список колонок для анализа (исключаем таргет и ID)
+            exclude = {target_column}
+            if self.id_column:
+                exclude.add(self.id_column)
+            
+            df_to_analyze = X.drop(columns=list(exclude & set(X.columns)))
+            # Авто-определение категориальных (object, category, bool)
+            if self.categorical_features is None:
+                self.categorical_features = df_to_analyze.select_dtypes(
+                    include=['object', 'category', 'bool']
+                ).columns.tolist()
+            # Авто-определение числовых (все оставшиеся типы 'number')
+            if self.numerical_features is None:
+                self.numerical_features = df_to_analyze.select_dtypes(
+                    include=['number']
+                ).columns.tolist()
+            self.logger.info(
+                f"Auto-detected features: {len(self.categorical_features)} cat, "
+                f"{len(self.numerical_features)} num."
+            )
 
     def _extract_metadata(self, X):
         """Извлекает имена колонок без копирования данных."""
@@ -223,15 +270,27 @@ class ModelTrainer:
         self.logger = logging.getLogger(__name__)
     
     def _build_preprocessor(self, feature_names):
-        current_cat = self.categorical_features or [col for col in feature_names if 'cat' in str(col).lower()]
+        # 1. Получаем индексы колонок на основе подготовленных списков
+        # Используем feature_names для сопоставления имен с порядковыми номерами
+        cat_indices = [
+            feature_names.index(col) 
+            for col in self.categorical_features 
+            if col in feature_names
+        ]
+        num_indices = [
+            feature_names.index(col) 
+            for col in self.numerical_features 
+            if col in feature_names
+        ]
+
+        if not cat_indices and not num_indices:
+            self.logger.warning("No features matched for preprocessing. Defaulting to passthrough.")
+            return ColumnTransformer(
+                [('bypass', 'passthrough', slice(None))],
+                remainder='drop'
+            )
         
-        cat_indices = [feature_names.index(col) for col in current_cat if col in feature_names]
-        
-        if not self.numerical_features:
-            num_indices = [i for i in range(len(feature_names)) if i not in cat_indices]
-        else:
-            num_indices = [feature_names.index(col) for col in self.numerical_features if col in feature_names]
-        # 2. Пайплайны
+        # 2. Пайплайны трансформации
         num_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy='mean')),
             ('scaler', StandardScaler())
@@ -241,16 +300,15 @@ class ModelTrainer:
             ('imputer', SimpleImputer(strategy='most_frequent')),
             ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
         ])
-        # 3. Сборка
+        # 3. Сборка ColumnTransformer
         transformers = []
         if cat_indices:
             transformers.append(('cat', cat_transformer, cat_indices))
         if num_indices:
             transformers.append(('num', num_transformer, num_indices))
-            
         return ColumnTransformer(
             transformers=transformers if transformers else [('pass', 'passthrough', slice(None))],
-            remainder='passthrough'
+            remainder='drop' # Изменили с passthrough на drop для безопасности (ID и прочее)
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
@@ -260,6 +318,8 @@ class ModelTrainer:
         """
         try:
             self.feature_names = self._extract_metadata(X) 
+
+            self._detected_dtypes = X.dtypes if isinstance(X, pd.DataFrame) else None
             # 1. Проверка типов
             valid_types = (pd.DataFrame, pd.Series, np.ndarray)
             if not isinstance(X, valid_types) and not isinstance(X, SharedDataFrame):
@@ -348,9 +408,17 @@ class ModelTrainer:
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
+            if isinstance(X_prepared, pd.DataFrame):
+                self._detect_feature_types(X_prepared, target_column="") 
+            else:
+                # Если пришел numpy массив без имен, инициализируем списки индексами
+                if self.categorical_features is None: self.categorical_features = []
+                if self.numerical_features is None:
+                    self.numerical_features = [f"col_{i}" for i in range(X_prepared.shape[1])]
+
             # Этап 2: Определение ключа алгоритма 
             # (перенесено выше для использования в препроцессоре)
-            algo_key = _ALIASES.get(self.algorithm, self.algorithm)
+            _ALIASES.get(self.algorithm, self.algorithm)
 
             # Этап 3: Создаём препроцессор через делегирование (Task 1.2)
             preprocessor = self._build_preprocessor(self.feature_names)
@@ -516,7 +584,7 @@ def train_model(
         test_size = float(cfg.get("test_size", 0.3))
         rs = cast(Optional[int], cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
-        log_path = cast(Optional[Union[str, Path]], cfg.get("log_path", None))
+        cast(Optional[Union[str, Path]], cfg.get("log_path", None))
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
