@@ -131,13 +131,6 @@ def test_invalid_data_type(base_params):
 
 
 # --- Тесты для IsotonicDataTransformer ---
-def test_isotonic_transformer_all_nan():
-    """ Обработка случая, когда все значения NaN."""
-    transformer = IsotonicDataTransformer()
-    X = pd.DataFrame({'a': [np.nan, np.nan, np.nan]})
-    # Должен вернуть range(n_samples)
-    result = transformer.transform(X)
-    assert np.array_equal(result, np.array([0, 1, 2]).reshape(-1, 1))
 def test_isotonic_transformer_median_nan():
     """Cлучай, когда медиана не вычисляется (напр. пустой ввод после фильтрации)."""
     # В текущей реализации до медианы доходит, если не все NaN. 

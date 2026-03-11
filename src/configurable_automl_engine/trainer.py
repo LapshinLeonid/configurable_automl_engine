@@ -104,8 +104,10 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
             
             if s_col.isna().all():
-                # Если все NaN, возвращаем индексы строк (согласно старой логике)
-                return np.arange(n_rows).reshape(-1, 1).astype(float)
+                raise TrainingError(
+                    f"Колонка с индексом {self.feature_index} содержит только NaN. "
+                    "Обучение IsotonicRegression невозможно."
+                )
             # Вычисляем медиану и заполняем пропуски
             fill_value = getattr(self, "median_", 0.0)
             X_imputed = s_col.fillna(fill_value)
@@ -320,12 +322,19 @@ class ModelTrainer:
             if isinstance(y, str):
                 if not isinstance(X, pd.DataFrame):
                     raise TrainingError(f"Target column '{y}' specified, but X is not a DataFrame")
+                self.feature_names = [col for col in X.columns if col != y]
+                X_obj = X[self.feature_names]
                 y_obj = X[y]
-                X_obj = X.drop(columns=[y])
-                self.feature_names = X_obj.columns.tolist()
             else:
-                X_obj = X.shared_array if isinstance(X, SharedDataFrame) else X
-                y_obj = y.iloc[:, 0] if isinstance(y, pd.DataFrame) else (y if isinstance(y, (pd.Series, np.ndarray)) else np.asarray(y))
+                X_obj = X.get_view() if isinstance(X, SharedDataFrame) else X
+                if isinstance(y, (pd.Series, np.ndarray)):
+                    y_obj = y
+                elif isinstance(y, pd.DataFrame):
+                    y_obj = y.iloc[:, 0]
+                elif hasattr(y, 'get_view'): # Поддержка SharedDataFrame для y
+                    y_obj = y.get_view().iloc[:, 0]
+                else:
+                    y_obj = np.asarray(y)
             # Консолидированная валидация (Task 1.1)
             n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
             if n_samples == 0: raise TrainingError("Данные пусты")

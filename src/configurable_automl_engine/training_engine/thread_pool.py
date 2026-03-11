@@ -198,6 +198,17 @@ class SharedDataFrame:
                 self.shm.unlink()
             except (FileNotFoundError, OSError):
                 pass # Уже удалено
+    
+    def get_view(self, columns=None):
+        """
+        Возвращает представление (view) данных. 
+        Если переданы columns, возвращает view только для этих столбцов.
+        """
+        if columns is None:
+            return self._df
+        
+        # Важно: используем .loc для создания slice-view, а не копии
+        return self._df.loc[:, columns]
 
 class DiskPersistenceManager:
     """Утилита для временного сохранения DataFrame на диск в формате Parquet.
