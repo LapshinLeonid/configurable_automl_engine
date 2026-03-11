@@ -62,7 +62,7 @@ BAD_PARAMS = {
 @pytest.mark.parametrize("algo,bad_param", BAD_PARAMS.items())
 def test_invalid_hyperparams(algo, bad_param):
     with pytest.raises(ValueError):
-        ModelTrainer(algorithm=algo, model_params=bad_param).fit(X_full, y_full)
+        ModelTrainer(algorithm=algo, hyperparams=bad_param).fit(X_full, y_full)
 
 
 # ---------------------------------------------------------------------

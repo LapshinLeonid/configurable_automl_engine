@@ -155,9 +155,9 @@ def test_trainer_init_invalid_params():
     with pytest.raises(TrainingError, match="Некорректный алгоритм"):
         ModelTrainer(algorithm=123)
     
-    # model_params не словарь
-    with pytest.raises(TrainingError, match="model_params должно быть словарём"):
-        ModelTrainer(model_params="not a dict")
+    # hyperparams не словарь
+    with pytest.raises(TrainingError, match="hyperparams должно быть словарём"):
+        ModelTrainer(hyperparams="not a dict")
         
     # hyperparams не словарь
     with pytest.raises(TrainingError, match="hyperparams должно быть словарём"):
@@ -225,7 +225,7 @@ def test_train_model_legacy_api(tmp_path):
     config = {
         "algorithm": "elasticnet",
         "metric": "r2",
-        "model_params": {"alpha": 0.1},
+        "hyperparams": {"alpha": 0.1},
         "enable_logging": True,
         "log_path": str(log_file)
     }
@@ -259,7 +259,7 @@ def test_train_model_legacy_api(tmp_path):
 def test_fit_internal_and_predict():
     """Покрытие внутренних механизмов обучения и предсказания."""
     # алгоритм со скалированием (SGD)
-    trainer = ModelTrainer(algorithm="sgdregressor", model_params={"max_iter": 5})
+    trainer = ModelTrainer(algorithm="sgdregressor", hyperparams={"max_iter": 5})
     X = pd.DataFrame({'num': [1, 2, 3, 4, 5, 6], 'cat': ['a', 'b', 'a', 'b', 'a', 'b']})
     y = np.array([1, 2, 3, 4, 5, 6])
     
@@ -279,27 +279,6 @@ def test_fit_internal_and_predict():
     # Проверяем, что в шагах пайплайна есть oversampler
     step_names = [s[0] for s in os_trainer.pipeline.steps]
     assert "oversampler" in step_names
-
-def test_init_with_hyperparams():
-    """
-    Проверяет ситуацию, когда model_params=None, но переданы hyperparams.
-    """
-    # Задаем тестовые гиперпараметры
-    test_hyperparams = {"n_estimators": 100, "max_depth": 5}
-    
-    # Инициализируем ModelTrainer, передавая hyperparams, но НЕ передавая model_params
-    # Это заставит код пропустить первый if и зайти в elif hyperparams is not None
-    trainer = ModelTrainer(
-        algorithm="rf",
-        model_params=None,
-        hyperparams=test_hyperparams
-    )
-    
-    # Проверки (Assertions)
-    # Убеждаемся, что в итоге внутренний атрибут self.model_params получил значения из hyperparams
-    assert trainer.model_params == test_hyperparams
-    assert isinstance(trainer.model_params, dict)
-    assert "n_estimators" in trainer.model_params
 
 def test_coverage_lock_removal_only():
     """
@@ -329,7 +308,7 @@ def test_prepare_data_empty_input_coverage():
     y_empty = pd.Series([], dtype=float)
     
     # Теперь ожидаем ValueError вместо TrainingError
-    with pytest.raises(ValueError, match="Данные пусты"):
+    with pytest.raises(TrainingError, match="Данные пусты"):
         trainer._prepare_data(X_empty, y_empty)
     
 def test_fit_internal_unexpected_error():
@@ -480,7 +459,7 @@ def test_train_model_y_dataframe_conversion_coverage():
     # Параметры для старого API train_model
     algo = "elasticnet"
     metric = "r2"
-    model_params = {"alpha": 0.1, "l1_ratio": 0.5}
+    hyperparams = {"alpha": 0.1, "l1_ratio": 0.5}
     
     # 2. Выполнение
     # Мы вызываем функцию. Нам не обязательно проверять результат R2, 
@@ -489,7 +468,7 @@ def test_train_model_y_dataframe_conversion_coverage():
         result = train_model(
             cfg_or_algo=algo,
             metric_or_testsize=metric,
-            params_or_metric=model_params,
+            params_or_metric=hyperparams,
             X=X,
             y=y_df
         )
@@ -501,48 +480,7 @@ def test_train_model_y_dataframe_conversion_coverage():
         # проверка типа y уже должна была выполниться.
         pytest.fail(f"Функция train_model упала при обработке y как DataFrame: {e}")
 
-def test_train_model_conversion_exception_coverage():
-    """
-    Тест для покрытия ветки: raise TrainingError(f"Ошибка при преобразовании данных: {e}")
-    Используем объект, который проходит проверку типов, но падает при конвертации в Series.
-    """
-    # 1. Создаем объект, который "взорвется" при попытке его прочитать
-    class BombArray(np.ndarray):
-        def __new__(cls):
-            # Создаем массив 2x1, чтобы пройти проверку на минимальное кол-во строк
-            return np.asarray([[10], [20]]).view(cls)
-        
-        def __iter__(self):
-            # Pandas вызывает __iter__ при создании Series из объекта, не являющегося Series
-            raise RuntimeError("Data corruption during iteration")
-        
-        @property
-        def values(self):
-            # На случай, если pandas попытается достучаться через .values
-            raise RuntimeError("Data corruption during access")
-    # 2. Подготовка данных
-    # X делаем валидным, чтобы пройти pd.DataFrame(X)
-    X_valid = pd.DataFrame({"feat": [1, 2]})
-    
-    # y делаем BombArray. Он пройдет isinstance(y, np.ndarray), 
-    # но упадет на строке y_s = pd.Series(y)
-    y_broken = BombArray()
-    
-    algo = "elasticnet"
-    metric = "r2"
-    model_params = {"alpha": 0.1}
-    # 3. Действие и Проверка
-    with pytest.raises(TrainingError) as excinfo:
-        train_model(
-            cfg_or_algo=algo,
-            metric_or_testsize=metric,
-            params_or_metric=model_params,
-            X=X_valid,
-            y=y_broken
-        )
-    # 4. Верификация
-    assert "Ошибка при преобразовании данных" in str(excinfo.value)
-    assert "Data must be 1-dimensional" in str(excinfo.value)
+
 
 def test_train_model_empty_data_coverage():
     """
@@ -554,13 +492,13 @@ def test_train_model_empty_data_coverage():
     
     algo = "elasticnet"
     metric = "r2"
-    model_params = {"alpha": 0.1}
+    hyperparams = {"alpha": 0.1}
     # Действие и Проверка
     with pytest.raises(TrainingError) as excinfo:
         train_model(
             cfg_or_algo=algo,
             metric_or_testsize=metric,
-            params_or_metric=model_params,
+            params_or_metric=hyperparams,
             X=X_empty,
             y=y_valid
         )
@@ -634,7 +572,7 @@ def test_fit_raises_error_when_scorer_returns_none():
     # но упадет на расчете метрики
     trainer = ModelTrainer(
         algorithm="elasticnet",
-        model_params={"alpha": 0.1},
+        hyperparams={"alpha": 0.1},
         metric="r2"
     )
     

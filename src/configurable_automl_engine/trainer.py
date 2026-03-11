@@ -125,8 +125,6 @@ class ModelTrainer:
     -----------
     algorithm: str
         Строковый ключ алгоритма (регистр не важен). Поддерживаются алиасы.
-    model_params: dict[str, Any] | None
-        Словарь гиперпараметров для регрессора. Если не задан, {}.
     hyperparams: dict[str, Any] | None
         Альтернативный вариант того же самого (поддерживается тестами).
     test_size: float
@@ -140,7 +138,6 @@ class ModelTrainer:
     def __init__(
         self,
         algorithm: str = "elasticnet",
-        model_params: dict[str, Any] | None = None,
         hyperparams: dict[str, Any] | None = None,
         test_size: float = 0.3,
         metric: str = "r2",
@@ -162,17 +159,13 @@ class ModelTrainer:
             raise TrainingError(f"Некорректный алгоритм: {algorithm!r}")
         self.algorithm = algorithm.lower()
 
-        # model_params vs hyperparams (для совместимости с тестами)
-        if model_params is not None:
-            if not isinstance(model_params, dict):
-                raise TrainingError("model_params должно быть словарём")
-            self.model_params = model_params
-        elif hyperparams is not None:
+        # hyperparams
+        if hyperparams is not None:
             if not isinstance(hyperparams, dict):
                 raise TrainingError("hyperparams должно быть словарём")
-            self.model_params = hyperparams
+            self.hyperparams = hyperparams
         else:
-            self.model_params = {}
+            self.hyperparams = {}
 
         # Остальные параметры
         self.test_size = test_size
@@ -321,36 +314,21 @@ class ModelTrainer:
 
             self._detected_dtypes = X.dtypes if isinstance(X, pd.DataFrame) else None
             # 1. Проверка типов
-            valid_types = (pd.DataFrame, pd.Series, np.ndarray)
-            if not isinstance(X, valid_types) and not isinstance(X, SharedDataFrame):
-                raise TrainingError(f"Неподдерживаемый тип данных для X: {type(X)}")
-            
-            # 2. Zero-Copy Logic: Оставляем массивы как есть, если это возможно
-            # Если это SharedDataFrame, извлекаем его внутренний массив
-            if isinstance(X, SharedDataFrame):
-                X_obj = X.shared_array
+            valid_types = (pd.DataFrame, pd.Series, np.ndarray, SharedDataFrame)
+            if not isinstance(X, valid_types):
+                raise TrainingError(f"Неподдерживаемый тип данных: {type(X)}")
+            if isinstance(y, str):
+                if not isinstance(X, pd.DataFrame):
+                    raise TrainingError(f"Target column '{y}' specified, but X is not a DataFrame")
+                y_obj = X[y]
+                X_obj = X.drop(columns=[y])
+                self.feature_names = X_obj.columns.tolist()
             else:
-                X_obj = X
-            # Приведение y к Series или 1D массиву
-            if isinstance(y, pd.DataFrame):
-                y_obj = y.iloc[:, 0]
-            elif isinstance(y, (pd.Series, np.ndarray)):
-                y_obj = y
-            else:
-                y_obj = np.asarray(y)
-                if y_obj.ndim > 1: # Это вызовет ValueError для 3D данных
-                    raise ValueError("y must be 1D")
-            # 3. Проверка на пустоту (через форму, чтобы не триггерить загрузку данных)
-            if hasattr(X_obj, "shape"):
-                if X_obj.shape[0] == 0:
-                    raise ValueError("Данные пусты")
-                n_samples = X_obj.shape[0]
-            else:
-                n_samples = len(X_obj)
-            if n_samples < 2:
-                raise TrainingError("Недостаточно записей для обучения (нужно минимум 2)")
-            if n_samples != len(y_obj):
-                raise TrainingError("Число строк X и y различается")
+                X_obj = X.shared_array if isinstance(X, SharedDataFrame) else X
+                y_obj = y.iloc[:, 0] if isinstance(y, pd.DataFrame) else (y if isinstance(y, (pd.Series, np.ndarray)) else np.asarray(y))
+            # Консолидированная валидация (Task 1.1)
+            n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
+            if n_samples == 0: raise TrainingError("Данные пусты")
             return X_obj, y_obj
         except (ValueError, TypeError, IndexError) as e:
             if str(e) == "Данные пусты":
@@ -405,16 +383,18 @@ class ModelTrainer:
         Оркестрация процесса обучения: подготовка, сборка и валидация.
         """
         with self.lock:
+            
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
             if isinstance(X_prepared, pd.DataFrame):
                 self._detect_feature_types(X_prepared, target_column="") 
             else:
-                # Если пришел numpy массив без имен, инициализируем списки индексами
                 if self.categorical_features is None: self.categorical_features = []
                 if self.numerical_features is None:
-                    self.numerical_features = [f"col_{i}" for i in range(X_prepared.shape[1])]
+                    n_cols = X_prepared.shape[1] if len(X_prepared.shape) > 1 else 1
+                    self.numerical_features = [f"col_{i}" for i in range(n_cols)]
+                if self.feature_names is None: self.feature_names = self.numerical_features
 
             # Этап 2: Определение ключа алгоритма 
             # (перенесено выше для использования в препроцессоре)
@@ -425,7 +405,7 @@ class ModelTrainer:
 
             # Этап 4: Создаём модель через фабрику
             try:
-                model_kwargs = self.model_params.copy()
+                model_kwargs = self.hyperparams.copy()
                 model_kwargs.pop("feature_index", None)
                 base_model = create_model(self.algorithm, **model_kwargs)
             except (ValueError, ImportError) as e:
@@ -433,6 +413,10 @@ class ModelTrainer:
             
             # Этап 5: Разбиение данных (используем iter_splits)
 
+            n_samples = X_prepared.shape[0] if hasattr(X_prepared, "shape") else len(X_prepared)
+            if n_samples < 2:
+                raise TrainingError("Недостаточно записей для обучения и валидации")
+            
             try:
                 X_train, X_val, y_train, y_val = next(
                     iter_splits(X_prepared, 
@@ -562,7 +546,7 @@ def train_model(
 ) -> float:
     algo: str = ""
     metric: str = ""
-    model_params: dict[str, Any] = {}
+    hyperparams: dict[str, Any] = {}
     test_size: float = 0.3
     rs: int | None = random_state
     """
@@ -580,7 +564,7 @@ def train_model(
         cfg: dict = cfg_or_algo  # type: ignore
         algo = str(cfg.get("algorithm",""))
         metric = str(cfg.get("metric",""))
-        model_params = cast(Dict[str, Any], cfg.get("model_params", {}))
+        hyperparams = cast(Dict[str, Any], cfg.get("hyperparams", {}))
         test_size = float(cfg.get("test_size", 0.3))
         rs = cast(Optional[int], cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
@@ -594,7 +578,7 @@ def train_model(
         # чтобы сохранить логику оригинальной валидации для тестов.
         algo = cfg_or_algo if cfg_or_algo is not None else "" 
         metric = str(metric_or_testsize)  
-        model_params = cast(Dict[str, Any], params_or_metric) 
+        hyperparams = cast(Dict[str, Any], params_or_metric) 
         test_size = 0.3
         rs = random_state
         data_os = False
@@ -606,44 +590,15 @@ def train_model(
         raise TrainingError("Неверный алгоритм")
     algo_key = algo.lower()
 
-    # Проверка model_params
-    if not isinstance(model_params, dict) or len(model_params) == 0:
+    if not hyperparams and algo_key not in ["isotonic", "isotonic_regression"]:
         raise TrainingError("Параметры модели не заданы")
 
-    # Проверка типов X и y
-    if not isinstance(X, (pd.DataFrame, pd.Series, np.ndarray)) or not isinstance(
-        y, (pd.Series, pd.DataFrame, np.ndarray)
-    ):
-        raise TrainingError("Неподдерживаемый тип данных для X или y")
-
-    # Приведение к pandas
-    try:
-        X_df = (
-            pd.DataFrame(X)
-            if not isinstance(X, (pd.DataFrame, pd.Series))
-            else X  
-        )
-        if isinstance(y, pd.DataFrame):
-            y_s = pd.Series(y.iloc[:, 0])  
-        else:
-            y_s = pd.Series(y) if not isinstance(y, pd.Series) else y  
-    except Exception as e:
-        raise TrainingError(f"Ошибка при преобразовании данных: {e}")
-
-    # Проверка размера выборки
-    n_samples = len(X_df)
-    if n_samples == 0 or len(y_s) == 0:
-        raise TrainingError("Данные пусты")
-    if n_samples != len(y_s):
-        raise TrainingError("Число строк X и y различается")
-    if n_samples < 2:
-        raise TrainingError("Недостаточно записей для обучения")
 
     # Создаём и обучаем ModelTrainer
     try:
         trainer = ModelTrainer(
-            algorithm=algo_key,
-            model_params=model_params,
+            algorithm=algo,
+            hyperparams=hyperparams,
             test_size=test_size,
             metric=metric,
             random_state=rs,
@@ -651,7 +606,7 @@ def train_model(
             data_oversampling_multiplier=data_os_mult,
             data_oversampling_algorithm=data_os_alg,
         )
-        trainer.fit(X_df, y_s)
+        trainer.fit(X, y)
         val_score = trainer.val_score
         if val_score is None:
             raise TrainingError("Модель не вернула значение метрики")

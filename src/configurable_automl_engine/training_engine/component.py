@@ -146,7 +146,7 @@ def _fit_and_save(
 
     trainer = getattr(trainer_module, "ModelTrainer")(
         algorithm=algo_name, 
-        model_params=best_params,
+        hyperparams=best_params,
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
         data_oversampling=cfg.oversampling.enable,
         data_oversampling_multiplier=cfg.oversampling.multiplier,
