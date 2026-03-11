@@ -67,11 +67,29 @@ def test_get_metric():
     with pytest.raises(KeyError, match="Metric 'unknown' not implemented"):
         get_metric("unknown")
 
-def test_is_greater_better():
-    assert is_greater_better("r2") is True
-    assert is_greater_better("neg_root_mean_squared_error") is True
-    assert is_greater_better("rmse") is False
-    assert is_greater_better("nrmse") is False
+@pytest.mark.parametrize("metric_name, expected", [
+    # 1. Тесты для явного списка _GREATER_IS_BETTER
+    ("r2", True),
+    ("R2", True),
+    ("accuracy", True),
+    
+    # 2. Тесты для вхождения ключевых слов ошибок
+    ("rmse", False),
+    ("mean_squared_error", False),
+    ("my_custom_mae_metric", False),
+    ("NRMSE_score", False),
+    
+    # 3. КРИТИЧЕСКИЙ ТЕСТ: Покрытие строки if lname.startswith("neg_")
+    # Эти метрики не входят в список _GREATER_IS_BETTER и не содержат "mse/mae/error"
+    ("neg_log_loss", False),
+    ("neg_mean_absolute_percentage_error", False),
+    ("NEG_WHATEVER", False),
+    
+    # 4. Тест на значение по умолчанию (если не подошло ни одно условие)
+    ("unknown_custom_metric", True),
+])
+def test_is_greater_better(metric_name, expected):
+    assert is_greater_better(metric_name) == expected
 
 def test_get_scorer_object():
     # Проверка кастомных объектов (включая лямбды в _SCORER_OBJECTS)
