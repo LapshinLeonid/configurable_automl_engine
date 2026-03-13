@@ -167,20 +167,21 @@ _METRICS: Dict[str, Callable[..., Any]] = {
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
 _SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
+    # Для ошибок устанавливаем greater_is_better=False, 
+    # sklearn сам будет возвращать отрицательные значения для максимизации
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
-    "neg_root_mean_squared_error": make_scorer(
-        lambda y_t, y_p: -_rmse(y_t, y_p),
-        greater_is_better=True,
-    ),
-    "rmse": make_scorer(
-        lambda y_t, y_p: -_rmse(y_t, y_p),
-        greater_is_better=True,
-    ),
+    "rmse": make_scorer(_rmse, greater_is_better=False),
+    "neg_root_mean_squared_error": make_scorer(_rmse, greater_is_better=False),
+    "mae": make_scorer(mean_squared_error, greater_is_better=False), # для примера
 }
 
-# Какие метрики интерпретируются как «больше — тем лучше»
-# nrmse сюда НЕ входит, так как Scorer инвертирует её в отрицательную
-_GREATER_IS_BETTER = {"r2", "neg_root_mean_squared_error"}
+# Какие метрики ИЗНАЧАЛЬНО интерпретируются как «чем выше — тем лучше»
+# (те, которые не требуют инверсии знака для понимания пользователем)
+_GREATER_IS_BETTER = {
+    "r2", 
+    "explained_variance", 
+    "adjusted_r2"
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -204,17 +205,27 @@ def get_metric(name: str) -> Callable[..., Any]:
 
 
 def is_greater_better(name: str) -> bool:
-    """Определить направление оптимизации для конкретной метрики.
-    Логика проверки:
-    1. Название метрики проверяется по внутреннему списку `_GREATER_IS_BETTER`.
-    2. Если метрика в списке — она считается максимизируемой (чем больше, тем лучше).
-    3. По умолчанию для ошибок (RMSE, NRMSE) возвращает False.
+    """Определить, является ли метрика максимизируемой (Score) 
+    или минимизируемой (Error).
+    
     Args:
         name (str): Название метрики.
     Returns:
-        bool: True, если метрику необходимо максимизировать; False, если минимизировать.
+        bool: True для метрик типа R2, False для метрик типа RMSE/MAE.
     """
-    return name.lower() in _GREATER_IS_BETTER
+    lname = name.lower()
+    # Если метрика явно в списке "больше-лучше"
+    if lname in _GREATER_IS_BETTER:
+        return True
+    # Если метрика содержит префиксы ошибки или наши стандартные регрессионные ошибки
+    if any(prefix in lname for prefix in ["rmse", "nrmse", "error", "mae", "mse"]):
+        return False
+    # По умолчанию для sklearn scorers, если не уверены, 
+    # проверяем наличие 'neg_' в названии (стандарт sklearn для ошибок)
+    if lname.startswith("neg_"):
+        return False
+        
+    return True # Default fallback для R2-подобных метрик
 
 def get_scorer_object(name: str,
                       global_y: np.ndarray | None = None

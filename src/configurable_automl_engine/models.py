@@ -91,7 +91,7 @@ _ALIASES: dict[str, str] = {
 
 
 def create_model(algorithm: Algorithm = "elasticnet", 
-                 **model_params: Any
+                 **hyperparams: Any
                  ) -> RegressorMixin:
     """
     Возвращает экземпляр выбранного регрессора.
@@ -117,7 +117,7 @@ def create_model(algorithm: Algorithm = "elasticnet",
         )
 
     # Для GaussianProcessRegressor (gpr) по умолчанию ставим ядро RBF(1.0)
-    if algo_key == "gaussian_process_regression" and "kernel" not in model_params:
-        model_params["kernel"] = RBF(1.0)
+    if algo_key == "gaussian_process_regression" and "kernel" not in hyperparams:
+        hyperparams["kernel"] = RBF(1.0)
 
-    return estimator_cls(**model_params)
+    return estimator_cls(**hyperparams)

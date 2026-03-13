@@ -103,15 +103,48 @@ class SharedDataFrame:
             self.columns = columns
 
     @staticmethod
+    def is_shared_array(X: Any) -> bool:
+        """
+        Проверяет, является ли объект массивом numpy, использующим SharedMemory.
+        Это критично для исключения повторного копирования в ModelTrainer.
+        """
+        if not isinstance(X, np.ndarray):
+            return False
+        # Проверяем, указывает ли буфер массива на сегмент разделяемой памяти
+        # (в Python 3.8+ SharedMemory.buf возвращает memoryview)
+        return hasattr(X, 'base') and isinstance(X.base, memoryview)
+
+    @staticmethod
+    def get_data_info(X: Any) -> tuple[int, list[str] | list[int]]:
+        """
+        Извлекает количество признаков и их имена (или индексы) без копирования.
+        """
+        if isinstance(X, pd.DataFrame):
+            return X.shape[1], X.columns.tolist()
+        elif isinstance(X, SharedDataFrame):
+            return X.shape[1], X.columns
+        elif isinstance(X, np.ndarray):
+            return (X.shape[1] 
+                    if X.ndim > 1 
+                    else 1, 
+                    list(range(X.shape[1] if X.ndim > 1 else 1)))
+        return 0, []
+
+    @staticmethod
     def is_compatible(df: pd.DataFrame) -> bool:
         """Проверяет, можно ли разместить DF в SHM 
         (только простые типы и RangeIndex)."""
-        # 1. Проверка типов данных (белый список: int, uint, float, bool)
+        if SharedDataFrame.is_shared_array(df):
+            return True
+        if not isinstance(df, pd.DataFrame):
+            return False
+        
+        #Проверка типов данных (белый список: int, uint, float, bool)
         allowed_kinds = {'i', 'u', 'f', 'b'}
         if not all(dt.kind in allowed_kinds for dt in df.dtypes):
             return False
             
-        # 2. Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
+        #Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
         # Если индекс не стандартный (0, 1, 2...), лучше отправить через Диск (Parquet)
         if not isinstance(df.index, pd.RangeIndex):
             return False
@@ -168,6 +201,19 @@ class SharedDataFrame:
                 self.shm.unlink()
             except (FileNotFoundError, OSError):
                 pass # Уже удалено
+    
+    def get_view(self, 
+                 columns: list[str] | None = None
+                 ) -> pd.DataFrame:
+        """
+        Возвращает представление (view) данных. 
+        Если переданы columns, возвращает view только для этих столбцов.
+        """
+        if columns is None:
+            return self.to_df()
+        
+        # Важно: используем .loc для создания slice-view, а не копии
+        return self.to_df().loc[:, columns]
 
 class DiskPersistenceManager:
     """Утилита для временного сохранения DataFrame на диск в формате Parquet.

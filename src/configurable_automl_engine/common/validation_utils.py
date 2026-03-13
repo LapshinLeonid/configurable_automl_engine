@@ -2,6 +2,9 @@ from __future__ import annotations
 import pandas as pd
 from typing import Tuple
 
+pd.options.mode.copy_on_write = True
+
+
 def validate_df_not_empty(df: pd.DataFrame) -> None:
     """
     Checks if the input is a non-empty pandas DataFrame.
