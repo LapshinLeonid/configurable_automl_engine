@@ -166,7 +166,7 @@ _METRICS: Dict[str, Callable[..., Any]] = {
 # --------------------------------------------------------------------------- #
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
-_SCORER_OBJECTS: Dict[str, Any] = {
+_SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
     # Для ошибок устанавливаем greater_is_better=False, 
     # sklearn сам будет возвращать отрицательные значения для максимизации
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
@@ -205,7 +205,8 @@ def get_metric(name: str) -> Callable[..., Any]:
 
 
 def is_greater_better(name: str) -> bool:
-    """Определить, является ли метрика максимизируемой (Score) или минимизируемой (Error).
+    """Определить, является ли метрика максимизируемой (Score) 
+    или минимизируемой (Error).
     
     Args:
         name (str): Название метрики.

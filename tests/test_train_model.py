@@ -995,3 +995,119 @@ class TestModelTrainerCoverage2:
         
         assert len(preds) == 2
         assert isinstance(preds, np.ndarray)
+
+def test_fit_sets_feature_names_from_numerical_when_none():
+    """
+    Тестирует строку: if self.feature_names is None: self.feature_names = self.numerical_features
+    Условие: Входные данные - numpy array (нет имен колонок), 
+    categorical_features не заданы.
+    """
+    # Создаем данные без имен колонок
+    X = np.array([[1, 2], [3, 4], [5, 6], [7, 8]])
+    y = np.array([10, 20, 30, 40])
+    
+    trainer = ModelTrainer(algorithm="elasticnet", random_state=42)
+    
+    # Мокаем внешние зависимости, чтобы тест не упал на этапе обучения модели
+    with patch('configurable_automl_engine.trainer.create_model') as mock_create, \
+         patch('configurable_automl_engine.trainer.iter_splits') as mock_splits, \
+         patch('configurable_automl_engine.trainer.get_scorer_object') as mock_scorer:
+        
+        # Настройка моков для минимально успешного прохода
+        mock_model = MagicMock()
+        mock_create.return_value = mock_model
+        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
+        mock_scorer.return_value = lambda m, x, y: 0.9
+        
+        trainer.fit(X, y)
+        
+        # Проверка: так как имен не было, они должны были создаться как col_0, col_1
+        # и присвоиться в feature_names
+        assert trainer.feature_names == ["col_0", "col_1"]
+        assert trainer.feature_names == trainer.numerical_features
+
+def test_fit_extracts_metadata_as_fallback():
+    """
+    Тестирует строку: self.feature_names = self._extract_metadata(X_prepared) or []
+    Условие: Мы принудительно зануляем feature_names перед этапом построения препроцессора.
+    """
+    X = pd.DataFrame({'a': [1, 2, 3, 4], 'b': [5, 6, 7, 8]})
+    y = pd.Series([1, 0, 1, 0])
+    
+    trainer = ModelTrainer()
+    # Патчим зависимости. 
+    # ВАЖНО: убедитесь, что путь к 'create_model' и др. совпадает с вашей структурой
+    with patch.object(ModelTrainer, '_detect_feature_types'), \
+         patch.object(ModelTrainer, '_extract_metadata') as mock_extract, \
+         patch('configurable_automl_engine.trainer.create_model') as mock_create, \
+         patch('configurable_automl_engine.trainer.iter_splits') as mock_splits, \
+         patch('configurable_automl_engine.trainer.get_scorer_object') as mock_scorer_factory, \
+         patch('configurable_automl_engine.trainer.is_greater_better', return_value=True):
+        
+        # 1. Настраиваем возврат имен при повторном извлечении
+        mock_extract.return_value = ['a', 'b']
+        
+        # 2. Настраиваем сплиттер (возвращаем итератор с одним кортежем данных)
+        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
+        
+        # 3. Исправляем ошибку MagicMock.__format__:
+        # Настраиваем фабрику скореров так, чтобы она возвращала функцию, 
+        # которая возвращает число (float), а не мок-объект.
+        mock_scorer_func = MagicMock(return_value=0.85)
+        mock_scorer_factory.return_value = mock_scorer_func
+        
+        # 4. Мокаем саму модель, чтобы fit_internal прошел успешно
+        mock_model = MagicMock()
+        mock_create.return_value = mock_model
+        # Нам нужно, чтобы к моменту "Этапа 3" в методе fit() self.feature_names был None.
+        # Используем side_effect для _prepare_data, чтобы сбросить поле после его заполнения.
+        original_prepare = trainer._prepare_data
+        
+        def side_effect_prepare(X_in, y_in):
+            res_X, res_y = original_prepare(X_in, y_in)
+            trainer.feature_names = None  # Сбрасываем для теста ветки fallback
+            return res_X, res_y
+        
+        with patch.object(ModelTrainer, '_prepare_data', side_effect=side_effect_prepare):
+            trainer.fit(X, y)
+            
+        # ПРОВЕРКИ:
+        # Убеждаемся, что fallback сработал и имена извлечены повторно
+        assert trainer.feature_names == ['a', 'b']
+        # Проверяем, что вызов экстрактора действительно был сделан в Этапе 3
+        assert mock_extract.called
+        # Проверяем, что метрика корректно записалась
+        assert trainer.val_score == 0.85
+
+def test_coverage_feature_names_from_numerical_fallback():
+    """
+    Тестирует конкретную строку:
+    if self.feature_names is None: 
+        self.feature_names = self.numerical_features
+    """
+    # 1. Данные НЕ DataFrame (чтобы попасть в else-ветку fit)
+    X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+    y = np.array([1, 2, 3, 4])
+    trainer = ModelTrainer(algorithm="elasticnet")
+    # Путь к модулю (замените на ваш фактический путь)
+    module_path = 'configurable_automl_engine.trainer'
+    with patch(f'{module_path}.create_model'), \
+         patch(f'{module_path}.iter_splits') as mock_splits, \
+         patch(f'{module_path}.get_scorer_object') as mock_scorer_factory, \
+         patch(f'{module_path}.is_greater_better', return_value=True):
+        # Настраиваем окружение обучения
+        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
+        mock_scorer_factory.return_value = lambda p, x, y: 0.5
+        
+        # КЛЮЧЕВОЙ МОМЕНТ: 
+        # Мы патчим _extract_metadata ТАК, чтобы он вернул None.
+        # Это заставит _prepare_data оставить self.feature_names = None.
+        with patch.object(ModelTrainer, '_extract_metadata', return_value=None):
+            trainer.fit(X, y)
+        # ПРОВЕРКА ПОКРЫТИЯ И ЛОГИКИ:
+        # 1. Так как это был numpy array, numerical_features должны были создаться
+        assert trainer.numerical_features == ["col_0", "col_1"]
+        # 2. Так как feature_names был None, он должен был подтянуть значения из numerical_features
+        assert trainer.feature_names == ["col_0", "col_1"]
+        # Проверяем, что они ссылаются на один и тот же список (или идентичны)
+        assert trainer.feature_names is trainer.numerical_features

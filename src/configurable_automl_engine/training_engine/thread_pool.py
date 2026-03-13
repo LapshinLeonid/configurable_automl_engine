@@ -124,7 +124,10 @@ class SharedDataFrame:
         elif isinstance(X, SharedDataFrame):
             return X.shape[1], X.columns
         elif isinstance(X, np.ndarray):
-            return X.shape[1] if X.ndim > 1 else 1, list(range(X.shape[1] if X.ndim > 1 else 1))
+            return (X.shape[1] 
+                    if X.ndim > 1 
+                    else 1, 
+                    list(range(X.shape[1] if X.ndim > 1 else 1)))
         return 0, []
 
     @staticmethod
@@ -199,16 +202,18 @@ class SharedDataFrame:
             except (FileNotFoundError, OSError):
                 pass # Уже удалено
     
-    def get_view(self, columns=None):
+    def get_view(self, 
+                 columns: list[str] | None = None
+                 ) -> pd.DataFrame:
         """
         Возвращает представление (view) данных. 
         Если переданы columns, возвращает view только для этих столбцов.
         """
         if columns is None:
-            return self._df
+            return self.to_df()
         
         # Важно: используем .loc для создания slice-view, а не копии
-        return self._df.loc[:, columns]
+        return self.to_df().loc[:, columns]
 
 class DiskPersistenceManager:
     """Утилита для временного сохранения DataFrame на диск в формате Parquet.
