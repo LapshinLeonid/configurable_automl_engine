@@ -1,16 +1,27 @@
-"""
-Hyperparameter optimisation module
+""" Hyperparameter Optimisation Module: 
+Двигатель автоматизированного поиска параметров. 
 
-• Поддерживает все «классические» алгоритмы из configurable_automl_engine.models,
-  где MODELS[key]["use"] is True,
-  + SGDRegressor, GaussianProcessRegressor, IsotonicRegression,
-    ARDRegression и GLM-семейство (Poisson/Gamma/Tweedie Regressor).
-• Нейросети (alias содержит "nn") исключаются автоматически.
-• Валидация — train_test_split (80 / 20), k-fold (по умолчанию 5) или
-  leave-one-out. Если наблюдений мало для k-fold (< 2 × k), автоматически
-  переключаемся на train_test_split.
-• По умолчанию метрика R², но можно указать любую
+Модуль обеспечивает высокоуровневую обертку над Optuna для 
+автоматического подбора конфигураций моделей с поддержкой 
+динамических пространств поиска, кросс-валидации и интегрированного оверсэмплинга.
+
+Ключевые возможности:
+    1. Hybrid Model Zoo: Полная поддержка базового пула моделей AutoML-движка 
+       с расширением за счет SGD, GaussianProcess, Isotonic и GLM-семейства.
+    2. Neural Filter: Автоматическая детекция и исключение нейросетевых архитектур 
+       (alias "nn") для оптимизации ресурсов в классическом ML-пайплайне.
+    3. Adaptive Validation: Интеллектуальное переключение между k-fold, 
+       Leave-One-Out и Train-Test Split (80/20) в зависимости от объема выборки 
+       (fallback при n_samples < 2k).
+    4. Integrated Oversampling: Бесшовная интеграция балансировки классов через 
+       Imbalance-Pipeline прямо внутри процесса оптимизации.
+    5. Dynamic Search Spaces: Поддержка как жестко заданных пространств (например, 
+       адаптивный KNN-space), так и внешних конфигураций через YAML/SearchSpaceEntry.
+    6. Metric Agnostic: Возможность оптимизации по любой стандартной или 
+       кастомной метрике Sklearn (по умолчанию R²).
 """
+
+
 from __future__ import annotations
 from functools import partial
 
@@ -48,14 +59,13 @@ logging = _logging  # alias
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
 class HyperoptError(Exception):
-    """Базовая ошибка модуля."""
-
+    """Базовая ошибка модуля гиперпараметрической оптимизации."""
 
 class InvalidAlgorithmError(HyperoptError):
-    """Алгоритм не найден или помечен use=False."""
+    """Ошибка, возникающая, если алгоритм не найден или помечен как неиспользуемый."""
 
 class InvalidDataError(HyperoptError):
-    """Некорректный X / y."""
+    """Ошибка, возникающая при передаче некорректных структур данных X или y."""
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
@@ -65,6 +75,14 @@ log = logging.getLogger(__name__)
 
 # ══════════ KNN-space зависит от размера выборки ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
+    """Создать генератор пространства поиска для алгоритма KNN.
+    Args:
+        n_samples (int): Количество образцов в выборке 
+            для расчета верхнего порога n_neighbors.
+    Returns:
+        Callable[[Trial], dict[str, Any]]: Функция-обертка, которая принимает объект 
+            optuna.Trial и возвращает словарь с предложенными гиперпараметрами.
+    """
     def _space(t: Trial) -> dict[str, Any]:
         max_k = int(max(1, min(30, int(n_samples * 0.8))))  # ≥1 и ≤30
         return {
@@ -77,15 +95,16 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
 
     return _space
 
-
-ALGO_SPACES: dict[str, Callable[[Trial], dict[str, Any]]] = {}
-
 # ═════════════════════════════ helper-utilities ═════════════════════════════
 
 def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
-    """
-    Преобразует словарь из конфига в параметры для модели через trial.suggest_*.
-    Поддерживает как SearchSpaceEntry (объекты с полем bounds), так и константы.
+    """Преобразовать конфигурационный словарь в параметры модели через методы Optuna.
+    Args:
+        trial (Trial): Объект текущей итерации Optuna.
+        space_dict (dict[str, Any]): Словарь, содержащий объекты SearchSpaceEntry 
+            (с границами и типами распределений) или константные значения.
+    Returns:
+        dict[str, Any]: Словарь конкретных значений гиперпараметров для данной итерации.
     """
     params: dict[str, Any] = {}
     for key, value in space_dict.items():
@@ -126,21 +145,35 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
     return params
 
 def _validate_data(X: Any, y: Any) -> None:
+    """Проверить типы и размеры входных данных X и y.
+    Args:
+        X (Any): Признаковое описание (ожидается np.ndarray или pd.DataFrame).
+        y (Any): Вектор целевой переменной 
+            (ожидается np.ndarray, pd.Series или pd.DataFrame).
+    Raises:
+        InvalidDataError: Если типы данных не поддерживаются 
+            или размеры X и y не совпадают.
+    """
     ok_types = (np.ndarray, pd.DataFrame)
     if not isinstance(X, ok_types):
-        raise InvalidDataError("X должен быть numpy.ndarray или pandas.DataFrame")
+        raise InvalidDataError("X must be a numpy.ndarray or pandas.DataFrame")
     if not isinstance(y, ok_types + (pd.Series,)):
         raise InvalidDataError(
-            "y должен быть numpy.ndarray, pandas.Series или DataFrame"
+            "y must be a numpy.ndarray, pandas.Series, or pandas.DataFrame"
         )
     if len(X) != len(y):
-        raise InvalidDataError(f"Размеры не совпадают: X={len(X)} y={len(y)}")
+        raise InvalidDataError(f"Size mismatch: X={len(X)} and y={len(y)}")
 
 
 def _get_estimator(algo: str) -> Any:
-    """
-    Проверяет валидность алгоритма через models.py.
-    Возвращает True, если алгоритм поддерживается, иначе кидает исключение.
+    """Проверить доступность и валидность указанного алгоритма.
+    Args:
+        algo (str): Название (alias) алгоритма.
+    Returns:
+        Any: Возвращает True, если модель успешно создается базовой фабрикой.
+    Raises:
+        InvalidAlgorithmError: Если алгоритм не поддерживается или отсутствует 
+            необходимая зависимость (библиотека).
     """
     try:
         # Пробуем создать модель с минимальными параметрами для проверки существования
@@ -149,19 +182,34 @@ def _get_estimator(algo: str) -> Any:
     except (ValueError, ImportError) as err:
         # Если в models.py алгоритм не найден или не установлен пакет
         #  (например, XGBoost)
-        raise InvalidAlgorithmError(f"Алгоритм «{algo}» не поддерживается: {err}")
+        raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
 
 
 def _build_scorer(name: str)-> Any:
+    """Создать объект метрики (scorer) по названию.
+    Args:
+        name (str): Строковое название метрики 
+            (например, 'r2' или 'neg_mean_squared_error').
+    Returns:
+        Any: Объект метрики, совместимый с API sklearn.
+    Raises:
+        HyperoptError: Если указано неизвестное название метрики.
+    """
     try:
         # Используем новый API, который возвращает либо объект make_scorer, либо строку
         return get_scorer_object(name)
     except Exception as err:
-        raise HyperoptError(f"Неизвестная метрика «{name}»") from err
+        raise HyperoptError(f"Unknown metric name: '{name}'") from err
 
 
 def _can_stratify(y: Any) -> bool:
-    """Можно ли безопасно stratify=y в train_test_split?"""
+    """Определить возможность применения стратификации для вектора y.
+    Args:
+        y (Any): Вектор целевой переменной.
+    Returns:
+        bool: True, если данные дискретны (целые числа/bool) и количество уникальных 
+            классов не превышает 15. В противном случае — False.
+    """
     if isinstance(y, (pd.Series, pd.DataFrame)):
         arr = y.values
     else:
@@ -184,7 +232,15 @@ def _split_train_test(
         test_size: float =0.2,
         random_state: int | None =42
         ) -> tuple[Any, Any, Any, Any]:
-    """train_test_split с попыткой стратификации."""
+    """Разбить данные на обучающую и тестовую выборки с автоматической стратификацией.
+    Args:
+        X (Any): Матрица признаков.
+        y (Any): Вектор ответов.
+        test_size (float): Доля тестовой выборки. По умолчанию 0.2.
+        random_state (int | None): Зерно генератора случайных чисел. По умолчанию 42.
+    Returns:
+        tuple[Any, Any, Any, Any]: Кортеж из (X_train, X_test, y_train, y_test).
+    """
     strat = y if _can_stratify(y) else None
     try:
         return cast(tuple[Any, Any, Any, Any], train_test_split(
@@ -222,13 +278,39 @@ def optimize(
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
 ) -> tuple[Any, dict[str, Any], float]:
-    """
-    Подбор гиперпараметров через Optuna.
-
-    Возвращает:
-        best_model  – обученный estimator с лучшими параметрами
-        best_params – словарь лучших гиперпараметров
-        best_score  – метрика на валидации
+    """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
+    Функция автоматически выбирает стратегию валидации, настраивает пространство поиска 
+    параметров и обучает финальную модель на всех предоставленных данных.
+    Args:
+        algo_name (str): Название алгоритма для оптимизации.
+        X (Any): Входные признаки.
+        y (Any): Целевая переменная.
+        data_oversampling (bool): Флаг включения балансировки классов. 
+            По умолчанию False.
+        data_oversampling_multiplier (float): Коэффициент масштабирования 
+            (для оверсэмплинга).
+        data_oversampling_algorithm (str): Название алгоритма балансировки 
+            (например, 'random', 'smote').
+        metric (str): Название метрики для максимизации. По умолчанию 'r2'.
+        val_method (ValidationStrategy | str): Метод валидации 
+            ('k_fold', 'leave_one_out', 'train_test_split').
+        validation_strategy (ValidationStrategy | str | None): Алиас для val_method 
+            (имеет приоритет).
+        n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
+        n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
+        random_state (int | None): Состояние случайности для воспроизводимости. 
+            По умолчанию 42.
+        train_test_split_test_size (float): Размер теста для валидации через split. 
+            По умолчанию 0.2.
+        space_overrides (dict | None): Словарь для переопределения пространств поиска.
+    Returns:
+        tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
+            - best_model: Обученная модель с лучшими параметрами.
+            - best_params: Словарь найденных оптимальных гиперпараметров.
+            - best_score: Лучшее значение метрики на валидации.
+    Raises:
+        ValueError: Если n_trials не является положительным целым числом.
+        HyperoptError: Если для выбранного алгоритма не определено пространство поиска.
     """
     # --- Формируем конфиг для использования внутри _objective ---
     oversampling_config: dict[str, Any] = {
@@ -262,17 +344,13 @@ def optimize(
     )
 
     # -------------------- 2. estimator + поисковое пространство ---- #
+    base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
 
     if algo == "knn":
-        base_space_fn: (
-            Callable[[Trial], dict[str, Any]] | None
-            ) = _make_knn_space(n_samples)
-    else:
-        base_space_fn = ALGO_SPACES.get(algo)
+        base_space_fn = _make_knn_space(n_samples)
 
     # Приоритет 1: Прямые переопределения (функции)
     # Приоритет 2: Динамический конфиг из YAML (dict с SearchSpaceEntry)
-    # Приоритет 3: Хардкод из ALGO_SPACES
     external_config = (space_overrides or {}).get(algo)
     
     # Если пришла функция (старый механизм) — используем её
@@ -290,7 +368,14 @@ def optimize(
 
     # -------------------- 3. objective для Optuna ------------------ #
     def _objective(trial: Trial) -> float:
-        """Возвращает средний nrmse (меньше — лучше, Optuna → maximize)."""
+        """Целевая функция для минимизации/максимизации в Optuna.
+    Args:
+        trial (Trial): Объект текущего испытания Optuna.
+    Returns:
+        float: Значение целевой метрики на текущем наборе параметров.
+    Raises:
+        optuna.TrialPruned: Если в процессе обучения возникла ошибка (ValueError).
+    """
 
         # 1. гиперпараметры и модель
         params = space_fn(trial)
@@ -314,7 +399,7 @@ def optimize(
             # Так как это генератор, берем next()
             X_tr, X_te, y_tr, y_te = next(iter_splits(
                 X, y, method="train_test_split", 
-                test_size=0.2, random_state=random_state
+                test_size=train_test_split_test_size, random_state=random_state
             ))
             current_estimator.fit(X_tr, y_tr)
             return float(scorer(current_estimator, X_te, y_te))

@@ -77,7 +77,7 @@ def _prepare_data(algo: str, X: pd.DataFrame, y: pd.Series):
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "algo",
-    sorted(k for k, space_fn in hyperopt.ALGO_SPACES.items() if space_fn is not None),
+    ["knn"],
 )
 def test_optimize_smoke(algo: str, toy_data):
     """optimize не должен падать и возвращает валидные объекты."""
@@ -178,14 +178,14 @@ def test_validate_data_mismatch():
     """Проверка ошибки при несовпадении длин X и y (строка 159)."""
     X = np.zeros((10, 2))
     y = np.zeros(5)
-    with pytest.raises(hyperopt.InvalidDataError, match="Размеры не совпадают"):
+    with pytest.raises(hyperopt.InvalidDataError, match="Size mismatch"):
         hyperopt._validate_data(X, y)
 
 def test_validate_data_invalid_y_type():
     """Проверка ошибки при недопустимом типе y (строка 155)."""
     X = np.zeros((5, 2))
     y = {1: 0, 2: 0} # dict не входит в ok_types
-    with pytest.raises(hyperopt.InvalidDataError, match="y должен быть"):
+    with pytest.raises(hyperopt.InvalidDataError, match="y must be"):
         hyperopt._validate_data(X, y)
 
 def test_optimize_with_oversampling(toy_data):
@@ -293,7 +293,7 @@ def test_apply_dynamic_space_floats():
     trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
 
 def test_build_scorer_error():
-    with pytest.raises(HyperoptError, match="Неизвестная метрика"):
+    with pytest.raises(HyperoptError, match="Unknown metric name"):
         _build_scorer("non_existent_metric_name_123")
 
 def test_can_stratify_pandas():
@@ -337,13 +337,6 @@ def test_optimize_raises_when_no_search_space(monkeypatch):
         hyperopt,
         "_get_estimator",
         lambda algo: True
-    )
-
-    # --- гарантируем отсутствие search-space ---
-    monkeypatch.setitem(
-        hyperopt.ALGO_SPACES,
-        "fake_algo",
-        None
     )
 
     with pytest.raises(HyperoptError, match="нет search-space"):
