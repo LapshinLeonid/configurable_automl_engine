@@ -106,6 +106,16 @@ def _run_hpo(
     ):
         kwargs["n_folds"] = n_folds
 
+    # прокидываем oversampling параметры, если tuner их поддерживает
+    if "data_oversampling" in sig.parameters:
+        kwargs["data_oversampling"] = data_oversampling
+
+    if "data_oversampling_multiplier" in sig.parameters:
+        kwargs["data_oversampling_multiplier"] = data_oversampling_multiplier
+
+    if "data_oversampling_algorithm" in sig.parameters:
+        kwargs["data_oversampling_algorithm"] = data_oversampling_algorithm
+
     # прокидываем кастомный search space, если предусмотрен
     if search_space_override is not None:
         # Мы передаем словарь {algo_name: hyperparameters_dict}
@@ -266,7 +276,7 @@ def train_best_model(
                 score, params = _execute_hpo_phase(
                     phase.name, algo_name, algo_cfg, phase.n_trials, override
                 )
-                phase_results[algo_name] = (score, params)
+                return algo_name, score, params
             except _CanonicalIAE:
                 raise
             except Exception as e:
@@ -274,15 +284,23 @@ def train_best_model(
         # Выполнение (параллельное или последовательное)
         if (cfg.general.parallel_strategy == "algorithms" 
             and len(current_candidates) > 1):
-            run_parallel(
+            results = run_parallel(
                 _worker,
                 args_seq=[(n, a) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode
             )
+            
+            for res in results:
+                if res:
+                    name, sc, pr = res
+                    phase_results[name] = (sc, pr)
         else:
             for n, a in current_candidates.items():
-                _worker(n, a)
+                res = _worker(n, a)
+                if res:
+                    name, sc, pr = res
+                    phase_results[name] = (sc, pr)
         if not phase_results:
             raise RuntimeError(f"No algorithms finished HPO in phase: {phase.name}")
     # После завершения всех фаз определяем финального победителя
