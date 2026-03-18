@@ -1,19 +1,28 @@
-
-"""
-Training-engine: coarse HPO → accurate HPO → финальный fit & save.
-
-Обновлено:
-* поддержан новый параметр `general.n_folds` (кол-во сплитов для k-fold CV).
-  Если стратегия валидации -- `k_fold`, значение прокидывается в hyperopt-модули.
-* ничего не меняется для `loo` и `train_test_split`.
+"""Модуль управления жизненным циклом обучения моделей (Training Engine).
+Обеспечивает автоматизированный процесс от валидации входных данных до
+сохранения финальной модели. Поддерживает многофазовый поиск гиперпараметров
+(HPO), динамическую загрузку алгоритмов и параллельное выполнение вычислений.
+Основные компоненты:
+    - train_best_model: Публичный интерфейс для запуска полного цикла обучения.
+    - _run_hpo: Обертка для поиска гиперпараметров через внешние тюнеры.
+    - _fit_and_save: Финальное обучение модели на полном наборе данных.
+    - _load_module: Помощник для динамического импорта модулей по пути.
+Пример использования:
+    results = train_best_model(
+        config="path/to/config.yaml",
+        df=my_dataframe,
+        target="target_col",
+        model_path_override="models/best.pkl"
+    )
 """
 
 from __future__ import annotations
 import importlib
 import inspect
 import logging
+import math
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Tuple, Union, Optional
 from types import ModuleType
 
 import pandas as pd
@@ -39,7 +48,7 @@ from .metrics import (
 )
 from .thread_pool import run_parallel
 
-
+from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 
 # ───────────────────────── canonical IAE ─────────────────────── #
 
@@ -52,7 +61,16 @@ _LOG = logging.getLogger("training_engine")
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
 def _load_module(path: str) -> ModuleType:  # noqa: D401
-    """Импортирует модуль по dotted-path; пробрасывает осмысленный ImportError."""
+    """Импортировать модуль по указанному пути.
+    Динамически загружает Python-модуль, используя dotted-path нотацию. 
+    В случае неудачи генерирует информативное исключение.
+    Args:
+        path (str): Путь к модулю в формате 'package.module'.
+    Returns:
+        ModuleType: Объект импортированного модуля.
+    Raises:
+        ImportError: Если модуль не найден по указанному пути.
+    """
     try:
         return importlib.import_module(path)
     except ModuleNotFoundError as exc:  # pragma: no cover
@@ -76,13 +94,36 @@ def _run_hpo(
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
-) -> Tuple[float, Dict[str, Any]]:
-    """
-    Запускает hyperopt-модуль и возвращает (score, best_params).
-
-    Если стратегия валидации -- k-fold, дополнительно передаём `n_folds`
-    в функцию `optimize`, **только** если параметр поддерживается
-    сигнатурой целевой функции.
+) -> Optional[Tuple[float, Dict[str, Any]]]:
+    """Запустить поиск оптимальных гиперпараметров для алгоритма.
+    Логика работы:
+    1. Загрузка тюнера: Импортируется модуль, указанный в `algo_cfg.tuner`.
+    2. Проверка сигнатуры: Метод `optimize` тюнера проверяется на поддержку 
+       специфичных параметров (n_folds, oversampling, space_overrides).
+    3. Выполнение: Запускается оптимизация. Если алгоритм признан невалидным 
+       через `InvalidAlgorithmError`, выбрасывается каноничное исключение.
+    Args:
+        algo_name (str): Название алгоритма.
+        algo_cfg (AlgoCfg): Конфигурация алгоритма с путями к тюнеру.
+        X (pd.DataFrame): Матрица признаков.
+        y (pd.Series): Вектор целевой переменной.
+        metric_name_sklearn (str): Название метрики в формате sklearn.
+        n_trials (int): Количество итераций поиска.
+        validation_strategy (ValidationStrategy): Стратегия валидации 
+            (k_fold, loo и т.д.).
+        n_folds (int | None): Количество фолдов для кросс-валидации.
+        search_space_override (Dict[str, Any] | None): 
+            Переопределенное пространство поиска.
+        data_oversampling (bool): Флаг включения оверсэмплинга.
+        data_oversampling_multiplier (float): Коэффициент увеличения выборки.
+        data_oversampling_algorithm (str): Название алгоритма оверсэмплинга.
+    Returns:
+        Optional[Tuple[float, Dict[str, Any]]]: 
+            Кортеж (лучшая метрика, лучшие параметры) 
+            или None, если произошла ошибка при выполнении HPO.
+    Raises:
+        _CanonicalIAE: Если тюнер сообщает о несовместимости алгоритма с данными.
+        AttributeError: Если в модуле тюнера отсутствует функция `optimize`.
     """
     tuner = _load_module(algo_cfg.tuner)
     if not hasattr(tuner, "optimize"):
@@ -106,6 +147,16 @@ def _run_hpo(
     ):
         kwargs["n_folds"] = n_folds
 
+    # прокидываем oversampling параметры, если tuner их поддерживает
+    if "data_oversampling" in sig.parameters:
+        kwargs["data_oversampling"] = data_oversampling
+
+    if "data_oversampling_multiplier" in sig.parameters:
+        kwargs["data_oversampling_multiplier"] = data_oversampling_multiplier
+
+    if "data_oversampling_algorithm" in sig.parameters:
+        kwargs["data_oversampling_algorithm"] = data_oversampling_algorithm
+
     # прокидываем кастомный search space, если предусмотрен
     if search_space_override is not None:
         # Мы передаем словарь {algo_name: hyperparameters_dict}
@@ -113,17 +164,15 @@ def _run_hpo(
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
 
-
-
     try:
         _model, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
-
     except Exception as err:  # noqa: BLE001
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
-        _LOG.warning("Skip %s: %s", algo_name, err, exc_info=True)
-        return float("-inf"), {}
+        _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
+        # возвращаем None, чтобы главный цикл знал, что алгоритм не прошёл
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -138,6 +187,20 @@ def _fit_and_save(
     model_path: Path,
     cfg: Config,
 ) -> None:
+    """Выполнить финальное обучение модели и сохранить результат на диск.
+    Args:
+        algo_name (str): Название выбранного алгоритма.
+        algo_cfg (AlgoCfg): Конфигурация алгоритма с путем к тренеру.
+        X (pd.DataFrame): Полная матрица признаков для обучения.
+        y (pd.Series): Полный вектор целевой переменной.
+        best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
+        model_path (Path): Путь для сохранения файла модели.
+        cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
+    Returns:
+        None
+    Raises:
+        AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
+    """
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
         raise AttributeError(
@@ -168,6 +231,22 @@ def train_best_model(
     target: str | None = None,
     model_path_override: str | Path | None = None,
 )-> Dict[str, Any]:
+    """Основной интерфейс обучения лучшей модели.
+    Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO) 
+    -> выбор победителя -> финальное обучение -> сохранение.
+    Args:
+        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения. 
+            Может быть путем к файлу, словарем или объектом Config.
+        df (pd.DataFrame): Исходные данные.
+        target (str | None): Имя целевого столбца. По умолчанию 'target'.
+        model_path_override (str | Path | None): Альтернативный путь сохранения модели.
+    Returns:
+        Dict[str, Any]: Словарь с результатами: название алгоритма, score, 
+            параметры и путь к файлу.
+    Raises:
+        TypeError: При передаче конфига неподдерживаемого типа.
+        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
+    """
     # Centralized validation
     validate_df_not_empty(df)
     # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
@@ -199,6 +278,27 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    def prepare_search_space(algo_name: str, user_overrides: Dict[str, Any] | None
+                             ) -> Dict[str, Any]:
+        """Подготовить пространство поиска гиперпараметров.
+        Объединяет системные значения по умолчанию с пользовательскими 
+        переопределениями из конфигурации.
+        Args:
+            algo_name (str): Имя алгоритма для поиска дефолтов.
+            user_overrides (Dict[str, Any] | None): Словарь с параметрами для замены.
+        Returns:
+            Dict[str, Any]: Итоговое пространство поиска.
+        """
+        # Получаем базовый спейс для алгоритма 
+        # (копируем, чтобы не менять глобальный объект)
+        space = DEFAULT_SPACES.get(algo_name, {}).copy()
+        
+        if user_overrides:
+            # Перезаписываем или добавляем параметры из конфига пользователя
+            space.update(user_overrides)
+            
+        return space
+
     def _execute_hpo_phase(
             phase_name: str, 
             algo: str, 
@@ -206,9 +306,18 @@ def train_best_model(
             n_trials: int, 
             search_space: Dict[str, Any] | None = None
             ) -> Tuple[float, Dict[str, Any]] :
-        """
-        Универсальная обертка для выполнения фазы HPO 
-        с логированием и обработкой метрик.
+        """Выполнить конкретную фазу HPO для алгоритма.
+        Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
+        Args:
+            phase_name (str): Название текущей фазы (напр. 'coarse').
+            algo (str): Имя алгоритма.
+            a_cfg (AlgoCfg): Конфигурация алгоритма.
+            n_trials (int): Количество итераций в этой фазе.
+            search_space (Dict[str, Any] | None): Пространство поиска для фазы.
+        Returns:
+            Tuple[float, Dict[str, Any]]: Кортеж (метрика, параметры).
+        Raises:
+            ValueError: Если HPO вернул пустой результат.
         """
         _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
         
@@ -216,7 +325,7 @@ def train_best_model(
         ovr = cfg.oversampling 
         
         try:
-            score, params = _run_hpo(
+            result = _run_hpo(
                 algo_name=algo,
                 algo_cfg=a_cfg,
                 X=X,
@@ -230,6 +339,13 @@ def train_best_model(
                 data_oversampling_multiplier=ovr.multiplier,
                 data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
             )
+
+            #Проверяем на None перед распаковкой
+            if result is None:
+                _LOG.warning(f"HPO returned None for {algo} in {phase_name}")
+                raise ValueError(f"HPO returned None for {algo} in {phase_name}")
+
+            score, params = result
             
             disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score
             _LOG.info(f"{phase_name} {algo:15} | score {disp:.5f} | params {params}")
@@ -257,34 +373,66 @@ def train_best_model(
             current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
+        
         def _worker(
                 algo_name: str, 
                 algo_cfg: AlgoCfg
-                ) -> None:
-            override = algo_cfg.hyperparameters if algo_cfg.hyperparameters else None
+                ) -> Tuple[str, float, Dict[str, Any]] | None:
+            """Воркер для параллельного или последовательного запуска задачи HPO.
+            Args:
+                algo_name (str): Имя алгоритма.
+                algo_cfg (AlgoCfg): Конфигурация алгоритма.
+            Returns:
+                Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры 
+                    или None в случае ошибки.
+            """
+            # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
+            full_search_space = prepare_search_space(
+                algo_name, 
+                algo_cfg.hyperparameters # это dict из вашего config_parser
+            )
             try:
                 score, params = _execute_hpo_phase(
-                    phase.name, algo_name, algo_cfg, phase.n_trials, override
+                    phase.name, algo_name, algo_cfg, phase.n_trials, full_search_space
                 )
-                phase_results[algo_name] = (score, params)
+                return algo_name, score, params
             except _CanonicalIAE:
                 raise
             except Exception as e:
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {phase.name}: {e}")
+                return None
         # Выполнение (параллельное или последовательное)
         if (cfg.general.parallel_strategy == "algorithms" 
             and len(current_candidates) > 1):
-            run_parallel(
+            results = run_parallel(
                 _worker,
                 args_seq=[(n, a) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode
             )
+
+            for res in results:
+                if res:
+                    name, sc, pr = res
+                    phase_results[name] = (sc, pr)
         else:
             for n, a in current_candidates.items():
-                _worker(n, a)
-        if not phase_results:
-            raise RuntimeError(f"No algorithms finished HPO in phase: {phase.name}")
+                res = _worker(n, a)
+                if res:
+                    name, sc, pr = res
+                    phase_results[name] = (sc, pr)
+        valid_results = {
+            name: (score, params)
+            for name, (score, params) in phase_results.items()
+            if score is not None and not math.isnan(score) and score != float("-inf")
+        }
+
+        if not valid_results:
+            failed_algos = list(current_candidates.keys())
+            raise RuntimeError(
+                f"No algorithms produced valid scores in phase '{phase.name}'. "
+                f"Failed algorithms: {failed_algos}"
+            )
     # После завершения всех фаз определяем финального победителя
     select = max if greater_is_better else min
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]

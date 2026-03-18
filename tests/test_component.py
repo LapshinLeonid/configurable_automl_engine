@@ -280,7 +280,7 @@ class TestTrainingEngineCoverage:
         cfg = Config.model_validate(base_config_dict)
         
         # Ожидаем RuntimeError, так как phase_results останется пустым (строка 279)
-        with pytest.raises(RuntimeError, match="No algorithms finished HPO"):
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=cfg, df=sample_df, target="target")
     # Исправленный тест на ошибку сохранения
     @patch("configurable_automl_engine.training_engine.component._run_hpo", return_value=(0.9, {"p": 1}))
