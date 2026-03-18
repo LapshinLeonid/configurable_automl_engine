@@ -26,12 +26,15 @@ import yaml
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, Annotated, Union, List
+from typing import Any, Dict, Optional, Literal, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from configurable_automl_engine.common.definitions import (ValidationStrategy, 
                                                            SerializationFormat,
                                                            ALGO_PACKAGE_MAPPING)
 from configurable_automl_engine.common.dependency_utils import is_installed
+
+from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
+
 __all__ = [
     "AlgoCfg",
     "Config",
@@ -207,118 +210,7 @@ class OversamplingCfg(BaseModel):
                 "Oversampling multiplier = 1 ➜ баланс классов не изменится."
             )
         return self
-# ───────────────── hyperopt ───────────────── #
-class BaseDistribution(BaseModel):
-    """Абстрактный базовый класс для распределений поиска."""
-    type: str
-class CategoricalSpace(BaseDistribution):
-    """Распределение для категориальных признаков: [options, 'categorical']."""
-    type: Literal["categorical"]
-    options: List[Any]
-class NumericSpace(BaseDistribution):
-    """Базовый класс для числовых диапазонов."""
-    low: float
-    high: float
-    @model_validator(mode="after")
-    def _validate_range(self) -> "NumericSpace":
-        if self.low > self.high:
-            raise ValueError(f"low ({self.low}) must be <= high ({self.high})")
-        return self
-class FloatSpace(NumericSpace):
-    """Распределение для чисел с плавающей точкой: [min, max, 'float', step?]."""
-    type: Literal["float", "float_log"]
-    step: Optional[float] = None
-    @model_validator(mode="after")
-    def _validate_float_constraints(self) -> "FloatSpace":
-        if self.type == "float_log" and self.step is not None:
-            raise ValueError("The 'step' parameter is not supported for 'float_log'")
-        if self.step is not None and self.step <= 0:
-            raise ValueError(f"Step must be positive. Got {self.step}")
-        return self
-class IntSpace(NumericSpace):
-    """Распределение для целых чисел: [min, max, 'int', step?]."""
-    type: Literal["int"]
-    low: int
-    high: int
-    step: Optional[int] = None
-    @model_validator(mode="after")
-    def _validate_int_constraints(self) -> "IntSpace":
-        if self.step is not None and self.step <= 0:
-            raise ValueError(f"Step must be positive. Got {self.step}")
-        return self
-class SearchSpaceEntry(BaseModel):
-    """Описание пространства поиска для отдельного гиперпараметра.
-    
-    Универсальный контейнер, поддерживающий как категориальные списки, 
-    так и числовые диапазоны. Реализует логику прозрачной конвертации 
-    из сокращенной YAML-записи в типизированные объекты распределений.
-    Attributes:
-        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный 
-            объект конкретного типа распределения.
-    """
-    config: Annotated[
-        Union[CategoricalSpace, FloatSpace, IntSpace],
-        Field(discriminator="type")
-    ]
-    @model_validator(mode="before")
-    @classmethod
-    def _parse_list_to_dict(cls, data: Any) -> Any:
-        """Преобразовать краткую списочную запись YAML 
-        в структурированный словарь Pydantic.
-        
-        Логика парсинга:
-        1. Если входные данные не список, возвращает их "как есть" 
-            для стандартной обработки.
-        2. Определяет тип распределения по индексу [1] (categorical) или [2] (numeric).
-        3. Для числовых типов автоматически выводит подтип (int/float), 
-            если он не указан явно.
-        4. Формирует внутренний словарь с ключами `type`, `low`, `high`, `step` для 
-           последующей дискриминации моделей.
-        Args:
-            data (Any): Исходные данные из YAML (список или словарь).
-        Returns:
-            Any: Словарь, готовый для инициализации Pydantic-модели.
-        Raises:
-            ValueError: Если список содержит менее 2 элементов.
-        """
 
-        if not isinstance(data, list):
-            return data
-        if len(data) < 2:
-            raise ValueError("Search space list must have at least 2 elements")
-        if data[1] == "categorical":
-            return {"config": {"type": "categorical", "options": data[0]}}
-        if len(data) >= 3:
-            dist_type = str(data[2])
-            payload = {"type": dist_type, "low": data[0], "high": data[1]}
-            if len(data) == 4:
-                payload["step"] = data[3]
-            return {"config": payload}
-        # Infer type for 2-element numeric lists
-        if isinstance(data[0], int) and isinstance(data[1], int):
-            return {"config": {"type": "int", "low": data[0], "high": data[1]}}
-        return {"config": {"type": "float", "low": data[0], "high": data[1]}}
-    @property
-    def low(self) -> Any:
-        return getattr(self.config, "low", None)
-    @property
-    def high(self) -> Any:
-        return getattr(self.config, "high", None)
-    @property
-    def dist_type(self) -> str:
-        return self.config.type
-    @property
-    def step(self) -> Optional[Union[int, float]]:
-        return getattr(self.config, "step", None)
-    @property
-    def bounds(self) -> List[Any]:
-        """Backward compatibility alias for the raw list structure."""
-        if isinstance(self.config, CategoricalSpace):
-            return [self.config.options, "categorical"]
-        res = [self.low, self.high, self.dist_type]
-        if self.step is not None:
-            res.append(self.step)
-        return res
 # ───────────────── algorithms ───────────────── #
 class AlgoCfg(BaseModel):
     """Техническая конфигурация конкретного ML-алгоритма в пайплайне.

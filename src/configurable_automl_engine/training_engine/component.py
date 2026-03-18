@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict, Tuple, Union
 from types import ModuleType
@@ -39,7 +40,7 @@ from .metrics import (
 )
 from .thread_pool import run_parallel
 
-
+from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 
 # ───────────────────────── canonical IAE ─────────────────────── #
 
@@ -128,12 +129,12 @@ def _run_hpo(
     try:
         _model, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
-
     except Exception as err:  # noqa: BLE001
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
-        _LOG.warning("Skip %s: %s", algo_name, err, exc_info=True)
-        return float("-inf"), {}
+        _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
+        # возвращаем None, чтобы главный цикл знал, что алгоритм не прошёл
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -209,6 +210,19 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    def prepare_search_space(algo_name: str, user_overrides: Dict[str, Any] | None) -> Dict[str, Any]:
+        """
+        Берет системные дефолты и накладывает на них пользовательские правки.
+        """
+        # Получаем базовый спейс для алгоритма (копируем, чтобы не менять глобальный объект)
+        space = DEFAULT_SPACES.get(algo_name, {}).copy()
+        
+        if user_overrides:
+            # Перезаписываем или добавляем параметры из конфига пользователя
+            space.update(user_overrides)
+            
+        return space
+
     def _execute_hpo_phase(
             phase_name: str, 
             algo: str, 
@@ -267,20 +281,26 @@ def train_best_model(
             current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
+        
         def _worker(
                 algo_name: str, 
                 algo_cfg: AlgoCfg
                 ) -> None:
-            override = algo_cfg.hyperparameters if algo_cfg.hyperparameters else None
+            # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
+            full_search_space = prepare_search_space(
+                algo_name, 
+                algo_cfg.hyperparameters # это dict из вашего config_parser
+            )
             try:
                 score, params = _execute_hpo_phase(
-                    phase.name, algo_name, algo_cfg, phase.n_trials, override
+                    phase.name, algo_name, algo_cfg, phase.n_trials, full_search_space
                 )
                 return algo_name, score, params
             except _CanonicalIAE:
                 raise
             except Exception as e:
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {phase.name}: {e}")
+                return None
         # Выполнение (параллельное или последовательное)
         if (cfg.general.parallel_strategy == "algorithms" 
             and len(current_candidates) > 1):
@@ -290,7 +310,7 @@ def train_best_model(
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode
             )
-            
+
             for res in results:
                 if res:
                     name, sc, pr = res
@@ -301,8 +321,18 @@ def train_best_model(
                 if res:
                     name, sc, pr = res
                     phase_results[name] = (sc, pr)
-        if not phase_results:
-            raise RuntimeError(f"No algorithms finished HPO in phase: {phase.name}")
+        valid_results = {
+            name: (score, params)
+            for name, (score, params) in phase_results.items()
+            if score is not None and not math.isnan(score) and score != float("-inf")
+        }
+
+        if not valid_results:
+            failed_algos = list(current_candidates.keys())
+            raise RuntimeError(
+                f"No algorithms produced valid scores in phase '{phase.name}'. "
+                f"Failed algorithms: {failed_algos}"
+            )
     # После завершения всех фаз определяем финального победителя
     select = max if greater_is_better else min
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]

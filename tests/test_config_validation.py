@@ -5,6 +5,9 @@ from pathlib import Path
 from pydantic import ValidationError
 from configurable_automl_engine.training_engine.config_parser import (
     GeneralCfg, OversamplingCfg, SearchSpaceEntry, AlgoCfg, Config, read_config, HPOPhaseCfg, 
+    
+)
+from configurable_automl_engine.common.hyperopt_defaults import (
     NumericSpace, FloatSpace, IntSpace,
 )
 from configurable_automl_engine.common.definitions import ValidationStrategy, SerializationFormat
