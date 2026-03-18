@@ -1,5 +1,3 @@
-from typing import Dict, Any, List
-
 from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, model_validator
 
@@ -159,7 +157,8 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
     "svr": {
         "C": SearchSpaceEntry.model_validate([1e-2, 100.0, "float_log"]),
         "epsilon": SearchSpaceEntry.model_validate([1e-3, 1.0, "float_log"]),
-        "kernel": SearchSpaceEntry.model_validate([["rbf", "poly", "sigmoid"], "categorical"]),
+        "kernel": SearchSpaceEntry.model_validate(
+            [["rbf", "poly", "sigmoid"], "categorical"]),
         "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
     },
     "xgb": {
@@ -172,10 +171,13 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
     },
     "sgdregressor": {
         "loss": SearchSpaceEntry.model_validate([
-            ["squared_error", "huber", "epsilon_insensitive", "squared_epsilon_insensitive"], 
-            "categorical"
+            ["squared_error", 
+             "huber", 
+             "epsilon_insensitive", 
+             "squared_epsilon_insensitive"], "categorical"
         ]),
-        "penalty": SearchSpaceEntry.model_validate([["l2", "l1", "elasticnet"], "categorical"]),
+        "penalty": SearchSpaceEntry.model_validate(
+            [["l2", "l1", "elasticnet"], "categorical"]),
         "alpha": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
         "learning_rate": SearchSpaceEntry.model_validate([
             ["constant", "optimal", "invscaling", "adaptive"], 
@@ -186,75 +188,3 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
         "max_iter": SearchSpaceEntry.model_validate([500, 5000, "int", 500]),
     }
 }
-
-'''
-# Общие параметры для Poisson, Gamma и Tweedie регрессоров
-GLM_COMMON = {
-    "alpha": SearchSpaceEntry(low=1e-6, high=1e-1, type="float", log=True),
-    "fit_intercept": SearchSpaceEntry(choices=[True, False], type="categorical"),
-    "max_iter": SearchSpaceEntry(low=50, high=1000, type="int", step=50),
-}
-
-DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
-    "elasticnet": {
-        "alpha": SearchSpaceEntry(low=1e-4, high=10.0, type="float", log=True),
-        "l1_ratio": SearchSpaceEntry(low=0.0, high=1.0, type="float"),
-    },
-    "lasso": {
-        "alpha": SearchSpaceEntry(low=1e-4, high=10.0, type="float", log=True),
-    },
-    "ridge": {
-        "alpha": SearchSpaceEntry(low=1e-4, high=10.0, type="float", log=True),
-    },
-    "decision_tree": {
-        "max_depth": SearchSpaceEntry(low=2, high=32, type="int", log=True),
-        "min_samples_leaf": SearchSpaceEntry(low=1, high=10, type="int"),
-    },
-    "random_forest": {
-        "n_estimators": SearchSpaceEntry(low=50, high=500, type="int", step=50),
-        "max_depth": SearchSpaceEntry(low=2, high=32, type="int", log=True),
-        "min_samples_leaf": SearchSpaceEntry(low=1, high=10, type="int"),
-        "bootstrap": SearchSpaceEntry(choices=[True, False], type="categorical"),
-    },
-    "extra_trees": {
-        "n_estimators": SearchSpaceEntry(low=50, high=500, type="int", step=50),
-        "max_depth": SearchSpaceEntry(low=2, high=32, type="int", log=True),
-        "min_samples_leaf": SearchSpaceEntry(low=1, high=10, type="int"),
-    },
-    "gradient_boosting": {
-        "n_estimators": SearchSpaceEntry(low=50, high=500, type="int", step=50),
-        "learning_rate": SearchSpaceEntry(low=0.01, high=0.3, type="float", log=True),
-        "max_depth": SearchSpaceEntry(low=2, high=5, type="int"),
-        "subsample": SearchSpaceEntry(low=0.5, high=1.0, type="float"),
-    },
-    "svr": {
-        "C": SearchSpaceEntry(low=1e-2, high=100.0, type="float", log=True),
-        "epsilon": SearchSpaceEntry(low=1e-3, high=1.0, type="float", log=True),
-        "kernel": SearchSpaceEntry(choices=["rbf", "poly", "sigmoid"], type="categorical"),
-        "gamma": SearchSpaceEntry(choices=["scale", "auto"], type="categorical"),
-    },
-    "xgb": {
-        "n_estimators": SearchSpaceEntry(low=100, high=800, type="int", step=100),
-        "learning_rate": SearchSpaceEntry(low=0.01, high=0.3, type="float", log=True),
-        "max_depth": SearchSpaceEntry(low=3, high=10, type="int"),
-        "subsample": SearchSpaceEntry(low=0.5, high=1.0, type="float"),
-        "colsample_bytree": SearchSpaceEntry(low=0.5, high=1.0, type="float"),
-        "gamma": SearchSpaceEntry(low=0.0, high=5.0, type="float"),
-    },
-    "sgdregressor": {
-        "loss": SearchSpaceEntry(
-            choices=["squared_error", "huber", "epsilon_insensitive", "squared_epsilon_insensitive"], 
-            type="categorical"
-        ),
-        "penalty": SearchSpaceEntry(choices=["l2", "l1", "elasticnet"], type="categorical"),
-        "alpha": SearchSpaceEntry(low=1e-6, high=1e-1, type="float", log=True),
-        "learning_rate": SearchSpaceEntry(
-            choices=["constant", "optimal", "invscaling", "adaptive"], 
-            type="categorical"
-        ),
-        "eta0": SearchSpaceEntry(low=1e-4, high=1e-1, type="float", log=True),
-        "l1_ratio": SearchSpaceEntry(low=0.0, high=1.0, type="float"),
-        "max_iter": SearchSpaceEntry(low=500, high=5000, type="int", step=500),
-    }
-}
-'''
