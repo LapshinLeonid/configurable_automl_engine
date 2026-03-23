@@ -27,6 +27,12 @@ jobs:
           # Устанавливаем остальные зависимости
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Lint with Ruff
+        run: ruff check src/
+        
+      - name: Type check with Mypy
+        run: mypy src --strict --ignore-missing-imports
+
       - name: Run tests
         env:
           PYTHONPATH: .

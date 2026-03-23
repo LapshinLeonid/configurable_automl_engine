@@ -23,13 +23,14 @@ These distributions are essential for the core functionality and will be install
 * **NumPy** (>=2.4.2): Base package for numerical computing and array manipulation.
 * **Scipy** (>=1.17.0): Used for advanced scientific computing and statistical functions.
 * **Pandas** (>=3.0.0): Used for data structures and high-level manipulation of tabular datasets before model ingestion. 
+* **PyArrow** (>=23.0.0): Provides a cross-language development platform for in-memory data, enabling efficient data exchange and high-performance integration with Pandas through the Arrow columnar format.
 * **Scikit-learn** (>=1.8.0): The primary library for machine learning algorithms, preprocessing tools, and validation frameworks.
 * **Imbalanced-learn** (>=0.14.1): Provides oversampling algorithms (like SMOTE) for handling datasets with skewed class distributions.
 * **Optuna**(>=4.7.0): Powers the engine to perform automated hyperparameter optimization searches.
 * **Pydantic** (>=2.12.5): Data validation and settings management using Python type annotations.
 * **PyYAML**(>=6.0.3): Implements the standard configuration schema, allowing the system to parse YAML files for model parameters and training setups.
 * **Joblib** (>=1.5.3): Provides lightweight pipelining and model serialization (saving/loading).
-* **Logging**: A centralized Python module configured to track training progress, system states, and error reporting.
+
 
 ## Optional Dependencies
 
