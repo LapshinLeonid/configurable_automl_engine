@@ -137,26 +137,26 @@ If you contribute, please ensure your code:
 
 # Project Structure
 
-├── src                                     # Project source code root
-│   └── configurable_automl_engine          # Main AutoML engine package
-│       ├── common                          # Shared utilities and helper functions
-│       │   ├── definitions.py              # Constants, enums, and schema definitions
-│       │   ├── dependency_utils.py         # Optional library and dependency checks
-│       │   ├── hyperopt_defaults.py        # Default search spaces for tuning
-│       │   ├── serialization_utils.py      # Model/pipeline serialization logic
-│       │   └── validation_utils.py         # Low-level data validation helpers
-│       ├── training_engine                 # Core orchestration and execution logic
-│       │   ├── component.py                # Pipeline building block base classes
-│       │   ├── config_parser.py            # Configuration parsing and validation
-│       │   ├── logger.py                   # Centralized logging management
-│       │   ├── metrics.py                  # Evaluation metrics implementation
-│       │   └── thread_pool.py              # Multi-threading and parallel execution
-│       ├── models.py                       # Model factory and algorithm wrappers
-│       ├── oversampling.py                 # Imbalance handling and resampling
-│       ├── trainer.py                      # Training process orchestrator
-│       ├── tuner.py                        # Hyperparameter optimization logic
-│       └── validation.py                   # High-level cross-validation strategies
-└── tests                                   # Unit and integration test suites
+├── src                                     # Project source code root  
+│   └── configurable_automl_engine          # Main AutoML engine package  
+│       ├── common                          # Shared utilities and helper functions  
+│       │   ├── definitions.py              # Constants, enums, and schema definitions  
+│       │   ├── dependency_utils.py         # Optional library and dependency checks  
+│       │   ├── hyperopt_defaults.py        # Default search spaces for tuning  
+│       │   ├── serialization_utils.py      # Model/pipeline serialization logic  
+│       │   └── validation_utils.py         # Low-level data validation helpers  
+│       ├── training_engine                 # Core orchestration and execution logic  
+│       │   ├── component.py                # Pipeline building block base classes  
+│       │   ├── config_parser.py            # Configuration parsing and validation  
+│       │   ├── logger.py                   # Centralized logging management  
+│       │   ├── metrics.py                  # Evaluation metrics implementation  
+│       │   └── thread_pool.py              # Multi-threading and parallel execution  
+│       ├── models.py                       # Model factory and algorithm wrappers  
+│       ├── oversampling.py                 # Imbalance handling and resampling  
+│       ├── trainer.py                      # Training process orchestrator  
+│       ├── tuner.py                        # Hyperparameter optimization logic  
+│       └── validation.py                   # High-level cross-validation strategies  
+└── tests                                   # Unit and integration test suites  
 
 # ⚠️ NeuroSlop Warning
 
