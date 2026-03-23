@@ -136,7 +136,7 @@ If you contribute, please ensure your code:
 * All docstrings written on English or Russian
 
 # Project Structure
-
+```
 ├── src                                     # Project source code root  
 │   └── configurable_automl_engine          # Main AutoML engine package  
 │       ├── common                          # Shared utilities and helper functions  
@@ -157,7 +157,7 @@ If you contribute, please ensure your code:
 │       ├── tuner.py                        # Hyperparameter optimization logic  
 │       └── validation.py                   # High-level cross-validation strategies  
 └── tests                                   # Unit and integration test suites  
-
+```
 # ⚠️ NeuroSlop Warning
 
 This project utilizes Large Language Models (LLMs) to assist in development and maintenance. To ensure transparency regarding the origin of the codebase, please note the following:
