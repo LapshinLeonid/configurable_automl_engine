@@ -124,3 +124,7 @@ dmypy.json
 .pyre/
 
 *.pkl
+
+src/configurable_automl_engine/_version.py
+
+*.joblib
