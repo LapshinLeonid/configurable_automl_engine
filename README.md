@@ -109,6 +109,19 @@ The example can be run from [example.py](example.py).
         results = caml.train_best_model(config=config, df=df, target='target')
         print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
+# Configuration File Structure
+
+The system uses a typed config based on Pydantic.
+
+Scheme:
+
+Supported algorithms:
+
+Supported comparison metrics:
+
+For each algorithm, the search space of hyperparameters can be constrained. Constraint formats:
+
+
 # Contributing
 
 Small improvements, fixes, reporting issues, requesting features are always appreciated. Use [ GitHub issue tracker](https://github.com/LapshinLeonid/configurable_automl_engine/issues) 
@@ -121,6 +134,28 @@ If you contribute, please ensure your code:
 * has 0 errors when checked by the mypy static analyzer with the --strict key
 * All docstrings written on English or Russian
 
+# Project Structure
+
+├── src                                     # Project source code root
+│   └── configurable_automl_engine          # Main AutoML engine package
+│       ├── common                          # Shared utilities and helper functions
+│       │   ├── definitions.py              # Constants, enums, and schema definitions
+│       │   ├── dependency_utils.py         # Optional library and dependency checks
+│       │   ├── hyperopt_defaults.py        # Default search spaces for tuning
+│       │   ├── serialization_utils.py      # Model/pipeline serialization logic
+│       │   └── validation_utils.py         # Low-level data validation helpers
+│       ├── training_engine                 # Core orchestration and execution logic
+│       │   ├── component.py                # Pipeline building block base classes
+│       │   ├── config_parser.py            # Configuration parsing and validation
+│       │   ├── logger.py                   # Centralized logging management
+│       │   ├── metrics.py                  # Evaluation metrics implementation
+│       │   └── thread_pool.py              # Multi-threading and parallel execution
+│       ├── models.py                       # Model factory and algorithm wrappers
+│       ├── oversampling.py                 # Imbalance handling and resampling
+│       ├── trainer.py                      # Training process orchestrator
+│       ├── tuner.py                        # Hyperparameter optimization logic
+│       └── validation.py                   # High-level cross-validation strategies
+└── tests                                   # Unit and integration test suites
 
 # ⚠️ NeuroSlop Warning
 
