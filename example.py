@@ -1,11 +1,10 @@
 from sklearn.datasets import load_diabetes
-# Импортируем модуль
+
 import configurable_automl_engine as caml
 
 data = load_diabetes(as_frame=True)
 df = data.frame
 
-# Конфигурация
 config = {
     "general": {
         "comparison_metric": "mae",
@@ -17,7 +16,7 @@ config = {
             {"name": "Fine Tuning", "n_trials": 200, "action": "refine_winner"}
         ],
         "log_to_file": None,
-        "parallel_strategy": "serial", # Для теста начнем с последовательного режима
+        "parallel_strategy": "serial",
         "max_workers": 1
     },
     "oversampling": {
@@ -50,4 +49,4 @@ config = {
 }
 if __name__ == "__main__":
     results = caml.train_best_model(config=config, df=df, target='target')
-    print(f"Победитель: {results['algorithm']}, Score: {results['score']:.4f}")
+    print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
