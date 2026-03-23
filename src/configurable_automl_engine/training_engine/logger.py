@@ -16,7 +16,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Type
+from typing import Any
 
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
