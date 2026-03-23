@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock ruff mypy
+          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML
           # Устанавливаем сам проект в "редактируемом" режиме, чтобы он был виден как пакет
           # Это сработает, если у вас в корне есть setup.py или pyproject.toml
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e .; fi
