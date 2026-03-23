@@ -82,7 +82,7 @@ def test_invalid_algorithm(base_params):
 
 def test_invalid_metric(base_params):
     with pytest.raises(TrainingError):
-        train_model("ElasticNet", "mse", base_params, X, y)
+        train_model("ElasticNet", "wrong_metric_name", base_params, X, y)
 
 
 def test_empty_params(base_params):
