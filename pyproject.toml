@@ -22,6 +22,7 @@ dependencies = [
     "scipy>=1.17.0",
     "optuna>=4.7.0",
     "pydantic>=2.12.5",
+    "pyarrow>23.0.0",
 ]
 
 [project.optional-dependencies]
