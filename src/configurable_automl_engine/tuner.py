@@ -137,8 +137,16 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     log=True
                     )
             elif dist_type == "categorical":
-                options = low
-                params[key] = trial.suggest_categorical(key,options)
+                # Извлекаем список опций из атрибута options или из вложенного config
+                options = getattr(value, "options", None)
+                if options is None and hasattr(value, "config"):
+                    options = getattr(value.config, "options", None)
+                
+                # Если всё еще None, откатываемся к low (для совместимости)
+                if options is None:
+                    options = low
+                    
+                params[key] = trial.suggest_categorical(key, options)
         else:
             # Если это просто значение (константа), используем как есть
             params[key] = value

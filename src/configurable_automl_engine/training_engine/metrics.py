@@ -29,6 +29,7 @@ from typing import Callable, Dict, Any, cast, Union
 import numpy as np
 import logging
 from sklearn.metrics import (mean_squared_error, 
+                             mean_absolute_error,
                              r2_score, 
                              make_scorer, 
                              get_scorer as sklearn_get_scorer
@@ -172,7 +173,9 @@ _SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
     "rmse": make_scorer(_rmse, greater_is_better=False),
     "neg_root_mean_squared_error": make_scorer(_rmse, greater_is_better=False),
-    "mae": make_scorer(mean_squared_error, greater_is_better=False), # для примера
+    "mae": make_scorer(mean_absolute_error, greater_is_better=False),
+    "mse": make_scorer(mean_squared_error, greater_is_better=False),
+
 }
 
 # Какие метрики ИЗНАЧАЛЬНО интерпретируются как «чем выше — тем лучше»
