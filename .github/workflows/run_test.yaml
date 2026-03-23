@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock
+          pip install pytest pytest-cov pytest-mock ruff mypy
           # Устанавливаем сам проект в "редактируемом" режиме, чтобы он был виден как пакет
           # Это сработает, если у вас в корне есть setup.py или pyproject.toml
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e .; fi
@@ -29,7 +29,7 @@ jobs:
 
       - name: Lint with Ruff
         run: ruff check src/
-        
+
       - name: Type check with Mypy
         run: mypy src --strict --ignore-missing-imports
 
