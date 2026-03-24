@@ -57,6 +57,13 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 _LOG = logging.getLogger("training_engine")
 
 
+def _algorithms_as_dict(algorithms_cfg) -> Dict[str, AlgoCfg]:
+    """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
+    return {
+        name: algo_cfg
+        for name in algorithms_cfg.model_fields
+        if (algo_cfg := getattr(algorithms_cfg, name)) is not None
+    }
 # --------------------------------------------------------------------------- #
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
@@ -260,6 +267,8 @@ def train_best_model(
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
+        print("CONFIG TYPE:", type(config))
+        print("ALGORITHMS:", config.get("algorithms") if isinstance(config, dict) else "N/A")
         cfg = Config.model_validate(config)
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
@@ -355,7 +364,8 @@ def train_best_model(
             raise
 
     # Начальный список кандидатов (все включенные алгоритмы)
-    current_candidates = {n: a for n, a in cfg.algorithms.items() if a.enable}
+    all_algorithms = _algorithms_as_dict(cfg.algorithms)
+    current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
     phase_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     for phase in cfg.general.phases:
         _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials}"
@@ -370,7 +380,7 @@ def train_best_model(
             select = max if greater_is_better else min
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
-            current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
+            current_candidates = {winner_algo: all_algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
         
@@ -437,7 +447,7 @@ def train_best_model(
     select = max if greater_is_better else min
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
     final_score, final_params = phase_results[winner_algo]
-    winner_cfg = cfg.algorithms[winner_algo]
+    winner_cfg = all_algorithms[winner_algo]
 
     
     

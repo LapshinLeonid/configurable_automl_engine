@@ -64,6 +64,8 @@ def _get_factory() -> dict[str, Any]:
         factory["xgboosting"] = XGBRegressor
     return factory
 
+AVAILABLE_ALGORITHMS = list(_get_factory().keys())
+
 _FACTORY = _get_factory()
 
 # ----------------------------------------------------------------------------- #

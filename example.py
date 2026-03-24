@@ -7,7 +7,7 @@ df = data.frame
 
 config = {
     "general": {
-        "comparison_metric": "mae",
+        "comparison_metric": "r2",
         "validation_strategy": "k_fold",
         "n_folds": 3,
         "path_to_model": "diabetes_model.joblib",
@@ -16,7 +16,7 @@ config = {
             {"name": "Fine Tuning", "n_trials": 200, "action": "refine_winner"}
         ],
         "log_to_file": None,
-        "parallel_strategy": "serial",
+        "parallel_strategy": "algorithms",
         "max_workers": 1
     },
     "oversampling": {
@@ -35,7 +35,7 @@ config = {
             "limit_hyperparameters": True,
             "hyperparameters": {"alpha": [0.1, 1.0]}
         },
-        "xgboost": {
+        "xgboosting": {
             "enable": True,
             "limit_hyperparameters": False,
             "hyperparameters": {

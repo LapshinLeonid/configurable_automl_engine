@@ -5,7 +5,6 @@ from configurable_automl_engine.training_engine.config_parser import Config, Val
 BASE_CFG = """
 {
     "general": {
-        "project_name": "demo",
         "validation_strategy": "k_fold",
         "phases": [
             {"name": "search", "n_trials": 1, "action": "all_algorithms"},
@@ -13,7 +12,7 @@ BASE_CFG = """
         ]
     },
     "algorithms": {
-        "logreg": {"enable": true}
+        "elasticnet": {"enable": true}
     }
 }
 """

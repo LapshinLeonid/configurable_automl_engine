@@ -56,7 +56,7 @@ algorithms:
     limit_hyperparameters: true
     hyperparameters:
       alpha: [0.1, 1.0]
-  knn:
+  nearest_neighbors_regression:
     enable: true
     limit_hyperparameters: true
     hyperparameters:
@@ -67,7 +67,7 @@ algorithms:
     hyperparameters:
       C: [0.1, 1.0]
       kernel: [linear]
-  xgboost:
+  xgboosting:
     enable: false
 """
 
@@ -108,7 +108,7 @@ def test_happy_path(tmp_path: Path, small_dataset):
         "elasticnet",
         "lasso",
         "ridge",
-        "knn",
+        "nearest_neighbors_regression",
         "svr",
     }
     assert isinstance(res["score"], float)
@@ -139,7 +139,7 @@ general:
   comparison_metric: rmse
   path_to_model: 'm.pkl'
 algorithms:
-  rf:
+  random_forest:
     enable: false
 """
     cfg_file = tmp_path / "cfg.yaml"
@@ -151,16 +151,39 @@ algorithms:
 # --------------------------------------------------------------------------- #
 #  UNSUPPORTED ALGORITHM SHOULD RAISE
 # --------------------------------------------------------------------------- #
+def _make_iae(message: str):
+    """
+    Создаёт экземпляр исключения с __class__.__name__ == 'InvalidAlgorithmError'.
+    Нужно потому что _run_hpo проверяет имя класса строкой,
+    а не через isinstance — это позволяет поймать IAE из любого модуля.
+    """
+    class InvalidAlgorithmError(Exception):
+        pass
+    return InvalidAlgorithmError(message)
+
 def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     """
-    Проверка вызова InvalidAlgorithmError при попытке использовать 
-    неподдерживаемый алгоритм (XGBoost в данном BROKEN_CFG).
+    Проверка вызова InvalidAlgorithmError при попытке использовать
+    неподдерживаемый алгоритм.
+    Покрывает ветку в _run_hpo:
+        if err.__class__.__name__ == "InvalidAlgorithmError":
+            raise _CanonicalIAE(str(err)) from err
     """
     cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(BROKEN_CFG.format(model_path="dummy_path"), "utf-8")
-    
-    with pytest.raises(InvalidAlgorithmError):
-        train_best_model(cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl")
+    cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
+
+    # Имитируем тюнер, чей optimize() бросает InvalidAlgorithmError
+    mock_tuner = MagicMock()
+    mock_tuner.optimize.side_effect = _make_iae("Algorithm not supported")
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=mock_tuner,
+    ):
+        with pytest.raises(InvalidAlgorithmError):
+            train_best_model(
+                cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
+            )
 
 from unittest.mock import patch
 from configurable_automl_engine import train_best_model
@@ -197,8 +220,8 @@ def sample_df():
 def mock_algo_cfg():
     return AlgoCfg(
         enable=True,
-        tuner="mock_tuner",
-        trainer_module="mock_trainer",
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
         hyperparameters=None
     )
 @pytest.fixture
@@ -206,7 +229,7 @@ def base_config_dict():
     """Полный валидный словарь для Pydantic модели Config"""
     return {
         "general": {
-            "comparison_metric": "accuracy",
+            "comparison_metric": "mae",
             "validation_strategy": "k_fold",
             "n_folds": 5,
             "phases": [
@@ -216,10 +239,10 @@ def base_config_dict():
             "log_to_file": None
         },
         "algorithms": {
-            "rf": {
+            "random_forest": {
                 "enable": True,
-                "tuner": "mock_tuner",
-                "trainer_module": "mock_trainer"
+                "tuner": "mock.mock_tuner",
+                "trainer_module": "mock.mock_trainer"
             }
         },
         "oversampling": {"data_oversampling": False}
@@ -243,7 +266,7 @@ class TestTrainingEngineCoverage:
                 algo_cfg=mock_algo_cfg, 
                 X=sample_df.drop(columns="target"), 
                 y=sample_df["target"],
-                metric_name_sklearn="accuracy", 
+                metric_name_sklearn="mae", 
                 n_trials=1,
                 validation_strategy=ValidationStrategy.k_fold
             )
@@ -314,7 +337,7 @@ def test_run_hpo_lacks_optimize_attr():
                 algo_cfg=algo_cfg,
                 X=pd.DataFrame({"a": [1]}),
                 y=pd.Series([1]),
-                metric_name_sklearn="accuracy",
+                metric_name_sklearn="mae",
                 n_trials=1,
                 validation_strategy=ValidationStrategy.k_fold
             )
@@ -332,7 +355,7 @@ def test_run_hpo_success_return():
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1]}),
             y=pd.Series([1]),
-            metric_name_sklearn="accuracy",
+            metric_name_sklearn="mae",
             n_trials=1,
             validation_strategy=ValidationStrategy.train_test_split
         )
@@ -348,10 +371,10 @@ def test_train_best_model_missing_target_column():
 def test_train_best_model_config_from_dict_and_refine_flow():
     valid_config_dict = {
         "general": {
-            "comparison_metric": "accuracy",
+            "comparison_metric": "mae",
             "validation_strategy": "k_fold",
             "n_folds": 2,
-            "parallel_strategy": "none",
+            "parallel_strategy": "algorithms",
             "phases": [
                 {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
                 {"name": "p2", "n_trials": 1, "action": "refine_winner"}
@@ -359,7 +382,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
             "path_to_model": "model.pkl"
         },
         "algorithms": {
-            "logreg": {
+            "elasticnet": {
                 "enable": True, 
                 "tuner": "unittest.mock", 
                 "trainer_module": "unittest.mock"
@@ -379,7 +402,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
         with patch("configurable_automl_engine.training_engine.component._fit_and_save") as mock_save:
             result = train_best_model(config=valid_config_dict, df=df, target="target")
             
-            assert result["algorithm"] == "logreg"
+            assert result["algorithm"] == "elasticnet"
             # Ожидаем 2 вызова: по одному на каждую фазу
             assert mock_hpo.call_count == 2
             mock_save.assert_called_once()
@@ -387,12 +410,12 @@ def test_train_best_model_refine_winner_error_coverage():
     """ Ошибка при refine_winner в самой первой фазе"""
     invalid_dict = {
         "general": {
-            "comparison_metric": "accuracy",
+            "comparison_metric": "mae",
             "validation_strategy": "train_test_split",
             "phases": [{"name": "fail", "n_trials": 1, "action": "refine_winner"}],
             "path_to_model": "test.pkl"
         },
-        "algorithms": {"a": {"enable": True, "tuner": "t", "trainer_module": "m"}},
+        "algorithms": {"elasticnet": {"enable": True}},
         "oversampling": {"enable": False}
     }
     df = pd.DataFrame({"f": [1, 2], "target": [0, 1]})

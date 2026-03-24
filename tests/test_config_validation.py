@@ -179,11 +179,11 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
             "validation_strategy": "train_test_split" 
         },
         "algorithms": {
-            "xgboost": {"enable": True}
+            "xgboosting": {"enable": True}
         }
     }
     
-    expected_msg = "Алгоритм 'xgboost' включён, но пакет 'xgboost' не установлен"
+    expected_msg = "Алгоритм 'xgboosting' включён, но пакет 'xgboost' не установлен"
     with pytest.raises(ValueError, match=expected_msg):
         Config.model_validate(data)
 
@@ -203,17 +203,17 @@ def test_config_skips_disabled_algorithms_dependency_check():
         },
         "algorithms": {
             "some_custom_algo": {"enable": True},
-            "xgboost": {"enable": False}
+            "xgboosting": {"enable": False}
         }
     }
     # Имитируем отсутствие библиотеки xgboost в системе
     with patch("configurable_automl_engine.common.dependency_utils.is_installed", return_value=False):
         # Если continue работает, объект будет создан успешно.
-        # Если continue не сработает, вылетит ValueError: "Алгоритм 'xgboost' включён..."
+        # Если continue не сработает, вылетит ValueError: "Алгоритм 'xgboosting' включён..."
         config = Config(**config_data)
     
     assert config.algorithms["xgboost"].enable is False
-    assert "xgboost" in config.algorithms
+    assert "xgboosting" in config.algorithms
 
 # 1. Тест для: if self.low > self.high: raise ValueError(...)
 def test_numeric_space_range_validation():

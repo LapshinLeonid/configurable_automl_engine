@@ -26,14 +26,27 @@ import yaml
 import logging
 from enum import Enum
 from pathlib import Path
+import re
 from typing import Any, Dict, Optional, Literal, List
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator, create_model
 from configurable_automl_engine.common.definitions import (ValidationStrategy, 
                                                            SerializationFormat,
-                                                           ALGO_PACKAGE_MAPPING)
+                                                           ALGO_PACKAGE_MAPPING,
+                                                           ParallelStrategy)
 from configurable_automl_engine.common.dependency_utils import is_installed
 
 from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
+
+from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+from configurable_automl_engine.training_engine.metrics import AVAILABLE_METRICS
+
+# Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
+ComparisonMetric = Literal[tuple(AVAILABLE_METRICS)] 
+
+from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+_DOTTED_PATH_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
 
 __all__ = [
     "AlgoCfg",
@@ -54,9 +67,11 @@ class HPOPhaseCfg(BaseModel):
         action (str): Тип действия ('all_algorithms' или 'refine_winner'), 
             определяющий область поиска.
     """
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(
         ..., 
-        description=("Уникальное название фазы оптимизации"
+        description=("Определенное пользователем название фазы оптимизации"
                      " (например, 'coarse_search' или 'fine_tuning')")
     )
     n_trials: int = Field(
@@ -76,7 +91,7 @@ class GeneralCfg(BaseModel):
     метрик, стратегий оценки качества (Cross-Validation / Hold-out) 
     и распределение вычислительных ресурсов.
     Attributes:
-        comparison_metric (str): Основная метрика для ранжирования моделей.
+        comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.
         path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.
         serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
         log_to_file (Path | None): Файл для записи логов работы движка.
@@ -87,7 +102,9 @@ class GeneralCfg(BaseModel):
         max_workers (int | None): Лимит потоков или процессов.
         parallel_mode (str): Технический режим исполнения ('threads' или 'processes').
     """
-    comparison_metric: str = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    comparison_metric: ComparisonMetric = Field(
         default="r2",
         description=("Метрика для сравнения моделей"
                      " и выбора лучшей (например, r2, rmse, accuracy)")
@@ -119,7 +136,7 @@ class GeneralCfg(BaseModel):
         description=("Количество блоков (фолдов) для кросс-валидации." 
                      "Используется только если validation_strategy = 'k_fold'")
     )
-    parallel_strategy: str = Field(
+    parallel_strategy: ParallelStrategy = Field(
         default="algorithms",
         description=("Стратегия распараллеливания." 
                      "Сейчас поддерживается только 'algorithms'"
@@ -185,7 +202,7 @@ class OversamplingCfg(BaseModel):
         algorithm (OversamplingAlgorithm): Выбранный метод генерации 
             (SMOTE, ADASYN и др.).
     """
-    model_config = ConfigDict(populate_by_name=True)  # принимать alias‑имена
+    model_config = ConfigDict(populate_by_name=True,extra="forbid")  # принимать alias‑имена
     enable: bool = Field(
         default=False,
         alias="data_oversampling",
@@ -225,13 +242,15 @@ class AlgoCfg(BaseModel):
         tuner (str): Dotted-path к модулю оптимизатора.
         trainer_module (str): Dotted-path к реализации обучения модели.
     """
+    model_config = ConfigDict(extra="forbid")
+
     enable: bool = Field(
         default=True, 
         description="Использовать ли данный алгоритм в пайплайне AutoML"
     )
     limit_hyperparameters: bool = Field(
         default=False,
-        description=("Если True, ограничивает пространство поиска"
+        description=("Если True, ограничивает пространство поиска "
                      "только базовыми параметрами (ускоряет работу)"
         )
     )
@@ -241,11 +260,11 @@ class AlgoCfg(BaseModel):
                      "Ключ — имя параметра"
         )
     )
-    tuner: str = Field(
+    tuner: Optional[str] = Field(
         default="configurable_automl_engine.tuner",
         description="Путь к модулю тюнера для оптимизации гиперпараметров"
     )
-    trainer_module: str = Field(
+    trainer_module: Optional[str] = Field(
         default="configurable_automl_engine.trainer",
         description=(
             "Dotted-path к модулю, содержащему класс `ModelTrainer`"
@@ -270,9 +289,23 @@ class AlgoCfg(BaseModel):
     @field_validator("tuner", "trainer_module")
     @classmethod
     def _must_not_be_empty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("module path must be non-empty")
+        if v is None:
+            return v
+        if not _DOTTED_PATH_RE.fullmatch(v):
+            raise ValueError(
+                f"'{v}' не является валидным dotted-path "
+                "(ожидается формат 'package.module' или 'a.b.c.Class')"
+            )
         return v
+
+class _AlgorithmsConfigBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+AlgorithmsConfig = create_model(
+    "AlgorithmsConfig",
+    __base__=_AlgorithmsConfigBase,
+    **{name: (Optional[AlgoCfg], None) for name in AVAILABLE_ALGORITHMS},
+)
 # ─────────────────── root ──────────────────── #
 class Config(BaseModel):
     """Корневой объект всей системы конфигурации AutoML.
@@ -282,8 +315,10 @@ class Config(BaseModel):
     Attributes:
         general (GeneralCfg): Общие параметры эксперимента.
         oversampling (OversamplingCfg): Настройки предобработки данных.
-        algorithms (Dict[str, AlgoCfg]): Реестр доступных и активных алгоритмов.
+        algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.
     """
+    model_config = ConfigDict(extra="forbid")
+    
     general: GeneralCfg = Field(
         ..., 
         description="Общие настройки эксперимента и валидации"
@@ -292,7 +327,7 @@ class Config(BaseModel):
         default = OversamplingCfg(),
         description="Настройки балансировки данных"
     )
-    algorithms: Dict[str, AlgoCfg] = Field(
+    algorithms: AlgorithmsConfig = Field(
         ..., 
         description=(
             "Словарь алгоритмов, где ключ — имя алгоритма "
@@ -301,9 +336,16 @@ class Config(BaseModel):
     )
     @field_validator("algorithms")
     @classmethod
-    def _must_have_enabled(cls, v: Dict[str, AlgoCfg]) -> Dict[str, AlgoCfg]:
-        if not any(a.enable for a in v.values()):
-            raise ValueError("no algorithms enabled in config")
+    def _must_have_enabled(cls, v: Any) -> Any:
+        # Поскольку 'v' теперь — это AlgorithmsConfig (объект), 
+        # мы получаем все его поля через .model_dump()
+        enabled_algorithms = [
+            algo for algo in v.model_dump().values() 
+            if algo is not None and algo.get("enable") is True
+        ]
+        
+        if not enabled_algorithms:
+            raise ValueError("Хотя бы один алгоритм должен быть включен (enable: true)")
         return v
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> "Config":
@@ -320,7 +362,13 @@ class Config(BaseModel):
             ValueError: Если для включенного алгоритма 
             отсутствует необходимая библиотека.
         """
-        for name, algo_cfg in self.algorithms.items():
+        for name in self.algorithms.model_fields:
+            algo_cfg = getattr(self.algorithms, name)
+            
+            # Пропускаем не заданные в конфиге алгоритмы
+            if algo_cfg is None:
+                continue
+            
             if not algo_cfg.enable:
                 continue
             required_pkg = algo_cfg.get_required_package(name)
