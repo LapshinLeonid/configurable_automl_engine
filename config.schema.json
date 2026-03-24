@@ -1,6 +1,7 @@
 {
   "$defs": {
     "AlgoCfg": {
+      "additionalProperties": false,
       "description": "Техническая конфигурация конкретного ML-алгоритма в пайплайне.\n\nХранит настройки включения алгоритма, переопределенные пространства \nпоиска и пути к программным модулям тренера и тюнера.\nAttributes:\n    enable (bool): Флаг участия алгоритма в текущем эксперименте.\n    limit_hyperparameters (bool): Режим сокращенного пространства поиска.\n    hyperparameters (Dict | None): Кастомные границы параметров, \n        перекрывающие значения по умолчанию.\n    tuner (str): Dotted-path к модулю оптимизатора.\n    trainer_module (str): Dotted-path к реализации обучения модели.",
       "properties": {
         "enable": {
@@ -19,12 +20,7 @@
           "anyOf": [
             {
               "additionalProperties": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/SearchSpaceEntry"
-                  },
-                  {}
-                ]
+                "$ref": "#/$defs/SearchSpaceEntry"
               },
               "type": "object"
             },
@@ -33,7 +29,7 @@
             }
           ],
           "default": null,
-          "description": "Переопределение пространства поиска гиперпараметров.Ключ — имя параметра",
+          "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. См. ALGO_HYPERPARAMETER_REGISTRY.",
           "title": "Hyperparameters"
         },
         "tuner": {
@@ -291,7 +287,22 @@
           "type": "string"
         },
         "options": {
-          "items": {},
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
           "title": "Options",
           "type": "array"
         }
@@ -344,6 +355,7 @@
       "type": "object"
     },
     "GeneralCfg": {
+      "additionalProperties": false,
       "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор \nметрик, стратегий оценки качества (Cross-Validation / Hold-out) \nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').",
       "properties": {
         "comparison_metric": {
@@ -440,6 +452,7 @@
       "type": "object"
     },
     "HPOPhaseCfg": {
+      "additionalProperties": false,
       "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя \nвыстраивать многоступенчатые стратегии поиска (например, сначала \nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'), \n        определяющий область поиска.",
       "properties": {
         "name": {
@@ -519,6 +532,7 @@
       "type": "string"
     },
     "OversamplingCfg": {
+      "additionalProperties": false,
       "description": "Параметры балансировки классов и синтеза данных.\n\nОбеспечивает конфигурацию методов устранения дисбаланса целевой переменной. \nИспользует механизм псевдонимов (aliases) для маппинга плоских ключей \nYAML в структурированный объект.\nAttributes:\n    enable (bool): Глобальный флаг включения оверсэмплинга.\n    multiplier (float): Целевой коэффициент увеличения выборки.\n    algorithm (OversamplingAlgorithm): Выбранный метод генерации \n        (SMOTE, ADASYN и др.).",
       "properties": {
         "data_oversampling": {
@@ -603,6 +617,7 @@
       "type": "string"
     }
   },
+  "additionalProperties": false,
   "description": "Корневой объект всей системы конфигурации AutoML.\n\nАгрегирует все секции настроек и выполняет финальную валидацию \nцелостности графа параметров, включая проверку системных зависимостей.\nAttributes:\n    general (GeneralCfg): Общие параметры эксперимента.\n    oversampling (OversamplingCfg): Настройки предобработки данных.\n    algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.",
   "properties": {
     "general": {

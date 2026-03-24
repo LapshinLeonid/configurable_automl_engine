@@ -35,7 +35,8 @@ from configurable_automl_engine.common.definitions import (ValidationStrategy,
                                                            ParallelStrategy)
 from configurable_automl_engine.common.dependency_utils import is_installed
 
-from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
+from configurable_automl_engine.common.hyperopt_defaults import (SearchSpaceEntry,
+                                                                  ALGO_HYPERPARAMETER_REGISTRY)
 
 from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
@@ -173,7 +174,7 @@ class GeneralCfg(BaseModel):
             and not is_installed("joblib")
         ):
             raise ValueError(
-                "serialization_format='joblib' требует установленный пакет 'joblib'"
+                "serialization_format='joblib' requires the 'joblib' package to be installed"
             )
         if self.n_folds < 1:
             raise ValueError("`n_folds` must be at least 1")
@@ -182,7 +183,7 @@ class GeneralCfg(BaseModel):
             self.validation_strategy == ValidationStrategy.k_fold
             and self.n_folds < 2
         ):
-            raise ValueError("`n_folds` must be ≥ 2 при k-fold валидации")
+            raise ValueError("n_folds must be ≥ 2 for k-fold validation")
         return self
 # ──────────────── oversampling ──────────────── #
 class OversamplingAlgorithm(str, Enum):
@@ -224,11 +225,12 @@ class OversamplingCfg(BaseModel):
     def _validate_oversampling_logic(self) -> "OversamplingCfg":
         if self.enable and self.multiplier == 1.0:
             logging.getLogger(__name__).warning(
-                "Oversampling multiplier = 1 ➜ баланс классов не изменится."
+                "Oversampling multiplier = 1 ➜ class balance will not change."
             )
         return self
 
 # ───────────────── algorithms ───────────────── #
+
 class AlgoCfg(BaseModel):
     """Техническая конфигурация конкретного ML-алгоритма в пайплайне.
     
@@ -244,6 +246,7 @@ class AlgoCfg(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
+
     enable: bool = Field(
         default=True, 
         description="Использовать ли данный алгоритм в пайплайне AutoML"
@@ -254,10 +257,11 @@ class AlgoCfg(BaseModel):
                      "только базовыми параметрами (ускоряет работу)"
         )
     )
-    hyperparameters: Dict[str, SearchSpaceEntry | Any] | None = Field(
+    hyperparameters: Dict[str, SearchSpaceEntry] | None = Field(
         default=None,
-        description=("Переопределение пространства поиска гиперпараметров."
-                     "Ключ — имя параметра"
+        description=(
+            "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. "
+            "См. ALGO_HYPERPARAMETER_REGISTRY."
         )
     )
     tuner: Optional[str] = Field(
@@ -286,6 +290,32 @@ class AlgoCfg(BaseModel):
                 если зависимость не определена.
         """
         return ALGO_PACKAGE_MAPPING.get(algo_name)
+    
+    def get_unknown_hyperparameters(self, algo_name: str) -> List[str]:
+        """Вернуть список гиперпараметров, несовместимых с данным алгоритмом.
+
+        Сверяет ключи `self.hyperparameters` с допустимым множеством из
+        `ALGO_HYPERPARAMETER_REGISTRY`. Если алгоритм отсутствует в реестре —
+        проверка пропускается (мягкий fallback).
+
+        Args:
+            algo_name (str): Уникальный идентификатор алгоритма.
+        Returns:
+            List[str]: Список недопустимых ключей. Пустой список — всё корректно.
+        """
+        if self.hyperparameters is None:
+            return []
+        allowed = ALGO_HYPERPARAMETER_REGISTRY.get(algo_name)
+        
+        if not allowed: 
+            return []
+        
+        if allowed is None:
+            logging.getLogger(__name__).warning(
+                f"Algorithm '{algo_name}' not found in registry - check skipped"
+            )
+            return []
+        return [k for k in self.hyperparameters if k not in allowed]
     @field_validator("tuner", "trainer_module")
     @classmethod
     def _must_not_be_empty(cls, v: str) -> str:
@@ -293,8 +323,7 @@ class AlgoCfg(BaseModel):
             return v
         if not _DOTTED_PATH_RE.fullmatch(v):
             raise ValueError(
-                f"'{v}' не является валидным dotted-path "
-                "(ожидается формат 'package.module' или 'a.b.c.Class')"
+                f"'{v}' is not a valid dotted path (expecting 'package.module' or 'a.b.c.Class' format)"
             )
         return v
 
@@ -318,7 +347,7 @@ class Config(BaseModel):
         algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.
     """
     model_config = ConfigDict(extra="forbid")
-    
+
     general: GeneralCfg = Field(
         ..., 
         description="Общие настройки эксперимента и валидации"
@@ -345,39 +374,56 @@ class Config(BaseModel):
         ]
         
         if not enabled_algorithms:
-            raise ValueError("Хотя бы один алгоритм должен быть включен (enable: true)")
+            raise ValueError("At least one algorithm must be enabled (enable: true)")
         return v
+        
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> "Config":
-        """Проверить наличие установленных зависимостей для всех активных алгоритмов.
-        
-        Логика проверки:
-        1. Итерируется по словарю алгоритмов, пропуская отключенные (`enable=False`).
-        2. Для каждого активного алгоритма запрашивает имя требуемого пакета.
-        3. Использует `is_installed` для проверки окружения.
-        
-        Returns:
-            Config: Полностью провалидированный корневой объект конфигурации.
-        Raises:
-            ValueError: Если для включенного алгоритма 
-            отсутствует необходимая библиотека.
-        """
+        # 1. Ensure self.algorithms is not None itself
+        if self.algorithms is None:
+            return self
+        # 2. Iterate safely over the fields defined in the model class
+        # Using __fields__ or model_fields to get the structure safely
         for name in self.algorithms.model_fields:
+            # Get the attribute value (could be None if not provided in data)
             algo_cfg = getattr(self.algorithms, name)
             
-            # Пропускаем не заданные в конфиге алгоритмы
+            # Skip if the algorithm entry is missing (None)
             if algo_cfg is None:
                 continue
+                
+            # Ensure it has an 'enable' attribute before checking it
+            # If it's a Pydantic model, check attribute, otherwise get() as dict
+            enabled = getattr(algo_cfg, 'enable', False)
             
-            if not algo_cfg.enable:
+            if enabled:
+                # Safely get the required package
+                required_pkg = getattr(algo_cfg, 'get_required_package', lambda n: None)(name)
+                
+                if required_pkg and not is_installed(required_pkg):
+                    raise ValueError(
+                        f"Algorithm '{name}' is enabled, but the package "
+                        f"'{required_pkg}' is not installed. "
+                        f"Please run: pip install {required_pkg}"
+                    )
+        return self
+    
+    @model_validator(mode="after")
+    def _check_hyperparameter_compatibility(self) -> "Config":
+        errors = []
+        for name in self.algorithms.model_fields:
+            algo_cfg = getattr(self.algorithms, name)
+            if algo_cfg is None or not algo_cfg.enable:
                 continue
-            required_pkg = algo_cfg.get_required_package(name)
-            if required_pkg and not is_installed(required_pkg):
-                raise ValueError(
-                    f"Алгоритм '{name}' включён, "
-                    f"но пакет '{required_pkg}' не установлен. "
-                    f"Пожалуйста, выполните: pip install {required_pkg}"
+            unknown = algo_cfg.get_unknown_hyperparameters(name)
+            if unknown:
+                allowed = sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
+                errors.append(
+                    f"Algorithm '{name}': unknown hyperparameters {unknown}. "
+                    "Allowed parameters: {allowed}"
                 )
+        if errors:
+            raise ValueError("\n".join(errors))
         return self
 # ────────────────── API ────────────────────── #
 def read_config(path: str | Path) -> Config:

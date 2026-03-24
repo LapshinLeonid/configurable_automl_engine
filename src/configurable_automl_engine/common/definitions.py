@@ -19,8 +19,7 @@ class SerializationFormat(str, Enum):
     joblib = "joblib"
 
 ALGO_PACKAGE_MAPPING: dict[str, str] = {
-    "xgboost": "xgboost",
-    "sklearn_rf": "scikit-learn",
+    "xgboosting": "xgboost",
 }
 
 class ParallelStrategy(str, Enum):

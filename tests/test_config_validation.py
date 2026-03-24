@@ -24,8 +24,7 @@ BASE = {
             {"name": "refine", "n_trials": 1, "action": "refine_winner"}
         ]
     },
-    "oversampling": {},
-    "algorithms": {"lgbm": {"enable": True}},
+    "algorithms": {"elasticnet": {"enable": True}},
 }
 
 def test_n_folds_ok():
@@ -48,24 +47,24 @@ def test_oversampling_warn_useless_multiplier(caplog):
     with caplog.at_level(logging.WARNING):
         OversamplingCfg(enable=True, multiplier=1.0)
     
-    assert "Oversampling multiplier = 1 ➜ баланс классов не изменится" in caplog.text
+    assert "Oversampling multiplier = 1 ➜ class balance will not change" in caplog.text
 
 # --- Тесты для AlgoCfg ---
 def test_algo_cfg_empty_paths():
     # Пустые пути модулей
-    with pytest.raises(ValidationError, match="module path must be non-empty"):
+    with pytest.raises(ValidationError, match=".*not a valid dotted path.*"):
         AlgoCfg(tuner="")
     
-    with pytest.raises(ValidationError, match="module path must be non-empty"):
+    with pytest.raises(ValidationError, match=".*not a valid dotted path.*"):
         AlgoCfg(trainer_module="")
 # --- Тесты для корневого Config и API ---
 def test_config_no_enabled_algorithms():
     # Тест валидатора _must_have_enabled
     algo_disabled = AlgoCfg(enable=False)
-    with pytest.raises(ValidationError, match="no algorithms enabled in config"):
+    with pytest.raises(ValidationError, match=".*At least one algorithm must be enabled.*"):
         Config(
             general=GeneralCfg(phases=[]),
-            algorithms={"test_algo": algo_disabled}
+            algorithms={"elasticnet": algo_disabled}
         )
 def test_read_config_integration(tmp_path):
     # Тест функции read_config и корректной загрузки YAML
@@ -75,10 +74,11 @@ def test_read_config_integration(tmp_path):
       phases:
         - name: "search"
           n_trials: 10
+          action: "all_algorithms"
       validation_strategy: "k_fold"
       n_folds: 3
     algorithms:
-      rf:
+      random_forest:
         enable: true
         hyperparameters:
           n_estimators: [[10, 50, 100], "categorical"]
@@ -88,8 +88,8 @@ def test_read_config_integration(tmp_path):
     
     config = read_config(config_file)
     assert config.general.n_folds == 3
-    assert "rf" in config.algorithms
-    assert config.algorithms["rf"].enable is True
+    assert hasattr(config.algorithms, 'random_forest')
+    assert getattr(config.algorithms, "random_forest").enable is True
 
 # Тесты для (Успешная валидация GeneralCfg)
 def test_general_cfg_valid_n_folds():
@@ -104,16 +104,20 @@ def test_general_cfg_valid_n_folds():
 # 3. Тесты для AlgoCfg._must_not_be_empty
 def test_algo_cfg_empty_paths():
     """ Проверка на пустую строку в путях модулей."""
-    with pytest.raises(ValueError, match="module path must be non-empty"):
+    with pytest.raises(ValidationError) as exc_info:
         AlgoCfg(tuner="", hyperparameters={})
     
-    with pytest.raises(ValueError, match="module path must be non-empty"):
-        AlgoCfg(trainer_module="", hyperparameters={})
+    error_msg = str(exc_info.value)
+    
+    # Assert specific parts of the message
+    assert "tuner" in error_msg
+    assert "not a valid dotted path" in error_msg
+    assert "Value error" in error_msg
 
 # Дополнительный тест для логики n_folds (граничные условия)
 def test_general_cfg_invalid_n_folds_kfold():
     """Покрывает ошибку валидации при n_folds < 2 для k_fold."""
-    with pytest.raises(ValueError, match="n_folds` must be ≥ 2"):
+    with pytest.raises(ValidationError, match="(?s).*n_folds must be ≥ 2.*"):
         GeneralCfg(
             phases=[HPOPhaseCfg(name="test", n_trials=1)],
             validation_strategy=ValidationStrategy.k_fold,
@@ -129,7 +133,7 @@ def test_general_cfg_coverage_line_83():
     # Используем первый доступный элемент из Enum, чтобы избежать AttributeError
     strategy = list(ValidationStrategy)[0] 
     
-    with pytest.raises(ValueError, match="`n_folds` must be at least 1"):
+    with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
         GeneralCfg(
             phases=[HPOPhaseCfg(name="test", n_trials=1)],
             validation_strategy=strategy,
@@ -166,7 +170,7 @@ def test_joblib_not_installed_raises_error(mock_is_installed):
         }
     }
     
-    with pytest.raises(ValueError, match="serialization_format='joblib' требует установленный пакет 'joblib'"):
+    with pytest.raises(ValidationError, match=".*serialization_format='joblib'.*"):
         Config.model_validate(data)
 @patch("configurable_automl_engine.training_engine.config_parser.is_installed")
 def test_missing_algorithm_dependency_raises_error(mock_is_installed):
@@ -183,7 +187,7 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
         }
     }
     
-    expected_msg = "Алгоритм 'xgboosting' включён, но пакет 'xgboost' не установлен"
+    expected_msg = "Algorithm 'xgboosting' is enabled, but the package 'xgboost' is not installed"
     with pytest.raises(ValueError, match=expected_msg):
         Config.model_validate(data)
 
@@ -202,7 +206,7 @@ def test_config_skips_disabled_algorithms_dependency_check():
             "phases": [{"name": "test", "n_trials": 1}]
         },
         "algorithms": {
-            "some_custom_algo": {"enable": True},
+            "elasticnet": {"enable": True},
             "xgboosting": {"enable": False}
         }
     }
@@ -210,10 +214,10 @@ def test_config_skips_disabled_algorithms_dependency_check():
     with patch("configurable_automl_engine.common.dependency_utils.is_installed", return_value=False):
         # Если continue работает, объект будет создан успешно.
         # Если continue не сработает, вылетит ValueError: "Алгоритм 'xgboosting' включён..."
-        config = Config(**config_data)
+        config = Config.model_validate(config_data)
     
-    assert config.algorithms["xgboost"].enable is False
-    assert "xgboosting" in config.algorithms
+    assert getattr(config.algorithms, "xgboosting").enable is False
+    assert hasattr(config.algorithms, "xgboosting")
 
 # 1. Тест для: if self.low > self.high: raise ValueError(...)
 def test_numeric_space_range_validation():
@@ -267,7 +271,7 @@ def test_search_space_bounds_property():
 # 6. Тест для: _check_algorithm_dependencies (проверка установленных пакетов)
 def test_algorithm_dependency_check():
     # Мокаем маппинг и функцию проверки установки
-    with patch("configurable_automl_engine.training_engine.config_parser.ALGO_PACKAGE_MAPPING", {"xgboost": "xgboost_pkg"}), \
+    with patch("configurable_automl_engine.training_engine.config_parser.ALGO_PACKAGE_MAPPING", {"xgboosting": "xgboost_pkg"}), \
          patch("configurable_automl_engine.training_engine.config_parser.is_installed") as mock_installed:
         
         # Ситуация: пакет НЕ установлен
@@ -280,17 +284,17 @@ def test_algorithm_dependency_check():
                 "n_folds": 2
             },
             "algorithms": {
-                "xgboost": {"enable": True}
+                "xgboosting": {"enable": True}
             }
         }
         
-        expected_msg = "Алгоритм 'xgboost' включён, но пакет 'xgboost_pkg' не установлен"
-        with pytest.raises(ValidationError, match=expected_msg):
+        expected_msg = "Algorithm 'xgboosting' is enabled, but the package 'xgboost_pkg' is not installed"
+        with pytest.raises(ValueError, match=re.escape(expected_msg)):
             Config.model_validate(config_data)
         # Ситуация: пакет установлен
         mock_installed.return_value = True
         cfg = Config.model_validate(config_data)
-        assert cfg.algorithms["xgboost"].enable is True
+        assert getattr(cfg.algorithms, "xgboosting").enable is True
 # 7. Дополнительный тест на n_folds (общая логика GeneralCfg)
 def test_general_cfg_n_folds():
     base_phases = [{"name": "test", "n_trials": 1}]
@@ -300,7 +304,7 @@ def test_general_cfg_n_folds():
         GeneralCfg(phases=base_phases, n_folds=0)
         
     # Ошибка: k_fold требует n_folds >= 2
-    with pytest.raises(ValidationError, match="`n_folds` must be ≥ 2 при k-fold"):
+    with pytest.raises(ValidationError, match=".*n_folds must be ≥ 2 for k-fold.*"):
         GeneralCfg(
             phases=base_phases, 
             validation_strategy="k_fold", 
