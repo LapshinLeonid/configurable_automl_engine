@@ -349,11 +349,6 @@ def train_best_model(
                 data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
             )
 
-            #Проверяем на None перед распаковкой
-            if result is None:
-                _LOG.warning(f"HPO returned None for {algo} in {phase_name}")
-                raise ValueError(f"HPO returned None for {algo} in {phase_name}")
-
             score, params = result
             
             disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score

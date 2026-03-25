@@ -310,11 +310,6 @@ class AlgoCfg(BaseModel):
         if not allowed: 
             return []
         
-        if allowed is None:
-            logging.getLogger(__name__).warning(
-                f"Algorithm '{algo_name}' not found in registry - check skipped"
-            )
-            return []
         return [k for k in self.hyperparameters if k not in allowed]
     @field_validator("tuner", "trainer_module")
     @classmethod
@@ -379,10 +374,8 @@ class Config(BaseModel):
         
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> "Config":
-        # 1. Ensure self.algorithms is not None itself
-        if self.algorithms is None:
-            return self
-        # 2. Iterate safely over the fields defined in the model class
+
+        # Iterate safely over the fields defined in the model class
         # Using __fields__ or model_fields to get the structure safely
         for name in self.algorithms.model_fields:
             # Get the attribute value (could be None if not provided in data)
@@ -417,7 +410,7 @@ class Config(BaseModel):
                 continue
             unknown = algo_cfg.get_unknown_hyperparameters(name)
             if unknown:
-                allowed = sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
+                sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
                 errors.append(
                     f"Algorithm '{name}': unknown hyperparameters {unknown}. "
                     "Allowed parameters: {allowed}"

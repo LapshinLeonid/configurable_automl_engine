@@ -57,7 +57,7 @@ class SearchSpaceEntry(BaseModel):
             объект конкретного типа распределения.
     """
     config: Annotated[
-        Union[CategoricalSpace, FloatSpace, IntSpace],
+        Union[CategoricalSpace[Any], FloatSpace, IntSpace],
         Field(discriminator="type")
     ]
     @model_validator(mode="before")
@@ -87,8 +87,6 @@ class SearchSpaceEntry(BaseModel):
         if len(data) == 1:
             # Одиночное значение → категориальное распределение с одним вариантом
             return {"config": {"type": "categorical", "options": data}}
-        if len(data) < 2:
-            raise ValueError("Search space list must have at least 2 elements")
         if data[1] == "categorical":
             return {"config": {"type": "categorical", "options": data[0]}}
         if len(data) >= 3:
@@ -224,7 +222,7 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
     "gaussian_process_regression": {},
 }
 
-ALGO_HYPERPARAMETER_REGISTRY: Dict[str, set] = {
+ALGO_HYPERPARAMETER_REGISTRY: Dict[str, set[str]] = {
     algo: set(params.keys())
     for algo, params in DEFAULT_SPACES.items()
 }

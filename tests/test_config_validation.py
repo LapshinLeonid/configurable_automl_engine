@@ -1,7 +1,6 @@
 import pytest
 import logging
 import re
-from pathlib import Path
 from pydantic import ValidationError
 from configurable_automl_engine.training_engine.config_parser import (
     GeneralCfg, OversamplingCfg, SearchSpaceEntry, AlgoCfg, Config, read_config, HPOPhaseCfg, 
@@ -310,3 +309,87 @@ def test_general_cfg_n_folds():
             validation_strategy="k_fold", 
             n_folds=1
         )
+
+def test_get_unknown_hyperparameters_none():
+    cfg = AlgoCfg(hyperparameters=None)
+    assert cfg.get_unknown_hyperparameters("xgboosting") == []
+
+
+def test_get_unknown_hyperparameters_empty_allowed(monkeypatch):
+    cfg = AlgoCfg(
+        hyperparameters={"a": [1, 10]}  # ✅ как в YAML
+    )
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {"xgboost": set()}
+    )
+
+    assert cfg.get_unknown_hyperparameters("xgboost") == []
+
+
+def test_get_unknown_hyperparameters_valid(monkeypatch):
+    cfg = AlgoCfg(
+        hyperparameters={"lr": [0.0, 1.0]}  # ✅
+    )
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {"xgboost": {"lr"}}
+    )
+
+    assert cfg.get_unknown_hyperparameters("xgboost") == []
+
+
+def test_get_unknown_hyperparameters_unknown(monkeypatch):
+    cfg = AlgoCfg(
+        hyperparameters={"bad_param": [1, 10]}  # ✅
+    )
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {"xgboost": {"lr"}}
+    )
+
+    assert cfg.get_unknown_hyperparameters("xgboost") == ["bad_param"]
+
+
+def test_validator_allows_none():
+    cfg = AlgoCfg(tuner=None, trainer_module=None)
+    assert cfg.tuner is None
+    assert cfg.trainer_module is None
+
+
+def test_validator_valid_path():
+    cfg = AlgoCfg(tuner="a.b", trainer_module="x.y.z")
+    assert cfg.tuner == "a.b"
+
+
+def test_validator_invalid_path():
+    with pytest.raises(ValueError):
+        AlgoCfg(tuner="invalid-path")
+
+def test_hyperparameter_compatibility_error(monkeypatch):
+    from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+    algo_name = AVAILABLE_ALGORITHMS[0]
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {algo_name: {"lr"}}
+    )
+
+    cfg_data = {
+        "general": {"phases": [{"name": "p1", "n_trials": 1}]},
+        "algorithms": {
+            algo_name: {
+                "enable": True,
+                "hyperparameters": {
+                    "bad": [1, 10]
+                }
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="unknown hyperparameters"):
+        Config.model_validate(cfg_data)

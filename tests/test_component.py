@@ -421,3 +421,24 @@ def test_train_best_model_refine_winner_error_coverage():
     df = pd.DataFrame({"f": [1, 2], "target": [0, 1]})
     with pytest.raises(RuntimeError, match="requires a winner"):
         train_best_model(config=invalid_dict, df=df, target="target")
+
+# 1. Тест на логирование ошибки в _run_hpo
+def test_run_hpo_logs_error_on_exception():
+    with patch("configurable_automl_engine.training_engine.component._load_module") as mock_load:
+        # Имитируем ошибку в тюнере
+        mock_tuner = MagicMock()
+        mock_tuner.optimize.side_effect = Exception("HPO failure")
+        mock_load.return_value = mock_tuner
+        
+        with patch("configurable_automl_engine.training_engine.component._LOG") as mock_log:
+            result = _run_hpo(
+                algo_name="test_algo", 
+                algo_cfg=MagicMock(), 
+                X=MagicMock(), y=MagicMock(),
+                metric_name_sklearn="accuracy", n_trials=1,
+                validation_strategy=MagicMock()
+            )
+            
+            assert result is None
+            # Проверяем, что была вызвана ошибка логгера
+            mock_log.error.assert_called()
