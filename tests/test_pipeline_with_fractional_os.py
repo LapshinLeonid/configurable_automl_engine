@@ -25,7 +25,7 @@ def test_pipeline_with_fractional_os(tmp_path: Path):
     cfg_path.write_text(
         f"""
 general:
-  comparison_metric: r2
+  comparison_metric: "r2"
   path_to_model: {tmp_path/'model.pkl'}
   phases:
     - name: "fast_search"
@@ -34,8 +34,7 @@ general:
 
 oversampling:
   enable: true
-  multiplier: 1.25
-  random_state: 0
+  multiplier: 1.25 
 
 algorithms:
   elasticnet:

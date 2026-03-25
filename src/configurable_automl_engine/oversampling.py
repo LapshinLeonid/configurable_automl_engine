@@ -184,7 +184,8 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
                     df[col] = df[col].astype(dtype)
                 
                 # 2. Если это объект (строки) — возвращаем тип object
-                elif dtype == object or "string" in str(dtype).lower():
+                elif (dtype is object or isinstance(dtype, np.dtype) 
+                      and dtype.kind == 'O'):
                     # Если добавили шум и колонка стала числовой,
                     # то НЕ откатываем к object
                     if self.add_noise and is_numeric_dtype(df[col]):

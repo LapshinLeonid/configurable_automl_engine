@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 # ──────────────── validation enum ──────────────── #
 class ValidationStrategy(str, Enum):
     """Разрешённые способы валидации при hyperopt."""
@@ -18,6 +19,9 @@ class SerializationFormat(str, Enum):
     joblib = "joblib"
 
 ALGO_PACKAGE_MAPPING: dict[str, str] = {
-    "xgboost": "xgboost",
-    "sklearn_rf": "scikit-learn",
+    "xgboosting": "xgboost",
 }
+
+class ParallelStrategy(str, Enum):
+    ALGORITHMS = "algorithms"
+

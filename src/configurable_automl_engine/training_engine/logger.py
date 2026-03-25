@@ -16,18 +16,23 @@
 
 import logging
 from pathlib import Path
+from typing import Any
 
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+
+# Используем Any для динамического хендлера, чтобы избежать конфликта типов в mypy
+HandlerClass: Any 
 
 
 # Импортируем специальный обработчик
 try:
     from concurrent_log_handler import ConcurrentRotatingFileHandler
+    HandlerClass = ConcurrentRotatingFileHandler
 except ImportError:
     # Фолбэк на стандартный обработчик, 
     # если библиотека не установлена
-    from logging.handlers import ( # type: ignore[assignment]
-        RotatingFileHandler as ConcurrentRotatingFileHandler) 
+    from logging.handlers import RotatingFileHandler
+    HandlerClass = RotatingFileHandler
 
 def get_logger(name: str) -> logging.Logger:
     """Получить именованный логгер в рамках иерархии библиотеки.
@@ -71,11 +76,11 @@ def setup_logging(logfile: Path,
     logfile.parent.mkdir(parents=True, exist_ok=True)
     
     # Настраиваем обработчик файла
-    fh = ConcurrentRotatingFileHandler(filename=str(logfile), 
-                                       mode="a", 
-                                       maxBytes=max_bytes, 
-                                       backupCount=backup_count,
-                                       encoding="utf-8")
+    fh = HandlerClass(filename=str(logfile), 
+                      mode="a", 
+                      maxBytes=max_bytes, 
+                      backupCount=backup_count,
+                      encoding="utf-8")
     fh.setLevel(level)
     formatter = logging.Formatter(log_format)
     fh.setFormatter(formatter)

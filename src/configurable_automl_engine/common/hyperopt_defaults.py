@@ -1,14 +1,18 @@
 from typing import Any, Dict, Optional, Literal, Annotated, Union, List
 from pydantic import BaseModel, Field, model_validator
 
+from typing import TypeVar, Generic
+
+T = TypeVar("T", str, int, float, bool)
+
 # ───────────────── hyperopt ───────────────── #
 class BaseDistribution(BaseModel):
     """Абстрактный базовый класс для распределений поиска."""
     type: str
-class CategoricalSpace(BaseDistribution):
+class CategoricalSpace(BaseDistribution, Generic[T]):
     """Распределение для категориальных признаков: [options, 'categorical']."""
     type: Literal["categorical"]
-    options: List[Any]
+    options: List[T]
 class NumericSpace(BaseDistribution):
     """Базовый класс для числовых диапазонов."""
     low: float
@@ -77,11 +81,12 @@ class SearchSpaceEntry(BaseModel):
         Raises:
             ValueError: Если список содержит менее 2 элементов.
         """
-
         if not isinstance(data, list):
             return data
-        if len(data) < 2:
-            raise ValueError("Search space list must have at least 2 elements")
+        # Если это одиночное значение (строка, число) — обернуть как категориальное
+        if len(data) == 1:
+            # Одиночное значение → категориальное распределение с одним вариантом
+            return {"config": {"type": "categorical", "options": data}}
         if data[1] == "categorical":
             return {"config": {"type": "categorical", "options": data[0]}}
         if len(data) >= 3:
@@ -161,7 +166,7 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
             [["rbf", "poly", "sigmoid"], "categorical"]),
         "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
     },
-    "xgb": {
+    "xgboosting": {
         "n_estimators": SearchSpaceEntry.model_validate([100, 800, "int", 100]),
         "learning_rate": SearchSpaceEntry.model_validate([0.01, 0.3, "float_log"]),
         "max_depth": SearchSpaceEntry.model_validate([3, 10, "int"]),
@@ -186,5 +191,38 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
         "eta0": SearchSpaceEntry.model_validate([1e-4, 1e-1, "float_log"]),
         "l1_ratio": SearchSpaceEntry.model_validate([0.0, 1.0, "float"]),
         "max_iter": SearchSpaceEntry.model_validate([500, 5000, "int", 500]),
-    }
+    },
+    "adaboost": {
+        "n_estimators": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
+        "learning_rate": SearchSpaceEntry.model_validate([0.01, 1.0, "float_log"]),
+        "loss": SearchSpaceEntry.model_validate(
+            [["linear", "square", "exponential"], "categorical"]),
+    },
+    "poissonregressor": {**GLM_COMMON},
+    "gammaregressor": {**GLM_COMMON},
+    "tweedieregressor": {**GLM_COMMON},
+    "glm": {**GLM_COMMON},
+    "ardregression": {
+        "n_iter": SearchSpaceEntry.model_validate([100, 1000, "int", 100]),
+        "alpha_1": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
+        "alpha_2": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
+        "lambda_1": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
+        "lambda_2": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
+    },
+    "nearest_neighbors_regression": {
+        "n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"]),
+        "weights": SearchSpaceEntry.model_validate(
+            [["uniform", "distance"], "categorical"]),
+        "p": SearchSpaceEntry.model_validate([1, 2, "int"]),
+    },
+    "isotonic_regression": {
+        "increasing": SearchSpaceEntry.model_validate(
+            [[True, False], "categorical"]),
+    },
+    "gaussian_process_regression": {},
+}
+
+ALGO_HYPERPARAMETER_REGISTRY: Dict[str, set[str]] = {
+    algo: set(params.keys())
+    for algo, params in DEFAULT_SPACES.items()
 }

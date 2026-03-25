@@ -7,22 +7,11 @@ df = data.frame
 
 config = {
     "general": {
-        "comparison_metric": "mae",
-        "validation_strategy": "k_fold",
-        "n_folds": 3,
-        "path_to_model": "diabetes_model.joblib",
+        "comparison_metric": "r2",
         "phases": [
-            {"name": "Coarse Search", "n_trials": 100, "action": "all_algorithms"},
-            {"name": "Fine Tuning", "n_trials": 200, "action": "refine_winner"}
+            {"n_trials": 100, "action": "all_algorithms"},
+            {"n_trials": 200, "action": "refine_winner"}
         ],
-        "log_to_file": None,
-        "parallel_strategy": "serial",
-        "max_workers": 1
-    },
-    "oversampling": {
-        "enable": False,
-        "multiplier": 1.0,
-        "algorithm": "smote"
     },
     "algorithms": {
         "random_forest": {
@@ -35,9 +24,9 @@ config = {
             "limit_hyperparameters": True,
             "hyperparameters": {"alpha": [0.1, 1.0]}
         },
-        "xgboost": {
+        "xgboosting": {
             "enable": True,
-            "limit_hyperparameters": False,
+            "limit_hyperparameters": True,
             "hyperparameters": {
                 "n_estimators": [100, 1000],
                 "max_depth": [3, 10],
@@ -47,6 +36,7 @@ config = {
         },
     }
 }
-if __name__ == "__main__":
-    results = caml.train_best_model(config=config, df=df, target='target')
-    print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+
+results = caml.train_best_model(config=config, df=df, target='target')
+
+print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")

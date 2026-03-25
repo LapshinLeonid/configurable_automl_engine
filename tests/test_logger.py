@@ -108,17 +108,21 @@ def test_setup_logging_idempotency(tmp_path, clean_logger):
 def test_setup_logging_import_fallback(tmp_path):
     """
     Покрывает ветку 'except ImportError'.
+    Проверяет, что при отсутствии библиотеки используется стандартный RotatingFileHandler.
     """
+    # Имитируем отсутствие библиотеки через блокировку в sys.modules
     with patch.dict(sys.modules, {'concurrent_log_handler': None}):
-        # Перезагружаем модуль
+        # Перезагружаем модуль logger, чтобы отработал блок try-except
         importlib.reload(configurable_automl_engine.training_engine.logger)
         
-        # Проверяем подмену класса
-        handler_class = getattr(configurable_automl_engine.training_engine.logger, 'ConcurrentRotatingFileHandler')
+        # Берем HandlerClass (новое имя из вашего кода)
+        # Если вы все же оставили имя ConcurrentRotatingFileHandler, используйте его
+        # Но судя по ошибке, вы назвали его иначе или импорт не обновился
+        handler_class = getattr(configurable_automl_engine.training_engine.logger, 'HandlerClass')
         
-        # ИСПРАВЛЕНИЕ: Используем полное имя из модуля logging.handlers для надежности
+        # Проверяем, что теперь это стандартный класс из logging.handlers
         assert handler_class is logging.handlers.RotatingFileHandler
-    # Восстанавливаем состояние
+    # ВАЖНО: После теста возвращаем всё как было, чтобы другие тесты не упали
     importlib.reload(configurable_automl_engine.training_engine.logger)
 def test_setup_logging_stream_handler_logic_coverage(tmp_path, clean_logger):
     """

@@ -175,8 +175,10 @@ _SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
     "neg_root_mean_squared_error": make_scorer(_rmse, greater_is_better=False),
     "mae": make_scorer(mean_absolute_error, greater_is_better=False),
     "mse": make_scorer(mean_squared_error, greater_is_better=False),
-
+    "r2": make_scorer(r2_score, greater_is_better=True),
 }
+
+AVAILABLE_METRICS = list(_SCORER_OBJECTS.keys())
 
 # Какие метрики ИЗНАЧАЛЬНО интерпретируются как «чем выше — тем лучше»
 # (те, которые не требуют инверсии знака для понимания пользователем)

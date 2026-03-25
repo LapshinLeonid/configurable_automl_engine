@@ -1,0 +1,647 @@
+{
+  "$defs": {
+    "AlgoCfg": {
+      "additionalProperties": false,
+      "description": "Техническая конфигурация конкретного ML-алгоритма в пайплайне.\n\nХранит настройки включения алгоритма, переопределенные пространства \nпоиска и пути к программным модулям тренера и тюнера.\nAttributes:\n    enable (bool): Флаг участия алгоритма в текущем эксперименте.\n    limit_hyperparameters (bool): Режим сокращенного пространства поиска.\n    hyperparameters (Dict | None): Кастомные границы параметров, \n        перекрывающие значения по умолчанию.\n    tuner (str): Dotted-path к модулю оптимизатора.\n    trainer_module (str): Dotted-path к реализации обучения модели.",
+      "properties": {
+        "enable": {
+          "default": true,
+          "description": "Использовать ли данный алгоритм в пайплайне AutoML",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "limit_hyperparameters": {
+          "default": false,
+          "description": "Ограничить гиперпараметры пространства поиска",
+          "title": "Limit Hyperparameters",
+          "type": "boolean"
+        },
+        "hyperparameters": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/SearchSpaceEntry"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. См. ALGO_HYPERPARAMETER_REGISTRY.",
+          "title": "Hyperparameters"
+        },
+        "tuner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "configurable_automl_engine.tuner",
+          "description": "Путь к модулю тюнера для оптимизации гиперпараметров",
+          "title": "Tuner"
+        },
+        "trainer_module": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "configurable_automl_engine.trainer",
+          "description": "Dotted-path к модулю, содержащему класс `ModelTrainer`(например, 'configurable_automl_engine.trainer').",
+          "title": "Trainer Module"
+        }
+      },
+      "title": "AlgoCfg",
+      "type": "object"
+    },
+    "AlgorithmsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "elasticnet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sgdregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision_tree": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "random_forest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extra_trees": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gradient_boosting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "adaboost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "poissonregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gammaregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tweedieregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gaussian_process_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "isotonic_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nearest_neighbors_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "svr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ardregression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "glm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ridge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lasso": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "xgboosting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AlgorithmsConfig",
+      "type": "object"
+    },
+    "CategoricalSpace": {
+      "description": "Распределение для категориальных признаков: [options, 'categorical'].",
+      "properties": {
+        "type": {
+          "const": "categorical",
+          "title": "Type",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "options"
+      ],
+      "title": "CategoricalSpace",
+      "type": "object"
+    },
+    "FloatSpace": {
+      "description": "Распределение для чисел с плавающей точкой: [min, max, 'float', step?].",
+      "properties": {
+        "type": {
+          "enum": [
+            "float",
+            "float_log"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "low": {
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "title": "High",
+          "type": "number"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        }
+      },
+      "required": [
+        "type",
+        "low",
+        "high"
+      ],
+      "title": "FloatSpace",
+      "type": "object"
+    },
+    "GeneralCfg": {
+      "additionalProperties": false,
+      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор \nметрик, стратегий оценки качества (Cross-Validation / Hold-out) \nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').",
+      "properties": {
+        "comparison_metric": {
+          "default": "r2",
+          "description": "Метрика для сравнения моделей и выбора лучшей (например, r2, rmse, accuracy)",
+          "enum": [
+            "nrmse",
+            "rmse",
+            "neg_root_mean_squared_error",
+            "mae",
+            "mse",
+            "r2"
+          ],
+          "title": "Comparison Metric",
+          "type": "string"
+        },
+        "path_to_model": {
+          "description": "Путь для сохранения/загрузки результирующей обученной модели",
+          "format": "path",
+          "title": "Path To Model",
+          "type": "string"
+        },
+        "serialization_format": {
+          "$ref": "#/$defs/SerializationFormat",
+          "default": "pickle",
+          "description": "Формат сериализации модели (pickle, joblib и т.д.)"
+        },
+        "log_to_file": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Путь к файлу логов. Если не указан,логи выводятся только в консоль",
+          "title": "Log To File"
+        },
+        "phases": {
+          "description": "Список последовательных фаз оптимизации гиперпараметров",
+          "items": {
+            "$ref": "#/$defs/HPOPhaseCfg"
+          },
+          "title": "Phases",
+          "type": "array"
+        },
+        "validation_strategy": {
+          "$ref": "#/$defs/ValidationStrategy",
+          "default": "k_fold",
+          "description": "Стратегия оценки качества:k-fold кросс-валидация или фиксированный hold-out"
+        },
+        "n_folds": {
+          "default": 5,
+          "description": "Количество блоков (фолдов) для кросс-валидации.Используется только если validation_strategy = 'k_fold'",
+          "title": "N Folds",
+          "type": "integer"
+        },
+        "parallel_strategy": {
+          "$ref": "#/$defs/ParallelStrategy",
+          "default": "algorithms",
+          "description": "Стратегия распараллеливания.Сейчас поддерживается только 'algorithms' (каждый алгоритм в своем потоке/процессе)."
+        },
+        "max_workers": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Максимальное количество потоков/процессов.Если null, используется количество ядер CPU",
+          "title": "Max Workers"
+        },
+        "parallel_mode": {
+          "default": "threads",
+          "description": "Режим многозадачности: потоки (для I/O задач) или процессы (для CPU-интенсивных вычислений)",
+          "enum": [
+            "threads",
+            "processes"
+          ],
+          "title": "Parallel Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phases"
+      ],
+      "title": "GeneralCfg",
+      "type": "object"
+    },
+    "HPOPhaseCfg": {
+      "additionalProperties": false,
+      "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя \nвыстраивать многоступенчатые стратегии поиска (например, сначала \nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'), \n        определяющий область поиска.",
+      "properties": {
+        "name": {
+          "default": null,
+          "description": "Определенное пользователем название фазы оптимизации (например, 'coarse_search' или 'fine_tuning')",
+          "title": "Name",
+          "type": "string"
+        },
+        "n_trials": {
+          "description": "Количество итераций (испытаний) в рамках данной фазы",
+          "minimum": 1,
+          "title": "N Trials",
+          "type": "integer"
+        },
+        "action": {
+          "default": "all_algorithms",
+          "description": "Действие фазы: поиск по всем алгоритмам или уточнение гиперпараметров для победителя предыдущих этапов",
+          "enum": [
+            "all_algorithms",
+            "refine_winner"
+          ],
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n_trials"
+      ],
+      "title": "HPOPhaseCfg",
+      "type": "object"
+    },
+    "IntSpace": {
+      "description": "Распределение для целых чисел: [min, max, 'int', step?].",
+      "properties": {
+        "type": {
+          "const": "int",
+          "title": "Type",
+          "type": "string"
+        },
+        "low": {
+          "title": "Low",
+          "type": "integer"
+        },
+        "high": {
+          "title": "High",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        }
+      },
+      "required": [
+        "type",
+        "low",
+        "high"
+      ],
+      "title": "IntSpace",
+      "type": "object"
+    },
+    "OversamplingAlgorithm": {
+      "enum": [
+        "random",
+        "random_with_noise",
+        "smote",
+        "adasyn"
+      ],
+      "title": "OversamplingAlgorithm",
+      "type": "string"
+    },
+    "OversamplingCfg": {
+      "additionalProperties": false,
+      "description": "Параметры балансировки классов и синтеза данных.\n\nОбеспечивает конфигурацию методов устранения дисбаланса целевой переменной. \nИспользует механизм псевдонимов (aliases) для маппинга плоских ключей \nYAML в структурированный объект.\nAttributes:\n    enable (bool): Глобальный флаг включения оверсэмплинга.\n    multiplier (float): Целевой коэффициент увеличения выборки.\n    algorithm (OversamplingAlgorithm): Выбранный метод генерации \n        (SMOTE, ADASYN и др.).",
+      "properties": {
+        "data_oversampling": {
+          "default": false,
+          "description": "Флаг включения балансировки данных.Применяется только к обучающей выборке",
+          "title": "Data Oversampling",
+          "type": "boolean"
+        },
+        "data_oversampling_multiplier": {
+          "default": 1.0,
+          "description": "Во сколько раз увеличить количество примеров миноритарных классов",
+          "minimum": 1.0,
+          "title": "Data Oversampling Multiplier",
+          "type": "number"
+        },
+        "data_oversampling_algorithm": {
+          "$ref": "#/$defs/OversamplingAlgorithm",
+          "default": "random",
+          "description": "Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)"
+        }
+      },
+      "title": "OversamplingCfg",
+      "type": "object"
+    },
+    "ParallelStrategy": {
+      "enum": [
+        "algorithms"
+      ],
+      "title": "ParallelStrategy",
+      "type": "string"
+    },
+    "SearchSpaceEntry": {
+      "description": "Описание пространства поиска для отдельного гиперпараметра.\n\nУниверсальный контейнер, поддерживающий как категориальные списки, \nтак и числовые диапазоны. Реализует логику прозрачной конвертации \nиз сокращенной YAML-записи в типизированные объекты распределений.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный \n        объект конкретного типа распределения.",
+      "properties": {
+        "config": {
+          "discriminator": {
+            "mapping": {
+              "categorical": "#/$defs/CategoricalSpace",
+              "float": "#/$defs/FloatSpace",
+              "float_log": "#/$defs/FloatSpace",
+              "int": "#/$defs/IntSpace"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CategoricalSpace"
+            },
+            {
+              "$ref": "#/$defs/FloatSpace"
+            },
+            {
+              "$ref": "#/$defs/IntSpace"
+            }
+          ],
+          "title": "Config"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "title": "SearchSpaceEntry",
+      "type": "object"
+    },
+    "SerializationFormat": {
+      "description": "Поддерживаемые форматы сериализации моделей.\nRationale: Обеспечивает типизацию и единый источник истины для выбора\nмежду стандартным pickle и оптимизированным для тяжелых весов joblib.",
+      "enum": [
+        "pickle",
+        "joblib"
+      ],
+      "title": "SerializationFormat",
+      "type": "string"
+    },
+    "ValidationStrategy": {
+      "description": "Разрешённые способы валидации при hyperopt.",
+      "enum": [
+        "train_test_split",
+        "k_fold",
+        "loo"
+      ],
+      "title": "ValidationStrategy",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Корневой объект всей системы конфигурации AutoML.\n\nАгрегирует все секции настроек и выполняет финальную валидацию \nцелостности графа параметров, включая проверку системных зависимостей.\nAttributes:\n    general (GeneralCfg): Общие параметры эксперимента.\n    oversampling (OversamplingCfg): Настройки предобработки данных.\n    algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.",
+  "properties": {
+    "general": {
+      "$ref": "#/$defs/GeneralCfg",
+      "description": "Общие настройки эксперимента и валидации"
+    },
+    "oversampling": {
+      "$ref": "#/$defs/OversamplingCfg",
+      "default": {
+        "data_oversampling": false,
+        "data_oversampling_multiplier": 1.0,
+        "data_oversampling_algorithm": "random"
+      },
+      "description": "Настройки балансировки данных"
+    },
+    "algorithms": {
+      "$ref": "#/$defs/AlgorithmsConfig",
+      "description": "Словарь алгоритмов, где ключ — имя алгоритма (например, 'xgboost', 'random_forest')"
+    }
+  },
+  "required": [
+    "general",
+    "algorithms"
+  ],
+  "title": "Config",
+  "type": "object"
+}

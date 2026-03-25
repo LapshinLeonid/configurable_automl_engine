@@ -57,6 +57,13 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 _LOG = logging.getLogger("training_engine")
 
 
+def _algorithms_as_dict(algorithms_cfg: Any) -> Dict[str, AlgoCfg]:
+    """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
+    return {
+        name: algo_cfg
+        for name in algorithms_cfg.model_fields
+        if (algo_cfg := getattr(algorithms_cfg, name)) is not None
+    }
 # --------------------------------------------------------------------------- #
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
@@ -125,6 +132,8 @@ def _run_hpo(
         _CanonicalIAE: Если тюнер сообщает о несовместимости алгоритма с данными.
         AttributeError: Если в модуле тюнера отсутствует функция `optimize`.
     """
+    if algo_cfg.tuner is None:
+        raise ValueError("Tuner path is not configured")
     tuner = _load_module(algo_cfg.tuner)
     if not hasattr(tuner, "optimize"):
         raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
@@ -201,6 +210,8 @@ def _fit_and_save(
     Raises:
         AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
     """
+    if algo_cfg.trainer_module is None:
+        raise ValueError("Trainer module path is not configured")
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
         raise AttributeError(
@@ -260,6 +271,9 @@ def train_best_model(
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
+        print("CONFIG TYPE:", type(config))
+        print("ALGORITHMS:", (
+            config.get("algorithms") if isinstance(config, dict) else "N/A"))
         cfg = Config.model_validate(config)
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
@@ -305,7 +319,7 @@ def train_best_model(
             a_cfg: AlgoCfg, 
             n_trials: int, 
             search_space: Dict[str, Any] | None = None
-            ) -> Tuple[float, Dict[str, Any]] :
+            ) -> Optional[Tuple[float, Dict[str, Any]]]:
         """Выполнить конкретную фазу HPO для алгоритма.
         Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
         Args:
@@ -339,11 +353,9 @@ def train_best_model(
                 data_oversampling_multiplier=ovr.multiplier,
                 data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
             )
-
-            #Проверяем на None перед распаковкой
+            
             if result is None:
-                _LOG.warning(f"HPO returned None for {algo} in {phase_name}")
-                raise ValueError(f"HPO returned None for {algo} in {phase_name}")
+                return None
 
             score, params = result
             
@@ -355,7 +367,8 @@ def train_best_model(
             raise
 
     # Начальный список кандидатов (все включенные алгоритмы)
-    current_candidates = {n: a for n, a in cfg.algorithms.items() if a.enable}
+    all_algorithms = _algorithms_as_dict(cfg.algorithms)
+    current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
     phase_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     for phase in cfg.general.phases:
         _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials}"
@@ -370,7 +383,7 @@ def train_best_model(
             select = max if greater_is_better else min
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
-            current_candidates = {winner_algo: cfg.algorithms[winner_algo]}
+            current_candidates = {winner_algo: all_algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
         
@@ -392,9 +405,15 @@ def train_best_model(
                 algo_cfg.hyperparameters # это dict из вашего config_parser
             )
             try:
-                score, params = _execute_hpo_phase(
+                result = _execute_hpo_phase(
                     phase.name, algo_name, algo_cfg, phase.n_trials, full_search_space
                 )
+
+                if result is None:
+                    return None
+
+                score, params = result
+
                 return algo_name, score, params
             except _CanonicalIAE:
                 raise
@@ -437,7 +456,7 @@ def train_best_model(
     select = max if greater_is_better else min
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
     final_score, final_params = phase_results[winner_algo]
-    winner_cfg = cfg.algorithms[winner_algo]
+    winner_cfg = all_algorithms[winner_algo]
 
     
     

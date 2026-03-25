@@ -56,13 +56,36 @@ def _get_factory() -> dict[str, Any]:
         "ardregression": ARDRegression,
         "glm": TweedieRegressor,
         "ridge": Ridge,
-        "lasso": Lasso
+        "lasso": Lasso,
+        "xgboosting": None
     }
         
     if is_installed("xgboost"):
         from xgboost import XGBRegressor
         factory["xgboosting"] = XGBRegressor
     return factory
+
+AVAILABLE_ALGORITHMS = [
+"elasticnet",
+"sgdregressor",
+"decision_tree",
+"random_forest",
+"extra_trees",
+"gradient_boosting",
+"adaboost",
+"poissonregressor",
+"gammaregressor",
+"tweedieregressor",
+"gaussian_process_regression",
+"isotonic_regression",
+"nearest_neighbors_regression",
+"svr",
+"ardregression",
+"glm",
+"ridge",
+"lasso",
+"xgboosting",
+]
 
 _FACTORY = _get_factory()
 
