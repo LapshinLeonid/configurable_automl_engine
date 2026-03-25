@@ -1,3 +1,9 @@
+![PyPI - Version](https://img.shields.io/pypi/v/configurable-automl-engine)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/configurable-automl-engine)
+![PyPI - License](https://img.shields.io/pypi/l/configurable-automl-engine)
+![PyPI - Types](https://img.shields.io/pypi/types/configurable-automl-engine)
+[![codecov](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine/branch/main/graph/badge.svg?token=TAUHARATUM)](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine)
+
 AutoML Engine is a configuration-driven automated machine learning library for Python. 
 It provides a high-performance ecosystem for model selection and hyperparameter optimization, 
 designed to scale from local experimentation to large-scale data processing.
