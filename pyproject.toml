@@ -24,6 +24,25 @@ dependencies = [
     "pydantic>=2.12.5",
     "pyarrow>23.0.0",
 ]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = [ 
+    "machine-learning", 
+    "data-science", 
+    "data-analysis"
+]
 
 [project.optional-dependencies]
 
@@ -33,7 +52,7 @@ test = ["pytest>=9.0.2"]
 
 all = ["configurable-automl-engine[xgboost]"]
 
-dev = ["automl-engine[all,test]"]
+dev = ["configurable-automl-engine[all,test]"]
 
 [project.urls]
 Homepage = "https://github.com/LapshinLeonid/configurable_automl_engine"
@@ -42,3 +61,6 @@ Issues = "https://github.com/LapshinLeonid/configurable_automl_engine/issues"
 [tool.setuptools_scm]
 local_scheme = "no-local-version"
 write_to = "src/configurable_automl_engine/_version.py"
+
+[tool.setuptools.package-data]
+configurable_automl_engine = ["py.typed"]

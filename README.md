@@ -1,3 +1,11 @@
+![PyPI - Version](https://img.shields.io/pypi/v/configurable-automl-engine)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/configurable-automl-engine)
+![PyPI - License](https://img.shields.io/pypi/l/configurable-automl-engine)
+![PyPI - Types](https://img.shields.io/pypi/types/configurable-automl-engine)
+[![codecov](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine/branch/main/graph/badge.svg?token=TAUHARATUM)](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine)
+[![CI](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml/badge.svg)](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
 AutoML Engine is a configuration-driven automated machine learning library for Python. 
 It provides a high-performance ecosystem for model selection and hyperparameter optimization, 
 designed to scale from local experimentation to large-scale data processing.
@@ -16,7 +24,7 @@ designed to scale from local experimentation to large-scale data processing.
 
 # Dependencies
 
-We recommend using the latest version of Python. AutoML Engine supports Python 3.9 and newer.
+We recommend using the latest version of Python. AutoML Engine supports Python 3.11 and newer.
 
 These distributions are essential for the core functionality and will be installed automatically:
 
@@ -36,7 +44,7 @@ These distributions are essential for the core functionality and will be install
 
 These distributions will not be installed automatically. Tou can install them using the bracket syntax (e.g., pip install "automl-engine[xgboost]").
 
-* **XGBoost**: Adds support for high-performance gradient boosting models..
+* **XGBoost**: Adds support for high-performance gradient boosting models.
 
 # Installation
 
