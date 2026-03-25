@@ -57,7 +57,7 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 _LOG = logging.getLogger("training_engine")
 
 
-def _algorithms_as_dict(algorithms_cfg) -> Dict[str, AlgoCfg]:
+def _algorithms_as_dict(algorithms_cfg: Any) -> Dict[str, AlgoCfg]:
     """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
     return {
         name: algo_cfg
@@ -132,6 +132,8 @@ def _run_hpo(
         _CanonicalIAE: Если тюнер сообщает о несовместимости алгоритма с данными.
         AttributeError: Если в модуле тюнера отсутствует функция `optimize`.
     """
+    if algo_cfg.tuner is None:
+        raise ValueError("Tuner path is not configured")
     tuner = _load_module(algo_cfg.tuner)
     if not hasattr(tuner, "optimize"):
         raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
@@ -208,6 +210,8 @@ def _fit_and_save(
     Raises:
         AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
     """
+    if algo_cfg.trainer_module is None:
+        raise ValueError("Trainer module path is not configured")
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
         raise AttributeError(
@@ -348,6 +352,9 @@ def train_best_model(
                 data_oversampling_multiplier=ovr.multiplier,
                 data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
             )
+            
+            if result is None:
+                raise RuntimeError(f"HPO phase '{phase.name}' failed to return a valid result.")
 
             score, params = result
             
