@@ -16,7 +16,7 @@ designed to scale from local experimentation to large-scale data processing.
 
 # Dependencies
 
-We recommend using the latest version of Python. AutoML Engine supports Python 3.9 and newer.
+We recommend using the latest version of Python. AutoML Engine supports Python 3.11 and newer.
 
 These distributions are essential for the core functionality and will be installed automatically:
 
@@ -36,7 +36,7 @@ These distributions are essential for the core functionality and will be install
 
 These distributions will not be installed automatically. Tou can install them using the bracket syntax (e.g., pip install "automl-engine[xgboost]").
 
-* **XGBoost**: Adds support for high-performance gradient boosting models..
+* **XGBoost**: Adds support for high-performance gradient boosting models.
 
 # Installation
 
