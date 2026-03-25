@@ -174,7 +174,7 @@ Supported algorithms:
 Algorithm configuration consists of:
 * "enable" - boolean flag, whether hyperparameter search is performed for the algorithm
 * "limit_hyperparameters" - (optional) boolean flag to set limits for hyperparameter search
-* "hyperparameters" - (optional) hyperparameter value constraints, unique to each algorithm. See [ALGO_HYPERPARAMETER_REGISTRY](/src/configurable_automl_engine/common/hypeopt) for details
+* "hyperparameters" - (optional) hyperparameter value constraints, unique to each algorithm. See [ALGO_HYPERPARAMETER_REGISTRY](/src/configurable_automl_engine/common/hypeopt_defaults) for details
 
 ## Oversampling section
 
