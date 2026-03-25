@@ -272,7 +272,8 @@ def train_best_model(
         cfg = config
     elif isinstance(config, dict):
         print("CONFIG TYPE:", type(config))
-        print("ALGORITHMS:", config.get("algorithms") if isinstance(config, dict) else "N/A")
+        print("ALGORITHMS:", (
+            config.get("algorithms") if isinstance(config, dict) else "N/A"))
         cfg = Config.model_validate(config)
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
@@ -318,7 +319,7 @@ def train_best_model(
             a_cfg: AlgoCfg, 
             n_trials: int, 
             search_space: Dict[str, Any] | None = None
-            ) -> Tuple[float, Dict[str, Any]] :
+            ) -> Optional[Tuple[float, Dict[str, Any]]]:
         """Выполнить конкретную фазу HPO для алгоритма.
         Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
         Args:
@@ -354,7 +355,7 @@ def train_best_model(
             )
             
             if result is None:
-                raise RuntimeError(f"HPO phase '{phase.name}' failed to return a valid result.")
+                return None
 
             score, params = result
             
@@ -404,9 +405,15 @@ def train_best_model(
                 algo_cfg.hyperparameters # это dict из вашего config_parser
             )
             try:
-                score, params = _execute_hpo_phase(
+                result = _execute_hpo_phase(
                     phase.name, algo_name, algo_cfg, phase.n_trials, full_search_space
                 )
+
+                if result is None:
+                    return None
+
+                score, params = result
+
                 return algo_name, score, params
             except _CanonicalIAE:
                 raise

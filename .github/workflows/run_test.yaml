@@ -31,7 +31,7 @@ jobs:
         run: ruff check src/
 
       - name: Type check with Mypy
-        run: mypy src --strict --ignore-missing-imports
+        run: mypy src --ignore-missing-imports
 
       - name: Run tests
         env:

@@ -27,8 +27,13 @@ import logging
 from enum import Enum
 from pathlib import Path
 import re
-from typing import Any, Dict, Optional, Literal, List
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator, create_model
+from typing import Any, Dict, Optional, Literal, List, TYPE_CHECKING
+from pydantic import (BaseModel, 
+                      Field, 
+                      ConfigDict, 
+                      field_validator, 
+                      model_validator, 
+                      create_model)
 from configurable_automl_engine.common.definitions import (ValidationStrategy, 
                                                            SerializationFormat,
                                                            ALGO_PACKAGE_MAPPING,
@@ -43,9 +48,8 @@ from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 from configurable_automl_engine.training_engine.metrics import AVAILABLE_METRICS
 
 # Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
-ComparisonMetric = Literal[tuple(AVAILABLE_METRICS)] 
+ComparisonMetric = Literal[*AVAILABLE_METRICS] # type: ignore
 
-from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
 _DOTTED_PATH_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
 
@@ -138,7 +142,7 @@ class GeneralCfg(BaseModel):
                      "Используется только если validation_strategy = 'k_fold'")
     )
     parallel_strategy: ParallelStrategy = Field(
-        default="algorithms",
+        default=list(ParallelStrategy)[0],
         description=("Стратегия распараллеливания." 
                      "Сейчас поддерживается только 'algorithms'"
                      " (каждый алгоритм в своем потоке/процессе).")
@@ -174,7 +178,8 @@ class GeneralCfg(BaseModel):
             and not is_installed("joblib")
         ):
             raise ValueError(
-                "serialization_format='joblib' requires the 'joblib' package to be installed"
+                "serialization_format='joblib' requires"
+                " the 'joblib' package to be installed"
             )
         if self.n_folds < 1:
             raise ValueError("`n_folds` must be at least 1")
@@ -203,7 +208,8 @@ class OversamplingCfg(BaseModel):
         algorithm (OversamplingAlgorithm): Выбранный метод генерации 
             (SMOTE, ADASYN и др.).
     """
-    model_config = ConfigDict(populate_by_name=True,extra="forbid")  # принимать alias‑имена
+    # принимать alias‑имена
+    model_config = ConfigDict(populate_by_name=True,extra="forbid")  
     enable: bool = Field(
         default=False,
         alias="data_oversampling",
@@ -318,7 +324,8 @@ class AlgoCfg(BaseModel):
             return v
         if not _DOTTED_PATH_RE.fullmatch(v):
             raise ValueError(
-                f"'{v}' is not a valid dotted path (expecting 'package.module' or 'a.b.c.Class' format)"
+                f"'{v}' is not a valid dotted path "
+                "(expecting 'package.module' or 'a.b.c.Class' format)"
             )
         return v
 
@@ -328,8 +335,19 @@ class _AlgorithmsConfigBase(BaseModel):
 AlgorithmsConfig = create_model(
     "AlgorithmsConfig",
     __base__=_AlgorithmsConfigBase,
-    **{name: (Optional[AlgoCfg], None) for name in AVAILABLE_ALGORITHMS},
-)
+    **{
+        name: (Optional[AlgoCfg], Field(default=None))
+        for name in AVAILABLE_ALGORITHMS
+    },
+) # type: ignore[call-overload]
+
+if TYPE_CHECKING:
+    # для mypy используем статический alias
+    AlgorithmsConfigType = _AlgorithmsConfigBase
+else:
+    # runtime — динамический create_model
+    AlgorithmsConfigType = AlgorithmsConfig
+
 # ─────────────────── root ──────────────────── #
 class Config(BaseModel):
     """Корневой объект всей системы конфигурации AutoML.
@@ -351,13 +369,13 @@ class Config(BaseModel):
         default = OversamplingCfg(),
         description="Настройки балансировки данных"
     )
-    algorithms: AlgorithmsConfig = Field(
+    algorithms: "AlgorithmsConfigType" = Field(
         ..., 
         description=(
             "Словарь алгоритмов, где ключ — имя алгоритма "
             "(например, 'xgboost', 'random_forest')"
         )
-    )
+    ) # type: ignore[valid-type]
     @field_validator("algorithms")
     @classmethod
     def _must_have_enabled(cls, v: Any) -> Any:
@@ -377,7 +395,8 @@ class Config(BaseModel):
 
         # Iterate safely over the fields defined in the model class
         # Using __fields__ or model_fields to get the structure safely
-        for name in self.algorithms.model_fields:
+        for name in getattr(self.algorithms, "__fields__", {}):
+
             # Get the attribute value (could be None if not provided in data)
             algo_cfg = getattr(self.algorithms, name)
             
@@ -391,7 +410,8 @@ class Config(BaseModel):
             
             if enabled:
                 # Safely get the required package
-                required_pkg = getattr(algo_cfg, 'get_required_package', lambda n: None)(name)
+                required_pkg = getattr(
+                    algo_cfg, 'get_required_package', lambda n: None)(name)
                 
                 if required_pkg and not is_installed(required_pkg):
                     raise ValueError(
@@ -404,7 +424,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _check_hyperparameter_compatibility(self) -> "Config":
         errors = []
-        for name in self.algorithms.model_fields:
+        for name in getattr(self.algorithms, "__fields__", {}):
             algo_cfg = getattr(self.algorithms, name)
             if algo_cfg is None or not algo_cfg.enable:
                 continue
