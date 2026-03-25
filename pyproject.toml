@@ -29,7 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: BSD 3-Clause",
+    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
     "Typing :: Typed",
     "Intended Audience :: Science/Research",
