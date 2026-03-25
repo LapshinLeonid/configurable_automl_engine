@@ -66,22 +66,11 @@ The example can be run from [example.py](example.py).
 
     config = {
         "general": {
-            "comparison_metric": "mae",
-            "validation_strategy": "k_fold",
-            "n_folds": 3,
-            "path_to_model": "diabetes_model.joblib",
+            "comparison_metric": "r2",
             "phases": [
-                {"name": "Coarse Search", "n_trials": 100, "action": "all_algorithms"},
-                {"name": "Fine Tuning", "n_trials": 200, "action": "refine_winner"}
+                {"n_trials": 100, "action": "all_algorithms"},
+                {"n_trials": 200, "action": "refine_winner"}
             ],
-            "log_to_file": None,
-            "parallel_strategy": "serial",
-            "max_workers": 1
-        },
-        "oversampling": {
-            "enable": False,
-            "multiplier": 1.0,
-            "algorithm": "smote"
         },
         "algorithms": {
             "random_forest": {
@@ -94,9 +83,9 @@ The example can be run from [example.py](example.py).
                 "limit_hyperparameters": True,
                 "hyperparameters": {"alpha": [0.1, 1.0]}
             },
-            "xgboost": {
+            "xgboosting": {
                 "enable": True,
-                "limit_hyperparameters": False,
+                "limit_hyperparameters": True,
                 "hyperparameters": {
                     "n_estimators": [100, 1000],
                     "max_depth": [3, 10],
@@ -106,22 +95,99 @@ The example can be run from [example.py](example.py).
             },
         }
     }
-    if __name__ == "__main__":
-        results = caml.train_best_model(config=config, df=df, target='target')
-        print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+
+    results = caml.train_best_model(config=config, df=df, target='target')
+
+    print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
 # Configuration File Structure
 
-The system uses a typed config based on Pydantic.
+The system uses a typed YAML or JSON config based on Pydantic.
 
-Scheme:
+Scheme: [config.schema.json](config.schema.json).
+
+Some Pydantic validation rules cannot be described in the schema. See [config_parser.py](/src/configurable_automl_engine/training_engine/config_parser.py) for details.
+
+The file must contain two sections: "general" and "alghorithms". Additionally, it may include an optional "oversampling" section.
+
+## General section
+The "general" section may include the following attributes:
+* "phases" - required section (array) of hyperparameter optimization phases
+* "comparison_metric" - (optional) accuracy metric for model comparison. Defaults to "r2" if not specified
+* "path_to_model" - (optional) path to save the best model
+* "serialization_format" - (optional) format for saving the model
+* "log_to_file" - (optional) path to the log file
+* "validation_strategy" - (optional) strategy for evaluating model accuracy
+* "n_folds" - (optional) number of folds for cross-validation; used only if "validation_strategy" = "k_fold"
+* "max_workers" - (optional) maximum number of threads/processes. If not specified the number of CPU cores is used
+
+Structure of an optimization phase ("phases"):
+* "n_trials" - number of iterations within this phase
+* "name" - (optional) user-defined name of the optimization phase
+* "action" - (optional) action for the phase, default is "all_algorithms"
+
+Allowed actions for an optimization phase:
+* "all_algorithms" - for each algorithm, performs "n_trials" hyperparameter optimization attempts. The best algorithm is passed to the next phase.
+* "refine_winner" - performs "n_trials" hyperparameter optimization attempts for the best algorithm from the previous phase.
+
+Allowed values for "comparison_metric":
+* "nrmse"
+* "rmse"
+* "mae"
+* "mse"
+* "r2"
+
+Allowed values for "serialization_format":
+* "pickle"
+* "joblib"
+
+Allowed values for "validation_strategy":
+* "train_test_split"
+* "k_fold"
+* "loo"
+
+## Alghorithms section
+
+The "alghorithms" section is a dictionary where the key is the algorithm name, and the value is a set of configurations for that algorithm.
 
 Supported algorithms:
+* "elasticnet"
+* "sgdregressor"
+* "decision_tree"
+* "random_forest"
+* "extra_trees"
+* "gradient_boosting"
+* "adaboost"
+* "poissonregressor"
+* "gammaregressor"
+* "tweedieregressor"
+* "gaussian_process_regression"
+* "isotonic_regression"
+* "nearest_neighbors_regression"
+* "svr"
+* "ardregression"
+* "glm"
+* "ridge"
+* "lasso"
+* "xgboosting"
 
-Supported comparison metrics:
+Algorithm configuration consists of:
+* "enable" - boolean flag, whether hyperparameter search is performed for the algorithm
+* "limit_hyperparameters" - (optional) boolean flag to set limits for hyperparameter search
+* "hyperparameters" - (optional) hyperparameter value constraints, unique to each algorithm. See [ALGO_HYPERPARAMETER_REGISTRY](/src/configurable_automl_engine/common/hypeopt) for details
 
-For each algorithm, the search space of hyperparameters can be constrained. Constraint formats:
+## Oversampling section
 
+The optional "oversampling" section may include:
+* "enable" - (optional) enable oversampling
+* "multiplier" - (optional) factor to increase dataset size
+* "algorithm" - (optional) oversampling algorithm
+
+#### Supported oversampling algorithms:
+* "random"
+* "random_with_noise"
+* "smote"
+* "adasyn"
 
 # Contributing
 

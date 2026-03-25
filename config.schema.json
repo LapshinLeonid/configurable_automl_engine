@@ -12,7 +12,7 @@
         },
         "limit_hyperparameters": {
           "default": false,
-          "description": "Если True, ограничивает пространство поиска только базовыми параметрами (ускоряет работу)",
+          "description": "Ограничить гиперпараметры пространства поиска",
           "title": "Limit Hyperparameters",
           "type": "boolean"
         },
@@ -456,6 +456,7 @@
       "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя \nвыстраивать многоступенчатые стратегии поиска (например, сначала \nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'), \n        определяющий область поиска.",
       "properties": {
         "name": {
+          "default": null,
           "description": "Определенное пользователем название фазы оптимизации (например, 'coarse_search' или 'fine_tuning')",
           "title": "Name",
           "type": "string"
@@ -478,7 +479,6 @@
         }
       },
       "required": [
-        "name",
         "n_trials"
       ],
       "title": "HPOPhaseCfg",

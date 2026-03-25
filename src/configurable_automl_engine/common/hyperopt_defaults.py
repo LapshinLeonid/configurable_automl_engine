@@ -57,7 +57,7 @@ class SearchSpaceEntry(BaseModel):
             объект конкретного типа распределения.
     """
     config: Annotated[
-        Union[CategoricalSpace[Any], FloatSpace, IntSpace],
+        Union[CategoricalSpace, FloatSpace, IntSpace],
         Field(discriminator="type")
     ]
     @model_validator(mode="before")

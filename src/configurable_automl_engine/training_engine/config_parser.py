@@ -75,7 +75,7 @@ class HPOPhaseCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
-        ..., 
+        default = None,
         description=("Определенное пользователем название фазы оптимизации"
                      " (например, 'coarse_search' или 'fine_tuning')")
     )
@@ -259,8 +259,7 @@ class AlgoCfg(BaseModel):
     )
     limit_hyperparameters: bool = Field(
         default=False,
-        description=("Если True, ограничивает пространство поиска "
-                     "только базовыми параметрами (ускоряет работу)"
+        description=("Ограничить гиперпараметры пространства поиска"
         )
     )
     hyperparameters: Dict[str, SearchSpaceEntry] | None = Field(
