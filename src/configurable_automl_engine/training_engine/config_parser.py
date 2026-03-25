@@ -75,7 +75,7 @@ class HPOPhaseCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
-        default = None,
+        default = "phase",
         description=("Определенное пользователем название фазы оптимизации"
                      " (например, 'coarse_search' или 'fine_tuning')")
     )
