@@ -43,7 +43,6 @@ from configurable_automl_engine.common.validation_utils import (
 from .logger import setup_logging
 
 from .metrics import (
-    is_greater_better,
     to_sklearn_name,
 )
 from .thread_pool import run_parallel
@@ -287,7 +286,6 @@ def train_best_model(
 
     metric_user = cfg.general.comparison_metric
     metric_sklearn = to_sklearn_name(metric_user)
-    greater_is_better = is_greater_better(metric_sklearn)
 
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
