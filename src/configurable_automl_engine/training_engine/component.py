@@ -380,7 +380,7 @@ def train_best_model(
                 raise RuntimeError(f"Phase '{phase.name}' requires a winner,"
                                    f" but no previous results exist.")
             
-            select = max if greater_is_better else min
+            select = max
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
@@ -453,7 +453,7 @@ def train_best_model(
                 f"Failed algorithms: {failed_algos}"
             )
     # После завершения всех фаз определяем финального победителя
-    select = max if greater_is_better else min
+    select = max
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
     final_score, final_params = phase_results[winner_algo]
     winner_cfg = all_algorithms[winner_algo]
