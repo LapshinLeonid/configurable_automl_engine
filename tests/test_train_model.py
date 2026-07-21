@@ -989,13 +989,11 @@ def test_fit_sets_feature_names_from_numerical_when_none():
     
     # Мокаем внешние зависимости, чтобы тест не упал на этапе обучения модели
     with patch('configurable_automl_engine.trainer.create_model') as mock_create, \
-         patch('configurable_automl_engine.trainer.iter_splits') as mock_splits, \
          patch('configurable_automl_engine.trainer.get_scorer_object') as mock_scorer:
         
         # Настройка моков для минимально успешного прохода
         mock_model = MagicMock()
         mock_create.return_value = mock_model
-        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
         mock_scorer.return_value = lambda m, x, y: 0.9
         
         trainer.fit(X, y)
@@ -1019,15 +1017,12 @@ def test_fit_extracts_metadata_as_fallback():
     with patch.object(ModelTrainer, '_detect_feature_types'), \
          patch.object(ModelTrainer, '_extract_metadata') as mock_extract, \
          patch('configurable_automl_engine.trainer.create_model') as mock_create, \
-         patch('configurable_automl_engine.trainer.iter_splits') as mock_splits, \
          patch('configurable_automl_engine.trainer.get_scorer_object') as mock_scorer_factory, \
          patch('configurable_automl_engine.trainer.is_greater_better', return_value=True):
         
         # 1. Настраиваем возврат имен при повторном извлечении
         mock_extract.return_value = ['a', 'b']
         
-        # 2. Настраиваем сплиттер (возвращаем итератор с одним кортежем данных)
-        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
         
         # 3. Исправляем ошибку MagicMock.__format__:
         # Настраиваем фабрику скореров так, чтобы она возвращала функцию, 
@@ -1071,11 +1066,9 @@ def test_coverage_feature_names_from_numerical_fallback():
     # Путь к модулю (замените на ваш фактический путь)
     module_path = 'configurable_automl_engine.trainer'
     with patch(f'{module_path}.create_model'), \
-         patch(f'{module_path}.iter_splits') as mock_splits, \
          patch(f'{module_path}.get_scorer_object') as mock_scorer_factory, \
          patch(f'{module_path}.is_greater_better', return_value=True):
         # Настраиваем окружение обучения
-        mock_splits.return_value = iter([(X[:2], X[2:], y[:2], y[2:])])
         mock_scorer_factory.return_value = lambda p, x, y: 0.5
         
         # КЛЮЧЕВОЙ МОМЕНТ: 
