@@ -43,6 +43,7 @@ from sklearn.model_selection import (
 
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
 
 from configurable_automl_engine.validation import make_cv
 
