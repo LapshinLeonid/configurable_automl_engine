@@ -76,12 +76,12 @@ log = logging.getLogger(__name__)
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
 # ══════════ KNN-space зависит от размера выборки ══════════
-def _make_knn_space(n_samples_eff: int) -> Callable[[Trial], dict[str, Any]]:
+def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
     """Создать генератор пространства поиска для алгоритма KNN."""
     def _space(t: Trial) -> dict[str, Any]:
         # Ограничение n_neighbors физическим пределом обучающей выборки (N_eff - 1).
         # Используем n_samples_eff вместо общего количества строк в датасете.
-        physical_limit = max(1, n_samples_eff - 1)
+        physical_limit = max(1, n_samples - 1)
         max_k = int(min(30, physical_limit))
         
         return {
