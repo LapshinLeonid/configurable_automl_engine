@@ -344,7 +344,7 @@ def optimize(
     n_samples = len(y)
     # Определяем, сколько строк реально "увидит" модель при обучении внутри CV/Split
     n_samples_eff = get_effective_train_size(
-        n_total=n_total,
+        n_total=n_samples,
         strategy=validation_strategy or val_method,
         n_folds=n_folds,
         test_size=train_test_split_test_size
