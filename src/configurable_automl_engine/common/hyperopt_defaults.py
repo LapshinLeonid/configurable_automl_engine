@@ -240,41 +240,54 @@ def clip_search_space(
     """
     Корректирует границы пространства поиска на основе размера выборки.
     
-    Rationale: Некоторые алгоритмы (KNN, DecisionTrees) падают, если 
-    гиперпараметры превышают количество доступных строк в данных.
-    
-    Args:
-        space: Словарь гиперпараметров (SearchSpaceEntry или сырые дикты).
-        n_samples: Текущее количество строк в обучающей выборке.
-        
-    Returns:
-        Dict[str, Any]: Модифицированный словарь пространства поиска.
+    Особенности:
+    1. Исключает мутацию глобального состояния через deep copy (Pydantic model_copy).
+    2. Гарантирует, что и low, и high не превышают физический лимит данных.
+    3. Сохраняет типы данных (int/float) согласно исходной конфигурации.
     """
     if n_samples <= 0:
         return space
 
-    for param, strategy in DATA_DEPENDENT_CONSTRAINTS.items():
-        if param not in space:
+    # Создаем новый словарь, чтобы не изменять оригинальный space
+    clipped_space = {}
+
+    for param, entry in space.items():
+        strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)
+        
+        # Если параметр не требует клиппинга или это не SearchSpaceEntry, копируем как есть
+        if not strategy or not isinstance(entry, SearchSpaceEntry):
+            clipped_space[param] = entry
             continue
-            
-        # Рассчитываем физический предел
-        limit = n_samples - 1 if strategy == "n_samples_minus_one" else n_samples
+
+        # 1. Рассчитываем физический предел для данного параметра
+        raw_limit = n_samples - 1 if strategy == "n_samples_minus_one" else n_samples
+        limit = float(max(1, raw_limit)) # Гарантируем минимум 1
         
-        entry = space[param]
-        
-        # Обработка SearchSpaceEntry (основной формат в движке)
-        if isinstance(entry, SearchSpaceEntry):
-            config = entry.config
-            # Клипаем только числовые распределения
-            if hasattr(config, "high") and hasattr(config, "low"):
-                # high не может быть меньше low, и не может быть больше limit
-                config.high = max(config.low, min(config.high, float(limit)))
-                # Если это целочисленный параметр, приводим к int
-                if isinstance(config, IntSpace):
-                    config.high = int(config.high)
-                    
-        # Обработка сырых словарей (для гибкости и тестов)
-        elif isinstance(entry, dict) and "high" in entry and "low" in entry:
-            entry["high"] = max(entry["low"], min(entry["high"], limit))
+        # 2. Глубокое копирование через Pydantic (защита от Global State Mutation)
+        new_entry = entry.model_copy(deep=True)
+        config = new_entry.config
+
+        # 3. Клиппинг числовых диапазонов
+        if isinstance(config, (IntSpace, FloatSpace)):
+            # Сначала определяем новый high (не может быть выше limit)
+            new_high = min(config.high, limit)
             
-    return space
+            # Затем определяем новый low (не может быть выше нового high)
+            # Это решает проблему Low > Limit Crash
+            new_low = min(config.low, new_high)
+
+            # 4. Обновляем конфиг через model_copy для соблюдения внутренней валидации
+            if isinstance(config, IntSpace):
+                new_entry.config = config.model_copy(update={
+                    "low": int(new_low), 
+                    "high": int(new_high)
+                })
+            else:
+                new_entry.config = config.model_copy(update={
+                    "low": new_low, 
+                    "high": new_high
+                })
+
+        clipped_space[param] = new_entry
+
+    return clipped_space
