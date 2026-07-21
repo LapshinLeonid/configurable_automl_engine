@@ -226,3 +226,55 @@ ALGO_HYPERPARAMETER_REGISTRY: Dict[str, set[str]] = {
     algo: set(params.keys())
     for algo, params in DEFAULT_SPACES.items()
 }
+
+DATA_DEPENDENT_CONSTRAINTS: Dict[str, str] = {
+    "n_neighbors": "n_samples_minus_one",
+    "min_samples_leaf": "n_samples",
+    "min_samples_split": "n_samples",
+}
+
+def clip_search_space(
+    space: Dict[str, Any], 
+    n_samples: int
+) -> Dict[str, Any]:
+    """
+    Корректирует границы пространства поиска на основе размера выборки.
+    
+    Rationale: Некоторые алгоритмы (KNN, DecisionTrees) падают, если 
+    гиперпараметры превышают количество доступных строк в данных.
+    
+    Args:
+        space: Словарь гиперпараметров (SearchSpaceEntry или сырые дикты).
+        n_samples: Текущее количество строк в обучающей выборке.
+        
+    Returns:
+        Dict[str, Any]: Модифицированный словарь пространства поиска.
+    """
+    if n_samples <= 0:
+        return space
+
+    for param, strategy in DATA_DEPENDENT_CONSTRAINTS.items():
+        if param not in space:
+            continue
+            
+        # Рассчитываем физический предел
+        limit = n_samples - 1 if strategy == "n_samples_minus_one" else n_samples
+        
+        entry = space[param]
+        
+        # Обработка SearchSpaceEntry (основной формат в движке)
+        if isinstance(entry, SearchSpaceEntry):
+            config = entry.config
+            # Клипаем только числовые распределения
+            if hasattr(config, "high") and hasattr(config, "low"):
+                # high не может быть меньше low, и не может быть больше limit
+                config.high = max(config.low, min(config.high, float(limit)))
+                # Если это целочисленный параметр, приводим к int
+                if isinstance(config, IntSpace):
+                    config.high = int(config.high)
+                    
+        # Обработка сырых словарей (для гибкости и тестов)
+        elif isinstance(entry, dict) and "high" in entry and "low" in entry:
+            entry["high"] = max(entry["low"], min(entry["high"], limit))
+            
+    return space
