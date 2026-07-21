@@ -2,6 +2,7 @@ from __future__ import annotations
 import pandas as pd
 from typing import Tuple
 from configurable_automl_engine.common.definitions import ValidationStrategy
+import math
 
 pd.options.mode.copy_on_write = True
 
@@ -81,7 +82,13 @@ test_size: float = 0.2
         return max(0, n_total - 1)
 
     if strategy == ValidationStrategy.train_test_split:
-        # Neff = floor(N_total * (1 - test_size))
-        return math.floor(n_total * (1 - test_size))
+        # Защита от некорректного test_size:
+        # Ограничиваем в диапазоне [0.01, 0.99], чтобы не получить 0 или n_total,
+        # что привело бы к падению большинства алгоритмов обучения.
+        safe_test_size = max(0.01, min(0.99, test_size))
+        
+        effective_size = math.floor(n_total * (1 - safe_test_size))
+        # Гарантируем, что если есть хотя бы 2 строки, то Neff будет минимум 1
+        return max(1 if n_total >= 2 else 0, effective_size)
 
     return n_total
