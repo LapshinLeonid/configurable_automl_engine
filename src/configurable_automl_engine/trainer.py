@@ -52,7 +52,6 @@ from configurable_automl_engine.training_engine.thread_pool import SharedDataFra
 
 from .models import create_model, _ALIASES
 
-from configurable_automl_engine.validation import iter_splits
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (save_artifact,
                                                                     load_artifact)
@@ -454,7 +453,11 @@ class ModelTrainer:
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
-            n_samples = X_prepared.shape[0] if hasattr(X_prepared, "shape") else len(X_prepared)
+            n_samples = (
+                X_prepared.shape[0] 
+                if hasattr(X_prepared, "shape") 
+                else len(X_prepared)
+            )
             if n_samples < 2:
                 raise TrainingError("Insufficient records for training")
 

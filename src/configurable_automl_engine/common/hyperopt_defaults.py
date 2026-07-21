@@ -254,7 +254,8 @@ def clip_search_space(
     for param, entry in space.items():
         strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)
         
-        # Если параметр не требует клиппинга или это не SearchSpaceEntry, копируем как есть
+        # Если параметр не требует клиппинга или это не SearchSpaceEntry, 
+        # копируем как есть
         if not strategy or not isinstance(entry, SearchSpaceEntry):
             clipped_space[param] = entry
             continue
