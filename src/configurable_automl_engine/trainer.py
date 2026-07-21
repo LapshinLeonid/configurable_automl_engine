@@ -52,7 +52,6 @@ from configurable_automl_engine.training_engine.thread_pool import SharedDataFra
 
 from .models import create_model, _ALIASES
 
-from configurable_automl_engine.validation import iter_splits
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (save_artifact,
                                                                     load_artifact)
@@ -159,8 +158,7 @@ class ModelTrainer:
     Attributes:
         algorithm (str): Название алгоритма или алиас 
             (например, 'elasticnet', 'xgboost').
-        hyperparams (dict): Конфигурация гиперпараметров для инициализации модели.
-        test_size (float): Доля данных, выделяемая для валидации (по умолчанию 0.3).
+        hyperparams (dict): Конфигурация гиперпараметров для инициализации модели..
         metric (str): Ключ метрики (r2, mse, mae) для оценки качества на валидации.
         random_state (int | None): Зерно для воспроизводимости разбиения и обучения.
         serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
@@ -181,7 +179,6 @@ class ModelTrainer:
         self,
         algorithm: str = "elasticnet",
         hyperparams: dict[str, Any] | None = None,
-        test_size: float = 0.3,
         metric: str = "r2",
         random_state: int | None = 42,
         data_oversampling: bool = False,
@@ -212,7 +209,6 @@ class ModelTrainer:
             self.hyperparams = {}
 
         # Остальные параметры
-        self.test_size = test_size
         self.metric = metric.lower()
         self.random_state = random_state
         self.serialization_format = serialization_format
@@ -393,10 +389,16 @@ class ModelTrainer:
                     y_obj = y.get_view().iloc[:, 0]
                 else:
                     y_obj = np.asarray(y)
-            # Консолидированная валидация (Task 1.1)
+            # Консолидированная валидация 
             n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
             if n_samples == 0: 
                 raise TrainingError("Data is empty")
+            nx = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
+            ny = y_obj.shape[0] if hasattr(y_obj, "shape") else len(y_obj)
+            
+            if nx != ny:
+                raise TrainingError(f"Mismatched samples: X has {nx}, y has {ny}")
+            
             return X_obj, y_obj
         except (ValueError, TypeError, IndexError) as e:
             if str(e) == "Data is empty":
@@ -451,6 +453,14 @@ class ModelTrainer:
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
+            n_samples = (
+                X_prepared.shape[0] 
+                if hasattr(X_prepared, "shape") 
+                else len(X_prepared)
+            )
+            if n_samples < 2:
+                raise TrainingError("Insufficient records for training")
+
             if isinstance(X_prepared, pd.DataFrame):
                 self._detect_feature_types(X_prepared, target_column="") 
             else:
@@ -480,38 +490,20 @@ class ModelTrainer:
             except (ValueError, ImportError) as e:
                 raise TrainingError(f"Error creating model: {e}")
             
-            # Этап 5: Разбиение данных (используем iter_splits)
-
-            n_samples = (X_prepared.shape[0] 
-                         if hasattr(X_prepared, "shape") 
-                         else len(X_prepared))
-            if n_samples < 2:
-                raise TrainingError("Insufficient records for training and validation")
-            
-            try:
-                X_train, X_val, y_train, y_val = next(
-                    iter_splits(X_prepared, 
-                                y_s, 
-                                method='train_test_split', 
-                                random_state=self.random_state)
-                )
-            except Exception as e:
-                raise TrainingError(f"Error splitting data: {e}")
-
-            # Этап 6: Сборка и обучение пайплайна (Task 2.3)
+            # Этап 5: Сборка и обучение пайплайна
             # Здесь автоматически применится оверсэмплинг, если он включен
-            self.pipeline = self._fit_internal(X_train, 
-                                               y_train, 
+            self.pipeline = self._fit_internal(X_prepared, 
+                                               y_s, 
                                                preprocessor, 
                                                base_model)
 
-            # Этап 7: Валидация и расчет метрик (финальный шаг)
+            # Этап 6: Валидация и расчет метрик (финальный шаг)
             try:
                 # 1. Получаем объект-скорер
                 scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
                 
                 # 2. Вычисляем raw_score (для ошибок sklearn вернет отрицательное число)
-                raw_score = scorer(self.pipeline, X_val, y_val)
+                raw_score = scorer(self.pipeline, X_prepared, y_s)
                 if raw_score is None:
                     raise TrainingError("Scorer returned None")
                 
@@ -617,7 +609,6 @@ def train_model(
     algo: str = ""
     metric: str = ""
     hyperparams: dict[str, Any] = {}
-    test_size: float = 0.3
     rs: int | None = random_state
     """Обеспечить совместимость со старым API для обучения моделей.
     Функция-фасад, которая принимает конфигурацию или набор позиционных аргументов,
@@ -639,7 +630,6 @@ def train_model(
         algo = str(cfg.get("algorithm",""))
         metric = str(cfg.get("metric",""))
         hyperparams = cast(Dict[str, Any], cfg.get("hyperparams", {}))
-        test_size = float(cfg.get("test_size", 0.3))
         rs = cast(Optional[int], cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
         data_os = bool(cfg.get("data_oversampling", False))
@@ -652,7 +642,6 @@ def train_model(
         algo = cfg_or_algo if cfg_or_algo is not None else "" 
         metric = str(metric_or_testsize)  
         hyperparams = cast(Dict[str, Any], params_or_metric) 
-        test_size = 0.3
         rs = random_state
         data_os = False
         data_os_mult = 1.0
@@ -672,7 +661,6 @@ def train_model(
         trainer = ModelTrainer(
             algorithm=algo,
             hyperparams=hyperparams,
-            test_size=test_size,
             metric=metric,
             random_state=rs,
             data_oversampling=data_os,

@@ -44,6 +44,7 @@ from sklearn.model_selection import (
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
+from configurable_automl_engine.common.validation_utils import get_effective_train_size
 
 from configurable_automl_engine.validation import make_cv
 
@@ -76,16 +77,10 @@ log = logging.getLogger(__name__)
 
 # ══════════ KNN-space зависит от размера выборки ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
-    """Создать генератор пространства поиска для алгоритма KNN.
-    Args:
-        n_samples (int): Количество образцов в выборке 
-            для расчета верхнего порога n_neighbors.
-    Returns:
-        Callable[[Trial], dict[str, Any]]: Функция-обертка.
-    """
+    """Создать генератор пространства поиска для алгоритма KNN."""
     def _space(t: Trial) -> dict[str, Any]:
-        # Centralized constraint for n_neighbors is (n_samples - 1).
-        # We also maintain the heuristic cap of 30 to avoid excessive complexity.
+        # Ограничение n_neighbors физическим пределом обучающей выборки (N_eff - 1).
+        # Используем n_samples_eff вместо общего количества строк в датасете.
         physical_limit = max(1, n_samples - 1)
         max_k = int(min(30, physical_limit))
         
@@ -347,6 +342,13 @@ def optimize(
 
     # -------------------- 1. стратегия CV -------------------------- #
     n_samples = len(y)
+    # Определяем, сколько строк реально "увидит" модель при обучении внутри CV/Split
+    n_samples_eff = get_effective_train_size(
+        n_total=n_samples,
+        strategy=validation_strategy or val_method,
+        n_folds=n_folds,
+        test_size=train_test_split_test_size
+    )
     val_method_eff, cv_obj = make_cv(
         n_samples,
         val_method=val_method,
@@ -359,7 +361,7 @@ def optimize(
     base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
 
     if algo == "knn":
-        base_space_fn = _make_knn_space(n_samples)
+        base_space_fn = _make_knn_space(n_samples_eff)
 
     # Приоритет 1: Прямые переопределения (функции)
     # Приоритет 2: Динамический конфиг из YAML (dict с SearchSpaceEntry)
@@ -370,7 +372,7 @@ def optimize(
         space_fn : Callable[[Trial], dict[str, Any]] | None = external_config
     # Если пришел словарь (новый механизм из YAML) — создаем обертку
     elif isinstance(external_config, dict):
-        clipped_config = clip_search_space(external_config, n_samples)
+        clipped_config = clip_search_space(external_config, n_samples_eff)
         space_fn  = partial(_apply_dynamic_space, space_dict=clipped_config)
     else:
         space_fn = base_space_fn

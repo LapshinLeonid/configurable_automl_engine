@@ -1,7 +1,8 @@
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import MagicMock
+import math
+from unittest.mock import MagicMock, patch
 from sklearn.linear_model import Ridge
 from configurable_automl_engine.common.hyperopt_defaults import FloatSpace
 
@@ -11,6 +12,11 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     IntSpace
 )
 from configurable_automl_engine.tuner import _make_knn_space, optimize
+
+from configurable_automl_engine.common.validation_utils import get_effective_train_size
+from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.trainer import ModelTrainer, train_model, TrainingError
+
 
 def test_clip_search_space_logic():
     """
@@ -148,3 +154,177 @@ def test_clip_handles_categorical():
     clipped = clip_search_space(space, n_samples=10)
     assert clipped["weights"].dist_type == "categorical"
     assert "uniform" in clipped["weights"].config.options
+
+@pytest.mark.parametrize("n_total, strategy, n_folds, test_size, expected", [
+    # K-Fold: floor(100 * (1 - 1/5)) = 80
+    (100, ValidationStrategy.k_fold, 5, 0.2, 80),
+    # K-Fold: floor(10 * (1 - 1/3)) = floor(6.66) = 6
+    (10, "k_fold", 3, 0.2, 6),
+    # LOO: 100 - 1 = 99
+    (100, ValidationStrategy.loo, 5, 0.2, 99),
+    # Train-Test Split: floor(100 * (1 - 0.25)) = 75
+    (100, ValidationStrategy.train_test_split, 5, 0.25, 75),
+    # Тест безопасности (clamping) test_size: 1.5 -> 0.99. floor(100 * 0.01) = 1
+    (100, ValidationStrategy.train_test_split, 5, 1.5, 1),
+    # Тест граничного случая: n=0
+    (0, ValidationStrategy.k_fold, 5, 0.2, 0),
+    # Минимум для Neff при n_total >= 2
+    (2, ValidationStrategy.train_test_split, 5, 0.99, 1),
+])
+def test_get_effective_train_size_logic(n_total, strategy, n_folds, test_size, expected):
+    result = get_effective_train_size(n_total, strategy, n_folds, test_size)
+    assert result == expected
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2. Тесты для trainer.py (Refactoring ModelTrainer)
+# ──────────────────────────────────────────────────────────────────────
+
+def test_model_trainer_no_longer_splits_internally():
+    """Проверяет, что ModelTrainer теперь обучается на всех переданных данных."""
+    df = pd.DataFrame({
+        "feature1": np.random.rand(10),
+        "target": np.random.rand(10)
+    })
+    
+    # Инициализация без test_size (теперь его нет в сигнатуре)
+    trainer = ModelTrainer(algorithm="ridge")
+    
+    with patch.object(ModelTrainer, '_fit_internal', wraps=trainer._fit_internal) as mock_fit:
+        trainer.fit(df, y="target")
+        
+        # Проверяем, что в _fit_internal передано 10 строк (весь df), а не часть
+        args, _ = mock_fit.call_args
+        # args[0] это X_train
+        assert len(args[0]) == 10
+        assert trainer.val_score is not None
+
+def test_train_model_facade_compatibility():
+    """Проверка, что функция-фасад train_model не падает без test_size."""
+    X = pd.DataFrame(np.random.rand(10, 2))
+    y = pd.Series(np.random.rand(10))
+    
+    # Вызов старого API (params_or_metric — это dict параметров)
+    # test_size теперь просто игнорируется внутри или отсутствует
+    score = train_model(
+        cfg_or_algo="ridge",
+        metric_or_testsize="r2",
+        params_or_metric={"alpha": 1.0},
+        X=X, y=y
+    )
+    assert isinstance(score, float)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 3. Тесты для tuner.py (KNN & Space Clipping)
+# ──────────────────────────────────────────────────────────────────────
+
+def test_knn_space_limit_uses_effective_size():
+    """Проверяет, что верхний предел KNN учитывает Neff, а не N_total."""
+    # Neff = 5
+    trial = MagicMock()
+    space_gen = _make_knn_space(n_samples=6)
+    
+    space_gen(trial)
+    
+    # physical_limit = max(1, 6 - 1) = 5.
+    # suggest_int должен быть вызван с high=5 (min(30, 5))
+    trial.suggest_int.assert_any_call("n_neighbors", 1, 5)
+
+@patch("configurable_automl_engine.tuner.clip_search_space")
+@patch("configurable_automl_engine.tuner.create_model")
+@patch("optuna.create_study")
+def test_optimize_calls_clipping_with_effective_size(mock_study, mock_create, mock_clip):
+    """Проверяет, что при оптимизации клиппинг вызывается с эффективным размером."""
+    X = pd.DataFrame(np.random.rand(20, 2))
+    y = pd.Series(np.random.rand(20))
+    
+    # Имитируем внешний конфиг пространства поиска
+    space_overrides = {"ridge": {"alpha": [0.1, 1.0]}}
+    
+    # Запускаем оптимизацию со стратегией k_fold (n_folds=2)
+    # Neff = floor(20 * (1 - 1/2)) = 10
+    try:
+        optimize(
+            algo_name="ridge",
+            X=X, y=y,
+            validation_strategy="k_fold",
+            n_folds=2,
+            n_trials=1,
+            space_overrides=space_overrides
+        )
+    except Exception:
+        pass # Нам важен только вызов клиппинга
+    
+    # Проверяем, что clip_search_space получил n_samples=10 (Neff)
+    mock_clip.assert_called_once()
+    assert mock_clip.call_args[0][1] == 10
+
+def test_knn_space_limit_at_minimum():
+    trial = MagicMock()
+    # Если осталась всего 1 строка после сплита
+    space_gen = _make_knn_space(n_samples=1)
+    space_gen(trial)
+    # Должен предложить 1 соседа (минимум для sklearn), а не 0
+    trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
+
+def test_model_trainer_raises_error_on_empty_data():
+    """Проверка генерации исключения TrainingError при передаче пустых данных."""
+    trainer = ModelTrainer(algorithm="ridge")
+    
+    # Сценарий 1: Пустой DataFrame
+    empty_df = pd.DataFrame()
+    empty_y = pd.Series(dtype=float)
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(empty_df, empty_y)
+        
+    # Сценарий 2: Пустой numpy массив
+    empty_X_np = np.array([]).reshape(0, 2)
+    empty_y_np = np.array([])
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(empty_X_np, empty_y_np)
+
+    # Сценарий 3: Данные с колонками, но без строк
+    df_zero_rows = pd.DataFrame(columns=["a", "b"])
+    y_zero_rows = pd.Series(dtype=float)
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(df_zero_rows, y_zero_rows)
+
+def test_get_effective_train_size_raises_on_invalid_string():
+    """Проверка, что функция падает на неизвестной строке."""
+    with pytest.raises(ValueError, match="Unknown validation strategy string"):
+        get_effective_train_size(100, strategy="magic_split")
+
+def test_get_effective_train_size_raises_on_invalid_type():
+    """Проверка, что функция падает на некорректном типе (например, None)."""
+    with pytest.raises(ValueError, match="Unsupported validation strategy type"):
+        get_effective_train_size(100, strategy=None)
+        
+    with pytest.raises(ValueError, match="Unsupported validation strategy type"):
+        get_effective_train_size(100, strategy=123.45)
+
+def test_clip_search_space_raises_on_negative_samples():
+    """
+    Проверка, что clip_search_space выбрасывает ValueError при отрицательном n_samples.
+    """
+    # Создаем минимальное корректное пространство поиска для теста
+    space = {
+        "n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])
+    }
+    
+    # Сценарий 1: Отрицательное значение
+    with pytest.raises(ValueError, match="must be positive"):
+        clip_search_space(space, n_samples=-1)
+
+    with pytest.raises(ValueError, match="Got -100"):
+        clip_search_space(space, n_samples=-100)
+
+def test_clip_search_space_raises_on_zero_samples():
+    """Проверка, что 0 образцов теперь вызывает ошибку, а не возвращает space."""
+    space = {"n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])}
+    
+    with pytest.raises(ValueError, match="must be positive"):
+        clip_search_space(space, n_samples=0)

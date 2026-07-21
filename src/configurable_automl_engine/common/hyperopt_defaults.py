@@ -246,7 +246,7 @@ def clip_search_space(
     3. Сохраняет типы данных (int/float) согласно исходной конфигурации.
     """
     if n_samples <= 0:
-        return space
+        raise ValueError(f"n_samples must be positive. Got {n_samples}")
 
     # Создаем новый словарь, чтобы не изменять оригинальный space
     clipped_space = {}
@@ -254,7 +254,8 @@ def clip_search_space(
     for param, entry in space.items():
         strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)
         
-        # Если параметр не требует клиппинга или это не SearchSpaceEntry, копируем как есть
+        # Если параметр не требует клиппинга или это не SearchSpaceEntry, 
+        # копируем как есть
         if not strategy or not isinstance(entry, SearchSpaceEntry):
             clipped_space[param] = entry
             continue
