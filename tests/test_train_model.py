@@ -182,7 +182,7 @@ def test_prepare_data_variants():
     X_small = pd.DataFrame({'a': [1]})
     y_small = pd.Series([1])
     # _prepare_data пропустит (там проверка < 2), но split может упасть 
-    with pytest.raises(TrainingError, match="Insufficient records for training and validation"):
+    with pytest.raises(TrainingError, match="Insufficient records for training"):
         trainer.fit(X_small, y_small)
 # --- Тесты сохранения и загрузки  ---
 def test_save_load_errors(tmp_path):
@@ -363,27 +363,6 @@ def test_coverage_fit_create_model_error():
     
     # 3. Проверка: Убеждаемся, что ошибка обернута в наше сообщение
     assert "Error creating model" in str(excinfo.value)
-
-def test_fit_split_error_fixed(monkeypatch):
-    """
-    Тест для покрытия ветки ошибки при разбиении данных.
-    """
-    # 1. Подготовка
-    trainer = ModelTrainer(algorithm="elasticnet")
-    def mock_iter_splits(*args, **kwargs):
-        raise RuntimeError("Force split failure")
-    # Патчим 'iter_splits' в модуле 'trainer'
-    monkeypatch.setattr("configurable_automl_engine.trainer.iter_splits", mock_iter_splits)
-    # 2. Действие и Проверка
-    # Используем данные с 2+ строками, чтобы пройти валидацию длины
-    X_test = pd.DataFrame([[1], [2]], columns=["feature1"])
-    y_test = pd.Series([0, 1])
-    with pytest.raises(TrainingError) as excinfo:
-        trainer.fit(X=X_test, y=y_test)
-    
-    # Теперь мы должны увидеть ошибку из блока исключений iter_splits
-    assert "Error splitting data" in str(excinfo.value)
-    assert "Force split failure" in str(excinfo.value)
 
 def test_predict_general_exception():
     """

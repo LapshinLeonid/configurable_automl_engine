@@ -69,7 +69,7 @@ test_size: float = 0.2
             strategy = ValidationStrategy(strategy)
         except ValueError:
             # Если передана неизвестная стратегия, возвращаем n_total как fallback
-            return n_total
+            raise ValueError(f"Unknown validation strategy string: '{strategy}'")
 
     if strategy == ValidationStrategy.k_fold:
         # Neff = floor(N_total * (1 - 1/k))
@@ -91,4 +91,4 @@ test_size: float = 0.2
         # Гарантируем, что если есть хотя бы 2 строки, то Neff будет минимум 1
         return max(1 if n_total >= 2 else 0, effective_size)
 
-    return n_total
+    raise ValueError(f"Unsupported validation strategy type or value: {strategy}")

@@ -246,7 +246,7 @@ def clip_search_space(
     3. Сохраняет типы данных (int/float) согласно исходной конфигурации.
     """
     if n_samples <= 0:
-        return space
+        raise ValueError(f"n_samples must be positive. Got {n_samples}")
 
     # Создаем новый словарь, чтобы не изменять оригинальный space
     clipped_space = {}

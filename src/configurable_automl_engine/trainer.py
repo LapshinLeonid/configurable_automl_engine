@@ -390,10 +390,16 @@ class ModelTrainer:
                     y_obj = y.get_view().iloc[:, 0]
                 else:
                     y_obj = np.asarray(y)
-            # Консолидированная валидация (Task 1.1)
+            # Консолидированная валидация 
             n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
             if n_samples == 0: 
                 raise TrainingError("Data is empty")
+            nx = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
+            ny = y_obj.shape[0] if hasattr(y_obj, "shape") else len(y_obj)
+            
+            if nx != ny:
+                raise TrainingError(f"Mismatched samples: X has {nx}, y has {ny}")
+            
             return X_obj, y_obj
         except (ValueError, TypeError, IndexError) as e:
             if str(e) == "Data is empty":
@@ -447,6 +453,10 @@ class ModelTrainer:
             
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
+
+            n_samples = X_prepared.shape[0] if hasattr(X_prepared, "shape") else len(X_prepared)
+            if n_samples < 2:
+                raise TrainingError("Insufficient records for training")
 
             if isinstance(X_prepared, pd.DataFrame):
                 self._detect_feature_types(X_prepared, target_column="") 

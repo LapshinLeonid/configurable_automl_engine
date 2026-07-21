@@ -15,7 +15,7 @@ from configurable_automl_engine.tuner import _make_knn_space, optimize
 
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.common.definitions import ValidationStrategy
-from configurable_automl_engine.trainer import ModelTrainer, train_model
+from configurable_automl_engine.trainer import ModelTrainer, train_model, TrainingError
 
 
 def test_clip_search_space_logic():
@@ -168,8 +168,6 @@ def test_clip_handles_categorical():
     (100, ValidationStrategy.train_test_split, 5, 1.5, 1),
     # Тест граничного случая: n=0
     (0, ValidationStrategy.k_fold, 5, 0.2, 0),
-    # Неизвестная стратегия: возврат n_total
-    (50, "unknown", 5, 0.2, 50),
     # Минимум для Neff при n_total >= 2
     (2, ValidationStrategy.train_test_split, 5, 0.99, 1),
 ])
@@ -269,3 +267,64 @@ def test_knn_space_limit_at_minimum():
     space_gen(trial)
     # Должен предложить 1 соседа (минимум для sklearn), а не 0
     trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
+
+def test_model_trainer_raises_error_on_empty_data():
+    """Проверка генерации исключения TrainingError при передаче пустых данных."""
+    trainer = ModelTrainer(algorithm="ridge")
+    
+    # Сценарий 1: Пустой DataFrame
+    empty_df = pd.DataFrame()
+    empty_y = pd.Series(dtype=float)
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(empty_df, empty_y)
+        
+    # Сценарий 2: Пустой numpy массив
+    empty_X_np = np.array([]).reshape(0, 2)
+    empty_y_np = np.array([])
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(empty_X_np, empty_y_np)
+
+    # Сценарий 3: Данные с колонками, но без строк
+    df_zero_rows = pd.DataFrame(columns=["a", "b"])
+    y_zero_rows = pd.Series(dtype=float)
+    
+    with pytest.raises(TrainingError, match="Data is empty"):
+        trainer.fit(df_zero_rows, y_zero_rows)
+
+def test_get_effective_train_size_raises_on_invalid_string():
+    """Проверка, что функция падает на неизвестной строке."""
+    with pytest.raises(ValueError, match="Unknown validation strategy string"):
+        get_effective_train_size(100, strategy="magic_split")
+
+def test_get_effective_train_size_raises_on_invalid_type():
+    """Проверка, что функция падает на некорректном типе (например, None)."""
+    with pytest.raises(ValueError, match="Unsupported validation strategy type"):
+        get_effective_train_size(100, strategy=None)
+        
+    with pytest.raises(ValueError, match="Unsupported validation strategy type"):
+        get_effective_train_size(100, strategy=123.45)
+
+def test_clip_search_space_raises_on_negative_samples():
+    """
+    Проверка, что clip_search_space выбрасывает ValueError при отрицательном n_samples.
+    """
+    # Создаем минимальное корректное пространство поиска для теста
+    space = {
+        "n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])
+    }
+    
+    # Сценарий 1: Отрицательное значение
+    with pytest.raises(ValueError, match="must be positive"):
+        clip_search_space(space, n_samples=-1)
+
+    with pytest.raises(ValueError, match="Got -100"):
+        clip_search_space(space, n_samples=-100)
+
+def test_clip_search_space_raises_on_zero_samples():
+    """Проверка, что 0 образцов теперь вызывает ошибку, а не возвращает space."""
+    space = {"n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])}
+    
+    with pytest.raises(ValueError, match="must be positive"):
+        clip_search_space(space, n_samples=0)
