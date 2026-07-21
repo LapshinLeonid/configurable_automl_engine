@@ -80,11 +80,14 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
         n_samples (int): Количество образцов в выборке 
             для расчета верхнего порога n_neighbors.
     Returns:
-        Callable[[Trial], dict[str, Any]]: Функция-обертка, которая принимает объект 
-            optuna.Trial и возвращает словарь с предложенными гиперпараметрами.
+        Callable[[Trial], dict[str, Any]]: Функция-обертка.
     """
     def _space(t: Trial) -> dict[str, Any]:
-        max_k = int(max(1, min(30, int(n_samples * 0.8))))  # ≥1 и ≤30
+        # Centralized constraint for n_neighbors is (n_samples - 1).
+        # We also maintain the heuristic cap of 30 to avoid excessive complexity.
+        physical_limit = max(1, n_samples - 1)
+        max_k = int(min(30, physical_limit))
+        
         return {
             "n_neighbors": t.suggest_int("n_neighbors", 1, max_k),
             "weights": t.suggest_categorical(
@@ -366,7 +369,8 @@ def optimize(
         space_fn : Callable[[Trial], dict[str, Any]] | None = external_config
     # Если пришел словарь (новый механизм из YAML) — создаем обертку
     elif isinstance(external_config, dict):
-        space_fn  = partial(_apply_dynamic_space, space_dict=external_config)
+        clipped_config = clip_search_space(external_config, n_samples)
+        space_fn  = partial(_apply_dynamic_space, space_dict=clipped_config)
     else:
         space_fn = base_space_fn
     if space_fn is None:
