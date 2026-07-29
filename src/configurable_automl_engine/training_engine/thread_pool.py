@@ -512,12 +512,9 @@ def run_parallel(
             return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
-        is_process_pool = (
-                "ProcessPoolExecutor" in globals() and 
-                isinstance(pool, globals()["ProcessPoolExecutor"])
-            )
         if pool is not None:
-            if mode == "processes" and is_process_pool:
+            is_proc_executor = type(pool).__name__ == "ProcessPoolExecutor"
+            if mode == "processes" and is_proc_executor:
                 # Безопасный захват воркеров до shutdown
                 # Копируем список объектов процессов, пока они доступны в _processes
                 workers = list(getattr(pool, "_processes", {}).values())

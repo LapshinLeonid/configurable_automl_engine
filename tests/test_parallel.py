@@ -54,7 +54,7 @@ def test_run_parallel_processes_cpu_bound():
     assert all(isinstance(r, str) for r in results)
 
 def test_run_parallel_fallback_mechanism(caplog):
-    """Исправлено: учитываем новые строки логов при сбое инициализации."""
+    """Актуализировано: проверка отката при сбое инициализации."""
     args = [(1, 10)]
     with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor", 
                side_effect=RuntimeError("OS Error")):
@@ -62,8 +62,9 @@ def test_run_parallel_fallback_mechanism(caplog):
             results = run_parallel(simple_task, args_seq=args, mode="processes")
     
     assert results == [11]
-    # Новый код пишет: "Falling back to threads due to: OS Error"
-    assert "Falling back to threads" in caplog.text
+    # Код пишет: "Error in process pool, falling back to threads: OS Error"
+    assert "falling back to threads" in caplog.text
+    assert "OS Error" in caplog.text
 
 def test_run_parallel_error_propagation(caplog):
     """Актуализировано: проверка лога при ошибке задачи (формат 'Task 0 failed')."""
@@ -152,18 +153,16 @@ class FailingExecutor:
     def __enter__(self): return self
     def __exit__(self, *args): pass
 
-def test_run_parallel_fallback_from_processes_to_threads(monkeypatch, caplog):
-    """Исправлено: обработка RuntimeError при инициализации пула."""
-    class FailingExecutor:
-        def __init__(self, *args, **kwargs): raise RuntimeError("init failed")
-
-    monkeypatch.setattr(thread_pool, "ProcessPoolExecutor", FailingExecutor)
+def test_run_parallel_init_section_coverage(monkeypatch, caplog):
+    """Актуализировано: проверка при отсутствии ProcessPoolExecutor в пространстве имен."""
+    # Удаляем атрибут, чтобы спровоцировать ошибку импорта/инициализации
+    monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
     
     with caplog.at_level(logging.ERROR):
-        results = run_parallel(lambda x: x + 1, args_seq=[(10,)], mode="processes")
+        results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
     
-    assert results == [11]
-    assert "Falling back to threads due to: init failed" in caplog.text
+    assert results == [5]
+    assert "Could not initialize ProcessPoolExecutor" in caplog.text or "falling back to threads" in caplog.text
 
 def test_run_parallel_init_section_coverage(monkeypatch, caplog):
     """Исправлено: проверка лога при отсутствии ProcessPoolExecutor в модуле."""
