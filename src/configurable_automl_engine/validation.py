@@ -21,7 +21,7 @@ Validation Engine: Единая фабрика разбиений для обу�
 
 from __future__ import annotations
 
-import logging as logging
+import logging
 from collections.abc import Generator
 
 import numpy as np

@@ -148,7 +148,7 @@ class GeneralCfg(BaseModel):
                      "Используется только если validation_strategy = 'k_fold'")
     )
     parallel_strategy: ParallelStrategy = Field(
-        default=list(ParallelStrategy)[0],
+        default=next(iter(ParallelStrategy)),
         description=("Стратегия распараллеливания." 
                      "Сейчас поддерживается только 'algorithms'"
                      " (каждый алгоритм в своем потоке/процессе).")

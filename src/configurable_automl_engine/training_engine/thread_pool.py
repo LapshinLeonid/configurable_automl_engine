@@ -150,10 +150,7 @@ class SharedDataFrame:
         #Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
         # Если индекс не является RangeIndex, объект признается несовместимым с SHM 
         # и будет автоматически перенаправлен в DiskPersistenceManager.
-        if not isinstance(df.index, pd.RangeIndex):
-            return False
-            
-        return True
+        return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
         """Восстановить pandas.DataFrame из разделяемой памяти.

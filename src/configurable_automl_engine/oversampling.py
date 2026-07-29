@@ -90,7 +90,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             base_size = max(counts.values())
             return {
                 cls: ceil(base_size * multiplier) 
-                for cls in counts.keys()
+                for cls in counts
             }
         
         # Важно: imbalanced-learn ожидает итоговое количество экземпляров 

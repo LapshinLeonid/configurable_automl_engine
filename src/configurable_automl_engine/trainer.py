@@ -109,7 +109,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         try:
             # 1. Получаем метаданные без принудительного копирования в DataFrame
             # Используем логику из _extract_metadata, которую мы обсуждали ранее
-            n_rows, n_cols = self._get_dimensions(X)
+            _n_rows, n_cols = self._get_dimensions(X)
             
             # 2. Валидация индекса признака
             if self.feature_index >= n_cols:
@@ -145,7 +145,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             return cast(np.ndarray, result)
         except Exception as e:
             if isinstance(e, TrainingError):
-                raise e
+                raise
             # Унификация сообщения об ошибке согласно тестам (#A8)
             raise TrainingError(f"Data transformation error: {e}")
 class ModelTrainer:
@@ -233,11 +233,10 @@ class ModelTrainer:
 
         for attr_name, features in [("categorical_features", categorical_features), 
                                 ("numerical_features", numerical_features)]:
-            if features is not None:
-                if (not isinstance(features, list) 
-                    or not all(isinstance(f, str) for f in features)):
-                    raise TrainingError(f"Parameter {attr_name} "
-                                        "must be a list of strings (column names)")
+            if features is not None and (not isinstance(features, list) 
+                or not all(isinstance(f, str) for f in features)):
+                raise TrainingError(f"Parameter {attr_name} "
+                                    "must be a list of strings (column names)")
 
     def _validate_features(self, X: pd.DataFrame) -> None:
         """Проверить наличие всех заданных имен признаков в переданном DataFrame."""
@@ -430,10 +429,10 @@ class ModelTrainer:
         # 5) Выполняем обучение
         try:
             self.pipeline.fit(X_train, y_train)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             # Пробрасываем валидационные ошибки напрямую, чтобы тесты могли их поймать
             # Это критично для тестов, проверяющих некорректные гиперпараметры
-            raise e
+            raise
         except TrainingError:
             raise
         except Exception as e:
