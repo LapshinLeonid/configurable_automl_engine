@@ -364,6 +364,8 @@ def run_parallel(
     timeout: int | float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
+    pool_timeout: int | float | None = None,
+    shutdown_grace_period: float = 5.0
 ) -> list[Any]:
     """Организовать параллельное выполнение функции с управлением памятью и жизненным циклом.
 
@@ -468,32 +470,35 @@ def run_parallel(
     pool = executor_cls(max_workers)
     
     try:
-        futures = []
-        for a, kw, d_idx, s_idx in execution_tasks:
+        future_to_idx = {}
+        for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes" and (shared_args_indices or disk_args_indices):
-                futures.append(pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx))
+                fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
             else:
-                futures.append(pool.submit(func, *a, **kw))
+                fut = pool.submit(func, *a, **kw)
+            future_to_idx[fut] = i
 
-        for fut in as_completed(futures):
+        for fut in as_completed(future_to_idx):
+            idx = future_to_idx[fut]  # Теперь индекс определен
+            
             elapsed = time.time() - start_time
-            if timeout and elapsed > timeout:
-                logger.error(f"Global timeout exceeded ({elapsed:.2f}s > {timeout}s). Stopping collection.")
+            # Используем pool_timeout если он задан, иначе глобальный timeout
+            effective_timeout = pool_timeout or timeout
+            
+            if effective_timeout and elapsed > effective_timeout:
+                logger.error(f"Global timeout exceeded. Skipping remaining {len(future_to_idx) - idx} tasks.")
                 break
 
             try:
-                # Рассчитываем оставшееся время для конкретной задачи
-                remaining = max(0, timeout - elapsed) if timeout else None
-                # Записываем результат строго в свою ячейку
+                remaining = max(0, effective_timeout - elapsed) if effective_timeout else None
                 results[idx] = fut.result(timeout=remaining)
-            except (TimeoutError, Exception) as e:
-                if isinstance(e, TimeoutError):
-                    logger.error("Task timed out, marking as failed")
-                    fut.cancel()
-                elif isinstance(e, InvalidAlgorithmError):
-                    raise
-                else:
-                    logger.error("Task failed: %s", e, exc_info=True)
+            except TimeoutError:
+                logger.error(f"Task {idx} timed out")
+                fut.cancel()
+                results[idx] = None
+            except Exception as e:
+                if isinstance(e, InvalidAlgorithmError): raise
+                logger.error(f"Task {idx} failed: {e}")
                 results[idx] = None
 
     except Exception as e:
@@ -504,7 +509,6 @@ def run_parallel(
             return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
-        finally:
         if pool is not None:
             if mode == "processes" and isinstance(pool, ProcessPoolExecutor):
                 # Безопасный захват воркеров до shutdown
@@ -514,8 +518,7 @@ def run_parallel(
                 pool.shutdown(wait=False, cancel_futures=True)
                 
                 # Льготный период ожидания (grace period)
-                grace_limit = 5.0
-                stop_time = time.time() + grace_limit
+                stop_time = time.time() + shutdown_grace_period
                 
                 while time.time() < stop_time and any(w.is_alive() for w in workers):
                     time.sleep(0.1)
