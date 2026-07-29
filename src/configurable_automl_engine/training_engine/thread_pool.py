@@ -486,14 +486,42 @@ def run_parallel(
     except Exception as e:
         if mode == "processes":
             logger.error("Falling back to threads due to: %s", e)
-            pool.shutdown(wait=False, cancel_futures=True) # Быстрая очистка перед рекурсией
+            workers = list(getattr(pool, "_processes", {}).values())
+            pool.shutdown(wait=False, cancel_futures=True)
+            for w in workers:
+                if w.is_alive(): w.terminate()
             _perform_cleanup(shm_refs, persistence_manager) 
             return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-        if mode == "processes":
+        if mode == "processes" and isinstance(pool, ProcessPoolExecutor):
+            workers = list(getattr(pool, "_processes", {}).values())
+            
+            pool.shutdown(wait=False, cancel_futures=True)
+            
+            # Ожидание завершения (Grace period 5 секунд)
+            grace_period = 5.0
+            start_grace = time.time()
+            while time.time() - start_grace < grace_period and any(w.is_alive() for w in workers):
+                time.sleep(0.1)
+            
+            # Forced Kill: Сначала terminate, затем kill
+            for w in workers:
+                if w.is_alive():
+                    logger.warning(f"Worker process {w.pid} hung. Terminating...")
+                    w.terminate()
+            
+            # Даем время на обработку SIGTERM, затем жесткий SIGKILL
+            time.sleep(0.5)
+            for w in workers:
+                if w.is_alive():
+                    logger.error(f"Worker process {w.pid} survived SIGTERM. Killing...")
+                    w.kill()
+                    
             _perform_cleanup(shm_refs, persistence_manager)
+        else:
+            # Для ThreadPoolExecutor или если пул не создался
+            pool.shutdown(wait=True, cancel_futures=True)
     return results
 
 
