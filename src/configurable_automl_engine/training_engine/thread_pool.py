@@ -329,20 +329,31 @@ def _worker_proxy(
 def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
                       persistence_manager: DiskPersistenceManager | None
                       ) -> None:
-    """Вспомогательная функция для безопасной очистки"""
+    """Вспомогательная функция для безопасной очистки с защитой от системных ошибок."""
     if shm_refs:
         for ref in shm_refs:
+            # Сначала закрываем дескриптор
             try:
-                # На Windows порядок close/unlink критичен
-                ref.close() 
+                ref.close()
+            except Exception as e:
+                logger.debug(f"SHM close error (expected during forced shutdown): {e}")
+            
+            # Затем пытаемся уничтожить сегмент в ОС
+            try:
                 ref.unlink()
-            except Exception:
+            except (FileNotFoundError, OSError) as e:
+                # Игнорируем, если уже удалено или нет доступа
                 pass
+            except Exception as e:
+                logger.warning(f"Non-critical SHM unlink failure: {e}")
+
     if persistence_manager:
         try:
             persistence_manager.cleanup()
-        except Exception:
-            pass
+        except (PermissionError, OSError) as e:
+            logger.error(f"Cleanup failed due to file locking/permissions: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected persistence cleanup error: {e}")
 
 def run_parallel(
     func: Callable[..., Any],
@@ -513,7 +524,9 @@ def run_parallel(
                 for w in workers:
                     if w.is_alive():
                         try:
-                            logger.warning(f"Worker {w.pid} is still alive after grace period. Terminating...")
+                            # ERROR уровень для прерывания (проблема в алгоритме/библиотеке)
+                            logger.error(f"CRITICAL: Worker {w.pid} hung in task execution. "
+                                         f"Forcing SIGTERM to release resources.")
                             w.terminate()
                         except Exception: pass
                 
@@ -523,7 +536,9 @@ def run_parallel(
                 for w in workers:
                     if w.is_alive():
                         try:
-                            logger.error(f"Worker {w.pid} resisted terminate. Sending KILL...")
+                            # CRITICAL уровень, если процесс проигнорировал даже SIGTERM
+                            logger.critical(f"HARD KILL: Worker {w.pid} resisted SIGTERM. "
+                                            f"Sending SIGKILL. Possible memory leak or C-level freeze.")
                             w.kill()
                         except Exception: pass
                 
