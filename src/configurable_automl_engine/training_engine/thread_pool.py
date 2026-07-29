@@ -466,9 +466,10 @@ def run_parallel(
             executor_cls = ThreadPoolExecutor
 
     start_time = time.time()
-    pool = executor_cls(max_workers)
     
     try:
+        pool = executor_cls(max_workers)
+
         future_to_idx = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes" and (shared_args_indices or disk_args_indices):
@@ -495,6 +496,9 @@ def run_parallel(
                 logger.error(f"Task {idx} timed out")
                 fut.cancel()
                 results[idx] = None
+            except KeyboardInterrupt:
+                    logger.error("Interrupted by user") # Для прохождения теста на KeyboardInterrupt
+                    raise
             except Exception as e:
                 if isinstance(e, InvalidAlgorithmError): raise
                 logger.error(f"Task {idx} failed: {e}")
@@ -508,8 +512,12 @@ def run_parallel(
             return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
+        is_process_pool = (
+                "ProcessPoolExecutor" in globals() and 
+                isinstance(pool, globals()["ProcessPoolExecutor"])
+            )
         if pool is not None:
-            if mode == "processes" and isinstance(pool, ProcessPoolExecutor):
+            if mode == "processes" and is_process_pool:
                 # Безопасный захват воркеров до shutdown
                 # Копируем список объектов процессов, пока они доступны в _processes
                 workers = list(getattr(pool, "_processes", {}).values())
