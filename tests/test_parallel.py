@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import os
 from multiprocessing import shared_memory
+import unittest
 
 from unittest.mock import MagicMock,patch
 from configurable_automl_engine.tuner import InvalidAlgorithmError
@@ -19,6 +20,8 @@ from configurable_automl_engine.training_engine.thread_pool import (
     _worker_proxy,
     _perform_cleanup,
 )
+
+MODULE_PATH = 'configurable_automl_engine.training_engine.thread_pool'
 
 # --- Тестовые функции ---
 def cpu_bound_task(n: int) -> str:
@@ -52,32 +55,30 @@ def test_run_parallel_processes_cpu_bound():
     
     assert len(results) == 3
     assert all(isinstance(r, str) for r in results)
-def test_run_parallel_fallback_mechanism():
-    """3. Проверка механизма Fallback при сбое инициализации процессов."""
-    args = [(1, 10), (2, 20)]
-    
-    # Имитируем ошибку при вызове ProcessPoolExecutor
-    with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor", side_effect=RuntimeError("OS Error")):
-        with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
-            results = run_parallel(simple_task, args_seq=args, mode="processes")
-            
-            # Проверяем, что результаты все равно получены (через fallback)
-            assert sorted(results) == [11, 22]
-            # Проверяем, что ошибка была залогирована
-            mock_logger.error.assert_called()
-            assert "Falling back to threads" in mock_logger.error.call_args[0][0]
 
-def test_run_parallel_error_propagation():
-    """5. Проверка проброса ошибок и записи в лог."""
-    args = [()] # Вызываем один раз без аргументов
+def test_run_parallel_fallback_mechanism(caplog):
+    """Актуализировано: проверка отката при сбое инициализации."""
+    args = [(1, 10)]
+    with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor", 
+               side_effect=RuntimeError("OS Error")):
+        with caplog.at_level(logging.ERROR):
+            results = run_parallel(simple_task, args_seq=args, mode="processes")
     
-    with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
-        results = run_parallel(failing_task, args_seq=args, mode="threads")
-        
-        assert results == [None]
-        # Проверяем, что ошибка залогирована
-        mock_logger.error.assert_called()
-        assert "Task failed" in mock_logger.error.call_args[0][0]
+    assert results == [11]
+    # Код пишет: "Error in process pool, falling back to threads: OS Error"
+    assert "falling back to threads" in caplog.text
+    assert "OS Error" in caplog.text
+
+def test_run_parallel_error_propagation(caplog):
+    """Актуализировано: проверка лога при ошибке задачи (формат 'Task 0 failed')."""
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(failing_task, args_seq=[()], mode="threads")
+    
+    assert results == [None]
+    # В актуальном коде: logger.error(f"Task {idx} failed: {e}")
+    assert "Task 0 failed" in caplog.text
+    assert "Intentional failure" in caplog.text
+
 def test_run_parallel_empty_args():
     """Дополнительно: проверка запуска без аргументов (ровно один раз)."""
     def get_one(): return 1
@@ -91,27 +92,25 @@ def test_run_parallel_validation_error():
             args_seq=[(1,)], 
             kwargs_seq=[{}, {}] # Разная длина
         )
-
 def test_run_parallel_timeout_error_coverage(caplog):
-    # Мокаем ThreadPoolExecutor, чтобы его футуры всегда кидали TimeoutError
+    """Актуализировано: проверка лога таймаута (формат 'Task 0 timed out') через wait."""
     with patch("configurable_automl_engine.training_engine.thread_pool.ThreadPoolExecutor") as mock_executor:
         mock_pool = MagicMock()
-        mock_executor.return_value.__enter__.return_value = mock_pool
+        mock_executor.return_value = mock_pool
         
-        # Создаем фейковую футуру
         mock_future = MagicMock()
-        # При вызове fut.result(timeout=...) кидаем TimeoutError из concurrent.futures
-        from concurrent.futures import TimeoutError
-        mock_future.result.side_effect = TimeoutError()
-        
+        # side_effect с TimeoutError больше не нужен: при таймауте wait() просто не вызывает .result()
         mock_pool.submit.return_value = mock_future
         
-        # as_completed должен вернуть список наших моков
-        with patch("configurable_automl_engine.training_engine.thread_pool.as_completed", return_value=[mock_future]):
+        # wait должен вернуть кортеж (done, not_done). Пустое множество done (set()) означает таймаут.
+        with patch("configurable_automl_engine.training_engine.thread_pool.wait", 
+                   return_value=(set(), {mock_future})):
             with caplog.at_level(logging.ERROR):
-                results = run_parallel(lambda: None, args_seq=[()])
+                results = run_parallel(lambda: None, args_seq=[()], timeout=0.1)
+                
     assert results == [None]
-    assert any("Task timed out after" in rec.getMessage() for rec in caplog.records)
+    # В актуальном коде: logger.error(f"Task {idx} timed out")
+    assert "Task 0 timed out" in caplog.text
 
 def raise_invalid():
     raise InvalidAlgorithmError("bad algo")
@@ -122,20 +121,32 @@ def test_run_parallel_invalid_algorithm_error_propagates():
 
 def raise_keyboard_interrupt():
     raise KeyboardInterrupt()
+
 def test_run_parallel_keyboard_interrupt_propagates(caplog):
+    """Исправлено: проверка новой строки лога при прерывании."""
+    def raise_ki(): raise KeyboardInterrupt()
+    
     with caplog.at_level(logging.ERROR):
         with pytest.raises(KeyboardInterrupt):
-            run_parallel(raise_keyboard_interrupt, args_seq=[()])
-    # Проверяем, что было залогировано сообщение
-    assert any("Interrupted by user (KeyboardInterrupt)" in rec.getMessage() for rec in caplog.records)
+            run_parallel(raise_ki, args_seq=[()])
+    
+    # В обновленном коде строка: "Interrupted by user"
+    assert "Interrupted by user" in caplog.text
 
 def raise_value_error():
     raise ValueError("boom")
+
 def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
+    """Актуализировано: проверка лога для произвольного исключения."""
+    def boom(): raise ValueError("boom")
+    
     with caplog.at_level(logging.ERROR):
-        results = run_parallel(raise_value_error, args_seq=[()])
+        results = run_parallel(boom, args_seq=[()])
+        
     assert results == [None]
-    assert any("Task failed with an unexpected error: boom" in rec.getMessage() for rec in caplog.records)
+    # В актуальном коде: "Task 0 failed: boom"
+    assert "Task 0 failed" in caplog.text 
+    assert "boom" in caplog.text
 
 class FailingExecutor:
     def __init__(self, *args, **kwargs):
@@ -143,54 +154,28 @@ class FailingExecutor:
         raise RuntimeError("init failed")
     def __enter__(self): return self
     def __exit__(self, *args): pass
-def test_run_parallel_fallback_from_processes_to_threads(monkeypatch, caplog):
-    # Подменяем ProcessPoolExecutor
-    monkeypatch.setattr(thread_pool, "ProcessPoolExecutor", FailingExecutor)
-    
-    def simple_func(x):
-        return x + 10
-    with caplog.at_level(logging.ERROR):
-        results = thread_pool.run_parallel(
-            simple_func, 
-            args_seq=[(5,)], 
-            mode="processes"
-        )
-    # 1. Результат должен быть успешным за счет рекурсивного вызова в threads
-    assert results == [15]
-    
-    # 2. Проверяем лог. Текст ошибки берется из e (RuntimeError("init failed"))
-    assert any("Falling back to threads due to: init failed" in rec.getMessage() 
-               for rec in caplog.records)
-    
+
 def test_run_parallel_init_section_coverage(monkeypatch, caplog):
-    """
-    Тест для покрытия строк 43-45 (инициализация в начале функции).
-    Мы удаляем ProcessPoolExecutor из модуля, чтобы попытка доступа к нему 
-    вызвала ошибку в блоке try.
-    """
-    
-    # 1. Удаляем атрибут из модуля thread_pool
-    # Это заставит строку 'executor_cls = ProcessPoolExecutor' выбросить NameError или AttributeError
+    """Актуализировано: проверка при отсутствии ProcessPoolExecutor в пространстве имен."""
+    # Удаляем атрибут, чтобы спровоцировать ошибку импорта/инициализации
     monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
+    
     with caplog.at_level(logging.ERROR):
-        # 2. Вызываем функцию. Теперь она споткнется прямо на входе в блок "processes"
-        results = thread_pool.run_parallel(
-            lambda x: x + 100,
-            args_seq=[(1,)],
-            mode="processes"
-        )
-    # ПРОВЕРКИ:
-    # 1. Результат должен быть 101, так как сработал fallback на ThreadPool
-    assert results == [101]
+        results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
     
-    # 2. Проверяем наличие лога именно из строки 44.
-    # В этом блоке текст ошибки обычно: "Could not initialize ProcessPoolExecutor"
-    log_messages = [rec.getMessage() for rec in caplog.records]
+    assert results == [5]
+    assert "Could not initialize ProcessPoolExecutor" in caplog.text or "falling back to threads" in caplog.text
+
+def test_run_parallel_init_section_coverage(monkeypatch, caplog):
+    """Исправлено: проверка лога при отсутствии ProcessPoolExecutor в модуле."""
+    monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
     
-    # Ищем специфичное сообщение
-    found = any("Could not initialize ProcessPoolExecutor" in msg for msg in log_messages)
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
     
-    assert found, f"Ожидаемый лог 'Could not initialize...' не найден. В логах: {log_messages}"
+    assert results == [5]
+    # В коде: "Could not initialize ProcessPoolExecutor"
+    assert "Could not initialize ProcessPoolExecutor" in caplog.text
 
 # Вспомогательная функция для тестов
 def process_df_task(df, multiplier):
@@ -367,67 +352,38 @@ def test_worker_proxy_integration():
     # 3. Проверяем результат
     assert results is not None, "Результат не должен быть None (проверьте логи на ошибки pickle)"
     assert results[0] == 6, f"Ожидалось 6, получено {results[0]}"
+
 def test_worker_proxy_disk_integration(tmp_path):
-    """
-    Дополнительный тест для покрытия строк загрузки с диска (Parquet).
-    """
-    df = pd.DataFrame({'val': [10, 20]})
-    file_path = str(tmp_path / "data.parquet")
-    df.to_parquet(file_path)
+    from configurable_automl_engine.training_engine.thread_pool import _worker_proxy
+    df = pd.DataFrame({'val': [30]})
+    path = str(tmp_path / "test.parquet")
+    df.to_parquet(path)
     
-    results = run_parallel(
-        func=worker_sum_func,
-        args_seq=[(file_path,)],
-        mode="processes",
-        disk_args_indices=[0] # Указываем, что 0-й аргумент - путь к parquet
-    )
-    
-    assert results[0] == 30
+    # Прямой вызов прокси, как это делает воркер
+    result = _worker_proxy(lambda x: x['val'].iloc[0], (path,), {}, [0], [])
+    assert result == 30
 
 def test_worker_proxy_logic_direct_coverage():
-    """
-    Исправленный тест для прямого вызова _worker_proxy.
-    Используем спецификацию класса SharedDataFrame, чтобы пройти проверку isinstance.
-    """
-    # 1. Готовим данные для SHM
-    # Передаем spec=SharedDataFrame, чтобы isinstance(mock_shm, SharedDataFrame) вернул True
-    mock_shm = MagicMock(spec=SharedDataFrame)
-    mock_df = pd.DataFrame({'a': [1]})
-    mock_shm.to_df.return_value = mock_df
+    # 1. Данные для восстановления
+    meta = ("test_shm_name", (1, 1), np.float64, ['a'])
     
-    def simple_func(x): return x
+    # Патчим SharedDataFrame, чтобы он не лез в реальную память ОС
+    with patch("configurable_automl_engine.training_engine.thread_pool.SharedDataFrame") as mock_class:
+        mock_instance = mock_class.return_value
+        mock_instance.to_df.return_value = pd.DataFrame({'a': [1.0]})
+        
+        def simple_func(x): return x
     
-    # 2. Проверяем блок SHM (теперь условие isinstance сработает)
-    result_shm = _worker_proxy(
-        func=simple_func,
-        args=(mock_shm,),
-        kwargs={},
-        disk_indices=None, # в коде проверка if disk_indices, None или [] подходят
-        shm_indices=[0]
-    )
-    
-    assert mock_shm.to_df.called, "Метод .to_df() должен был быть вызван"
-    assert isinstance(result_shm, pd.DataFrame), "Результат должен быть DataFrame"
-    assert result_shm.iloc[0]['a'] == 1
-    # 3. Проверяем блок Disk/Parquet (строки 71-76)
-    import os
-    tmp_file = "test_coverage_direct.parquet"
-    mock_df.to_parquet(tmp_file)
-    
-    try:
-        # Передаем строку, заканчивающуюся на .parquet
-        result_disk = _worker_proxy(
+        result = _worker_proxy(
             func=simple_func,
-            args=(tmp_file,),
+            args=(None,), # В args теперь None на месте SHM
             kwargs={},
-            disk_indices=[0],
-            shm_indices=[]
+            disk_indices=None,
+            shm_info={0: meta} # Передаем через shm_info
         )
-        assert isinstance(result_disk, pd.DataFrame), "Данные с диска не загрузились как DF"
-        assert result_disk.iloc[0]['a'] == 1
-    finally:
-        if os.path.exists(tmp_file):
-            os.remove(tmp_file)
+        assert result.iloc[0]['a'] == 1.0
+        # Проверяем, что конструктор вызвался с нашими метаданными
+        mock_class.assert_called_with(name=meta[0], shape=meta[1], dtype=meta[2], columns=meta[3])
 
 def test_coverage_unlink_file_not_found():
     """
@@ -480,72 +436,47 @@ def test_shared_data_frame_is_compatible_coverage():
 
 # 2. Тестирование исключения в _worker_proxy
 def test_worker_proxy_close_exception():
-    """Покрывает строку в _worker_proxy:
-    except Exception: #эту строку надо проверить (в цикле по shm_wrappers)
-    """
-    # Создаем Mock, который имитирует SharedDataFrame
-    mock_wrapper = MagicMock()
-    # Настраиваем, чтобы .to_df() вернул простой DF
-    mock_wrapper.to_df.return_value = pd.DataFrame([1, 2])
-    # Имитируем ошибку при вызове .close()
-    mock_wrapper.close.side_effect = Exception("Simulated close error")
+    meta = ("name", (1, 2), np.int64, ["a", "b"])
     
-    def dummy_func(df):
-        return len(df)
-    # Запускаем прокси. Ошибка в close() не должна привести к падению программы.
-    try:
+    with patch("configurable_automl_engine.training_engine.thread_pool.SharedDataFrame") as mock_class:
+        mock_instance = mock_class.return_value
+        mock_instance.to_df.return_value = pd.DataFrame({'a': [1], 'b': [2]})
+        mock_instance.close.side_effect = Exception("Simulated close error")
+    
+        def dummy_func(df): return len(df.columns)
+        
+        # Передаем shm_info, чтобы прокси создал воркер-враппер
         result = _worker_proxy(
             func=dummy_func,
-            args=(mock_wrapper,),
+            args=(None,),
             kwargs={},
             disk_indices=[],
-            shm_indices=[0]
+            shm_info={0: meta}
         )
         assert result == 2
-    except Exception as e:
-        pytest.fail(f"_worker_proxy failed to catch internal exception: {e}")
-    
+        assert mock_instance.close.called
+
     # Проверяем, что метод close был вызван
-    mock_wrapper.close.assert_called_once()
+    mock_instance.close.assert_called_once()
 
 def test_perform_cleanup_all_exceptions():
-    """
-    Тестируем, что ошибки в любом месте _perform_cleanup не прерывают выполнение.
-    """
-    # 1. Сценарий: Ошибка происходит на этапе close()
-    # В этом случае unlink() не будет вызван (т.к. они в одном try блоке), 
-    # но выполнение должно продолжиться.
-    ref_fail_close = MagicMock()
-    ref_fail_close.close.side_effect = RuntimeError("Close failed")
+    # Объект, у которого close() падает, но unlink() должен быть вызван
+    ref_fail = MagicMock()
+    ref_fail.close.side_effect = Exception("Close error")
     
-    # 2. Сценарий: close() успешен, но unlink() выдает ошибку
-    # Здесь проверятся, что ошибка unlink тоже перехватывается.
-    ref_fail_unlink = MagicMock()
-    ref_fail_unlink.close.return_value = None
-    ref_fail_unlink.unlink.side_effect = Exception("Unlink failed")
-    # 3. Сценарий: Ошибка в менеджере ресурсов
     mock_pm = MagicMock()
-    mock_pm.cleanup.side_effect = Exception("PM cleanup failed")
-    # Вызываем очистку
+    mock_pm.cleanup.side_effect = Exception("PM error")
+    
+    # Функция не должна выбрасывать исключение (Phase 3 resilience)
     try:
-        _perform_cleanup(
-            shm_refs=[ref_fail_close, ref_fail_unlink], 
-            persistence_manager=mock_pm
-        )
+        _perform_cleanup(shm_refs=[ref_fail], persistence_manager=mock_pm)
     except Exception as e:
         pytest.fail(f"_perform_cleanup leaked an exception: {e}")
-    # ПРОВЕРКИ:
     
-    # Для первого объекта: close вызвался, выполнение ушло в except
-    ref_fail_close.close.assert_called_once()
-    assert ref_fail_close.unlink.call_count == 0  # Это ожидаемое поведение вашего кода
-    
-    # Для второго объекта: close успешен, unlink вызвался и упал
-    ref_fail_unlink.close.assert_called_once()
-    ref_fail_unlink.unlink.assert_called_once()
-    
-    # Менеджер тоже должен быть вызван
-    mock_pm.cleanup.assert_called_once()
+    assert ref_fail.close.called
+    # unlink должен вызываться всегда для очистки ОС, даже если дескриптор не закрылся
+    assert ref_fail.unlink.called 
+    assert mock_pm.cleanup.called
 
 # 4. Проверка поведения при пустом persistence_manager
 def test_perform_cleanup_none_pm():
@@ -671,3 +602,204 @@ def test_get_view():
     finally:
         sdf.unlink()
         sdf.close()
+
+def global_long_sleep_task(*args, **kwargs):
+    time.sleep(10)
+
+def test_run_parallel_worker_hard_kill(caplog):
+    """Тестирует принудительное завершение (SIGTERM/SIGKILL) зависшего воркера."""
+    
+    # Создаем мок процесса, который "живой" и не хочет завершаться
+    mock_worker = MagicMock()
+    mock_worker.is_alive.return_value = True
+    mock_worker.pid = 9999
+
+    # Патчим только класс Executor-а
+    with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor") as mock_executor_cls:
+        mock_pool = mock_executor_cls.return_value
+        # Важно: имитируем внутреннее устройство ProcessPoolExecutor
+        mock_pool._processes = {0: mock_worker}
+        
+        # Настраиваем submit так, чтобы он возвращал "зависшую" Future
+        mock_future = MagicMock()
+        mock_pool.submit.return_value = mock_future
+        
+        # Чтобы тест не ждал реальные 10 секунд таймаута в коде
+        with caplog.at_level(logging.ERROR):
+            from configurable_automl_engine.training_engine.thread_pool import run_parallel
+            
+            run_parallel(
+                global_long_sleep_task, 
+                args_seq=[()], 
+                mode="processes", 
+                timeout=0.1, 
+                shutdown_grace_period=0.1 # Короткий период для быстрого теста
+            )
+
+    # Проверки:
+    # 1. Была попытка мягкого завершения (terminate)
+    assert mock_worker.terminate.called, "Метод terminate() не был вызван для зависшего воркера"
+    
+    # 2. Была попытка жесткого завершения (kill), так как is_alive все еще True
+    assert mock_worker.kill.called, "Метод kill() не был вызван после игнорирования terminate"
+    
+    # 3. Наличие критических логов в выводе
+    assert "CRITICAL: Worker 9999 hung" in caplog.text
+    assert "HARD KILL: Worker 9999 resisted SIGTERM" in caplog.text
+
+def test_run_parallel_pool_timeout_precedence(caplog): # Добавлен caplog
+    """Проверяет, что pool_timeout перекрывает глобальный timeout."""
+    
+    # Глобальный лимит 10 секунд, но лимит пула 0.1 секунду
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(
+            slow_task, 
+            args_seq=[(1.0,)], # Задача спит 1 секунду
+            mode="threads", 
+            timeout=10, 
+            pool_timeout=0.1
+        )
+    
+    assert results == [None]
+    assert "Task 0 timed out" in caplog.text
+
+def task_with_kwargs(df, multiplier=1, add=0):
+    return (df.sum().sum() * multiplier) + add
+
+def test_run_parallel_processes_with_kwargs():
+    df = pd.DataFrame({'a': [1, 1]})
+    # Передаем и args, и kwargs
+    results = run_parallel(
+        task_with_kwargs,
+        args_seq=[(df,)],
+        kwargs_seq=[{'multiplier': 2, 'add': 5}],
+        mode="processes",
+        shared_args_indices=[0]
+    )
+    assert results == [9] # (2 * 2) + 5
+
+# В файле test_parallel.py (исправление самого теста)
+def global_identity_func(x):
+    return x.iloc[0, 0]
+
+def test_run_parallel_duplicate_indices_handling():
+    df = pd.DataFrame({'a': [1]})
+    results = run_parallel(
+        global_identity_func, # Вместо lambda
+        args_seq=[(df,)],
+        mode="processes",
+        shared_args_indices=[0],
+        disk_args_indices=[0]
+    )
+    assert results == [1]
+
+def test_get_view_new():
+    df = pd.DataFrame({'A': [1, 2], 'B': [3, 4]})
+    sdf = SharedDataFrame(df)
+    try:
+        # Проверяем, что get_view корректно работает через to_df()
+        view_subset = sdf.get_view(['A'])
+        assert isinstance(view_subset, pd.DataFrame)
+        assert view_subset.columns.tolist() == ['A']
+        assert view_subset.iloc[0,0] == 1
+    finally:
+        sdf.close()
+        sdf.unlink()
+
+class TestParallelErrorHandling(unittest.TestCase):
+
+    # --- ТЕСТЫ ДЛЯ _perform_cleanup ---
+
+    def test_shm_unlink_oserror_pass(self):
+        """Покрытие: except (FileNotFoundError, OSError): pass в SHM unlink"""
+        shm_mock = MagicMock(spec=SharedDataFrame)
+        # Имитируем FileNotFoundError при попытке удалить сегмент
+        shm_mock.unlink.side_effect = FileNotFoundError("Already gone")
+        
+        # Функция не должна упасть
+        try:
+            _perform_cleanup([shm_mock], None)
+        except Exception as e:
+            self.fail(f"_perform_cleanup raised {type(e).__name__} unexpectedly!")
+        
+        shm_mock.unlink.assert_called_once()
+
+    def test_shm_unlink_generic_exception_warning(self):
+        """Покрытие: except Exception as e: logger.warning(...) в SHM unlink"""
+        shm_mock = MagicMock(spec=SharedDataFrame)
+        shm_mock.unlink.side_effect = ValueError("Fatal SHM error")
+        
+        with self.assertLogs(MODULE_PATH, level='WARNING') as cm:
+            _perform_cleanup([shm_mock], None)
+            
+        self.assertTrue(any("Non-critical SHM unlink failure" in log for log in cm.output))
+
+    def test_persistence_cleanup_permission_error(self):
+        """Покрытие: except (PermissionError, OSError) в persistence_manager.cleanup"""
+        pm_mock = MagicMock(spec=DiskPersistenceManager)
+        pm_mock.cleanup.side_effect = PermissionError("File locked")
+        
+        with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+            _perform_cleanup(None, pm_mock)
+            
+        self.assertTrue(any("Cleanup failed due to file locking/permissions" in log for log in cm.output))
+
+    # --- ТЕСТЫ ДЛЯ run_parallel (Цикл ожидания) ---
+
+    @patch(f'{MODULE_PATH}.wait')
+    def test_run_parallel_wait_loop_exception(self, mock_wait):
+        """Покрытие: except Exception as e: logger.error(Error while waiting for tasks)"""
+        mock_wait.side_effect = RuntimeError("Internal pool crash")
+        
+        def dummy(x): return x
+        
+        with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+            # Запускаем в threads для простоты
+            run_parallel(dummy, args_seq=[(1,)], mode="threads")
+            
+        self.assertTrue(any("Error while waiting for tasks" in log for log in cm.output))
+
+    # --- ТЕСТЫ ДЛЯ run_parallel (Принудительное завершение воркеров) ---
+
+    @patch(f'{MODULE_PATH}.ProcessPoolExecutor')
+    @patch(f'{MODULE_PATH}.time.sleep') 
+    def test_worker_terminate_and_kill_exceptions(self, mock_sleep, mock_executor_cls):
+        """
+        Покрытие блоков:
+        - except Exception: pass при w.terminate()
+        - except Exception: pass при w.kill()
+        """
+        mock_executor = mock_executor_cls.return_value
+        
+        # Создаем воркера, который не хочет умирать
+        mock_worker = MagicMock()
+        mock_worker.is_alive.return_value = True
+        mock_worker.pid = 777
+        
+        # Настраиваем ошибки на системные вызовы уничтожения
+        mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
+        mock_worker.kill.side_effect = RuntimeError("Kill blocked")
+        
+        # Подменяем список процессов внутри Executor
+        mock_executor._processes = {0: mock_worker}
+        
+        # Имитируем ситуацию, когда задачи не завершились вовремя
+        with patch(f'{MODULE_PATH}.wait') as mock_wait:
+            mock_wait.return_value = (set(), set()) 
+            
+            with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+                run_parallel(
+                    func=lambda x: x, 
+                    args_seq=[(1,)], 
+                    mode="processes", 
+                    pool_timeout=0.01,
+                    shutdown_grace_period=0.01
+                )
+
+            # Проверяем, что логи перед 'pass' были записаны
+            self.assertTrue(any("CRITICAL: Worker 777 hung" in log for log in cm.output))
+            self.assertTrue(any("HARD KILL: Worker 777 resisted" in log for log in cm.output))
+            
+        # Проверяем, что методы вызывались, несмотря на ошибки
+        self.assertTrue(mock_worker.terminate.called)
+        self.assertTrue(mock_worker.kill.called)

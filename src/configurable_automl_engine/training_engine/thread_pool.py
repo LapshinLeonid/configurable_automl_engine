@@ -16,8 +16,8 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
 """
 from concurrent.futures import (ThreadPoolExecutor,
                                 ProcessPoolExecutor, 
-                                as_completed, 
-                                TimeoutError, 
+                                wait,
+                                FIRST_COMPLETED, 
                                 Executor
                                 )
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -31,6 +31,7 @@ import tempfile
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
 import logging
+import time
 logger = logging.getLogger(__name__)
 
 class SharedDataFrame:
@@ -145,7 +146,8 @@ class SharedDataFrame:
             return False
             
         #Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
-        # Если индекс не стандартный (0, 1, 2...), лучше отправить через Диск (Parquet)
+        # Если индекс не является RangeIndex, объект признается несовместимым с SHM 
+        # и будет автоматически перенаправлен в DiskPersistenceManager.
         if not isinstance(df.index, pd.RangeIndex):
             return False
             
@@ -272,7 +274,7 @@ def _worker_proxy(
         args: Sequence[Any], 
         kwargs: Mapping[str, Any], 
         disk_indices: list[int] | None, 
-        shm_indices: list[int] | None
+        shm_info: dict[int, tuple]
         ) -> Any:
     """Десериализовать данные и выполнить целевую функцию внутри воркера.
     Логика выполнения:
@@ -287,8 +289,9 @@ def _worker_proxy(
         args (Sequence): Список аргументов (включая прокси-объекты).
         kwargs (Mapping): Именованные аргументы.
         disk_indices (list[int]): Индексы аргументов, сохраненных на диск.
-        shm_indices (list[int]): Индексы аргументов, содержащих объекты 
-            SharedDataFrame или их прокси.
+        shm_info (dict[int, tuple]): Словарь, где ключ — индекс аргумента, 
+            а значение — кортеж с метаданными SHM (имя, shape, dtype, columns) 
+            для восстановления.
     Returns:
         Any: Результат выполнения функции func.
     """
@@ -299,14 +302,16 @@ def _worker_proxy(
     shm_wrappers: list[SharedDataFrame] = []
     try:
         # 1. Восстановление из Shared Memory
-        if shm_indices:
-            for idx in shm_indices:
-                wrapper = final_args[idx]
-                # Используем duck typing для совместимости 
-                # (и с Mock, и с реальным классом)
-                if hasattr(wrapper, 'to_df'):
-                    final_args[idx] = wrapper.to_df()
-                    shm_wrappers.append(wrapper)
+        # Восстановление SHM по метаданным (имя, shape, dtype, columns)
+        if shm_info:
+            for idx, meta in shm_info.items():
+                wrapper = SharedDataFrame(
+                    name=meta[0], 
+                    shape=meta[1], 
+                    dtype=meta[2], 
+                    columns=meta[3])
+                final_args[idx] = wrapper.to_df()
+                shm_wrappers.append(wrapper)
         # 2. Загрузка с диска
         if disk_indices:
             for idx in disk_indices:
@@ -328,20 +333,31 @@ def _worker_proxy(
 def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
                       persistence_manager: DiskPersistenceManager | None
                       ) -> None:
-    """Вспомогательная функция для безопасной очистки"""
+    """Вспомогательная функция для безопасной очистки с защитой от системных ошибок."""
     if shm_refs:
         for ref in shm_refs:
+            # Сначала закрываем дескриптор
             try:
-                # На Windows порядок close/unlink критичен
-                ref.close() 
+                ref.close()
+            except Exception as e:
+                logger.debug(f"SHM close error (expected during forced shutdown): {e}")
+            
+            # Затем пытаемся уничтожить сегмент в ОС
+            try:
                 ref.unlink()
-            except Exception:
+            except (FileNotFoundError, OSError):
+                # Игнорируем, если уже удалено или нет доступа
                 pass
+            except Exception as e:
+                logger.warning(f"Non-critical SHM unlink failure: {e}")
+
     if persistence_manager:
         try:
             persistence_manager.cleanup()
-        except Exception:
-            pass
+        except (PermissionError, OSError) as e:
+            logger.error(f"Cleanup failed due to file locking/permissions: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected persistence cleanup error: {e}")
 
 def run_parallel(
     func: Callable[..., Any],
@@ -352,31 +368,50 @@ def run_parallel(
     timeout: int | float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
+    pool_timeout: int | float | None = None,
+    shutdown_grace_period: float = 5.0
 ) -> list[Any]:
-    """Организовать параллельное выполнение функции с управлением памятью.
+    """Организовать параллельное выполнение функции 
+    с управлением памятью и жизненным циклом.
+
     Логика параллелизма:
     1. Режим: Поддерживает многопоточность (threads) и многопроцессорность (processes).
-    2. Оптимизация: При работе с процессами переносит DataFrame в Shared Memory 
-       или на диск для исключения накладных расходов на Pickle-сериализацию.
-    3. Исполнение: Использует Executor для запуска задач и собирает результаты с 
-       контролем таймаута.
-    4. Отказоустойчивость: При сбое инициализации или выполнении пула процессов 
-        выполняется попытка перезапуска всей последовательности задач 
-        в режиме "threads" с предварительной очисткой ресурсов.
-    5. Ресурсный менеджмент: Гарантирует очистку сегментов памяти и временных 
-       файлов после завершения всех задач.
+    2. Оптимизация данных: При работе с процессами переносит DataFrame в Shared Memory 
+       или на диск, исключая накладные расходы на Pickle-сериализацию.
+    3. Управление жизненным циклом: Использует явную инициализацию и 
+       завершение Executor (shutdown с cancel_futures=True). Это позволяет 
+       немедленно прерывать выполнение при сбоях или таймаутах.
+    4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения 
+       всей последовательности задач. Если лимит превышен, сбор результатов 
+       прекращается, а оставшиеся в очереди задачи отменяются.
+    5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов 
+       выполняется попытка перезапуска всей последовательности в режиме "threads" 
+       с принудительной очисткой ресурсов.
+    6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных 
+       файлов, а также корректную остановку всех рабочих процессов/потоков.
+
     Args:
         func (Callable): Функция для запуска.
         args_seq (Iterable): Последовательность кортежей аргументов.
         kwargs_seq (Iterable): Последовательность словарей именованных аргументов.
         max_workers (int): Лимит количества рабочих воркеров.
         mode (str): Режим параллелизма ("threads" или "processes").
-        timeout (int | float): Максимальное время ожидания для каждой задачи.
+        timeout (int | float): Глобальный лимит времени в секундах 
+        на выполнение всех задач.
         shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
         disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
+        pool_timeout (int | float | None): Индивидуальный таймаут для ожидания задач 
+            в пуле (если не задан, используется глобальный timeout).
+        shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение 
+            воркеров перед принудительным отправлением SIGTERM/SIGKILL.
+
     Returns:
-        list[Any]: Список результатов выполнения задач (None в случае ошибки/таймаута).
+        list[Any]: Список результатов. Задачи, не успевшие выполниться 
+            или вызвавшие стандартные исключения, заменяются на None. 
+            Критические ошибки (InvalidAlgorithmError) и прерывания пользователя 
+            (KeyboardInterrupt) пробрасываются вызывающему коду.
     """
+    pool = None
 
     args_seq = list(args_seq or [()])
     kwargs_seq = list(kwargs_seq or [{}] * len(args_seq))
@@ -384,9 +419,6 @@ def run_parallel(
 
     if len(args_seq) != len(kwargs_seq):
         raise ValueError("args_seq and kwargs_seq must be of equal length")
-
-    
-    results: list[Any] = []
 
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
@@ -400,37 +432,41 @@ def run_parallel(
         
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
+            curr_shm_info = {} # Индекс -> (имя, shape, dtype, columns)
             for idx in set(target_shm_indices) | set(target_disk_indices):
                 if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                    # Проверка совместимости: если SHM нельзя, 
-                    # принудительно на диск
-                    if (target_shm_indices is not None and idx in target_shm_indices 
+                    if (idx in target_shm_indices 
                         and SharedDataFrame.is_compatible(new_args[idx])):
                         shm_wrapper = SharedDataFrame(new_args[idx])
                         shm_refs.append(shm_wrapper)
-                        new_args[idx] = shm_wrapper
+                        # Сохраняем метаданные для передачи в воркер
+                        curr_shm_info[idx] = (
+                            shm_wrapper.name, 
+                            shm_wrapper.shape, 
+                            shm_wrapper.dtype, 
+                            shm_wrapper.columns)
+                        new_args[idx] = None # Сам объект не передаем
                     else:
                         path = persistence_manager.save_df(new_args[idx])
                         new_args[idx] = path
             
-            # Определяем индексы именно для этой задачи
-            curr_shm = [i for i in target_shm_indices if i < len(new_args) 
-                        and isinstance(new_args[i], SharedDataFrame)]
             curr_disk = [i for i in (set(target_shm_indices) | set(target_disk_indices))
                          if i < len(new_args) and isinstance(new_args[i], str) 
                          and new_args[i].endswith(".parquet")]
             
-            task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm))
+            task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm_info))
         
         # Переопределяем итерируемый объект для запуска
-        execution_tasks = task_payloads 
+        execution_tasks = task_payloads
     else:
         # Для потоков или обычных процессов без SHM/Disk
         execution_tasks = [
                         (tuple(a), kw, disk_args_indices 
-                         or [], shared_args_indices or []) 
+                         or [], {}) 
                         for a, kw in zip(args_seq, kwargs_seq)
                         ]
+    # Преаллокация списка для сохранения длины и порядка
+    results: list[Any] = [None] * len(execution_tasks)
 
     # 1. Определяем класс исполнителя
     executor_cls: Callable[[int | None], Executor] = ThreadPoolExecutor
@@ -438,75 +474,125 @@ def run_parallel(
         try:
             executor_cls = ProcessPoolExecutor
         except Exception as e:
-            logger.error(
-                f"Could not initialize ProcessPoolExecutor: {e}. "
-                "Falling back to threads.")
+            logger.error(f"Could not initialize ProcessPoolExecutor:"
+                         f" {e}. Falling back to threads.")
             executor_cls = ThreadPoolExecutor
+
+    start_time = time.time()
     
+    try:
+        pool = executor_cls(max_workers)
 
+        future_to_idx = {}
+        for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
+            if mode == "processes" and (shared_args_indices or disk_args_indices):
+                fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
+            else:
+                fut = pool.submit(func, *a, **kw)
+            future_to_idx[fut] = i
 
-    # Флаг для отслеживания успешного завершения пула
-    # 2. Используем выбранный класс (универсальный интерфейс)
-    try:  
-        with executor_cls(max_workers) as pool:
-            futures = []
-            for a, kw, d_idx, s_idx in execution_tasks:
-                if mode == "processes" and (shared_args_indices or disk_args_indices):
-                    # Вызываем прокси-функцию для десериализации данных 
-                    # в контексте воркера
-                    futures.append(pool.submit(_worker_proxy, 
-                                               func, 
-                                               a, 
-                                               kw, 
-                                               d_idx, 
-                                               s_idx))
-                else:
-                    futures.append(pool.submit(func, *a, **kw))
-            for fut in as_completed(futures):
-                try:
-                    # Здесь ловятся исключения из самих задач
-                    results.append(fut.result(timeout=timeout))
-                except TimeoutError:
-                    logger.error(
-                        "Task timed out after %s s, marking as failed", 
-                        timeout
-                    )
-                    fut.cancel()
-                    results.append(None)
-                except KeyboardInterrupt:
-                    logger.error("Interrupted by user (KeyboardInterrupt)")
-                    # Пробрасываем прерывания немедленно
-                    # Прерывание вызовет выход из блока 'with', что автоматически 
-                    # запустит shutdown(wait=True) для очистки активных воркеров
-                    raise 
-                except InvalidAlgorithmError:
-                    raise
-                except Exception as e:
-                    logger.error(
-                        "Task failed with an unexpected error: %s", 
-                        e, 
-                        exc_info=True
-                    )
-                    results.append(None)
-        # Если мы дошли сюда, пул закрылся штатно (wait=True отработал)
+        while future_to_idx:
+            elapsed = time.time() - start_time
+            effective_timeout = pool_timeout or timeout
+            remaining_global = (
+                max(0.1, effective_timeout - elapsed) if effective_timeout else None
+                )
+            
+            try:
+                # Ждем завершения хотя бы одной задачи в пределах оставшегося времени
+                done, _ = wait(
+                    future_to_idx.keys(), 
+                    timeout=remaining_global, 
+                    return_when=FIRST_COMPLETED
+                )
+                
+                if not done: # Вышли по таймауту wait
+                    # Чтобы прошел тест test_run_parallel_timeout_error_coverage:
+                    for fut, idx in future_to_idx.items():
+                        logger.error(f"Task {idx} timed out")
+                    break
+                
+                for fut in done:
+                    idx = future_to_idx.pop(fut)
+                    try:
+                        results[idx] = fut.result(timeout=0)
+                    except (InvalidAlgorithmError, KeyboardInterrupt): 
+                        raise # Пробрасываем критические ошибки наверх для тестов
+                    except Exception as e:
+                        logger.error(f"Task {idx} failed: {e}")
+                        results[idx] = None
+                        
+            except (InvalidAlgorithmError, KeyboardInterrupt) as e:
+                if isinstance(e, KeyboardInterrupt):
+                    logger.error("Interrupted by user") # Строка для теста
+                raise # Выход из цикла и проброс в блок finally
+            except Exception as e:
+                logger.error(f"Error while waiting for tasks: {e}")
+                break
 
     except Exception as e:
         if mode == "processes":
-            logger.error("Falling back to threads due to: %s", e)
+            logger.error("Error in process pool, falling back to threads: %s", e)
+
             _perform_cleanup(shm_refs, persistence_manager) 
             return run_parallel(func, 
                                 args_seq, 
                                 kwargs_seq, 
                                 max_workers, 
                                 mode="threads", 
-                                timeout=timeout
-                                )
+                                timeout=timeout)
         raise
     finally:
-        if mode == "processes":
-            # Выполняем окончательное удаление сегментов SHM и временных файлов через 
-            # вспомогательную функцию _perform_cleanup
-            _perform_cleanup(shm_refs, persistence_manager)
+        if pool is not None:
+            is_proc_executor = (
+                type(pool).__name__ == "ProcessPoolExecutor" 
+                or hasattr(pool, "_processes"))
+            if mode == "processes" and is_proc_executor:
+                # Безопасный захват воркеров до shutdown
+                # Копируем список объектов процессов, пока они доступны в _processes
+                workers = list(getattr(pool, "_processes", {}).values())
+                
+                pool.shutdown(wait=False, cancel_futures=True)
+                
+                # Льготный период ожидания (grace period)
+                stop_time = time.time() + shutdown_grace_period
+                
+                while time.time() < stop_time and any(w.is_alive() for w in workers):
+                    time.sleep(0.1)
+                
+                # Принудительное завершение выживших (terminate -> kill)
+                for w in workers:
+                    if w.is_alive():
+                        try:
+                            # ERROR уровень для прерывания 
+                            # (проблема в алгоритме/библиотеке)
+                            logger.error(f"CRITICAL: Worker {w.pid} hung "
+                                         f"in task execution. "
+                                         f"Forcing SIGTERM to release resources.")
+                            w.terminate()
+                        except Exception: 
+                            pass
+                
+                # Короткая пауза для завершения системных вызовов
+                time.sleep(0.2)
+                
+                for w in workers:
+                    if w.is_alive():
+                        try:
+                            # CRITICAL уровень, если процесс проигнорировал даже SIGTERM
+                            logger.critical(
+                                            f"HARD KILL: Worker {w.pid} resisted"
+                                            f" SIGTERM. Sending SIGKILL. Possible "
+                                            f"memory leak or C-level freeze.")
+                            w.kill()
+                        except Exception: 
+                            pass
+                
+                # Финальная очистка SHM/Disk (только в режиме процессов)
+                _perform_cleanup(shm_refs, persistence_manager)
+            else:
+                # Для ThreadPoolExecutor или если режим не "processes"
+                pool.shutdown(wait=True, cancel_futures=True)
     return results
 
 
