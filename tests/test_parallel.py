@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import os
 from multiprocessing import shared_memory
+import unittest
 
 from unittest.mock import MagicMock,patch
 from configurable_automl_engine.tuner import InvalidAlgorithmError
@@ -19,6 +20,8 @@ from configurable_automl_engine.training_engine.thread_pool import (
     _worker_proxy,
     _perform_cleanup,
 )
+
+MODULE_PATH = 'configurable_automl_engine.training_engine.thread_pool'
 
 # --- Тестовые функции ---
 def cpu_bound_task(n: int) -> str:
@@ -703,3 +706,101 @@ def test_get_view_new():
     finally:
         sdf.close()
         sdf.unlink()
+
+class TestParallelErrorHandling(unittest.TestCase):
+
+    # --- ТЕСТЫ ДЛЯ _perform_cleanup ---
+
+    def test_shm_unlink_oserror_pass(self):
+        """Покрытие: except (FileNotFoundError, OSError): pass в SHM unlink"""
+        shm_mock = MagicMock(spec=SharedDataFrame)
+        # Имитируем FileNotFoundError при попытке удалить сегмент
+        shm_mock.unlink.side_effect = FileNotFoundError("Already gone")
+        
+        # Функция не должна упасть
+        try:
+            _perform_cleanup([shm_mock], None)
+        except Exception as e:
+            self.fail(f"_perform_cleanup raised {type(e).__name__} unexpectedly!")
+        
+        shm_mock.unlink.assert_called_once()
+
+    def test_shm_unlink_generic_exception_warning(self):
+        """Покрытие: except Exception as e: logger.warning(...) в SHM unlink"""
+        shm_mock = MagicMock(spec=SharedDataFrame)
+        shm_mock.unlink.side_effect = ValueError("Fatal SHM error")
+        
+        with self.assertLogs(MODULE_PATH, level='WARNING') as cm:
+            _perform_cleanup([shm_mock], None)
+            
+        self.assertTrue(any("Non-critical SHM unlink failure" in log for log in cm.output))
+
+    def test_persistence_cleanup_permission_error(self):
+        """Покрытие: except (PermissionError, OSError) в persistence_manager.cleanup"""
+        pm_mock = MagicMock(spec=DiskPersistenceManager)
+        pm_mock.cleanup.side_effect = PermissionError("File locked")
+        
+        with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+            _perform_cleanup(None, pm_mock)
+            
+        self.assertTrue(any("Cleanup failed due to file locking/permissions" in log for log in cm.output))
+
+    # --- ТЕСТЫ ДЛЯ run_parallel (Цикл ожидания) ---
+
+    @patch(f'{MODULE_PATH}.wait')
+    def test_run_parallel_wait_loop_exception(self, mock_wait):
+        """Покрытие: except Exception as e: logger.error(Error while waiting for tasks)"""
+        mock_wait.side_effect = RuntimeError("Internal pool crash")
+        
+        def dummy(x): return x
+        
+        with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+            # Запускаем в threads для простоты
+            run_parallel(dummy, args_seq=[(1,)], mode="threads")
+            
+        self.assertTrue(any("Error while waiting for tasks" in log for log in cm.output))
+
+    # --- ТЕСТЫ ДЛЯ run_parallel (Принудительное завершение воркеров) ---
+
+    @patch(f'{MODULE_PATH}.ProcessPoolExecutor')
+    @patch(f'{MODULE_PATH}.time.sleep') 
+    def test_worker_terminate_and_kill_exceptions(self, mock_sleep, mock_executor_cls):
+        """
+        Покрытие блоков:
+        - except Exception: pass при w.terminate()
+        - except Exception: pass при w.kill()
+        """
+        mock_executor = mock_executor_cls.return_value
+        
+        # Создаем воркера, который не хочет умирать
+        mock_worker = MagicMock()
+        mock_worker.is_alive.return_value = True
+        mock_worker.pid = 777
+        
+        # Настраиваем ошибки на системные вызовы уничтожения
+        mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
+        mock_worker.kill.side_effect = RuntimeError("Kill blocked")
+        
+        # Подменяем список процессов внутри Executor
+        mock_executor._processes = {0: mock_worker}
+        
+        # Имитируем ситуацию, когда задачи не завершились вовремя
+        with patch(f'{MODULE_PATH}.wait') as mock_wait:
+            mock_wait.return_value = (set(), set()) 
+            
+            with self.assertLogs(MODULE_PATH, level='ERROR') as cm:
+                run_parallel(
+                    func=lambda x: x, 
+                    args_seq=[(1,)], 
+                    mode="processes", 
+                    pool_timeout=0.01,
+                    shutdown_grace_period=0.01
+                )
+
+            # Проверяем, что логи перед 'pass' были записаны
+            self.assertTrue(any("CRITICAL: Worker 777 hung" in log for log in cm.output))
+            self.assertTrue(any("HARD KILL: Worker 777 resisted" in log for log in cm.output))
+            
+        # Проверяем, что методы вызывались, несмотря на ошибки
+        self.assertTrue(mock_worker.terminate.called)
+        self.assertTrue(mock_worker.kill.called)
