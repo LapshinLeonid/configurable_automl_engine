@@ -395,7 +395,8 @@ def run_parallel(
         raise ValueError("args_seq and kwargs_seq must be of equal length")
 
     
-    results: list[Any] = []
+    # Преаллокация списка для сохранения длины и порядка
+    results: list[Any] = [None] * len(execution_tasks)
 
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
@@ -470,19 +471,17 @@ def run_parallel(
             try:
                 # Рассчитываем оставшееся время для конкретной задачи
                 remaining = max(0, timeout - elapsed) if timeout else None
-                results.append(fut.result(timeout=remaining))
-            except TimeoutError:
-                logger.error("Task timed out, marking as failed")
-                fut.cancel()
-                results.append(None)
-            except KeyboardInterrupt:
-                logger.error("Interrupted by user")
-                raise 
-            except InvalidAlgorithmError:
-                raise
-            except Exception as e:
-                logger.error("Task failed: %s", e, exc_info=True)
-                results.append(None)
+                # Записываем результат строго в свою ячейку
+                results[idx] = fut.result(timeout=remaining)
+            except (TimeoutError, Exception) as e:
+                if isinstance(e, TimeoutError):
+                    logger.error("Task timed out, marking as failed")
+                    fut.cancel()
+                elif isinstance(e, InvalidAlgorithmError):
+                    raise
+                else:
+                    logger.error("Task failed: %s", e, exc_info=True)
+                results[idx] = None
 
     except Exception as e:
         if mode == "processes":
