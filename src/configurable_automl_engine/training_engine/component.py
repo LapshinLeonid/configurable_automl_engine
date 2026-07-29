@@ -17,16 +17,23 @@
 """
 
 from __future__ import annotations
+
 import importlib
 import inspect
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union, Optional
 from types import ModuleType
+from typing import Any
 
 import pandas as pd
 
+from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+from configurable_automl_engine.common.validation_utils import (
+    check_target_exists,
+    prepare_X_y,
+    validate_df_not_empty,
+)
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -34,29 +41,18 @@ from configurable_automl_engine.training_engine.config_parser import (
     read_config,
 )
 
-from configurable_automl_engine.common.validation_utils import (
-    validate_df_not_empty,
-    check_target_exists,
-    prepare_X_y
-)
-
+# ───────────────────────── canonical IAE ─────────────────────── #
+from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
-
 from .metrics import (
     to_sklearn_name,
 )
 from .thread_pool import run_parallel
 
-from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
-
-# ───────────────────────── canonical IAE ─────────────────────── #
-
-from ..tuner import InvalidAlgorithmError as _CanonicalIAE
-
 _LOG = logging.getLogger("training_engine")
 
 
-def _algorithms_as_dict(algorithms_cfg: Any) -> Dict[str, AlgoCfg]:
+def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
     """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
     return {
         name: algo_cfg
@@ -66,7 +62,7 @@ def _algorithms_as_dict(algorithms_cfg: Any) -> Dict[str, AlgoCfg]:
 # --------------------------------------------------------------------------- #
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
-def _load_module(path: str) -> ModuleType:  # noqa: D401
+def _load_module(path: str) -> ModuleType:
     """Импортировать модуль по указанному пути.
     Динамически загружает Python-модуль, используя dotted-path нотацию. 
     В случае неудачи генерирует информативное исключение.
@@ -96,11 +92,11 @@ def _run_hpo(
     n_trials: int,
     validation_strategy: ValidationStrategy,
     n_folds: int | None = None,
-    search_space_override: Dict[str, Any] | None = None,
+    search_space_override: dict[str, Any] | None = None,
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
-) -> Optional[Tuple[float, Dict[str, Any]]]:
+) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
     1. Загрузка тюнера: Импортируется модуль, указанный в `algo_cfg.tuner`.
@@ -138,7 +134,7 @@ def _run_hpo(
         raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
 
     sig = inspect.signature(tuner.optimize)
-    kwargs: Dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "algo_name": algo_name,
         "X": X,
         "y": y,
@@ -175,7 +171,7 @@ def _run_hpo(
     try:
         _model, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
         _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
@@ -191,7 +187,7 @@ def _fit_and_save(
     algo_cfg: AlgoCfg,
     X: pd.DataFrame,
     y: pd.Series,
-    best_params: Dict[str, Any],
+    best_params: dict[str, Any],
     model_path: Path,
     cfg: Config,
 ) -> None:
@@ -217,7 +213,7 @@ def _fit_and_save(
             f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
         )
 
-    trainer = getattr(trainer_module, "ModelTrainer")(
+    trainer = trainer_module.ModelTrainer(
         algorithm=algo_name, 
         hyperparams=best_params,
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
@@ -236,11 +232,11 @@ def _fit_and_save(
 
 
 def train_best_model(
-    config: Union[str, Path, Config, Dict [str, Any]],
+    config: str | Path | Config | dict[str, Any],
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
-)-> Dict[str, Any]:
+)-> dict[str, Any]:
     """Основной интерфейс обучения лучшей модели.
     Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO) 
     -> выбор победителя -> финальное обучение -> сохранение.
@@ -290,8 +286,8 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
-    def prepare_search_space(algo_name: str, user_overrides: Dict[str, Any] | None
-                             ) -> Dict[str, Any]:
+    def prepare_search_space(algo_name: str, user_overrides: dict[str, Any] | None
+                             ) -> dict[str, Any]:
         """Подготовить пространство поиска гиперпараметров.
         Объединяет системные значения по умолчанию с пользовательскими 
         переопределениями из конфигурации.
@@ -316,8 +312,8 @@ def train_best_model(
             algo: str, 
             a_cfg: AlgoCfg, 
             n_trials: int, 
-            search_space: Dict[str, Any] | None = None
-            ) -> Optional[Tuple[float, Dict[str, Any]]]:
+            search_space: dict[str, Any] | None = None
+            ) -> tuple[float, dict[str, Any]] | None:
         """Выполнить конкретную фазу HPO для алгоритма.
         Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
         Args:
@@ -367,7 +363,7 @@ def train_best_model(
     # Начальный список кандидатов (все включенные алгоритмы)
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
     current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
-    phase_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
     for phase in cfg.general.phases:
         _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials}"
                   f" trials, action: {phase.action}) ---")
@@ -388,7 +384,7 @@ def train_best_model(
         def _worker(
                 algo_name: str, 
                 algo_cfg: AlgoCfg
-                ) -> Tuple[str, float, Dict[str, Any]] | None:
+                ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
                 algo_name (str): Имя алгоритма.

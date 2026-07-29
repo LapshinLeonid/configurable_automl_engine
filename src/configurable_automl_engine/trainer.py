@@ -31,41 +31,40 @@ Persistence: Встроенные методы save и load с поддержк�
     (Pickle, Joblib) через систему артефактов. """
 
 from __future__ import annotations
-import logging
 
-from pathlib import Path
-from typing import Any, Callable, Dict, cast, Optional
+import logging
 import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from configurable_automl_engine.oversampling import DataOversampler
-from sklearn.compose import ColumnTransformer
-
-from sklearn.base import BaseEstimator, TransformerMixin
-
-from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
-
-
-from .models import create_model, _ALIASES
 
 from configurable_automl_engine.common.definitions import SerializationFormat
-from configurable_automl_engine.common.serialization_utils import (save_artifact,
-                                                                    load_artifact)
-from configurable_automl_engine.training_engine.metrics import (
-    get_scorer_object, 
-    is_greater_better
+from configurable_automl_engine.common.serialization_utils import (
+    load_artifact,
+    save_artifact,
 )
+from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.training_engine.metrics import (
+    get_scorer_object,
+    is_greater_better,
+)
+from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
+
+from .models import _ALIASES, create_model
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
 
 class TrainingError(RuntimeError):
     """Исключение для ошибок, связанных с данными или параметрами обучения."""
-    pass
 
 class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """Трансформер для подготовки данных под IsotonicRegression.
@@ -629,8 +628,8 @@ def train_model(
         cfg: dict = cfg_or_algo  # type: ignore
         algo = str(cfg.get("algorithm",""))
         metric = str(cfg.get("metric",""))
-        hyperparams = cast(Dict[str, Any], cfg.get("hyperparams", {}))
-        rs = cast(Optional[int], cfg.get("random_state", 42))
+        hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
+        rs = cast(int | None, cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
@@ -641,7 +640,7 @@ def train_model(
         # чтобы сохранить логику оригинальной валидации для тестов.
         algo = cfg_or_algo if cfg_or_algo is not None else "" 
         metric = str(metric_or_testsize)  
-        hyperparams = cast(Dict[str, Any], params_or_metric) 
+        hyperparams = cast(dict[str, Any], params_or_metric) 
         rs = random_state
         data_os = False
         data_os_mult = 1.0

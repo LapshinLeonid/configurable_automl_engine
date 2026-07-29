@@ -14,24 +14,26 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
         shared_args_indices=[0]
     )
 """
-from concurrent.futures import (ThreadPoolExecutor,
-                                ProcessPoolExecutor, 
-                                wait,
-                                FIRST_COMPLETED, 
-                                Executor
-                                )
-from typing import Any, Callable, Iterable, Mapping, Sequence
-from multiprocessing import shared_memory
-
-import pandas as pd
-import numpy as np
+import logging
 import os
 import tempfile
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Executor,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
+from multiprocessing import shared_memory
+from typing import Any
+
+import numpy as np
+import pandas as pd
 
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
-import logging
-import time
 logger = logging.getLogger(__name__)
 
 class SharedDataFrame:
@@ -365,10 +367,10 @@ def run_parallel(
     kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
     max_workers: int | None = None, 
     mode: str = "threads",
-    timeout: int | float | None = 3600,
+    timeout: float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
-    pool_timeout: int | float | None = None,
+    pool_timeout: float | None = None,
     shutdown_grace_period: float = 5.0
 ) -> list[Any]:
     """Организовать параллельное выполнение функции 

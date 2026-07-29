@@ -12,19 +12,17 @@
         безопасного доступа к параметрам в Pipeline.
 """
 
-import numpy as np
-import pandas as pd
+import logging
 import threading
 from collections import Counter
-from typing import Any, Optional, Dict
-
 from math import ceil
-import logging
+from typing import Any
 
+import numpy as np
+import pandas as pd
 from imblearn.base import BaseSampler
-from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN, SMOTENC
+from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_numeric_dtype
-
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +55,11 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
     def __init__(
         self,
         *,
-        multiplier: float | int = 1.0,
+        multiplier: float = 1.0,
         algorithm: str = "random",
         add_noise: bool = False,
         balance: bool = False,
-        random_state: Optional[int] = 42,
+        random_state: int | None = 42,
         noise_level: float = 0.01
     ):
         # Сохраняем ровно то, что пришло, чтобы потом работал clone
@@ -75,7 +73,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
         super().__init__()
         self._lock = threading.RLock()
 
-    def _strategy(self, y: pd.Series, multiplier: float) -> Dict[Any, int]:
+    def _strategy(self, y: pd.Series, multiplier: float) -> dict[Any, int]:
         """Рассчитать целевое количество экземпляров для каждого класса.
         Args:
             y (pd.Series): Вектор целевой переменной.
@@ -363,7 +361,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
 
     def oversample(self, 
                    data: pd.DataFrame, 
-                   target: Optional [str] = None
+                   target: str | None = None
                    ) -> pd.DataFrame:
         """Увеличить выборку в формате DataFrame с сохранением метаданных.
         Args:
@@ -439,9 +437,9 @@ def oversample(
     multiplier: float = 1.0,
     algorithm: str = "random",
     add_noise: bool = False,
-    balance: Optional[bool] = False,
-    target: Optional[str] = None,
-    random_state: Optional[int] = 42,
+    balance: bool | None = False,
+    target: str | None = None,
+    random_state: int | None = 42,
     noise_level: float = 0.01,
 ) -> pd.DataFrame:
     """Увеличить объем DataFrame через интерфейс функционального вызова.

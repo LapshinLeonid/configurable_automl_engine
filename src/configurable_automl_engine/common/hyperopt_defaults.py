@@ -1,7 +1,12 @@
-from typing import Any, Dict, Optional, Literal, Annotated, Union, List
-from pydantic import BaseModel, Field, model_validator
+from typing import (
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    TypeVar,
+)
 
-from typing import TypeVar, Generic
+from pydantic import BaseModel, Field, model_validator
 
 T = TypeVar("T", str, int, float, bool)
 
@@ -12,7 +17,7 @@ class BaseDistribution(BaseModel):
 class CategoricalSpace(BaseDistribution, Generic[T]):
     """Распределение для категориальных признаков: [options, 'categorical']."""
     type: Literal["categorical"]
-    options: List[T]
+    options: list[T]
 class NumericSpace(BaseDistribution):
     """Базовый класс для числовых диапазонов."""
     low: float
@@ -25,7 +30,7 @@ class NumericSpace(BaseDistribution):
 class FloatSpace(NumericSpace):
     """Распределение для чисел с плавающей точкой: [min, max, 'float', step?]."""
     type: Literal["float", "float_log"]
-    step: Optional[float] = None
+    step: float | None = None
     @model_validator(mode="after")
     def _validate_float_constraints(self) -> "FloatSpace":
         if self.type == "float_log" and self.step is not None:
@@ -38,7 +43,7 @@ class IntSpace(NumericSpace):
     type: Literal["int"]
     low: int
     high: int
-    step: Optional[int] = None
+    step: int | None = None
     @model_validator(mode="after")
     def _validate_int_constraints(self) -> "IntSpace":
         if self.step is not None and self.step <= 0:
@@ -57,7 +62,7 @@ class SearchSpaceEntry(BaseModel):
             объект конкретного типа распределения.
     """
     config: Annotated[
-        Union[CategoricalSpace, FloatSpace, IntSpace],
+        CategoricalSpace | FloatSpace | IntSpace,
         Field(discriminator="type")
     ]
     @model_validator(mode="before")
@@ -109,10 +114,10 @@ class SearchSpaceEntry(BaseModel):
     def dist_type(self) -> str:
         return self.config.type
     @property
-    def step(self) -> Optional[Union[int, float]]:
+    def step(self) -> int | float | None:
         return getattr(self.config, "step", None)
     @property
-    def bounds(self) -> List[Any]:
+    def bounds(self) -> list[Any]:
         """Backward compatibility alias for the raw list structure."""
         if isinstance(self.config, CategoricalSpace):
             return [self.config.options, "categorical"]
@@ -127,7 +132,7 @@ GLM_COMMON = {
     "fit_intercept": SearchSpaceEntry.model_validate([[True, False], "categorical"]),
     "max_iter": SearchSpaceEntry.model_validate([50, 1000, "int", 50]),
 }
-DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
+DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "elasticnet": {
         "alpha": SearchSpaceEntry.model_validate([1e-4, 10.0, "float_log"]),
         "l1_ratio": SearchSpaceEntry.model_validate([0.0, 1.0, "float"]),
@@ -222,21 +227,21 @@ DEFAULT_SPACES: Dict[str, Dict[str, SearchSpaceEntry]] = {
     "gaussian_process_regression": {},
 }
 
-ALGO_HYPERPARAMETER_REGISTRY: Dict[str, set[str]] = {
+ALGO_HYPERPARAMETER_REGISTRY: dict[str, set[str]] = {
     algo: set(params.keys())
     for algo, params in DEFAULT_SPACES.items()
 }
 
-DATA_DEPENDENT_CONSTRAINTS: Dict[str, str] = {
+DATA_DEPENDENT_CONSTRAINTS: dict[str, str] = {
     "n_neighbors": "n_samples_minus_one",
     "min_samples_leaf": "n_samples",
     "min_samples_split": "n_samples",
 }
 
 def clip_search_space(
-    space: Dict[str, Any], 
+    space: dict[str, Any], 
     n_samples: int
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Корректирует границы пространства поиска на основе размера выборки.
     
