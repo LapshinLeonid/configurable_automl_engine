@@ -398,6 +398,8 @@ def run_parallel(
     # Преаллокация списка для сохранения длины и порядка
     results: list[Any] = [None] * len(execution_tasks)
 
+    pool = None
+
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
     persistence_manager = DiskPersistenceManager()
@@ -485,43 +487,51 @@ def run_parallel(
 
     except Exception as e:
         if mode == "processes":
-            logger.error("Falling back to threads due to: %s", e)
-            workers = list(getattr(pool, "_processes", {}).values())
-            pool.shutdown(wait=False, cancel_futures=True)
-            for w in workers:
-                if w.is_alive(): w.terminate()
+            logger.error("Error in process pool, falling back to threads: %s", e)
+
             _perform_cleanup(shm_refs, persistence_manager) 
             return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
-        if mode == "processes" and isinstance(pool, ProcessPoolExecutor):
-            workers = list(getattr(pool, "_processes", {}).values())
-            
-            pool.shutdown(wait=False, cancel_futures=True)
-            
-            # Ожидание завершения (Grace period 5 секунд)
-            grace_period = 5.0
-            start_grace = time.time()
-            while time.time() - start_grace < grace_period and any(w.is_alive() for w in workers):
-                time.sleep(0.1)
-            
-            # Forced Kill: Сначала terminate, затем kill
-            for w in workers:
-                if w.is_alive():
-                    logger.warning(f"Worker process {w.pid} hung. Terminating...")
-                    w.terminate()
-            
-            # Даем время на обработку SIGTERM, затем жесткий SIGKILL
-            time.sleep(0.5)
-            for w in workers:
-                if w.is_alive():
-                    logger.error(f"Worker process {w.pid} survived SIGTERM. Killing...")
-                    w.kill()
-                    
-            _perform_cleanup(shm_refs, persistence_manager)
-        else:
-            # Для ThreadPoolExecutor или если пул не создался
-            pool.shutdown(wait=True, cancel_futures=True)
+        finally:
+        if pool is not None:
+            if mode == "processes" and isinstance(pool, ProcessPoolExecutor):
+                # Безопасный захват воркеров до shutdown
+                # Копируем список объектов процессов, пока они доступны в _processes
+                workers = list(getattr(pool, "_processes", {}).values())
+                
+                pool.shutdown(wait=False, cancel_futures=True)
+                
+                # Льготный период ожидания (grace period)
+                grace_limit = 5.0
+                stop_time = time.time() + grace_limit
+                
+                while time.time() < stop_time and any(w.is_alive() for w in workers):
+                    time.sleep(0.1)
+                
+                # Принудительное завершение выживших (terminate -> kill)
+                for w in workers:
+                    if w.is_alive():
+                        try:
+                            logger.warning(f"Worker {w.pid} is still alive after grace period. Terminating...")
+                            w.terminate()
+                        except Exception: pass
+                
+                # Короткая пауза для завершения системных вызовов
+                time.sleep(0.2)
+                
+                for w in workers:
+                    if w.is_alive():
+                        try:
+                            logger.error(f"Worker {w.pid} resisted terminate. Sending KILL...")
+                            w.kill()
+                        except Exception: pass
+                
+                # Финальная очистка SHM/Disk (только в режиме процессов)
+                _perform_cleanup(shm_refs, persistence_manager)
+            else:
+                # Для ThreadPoolExecutor или если режим не "processes"
+                pool.shutdown(wait=True, cancel_futures=True)
     return results
 
 
