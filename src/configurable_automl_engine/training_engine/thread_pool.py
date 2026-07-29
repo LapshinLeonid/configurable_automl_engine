@@ -399,6 +399,7 @@ def run_parallel(
         list[Any]: Список результатов. Задачи, не успевшие выполниться из-за таймаута 
                   или завершившиеся с ошибкой, заменяются на None.
     """
+    pool = None
 
     args_seq = list(args_seq or [()])
     kwargs_seq = list(kwargs_seq or [{}] * len(args_seq))
@@ -409,9 +410,6 @@ def run_parallel(
 
     
     # Преаллокация списка для сохранения длины и порядка
-    results: list[Any] = [None] * len(execution_tasks)
-
-    pool = None
 
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
@@ -456,6 +454,7 @@ def run_parallel(
                          or [], shared_args_indices or []) 
                         for a, kw in zip(args_seq, kwargs_seq)
                         ]
+        results: list[Any] = [None] * len(execution_tasks)
 
     # 1. Определяем класс исполнителя
     executor_cls: Callable[[int | None], Executor] = ThreadPoolExecutor
