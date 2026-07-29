@@ -92,20 +92,19 @@ def test_run_parallel_validation_error():
             args_seq=[(1,)], 
             kwargs_seq=[{}, {}] # Разная длина
         )
-
 def test_run_parallel_timeout_error_coverage(caplog):
-    """Актуализировано: проверка лога таймаута (формат 'Task 0 timed out')."""
+    """Актуализировано: проверка лога таймаута (формат 'Task 0 timed out') через wait."""
     with patch("configurable_automl_engine.training_engine.thread_pool.ThreadPoolExecutor") as mock_executor:
         mock_pool = MagicMock()
         mock_executor.return_value = mock_pool
         
         mock_future = MagicMock()
-        mock_future.result.side_effect = TimeoutError()
+        # side_effect с TimeoutError больше не нужен: при таймауте wait() просто не вызывает .result()
         mock_pool.submit.return_value = mock_future
         
-        # as_completed должен вернуть тот же объект, что попал в future_to_idx
-        with patch("configurable_automl_engine.training_engine.thread_pool.as_completed", 
-                   return_value=[mock_future]):
+        # wait должен вернуть кортеж (done, not_done). Пустое множество done (set()) означает таймаут.
+        with patch("configurable_automl_engine.training_engine.thread_pool.wait", 
+                   return_value=(set(), {mock_future})):
             with caplog.at_level(logging.ERROR):
                 results = run_parallel(lambda: None, args_seq=[()], timeout=0.1)
                 
