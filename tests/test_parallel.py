@@ -628,3 +628,104 @@ def test_get_view():
     finally:
         sdf.unlink()
         sdf.close()
+
+def global_long_sleep_task(*args, **kwargs):
+    time.sleep(10)
+
+def test_run_parallel_worker_hard_kill(caplog):
+    """Тестирует принудительное завершение (SIGTERM/SIGKILL) зависшего воркера."""
+    
+    # Создаем мок процесса, который "живой" и не хочет завершаться
+    mock_worker = MagicMock()
+    mock_worker.is_alive.return_value = True
+    mock_worker.pid = 9999
+
+    # Патчим только класс Executor-а
+    with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor") as mock_executor_cls:
+        mock_pool = mock_executor_cls.return_value
+        # Важно: имитируем внутреннее устройство ProcessPoolExecutor
+        mock_pool._processes = {0: mock_worker}
+        
+        # Настраиваем submit так, чтобы он возвращал "зависшую" Future
+        mock_future = MagicMock()
+        mock_pool.submit.return_value = mock_future
+        
+        # Чтобы тест не ждал реальные 10 секунд таймаута в коде
+        with caplog.at_level(logging.ERROR):
+            from configurable_automl_engine.training_engine.thread_pool import run_parallel
+            
+            run_parallel(
+                global_long_sleep_task, 
+                args_seq=[()], 
+                mode="processes", 
+                timeout=0.1, 
+                shutdown_grace_period=0.1 # Короткий период для быстрого теста
+            )
+
+    # Проверки:
+    # 1. Была попытка мягкого завершения (terminate)
+    assert mock_worker.terminate.called, "Метод terminate() не был вызван для зависшего воркера"
+    
+    # 2. Была попытка жесткого завершения (kill), так как is_alive все еще True
+    assert mock_worker.kill.called, "Метод kill() не был вызван после игнорирования terminate"
+    
+    # 3. Наличие критических логов в выводе
+    assert "CRITICAL: Worker 9999 hung" in caplog.text
+    assert "HARD KILL: Worker 9999 resisted SIGTERM" in caplog.text
+
+def test_run_parallel_pool_timeout_precedence(caplog): # Добавлен caplog
+    """Проверяет, что pool_timeout перекрывает глобальный timeout."""
+    from configurable_automl_engine.training_engine.thread_pool import run_parallel, slow_task
+    
+    # Глобальный лимит 10 секунд, но лимит пула 0.1 секунду
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(
+            slow_task, 
+            args_seq=[(1.0,)], # Задача спит 1 секунду
+            mode="threads", 
+            timeout=10, 
+            pool_timeout=0.1
+        )
+    
+    assert results == [None]
+    assert "Task 0 timed out" in caplog.text
+
+def task_with_kwargs(df, multiplier=1, add=0):
+    return (df.sum().sum() * multiplier) + add
+
+def test_run_parallel_processes_with_kwargs():
+    df = pd.DataFrame({'a': [1, 1]})
+    # Передаем и args, и kwargs
+    results = run_parallel(
+        task_with_kwargs,
+        args_seq=[(df,)],
+        kwargs_seq=[{'multiplier': 2, 'add': 5}],
+        mode="processes",
+        shared_args_indices=[0]
+    )
+    assert results == [9] # (2 * 2) + 5
+
+def test_run_parallel_duplicate_indices_handling():
+    df = pd.DataFrame({'a': [1]})
+    # Указываем 0 индекс и там, и там
+    results = run_parallel(
+        lambda x: x.iloc[0,0],
+        args_seq=[(df,)],
+        mode="processes",
+        shared_args_indices=[0],
+        disk_args_indices=[0]
+    )
+    assert results == [1]
+
+def test_get_view_new():
+    df = pd.DataFrame({'A': [1, 2], 'B': [3, 4]})
+    sdf = SharedDataFrame(df)
+    try:
+        # Проверяем, что get_view корректно работает через to_df()
+        view_subset = sdf.get_view(['A'])
+        assert isinstance(view_subset, pd.DataFrame)
+        assert view_subset.columns.tolist() == ['A']
+        assert view_subset.iloc[0,0] == 1
+    finally:
+        sdf.close()
+        sdf.unlink()
