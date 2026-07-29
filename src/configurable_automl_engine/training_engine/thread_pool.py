@@ -31,6 +31,7 @@ import tempfile
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
 import logging
+import time
 logger = logging.getLogger(__name__)
 
 class SharedDataFrame:
@@ -353,29 +354,37 @@ def run_parallel(
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
 ) -> list[Any]:
-    """Организовать параллельное выполнение функции с управлением памятью.
+    """Организовать параллельное выполнение функции с управлением памятью и жизненным циклом.
+
     Логика параллелизма:
     1. Режим: Поддерживает многопоточность (threads) и многопроцессорность (processes).
-    2. Оптимизация: При работе с процессами переносит DataFrame в Shared Memory 
-       или на диск для исключения накладных расходов на Pickle-сериализацию.
-    3. Исполнение: Использует Executor для запуска задач и собирает результаты с 
-       контролем таймаута.
-    4. Отказоустойчивость: При сбое инициализации или выполнении пула процессов 
-        выполняется попытка перезапуска всей последовательности задач 
-        в режиме "threads" с предварительной очисткой ресурсов.
-    5. Ресурсный менеджмент: Гарантирует очистку сегментов памяти и временных 
-       файлов после завершения всех задач.
+    2. Оптимизация данных: При работе с процессами переносит DataFrame в Shared Memory 
+       или на диск, исключая накладные расходы на Pickle-сериализацию.
+    3. Управление жизненным циклом (Phase 1): Использует явную инициализацию и 
+       завершение Executor (shutdown с cancel_futures=True). Это позволяет 
+       немедленно прерывать выполнение при сбоях или таймаутах.
+    4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения 
+       всей последовательности задач. Если лимит превышен, сбор результатов 
+       прекращается, а оставшиеся в очереди задачи отменяются.
+    5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов 
+       выполняется попытка перезапуска всей последовательности в режиме "threads" 
+       с принудительной очисткой ресурсов.
+    6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных 
+       файлов, а также корректную остановку всех рабочих процессов/потоков.
+
     Args:
         func (Callable): Функция для запуска.
         args_seq (Iterable): Последовательность кортежей аргументов.
         kwargs_seq (Iterable): Последовательность словарей именованных аргументов.
         max_workers (int): Лимит количества рабочих воркеров.
         mode (str): Режим параллелизма ("threads" или "processes").
-        timeout (int | float): Максимальное время ожидания для каждой задачи.
+        timeout (int | float): Глобальный лимит времени в секундах на выполнение всех задач.
         shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
         disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
+
     Returns:
-        list[Any]: Список результатов выполнения задач (None в случае ошибки/таймаута).
+        list[Any]: Список результатов. Задачи, не успевшие выполниться из-за таймаута 
+                  или завершившиеся с ошибкой, заменяются на None.
     """
 
     args_seq = list(args_seq or [()])
@@ -438,74 +447,53 @@ def run_parallel(
         try:
             executor_cls = ProcessPoolExecutor
         except Exception as e:
-            logger.error(
-                f"Could not initialize ProcessPoolExecutor: {e}. "
-                "Falling back to threads.")
+            logger.error(f"Could not initialize ProcessPoolExecutor: {e}. Falling back to threads.")
             executor_cls = ThreadPoolExecutor
+
+    start_time = time.time()
+    pool = executor_cls(max_workers)
     
+    try:
+        futures = []
+        for a, kw, d_idx, s_idx in execution_tasks:
+            if mode == "processes" and (shared_args_indices or disk_args_indices):
+                futures.append(pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx))
+            else:
+                futures.append(pool.submit(func, *a, **kw))
 
+        for fut in as_completed(futures):
+            elapsed = time.time() - start_time
+            if timeout and elapsed > timeout:
+                logger.error(f"Global timeout exceeded ({elapsed:.2f}s > {timeout}s). Stopping collection.")
+                break
 
-    # Флаг для отслеживания успешного завершения пула
-    # 2. Используем выбранный класс (универсальный интерфейс)
-    try:  
-        with executor_cls(max_workers) as pool:
-            futures = []
-            for a, kw, d_idx, s_idx in execution_tasks:
-                if mode == "processes" and (shared_args_indices or disk_args_indices):
-                    # Вызываем прокси-функцию для десериализации данных 
-                    # в контексте воркера
-                    futures.append(pool.submit(_worker_proxy, 
-                                               func, 
-                                               a, 
-                                               kw, 
-                                               d_idx, 
-                                               s_idx))
-                else:
-                    futures.append(pool.submit(func, *a, **kw))
-            for fut in as_completed(futures):
-                try:
-                    # Здесь ловятся исключения из самих задач
-                    results.append(fut.result(timeout=timeout))
-                except TimeoutError:
-                    logger.error(
-                        "Task timed out after %s s, marking as failed", 
-                        timeout
-                    )
-                    fut.cancel()
-                    results.append(None)
-                except KeyboardInterrupt:
-                    logger.error("Interrupted by user (KeyboardInterrupt)")
-                    # Пробрасываем прерывания немедленно
-                    # Прерывание вызовет выход из блока 'with', что автоматически 
-                    # запустит shutdown(wait=True) для очистки активных воркеров
-                    raise 
-                except InvalidAlgorithmError:
-                    raise
-                except Exception as e:
-                    logger.error(
-                        "Task failed with an unexpected error: %s", 
-                        e, 
-                        exc_info=True
-                    )
-                    results.append(None)
-        # Если мы дошли сюда, пул закрылся штатно (wait=True отработал)
+            try:
+                # Рассчитываем оставшееся время для конкретной задачи
+                remaining = max(0, timeout - elapsed) if timeout else None
+                results.append(fut.result(timeout=remaining))
+            except TimeoutError:
+                logger.error("Task timed out, marking as failed")
+                fut.cancel()
+                results.append(None)
+            except KeyboardInterrupt:
+                logger.error("Interrupted by user")
+                raise 
+            except InvalidAlgorithmError:
+                raise
+            except Exception as e:
+                logger.error("Task failed: %s", e, exc_info=True)
+                results.append(None)
 
     except Exception as e:
         if mode == "processes":
             logger.error("Falling back to threads due to: %s", e)
+            pool.shutdown(wait=False, cancel_futures=True) # Быстрая очистка перед рекурсией
             _perform_cleanup(shm_refs, persistence_manager) 
-            return run_parallel(func, 
-                                args_seq, 
-                                kwargs_seq, 
-                                max_workers, 
-                                mode="threads", 
-                                timeout=timeout
-                                )
+            return run_parallel(func, args_seq, kwargs_seq, max_workers, mode="threads", timeout=timeout)
         raise
     finally:
+        pool.shutdown(wait=True, cancel_futures=True)
         if mode == "processes":
-            # Выполняем окончательное удаление сегментов SHM и временных файлов через 
-            # вспомогательную функцию _perform_cleanup
             _perform_cleanup(shm_refs, persistence_manager)
     return results
 
