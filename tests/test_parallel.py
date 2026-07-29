@@ -362,49 +362,26 @@ def test_worker_proxy_disk_integration(tmp_path):
     assert result == 30
 
 def test_worker_proxy_logic_direct_coverage():
-    """
-    Исправленный тест для прямого вызова _worker_proxy.
-    Используем спецификацию класса SharedDataFrame, чтобы пройти проверку isinstance.
-    """
-    # 1. Готовим данные для SHM
-    # Передаем spec=SharedDataFrame, чтобы isinstance(mock_shm, SharedDataFrame) вернул True
-    mock_shm = MagicMock(spec=SharedDataFrame)
-    mock_df = pd.DataFrame({'a': [1]})
-    mock_shm.to_df.return_value = mock_df
+    # 1. Данные для восстановления
+    meta = ("test_shm_name", (1, 1), np.float64, ['a'])
     
-    def simple_func(x): return x
+    # Патчим SharedDataFrame, чтобы он не лез в реальную память ОС
+    with patch("configurable_automl_engine.training_engine.thread_pool.SharedDataFrame") as mock_class:
+        mock_instance = mock_class.return_value
+        mock_instance.to_df.return_value = pd.DataFrame({'a': [1.0]})
+        
+        def simple_func(x): return x
     
-    # 2. Проверяем блок SHM (теперь условие isinstance сработает)
-    result_shm = _worker_proxy(
-        func=simple_func,
-        args=(mock_shm,),
-        kwargs={},
-        disk_indices=None, # в коде проверка if disk_indices, None или [] подходят
-        shm_indices=[0]
-    )
-    
-    assert mock_shm.to_df.called, "Метод .to_df() должен был быть вызван"
-    assert isinstance(result_shm, pd.DataFrame), "Результат должен быть DataFrame"
-    assert result_shm.iloc[0]['a'] == 1
-    # 3. Проверяем блок Disk/Parquet (строки 71-76)
-    import os
-    tmp_file = "test_coverage_direct.parquet"
-    mock_df.to_parquet(tmp_file)
-    
-    try:
-        # Передаем строку, заканчивающуюся на .parquet
-        result_disk = _worker_proxy(
+        result = _worker_proxy(
             func=simple_func,
-            args=(tmp_file,),
+            args=(None,), # В args теперь None на месте SHM
             kwargs={},
-            disk_indices=[0],
-            shm_indices=[]
+            disk_indices=None,
+            shm_info={0: meta} # Передаем через shm_info
         )
-        assert isinstance(result_disk, pd.DataFrame), "Данные с диска не загрузились как DF"
-        assert result_disk.iloc[0]['a'] == 1
-    finally:
-        if os.path.exists(tmp_file):
-            os.remove(tmp_file)
+        assert result.iloc[0]['a'] == 1.0
+        # Проверяем, что конструктор вызвался с нашими метаданными
+        mock_class.assert_called_with(name=meta[0], shape=meta[1], dtype=meta[2], columns=meta[3])
 
 def test_coverage_unlink_file_not_found():
     """
@@ -457,33 +434,28 @@ def test_shared_data_frame_is_compatible_coverage():
 
 # 2. Тестирование исключения в _worker_proxy
 def test_worker_proxy_close_exception():
-    """Покрывает строку в _worker_proxy:
-    except Exception: #эту строку надо проверить (в цикле по shm_wrappers)
-    """
-    # Создаем Mock, который имитирует SharedDataFrame
-    mock_wrapper = MagicMock()
-    # Настраиваем, чтобы .to_df() вернул простой DF
-    mock_wrapper.to_df.return_value = pd.DataFrame([1, 2])
-    # Имитируем ошибку при вызове .close()
-    mock_wrapper.close.side_effect = Exception("Simulated close error")
+    meta = ("name", (1, 2), np.int64, ["a", "b"])
     
-    def dummy_func(df):
-        return len(df)
-    # Запускаем прокси. Ошибка в close() не должна привести к падению программы.
-    try:
+    with patch("configurable_automl_engine.training_engine.thread_pool.SharedDataFrame") as mock_class:
+        mock_instance = mock_class.return_value
+        mock_instance.to_df.return_value = pd.DataFrame({'a': [1], 'b': [2]})
+        mock_instance.close.side_effect = Exception("Simulated close error")
+    
+        def dummy_func(df): return len(df.columns)
+        
+        # Передаем shm_info, чтобы прокси создал воркер-враппер
         result = _worker_proxy(
             func=dummy_func,
-            args=(mock_wrapper,),
+            args=(None,),
             kwargs={},
             disk_indices=[],
-            shm_indices=[0]
+            shm_info={0: meta}
         )
         assert result == 2
-    except Exception as e:
-        pytest.fail(f"_worker_proxy failed to catch internal exception: {e}")
-    
+        assert mock_instance.close.called
+
     # Проверяем, что метод close был вызван
-    mock_wrapper.close.assert_called_once()
+    mock_instance.close.assert_called_once()
 
 def test_perform_cleanup_all_exceptions():
     # Объект, у которого close() падает, но unlink() должен быть вызван
@@ -675,7 +647,6 @@ def test_run_parallel_worker_hard_kill(caplog):
 
 def test_run_parallel_pool_timeout_precedence(caplog): # Добавлен caplog
     """Проверяет, что pool_timeout перекрывает глобальный timeout."""
-    from configurable_automl_engine.training_engine.thread_pool import run_parallel, slow_task
     
     # Глобальный лимит 10 секунд, но лимит пула 0.1 секунду
     with caplog.at_level(logging.ERROR):
@@ -705,11 +676,14 @@ def test_run_parallel_processes_with_kwargs():
     )
     assert results == [9] # (2 * 2) + 5
 
+# В файле test_parallel.py (исправление самого теста)
+def global_identity_func(x):
+    return x.iloc[0, 0]
+
 def test_run_parallel_duplicate_indices_handling():
     df = pd.DataFrame({'a': [1]})
-    # Указываем 0 индекс и там, и там
     results = run_parallel(
-        lambda x: x.iloc[0,0],
+        global_identity_func, # Вместо lambda
         args_seq=[(df,)],
         mode="processes",
         shared_args_indices=[0],

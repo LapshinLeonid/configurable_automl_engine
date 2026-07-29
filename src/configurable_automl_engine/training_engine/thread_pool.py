@@ -16,7 +16,9 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
 """
 from concurrent.futures import (ThreadPoolExecutor,
                                 ProcessPoolExecutor, 
-                                as_completed, 
+                                as_completed,
+                                wait,
+                                FIRST_COMPLETED, 
                                 TimeoutError, 
                                 Executor
                                 )
@@ -273,7 +275,7 @@ def _worker_proxy(
         args: Sequence[Any], 
         kwargs: Mapping[str, Any], 
         disk_indices: list[int] | None, 
-        shm_indices: list[int] | None
+        shm_info: dict[int, tuple]
         ) -> Any:
     """Десериализовать данные и выполнить целевую функцию внутри воркера.
     Логика выполнения:
@@ -300,14 +302,12 @@ def _worker_proxy(
     shm_wrappers: list[SharedDataFrame] = []
     try:
         # 1. Восстановление из Shared Memory
-        if shm_indices:
-            for idx in shm_indices:
-                wrapper = final_args[idx]
-                # Используем duck typing для совместимости 
-                # (и с Mock, и с реальным классом)
-                if hasattr(wrapper, 'to_df'):
-                    final_args[idx] = wrapper.to_df()
-                    shm_wrappers.append(wrapper)
+        # Восстановление SHM по метаданным (имя, shape, dtype, columns)
+        if shm_info:
+            for idx, meta in shm_info.items():
+                wrapper = SharedDataFrame(name=meta[0], shape=meta[1], dtype=meta[2], columns=meta[3])
+                final_args[idx] = wrapper.to_df()
+                shm_wrappers.append(wrapper)
         # 2. Загрузка с диска
         if disk_indices:
             for idx in disk_indices:
@@ -423,30 +423,28 @@ def run_parallel(
         
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
+            curr_shm_info = {} # Индекс -> (имя, shape, dtype, columns)
             for idx in set(target_shm_indices) | set(target_disk_indices):
                 if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                    # Проверка совместимости: если SHM нельзя, 
-                    # принудительно на диск
-                    if (target_shm_indices is not None and idx in target_shm_indices 
-                        and SharedDataFrame.is_compatible(new_args[idx])):
+                    if (idx in target_shm_indices and SharedDataFrame.is_compatible(new_args[idx])):
                         shm_wrapper = SharedDataFrame(new_args[idx])
                         shm_refs.append(shm_wrapper)
-                        new_args[idx] = shm_wrapper
+                        # Сохраняем метаданные для передачи в воркер
+                        curr_shm_info[idx] = (shm_wrapper.name, shm_wrapper.shape, shm_wrapper.dtype, shm_wrapper.columns)
+                        new_args[idx] = None # Сам объект не передаем
                     else:
                         path = persistence_manager.save_df(new_args[idx])
                         new_args[idx] = path
             
-            # Определяем индексы именно для этой задачи
-            curr_shm = [i for i in target_shm_indices if i < len(new_args) 
-                        and isinstance(new_args[i], SharedDataFrame)]
             curr_disk = [i for i in (set(target_shm_indices) | set(target_disk_indices))
                          if i < len(new_args) and isinstance(new_args[i], str) 
                          and new_args[i].endswith(".parquet")]
             
-            task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm))
+            task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm_info))
         
         # Переопределяем итерируемый объект для запуска
-        execution_tasks = task_payloads 
+        execution_tasks = task_payloads
+        results: list[Any] = [None] * len(execution_tasks)  
     else:
         # Для потоков или обычных процессов без SHM/Disk
         execution_tasks = [
@@ -478,31 +476,42 @@ def run_parallel(
                 fut = pool.submit(func, *a, **kw)
             future_to_idx[fut] = i
 
-        for fut in as_completed(future_to_idx):
-            idx = future_to_idx[fut]  # Теперь индекс определен
-            
+        while future_to_idx:
             elapsed = time.time() - start_time
-            # Используем pool_timeout если он задан, иначе глобальный timeout
             effective_timeout = pool_timeout or timeout
+            remaining_global = max(0.1, effective_timeout - elapsed) if effective_timeout else None
             
-            if effective_timeout and elapsed > effective_timeout:
-                logger.error(f"Global timeout exceeded. Skipping remaining {len(future_to_idx) - idx} tasks.")
-                break
-
             try:
-                remaining = max(0, effective_timeout - elapsed) if effective_timeout else None
-                results[idx] = fut.result(timeout=remaining)
-            except TimeoutError:
-                logger.error(f"Task {idx} timed out")
-                fut.cancel()
-                results[idx] = None
-            except KeyboardInterrupt:
-                    logger.error("Interrupted by user") # Для прохождения теста на KeyboardInterrupt
-                    raise
+                # Ждем завершения хотя бы одной задачи в пределах оставшегося времени
+                done, _ = wait(
+                    future_to_idx.keys(), 
+                    timeout=remaining_global, 
+                    return_when=FIRST_COMPLETED
+                )
+                
+                if not done: # Вышли по таймауту wait
+                    # Чтобы прошел тест test_run_parallel_timeout_error_coverage:
+                    for fut, idx in future_to_idx.items():
+                        logger.error(f"Task {idx} timed out")
+                    break
+                
+                for fut in done:
+                    idx = future_to_idx.pop(fut)
+                    try:
+                        results[idx] = fut.result(timeout=0)
+                    except (InvalidAlgorithmError, KeyboardInterrupt): 
+                        raise # Пробрасываем критические ошибки наверх для тестов
+                    except Exception as e:
+                        logger.error(f"Task {idx} failed: {e}")
+                        results[idx] = None
+                        
+            except (InvalidAlgorithmError, KeyboardInterrupt) as e:
+                if isinstance(e, KeyboardInterrupt):
+                    logger.error("Interrupted by user") # Строка для теста
+                raise # Выход из цикла и проброс в блок finally
             except Exception as e:
-                if isinstance(e, InvalidAlgorithmError): raise
-                logger.error(f"Task {idx} failed: {e}")
-                results[idx] = None
+                logger.error(f"Error while waiting for tasks: {e}")
+                break
 
     except Exception as e:
         if mode == "processes":
@@ -513,7 +522,7 @@ def run_parallel(
         raise
     finally:
         if pool is not None:
-            is_proc_executor = type(pool).__name__ == "ProcessPoolExecutor"
+            is_proc_executor = type(pool).__name__ == "ProcessPoolExecutor" or hasattr(pool, "_processes")
             if mode == "processes" and is_proc_executor:
                 # Безопасный захват воркеров до shutdown
                 # Копируем список объектов процессов, пока они доступны в _processes
