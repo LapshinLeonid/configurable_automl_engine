@@ -425,7 +425,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             return res_df.reset_index(drop=True)
         
         except Exception as e:
-            logger.error(f"Oversampling error: {e}", exc_info=True)
+            logger.exception(f"Oversampling error: {e}", exc_info=True)
             raise
 
 # ------------------------------------------------------------------ #

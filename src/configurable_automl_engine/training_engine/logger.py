@@ -91,9 +91,9 @@ def setup_logging(logfile: Path,
         base_logger.addHandler(fh)
         base_logger.info(f"Логирование в файл инициализировано: {logfile}")
 
-    if log_to_console:
-        # Проверяем, нет ли уже консольного обработчика
-        if not any(type(h) is logging.StreamHandler for h in base_logger.handlers):
+    # Проверяем, нет ли уже консольного обработчика
+    if (log_to_console
+        and not any(type(h) is logging.StreamHandler for h in base_logger.handlers)):
             sh = logging.StreamHandler()
             sh.setLevel(console_level)
             sh.setFormatter(logging.Formatter(log_format))
