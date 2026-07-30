@@ -338,7 +338,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             # Сначала закрываем дескриптор
             try:
                 ref.close()
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.debug(f"SHM close error (expected during forced shutdown): {e}")
             
             # Затем пытаемся уничтожить сегмент в ОС
@@ -347,7 +347,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             except (FileNotFoundError, OSError):
                 # Игнорируем, если уже удалено или нет доступа
                 pass
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.warning(f"Non-critical SHM unlink failure: {e}")
 
     if persistence_manager:
@@ -355,7 +355,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             persistence_manager.cleanup()
         except (PermissionError, OSError) as e:
             logger.error(f"Cleanup failed due to file locking/permissions: {e}")
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             logger.error(f"Unexpected persistence cleanup error: {e}")
 
 def run_parallel(
@@ -517,7 +517,7 @@ def run_parallel(
                         results[idx] = fut.result(timeout=0)
                     except (InvalidAlgorithmError, KeyboardInterrupt): 
                         raise # Пробрасываем критические ошибки наверх для тестов
-                    except Exception as e:
+                    except Exception as e: # noqa: BLE001
                         logger.error(f"Task {idx} failed: {e}")
                         results[idx] = None
                         
@@ -525,7 +525,7 @@ def run_parallel(
                 if isinstance(e, KeyboardInterrupt):
                     logger.error("Interrupted by user") # Строка для теста
                 raise # Выход из цикла и проброс в блок finally
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
                 break
 
@@ -569,7 +569,7 @@ def run_parallel(
                                          f"in task execution. "
                                          f"Forcing SIGTERM to release resources.")
                             w.terminate()
-                        except Exception: 
+                        except Exception: # noqa: BLE001, S110
                             pass
                 
                 # Короткая пауза для завершения системных вызовов
@@ -584,7 +584,7 @@ def run_parallel(
                                             f" SIGTERM. Sending SIGKILL. Possible "
                                             f"memory leak or C-level freeze.")
                             w.kill()
-                        except Exception: 
+                        except Exception: # noqa: BLE001, S110
                             pass
                 
                 # Финальная очистка SHM/Disk (только в режиме процессов)
