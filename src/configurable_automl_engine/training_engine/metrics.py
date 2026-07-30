@@ -229,10 +229,7 @@ def is_greater_better(name: str) -> bool:
         return False
     # По умолчанию для sklearn scorers, если не уверены, 
     # проверяем наличие 'neg_' в названии (стандарт sklearn для ошибок)
-    if lname.startswith("neg_"):
-        return False
-        
-    return True # Default fallback для R2-подобных метрик
+    return not lname.startswith("neg_")
 
 def get_scorer_object(name: str,
                       global_y: np.ndarray | None = None
