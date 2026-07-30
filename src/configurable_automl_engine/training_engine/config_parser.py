@@ -27,7 +27,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import (
@@ -341,7 +341,7 @@ AlgorithmsConfig = create_model(
     "AlgorithmsConfig",
     __base__=_AlgorithmsConfigBase,
     **{
-        name: (Optional[AlgoCfg], Field(default=None))
+        name: (AlgoCfg | None, Field(default=None))
         for name in AVAILABLE_ALGORITHMS
     },
 ) # type: ignore[call-overload]
