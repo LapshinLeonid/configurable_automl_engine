@@ -325,7 +325,7 @@ def _worker_proxy(
         for w in shm_wrappers:
             try:
                 w.close()
-            except Exception:
+            except Exception: # noqa: S110, BLE001
                 pass
         final_args.clear() # Помогаем GC быстрее освободить ссылки
 
@@ -472,7 +472,7 @@ def run_parallel(
     if mode == "processes":
         try:
             executor_cls = ProcessPoolExecutor
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             logger.error(f"Could not initialize ProcessPoolExecutor:"
                          f" {e}. Falling back to threads.")
             executor_cls = ThreadPoolExecutor
