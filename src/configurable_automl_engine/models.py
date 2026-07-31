@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
+from functools import lru_cache
 from typing import Any
 
 from sklearn.base import RegressorMixin
@@ -34,6 +37,8 @@ from sklearn.tree import DecisionTreeRegressor
 from configurable_automl_engine.common.dependency_utils import is_installed
 
 Algorithm = str
+
+logger = logging.getLogger("configurable_automl_engine.models")
 
 # ----------------------------------------------------------------------------- #
 #                       Карта алгоритмов (длинные ключи)                       #
@@ -92,6 +97,14 @@ AVAILABLE_ALGORITHMS = [
 _FACTORY = _get_factory()
 
 # ----------------------------------------------------------------------------- #
+#               Legacy parameter mappings (API drift)                          #
+# ----------------------------------------------------------------------------- #
+LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
+    # ARDRegression: sklearn renamed `n_iter` -> `max_iter` in 1.2+
+    "ardregression": {"n_iter": "max_iter"},
+}
+
+# ----------------------------------------------------------------------------- #
 #                       Короткие псевдонимы (алиасы)                            #
 # ----------------------------------------------------------------------------- #
 _ALIASES: dict[str, str] = {
@@ -114,6 +127,94 @@ _ALIASES: dict[str, str] = {
     "lasso": "lasso"
 }
 
+
+# ----------------------------------------------------------------------------- #
+#                  Signature introspection (cached)                             #
+# ----------------------------------------------------------------------------- #
+
+@lru_cache(maxsize=32)
+def _get_constructor_param_info(cls: type) -> tuple[set[str], bool]:
+    """Return accepted constructor param names and whether cls accepts **kwargs.
+
+    The result is cached per *class* (not per instance) so that repeated
+    introspection during HyperOpt sweeps is O(1) after the first call.
+
+    Returns
+    -------
+    tuple[set[str], bool]
+        ``(accepted_param_names, accepts_var_kwargs)``
+    """
+    sig = inspect.signature(cls.__init__)
+    accepted: set[str] = set()
+    accepts_var_kwargs = False
+    for name, param in sig.parameters.items():
+        if name == "self":
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_var_kwargs = True
+        else:
+            accepted.add(name)
+    return accepted, accepts_var_kwargs
+
+
+# ----------------------------------------------------------------------------- #
+#                  Parameter cleaning                                           #
+# ----------------------------------------------------------------------------- #
+
+def clean_hyperparameters(
+    algo_key: str,
+    estimator_cls: type,
+    hyperparams: dict[str, Any],
+) -> dict[str, Any]:
+    """Filter and remap hyperparameters to match the estimator constructor.
+
+    1. **Remap** legacy keys (e.g. ``n_iter`` → ``max_iter`` for ARDRegression)
+       using :data:`LEGACY_PARAM_MAPPINGS`.
+    2. **Drop** keys that are not accepted by the constructor, unless the
+       constructor accepts ``**kwargs``.
+    3. **Log** every remap and drop at DEBUG level.
+
+    Parameters
+    ----------
+    algo_key : str
+        Normalised algorithm key (e.g. ``"ardregression"``).
+    estimator_cls : type
+        The sklearn estimator class.
+    hyperparams : dict[str, Any]
+        Raw hyperparameter dict from a sweep / config.
+
+    Returns
+    -------
+    dict[str, Any]
+        A clean dict containing only valid constructor kwargs.
+    """
+    accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
+    mappings = LEGACY_PARAM_MAPPINGS.get(algo_key, {})
+    cleaned: dict[str, Any] = {}
+
+    for key, value in hyperparams.items():
+        # 1. Remap legacy keys
+        if key in mappings:
+            new_key = mappings[key]
+            if new_key in accepted_params or accepts_var_kwargs:
+                cleaned[new_key] = value
+                logger.debug(
+                    "Remapped '%s' -> '%s' for %s", key, new_key, algo_key
+                )
+            continue
+
+        # 2. Keep valid keys; drop unknown ones
+        if key in accepted_params or accepts_var_kwargs:
+            cleaned[key] = value
+        else:
+            logger.debug("Dropped unknown param '%s' for %s", key, algo_key)
+
+    return cleaned
+
+
+# ----------------------------------------------------------------------------- #
+#                  Public factory                                                 #
+# ----------------------------------------------------------------------------- #
 
 def create_model(algorithm: Algorithm = "elasticnet", 
                  **hyperparams: Any
@@ -149,5 +250,8 @@ def create_model(algorithm: Algorithm = "elasticnet",
     # чтобы C-код LibSVM сам выходил из цикла при заклинивании
     if algo_key == "svr" and "max_iter" not in hyperparams:
         hyperparams["max_iter"] = 10000
+
+    # Clean / remap hyperparameters before instantiation
+    hyperparams = clean_hyperparameters(algo_key, estimator_cls, hyperparams)
 
     return estimator_cls(**hyperparams)
