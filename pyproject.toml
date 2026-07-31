@@ -66,12 +66,13 @@
     configurable_automl_engine = ["py.typed"]
 
     [tool.mypy]
-    
+
     [[tool.mypy.overrides]]
     module = [
         "sklearn.*",
         "joblib.*",
         "imblearn",
-        "imblearn.*",
+        "imblearn.*"
+        "concurrent_log_handler.*",
     ]
     ignore_missing_imports = true
