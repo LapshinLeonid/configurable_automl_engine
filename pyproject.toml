@@ -72,7 +72,7 @@
         "sklearn.*",
         "joblib.*",
         "imblearn",
-        "imblearn.*"
+        "imblearn.*",
         "concurrent_log_handler.*",
     ]
     ignore_missing_imports = true
