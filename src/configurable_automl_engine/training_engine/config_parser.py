@@ -163,6 +163,22 @@ class GeneralCfg(BaseModel):
         description=("Режим многозадачности: потоки (для I/O задач)"
                      " или процессы (для CPU-интенсивных вычислений)")
     )
+    phase_timeout: float | None = Field(
+        default=None,
+        ge=1.0,
+        description=(
+            "Глобальный таймаут на всю фазу HPO (в секундах). "
+            "Если None — используется значение по умолчанию run_parallel (3600)."
+        )
+    )
+    task_timeout: float | None = Field(
+        default=None,
+        ge=1.0,
+        description=(
+            "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). "
+            "Если None — используется phase_timeout или глобальный timeout."
+        )
+    )
     @model_validator(mode="after")
     def _check_n_folds(self) -> GeneralCfg:
         """Проверить логическую целостность настроек валидации и сериализации.
