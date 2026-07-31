@@ -125,7 +125,7 @@ def create_model(algorithm: Algorithm = "elasticnet",
     бросает ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
-        raise TypeError(f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}")
+        raise TypeError(f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}")  
 
     algo_key = algorithm.lower()
     algo_key = _ALIASES.get(algo_key, algo_key)
@@ -144,5 +144,10 @@ def create_model(algorithm: Algorithm = "elasticnet",
     # Для GaussianProcessRegressor (gpr) по умолчанию ставим ядро RBF(1.0)
     if algo_key == "gaussian_process_regression" and "kernel" not in hyperparams:
         hyperparams["kernel"] = RBF(1.0)
+
+    # Если max_iter не задан, ставим ограничение (например, 10 000 итераций),
+    # чтобы C-код LibSVM сам выходил из цикла при заклинивании
+    if algo_key == "svr" and "max_iter" not in hyperparams:
+        hyperparams["max_iter"] = 10000
 
     return estimator_cls(**hyperparams)
