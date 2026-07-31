@@ -1,0 +1,77 @@
+# .sourcecraft/ci.yaml
+
+on:
+  push:
+    - workflows: [ai-development-pipeline]
+      filter:
+        branches: ["infrastructure-ci-only-do-not-delete"]
+
+workflows:
+  # ----------------------------------------------------
+  # Единый пайплайн: планирование → код → ревью
+  # ----------------------------------------------------
+  ai-development-pipeline:
+    inputs:
+      issue_id:
+        type: string
+        required: true
+        description: "Укажите ID (номер) задачи"
+
+    tasks:
+      - name: full-development-cycle
+        env:
+          ISSUE_ID: ${{ inputs.issue_id }}
+        cubes:
+          # Шаг 0: Установка CLI и настройка auth (один раз на всю задачу)
+          - name: setup-cli
+            script:
+              - |
+                curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                # Настройка аутентификации через SOURCECRAFT_TOKEN (неинтерактивно)
+                mkdir -p ~/.config/sourcecraft
+                cat > ~/.config/sourcecraft/config.yaml << EOF
+                auth: "${SOURCECRAFT_TOKEN}"
+                storage: filesystem
+                EOF
+
+                # Сохраняем PATH для следующих кубов
+                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
+
+          # Шаг 1: Генерация архитектурного плана
+          - name: generate-plan
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+                src do --autoinstall "Проанализируй задачу #$ISSUE_ID, составь архитектурный план реализации и сохрани его в файл plan.json"
+            artifacts:
+              paths:
+                - plan.json
+
+          # Шаг 2: Написание кода с использованием плана
+          - name: execute-coding
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+                src do --autoinstall "Реализуй задачу #$ISSUE_ID используя архитектурный план из plan.json. Запусти тесты: poetry run ruff check . && poetry run pytest. При успехе закоммить изменения и создай Pull Request."
+
+      # Шаг 3: Автоматическое ревью (отдельный task, т.к. нужен созданный PR)
+      - name: automated-review
+        needs:
+          - full-development-cycle
+        cubes:
+          - name: run-review
+            script:
+              - |
+                curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                # Настройка аутентификации через SOURCECRAFT_TOKEN (неинтерактивно)
+                mkdir -p ~/.config/sourcecraft
+                cat > ~/.config/sourcecraft/config.yaml << EOF
+                auth: "${SOURCECRAFT_TOKEN}"
+                storage: filesystem
+                EOF
+
+                src codereview --autoinstall
