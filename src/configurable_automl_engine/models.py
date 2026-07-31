@@ -4,30 +4,32 @@
 """
 
 from __future__ import annotations
+
 from typing import Any
 
 from sklearn.base import RegressorMixin
-from sklearn.linear_model import (
-    ElasticNet,
-    SGDRegressor,
-    ARDRegression,
-    PoissonRegressor,
-    GammaRegressor,
-    TweedieRegressor,
-    Ridge,
-    Lasso
+from sklearn.ensemble import (
+    AdaBoostRegressor,
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    RandomForestRegressor,
 )
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import (
+    ARDRegression,
+    ElasticNet,
+    GammaRegressor,
+    Lasso,
+    PoissonRegressor,
+    Ridge,
+    SGDRegressor,
+    TweedieRegressor,
+)
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import (
-    RandomForestRegressor,
-    ExtraTreesRegressor,
-    GradientBoostingRegressor,
-    AdaBoostRegressor)
 
 from configurable_automl_engine.common.dependency_utils import is_installed
 
@@ -123,7 +125,7 @@ def create_model(algorithm: Algorithm = "elasticnet",
     бросает ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
-        raise ValueError(f"Некорректный алгоритм: {algorithm!r}")
+        raise TypeError(f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}")
 
     algo_key = algorithm.lower()
     algo_key = _ALIASES.get(algo_key, algo_key)

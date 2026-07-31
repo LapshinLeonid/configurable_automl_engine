@@ -21,20 +21,17 @@ Validation Engine: Единая фабрика разбиений для обу�
 
 from __future__ import annotations
 
-from typing import Generator, Tuple, Union
+import logging
+from collections.abc import Generator
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from sklearn import model_selection
 from sklearn.model_selection import KFold, LeaveOneOut, train_test_split
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.validation_utils import validate_df_not_empty
 
-from configurable_automl_engine.common.validation_utils import (
-    validate_df_not_empty
-)
-
-import logging as logging
 log = logging.getLogger(__name__)
 
 RANDOM_STATE = 42  # фиксируем сид в одном месте
@@ -60,7 +57,7 @@ def norm_val_method(val_method: ValidationStrategy | str) -> str:
     # Если передана строка, пытаемся привести её к нижнему регистру
     return str(val_method).lower()
 
-def make_cv(  # noqa: C901  (читаемо и так)
+def make_cv(
     n_samples: int,
     *,
     val_method: ValidationStrategy | str,
@@ -118,14 +115,14 @@ def make_cv(  # noqa: C901  (читаемо и так)
 
 
 def iter_splits(
-    X: Union[np.ndarray, pd.DataFrame],
-    y: Union[np.ndarray, pd.Series] = None,
+    X: np.ndarray | pd.DataFrame,
+    y: np.ndarray | pd.Series = None,
     *,
     method: ValidationStrategy | str  = "k_fold",
     n_folds: int = 5,
     test_size: float = 0.2, 
     random_state: int | None = 42,
-) -> Generator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], None, None]:
+) -> Generator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], None, None]:
     """
     Генерирует итеративные разбиения данных на обучающую и валидационную выборки.
     Функция инкапсулирует логику кросс-валидации и простого разделения, возвращая 

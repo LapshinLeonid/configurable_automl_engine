@@ -1,8 +1,10 @@
 from __future__ import annotations
-import pandas as pd
-from typing import Tuple
-from configurable_automl_engine.common.definitions import ValidationStrategy
+
 import math
+
+import pandas as pd
+
+from configurable_automl_engine.common.definitions import ValidationStrategy
 
 pd.options.mode.copy_on_write = True
 
@@ -27,7 +29,7 @@ def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
             f" in dataframe columns: {list(df.columns)}"
         )
 
-def prepare_X_y(df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, pd.Series]:
+def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
     """
     Splits the DataFrame into features (X) and target (y).
     

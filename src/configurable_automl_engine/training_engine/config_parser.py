@@ -22,29 +22,35 @@ AutoML Config Engine: Валидация и парсинг иерархичес�
        для чистоты структуры YAML-файла.
 """
 from __future__ import annotations
-import yaml
+
 import logging
+import re
 from enum import Enum
 from pathlib import Path
-import re
-from typing import Any, Dict, Optional, Literal, List, TYPE_CHECKING
-from pydantic import (BaseModel, 
-                      Field, 
-                      ConfigDict, 
-                      field_validator, 
-                      model_validator, 
-                      create_model)
-from configurable_automl_engine.common.definitions import (ValidationStrategy, 
-                                                           SerializationFormat,
-                                                           ALGO_PACKAGE_MAPPING,
-                                                           ParallelStrategy)
+from typing import TYPE_CHECKING, Any, Literal
+
+import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    create_model,
+    field_validator,
+    model_validator,
+)
+
+from configurable_automl_engine.common.definitions import (
+    ALGO_PACKAGE_MAPPING,
+    ParallelStrategy,
+    SerializationFormat,
+    ValidationStrategy,
+)
 from configurable_automl_engine.common.dependency_utils import is_installed
-
-from configurable_automl_engine.common.hyperopt_defaults import (SearchSpaceEntry,
-                                                                  ALGO_HYPERPARAMETER_REGISTRY)
-
+from configurable_automl_engine.common.hyperopt_defaults import (
+    ALGO_HYPERPARAMETER_REGISTRY,
+    SearchSpaceEntry,
+)
 from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
-
 from configurable_automl_engine.training_engine.metrics import AVAILABLE_METRICS
 
 # Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
@@ -122,12 +128,12 @@ class GeneralCfg(BaseModel):
         default=SerializationFormat.pickle,
         description="Формат сериализации модели (pickle, joblib и т.д.)"
     )
-    log_to_file: Optional[Path] = Field(
+    log_to_file: Path | None = Field(
         default=None,
         description=("Путь к файлу логов. Если не указан,"
                      "логи выводятся только в консоль")
     )
-    phases: List[HPOPhaseCfg] = Field(
+    phases: list[HPOPhaseCfg] = Field(
         ..., 
         description="Список последовательных фаз оптимизации гиперпараметров"
     )
@@ -142,12 +148,12 @@ class GeneralCfg(BaseModel):
                      "Используется только если validation_strategy = 'k_fold'")
     )
     parallel_strategy: ParallelStrategy = Field(
-        default=list(ParallelStrategy)[0],
+        default=next(iter(ParallelStrategy)),
         description=("Стратегия распараллеливания." 
                      "Сейчас поддерживается только 'algorithms'"
                      " (каждый алгоритм в своем потоке/процессе).")
     )
-    max_workers: Optional[int] = Field(
+    max_workers: int | None = Field(
         default=None,
         description=("Максимальное количество потоков/процессов."
                      "Если null, используется количество ядер CPU")
@@ -158,7 +164,7 @@ class GeneralCfg(BaseModel):
                      " или процессы (для CPU-интенсивных вычислений)")
     )
     @model_validator(mode="after")
-    def _check_n_folds(self) -> "GeneralCfg":
+    def _check_n_folds(self) -> GeneralCfg:
         """Проверить логическую целостность настроек валидации и сериализации.
         
         Логика проверки:
@@ -228,7 +234,7 @@ class OversamplingCfg(BaseModel):
         description="Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)",
     )
     @model_validator(mode="after")
-    def _validate_oversampling_logic(self) -> "OversamplingCfg":
+    def _validate_oversampling_logic(self) -> OversamplingCfg:
         if self.enable and self.multiplier == 1.0:
             logging.getLogger(__name__).warning(
                 "Oversampling multiplier = 1 ➜ class balance will not change."
@@ -262,25 +268,25 @@ class AlgoCfg(BaseModel):
         description=("Ограничить гиперпараметры пространства поиска"
         )
     )
-    hyperparameters: Dict[str, SearchSpaceEntry] | None = Field(
+    hyperparameters: dict[str, SearchSpaceEntry] | None = Field(
         default=None,
         description=(
             "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. "
             "См. ALGO_HYPERPARAMETER_REGISTRY."
         )
     )
-    tuner: Optional[str] = Field(
+    tuner: str | None = Field(
         default="configurable_automl_engine.tuner",
         description="Путь к модулю тюнера для оптимизации гиперпараметров"
     )
-    trainer_module: Optional[str] = Field(
+    trainer_module: str | None = Field(
         default="configurable_automl_engine.trainer",
         description=(
             "Dotted-path к модулю, содержащему класс `ModelTrainer`"
             "(например, 'configurable_automl_engine.trainer')."
             )
     )
-    def get_required_package(self, algo_name: str) -> Optional[str]:
+    def get_required_package(self, algo_name: str) -> str | None:
         """Определить имя внешнего Python-пакета, необходимого для работы алгоритма.
         
         Логика поиска:
@@ -296,7 +302,7 @@ class AlgoCfg(BaseModel):
         """
         return ALGO_PACKAGE_MAPPING.get(algo_name)
     
-    def get_unknown_hyperparameters(self, algo_name: str) -> List[str]:
+    def get_unknown_hyperparameters(self, algo_name: str) -> list[str]:
         """Вернуть список гиперпараметров, несовместимых с данным алгоритмом.
 
         Сверяет ключи `self.hyperparameters` с допустимым множеством из
@@ -335,7 +341,7 @@ AlgorithmsConfig = create_model(
     "AlgorithmsConfig",
     __base__=_AlgorithmsConfigBase,
     **{
-        name: (Optional[AlgoCfg], Field(default=None))
+        name: (AlgoCfg | None, Field(default=None))
         for name in AVAILABLE_ALGORITHMS
     },
 ) # type: ignore[call-overload]
@@ -368,7 +374,7 @@ class Config(BaseModel):
         default = OversamplingCfg(),
         description="Настройки балансировки данных"
     )
-    algorithms: "AlgorithmsConfigType" = Field(
+    algorithms: AlgorithmsConfigType = Field(
         ..., 
         description=(
             "Словарь алгоритмов, где ключ — имя алгоритма "
@@ -390,7 +396,7 @@ class Config(BaseModel):
         return v
         
     @model_validator(mode="after")
-    def _check_algorithm_dependencies(self) -> "Config":
+    def _check_algorithm_dependencies(self) -> Config:
 
         # Iterate safely over the fields defined in the model class
         # Using __fields__ or model_fields to get the structure safely
@@ -421,7 +427,7 @@ class Config(BaseModel):
         return self
     
     @model_validator(mode="after")
-    def _check_hyperparameter_compatibility(self) -> "Config":
+    def _check_hyperparameter_compatibility(self) -> Config:
         errors = []
         for name in getattr(self.algorithms, "__fields__", {}):
             algo_cfg = getattr(self.algorithms, name)

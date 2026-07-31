@@ -14,24 +14,26 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
         shared_args_indices=[0]
     )
 """
-from concurrent.futures import (ThreadPoolExecutor,
-                                ProcessPoolExecutor, 
-                                wait,
-                                FIRST_COMPLETED, 
-                                Executor
-                                )
-from typing import Any, Callable, Iterable, Mapping, Sequence
-from multiprocessing import shared_memory
-
-import pandas as pd
-import numpy as np
+import logging
 import os
 import tempfile
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Executor,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
+from multiprocessing import shared_memory
+from typing import Any
+
+import numpy as np
+import pandas as pd
 
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
-import logging
-import time
 logger = logging.getLogger(__name__)
 
 class SharedDataFrame:
@@ -148,10 +150,7 @@ class SharedDataFrame:
         #Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
         # Если индекс не является RangeIndex, объект признается несовместимым с SHM 
         # и будет автоматически перенаправлен в DiskPersistenceManager.
-        if not isinstance(df.index, pd.RangeIndex):
-            return False
-            
-        return True
+        return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
         """Восстановить pandas.DataFrame из разделяемой памяти.
@@ -326,7 +325,7 @@ def _worker_proxy(
         for w in shm_wrappers:
             try:
                 w.close()
-            except Exception:
+            except Exception: # noqa: S110, BLE001
                 pass
         final_args.clear() # Помогаем GC быстрее освободить ссылки
 
@@ -339,7 +338,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             # Сначала закрываем дескриптор
             try:
                 ref.close()
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.debug(f"SHM close error (expected during forced shutdown): {e}")
             
             # Затем пытаемся уничтожить сегмент в ОС
@@ -348,7 +347,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             except (FileNotFoundError, OSError):
                 # Игнорируем, если уже удалено или нет доступа
                 pass
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.warning(f"Non-critical SHM unlink failure: {e}")
 
     if persistence_manager:
@@ -356,7 +355,7 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             persistence_manager.cleanup()
         except (PermissionError, OSError) as e:
             logger.error(f"Cleanup failed due to file locking/permissions: {e}")
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             logger.error(f"Unexpected persistence cleanup error: {e}")
 
 def run_parallel(
@@ -365,10 +364,10 @@ def run_parallel(
     kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
     max_workers: int | None = None, 
     mode: str = "threads",
-    timeout: int | float | None = 3600,
+    timeout: float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
-    pool_timeout: int | float | None = None,
+    pool_timeout: float | None = None,
     shutdown_grace_period: float = 5.0
 ) -> list[Any]:
     """Организовать параллельное выполнение функции 
@@ -473,7 +472,7 @@ def run_parallel(
     if mode == "processes":
         try:
             executor_cls = ProcessPoolExecutor
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             logger.error(f"Could not initialize ProcessPoolExecutor:"
                          f" {e}. Falling back to threads.")
             executor_cls = ThreadPoolExecutor
@@ -518,7 +517,7 @@ def run_parallel(
                         results[idx] = fut.result(timeout=0)
                     except (InvalidAlgorithmError, KeyboardInterrupt): 
                         raise # Пробрасываем критические ошибки наверх для тестов
-                    except Exception as e:
+                    except Exception as e: # noqa: BLE001
                         logger.error(f"Task {idx} failed: {e}")
                         results[idx] = None
                         
@@ -526,7 +525,7 @@ def run_parallel(
                 if isinstance(e, KeyboardInterrupt):
                     logger.error("Interrupted by user") # Строка для теста
                 raise # Выход из цикла и проброс в блок finally
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
                 break
 
@@ -570,7 +569,7 @@ def run_parallel(
                                          f"in task execution. "
                                          f"Forcing SIGTERM to release resources.")
                             w.terminate()
-                        except Exception: 
+                        except Exception: # noqa: BLE001, S110
                             pass
                 
                 # Короткая пауза для завершения системных вызовов
@@ -585,7 +584,7 @@ def run_parallel(
                                             f" SIGTERM. Sending SIGKILL. Possible "
                                             f"memory leak or C-level freeze.")
                             w.kill()
-                        except Exception: 
+                        except Exception: # noqa: BLE001, S110
                             pass
                 
                 # Финальная очистка SHM/Disk (только в режиме процессов)

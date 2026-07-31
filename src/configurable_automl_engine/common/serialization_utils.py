@@ -1,10 +1,13 @@
 import pickle
 from pathlib import Path
-from typing import Any, Union
-from configurable_automl_engine.common.definitions import SerializationFormat
+from typing import Any
+
 import joblib
 
-def save_artifact(obj: Any, path: Union[str, Path], fmt: SerializationFormat) -> None:
+from configurable_automl_engine.common.definitions import SerializationFormat
+
+
+def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
     """
     Сохраняет объект на диск в выбранном формате.
     """
@@ -16,7 +19,7 @@ def save_artifact(obj: Any, path: Union[str, Path], fmt: SerializationFormat) ->
         with open(path, 'wb') as f:
             pickle.dump(obj, f)
 
-def load_artifact(path: Union[str, Path], fmt: SerializationFormat) -> Any:
+def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
     """
     Загружает объект с диска в выбранном формате.
     """

@@ -24,16 +24,18 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Any, cast, Union
+import logging
+from collections.abc import Callable
+from typing import Any, cast
 
 import numpy as np
-import logging
-from sklearn.metrics import (mean_squared_error, 
-                             mean_absolute_error,
-                             r2_score, 
-                             make_scorer, 
-                             get_scorer as sklearn_get_scorer
-                            )
+from sklearn.metrics import get_scorer as sklearn_get_scorer
+from sklearn.metrics import (
+    make_scorer,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +152,7 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
 # --------------------------------------------------------------------------- #
 #  Частный реестр «сырой» (без переворота знака и прочего)
 # --------------------------------------------------------------------------- #
-_METRICS: Dict[str, Callable[..., Any]] = {
+_METRICS: dict[str, Callable[..., Any]] = {
     # «меньше → лучше»
     "rmse": _rmse,
     "nrmse": _nrmse,
@@ -167,7 +169,7 @@ _METRICS: Dict[str, Callable[..., Any]] = {
 # --------------------------------------------------------------------------- #
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
-_SCORER_OBJECTS: Dict[str, Callable[..., Any]] = {
+_SCORER_OBJECTS: dict[str, Callable[..., Any]] = {
     # Для ошибок устанавливаем greater_is_better=False, 
     # sklearn сам будет возвращать отрицательные значения для максимизации
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
@@ -227,10 +229,7 @@ def is_greater_better(name: str) -> bool:
         return False
     # По умолчанию для sklearn scorers, если не уверены, 
     # проверяем наличие 'neg_' в названии (стандарт sklearn для ошибок)
-    if lname.startswith("neg_"):
-        return False
-        
-    return True # Default fallback для R2-подобных метрик
+    return not lname.startswith("neg_")
 
 def get_scorer_object(name: str,
                       global_y: np.ndarray | None = None
@@ -264,7 +263,7 @@ def get_scorer_object(name: str,
     # В остальных случаях возвращаем имя как есть 
     # (sklearn сам найдет встроенную метрику)
     scorer = sklearn_get_scorer(lname)
-    return cast("Union[Callable[..., Any], str]", scorer)
+    return cast("Callable[..., Any] | str", scorer)
 
 # --------------------------------------------------------------------------- #
 #  Приведение пользовательских alias-ов к тому, что понимает sklearn

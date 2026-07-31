@@ -12,19 +12,17 @@
         безопасного доступа к параметрам в Pipeline.
 """
 
-import numpy as np
-import pandas as pd
+import logging
 import threading
 from collections import Counter
-from typing import Any, Optional, Dict
-
 from math import ceil
-import logging
+from typing import Any, ClassVar
 
+import numpy as np
+import pandas as pd
 from imblearn.base import BaseSampler
-from imblearn.over_sampling import RandomOverSampler, SMOTE, ADASYN, SMOTENC
+from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_numeric_dtype
-
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
     """
     _sampling_type = "over-sampling"
 
-    _parameter_constraints: dict [str, list[Any]] = {
+    _parameter_constraints: ClassVar[dict [str, list[Any]]] = {
         "multiplier": [float, int],
         "algorithm": [str],
         "add_noise": ["boolean"],
@@ -57,11 +55,11 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
     def __init__(
         self,
         *,
-        multiplier: float | int = 1.0,
+        multiplier: float = 1.0,
         algorithm: str = "random",
         add_noise: bool = False,
         balance: bool = False,
-        random_state: Optional[int] = 42,
+        random_state: int | None = 42,
         noise_level: float = 0.01
     ):
         # Сохраняем ровно то, что пришло, чтобы потом работал clone
@@ -75,7 +73,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
         super().__init__()
         self._lock = threading.RLock()
 
-    def _strategy(self, y: pd.Series, multiplier: float) -> Dict[Any, int]:
+    def _strategy(self, y: pd.Series, multiplier: float) -> dict[Any, int]:
         """Рассчитать целевое количество экземпляров для каждого класса.
         Args:
             y (pd.Series): Вектор целевой переменной.
@@ -92,7 +90,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             base_size = max(counts.values())
             return {
                 cls: ceil(base_size * multiplier) 
-                for cls in counts.keys()
+                for cls in counts
             }
         
         # Важно: imbalanced-learn ожидает итоговое количество экземпляров 
@@ -220,7 +218,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
                 else:
                     if not pd.Series(df[col]).isna().any():
                         df[col] = df[col].astype(dtype)
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
     
@@ -363,7 +361,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
 
     def oversample(self, 
                    data: pd.DataFrame, 
-                   target: Optional [str] = None
+                   target: str | None = None
                    ) -> pd.DataFrame:
         """Увеличить выборку в формате DataFrame с сохранением метаданных.
         Args:
@@ -387,8 +385,8 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             
             # ПРОВЕРКА: Если таргет не указан, нельзя использовать балансировку 
             # или синтетические алгоритмы
-            if target is None:
-                if self.balance or algo_local in ("smote", "adasyn"):
+            if (target is None
+                and (self.balance or algo_local in ("smote", "adasyn"))):
                     raise ValueError(
                         f"The 'target' parameter must be specified for "
                         f"the '{self.algorithm}' algorithm "
@@ -426,8 +424,8 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
 
             return res_df.reset_index(drop=True)
         
-        except Exception as e:
-            logger.error(f"Oversampling error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Oversampling error")
             raise
 
 # ------------------------------------------------------------------ #
@@ -439,9 +437,9 @@ def oversample(
     multiplier: float = 1.0,
     algorithm: str = "random",
     add_noise: bool = False,
-    balance: Optional[bool] = False,
-    target: Optional[str] = None,
-    random_state: Optional[int] = 42,
+    balance: bool | None = False,
+    target: str | None = None,
+    random_state: int | None = 42,
     noise_level: float = 0.01,
 ) -> pd.DataFrame:
     """Увеличить объем DataFrame через интерфейс функционального вызова.

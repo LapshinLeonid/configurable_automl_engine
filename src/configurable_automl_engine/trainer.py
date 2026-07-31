@@ -31,41 +31,40 @@ Persistence: Встроенные методы save и load с поддержк�
     (Pickle, Joblib) через систему артефактов. """
 
 from __future__ import annotations
-import logging
 
-from pathlib import Path
-from typing import Any, Callable, Dict, cast, Optional
+import logging
 import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from configurable_automl_engine.oversampling import DataOversampler
-from sklearn.compose import ColumnTransformer
-
-from sklearn.base import BaseEstimator, TransformerMixin
-
-from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
-
-
-from .models import create_model, _ALIASES
 
 from configurable_automl_engine.common.definitions import SerializationFormat
-from configurable_automl_engine.common.serialization_utils import (save_artifact,
-                                                                    load_artifact)
-from configurable_automl_engine.training_engine.metrics import (
-    get_scorer_object, 
-    is_greater_better
+from configurable_automl_engine.common.serialization_utils import (
+    load_artifact,
+    save_artifact,
 )
+from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.training_engine.metrics import (
+    get_scorer_object,
+    is_greater_better,
+)
+from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
+
+from .models import _ALIASES, create_model
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
 
 class TrainingError(RuntimeError):
     """Исключение для ошибок, связанных с данными или параметрами обучения."""
-    pass
 
 class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """Трансформер для подготовки данных под IsotonicRegression.
@@ -110,7 +109,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         try:
             # 1. Получаем метаданные без принудительного копирования в DataFrame
             # Используем логику из _extract_metadata, которую мы обсуждали ранее
-            n_rows, n_cols = self._get_dimensions(X)
+            _n_rows, n_cols = self._get_dimensions(X)
             
             # 2. Валидация индекса признака
             if self.feature_index >= n_cols:
@@ -146,7 +145,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             return cast(np.ndarray, result)
         except Exception as e:
             if isinstance(e, TrainingError):
-                raise e
+                raise
             # Унификация сообщения об ошибке согласно тестам (#A8)
             raise TrainingError(f"Data transformation error: {e}")
 class ModelTrainer:
@@ -234,11 +233,10 @@ class ModelTrainer:
 
         for attr_name, features in [("categorical_features", categorical_features), 
                                 ("numerical_features", numerical_features)]:
-            if features is not None:
-                if (not isinstance(features, list) 
-                    or not all(isinstance(f, str) for f in features)):
-                    raise TrainingError(f"Parameter {attr_name} "
-                                        "must be a list of strings (column names)")
+            if features is not None and (not isinstance(features, list) 
+                or not all(isinstance(f, str) for f in features)):
+                raise TrainingError(f"Parameter {attr_name} "
+                                    "must be a list of strings (column names)")
 
     def _validate_features(self, X: pd.DataFrame) -> None:
         """Проверить наличие всех заданных имен признаков в переданном DataFrame."""
@@ -431,10 +429,10 @@ class ModelTrainer:
         # 5) Выполняем обучение
         try:
             self.pipeline.fit(X_train, y_train)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             # Пробрасываем валидационные ошибки напрямую, чтобы тесты могли их поймать
             # Это критично для тестов, проверяющих некорректные гиперпараметры
-            raise e
+            raise
         except TrainingError:
             raise
         except Exception as e:
@@ -524,7 +522,7 @@ class ModelTrainer:
                     " final val_score={self.val_score:.4f} "
                     f"(greater_is_better={is_greater_better(self.metric)})"
                 )
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 raise TrainingError(f"Error calculating metrics on validation: {e}")
             
             return self
@@ -553,7 +551,7 @@ class ModelTrainer:
                 preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
                 
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 raise TrainingError(f"Error during prediction: {e}")
 
 
@@ -587,7 +585,7 @@ class ModelTrainer:
             obj = load_artifact(path=path_obj, fmt=fmt)
         except FileNotFoundError:
             raise TrainingError(f"File not found: {path}")
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             raise TrainingError(f"Error loading artifact: {e}")
         # Проверка типа загруженного объекта
         if not isinstance(obj, cls):
@@ -629,8 +627,8 @@ def train_model(
         cfg: dict = cfg_or_algo  # type: ignore
         algo = str(cfg.get("algorithm",""))
         metric = str(cfg.get("metric",""))
-        hyperparams = cast(Dict[str, Any], cfg.get("hyperparams", {}))
-        rs = cast(Optional[int], cfg.get("random_state", 42))
+        hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
+        rs = cast(int | None, cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
@@ -641,7 +639,7 @@ def train_model(
         # чтобы сохранить логику оригинальной валидации для тестов.
         algo = cfg_or_algo if cfg_or_algo is not None else "" 
         metric = str(metric_or_testsize)  
-        hyperparams = cast(Dict[str, Any], params_or_metric) 
+        hyperparams = cast(dict[str, Any], params_or_metric) 
         rs = random_state
         data_os = False
         data_os_mult = 1.0
@@ -657,26 +655,19 @@ def train_model(
 
 
     # Создаём и обучаем ModelTrainer
-    try:
-        trainer = ModelTrainer(
-            algorithm=algo,
-            hyperparams=hyperparams,
-            metric=metric,
-            random_state=rs,
-            data_oversampling=data_os,
-            data_oversampling_multiplier=data_os_mult,
-            data_oversampling_algorithm=data_os_alg,
-        )
-        trainer.fit(X, y)
-        val_score = trainer.val_score
-        if val_score is None:
-            raise TrainingError("Model did not return a metric value")
-    except TrainingError:
-        raise
-    except ValueError:
-        raise
-    except TypeError:
-        raise
+    trainer = ModelTrainer(
+        algorithm=algo,
+        hyperparams=hyperparams,
+        metric=metric,
+        random_state=rs,
+        data_oversampling=data_os,
+        data_oversampling_multiplier=data_os_mult,
+        data_oversampling_algorithm=data_os_alg,
+    )
+    trainer.fit(X, y)
+    val_score = trainer.val_score
+    if val_score is None:
+        raise TrainingError("Model did not return a metric value")
 
     # Логирование (если enable_logging=True)
     if enable_logging:

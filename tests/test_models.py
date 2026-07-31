@@ -4,15 +4,14 @@ from configurable_automl_engine.models import create_model
 
 def test_create_model_invalid_type():
     """
-    Тест покрытия строки 96: проверка возбуждения ValueError, 
-    если аргумент algorithm не является строкой.
+    Проверка возбуждения TypeError, если аргумент algorithm не является строкой.
     """
     # Передаем список вместо строки
-    with pytest.raises(ValueError, match="Некорректный алгоритм:"):
+    with pytest.raises(TypeError, match="Алгоритм должен быть строкой"):
         create_model(algorithm=["elasticnet"])
-    
+
     # Передаем число вместо строки
-    with pytest.raises(ValueError, match="Некорректный алгоритм:"):
+    with pytest.raises(TypeError, match="Алгоритм должен быть строкой"):
         create_model(algorithm=123)
 
 def test_create_model_import_error_for_missing_package():

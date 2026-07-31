@@ -23,20 +23,20 @@
 
 
 from __future__ import annotations
-from functools import partial
 
 # ─────────────────────────────── stdlib
 import logging as _logging
-from typing import Any, Callable, cast
+from collections.abc import Callable
+from functools import partial
+from typing import Any, cast
 
 # ──────────────────────────── third-party
 import numpy as np
 import optuna
 import pandas as pd
+from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import Trial
-
 from sklearn import model_selection
-
 from sklearn.model_selection import (
     train_test_split,
 )
@@ -45,17 +45,10 @@ from sklearn.model_selection import (
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
-
-from configurable_automl_engine.validation import make_cv
-
-from imblearn.pipeline import Pipeline as ImbPipeline
-from configurable_automl_engine.oversampling import DataOversampler
-
-from configurable_automl_engine.training_engine.metrics import get_scorer_object
-
 from configurable_automl_engine.models import create_model
-
-from configurable_automl_engine.validation import iter_splits
+from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.training_engine.metrics import get_scorer_object
+from configurable_automl_engine.validation import iter_splits, make_cv
 
 logging = _logging  # alias
 
