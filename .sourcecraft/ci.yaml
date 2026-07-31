@@ -5,8 +5,45 @@ on:
     - workflows: [ai-development-pipeline]
       filter:
         branches: ["infrastructure-ci-only-do-not-delete"]
+    - workflows: [sync-to-github]
+      filter:
+        branches: ["**"]
 
 workflows:
+  # ----------------------------------------------------
+  # Синхронизация SourceCraft → GitHub
+  # ----------------------------------------------------
+  sync-to-github:
+    tasks:
+      - name: push-to-github
+        cubes:
+          - name: sync
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              GITHUB_REPO: "LapshinLeonid/configurable_automl_engine"
+            script:
+              - |
+                set -e
+
+                echo "🔍 Проверяем commit title на флаг пропуска..."
+                COMMIT_TITLE=$(git log -1 --pretty=%s)
+                if echo "$COMMIT_TITLE" | grep -q "\[skip-sync\]"; then
+                  echo "⏭️ Commit title содержит [skip-sync], пропускаем синхронизацию в GitHub"
+                  exit 0
+                fi
+
+                BRANCH="${SOURCECRAFT_COMMIT_REF_NAME}"
+                echo "🔄 Синхронизируем ветку '$BRANCH' в GitHub..."
+
+                git config user.name "SourceCraft Sync"
+                git config user.email "noreply@sourcecraft.dev"
+
+                # Добавляем GitHub как remote и пушим через HEAD (detached HEAD в CI/CD)
+                git remote add github "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+                git push github "HEAD:refs/heads/${BRANCH}"
+
+                echo "✅ Ветка '$BRANCH' синхронизирована в GitHub"
+
   # ----------------------------------------------------
   # Единый пайплайн: планирование → код → ревью
   # ----------------------------------------------------
