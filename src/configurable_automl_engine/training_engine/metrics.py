@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
-from sklearn.metrics import get_scorer as sklearn_get_scorer
+from sklearn.metrics import get_scorer as sklearn_get_scorer # type: ignore[import-untyped]
 from sklearn.metrics import (
     make_scorer,
     mean_absolute_error,
