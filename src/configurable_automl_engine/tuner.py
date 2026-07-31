@@ -39,7 +39,7 @@ from optuna.trial import Trial
 from sklearn import model_selection
 from sklearn.model_selection import (
     train_test_split,
-) 
+)
 
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy

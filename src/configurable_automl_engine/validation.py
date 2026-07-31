@@ -26,7 +26,7 @@ from collections.abc import Generator
 
 import numpy as np
 import pandas as pd
-from sklearn import model_selection 
+from sklearn import model_selection
 from sklearn.model_selection import KFold, LeaveOneOut, train_test_split
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
