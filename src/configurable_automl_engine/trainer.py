@@ -522,7 +522,7 @@ class ModelTrainer:
                     " final val_score={self.val_score:.4f} "
                     f"(greater_is_better={is_greater_better(self.metric)})"
                 )
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 raise TrainingError(f"Error calculating metrics on validation: {e}")
             
             return self
@@ -551,7 +551,7 @@ class ModelTrainer:
                 preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
                 
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 raise TrainingError(f"Error during prediction: {e}")
 
 
@@ -585,7 +585,7 @@ class ModelTrainer:
             obj = load_artifact(path=path_obj, fmt=fmt)
         except FileNotFoundError:
             raise TrainingError(f"File not found: {path}")
-        except Exception as e:
+        except Exception as e: # noqa: BLE001
             raise TrainingError(f"Error loading artifact: {e}")
         # Проверка типа загруженного объекта
         if not isinstance(obj, cls):
