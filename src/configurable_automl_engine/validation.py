@@ -116,7 +116,7 @@ def make_cv(
 
 def iter_splits(
     X: np.ndarray | pd.DataFrame,
-    y: np.ndarray | pd.Series = None,
+    y: np.ndarray | pd.Series | None = None,
     *,
     method: ValidationStrategy | str  = "k_fold",
     n_folds: int = 5,

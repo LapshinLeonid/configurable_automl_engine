@@ -1,66 +1,78 @@
-[build-system]
-requires = ["setuptools>=64","setuptools-scm>=8", "wheel"]
-build-backend = "setuptools.build_meta"
+    [build-system]
+    requires = ["setuptools>=64","setuptools-scm>=8", "wheel"]
+    build-backend = "setuptools.build_meta"
 
-[project]
-name = "configurable-automl-engine"              # имя на PyPI (может отличаться от модуля)
-dynamic = ["version"]
-description = "A configuration-driven AutoML orchestrator for automated model selection and two-stage hyperparameter optimization."
-readme = "README.md"
-license = {text = "BSD 3-Clause"}
-authors = [
-  { name = "Leonid Lapshin", email = "leonid.lapshin.a@gmail.com" }
-  ]
-requires-python = ">=3.11"
-dependencies = [
-    "numpy>=2.4.2",
-    "pandas>=3.0.0",
-    "imbalanced-learn>=0.14.1",
-    "scikit-learn>=1.8.0",
-    "joblib>=1.5.3",
-    "pyyaml>=6.0.3",
-    "scipy>=1.17.0",
-    "optuna>=4.7.0",
-    "pydantic>=2.12.5",
-    "pyarrow>23.0.0",
-]
-classifiers = [
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: BSD License",
-    "Operating System :: OS Independent",
-    "Typing :: Typed",
-    "Intended Audience :: Science/Research",
-    "Intended Audience :: Developers",
-    "Development Status :: 4 - Beta",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-]
-keywords = [ 
-    "machine-learning", 
-    "data-science", 
-    "data-analysis"
-]
+    [project]
+    name = "configurable-automl-engine"              # имя на PyPI (может отличаться от модуля)
+    dynamic = ["version"]
+    description = "A configuration-driven AutoML orchestrator for automated model selection and two-stage hyperparameter optimization."
+    readme = "README.md"
+    license = {text = "BSD 3-Clause"}
+    authors = [
+    { name = "Leonid Lapshin", email = "leonid.lapshin.a@gmail.com" }
+    ]
+    requires-python = ">=3.11"
+    dependencies = [
+        "numpy>=2.4.2",
+        "pandas>=3.0.0",
+        "imbalanced-learn>=0.14.1",
+        "scikit-learn>=1.8.0",
+        "joblib>=1.5.3",
+        "pyyaml>=6.0.3",
+        "scipy>=1.17.0",
+        "optuna>=4.7.0",
+        "pydantic>=2.12.5",
+        "pyarrow>23.0.0",
+    ]
+    classifiers = [
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
+        "License :: OSI Approved :: BSD License",
+        "Operating System :: OS Independent",
+        "Typing :: Typed",
+        "Intended Audience :: Science/Research",
+        "Intended Audience :: Developers",
+        "Development Status :: 4 - Beta",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Software Development :: Libraries :: Python Modules",
+    ]
+    keywords = [ 
+        "machine-learning", 
+        "data-science", 
+        "data-analysis"
+    ]
 
-[project.optional-dependencies]
+    [project.optional-dependencies]
 
-xgboost = ["xgboost>=3.1.3"]
+    xgboost = ["xgboost>=3.1.3"]
 
-test = ["pytest>=9.0.2"]
+    test = ["pytest>=9.0.2"]
 
-all = ["configurable-automl-engine[xgboost]"]
+    all = ["configurable-automl-engine[xgboost]"]
 
-dev = ["configurable-automl-engine[all,test]"]
+    dev = ["configurable-automl-engine[all,test]"]
 
-[project.urls]
-Homepage = "https://github.com/LapshinLeonid/configurable_automl_engine"
-Issues = "https://github.com/LapshinLeonid/configurable_automl_engine/issues"
+    [project.urls]
+    Homepage = "https://github.com/LapshinLeonid/configurable_automl_engine"
+    Issues = "https://github.com/LapshinLeonid/configurable_automl_engine/issues"
 
-[tool.setuptools_scm]
-local_scheme = "no-local-version"
-write_to = "src/configurable_automl_engine/_version.py"
+    [tool.setuptools_scm]
+    local_scheme = "no-local-version"
+    write_to = "src/configurable_automl_engine/_version.py"
 
-[tool.setuptools.package-data]
-configurable_automl_engine = ["py.typed"]
+    [tool.setuptools.package-data]
+    configurable_automl_engine = ["py.typed"]
+
+    [tool.mypy]
+
+    [[tool.mypy.overrides]]
+    module = [
+        "sklearn.*",
+        "joblib.*",
+        "imblearn",
+        "imblearn.*",
+        "concurrent_log_handler.*",
+    ]
+    ignore_missing_imports = true

@@ -123,12 +123,12 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
         
         if not numeric_cols.empty:
             # Векторизованное добавление шума для всех числовых колонок сразу
-            stds = df[numeric_cols].std().fillna(1.0).replace(0, 1.0).values
+            stds = df[numeric_cols].std().fillna(1.0).replace(0, 1.0).to_numpy()
             scales = stds * self.noise_level
             noise = rng.normal(0, 1.0, size=(len(df), len(numeric_cols))) * scales
             
-            # Используем .values для скорости
-            df[numeric_cols] = df[numeric_cols].values + noise
+            # Используем .to_numpy() для скорости
+            df[numeric_cols] = df[numeric_cols].to_numpy() + noise
         return df
 
     def __getstate__(self) -> dict[str, Any]:

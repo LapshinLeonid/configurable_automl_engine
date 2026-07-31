@@ -79,6 +79,7 @@ class SharedDataFrame:
         
         self.name: str | None = None
         self._owner = df is not None
+        self.columns: list[str] | None = None
 
         if df is not None:
             self.name = f"shm_{id(df)}_{np.random.randint(1000)}"
@@ -103,6 +104,7 @@ class SharedDataFrame:
                 dtype=dtype, 
                 buffer=self.shm.buf
                 )
+            self.shape = self.shared_array.shape
             self.columns = columns
 
     @staticmethod
@@ -125,18 +127,21 @@ class SharedDataFrame:
         if isinstance(X, pd.DataFrame):
             return X.shape[1], X.columns.tolist()
         elif isinstance(X, SharedDataFrame):
-            return X.shape[1], X.columns
+            shape = getattr(X, 'shape', X.shared_array.shape)
+            n_cols = shape[1] if len(shape) > 1 else 1
+            cols = X.columns if X.columns is not None else [str(i) for i in range(n_cols)]
+            return n_cols, cols
         elif isinstance(X, np.ndarray):
-            return (X.shape[1] 
-                    if X.ndim > 1 
-                    else 1, 
-                    list(range(X.shape[1] if X.ndim > 1 else 1)))
+            n_cols = X.shape[1] if X.ndim > 1 else 1
+            return n_cols, list(range(n_cols))
         return 0, []
 
     @staticmethod
-    def is_compatible(df: pd.DataFrame) -> bool:
+    def is_compatible(df: Any) -> bool:
         """Проверяет, можно ли разместить DF в SHM 
         (только простые типы и RangeIndex)."""
+        """Проверяет, можно ли разместить DF в SHM 
+        (уже разделяемый массив, либо DF с простыми типами и RangeIndex)."""
         if SharedDataFrame.is_shared_array(df):
             return True
         if not isinstance(df, pd.DataFrame):

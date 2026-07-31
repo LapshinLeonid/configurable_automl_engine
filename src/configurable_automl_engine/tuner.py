@@ -210,18 +210,19 @@ def _can_stratify(y: Any) -> bool:
         bool: True, если данные дискретны (целые числа/bool) и количество уникальных 
             классов не превышает 15. В противном случае — False.
     """
-    if isinstance(y, (pd.Series, pd.DataFrame)):
-        arr = y.values
-    else:
-        arr = np.asarray(y)
+    # np.asarray гарантирует чистый np.ndarray и np.dtype для mypy (без ExtensionArray/Dtype)
+    arr = np.asarray(y)
 
     if arr.ndim != 1:
         return False
+        
     uniq = np.unique(arr)
     return (
         uniq.size <= 15
-        and np.issubdtype(arr.dtype, np.integer)
-        or np.issubdtype(arr.dtype, np.bool_)
+        and (
+            np.issubdtype(arr.dtype, np.integer)
+            or np.issubdtype(arr.dtype, np.bool_)
+        )
     )
 
 
