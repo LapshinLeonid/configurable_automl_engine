@@ -34,6 +34,8 @@ import pandas as pd
 
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
+import logging
+import time
 logger = logging.getLogger(__name__)
 
 class SharedDataFrame:
