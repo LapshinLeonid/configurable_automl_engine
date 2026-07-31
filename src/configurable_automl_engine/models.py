@@ -125,7 +125,7 @@ def create_model(algorithm: Algorithm = "elasticnet",
     бросает ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
-        raise ValueError(f"Некорректный алгоритм: {algorithm!r}")
+        raise TypeError(f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}")
 
     algo_key = algorithm.lower()
     algo_key = _ALIASES.get(algo_key, algo_key)

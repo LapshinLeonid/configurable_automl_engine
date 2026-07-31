@@ -16,7 +16,7 @@ import logging
 import threading
 from collections import Counter
 from math import ceil
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
     """
     _sampling_type = "over-sampling"
 
-    _parameter_constraints: dict [str, list[Any]] = {
+    _parameter_constraints: ClassVar[dict [str, list[Any]]] = {
         "multiplier": [float, int],
         "algorithm": [str],
         "add_noise": ["boolean"],
@@ -218,7 +218,7 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
                 else:
                     if not pd.Series(df[col]).isna().any():
                         df[col] = df[col].astype(dtype)
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
     
@@ -385,8 +385,8 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
             
             # ПРОВЕРКА: Если таргет не указан, нельзя использовать балансировку 
             # или синтетические алгоритмы
-            if target is None:
-                if self.balance or algo_local in ("smote", "adasyn"):
+            if (target is None
+                and (self.balance or algo_local in ("smote", "adasyn"))):
                     raise ValueError(
                         f"The 'target' parameter must be specified for "
                         f"the '{self.algorithm}' algorithm "
@@ -424,8 +424,8 @@ class DataOversampler(BaseSampler): # type: ignore[misc]
 
             return res_df.reset_index(drop=True)
         
-        except Exception as e:
-            logger.exception(f"Oversampling error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Oversampling error")
             raise
 
 # ------------------------------------------------------------------ #
