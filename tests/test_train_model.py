@@ -114,10 +114,11 @@ def test_too_few_records(base_params):
 
 
 def test_invalid_param_key(base_params):
-    # Параметр неизвестный для ElasticNet
+    # Неизвестные параметры должны молча игнорироваться (clean_hyperparameters
+    # отбрасывает их вместо выброса TypeError)
     bad_params = {"foobar": 1}
-    with pytest.raises(TypeError):
-        train_model("ElasticNet", "r2", bad_params, X, y)
+    score = train_model("ElasticNet", "r2", bad_params, X, y)
+    assert isinstance(score, float)
 
 
 def test_negative_alpha(base_params):
