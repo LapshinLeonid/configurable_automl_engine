@@ -655,26 +655,19 @@ def train_model(
 
 
     # Создаём и обучаем ModelTrainer
-    try:
-        trainer = ModelTrainer(
-            algorithm=algo,
-            hyperparams=hyperparams,
-            metric=metric,
-            random_state=rs,
-            data_oversampling=data_os,
-            data_oversampling_multiplier=data_os_mult,
-            data_oversampling_algorithm=data_os_alg,
-        )
-        trainer.fit(X, y)
-        val_score = trainer.val_score
-        if val_score is None:
-            raise TrainingError("Model did not return a metric value")
-    except TrainingError:
-        raise
-    except ValueError:
-        raise
-    except TypeError:
-        raise
+    trainer = ModelTrainer(
+        algorithm=algo,
+        hyperparams=hyperparams,
+        metric=metric,
+        random_state=rs,
+        data_oversampling=data_os,
+        data_oversampling_multiplier=data_os_mult,
+        data_oversampling_algorithm=data_os_alg,
+    )
+    trainer.fit(X, y)
+    val_score = trainer.val_score
+    if val_score is None:
+        raise TrainingError("Model did not return a metric value")
 
     # Логирование (если enable_logging=True)
     if enable_logging:
