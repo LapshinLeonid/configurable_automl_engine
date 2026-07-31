@@ -190,6 +190,7 @@ def _fit_and_save(
     best_params: dict[str, Any],
     model_path: Path,
     cfg: Config,
+    metric_name_sklearn: str = "r2",
 ) -> None:
     """Выполнить финальное обучение модели и сохранить результат на диск.
     Args:
@@ -216,6 +217,7 @@ def _fit_and_save(
     trainer = trainer_module.ModelTrainer(
         algorithm=algo_name, 
         hyperparams=best_params,
+        metric=metric_name_sklearn,
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
         data_oversampling=cfg.oversampling.enable,
         data_oversampling_multiplier=cfg.oversampling.multiplier,
@@ -460,7 +462,7 @@ def train_best_model(
     model_path = Path(model_path_override or cfg.general.path_to_model)
 
     try:
-        _fit_and_save(winner_algo,winner_cfg, X,y, final_params, model_path, cfg)
+        _fit_and_save(winner_algo,winner_cfg, X,y, final_params, model_path, cfg, metric_name_sklearn=metric_sklearn)
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
         _LOG.error(f"Failed to save final model: {e}")
