@@ -144,7 +144,7 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     tuple[frozenset[str], bool]
         ``(accepted_param_names, accepts_var_kwargs)``
     """
-    sig = inspect.signature(cls.__init__)
+    sig = inspect.signature(cls)
     accepted: set[str] = set()
     accepts_var_kwargs = False
     for name, param in sig.parameters.items():

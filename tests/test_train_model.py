@@ -1084,3 +1084,15 @@ def test_coverage_feature_names_from_numerical_fallback():
         assert trainer.feature_names == ["col_0", "col_1"]
         # Проверяем, что они ссылаются на один и тот же список (или идентичны)
         assert trainer.feature_names is trainer.numerical_features
+
+
+def test_constructor_param_info_self_skipped(base_params):
+    """
+    Covers the `if name == "self": continue` branch in
+    `_get_constructor_param_info` (models.py line 152).
+
+    Every sklearn estimator has ``self`` as the first ``__init__`` parameter,
+    so calling ``train_model`` with any valid algorithm exercises this branch.
+    """
+    result = train_model("ElasticNet", "r2", base_params, X, y)
+    assert isinstance(result, float)

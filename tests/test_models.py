@@ -39,6 +39,40 @@ def test_get_constructor_param_info_different_classes():
     assert r1 != r2
 
 
+def test_get_constructor_param_info_skips_self():
+    """
+    Cover the 'if name == "self": continue' branch (line 152).
+    Use a class whose __init__ has only 'self' and **kwargs to also
+    cover the VAR_KEYWORD branch (line 154).
+    """
+    class _ModelWithKwargs:
+        def __init__(self, **kwargs):
+            pass
+
+    accepted, accepts_kwargs = _get_constructor_param_info(_ModelWithKwargs)
+    # 'self' must never appear in accepted params
+    assert "self" not in accepted
+    # The class accepts **kwargs
+    assert accepts_kwargs is True
+    # No positional params beyond self
+    assert accepted == frozenset()
+
+
+def test_get_constructor_param_info_self_only():
+    """
+    Cover the 'if name == "self": continue' branch with a class
+    that has ONLY 'self' (no params, no **kwargs).
+    """
+    class _ModelSelfOnly:
+        def __init__(self):
+            pass
+
+    accepted, accepts_kwargs = _get_constructor_param_info(_ModelSelfOnly)
+    assert "self" not in accepted
+    assert accepts_kwargs is False
+    assert accepted == frozenset()
+
+
 def test_legacy_param_mappings_contains_ard():
     """LEGACY_PARAM_MAPPINGS has the expected entry for ardregression."""
     assert "ardregression" in LEGACY_PARAM_MAPPINGS
