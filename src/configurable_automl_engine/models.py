@@ -133,7 +133,7 @@ _ALIASES: dict[str, str] = {
 # ----------------------------------------------------------------------------- #
 
 @lru_cache(maxsize=32)
-def _get_constructor_param_info(cls: type) -> tuple[set[str], bool]:
+def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     """Return accepted constructor param names and whether cls accepts **kwargs.
 
     The result is cached per *class* (not per instance) so that repeated
@@ -141,7 +141,7 @@ def _get_constructor_param_info(cls: type) -> tuple[set[str], bool]:
 
     Returns
     -------
-    tuple[set[str], bool]
+    tuple[frozenset[str], bool]
         ``(accepted_param_names, accepts_var_kwargs)``
     """
     sig = inspect.signature(cls.__init__)
@@ -154,7 +154,7 @@ def _get_constructor_param_info(cls: type) -> tuple[set[str], bool]:
             accepts_var_kwargs = True
         else:
             accepted.add(name)
-    return accepted, accepts_var_kwargs
+    return frozenset(accepted), accepts_var_kwargs
 
 
 # ----------------------------------------------------------------------------- #
@@ -196,7 +196,7 @@ def clean_hyperparameters(
         # 1. Remap legacy keys
         if key in mappings:
             new_key = mappings[key]
-            if new_key in accepted_params or accepts_var_kwargs:
+            if new_key not in hyperparams and (new_key in accepted_params or accepts_var_kwargs):
                 cleaned[new_key] = value
                 logger.debug(
                     "Remapped '%s' -> '%s' for %s", key, new_key, algo_key
