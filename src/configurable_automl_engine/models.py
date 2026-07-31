@@ -148,7 +148,7 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     accepted: set[str] = set()
     accepts_var_kwargs = False
     for name, param in sig.parameters.items():
-        if name == "self":
+        if name == "self":  # pragma: no cover
             continue
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             accepts_var_kwargs = True
