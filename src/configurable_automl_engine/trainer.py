@@ -91,7 +91,9 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         """Вычислить медиану выбранного признака для последующей импутации пропусков."""
         _, n_cols = self._get_dimensions(X)
         idx = self.feature_index if self.feature_index < n_cols else 0
-        
+
+        X_col: pd.Series | np.ndarray
+
         if isinstance(X, pd.DataFrame):
             X_col = X.iloc[:, idx]
         elif isinstance(X, np.ndarray):
@@ -119,6 +121,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
                 )
             # 3. Извлечение колонки (Zero-copy для numpy и pandas)
             # Если X - DataFrame, используем iloc. Если numpy - обычный слайсинг.
+            X_col: pd.Series | np.ndarray
             if isinstance(X, pd.DataFrame):
                 X_col = X.iloc[:, self.feature_index]
             elif isinstance(X, np.ndarray):
@@ -370,6 +373,10 @@ class ModelTrainer:
             valid_types = (pd.DataFrame, pd.Series, np.ndarray, SharedDataFrame)
             if not isinstance(X, valid_types):
                 raise TrainingError(f"Unsupported data type: {type(X)}")
+
+            X_obj: pd.DataFrame | pd.Series | np.ndarray
+            y_obj: pd.Series | np.ndarray
+
             if isinstance(y, str):
                 if not isinstance(X, pd.DataFrame):
                     raise TrainingError(f"Target column '{y}' specified,"
