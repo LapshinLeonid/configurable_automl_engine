@@ -169,7 +169,7 @@ def _run_hpo(
             kwargs["space_overrides"] = overrides
 
     try:
-        _model, best_params, best_score = tuner.optimize(**kwargs)
+        _, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
@@ -266,8 +266,8 @@ def train_best_model(
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
-        print("CONFIG TYPE:", type(config))
-        print("ALGORITHMS:", (
+        _LOG.debug("CONFIG TYPE:", type(config))
+        _LOG.debug("ALGORITHMS:", (
             config.get("algorithms") if isinstance(config, dict) else "N/A"))
         cfg = Config.model_validate(config)
     elif isinstance(config, (str, Path)):
@@ -383,7 +383,8 @@ def train_best_model(
         
         def _worker(
                 algo_name: str, 
-                algo_cfg: AlgoCfg
+                algo_cfg: AlgoCfg,
+                p=phase
                 ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
@@ -400,7 +401,7 @@ def train_best_model(
             )
             try:
                 result = _execute_hpo_phase(
-                    phase.name, algo_name, algo_cfg, phase.n_trials, full_search_space
+                    p.name, algo_name, algo_cfg, p.n_trials, full_search_space
                 )
 
                 if result is None:
@@ -411,8 +412,8 @@ def train_best_model(
                 return algo_name, score, params
             except _CanonicalIAE:
                 raise
-            except Exception as e:
-                _LOG.warning(f"Algorithm {algo_name} failed in phase {phase.name}: {e}")
+            except Exception as e: # noqa: BLE001
+                _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
                 return None
         # Выполнение (параллельное или последовательное)
         if (cfg.general.parallel_strategy == "algorithms" 
