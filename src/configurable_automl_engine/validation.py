@@ -26,8 +26,8 @@ from collections.abc import Generator
 
 import numpy as np
 import pandas as pd
-from sklearn import model_selection # type: ignore[import-untyped]
-from sklearn.model_selection import KFold, LeaveOneOut, train_test_split # type: ignore[import-untyped]
+from sklearn import model_selection 
+from sklearn.model_selection import KFold, LeaveOneOut, train_test_split
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.validation_utils import validate_df_not_empty

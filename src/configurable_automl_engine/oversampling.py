@@ -20,8 +20,8 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from imblearn.base import BaseSampler # type: ignore[import-untyped]
-from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler # type: ignore[import-untyped]
+from imblearn.base import BaseSampler
+from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_numeric_dtype
 
 logger = logging.getLogger(__name__)

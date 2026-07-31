@@ -2,7 +2,7 @@ import pickle
 from pathlib import Path
 from typing import Any
 
-import joblib # type: ignore[import-untyped]
+import joblib
 
 from configurable_automl_engine.common.definitions import SerializationFormat
 
