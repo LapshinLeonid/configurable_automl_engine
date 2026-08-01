@@ -418,13 +418,15 @@ def train_best_model(
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
                 return None
         # Выполнение (параллельное или последовательное)
-        if (cfg.general.parallel_strategy == "algorithms" 
+        if (cfg.general.parallel_strategy == "algorithms"
             and len(current_candidates) > 1):
             results = run_parallel(
                 _worker,
                 args_seq=[(n, a) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
-                mode=cfg.general.parallel_mode
+                mode=cfg.general.parallel_mode,
+                timeout=cfg.general.phase_timeout,
+                task_timeout=cfg.general.task_timeout,
             )
 
             for res in results:

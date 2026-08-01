@@ -14,17 +14,18 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
         shared_args_indices=[0]
     )
 """
+import concurrent.futures
 import logging
 import os
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import (
-    FIRST_COMPLETED,
     Executor,
+    Future,
     ProcessPoolExecutor,
     ThreadPoolExecutor,
-    wait,
+    as_completed,
 )
 from multiprocessing import shared_memory
 from typing import Any
@@ -363,35 +364,71 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
         except Exception as e: # noqa: BLE001
             logger.error(f"Unexpected persistence cleanup error: {e}")
 
+def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
+    """Принудительное завершение всех процессов в пуле.
+    
+    Используется watchdog-механизмом при обнаружении зависших задач
+    (C-level crash воркера).
+    
+    Args:
+        pool: ProcessPoolExecutor или ThreadPoolExecutor
+        shutdown_grace_period: время ожидания graceful shutdown в секундах
+    """
+    workers = list(getattr(pool, "_processes", {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+
+    stop_time = time.time() + shutdown_grace_period
+    while time.time() < stop_time and any(w.is_alive() for w in workers):
+        time.sleep(0.1)
+
+    for w in workers:
+        if w.is_alive():
+            try:
+                logger.error(f"CRITICAL: Worker {w.pid} hung. Forcing SIGTERM.")
+                w.terminate()
+            except Exception: # noqa: S110, BLE001
+                pass
+
+    time.sleep(0.2)
+
+    for w in workers:
+        if w.is_alive():
+            try:
+                logger.critical(f"HARD KILL: Worker {w.pid} resisted SIGTERM. Sending SIGKILL.")
+                w.kill()
+            except Exception: # noqa: S110, BLE001
+                pass
+
+
 def run_parallel(
     func: Callable[..., Any],
     args_seq: Iterable[Sequence[Any]] | None = None,
     kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
-    max_workers: int | None = None, 
+    max_workers: int | None = None,
     mode: str = "threads",
     timeout: float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
-    pool_timeout: float | None = None,
-    shutdown_grace_period: float = 5.0
+    shutdown_grace_period: float = 5.0,
+    task_timeout: float | None = None,  # индивидуальный таймаут на задачу
 ) -> list[Any]:
-    """Организовать параллельное выполнение функции 
+    """Организовать параллельное выполнение функции
     с управлением памятью и жизненным циклом.
 
     Логика параллелизма:
     1. Режим: Поддерживает многопоточность (threads) и многопроцессорность (processes).
-    2. Оптимизация данных: При работе с процессами переносит DataFrame в Shared Memory 
+    2. Оптимизация данных: При работе с процессами переносит DataFrame в Shared Memory
        или на диск, исключая накладные расходы на Pickle-сериализацию.
-    3. Управление жизненным циклом: Использует явную инициализацию и 
-       завершение Executor (shutdown с cancel_futures=True). Это позволяет 
+    3. Управление жизненным циклом: Использует явную инициализацию и
+       завершение Executor (shutdown с cancel_futures=True). Это позволяет
        немедленно прерывать выполнение при сбоях или таймаутах.
-    4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения 
-       всей последовательности задач. Если лимит превышен, сбор результатов 
+    4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения
+       всей последовательности задач. Если лимит превышен, сбор результатов
        прекращается, а оставшиеся в очереди задачи отменяются.
-    5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов 
-       выполняется попытка перезапуска всей последовательности в режиме "threads" 
+    5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов
+       выполняется попытка перезапуска всей последовательности в режиме "threads"
        с принудительной очисткой ресурсов.
-    6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных 
+    6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных
        файлов, а также корректную остановку всех рабочих процессов/потоков.
 
     Args:
@@ -400,19 +437,20 @@ def run_parallel(
         kwargs_seq (Iterable): Последовательность словарей именованных аргументов.
         max_workers (int): Лимит количества рабочих воркеров.
         mode (str): Режим параллелизма ("threads" или "processes").
-        timeout (int | float): Глобальный лимит времени в секундах 
-        на выполнение всех задач.
+        timeout (int | float): Глобальный лимит времени в секундах
+        на выполнение всех задач. Если не задан — задачи выполняются без глобального ограничения.
         shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
         disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
-        pool_timeout (int | float | None): Индивидуальный таймаут для ожидания задач 
-            в пуле (если не задан, используется глобальный timeout).
-        shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение 
+        shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение
             воркеров перед принудительным отправлением SIGTERM/SIGKILL.
+        task_timeout (float | None): Индивидуальный таймаут на одну задачу (алгоритм) в секундах.
+            Если None — используется глобальный timeout. Deadline для каждой задачи считается
+            от момента её отправки в пул (submit_time), а не от общего start_time.
 
     Returns:
-        list[Any]: Список результатов. Задачи, не успевшие выполниться 
-            или вызвавшие стандартные исключения, заменяются на None. 
-            Критические ошибки (InvalidAlgorithmError) и прерывания пользователя 
+        list[Any]: Список результатов. Задачи, не успевшие выполниться
+            или вызвавшие стандартные исключения, заменяются на None.
+            Критические ошибки (InvalidAlgorithmError) и прерывания пользователя
             (KeyboardInterrupt) пробрасываются вызывающему коду.
     """
     pool = None
@@ -488,110 +526,136 @@ def run_parallel(
         pool = executor_cls(max_workers)
 
         future_to_idx = {}
+        submit_time_by_future: dict[Future, float] = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes" and (shared_args_indices or disk_args_indices):
                 fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
             else:
                 fut = pool.submit(func, *a, **kw)
             future_to_idx[fut] = i
+            submit_time_by_future[fut] = time.time()
+
+        # Абсолютные дедлайны для каждой задачи (от времени submit)
+        deadline_by_future: dict[Future, float] = {}
+        for fut, idx in future_to_idx.items():
+            task_t = task_timeout or float('inf')
+            deadline_by_future[fut] = submit_time_by_future.get(fut, start_time) + task_t
+
+        stale_iterations = 0
+        MAX_STALE_ITERATIONS = 5
 
         while future_to_idx:
-            elapsed = time.time() - start_time
-            effective_timeout = pool_timeout or timeout
-            remaining_global = (
-                max(0.1, effective_timeout - elapsed) if effective_timeout else None
-                )
-            
+            time.time() - start_time
+            effective_timeout = timeout
+
+            # Вычисляем минимальный оставшийся таймаут
+            now = time.time()
+            remaining_by_future = {}
+            for fut, deadline in deadline_by_future.items():
+                if fut in future_to_idx:
+                    rem = max(0.1, deadline - now)
+                    remaining_by_future[fut] = rem
+            min_remaining = min(remaining_by_future.values()) if remaining_by_future else None
+
+            # Если глобальный таймаут меньше — используем его
+            if effective_timeout is not None:
+                global_remaining = max(0.1, effective_timeout - (now - start_time))
+                if min_remaining is not None:
+                    min_remaining = min(min_remaining, global_remaining)
+                else:
+                    min_remaining = global_remaining  # pragma: no cover
+
+            timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
+
             try:
-                # Ждем завершения хотя бы одной задачи в пределах оставшегося времени
-                done, _ = wait(
-                    future_to_idx.keys(), 
-                    timeout=remaining_global, 
-                    return_when=FIRST_COMPLETED
+                completed_set = set()
+                if timeout_for_ac is not None:
+                    for fut in as_completed(future_to_idx.keys(), timeout=timeout_for_ac):
+                        completed_set.add(fut)
+                        idx = future_to_idx.pop(fut)
+                        try:
+                            results[idx] = fut.result(timeout=0)
+                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                            raise
+                        except Exception as e: # noqa: BLE001
+                            logger.error(f"Task {idx} failed: {e}")
+                            results[idx] = None
+                        stale_iterations = 0  # сброс stale при успехе
+                else:
+                    for fut in as_completed(future_to_idx.keys()):
+                        completed_set.add(fut)
+                        idx = future_to_idx.pop(fut)
+                        try:
+                            results[idx] = fut.result(timeout=0)
+                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                            raise
+                        except Exception as e: # noqa: BLE001
+                            logger.error(f"Task {idx} failed: {e}")
+                            results[idx] = None
+                        stale_iterations = 0
+
+            except concurrent.futures.TimeoutError:
+                # as_completed не дождался ни одной задачи за timeout_for_ac
+                remaining_global = (
+                    max(0.1, effective_timeout - (time.time() - start_time))
+                    if effective_timeout else None
                 )
-                
-                if not done: # Вышли по таймауту wait
-                    # Чтобы прошел тест test_run_parallel_timeout_error_coverage:
+
+                if remaining_global is not None and remaining_global <= 0.1:
+                    # Глобальный таймаут истёк — штатный выход
                     for fut, idx in future_to_idx.items():
                         logger.error(f"Task {idx} timed out")
+                    future_to_idx.clear()
                     break
-                
-                for fut in done:
-                    idx = future_to_idx.pop(fut)
-                    try:
-                        results[idx] = fut.result(timeout=0)
-                    except (InvalidAlgorithmError, KeyboardInterrupt): 
-                        raise # Пробрасываем критические ошибки наверх для тестов
-                    except Exception as e: # noqa: BLE001
-                        logger.error(f"Task {idx} failed: {e}")
-                        results[idx] = None
-                        
+                else:
+                    # Возможное C-level падение
+                    stale_iterations += 1
+                    logger.warning(
+                        f"as_completed timeout (stale #{stale_iterations}): "
+                        f"no tasks completed in {timeout_for_ac:.1f}s."
+                    )
+
+                    if stale_iterations >= MAX_STALE_ITERATIONS:
+                        logger.error(
+                            f"WATCHDOG: {stale_iterations} consecutive stale iterations. "
+                            f"Possible C-level crash. Forcing shutdown."
+                        )
+                        if mode == "processes":
+                            _force_shutdown_processes(pool, shutdown_grace_period)
+                        for fut, idx in future_to_idx.items():
+                            results[idx] = None
+                        future_to_idx.clear()
+                        break
+
             except (InvalidAlgorithmError, KeyboardInterrupt) as e:
                 if isinstance(e, KeyboardInterrupt):
-                    logger.error("Interrupted by user") # Строка для теста
-                raise # Выход из цикла и проброс в блок finally
+                    logger.error("Interrupted by user")
+                raise
             except Exception as e: # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
+                future_to_idx.clear()
                 break
 
     except Exception as e:
         if mode == "processes":
             logger.error("Error in process pool, falling back to threads: %s", e)
 
-            _perform_cleanup(shm_refs, persistence_manager) 
-            return run_parallel(func, 
-                                args_seq, 
-                                kwargs_seq, 
-                                max_workers, 
-                                mode="threads", 
-                                timeout=timeout)
+            _perform_cleanup(shm_refs, persistence_manager)
+            return run_parallel(func,
+                                args_seq,
+                                kwargs_seq,
+                                max_workers,
+                                mode="threads",
+                                timeout=timeout,
+                                task_timeout=task_timeout)
         raise
     finally:
         if pool is not None:
             is_proc_executor = (
-                type(pool).__name__ == "ProcessPoolExecutor" 
+                type(pool).__name__ == "ProcessPoolExecutor"
                 or hasattr(pool, "_processes"))
             if mode == "processes" and is_proc_executor:
-                # Безопасный захват воркеров до shutdown
-                # Копируем список объектов процессов, пока они доступны в _processes
-                workers = list(getattr(pool, "_processes", {}).values())
-                
-                pool.shutdown(wait=False, cancel_futures=True)
-                
-                # Льготный период ожидания (grace period)
-                stop_time = time.time() + shutdown_grace_period
-                
-                while time.time() < stop_time and any(w.is_alive() for w in workers):
-                    time.sleep(0.1)
-                
-                # Принудительное завершение выживших (terminate -> kill)
-                for w in workers:
-                    if w.is_alive():
-                        try:
-                            # ERROR уровень для прерывания 
-                            # (проблема в алгоритме/библиотеке)
-                            logger.error(f"CRITICAL: Worker {w.pid} hung "
-                                         f"in task execution. "
-                                         f"Forcing SIGTERM to release resources.")
-                            w.terminate()
-                        except Exception: # noqa: BLE001, S110
-                            pass
-                
-                # Короткая пауза для завершения системных вызовов
-                time.sleep(0.2)
-                
-                for w in workers:
-                    if w.is_alive():
-                        try:
-                            # CRITICAL уровень, если процесс проигнорировал даже SIGTERM
-                            logger.critical(
-                                            f"HARD KILL: Worker {w.pid} resisted"
-                                            f" SIGTERM. Sending SIGKILL. Possible "
-                                            f"memory leak or C-level freeze.")
-                            w.kill()
-                        except Exception: # noqa: BLE001, S110
-                            pass
-                
+                _force_shutdown_processes(pool, shutdown_grace_period)
                 # Финальная очистка SHM/Disk (только в режиме процессов)
                 _perform_cleanup(shm_refs, persistence_manager)
             else:

@@ -443,6 +443,22 @@
           ],
           "title": "Parallel Mode",
           "type": "string"
+        },
+        "phase_timeout": {
+          "description": "Глобальный таймаут на всю фазу HPO (в секундах). Если None — используется значение по умолчанию run_parallel (3600).",
+          "default": null,
+          "anyOf": [
+            {"type": "number", "minimum": 1.0},
+            {"type": "null"}
+          ]
+        },
+        "task_timeout": {
+          "description": "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). Если None — используется phase_timeout или глобальный timeout.",
+          "default": null,
+          "anyOf": [
+            {"type": "number", "minimum": 1.0},
+            {"type": "null"}
+          ]
         }
       },
       "required": [
