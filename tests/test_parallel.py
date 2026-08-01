@@ -1050,3 +1050,27 @@ def test_run_parallel_generic_exception_no_timeout(caplog):
     assert results == [None]
     assert "Task 0 failed" in caplog.text
     assert "No-timeout failure" in caplog.text
+
+
+def raise_invalid_no_timeout():
+    raise InvalidAlgorithmError("bad algo no timeout")
+
+
+def test_run_parallel_invalid_algorithm_error_propagates_no_timeout():
+    """Покрытие строки 625: re-raise InvalidAlgorithmError в else-ветке (timeout_for_ac is None)."""
+    with pytest.raises(InvalidAlgorithmError, match="bad algo no timeout"):
+        run_parallel(raise_invalid_no_timeout, args_seq=[()], timeout=None)
+
+
+def raise_keyboard_interrupt_no_timeout():
+    raise KeyboardInterrupt()
+
+
+def test_run_parallel_keyboard_interrupt_propagates_no_timeout(caplog):
+    """Покрытие строки 625: re-raise KeyboardInterrupt в else-ветке (timeout_for_ac is None)."""
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(KeyboardInterrupt):
+            run_parallel(
+                raise_keyboard_interrupt_no_timeout, args_seq=[()], timeout=None
+            )

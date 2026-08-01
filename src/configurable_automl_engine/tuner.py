@@ -274,7 +274,7 @@ def optimize(
     random_state: int | None = 42,
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
-) -> tuple[Any, dict[str, Any], float]:
+) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
     Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
     параметров и обучает финальную модель на всех предоставленных данных.
@@ -461,8 +461,11 @@ def optimize(
         )
         raise
 
-    best_params = study.best_params
-    best_score = study.best_value
+    try:
+        best_params = study.best_params
+        best_score = study.best_value
+    except ValueError:
+        return None, None, -3.4028235e38
 
     # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!
