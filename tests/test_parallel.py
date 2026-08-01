@@ -652,17 +652,15 @@ def test_run_parallel_worker_hard_kill():
     assert any("WATCHDOG" in msg for msg in error_messages)
     assert mock_force.called
 
-def test_run_parallel_pool_timeout_precedence(caplog): # Добавлен caplog
-    """Проверяет, что pool_timeout перекрывает глобальный timeout."""
+def test_run_parallel_timeout_global_limit(caplog):
+    """Проверяет, что глобальный timeout работает как лимит фазы."""
     
-    # Глобальный лимит 10 секунд, но лимит пула 0.1 секунду
     with caplog.at_level(logging.ERROR):
         results = run_parallel(
-            slow_task, 
+            slow_task,
             args_seq=[(1.0,)], # Задача спит 1 секунду
-            mode="threads", 
-            timeout=10, 
-            pool_timeout=0.1
+            mode="threads",
+            timeout=0.1  # глобальный лимит фазы
         )
     
     assert results == [None]
@@ -837,7 +835,7 @@ def test_as_completed_with_task_timeout():
         args_seq=[(5.0,)],  # спит 5 секунд
         mode="threads",
         timeout=10,
-        pool_timeout=0.5  # task_timeout = 0.5
+        task_timeout=0.5  # индивидуальный таймаут на задачу
     )
     assert results == [None]
 
@@ -852,8 +850,7 @@ def test_watchdog_not_triggered_on_slow_but_alive_tasks():
         slow_task,
         args_seq=[(2.0,)],  # задача на 2 секунды
         mode="threads",
-        timeout=10,
-        pool_timeout=5  # достаточно большой таймаут
+        timeout=10,  # достаточно большой глобальный таймаут
     )
     assert results == ["done"]  # задача должна завершиться нормально
 
@@ -901,7 +898,6 @@ def test_watchdog_not_triggered_when_global_timeout_expires(mock_as_completed):
                 args_seq=[()],
                 mode="processes",
                 timeout=0.1,  # маленький глобальный таймаут
-                pool_timeout=0.1
             )
     
     assert results == [None]

@@ -409,9 +409,8 @@ def run_parallel(
     timeout: float | None = 3600,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
-    pool_timeout: float | None = None,
     shutdown_grace_period: float = 5.0,
-    task_timeout: float | None = None,  # NEW: индивидуальный таймаут на задачу
+    task_timeout: float | None = None,  # индивидуальный таймаут на задачу
 ) -> list[Any]:
     """Организовать параллельное выполнение функции
     с управлением памятью и жизненным циклом.
@@ -439,15 +438,14 @@ def run_parallel(
         max_workers (int): Лимит количества рабочих воркеров.
         mode (str): Режим параллелизма ("threads" или "processes").
         timeout (int | float): Глобальный лимит времени в секундах
-        на выполнение всех задач.
+        на выполнение всех задач. Если не задан — задачи выполняются без глобального ограничения.
         shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
         disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
-        pool_timeout (int | float | None): Индивидуальный таймаут для ожидания задач
-            в пуле (если не задан, используется глобальный timeout).
         shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение
             воркеров перед принудительным отправлением SIGTERM/SIGKILL.
         task_timeout (float | None): Индивидуальный таймаут на одну задачу (алгоритм) в секундах.
-            Если None — используется pool_timeout или timeout.
+            Если None — используется глобальный timeout. Deadline для каждой задачи считается
+            от момента её отправки в пул (submit_time), а не от общего start_time.
 
     Returns:
         list[Any]: Список результатов. Задачи, не успевшие выполниться
@@ -528,114 +526,115 @@ def run_parallel(
         pool = executor_cls(max_workers)
 
         future_to_idx = {}
+        submit_time_by_future: dict[Future, float] = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes" and (shared_args_indices or disk_args_indices):
                 fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
             else:
                 fut = pool.submit(func, *a, **kw)
             future_to_idx[fut] = i
+            submit_time_by_future[fut] = time.time()
+
+        # Абсолютные дедлайны для каждой задачи (от времени submit)
+        deadline_by_future: dict[Future, float] = {}
+        for fut, idx in future_to_idx.items():
+            task_t = task_timeout or float('inf')
+            deadline_by_future[fut] = submit_time_by_future.get(fut, start_time) + task_t
+
+        stale_iterations = 0
+        MAX_STALE_ITERATIONS = 5
 
         while future_to_idx:
-            # NEW: абсолютные дедлайны для каждой задачи
-            deadline_by_future: dict[Future, float] = {}
-            for fut, idx in future_to_idx.items():
-                task_t = task_timeout or timeout or float('inf')
-                deadline_by_future[fut] = start_time + task_t
+            elapsed = time.time() - start_time
+            effective_timeout = timeout
 
-            stale_iterations = 0
-            MAX_STALE_ITERATIONS = 5
+            # Вычисляем минимальный оставшийся таймаут
+            now = time.time()
+            remaining_by_future = {}
+            for fut, deadline in deadline_by_future.items():
+                if fut in future_to_idx:
+                    rem = max(0.1, deadline - now)
+                    remaining_by_future[fut] = rem
+            min_remaining = min(remaining_by_future.values()) if remaining_by_future else None
 
-            while future_to_idx:
-                elapsed = time.time() - start_time
-                effective_timeout = pool_timeout or timeout
+            # Если глобальный таймаут меньше — используем его
+            if effective_timeout is not None:
+                global_remaining = max(0.1, effective_timeout - (now - start_time))
+                if min_remaining is not None:
+                    min_remaining = min(min_remaining, global_remaining)
+                else:
+                    min_remaining = global_remaining
 
-                # Вычисляем минимальный оставшийся таймаут
-                now = time.time()
-                remaining_by_future = {}
-                for fut, deadline in deadline_by_future.items():
-                    if fut in future_to_idx:
-                        rem = max(0.1, deadline - now)
-                        remaining_by_future[fut] = rem
-                min_remaining = min(remaining_by_future.values()) if remaining_by_future else None
+            timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
 
-                # Если глобальный таймаут меньше — используем его
-                if effective_timeout is not None:
-                    global_remaining = max(0.1, effective_timeout - (now - start_time))
-                    if min_remaining is not None:
-                        min_remaining = min(min_remaining, global_remaining)
-                    else:
-                        min_remaining = global_remaining
+            try:
+                completed_set = set()
+                if timeout_for_ac is not None:
+                    for fut in as_completed(future_to_idx.keys(), timeout=timeout_for_ac):
+                        completed_set.add(fut)
+                        idx = future_to_idx.pop(fut)
+                        try:
+                            results[idx] = fut.result(timeout=0)
+                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                            raise
+                        except Exception as e:
+                            logger.error(f"Task {idx} failed: {e}")
+                            results[idx] = None
+                        stale_iterations = 0  # сброс stale при успехе
+                else:
+                    for fut in as_completed(future_to_idx.keys()):
+                        completed_set.add(fut)
+                        idx = future_to_idx.pop(fut)
+                        try:
+                            results[idx] = fut.result(timeout=0)
+                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                            raise
+                        except Exception as e:
+                            logger.error(f"Task {idx} failed: {e}")
+                            results[idx] = None
+                        stale_iterations = 0
 
-                timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
+            except concurrent.futures.TimeoutError:
+                # as_completed не дождался ни одной задачи за timeout_for_ac
+                remaining_global = (
+                    max(0.1, effective_timeout - (time.time() - start_time))
+                    if effective_timeout else None
+                )
 
-                try:
-                    completed_set = set()
-                    if timeout_for_ac is not None:
-                        for fut in as_completed(future_to_idx.keys(), timeout=timeout_for_ac):
-                            completed_set.add(fut)
-                            idx = future_to_idx.pop(fut)
-                            try:
-                                results[idx] = fut.result(timeout=0)
-                            except (InvalidAlgorithmError, KeyboardInterrupt):
-                                raise
-                            except Exception as e:
-                                logger.error(f"Task {idx} failed: {e}")
-                                results[idx] = None
-                            stale_iterations = 0  # сброс stale при успехе
-                    else:
-                        for fut in as_completed(future_to_idx.keys()):
-                            completed_set.add(fut)
-                            idx = future_to_idx.pop(fut)
-                            try:
-                                results[idx] = fut.result(timeout=0)
-                            except (InvalidAlgorithmError, KeyboardInterrupt):
-                                raise
-                            except Exception as e:
-                                logger.error(f"Task {idx} failed: {e}")
-                                results[idx] = None
-                            stale_iterations = 0
-
-                except concurrent.futures.TimeoutError:
-                    # as_completed не дождался ни одной задачи за timeout_for_ac
-                    remaining_global = (
-                        max(0.1, effective_timeout - (time.time() - start_time))
-                        if effective_timeout else None
-                    )
-
-                    if remaining_global is not None and remaining_global <= 0.1:
-                        # Глобальный таймаут истёк — штатный выход
-                        for fut, idx in future_to_idx.items():
-                            logger.error(f"Task {idx} timed out")
-                        future_to_idx.clear()
-                        break
-                    else:
-                        # Возможное C-level падение
-                        stale_iterations += 1
-                        logger.warning(
-                            f"as_completed timeout (stale #{stale_iterations}): "
-                            f"no tasks completed in {timeout_for_ac:.1f}s."
-                        )
-
-                        if stale_iterations >= MAX_STALE_ITERATIONS:
-                            logger.error(
-                                f"WATCHDOG: {stale_iterations} consecutive stale iterations. "
-                                f"Possible C-level crash. Forcing shutdown."
-                            )
-                            if mode == "processes":
-                                _force_shutdown_processes(pool, shutdown_grace_period)
-                            for fut, idx in future_to_idx.items():
-                                results[idx] = None
-                            future_to_idx.clear()
-                            break
-
-                except (InvalidAlgorithmError, KeyboardInterrupt) as e:
-                    if isinstance(e, KeyboardInterrupt):
-                        logger.error("Interrupted by user")
-                    raise
-                except Exception as e:
-                    logger.error(f"Error while waiting for tasks: {e}")
+                if remaining_global is not None and remaining_global <= 0.1:
+                    # Глобальный таймаут истёк — штатный выход
+                    for fut, idx in future_to_idx.items():
+                        logger.error(f"Task {idx} timed out")
                     future_to_idx.clear()
                     break
+                else:
+                    # Возможное C-level падение
+                    stale_iterations += 1
+                    logger.warning(
+                        f"as_completed timeout (stale #{stale_iterations}): "
+                        f"no tasks completed in {timeout_for_ac:.1f}s."
+                    )
+
+                    if stale_iterations >= MAX_STALE_ITERATIONS:
+                        logger.error(
+                            f"WATCHDOG: {stale_iterations} consecutive stale iterations. "
+                            f"Possible C-level crash. Forcing shutdown."
+                        )
+                        if mode == "processes":
+                            _force_shutdown_processes(pool, shutdown_grace_period)
+                        for fut, idx in future_to_idx.items():
+                            results[idx] = None
+                        future_to_idx.clear()
+                        break
+
+            except (InvalidAlgorithmError, KeyboardInterrupt) as e:
+                if isinstance(e, KeyboardInterrupt):
+                    logger.error("Interrupted by user")
+                raise
+            except Exception as e:
+                logger.error(f"Error while waiting for tasks: {e}")
+                future_to_idx.clear()
+                break
 
     except Exception as e:
         if mode == "processes":
@@ -647,7 +646,8 @@ def run_parallel(
                                 kwargs_seq,
                                 max_workers,
                                 mode="threads",
-                                timeout=timeout)
+                                timeout=timeout,
+                                task_timeout=task_timeout)
         raise
     finally:
         if pool is not None:

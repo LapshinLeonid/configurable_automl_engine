@@ -424,7 +424,7 @@ def train_best_model(
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
                 timeout=cfg.general.phase_timeout,
-                pool_timeout=cfg.general.task_timeout,
+                task_timeout=cfg.general.task_timeout,
             )
 
             for res in results:
