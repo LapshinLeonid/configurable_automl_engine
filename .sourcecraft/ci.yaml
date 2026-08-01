@@ -42,7 +42,7 @@ workflows:
                 git config user.email "noreply@sourcecraft.dev"
 
                 # Очищаем токен от возможных пробелов и переносов строк
-                CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\\n\\r ')
+                CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\n\r ')
 
                 # Добавляем GitHub как remote и пушим через HEAD (detached HEAD в CI/CD)
                 git remote add github "https://x-access-token:${CLEAN_TOKEN}@github.com/${GITHUB_REPO}.git"
@@ -103,7 +103,7 @@ workflows:
                 EOF
 
                 # Сохраняем PATH для следующих кубов
-                echo "export PATH=\\\"/root/sourcecraft/bin:\\$PATH\\\"" >> ~/.bashrc
+                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
 
           # Шаг 1: Генерация архитектурного плана
           - name: generate-plan
@@ -126,7 +126,7 @@ workflows:
 
                 После написания кода, тестов и успешного прохождения всех проверок (ruff, mypy, pytest) закоммить изменения и создай Pull Request.
                 
-                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\\\"publicId\\\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
+                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\"publicId\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
                 "
             artifacts:
               paths:
@@ -318,7 +318,7 @@ workflows:
                 EOF
 
                 # Сохраняем PATH для следующих кубов
-                echo "export PATH=\\\"/root/sourcecraft/bin:\\$PATH\\\"" >> ~/.bashrc
+                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
 
           - name: apply-fixes
             script:
