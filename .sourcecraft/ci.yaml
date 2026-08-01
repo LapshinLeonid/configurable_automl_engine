@@ -42,7 +42,7 @@ workflows:
                 git config user.email "noreply@sourcecraft.dev"
 
                 # Очищаем токен от возможных пробелов и переносов строк
-                CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\n\r ')
+                CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\\n\\r ')
 
                 # Добавляем GitHub как remote и пушим через HEAD (detached HEAD в CI/CD)
                 git remote add github "https://x-access-token:${CLEAN_TOKEN}@github.com/${GITHUB_REPO}.git"
@@ -88,7 +88,7 @@ workflows:
                 # Установка зависимостей проекта из pyproject.toml
                 echo "📦 Устанавливаем зависимости проекта..."
                 python3 -m pip install --upgrade pip
-                python3 -m pip install -e ".[all,test]"
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
                 # Установка SourceCraft CLI
                 echo "🔧 Устанавливаем SourceCraft CLI..."
@@ -103,7 +103,7 @@ workflows:
                 EOF
 
                 # Сохраняем PATH для следующих кубов
-                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
+                echo "export PATH=\\\"/root/sourcecraft/bin:\\$PATH\\\"" >> ~/.bashrc
 
           # Шаг 1: Генерация архитектурного плана
           - name: generate-plan
@@ -126,7 +126,7 @@ workflows:
 
                 После написания кода, тестов и успешного прохождения всех проверок (ruff, mypy, pytest) закоммить изменения и создай Pull Request.
                 
-                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\"publicId\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
+                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\\\"publicId\\\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
                 "
             artifacts:
               paths:
@@ -303,7 +303,7 @@ workflows:
                 # Установка зависимостей проекта из pyproject.toml
                 echo "📦 Устанавливаем зависимости проекта..."
                 python3 -m pip install --upgrade pip
-                python3 -m pip install -e ".[all,test]"
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
                 # Установка SourceCraft CLI
                 echo "🔧 Устанавливаем SourceCraft CLI..."
@@ -318,7 +318,7 @@ workflows:
                 EOF
 
                 # Сохраняем PATH для следующих кубов
-                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
+                echo "export PATH=\\\"/root/sourcecraft/bin:\\$PATH\\\"" >> ~/.bashrc
 
           - name: apply-fixes
             script:
@@ -344,9 +344,25 @@ workflows:
             image: python:3.11-slim
             script:
               - pip install --upgrade pip
-              - pip install -e .
-              - pip install -r requirements.txt
-              - pip install pytest pytest-cov ruff mypy types-PyYAML
-              - ruff check src/
-              - mypy src --install-types --non-interactive
-              - pytest --cov=src
+              - SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
+              - pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  1. ПРОВЕРКА СТИЛЯ КОДА (Ruff)"
+                echo "═══════════════════════════════════════════════════════════════"
+                ruff check src/
+                echo "✅ Ruff: замечаний нет"
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  2. ПРОВЕРКА ТИПОВ (Mypy)"
+                echo "═══════════════════════════════════════════════════════════════"
+                mypy src --install-types --non-interactive
+                echo "✅ Mypy: замечаний нет"
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  3. ЗАПУСК ТЕСТОВ И ПОКРЫТИЕ (Pytest)"
+                echo "═══════════════════════════════════════════════════════════════"
+                pytest --cov=src
