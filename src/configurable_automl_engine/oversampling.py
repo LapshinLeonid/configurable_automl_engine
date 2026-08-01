@@ -23,6 +23,7 @@ import pandas as pd
 from imblearn.base import BaseSampler
 from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_numeric_dtype
+from sklearn.preprocessing import OrdinalEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,38 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         self.__dict__.update(state)
         # Заново инициализируем lock после десериализации
         self._lock = threading.RLock()
+
+    # ------------------------------------------------------------------ #
+    #  Пункт 1: Переопределение fit_resample для обхода _check_X_y       #
+    # ------------------------------------------------------------------ #
+
+    def fit_resample(self, X, y, **params):  # type: ignore[override]
+        """Выполнить ресемплирование, минуя _check_X_y (validate_data).
+
+        Родительский ``BaseSampler.fit_resample`` → ``SamplerMixin.fit_resample``
+        вызывает ``_check_X_y`` → ``validate_data`` → ``check_array`` c
+        ``dtype=np.float64``, что приводит к ``ValueError`` на нечисловых данных
+        ДО того, как выполняется кастомная проверка в ``_fit_resample``.
+
+        Данный override безопасно конвертирует X/y и делегирует напрямую
+        в ``_fit_resample``, сохраняя всю существующую логику валидации
+        (поддержка алгоритма, корректность multiplier, тип данных и т.д.).
+
+        Args:
+            X: Признаки (DataFrame, ndarray или array-like).
+            y: Целевая переменная.
+
+        Returns:
+            tuple: (X_resampled, y_resampled) — результаты ресемплинга.
+        """
+        # Базовая конвертация для совместимости с _fit_resample
+        # Разреженные матрицы не конвертируем — это сломает формат
+        is_sparse = hasattr(X, "tocsr") or hasattr(X, "issparse")
+        if not is_sparse and not isinstance(X, (pd.DataFrame, np.ndarray)):
+            X = np.asarray(X)
+        if not isinstance(y, (pd.Series, np.ndarray)):
+            y = np.asarray(y)
+        return self._fit_resample(X, y)
 
     # ------------------------------------------------------------------ #
     #  Пункт 2: Реализация защищенного метода _fit_resample              #
@@ -277,6 +310,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 for i, col in enumerate(X_df.columns)
                 if not is_numeric_dtype(X_df[col])
             ]
+            cat_cols = [X_df.columns[i] for i in cat_features_idx]
             # Проверка на отсутствие числовых колонок для SMOTE/ADASYN
             if algo_local in ["smote", "adasyn"] and len(cat_features_idx) == len(
                 X_df.columns
@@ -295,7 +329,20 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 sampler = RandomOverSampler(
                     sampling_strategy=strategy, random_state=self.random_state
                 )
+                # Кодирование категориальных признаков для прохождения
+                # _check_X_y внутри RandomOverSampler, который принудительно
+                # конвертирует DataFrame в float.
+                ordinal_encoder: OrdinalEncoder | None = None
+                if cat_features_idx:
+                    ordinal_encoder = OrdinalEncoder(
+                        handle_unknown="use_encoded_value", unknown_value=-1
+                    )
+                    X_to_resample = X_to_resample.copy()
+                    X_to_resample[cat_cols] = ordinal_encoder.fit_transform(
+                        X_to_resample[cat_cols]
+                    )
             else:
+                ordinal_encoder = None
                 # Случай SMOTE / ADASYN
                 counts = Counter(y_s)
 
@@ -349,6 +396,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             if self.add_noise:
                 X_res_df = self._add_gaussian_noise(X_res_df)
 
+            # Декодирование категориальных колонок обратно (только для random)
+            if ordinal_encoder is not None:
+                X_res_df[cat_cols] = ordinal_encoder.inverse_transform(
+                    X_res_df[cat_cols]
+                )
+
             logger.info(
                 "%s resample: %d -> %d", algo_local.upper(), len(X_df), len(X_res_df)
             )
@@ -392,6 +445,18 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     f"or when balance=True. Without a target, only 'random' "
                     f"oversampling of the entire dataset is possible."
                 )
+
+            # РАННЯЯ ПРОВЕРКА: Для SMOTE/ADASYN все признаки должны быть
+            # числовыми (хотя бы один). Эта проверка выбрасывает TypeError
+            # ДО вызова self.fit_resample(), предотвращая падение imblearn
+            # с неинформативным ValueError на этапе _check_X_y.
+            if algo_local in ("smote", "adasyn"):
+                _X_check = data.drop(target, axis=1)
+                if all(not is_numeric_dtype(_X_check[col]) for col in _X_check.columns):
+                    raise TypeError(
+                        f"{self.algorithm.upper()} requires "
+                        "at least one numeric feature."
+                    )
 
             # Если таргет не указан, создаем фиктивный вектор для
             # совместимости с API imblearn,
