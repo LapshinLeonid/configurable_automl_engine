@@ -418,3 +418,59 @@ class TestTunerObjective:
                 space_overrides=mock_space
             )
             assert best_score == -3.4028235e+38
+
+    def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
+        """
+        5 последовательных ValueError в cross_val_score → InvalidAlgorithmError.
+        Проверяет, что optimize() выбрасывает InvalidAlgorithmError после
+        MAX_CONSECUTIVE_FAILURES (5) последовательных ошибок.
+        """
+        X, y = dummy_data
+        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
+             patch('configurable_automl_engine.tuner.create_model'), \
+             patch('configurable_automl_engine.tuner._build_scorer'), \
+             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
+             patch('configurable_automl_engine.tuner._validate_data'), \
+             patch('configurable_automl_engine.tuner._get_estimator'):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            # Каждый вызов cross_val_score кидает ValueError
+            mock_cv.side_effect = ValueError("cv failed")
+
+            with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
+                optimize(
+                    algo_name="rf",
+                    X=X, y=y,
+                    n_trials=10,
+                    space_overrides=mock_space
+                )
+
+    def test_four_failures_one_success_not_disqualified(self, dummy_data, mock_space):
+        """
+        4 ошибки + 1 успех → алгоритм НЕ дисквалифицируется.
+        Проверяет, что при 4 последовательных ValueError и 1 успешном
+        запуске cross_val_score оптимизация завершается успешно.
+        """
+        X, y = dummy_data
+        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
+             patch('configurable_automl_engine.tuner.create_model'), \
+             patch('configurable_automl_engine.tuner._build_scorer'), \
+             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
+             patch('configurable_automl_engine.tuner._validate_data'), \
+             patch('configurable_automl_engine.tuner._get_estimator'):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            # 4 ошибки подряд, затем успех
+            mock_cv.side_effect = [
+                ValueError("cv failed"),
+                ValueError("cv failed"),
+                ValueError("cv failed"),
+                ValueError("cv failed"),
+                np.array([0.85]),
+            ]
+
+            _, _, best_score = optimize(
+                algo_name="rf",
+                X=X, y=y,
+                n_trials=5,
+                space_overrides=mock_space
+            )
+            assert best_score == 0.85

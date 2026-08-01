@@ -376,6 +376,9 @@ def optimize(
     scorer = _build_scorer(metric)
 
     # -------------------- 3. objective для Optuna ------------------ #
+    MAX_CONSECUTIVE_FAILURES = 5
+    consecutive_failures = 0
+
     def _objective(trial: Trial) -> float:
         """Целевая функция для минимизации/максимизации в Optuna.
     Args:
@@ -385,6 +388,7 @@ def optimize(
     Raises:
         optuna.TrialPruned: Если в процессе обучения возникла ошибка (ValueError).
     """
+        nonlocal consecutive_failures
 
         # 1. гиперпараметры и модель
         params = space_fn(trial)
@@ -411,6 +415,7 @@ def optimize(
                 test_size=train_test_split_test_size, random_state=random_state
             ))
             current_estimator.fit(X_tr, y_tr)
+            consecutive_failures = 0
             return float(scorer(current_estimator, X_te, y_te))
             
         # 3. k-fold или Leave-One-Out
@@ -427,10 +432,18 @@ def optimize(
             avg_score = float(np.mean(scores))
             # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
             if not np.isfinite(avg_score):
+                consecutive_failures = 0
                 return -3.4028235e+38 # аналог минимального float32 или float('-inf')
+            consecutive_failures = 0
             return avg_score
         except ValueError as err:
             trial.set_user_attr("fail_reason", str(err))
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                raise InvalidAlgorithmError(
+                    f"Algorithm '{algo}' disqualified after "
+                    f"{consecutive_failures} consecutive failures"
+                )
             raise optuna.TrialPruned()
 
     # -------------------- 4. запуск Optuna ------------------------- #
@@ -438,7 +451,15 @@ def optimize(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=random_state),
     )
-    study.optimize(_objective, n_trials=n_trials)
+    try:
+        study.optimize(_objective, n_trials=n_trials)
+    except InvalidAlgorithmError:
+        log.warning(
+            "Algorithm %s disqualified after %d consecutive failures",
+            algo,
+            MAX_CONSECUTIVE_FAILURES,
+        )
+        raise
 
 
     best_params = study.best_params

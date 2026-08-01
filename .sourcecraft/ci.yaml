@@ -48,7 +48,9 @@ workflows:
                 echo "✅ Ветка '$BRANCH' синхронизирована в GitHub"
 
   # ----------------------------------------------------
-  # Единый пайплайн: планирование → код → ревью
+  # Единый пайплайн: планирование → код → ревью → правки → ревью → правки
+  # Все шаги в одном task, чтобы артефакты (pr_number.txt)
+  # были доступны между кубами.
   # ----------------------------------------------------
   ai-development-pipeline:
     inputs:
@@ -58,11 +60,11 @@ workflows:
         description: "Укажите ID (номер) задачи"
 
     tasks:
-      - name: full-development-cycle
+      - name: full-cycle
         env:
           ISSUE_ID: ${{ inputs.issue_id }}
         cubes:
-          # Шаг 0: Установка CLI и настройка auth (один раз на всю задачу)
+          # Шаг 0: Установка CLI и настройка auth
           - name: setup-cli
             script:
               - |
@@ -94,14 +96,185 @@ workflows:
             script:
               - |
                 export PATH="/root/sourcecraft/bin:$PATH"
-                src do --autoinstall "Реализуй задачу #$ISSUE_ID используя архитектурный план из plan.json. Запусти тесты: poetry run ruff check . && poetry run pytest. При успехе закоммить изменения и создай Pull Request."
+                src do --autoinstall "
+                Реализуй задачу #$ISSUE_ID, используя архитектурный план из plan.json.
+                Строго следуй стандартам и шагам проверки из AGENTS.md.
 
-      # Шаг 3: Автоматическое ревью (отдельный task, т.к. нужен созданный PR)
-      - name: automated-review
-        needs:
-          - full-development-cycle
+                После написания кода, тестов и успешного прохождения всех проверок (ruff, mypy, pytest) закоммить изменения и создай Pull Request.
+                
+                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\"publicId\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
+                "
+            artifacts:
+              paths:
+                - plan.json
+                - pr_number.txt
+
+          # --------------------------------------------------
+          # Итерация 1: ревью → правки
+          # --------------------------------------------------
+
+          # Шаг 3: Первое ревью
+          - name: review-1
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
+
+                if [ -n "$PR_NUMBER" ]; then
+                  echo "🔍 Итерация 1: запускаем ревью для PR #$PR_NUMBER"
+                  src pr checkout "$PR_NUMBER"
+                  src codereview "$PR_NUMBER" --autoinstall 2>&1 | tee review_output.txt
+                else
+                  echo "⚠️ Номер PR не найден, пропускаем ревью"
+                  exit 1
+                fi
+
+                echo "Ревью #1 завершено."
+
+          # Шаг 4: Первые правки
+          - name: fix-1
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
+
+                if [ -z "$PR_NUMBER" ]; then
+                  echo "⚠️ Номер PR не найден, пропускаем"
+                  exit 0
+                fi
+
+                # Получаем комментарии ревью
+                echo "📋 Получаем комментарии ревью для PR #$PR_NUMBER..."
+                src pr list-comments "$PR_NUMBER" --json 2>/dev/null > pr_comments.json || echo "[]" > pr_comments.json
+
+                REVIEW_TEXT=$(python3 -c "
+                import json, sys
+                try:
+                    with open('pr_comments.json') as f:
+                        comments = json.load(f)
+                    texts = []
+                    for c in comments:
+                        body = c.get('body', c.get('text', ''))
+                        if body and 'Automated review' not in body:
+                            texts.append(body)
+                    if texts:
+                        print('\\n---\\n'.join(texts))
+                    else:
+                        print('')
+                except:
+                    print('')
+                " 2>/dev/null || echo "")
+
+                if [ -z "$REVIEW_TEXT" ]; then
+                  echo "✅ Замечаний ревью не найдено. Правки не требуются."
+                  exit 0
+                fi
+
+                echo "📝 Итерация 1: найдены замечания. Применяем правки..."
+                src pr checkout "$PR_NUMBER"
+
+                src do --autoinstall "
+                Внеси исправления в код согласно следующим замечаниям ревью:
+
+                ${REVIEW_TEXT}
+
+                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
+                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                "
+
+          # --------------------------------------------------
+          # Итерация 2: ревью → правки
+          # --------------------------------------------------
+
+          # Шаг 5: Второе ревью (проверяем, что правки применены)
+          - name: review-2
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
+
+                if [ -n "$PR_NUMBER" ]; then
+                  echo "🔍 Итерация 2: повторное ревью для PR #$PR_NUMBER"
+                  src pr checkout "$PR_NUMBER"
+                  src codereview "$PR_NUMBER" --autoinstall 2>&1 | tee review_output_2.txt
+                else
+                  echo "⚠️ Номер PR не найден, пропускаем"
+                  exit 1
+                fi
+
+                echo "Ревью #2 завершено."
+
+          # Шаг 6: Вторые правки (если ревью всё ещё недовольно)
+          - name: fix-2
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+
+                PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
+
+                if [ -z "$PR_NUMBER" ]; then
+                  echo "⚠️ Номер PR не найден, пропускаем"
+                  exit 0
+                fi
+
+                # Получаем комментарии ревью
+                echo "📋 Получаем комментарии ревью для PR #$PR_NUMBER (итерация 2)..."
+                src pr list-comments "$PR_NUMBER" --json 2>/dev/null > pr_comments_2.json || echo "[]" > pr_comments_2.json
+
+                REVIEW_TEXT=$(python3 -c "
+                import json, sys
+                try:
+                    with open('pr_comments_2.json') as f:
+                        comments = json.load(f)
+                    texts = []
+                    for c in comments:
+                        body = c.get('body', c.get('text', ''))
+                        if body and 'Automated review' not in body:
+                            texts.append(body)
+                    if texts:
+                        print('\\n---\\n'.join(texts))
+                    else:
+                        print('')
+                except:
+                    print('')
+                " 2>/dev/null || echo "")
+
+                if [ -z "$REVIEW_TEXT" ]; then
+                  echo "✅ После второй итерации замечаний нет. PR чист!"
+                  exit 0
+                fi
+
+                echo "📝 Итерация 2: применяем финальные правки..."
+                src pr checkout "$PR_NUMBER"
+
+                src do --autoinstall "
+                Внеси исправления в код согласно следующим замечаниям ревью (финальная итерация):
+
+                ${REVIEW_TEXT}
+
+                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
+                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                "
+
+  # ----------------------------------------------------
+  # Применение правок по ревью (ручной запуск)
+  # ----------------------------------------------------
+  apply-review-fixes:
+    inputs:
+      review_comments:
+        type: string
+        required: true
+        description: "Текст замечаний/правок, которые нужно внести в код"
+
+    tasks:
+      - name: fix-and-push
+        env:
+          REVIEW_COMMENTS: ${{ inputs.review_comments }}
         cubes:
-          - name: run-review
+          - name: setup-cli
             script:
               - |
                 curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
@@ -114,4 +287,18 @@ workflows:
                 storage: filesystem
                 EOF
 
-                src codereview --autoinstall
+                # Сохраняем PATH для следующих кубов
+                echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
+
+          - name: apply-fixes
+            script:
+              - |
+                export PATH="/root/sourcecraft/bin:$PATH"
+                src do --autoinstall "
+                Внеси исправления в код согласно следующим замечаниям ревью:
+
+                ${REVIEW_COMMENTS}
+
+                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
+                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                "
