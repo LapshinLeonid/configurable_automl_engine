@@ -7,7 +7,7 @@ on:
         branches: ["infrastructure-ci-only-do-not-delete"]
     - workflows: [sync-to-github]
       filter:
-        branches: ["**"]
+        branches: ["main"]
 
 workflows:
   # ----------------------------------------------------
