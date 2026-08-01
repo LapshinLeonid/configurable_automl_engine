@@ -6,11 +6,13 @@ from configurable_automl_engine.validation import RANDOM_STATE
 
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold, LeaveOneOut
+
 # Исправленные импорты
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.validation import norm_val_method
 from optuna.trial import Trial
 from typing import Any, Callable
+
 
 # ═════════════════════ EXPORT: _objective (для тестов) ══════════════════════
 def _objective(
@@ -46,6 +48,7 @@ def _objective(
         clf.fit(X[tr_idx], y[tr_idx])
         scores.append(accuracy_score(y[te_idx], clf.predict(X[te_idx])))
     return float(np.mean(scores))
+
 
 class DummyClf(BaseEstimator):
     """Модель, которая предсказывает самый частый класс."""

@@ -45,6 +45,7 @@ def test_get_constructor_param_info_skips_self():
     Use a class whose __init__ has only 'self' and **kwargs to also
     cover the VAR_KEYWORD branch (line 154).
     """
+
     class _ModelWithKwargs:
         def __init__(self, **kwargs):
             pass
@@ -63,6 +64,7 @@ def test_get_constructor_param_info_self_only():
     Cover the 'if name == "self": continue' branch with a class
     that has ONLY 'self' (no params, no **kwargs).
     """
+
     class _ModelSelfOnly:
         def __init__(self):
             pass
@@ -169,6 +171,7 @@ def test_create_model_invalid_type():
     with pytest.raises(TypeError, match="Алгоритм должен быть строкой"):
         create_model(algorithm=123)
 
+
 def test_create_model_import_error_for_missing_package():
     """
     Тест покрытия строки 107: проверка возбуждения ImportError,
@@ -180,10 +183,11 @@ def test_create_model_import_error_for_missing_package():
         # Настраиваем мок так, чтобы для 'xgboosting' возвращался None
         mocked_factory.__contains__.return_value = True
         mocked_factory.__getitem__.return_value = None
-        
+
         # Пытаемся создать модель через алиас 'xgboost'
         with pytest.raises(ImportError, match="требует дополнительного пакета"):
             create_model("xgboost")
+
 
 def test_create_model_unknown_algorithm():
     """
@@ -191,6 +195,7 @@ def test_create_model_unknown_algorithm():
     """
     with pytest.raises(ValueError, match="Неизвестный алгоритм: 'unknown_model'"):
         create_model("unknown_model")
+
 
 def test_create_model_gpr_default_kernel():
     """

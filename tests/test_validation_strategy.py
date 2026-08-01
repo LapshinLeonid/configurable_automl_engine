@@ -1,6 +1,9 @@
 import pytest
 from pydantic import ValidationError
-from configurable_automl_engine.training_engine.config_parser import Config, ValidationStrategy
+from configurable_automl_engine.training_engine.config_parser import (
+    Config,
+    ValidationStrategy,
+)
 
 BASE_CFG = """
 {
@@ -24,10 +27,12 @@ def test_valid_values(v):
     parsed = Config.model_validate_json(cfg)
     assert parsed.general.validation_strategy.value == v
 
+
 def test_default():
-    cfg = BASE_CFG.replace('"validation_strategy": "k_fold",', '')
+    cfg = BASE_CFG.replace('"validation_strategy": "k_fold",', "")
     parsed = Config.model_validate_json(cfg)
     assert parsed.general.validation_strategy is ValidationStrategy.k_fold
+
 
 def test_invalid_value():
     bad = BASE_CFG.replace('"k_fold"', '"wrong"')

@@ -44,6 +44,7 @@ logger = logging.getLogger("configurable_automl_engine.models")
 #                       Карта алгоритмов (длинные ключи)                       #
 # ----------------------------------------------------------------------------- #
 
+
 def _get_factory() -> dict[str, Any]:
     factory = {
         "elasticnet": ElasticNet,
@@ -64,34 +65,36 @@ def _get_factory() -> dict[str, Any]:
         "glm": TweedieRegressor,
         "ridge": Ridge,
         "lasso": Lasso,
-        "xgboosting": None
+        "xgboosting": None,
     }
-        
+
     if is_installed("xgboost"):
         from xgboost import XGBRegressor
+
         factory["xgboosting"] = XGBRegressor
     return factory
 
+
 AVAILABLE_ALGORITHMS = [
-"elasticnet",
-"sgdregressor",
-"decision_tree",
-"random_forest",
-"extra_trees",
-"gradient_boosting",
-"adaboost",
-"poissonregressor",
-"gammaregressor",
-"tweedieregressor",
-"gaussian_process_regression",
-"isotonic_regression",
-"nearest_neighbors_regression",
-"svr",
-"ardregression",
-"glm",
-"ridge",
-"lasso",
-"xgboosting",
+    "elasticnet",
+    "sgdregressor",
+    "decision_tree",
+    "random_forest",
+    "extra_trees",
+    "gradient_boosting",
+    "adaboost",
+    "poissonregressor",
+    "gammaregressor",
+    "tweedieregressor",
+    "gaussian_process_regression",
+    "isotonic_regression",
+    "nearest_neighbors_regression",
+    "svr",
+    "ardregression",
+    "glm",
+    "ridge",
+    "lasso",
+    "xgboosting",
 ]
 
 _FACTORY = _get_factory()
@@ -124,13 +127,14 @@ _ALIASES: dict[str, str] = {
     "glm": "glm",
     "xgboost": "xgboosting",
     "ridge_regression": "ridge",
-    "lasso": "lasso"
+    "lasso": "lasso",
 }
 
 
 # ----------------------------------------------------------------------------- #
 #                  Signature introspection (cached)                             #
 # ----------------------------------------------------------------------------- #
+
 
 @lru_cache(maxsize=32)
 def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
@@ -160,6 +164,7 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
 # ----------------------------------------------------------------------------- #
 #                  Parameter cleaning                                           #
 # ----------------------------------------------------------------------------- #
+
 
 def clean_hyperparameters(
     algo_key: str,
@@ -196,11 +201,11 @@ def clean_hyperparameters(
         # 1. Remap legacy keys
         if key in mappings:
             new_key = mappings[key]
-            if new_key not in hyperparams and (new_key in accepted_params or accepts_var_kwargs):
+            if new_key not in hyperparams and (
+                new_key in accepted_params or accepts_var_kwargs
+            ):
                 cleaned[new_key] = value
-                logger.debug(
-                    "Remapped '%s' -> '%s' for %s", key, new_key, algo_key
-                )
+                logger.debug("Remapped '%s' -> '%s' for %s", key, new_key, algo_key)
             continue
 
         # 2. Keep valid keys; drop unknown ones
@@ -216,17 +221,20 @@ def clean_hyperparameters(
 #                  Public factory                                                 #
 # ----------------------------------------------------------------------------- #
 
-def create_model(algorithm: Algorithm = "elasticnet", 
-                 **hyperparams: Any
-                 ) -> RegressorMixin:
+
+def create_model(
+    algorithm: Algorithm = "elasticnet", **hyperparams: Any
+) -> RegressorMixin:
     """
     Возвращает экземпляр выбранного регрессора.
     Алгоритм задаётся строкой, не зависит от регистра. Поддерживаются алиасы.
-    Если алгоритм не найден или требует отсутствующий пакет, 
+    Если алгоритм не найден или требует отсутствующий пакет,
     бросает ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
-        raise TypeError(f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}")  
+        raise TypeError(
+            f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}"
+        )
 
     algo_key = algorithm.lower()
     algo_key = _ALIASES.get(algo_key, algo_key)

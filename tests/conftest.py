@@ -2,7 +2,13 @@ import pytest
 from .data_factory import create_mock_df
 
 from pathlib import Path
-from configurable_automl_engine.training_engine.config_parser import Config, GeneralCfg, HPOPhaseCfg
+from configurable_automl_engine.training_engine.config_parser import (
+    Config,
+    GeneralCfg,
+    HPOPhaseCfg,
+)
+
+
 @pytest.fixture
 def test_config(tmp_path: Path) -> Config:
     """
@@ -19,13 +25,14 @@ def test_config(tmp_path: Path) -> Config:
             log_to_file=str(log_dir / "test_run.log"),
             phases=[
                 HPOPhaseCfg(name="Test Phase", n_trials=2, action="all_algorithms")
-            ]
+            ],
         ),
         algorithms={
             "random_forest": {"enable": True, "limit_hyperparameters": True},
-            "ridge": {"enable": True, "limit_hyperparameters": True}
-        }
+            "ridge": {"enable": True, "limit_hyperparameters": True},
+        },
     )
+
 
 @pytest.fixture
 def small_dataset():
@@ -34,6 +41,7 @@ def small_dataset():
     Создает минимальный набор данных: 10 строк, 3 признака.
     """
     return create_mock_df(rows=10, cols=3, target="target")
+
 
 @pytest.fixture
 def regression_dataset():

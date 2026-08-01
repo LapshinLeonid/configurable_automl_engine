@@ -1,7 +1,7 @@
 """Модуль для параллельного выполнения задач с управлением памятью.
 Предоставляет инструменты для параллельного запуска функций (ThreadPool/ProcessPool)
 с оптимизированной передачей тяжелых объектов pandas.DataFrame через механизмы
-Shared Memory (разделяемая память) и Disk Persistence (дисковый кэш). 
+Shared Memory (разделяемая память) и Disk Persistence (дисковый кэш).
 Основные компоненты:
     - SharedDataFrame: Контейнер для размещения данных в разделяемой памяти ОС.
     - DiskPersistenceManager: Менеджер временного хранения данных в Parquet.
@@ -14,6 +14,7 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
         shared_args_indices=[0]
     )
 """
+
 import concurrent.futures
 import logging
 import os
@@ -37,6 +38,7 @@ from configurable_automl_engine.tuner import InvalidAlgorithmError
 
 logger = logging.getLogger(__name__)
 
+
 class SharedDataFrame:
     """Обертка для размещения DataFrame в разделяемой памяти (Shared Memory).
 
@@ -52,21 +54,22 @@ class SharedDataFrame:
         dtype (np.dtype): Тип данных элементов массива.
         columns (list[str]): Список имен столбцов для восстановления DataFrame.
     """
+
     def __init__(
-            self,
-            df: pd.DataFrame | None = None, 
-            name: str | None = None, 
-            shape: tuple[int, ...] | None = None, 
-            dtype: np.dtype | Any = None, 
-            columns: list[str] | None = None
-            ) -> None:
+        self,
+        df: pd.DataFrame | None = None,
+        name: str | None = None,
+        shape: tuple[int, ...] | None = None,
+        dtype: np.dtype | Any = None,
+        columns: list[str] | None = None,
+    ) -> None:
         """Инициализировать объект разделяемой памяти для DataFrame.
         Логика инициализации:
-        1. Создание: Если передан df, создается новый сегмент Shared Memory, 
+        1. Создание: Если передан df, создается новый сегмент Shared Memory,
            с уникальным именем (shm_ + id + random), куда копируются данные
-        2. Подключение: Если df не передан, выполняется подключение к существующему 
+        2. Подключение: Если df не передан, выполняется подключение к существующему
            сегменту по имени (name) с использованием метаданных (shape, dtype, columns).
-        3. Метаданные: Список имен столбцов сохраняется для последующего 
+        3. Метаданные: Список имен столбцов сохраняется для последующего
            восстановления структуры DataFrame.
         Args:
             df (pd.DataFrame | None): Исходный DataFrame для размещения в SHM.
@@ -77,7 +80,7 @@ class SharedDataFrame:
         Returns:
             None
         """
-        
+
         self.name: str | None = None
         self._owner = df is not None
         self.columns: list[str] | None = None
@@ -85,13 +88,12 @@ class SharedDataFrame:
         if df is not None:
             self.name = f"shm_{id(df)}_{np.random.randint(1000)}"
             data = df.to_numpy()
-            self.shm = shared_memory.SharedMemory(create=True,
-                                                  size=data.nbytes,
-                                                  name=self.name)
-            self.shared_array = np.ndarray(data.shape, 
-                                           dtype=data.dtype, 
-                                           buffer=self.shm.buf
-                                           )
+            self.shm = shared_memory.SharedMemory(
+                create=True, size=data.nbytes, name=self.name
+            )
+            self.shared_array = np.ndarray(
+                data.shape, dtype=data.dtype, buffer=self.shm.buf
+            )
             self.shared_array[:] = data[:]
             self.shape = data.shape
             self.dtype = data.dtype
@@ -101,10 +103,8 @@ class SharedDataFrame:
             self.shm = shared_memory.SharedMemory(name=name)
             actual_shape = shape if shape is not None else ()
             self.shared_array = np.ndarray(
-                actual_shape, 
-                dtype=dtype, 
-                buffer=self.shm.buf
-                )
+                actual_shape, dtype=dtype, buffer=self.shm.buf
+            )
             self.shape = self.shared_array.shape
             self.columns = columns
 
@@ -118,7 +118,7 @@ class SharedDataFrame:
             return False
         # Проверяем, указывает ли буфер массива на сегмент разделяемой памяти
         # (в Python 3.8+ SharedMemory.buf возвращает memoryview)
-        return hasattr(X, 'base') and isinstance(X.base, memoryview)
+        return hasattr(X, "base") and isinstance(X.base, memoryview)
 
     @staticmethod
     def get_data_info(X: Any) -> tuple[int, list[str] | list[int]]:
@@ -128,9 +128,11 @@ class SharedDataFrame:
         if isinstance(X, pd.DataFrame):
             return X.shape[1], X.columns.tolist()
         elif isinstance(X, SharedDataFrame):
-            shape = getattr(X, 'shape', X.shared_array.shape)
+            shape = getattr(X, "shape", X.shared_array.shape)
             n_cols = shape[1] if len(shape) > 1 else 1
-            cols = X.columns if X.columns is not None else [str(i) for i in range(n_cols)]
+            cols = (
+                X.columns if X.columns is not None else [str(i) for i in range(n_cols)]
+            )
             return n_cols, cols
         elif isinstance(X, np.ndarray):
             n_cols = X.shape[1] if X.ndim > 1 else 1
@@ -139,7 +141,7 @@ class SharedDataFrame:
 
     @staticmethod
     def is_compatible(df: Any) -> bool:
-        """Проверяет, можно ли разместить DF в SHM 
+        """Проверяет, можно ли разместить DF в SHM
         (только простые типы и RangeIndex)."""
         """Проверяет, можно ли разместить DF в SHM 
         (уже разделяемый массив, либо DF с простыми типами и RangeIndex)."""
@@ -147,101 +149,102 @@ class SharedDataFrame:
             return True
         if not isinstance(df, pd.DataFrame):
             return False
-        
-        #Проверка типов данных (белый список: int, uint, float, bool)
-        allowed_kinds = {'i', 'u', 'f', 'b'}
+
+        # Проверка типов данных (белый список: int, uint, float, bool)
+        allowed_kinds = {"i", "u", "f", "b"}
         if not all(dt.kind in allowed_kinds for dt in df.dtypes):
             return False
-            
-        #Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
-        # Если индекс не является RangeIndex, объект признается несовместимым с SHM 
+
+        # Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
+        # Если индекс не является RangeIndex, объект признается несовместимым с SHM
         # и будет автоматически перенаправлен в DiskPersistenceManager.
         return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
         """Восстановить pandas.DataFrame из разделяемой памяти.
         Логика восстановления:
-        1. Проксирование: Создается объект np.ndarray, для которого принудительно 
-        устанавливается флаг writeable=False для предотвращения 
+        1. Проксирование: Создается объект np.ndarray, для которого принудительно
+        устанавливается флаг writeable=False для предотвращения
         лишнего копирования в pandas.
-        2. Реконструкция: На базе массива и сохраненного списка столбцов формируется 
+        2. Реконструкция: На базе массива и сохраненного списка столбцов формируется
            новый объект DataFrame.
-        3. Изоляция: Итоговый DataFrame является независимым объектом в памяти 
+        3. Изоляция: Итоговый DataFrame является независимым объектом в памяти
            текущего процесса.
         Returns:
             pd.DataFrame: Восстановленный набор данных.
         """
 
-        # Устанавливаем флаг writeable=False. Это критично: pandas часто делает 
+        # Устанавливаем флаг writeable=False. Это критично: pandas часто делает
         # скрытую копию, если «опасается», что кто-то изменит общий буфер.
         self.shared_array.setflags(write=False)
-        
+
         # copy=False в конструкторе и использование однородного numpy-массива
         # гарантирует создание DataFrame без выделения новой памяти под данные.
         return pd.DataFrame(self.shared_array, columns=self.columns, copy=False)
-    
+
     def close(self) -> None:
         """Закрыть доступ к сегменту разделяемой памяти.
         Логика закрытия:
         1. Хендл: Закрывает дескриптор доступа к SHM в текущем процессе.
-        2. Сохранность: Сами данные в ОС не уничтожаются, что позволяет другим 
+        2. Сохранность: Сами данные в ОС не уничтожаются, что позволяет другим
            процессам продолжать работу с сегментом.
         Returns:
             None
         """
 
-        if hasattr(self, 'shm'):
+        if hasattr(self, "shm"):
             self.shm.close()
-            
+
     def unlink(self) -> None:
         """Уничтожить сегмент разделяемой памяти в операционной системе.
         Логика удаления:
         1. Владение: Операция выполняется только процессом-создателем (_owner=True).
-        2. Освобождение: Помечает сегмент для удаления; память будет полностью 
+        2. Освобождение: Помечает сегмент для удаления; память будет полностью
            освобождена ОС, когда все процессы закроют свои ссылки на него.
         Returns:
             None
         """
 
-        if self._owner and hasattr(self, 'shm'):
+        if self._owner and hasattr(self, "shm"):
             try:
                 self.shm.unlink()
             except (FileNotFoundError, OSError):
-                pass # Уже удалено
-    
-    def get_view(self, 
-                 columns: list[str] | None = None
-                 ) -> pd.DataFrame:
+                pass  # Уже удалено
+
+    def get_view(self, columns: list[str] | None = None) -> pd.DataFrame:
         """
-        Возвращает представление (view) данных. 
+        Возвращает представление (view) данных.
         Если переданы columns, возвращает view только для этих столбцов.
         """
         if columns is None:
             return self.to_df()
-        
+
         # Важно: используем .loc для создания slice-view, а не копии
         return self.to_df().loc[:, columns]
+
 
 class DiskPersistenceManager:
     """Утилита для временного сохранения DataFrame на диск в формате Parquet.
 
     Используется как альтернатива Shared Memory, когда данные слишком велики
     для оперативной памяти или требуется строгая типизация через дисковый кэш.
-    
+
     Attributes:
         tmp_dir (str | None): Путь к временной директории (например, /dev/shm).
         created_files (list[str]): Список путей к созданным временным файлам.
     """
+
     def __init__(self, use_shm: bool = True):
         # Используем /dev/shm для Linux если доступно, иначе стандартный temp
         self.tmp_dir = "/dev/shm" if use_shm and os.path.exists("/dev/shm") else None
         self.created_files: list[str] = []
+
     def save_df(self, df: pd.DataFrame) -> str:
         """Сохранить DataFrame во временный файл Parquet.
         Логика сохранения:
-        1. Локация: Файл создается в /dev/shm (RAM-диск) для ускорения операций 
+        1. Локация: Файл создается в /dev/shm (RAM-диск) для ускорения операций
            в Linux или в системной временной папке.
-        2. Формат: Используется Parquet с автоматическим выбором движка 
+        2. Формат: Используется Parquet с автоматическим выбором движка
         (fastparquet или pyarrow) в зависимости от доступности библиотек.
         3. Регистрация: Путь к файлу добавляется в список для последующей очистки.
         Args:
@@ -252,13 +255,12 @@ class DiskPersistenceManager:
 
         fd, path = tempfile.mkstemp(suffix=".parquet", dir=self.tmp_dir)
         os.close(fd)
-        df.to_parquet(path, 
-                      engine=
-                      ("fastparquet" if "fastparquet" in globals() else "pyarrow")
-                      )
+        df.to_parquet(
+            path, engine=("fastparquet" if "fastparquet" in globals() else "pyarrow")
+        )
         self.created_files.append(path)
         return path
-    
+
     def cleanup(self) -> None:
         """Удалить все созданные временные файлы.
         Логика очистки:
@@ -274,28 +276,29 @@ class DiskPersistenceManager:
             except (OSError, FileNotFoundError) as e:
                 logger.warning(f"Failed to delete temp file {path}: {e}")
 
+
 def _worker_proxy(
-        func: Callable[..., Any], 
-        args: Sequence[Any], 
-        kwargs: Mapping[str, Any], 
-        disk_indices: list[int] | None, 
-        shm_info: dict[int, tuple]
-        ) -> Any:
+    func: Callable[..., Any],
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    disk_indices: list[int] | None,
+    shm_info: dict[int, tuple],
+) -> Any:
     """Десериализовать данные и выполнить целевую функцию внутри воркера.
     Логика выполнения:
-    1. Shared Memory: Находит объекты SharedDataFrame по индексам и 
+    1. Shared Memory: Находит объекты SharedDataFrame по индексам и
        конвертирует их обратно в DataFrame.
     2. Disk: Читает Parquet-файлы по переданным путям и восстанавливает DataFrame.
     3. Вызов: Передает восстановленные данные в целевую функцию func.
-    4. Очистка: Закрывает локальные хендлы Shared Memory и принудительно 
+    4. Очистка: Закрывает локальные хендлы Shared Memory и принудительно
         очищает список аргументов для ускорения работы Garbage Collector.
     Args:
         func (Callable): Целевая функция для выполнения.
         args (Sequence): Список аргументов (включая прокси-объекты).
         kwargs (Mapping): Именованные аргументы.
         disk_indices (list[int]): Индексы аргументов, сохраненных на диск.
-        shm_info (dict[int, tuple]): Словарь, где ключ — индекс аргумента, 
-            а значение — кортеж с метаданными SHM (имя, shape, dtype, columns) 
+        shm_info (dict[int, tuple]): Словарь, где ключ — индекс аргумента,
+            а значение — кортеж с метаданными SHM (имя, shape, dtype, columns)
             для восстановления.
     Returns:
         Any: Результат выполнения функции func.
@@ -311,10 +314,8 @@ def _worker_proxy(
         if shm_info:
             for idx, meta in shm_info.items():
                 wrapper = SharedDataFrame(
-                    name=meta[0], 
-                    shape=meta[1], 
-                    dtype=meta[2], 
-                    columns=meta[3])
+                    name=meta[0], shape=meta[1], dtype=meta[2], columns=meta[3]
+                )
                 final_args[idx] = wrapper.to_df()
                 shm_wrappers.append(wrapper)
         # 2. Загрузка с диска
@@ -326,34 +327,36 @@ def _worker_proxy(
         return func(*final_args, **kwargs)
     finally:
         # Важно: закрываем только локальные ссылки (дескрипторы) воркера.
-        # Сами данные в SHM остаются живы, 
+        # Сами данные в SHM остаются живы,
         # пока их не удалит главный процесс через .unlink()
         for w in shm_wrappers:
             try:
                 w.close()
-            except Exception: # noqa: S110, BLE001
+            except Exception:  # noqa: S110, BLE001
                 pass
-        final_args.clear() # Помогаем GC быстрее освободить ссылки
+        final_args.clear()  # Помогаем GC быстрее освободить ссылки
 
-def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
-                      persistence_manager: DiskPersistenceManager | None
-                      ) -> None:
+
+def _perform_cleanup(
+    shm_refs: list[SharedDataFrame] | None,
+    persistence_manager: DiskPersistenceManager | None,
+) -> None:
     """Вспомогательная функция для безопасной очистки с защитой от системных ошибок."""
     if shm_refs:
         for ref in shm_refs:
             # Сначала закрываем дескриптор
             try:
                 ref.close()
-            except Exception as e: # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 logger.debug(f"SHM close error (expected during forced shutdown): {e}")
-            
+
             # Затем пытаемся уничтожить сегмент в ОС
             try:
                 ref.unlink()
             except (FileNotFoundError, OSError):
                 # Игнорируем, если уже удалено или нет доступа
                 pass
-            except Exception as e: # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"Non-critical SHM unlink failure: {e}")
 
     if persistence_manager:
@@ -361,15 +364,16 @@ def _perform_cleanup(shm_refs: list[SharedDataFrame] | None,
             persistence_manager.cleanup()
         except (PermissionError, OSError) as e:
             logger.error(f"Cleanup failed due to file locking/permissions: {e}")
-        except Exception as e: # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Unexpected persistence cleanup error: {e}")
+
 
 def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
     """Принудительное завершение всех процессов в пуле.
-    
+
     Используется watchdog-механизмом при обнаружении зависших задач
     (C-level crash воркера).
-    
+
     Args:
         pool: ProcessPoolExecutor или ThreadPoolExecutor
         shutdown_grace_period: время ожидания graceful shutdown в секундах
@@ -386,7 +390,7 @@ def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
             try:
                 logger.error(f"CRITICAL: Worker {w.pid} hung. Forcing SIGTERM.")
                 w.terminate()
-            except Exception: # noqa: S110, BLE001
+            except Exception:  # noqa: S110, BLE001
                 pass
 
     time.sleep(0.2)
@@ -394,9 +398,11 @@ def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
     for w in workers:
         if w.is_alive():
             try:
-                logger.critical(f"HARD KILL: Worker {w.pid} resisted SIGTERM. Sending SIGKILL.")
+                logger.critical(
+                    f"HARD KILL: Worker {w.pid} resisted SIGTERM. Sending SIGKILL."
+                )
                 w.kill()
-            except Exception: # noqa: S110, BLE001
+            except Exception:  # noqa: S110, BLE001
                 pass
 
 
@@ -458,55 +464,59 @@ def run_parallel(
     args_seq = list(args_seq or [()])
     kwargs_seq = list(kwargs_seq or [{}] * len(args_seq))
 
-
     if len(args_seq) != len(kwargs_seq):
         raise ValueError("args_seq and kwargs_seq must be of equal length")
 
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
     persistence_manager = DiskPersistenceManager()
-    
+
     if mode == "processes" and (shared_args_indices or disk_args_indices):
-        task_payloads = [] # Список кортежей 
-        #(args, kwargs, actual_shm_idx, actual_disk_idx)
+        task_payloads = []  # Список кортежей
+        # (args, kwargs, actual_shm_idx, actual_disk_idx)
         target_shm_indices = shared_args_indices or []
         target_disk_indices = disk_args_indices or []
-        
+
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
-            curr_shm_info = {} # Индекс -> (имя, shape, dtype, columns)
+            curr_shm_info = {}  # Индекс -> (имя, shape, dtype, columns)
             for idx in set(target_shm_indices) | set(target_disk_indices):
                 if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                    if (idx in target_shm_indices 
-                        and SharedDataFrame.is_compatible(new_args[idx])):
+                    if idx in target_shm_indices and SharedDataFrame.is_compatible(
+                        new_args[idx]
+                    ):
                         shm_wrapper = SharedDataFrame(new_args[idx])
                         shm_refs.append(shm_wrapper)
                         # Сохраняем метаданные для передачи в воркер
                         curr_shm_info[idx] = (
-                            shm_wrapper.name, 
-                            shm_wrapper.shape, 
-                            shm_wrapper.dtype, 
-                            shm_wrapper.columns)
-                        new_args[idx] = None # Сам объект не передаем
+                            shm_wrapper.name,
+                            shm_wrapper.shape,
+                            shm_wrapper.dtype,
+                            shm_wrapper.columns,
+                        )
+                        new_args[idx] = None  # Сам объект не передаем
                     else:
                         path = persistence_manager.save_df(new_args[idx])
                         new_args[idx] = path
-            
-            curr_disk = [i for i in (set(target_shm_indices) | set(target_disk_indices))
-                         if i < len(new_args) and isinstance(new_args[i], str) 
-                         and new_args[i].endswith(".parquet")]
-            
+
+            curr_disk = [
+                i
+                for i in (set(target_shm_indices) | set(target_disk_indices))
+                if i < len(new_args)
+                and isinstance(new_args[i], str)
+                and new_args[i].endswith(".parquet")
+            ]
+
             task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm_info))
-        
+
         # Переопределяем итерируемый объект для запуска
         execution_tasks = task_payloads
     else:
         # Для потоков или обычных процессов без SHM/Disk
         execution_tasks = [
-                        (tuple(a), kw, disk_args_indices 
-                         or [], {}) 
-                        for a, kw in zip(args_seq, kwargs_seq)
-                        ]
+            (tuple(a), kw, disk_args_indices or [], {})
+            for a, kw in zip(args_seq, kwargs_seq)
+        ]
     # Преаллокация списка для сохранения длины и порядка
     results: list[Any] = [None] * len(execution_tasks)
 
@@ -515,13 +525,15 @@ def run_parallel(
     if mode == "processes":
         try:
             executor_cls = ProcessPoolExecutor
-        except Exception as e: # noqa: BLE001
-            logger.error(f"Could not initialize ProcessPoolExecutor:"
-                         f" {e}. Falling back to threads.")
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"Could not initialize ProcessPoolExecutor:"
+                f" {e}. Falling back to threads."
+            )
             executor_cls = ThreadPoolExecutor
 
     start_time = time.time()
-    
+
     try:
         pool = executor_cls(max_workers)
 
@@ -538,8 +550,10 @@ def run_parallel(
         # Абсолютные дедлайны для каждой задачи (от времени submit)
         deadline_by_future: dict[Future, float] = {}
         for fut, idx in future_to_idx.items():
-            task_t = task_timeout or float('inf')
-            deadline_by_future[fut] = submit_time_by_future.get(fut, start_time) + task_t
+            task_t = task_timeout or float("inf")
+            deadline_by_future[fut] = (
+                submit_time_by_future.get(fut, start_time) + task_t
+            )
 
         while future_to_idx:
             now = time.time()
@@ -571,7 +585,9 @@ def run_parallel(
                 if fut in future_to_idx:
                     rem = max(0.1, deadline - now)
                     remaining_by_future[fut] = rem
-            min_remaining = min(remaining_by_future.values()) if remaining_by_future else None
+            min_remaining = (
+                min(remaining_by_future.values()) if remaining_by_future else None
+            )
 
             # Если глобальный таймаут меньше — используем его
             if effective_timeout is not None:
@@ -581,11 +597,17 @@ def run_parallel(
                 else:
                     min_remaining = global_remaining  # pragma: no cover
 
-            timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
+            timeout_for_ac = (
+                min_remaining
+                if min_remaining is not None and min_remaining < float("inf")
+                else None
+            )
 
             try:
                 if timeout_for_ac is not None:
-                    for fut in as_completed(future_to_idx.keys(), timeout=timeout_for_ac):
+                    for fut in as_completed(
+                        future_to_idx.keys(), timeout=timeout_for_ac
+                    ):
                         idx = future_to_idx.pop(fut)
                         try:
                             results[idx] = fut.result(timeout=0)
@@ -624,19 +646,21 @@ def run_parallel(
             logger.error("Error in process pool, falling back to threads: %s", e)
 
             _perform_cleanup(shm_refs, persistence_manager)
-            return run_parallel(func,
-                                args_seq,
-                                kwargs_seq,
-                                max_workers,
-                                mode="threads",
-                                timeout=timeout,
-                                task_timeout=task_timeout)
+            return run_parallel(
+                func,
+                args_seq,
+                kwargs_seq,
+                max_workers,
+                mode="threads",
+                timeout=timeout,
+                task_timeout=task_timeout,
+            )
         raise
     finally:
         if pool is not None:
-            is_proc_executor = (
-                type(pool).__name__ == "ProcessPoolExecutor"
-                or hasattr(pool, "_processes"))
+            is_proc_executor = type(pool).__name__ == "ProcessPoolExecutor" or hasattr(
+                pool, "_processes"
+            )
             if mode == "processes" and is_proc_executor:
                 _force_shutdown_processes(pool, shutdown_grace_period)
                 # Финальная очистка SHM/Disk (только в режиме процессов)
@@ -645,5 +669,3 @@ def run_parallel(
                 # Для ThreadPoolExecutor или если режим не "processes"
                 pool.shutdown(wait=True, cancel_futures=True)
     return results
-
-

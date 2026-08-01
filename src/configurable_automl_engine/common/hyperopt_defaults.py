@@ -10,27 +10,40 @@ from pydantic import BaseModel, Field, model_validator
 
 T = TypeVar("T", str, int, float, bool)
 
+
 # ───────────────── hyperopt ───────────────── #
 class BaseDistribution(BaseModel):
     """Абстрактный базовый класс для распределений поиска."""
+
     type: str
+
+
 class CategoricalSpace(BaseDistribution, Generic[T]):
     """Распределение для категориальных признаков: [options, 'categorical']."""
+
     type: Literal["categorical"]
     options: list[T]
+
+
 class NumericSpace(BaseDistribution):
     """Базовый класс для числовых диапазонов."""
+
     low: float
     high: float
+
     @model_validator(mode="after")
     def _validate_range(self) -> "NumericSpace":
         if self.low > self.high:
             raise ValueError(f"low ({self.low}) must be <= high ({self.high})")
         return self
+
+
 class FloatSpace(NumericSpace):
     """Распределение для чисел с плавающей точкой: [min, max, 'float', step?]."""
+
     type: Literal["float", "float_log"]
     step: float | None = None
+
     @model_validator(mode="after")
     def _validate_float_constraints(self) -> "FloatSpace":
         if self.type == "float_log" and self.step is not None:
@@ -38,12 +51,16 @@ class FloatSpace(NumericSpace):
         if self.step is not None and self.step <= 0:
             raise ValueError(f"Step must be positive. Got {self.step}")
         return self
+
+
 class IntSpace(NumericSpace):
     """Распределение для целых чисел: [min, max, 'int', step?]."""
+
     type: Literal["int"]
     low: int
     high: int
     step: int | None = None
+
     @model_validator(mode="after")
     def _validate_int_constraints(self) -> "IntSpace":
         if self.step is not None and self.step <= 0:
@@ -53,31 +70,32 @@ class IntSpace(NumericSpace):
 
 class SearchSpaceEntry(BaseModel):
     """Описание пространства поиска для отдельного гиперпараметра.
-    
-    Универсальный контейнер, поддерживающий как категориальные списки, 
-    так и числовые диапазоны. Реализует логику прозрачной конвертации 
+
+    Универсальный контейнер, поддерживающий как категориальные списки,
+    так и числовые диапазоны. Реализует логику прозрачной конвертации
     из сокращенной YAML-записи в типизированные объекты распределений.
     Attributes:
-        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный 
+        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный
             объект конкретного типа распределения.
     """
+
     config: Annotated[
-        CategoricalSpace | FloatSpace | IntSpace,
-        Field(discriminator="type")
+        CategoricalSpace | FloatSpace | IntSpace, Field(discriminator="type")
     ]
+
     @model_validator(mode="before")
     @classmethod
     def _parse_list_to_dict(cls, data: Any) -> Any:
-        """Преобразовать краткую списочную запись YAML 
+        """Преобразовать краткую списочную запись YAML
         в структурированный словарь Pydantic.
-        
+
         Логика парсинга:
-        1. Если входные данные не список, возвращает их "как есть" 
+        1. Если входные данные не список, возвращает их "как есть"
             для стандартной обработки.
         2. Определяет тип распределения по индексу [1] (categorical) или [2] (numeric).
-        3. Для числовых типов автоматически выводит подтип (int/float), 
+        3. Для числовых типов автоматически выводит подтип (int/float),
             если он не указан явно.
-        4. Формирует внутренний словарь с ключами `type`, `low`, `high`, `step` для 
+        4. Формирует внутренний словарь с ключами `type`, `low`, `high`, `step` для
            последующей дискриминации моделей.
         Args:
             data (Any): Исходные данные из YAML (список или словарь).
@@ -104,18 +122,23 @@ class SearchSpaceEntry(BaseModel):
         if isinstance(data[0], int) and isinstance(data[1], int):
             return {"config": {"type": "int", "low": data[0], "high": data[1]}}
         return {"config": {"type": "float", "low": data[0], "high": data[1]}}
+
     @property
     def low(self) -> Any:
         return getattr(self.config, "low", None)
+
     @property
     def high(self) -> Any:
         return getattr(self.config, "high", None)
+
     @property
     def dist_type(self) -> str:
         return self.config.type
+
     @property
     def step(self) -> int | float | None:
         return getattr(self.config, "step", None)
+
     @property
     def bounds(self) -> list[Any]:
         """Backward compatibility alias for the raw list structure."""
@@ -125,6 +148,7 @@ class SearchSpaceEntry(BaseModel):
         if self.step is not None:
             res.append(self.step)
         return res
+
 
 # Общие параметры для Poisson, Gamma и Tweedie регрессоров
 GLM_COMMON = {
@@ -168,7 +192,8 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "C": SearchSpaceEntry.model_validate([1e-2, 100.0, "float_log"]),
         "epsilon": SearchSpaceEntry.model_validate([1e-3, 1.0, "float_log"]),
         "kernel": SearchSpaceEntry.model_validate(
-            [["rbf", "poly", "sigmoid"], "categorical"]),
+            [["rbf", "poly", "sigmoid"], "categorical"]
+        ),
         "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
     },
     "xgboosting": {
@@ -180,19 +205,24 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "gamma": SearchSpaceEntry.model_validate([0.0, 5.0, "float"]),
     },
     "sgdregressor": {
-        "loss": SearchSpaceEntry.model_validate([
-            ["squared_error", 
-             "huber", 
-             "epsilon_insensitive", 
-             "squared_epsilon_insensitive"], "categorical"
-        ]),
+        "loss": SearchSpaceEntry.model_validate(
+            [
+                [
+                    "squared_error",
+                    "huber",
+                    "epsilon_insensitive",
+                    "squared_epsilon_insensitive",
+                ],
+                "categorical",
+            ]
+        ),
         "penalty": SearchSpaceEntry.model_validate(
-            [["l2", "l1", "elasticnet"], "categorical"]),
+            [["l2", "l1", "elasticnet"], "categorical"]
+        ),
         "alpha": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
-        "learning_rate": SearchSpaceEntry.model_validate([
-            ["constant", "optimal", "invscaling", "adaptive"], 
-            "categorical"
-        ]),
+        "learning_rate": SearchSpaceEntry.model_validate(
+            [["constant", "optimal", "invscaling", "adaptive"], "categorical"]
+        ),
         "eta0": SearchSpaceEntry.model_validate([1e-4, 1e-1, "float_log"]),
         "l1_ratio": SearchSpaceEntry.model_validate([0.0, 1.0, "float"]),
         "max_iter": SearchSpaceEntry.model_validate([500, 5000, "int", 500]),
@@ -201,7 +231,8 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "n_estimators": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
         "learning_rate": SearchSpaceEntry.model_validate([0.01, 1.0, "float_log"]),
         "loss": SearchSpaceEntry.model_validate(
-            [["linear", "square", "exponential"], "categorical"]),
+            [["linear", "square", "exponential"], "categorical"]
+        ),
     },
     "poissonregressor": {**GLM_COMMON},
     "gammaregressor": {**GLM_COMMON},
@@ -217,19 +248,18 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "nearest_neighbors_regression": {
         "n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"]),
         "weights": SearchSpaceEntry.model_validate(
-            [["uniform", "distance"], "categorical"]),
+            [["uniform", "distance"], "categorical"]
+        ),
         "p": SearchSpaceEntry.model_validate([1, 2, "int"]),
     },
     "isotonic_regression": {
-        "increasing": SearchSpaceEntry.model_validate(
-            [[True, False], "categorical"]),
+        "increasing": SearchSpaceEntry.model_validate([[True, False], "categorical"]),
     },
     "gaussian_process_regression": {},
 }
 
 ALGO_HYPERPARAMETER_REGISTRY: dict[str, set[str]] = {
-    algo: set(params.keys())
-    for algo, params in DEFAULT_SPACES.items()
+    algo: set(params.keys()) for algo, params in DEFAULT_SPACES.items()
 }
 
 DATA_DEPENDENT_CONSTRAINTS: dict[str, str] = {
@@ -238,13 +268,11 @@ DATA_DEPENDENT_CONSTRAINTS: dict[str, str] = {
     "min_samples_split": "n_samples",
 }
 
-def clip_search_space(
-    space: dict[str, Any], 
-    n_samples: int
-) -> dict[str, Any]:
+
+def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
     """
     Корректирует границы пространства поиска на основе размера выборки.
-    
+
     Особенности:
     1. Исключает мутацию глобального состояния через deep copy (Pydantic model_copy).
     2. Гарантирует, что и low, и high не превышают физический лимит данных.
@@ -258,8 +286,8 @@ def clip_search_space(
 
     for param, entry in space.items():
         strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)
-        
-        # Если параметр не требует клиппинга или это не SearchSpaceEntry, 
+
+        # Если параметр не требует клиппинга или это не SearchSpaceEntry,
         # копируем как есть
         if not strategy or not isinstance(entry, SearchSpaceEntry):
             clipped_space[param] = entry
@@ -267,8 +295,8 @@ def clip_search_space(
 
         # 1. Рассчитываем физический предел для данного параметра
         raw_limit = n_samples - 1 if strategy == "n_samples_minus_one" else n_samples
-        limit = float(max(1, raw_limit)) # Гарантируем минимум 1
-        
+        limit = float(max(1, raw_limit))  # Гарантируем минимум 1
+
         # 2. Глубокое копирование через Pydantic (защита от Global State Mutation)
         new_entry = entry.model_copy(deep=True)
         config = new_entry.config
@@ -277,22 +305,20 @@ def clip_search_space(
         if isinstance(config, (IntSpace, FloatSpace)):
             # Сначала определяем новый high (не может быть выше limit)
             new_high = min(config.high, limit)
-            
+
             # Затем определяем новый low (не может быть выше нового high)
             # Это решает проблему Low > Limit Crash
             new_low = min(config.low, new_high)
 
             # 4. Обновляем конфиг через model_copy для соблюдения внутренней валидации
             if isinstance(config, IntSpace):
-                new_entry.config = config.model_copy(update={
-                    "low": int(new_low), 
-                    "high": int(new_high)
-                })
+                new_entry.config = config.model_copy(
+                    update={"low": int(new_low), "high": int(new_high)}
+                )
             else:
-                new_entry.config = config.model_copy(update={
-                    "low": new_low, 
-                    "high": new_high
-                })
+                new_entry.config = config.model_copy(
+                    update={"low": new_low, "high": new_high}
+                )
 
         clipped_space[param] = new_entry
 

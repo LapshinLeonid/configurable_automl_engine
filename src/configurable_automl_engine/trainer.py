@@ -1,34 +1,34 @@
-""" Model Trainer: Универсальный оркестратор жизненного цикла регрессионных моделей.
+"""Model Trainer: Универсальный оркестратор жизненного цикла регрессионных моделей.
 
-Данный модуль инкапсулирует логику построения обучающих пайплайнов, 
+Данный модуль инкапсулирует логику построения обучающих пайплайнов,
 объединяя предобработку данных, балансировку выборок и обучение алгоритмов Scikit-learn.
 
-Ключевой особенностью является полная автоматизация подготовки признаков: 
-система самостоятельно 
-классифицирует типы данных, 
-обрабатывает пропуски и масштабирует значения, 
+Ключевой особенностью является полная автоматизация подготовки признаков:
+система самостоятельно
+классифицирует типы данных,
+обрабатывает пропуски и масштабирует значения,
 гарантируя корректную передачу данных в финальный оценщик.
 
 Основные компоненты:
 
 ModelTrainer: Главный класс-контейнер для обучения, валидации и деплоя моделей.
-train_model: Функциональный интерфейс (Facade) для обеспечения 
+train_model: Функциональный интерфейс (Facade) для обеспечения
     обратной совместимости со старым API.
-TrainingError: Специализированное исключение 
+TrainingError: Специализированное исключение
     для унифицированной обработки сбоев обучения.
 
 Особенности реализации:
 
-Pipeline Integration: Использование imblearn.pipeline позволяет бесшовно интегрировать 
+Pipeline Integration: Использование imblearn.pipeline позволяет бесшовно интегрировать
     механизмы оверсэмплинга (SMOTE, ADASYN) непосредственно в процесс обучения.
-Automated Feature Engineering: Встроенный ColumnTransformer автоматически применяет 
+Automated Feature Engineering: Встроенный ColumnTransformer автоматически применяет
     One-Hot кодирование для категорий и StandardScaler для числовых признаков.
-Thread Safety: Использование рекурсивных блокировок (threading.RLock) гарантирует 
+Thread Safety: Использование рекурсивных блокировок (threading.RLock) гарантирует
     безопасность при обращении к состоянию модели из нескольких потоков.
-Isotonic Support: Специальный трансформер IsotonicDataTransformer адаптирует 
+Isotonic Support: Специальный трансформер IsotonicDataTransformer адаптирует
     многомерные данные под строгие требования алгоритмов изотонической регрессии.
-Persistence: Встроенные методы save и load с поддержкой различных форматов сериализации 
-    (Pickle, Joblib) через систему артефактов. """
+Persistence: Встроенные методы save и load с поддержкой различных форматов сериализации
+    (Pickle, Joblib) через систему артефактов."""
 
 from __future__ import annotations
 
@@ -66,27 +66,29 @@ __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 class TrainingError(RuntimeError):
     """Исключение для ошибок, связанных с данными или параметрами обучения."""
 
+
 class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """Трансформер для подготовки данных под IsotonicRegression.
-    Выбирает указанный столбец и обеспечивает корректную обработку пропусков 
+    Выбирает указанный столбец и обеспечивает корректную обработку пропусков
     для соответствия требованиям алгоритма изотонической регрессии.
     Attributes:
         feature_index (int): Порядковый номер признака для извлечения.
         median_ (float): Вычисленное медианное значение для заполнения пропусков.
     """
+
     def __init__(self, feature_index: int = 0):
         """Инициализировать трансформер с указанием индекса целевого признака."""
         self.feature_index = feature_index
-    
+
     def _get_dimensions(self, X: Any) -> tuple[int, int]:
-        """Получить количество строк и столбцов входных данных 
-            в универсальном формате."""
-        if hasattr(X, 'shape'):
+        """Получить количество строк и столбцов входных данных
+        в универсальном формате."""
+        if hasattr(X, "shape"):
             return X.shape[0], (X.shape[1] if len(X.shape) > 1 else 1)
         n_rows = len(X)
         n_cols = len(X[0]) if n_rows > 0 and isinstance(X[0], (list, np.ndarray)) else 1
         return n_rows, n_cols
-    
+
     def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
         """Вычислить медиану выбранного признака для последующей импутации пропусков."""
         _, n_cols = self._get_dimensions(X)
@@ -100,19 +102,19 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             X_col = X[:, idx] if len(X.shape) > 1 else X
         else:
             X_col = np.asarray(X)[:, idx]
-            
+
         s_col = pd.Series(X_col)
         self.median_ = float(s_col.median()) if not s_col.isna().all() else 0.0
         return self
-    
+
     def transform(self, X: Any) -> np.ndarray:
-        """Извлечь признак, заполнить пропуски 
-            и преобразовать в 2D-массив (n_samples, 1)."""
+        """Извлечь признак, заполнить пропуски
+        и преобразовать в 2D-массив (n_samples, 1)."""
         try:
             # 1. Получаем метаданные без принудительного копирования в DataFrame
             # Используем логику из _extract_metadata, которую мы обсуждали ранее
             _n_rows, n_cols = self._get_dimensions(X)
-            
+
             # 2. Валидация индекса признака
             if self.feature_index >= n_cols:
                 raise TrainingError(
@@ -131,10 +133,10 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
                 X_col = np.asarray(X)[:, self.feature_index]
             # 4. Логика обработки NaN
             # Проверяем, являются ли все значения в колонке NaN
-            # Используем pd.Series для удобства вычисления медианы, 
+            # Используем pd.Series для удобства вычисления медианы,
             # если это еще не Series
             s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
-            
+
             if s_col.isna().all():
                 raise TrainingError(
                     f"Column with index {self.feature_index} contains only NaN values."
@@ -151,14 +153,16 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
                 raise
             # Унификация сообщения об ошибке согласно тестам (#A8)
             raise TrainingError(f"Data transformation error: {e}")
+
+
 class ModelTrainer:
     """Оркестратор процесса обучения и валидации регрессионных моделей.
-    
-    Автоматизирует построение пайплайна, включающего предобработку признаков 
-    (импутация, скалирование, кодирование), синтетическое увеличение выборки 
+
+    Автоматизирует построение пайплайна, включающего предобработку признаков
+    (импутация, скалирование, кодирование), синтетическое увеличение выборки
     (oversampling) и обучение выбранного алгоритма с обязательной валидацией.
     Attributes:
-        algorithm (str): Название алгоритма или алиас 
+        algorithm (str): Название алгоритма или алиас
             (например, 'elasticnet', 'xgboost').
         hyperparams (dict): Конфигурация гиперпараметров для инициализации модели..
         metric (str): Ключ метрики (r2, mse, mae) для оценки качества на валидации.
@@ -172,7 +176,7 @@ class ModelTrainer:
         os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
         pipeline (Pipeline | None): Итоговый объект пайплайна после вызова fit().
         val_score (float | None): Значение метрики, полученное на hold-out выборке.
-        feature_names (list[str] | None): Список имен признаков, 
+        feature_names (list[str] | None): Список имен признаков,
             определенных при обучении.
         lock (threading.RLock): Рекурсивная блокировка для потокобезопасного обучения.
     """
@@ -187,9 +191,9 @@ class ModelTrainer:
         data_oversampling_multiplier: float = 1.0,
         data_oversampling_algorithm: str = "random",
         serialization_format: SerializationFormat = SerializationFormat.pickle,
-        categorical_features: list[str] | None = None,  
-        numerical_features: list[str] | None = None,  
-        id_column: str | None = None
+        categorical_features: list[str] | None = None,
+        numerical_features: list[str] | None = None,
+        id_column: str | None = None,
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки."""
 
@@ -229,144 +233,150 @@ class ModelTrainer:
 
         # Поля, которые заполняются после fit(...)
         self.pipeline: Pipeline | None = None
-        self.base_model: Any = None 
+        self.base_model: Any = None
         self.val_score: float | None = None
-        self._last_train_y: pd.Series | None = None 
-        self._last_val_y: pd.Series | None = None 
+        self._last_train_y: pd.Series | None = None
+        self._last_val_y: pd.Series | None = None
 
-        for attr_name, features in [("categorical_features", categorical_features), 
-                                ("numerical_features", numerical_features)]:
-            if features is not None and (not isinstance(features, list) 
-                or not all(isinstance(f, str) for f in features)):
-                raise TrainingError(f"Parameter {attr_name} "
-                                    "must be a list of strings (column names)")
+        for attr_name, features in [
+            ("categorical_features", categorical_features),
+            ("numerical_features", numerical_features),
+        ]:
+            if features is not None and (
+                not isinstance(features, list)
+                or not all(isinstance(f, str) for f in features)
+            ):
+                raise TrainingError(
+                    f"Parameter {attr_name} must be a list of strings (column names)"
+                )
 
     def _validate_features(self, X: pd.DataFrame) -> None:
         """Проверить наличие всех заданных имен признаков в переданном DataFrame."""
 
-        specified_features = ((self.categorical_features or []) 
-                              + (self.numerical_features or []))
+        specified_features = (self.categorical_features or []) + (
+            self.numerical_features or []
+        )
         missing = [col for col in specified_features if col not in X.columns]
         if missing:
             raise TrainingError(f"Specified columns not found in data: {missing}")
-    def _detect_feature_types(self, 
-                              X: pd.DataFrame, 
-                              target_column: str
-                              ) -> None:
+
+    def _detect_feature_types(self, X: pd.DataFrame, target_column: str) -> None:
         """Автоматически классифицировать колонки на числовые и категориальные."""
         with self.lock:
             # Если оба списка уже заполнены пользователем — просто валидируем
-            if (self.categorical_features is not None 
-                and self.numerical_features is not None):
+            if (
+                self.categorical_features is not None
+                and self.numerical_features is not None
+            ):
                 self._validate_features(X)
                 return
             # Определяем список колонок для анализа (исключаем таргет и ID)
             exclude = {target_column}
             if self.id_column:
                 exclude.add(self.id_column)
-            
+
             df_to_analyze = X.drop(columns=list(exclude & set(X.columns)))
             # Авто-определение категориальных (object, category, bool)
             if self.categorical_features is None:
                 self.categorical_features = df_to_analyze.select_dtypes(
-                    include=['object', 'category', 'bool']
+                    include=["object", "category", "bool"]
                 ).columns.tolist()
             # Авто-определение числовых (все оставшиеся типы 'number')
             if self.numerical_features is None:
                 self.numerical_features = df_to_analyze.select_dtypes(
-                    include=['number']
+                    include=["number"]
                 ).columns.tolist()
             self.logger.info(
                 f"Auto-detected features: {len(self.categorical_features)} cat, "
                 f"{len(self.numerical_features)} num."
             )
 
-    def _extract_metadata(self, 
-                          X: Any
-                          )-> list[str] | None:
-        """Получить имена колонок из различных структур данных 
-            без копирования содержимого."""
-        if hasattr(X, 'get_data_info'):
-            return cast(list[str], X.get_data_info()['columns'])
+    def _extract_metadata(self, X: Any) -> list[str] | None:
+        """Получить имена колонок из различных структур данных
+        без копирования содержимого."""
+        if hasattr(X, "get_data_info"):
+            return cast(list[str], X.get_data_info()["columns"])
         if isinstance(X, pd.DataFrame):
             return cast(list[str], X.columns.tolist())
-        if hasattr(X, 'shape') and len(X.shape) > 1:
+        if hasattr(X, "shape") and len(X.shape) > 1:
             return [str(f"col_{i}") for i in range(X.shape[1])]
         return None
-    
+
     def __getstate__(self) -> dict[str, Any]:
-        """Управление состоянием объекта для корректной сериализации 
-            (исключение lock и logger)."""
+        """Управление состоянием объекта для корректной сериализации
+        (исключение lock и logger)."""
         state = self.__dict__.copy()
         # Remove unpicklable entries
-        if 'lock' in state:
-            del state['lock']
-        if 'logger' in state:
-            del state['logger']
+        if "lock" in state:
+            del state["lock"]
+        if "logger" in state:
+            del state["logger"]
         return state
-    def __setstate__(self, 
-                     state: dict[str, Any]
-                     ) -> None:
-        """Восстановить состояние объекта после десериализации, 
-            инициализируя потокобезопасный lock и логгер"""
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Восстановить состояние объекта после десериализации,
+        инициализируя потокобезопасный lock и логгер"""
         self.__dict__.update(state)
         # Re-initialize the lock after unpickling
         self.lock = threading.RLock()
         # Re-initialize logger if necessary
         self.logger = logging.getLogger(__name__)
-    
-    def _build_preprocessor(self, 
-                            feature_names: list[str]
-                            )-> ColumnTransformer:
+
+    def _build_preprocessor(self, feature_names: list[str]) -> ColumnTransformer:
         """Сконструировать ColumnTransformer для раздельной обработки типов данных."""
         # 1. Получаем индексы колонок на основе подготовленных списков
         # Используем feature_names для сопоставления имен с порядковыми номерами
         cat_indices = [
-            feature_names.index(col) 
+            feature_names.index(col)
             for col in (self.categorical_features or [])
             if col in feature_names
         ]
         num_indices = [
-            feature_names.index(col) 
-            for col in (self.numerical_features or []) 
+            feature_names.index(col)
+            for col in (self.numerical_features or [])
             if col in feature_names
         ]
 
         if not cat_indices and not num_indices:
-            self.logger.warning("No features matched for preprocessing."
-                                " Defaulting to passthrough.")
-            return ColumnTransformer(
-                [('bypass', 'passthrough', slice(None))],
-                remainder='drop'
+            self.logger.warning(
+                "No features matched for preprocessing. Defaulting to passthrough."
             )
-        
+            return ColumnTransformer(
+                [("bypass", "passthrough", slice(None))], remainder="drop"
+            )
+
         # 2. Пайплайны трансформации
-        num_transformer = Pipeline(steps=[
-            ('imputer', SimpleImputer(strategy='mean')),
-            ('scaler', StandardScaler())
-        ])
-        
-        cat_transformer = Pipeline(steps=[
-            ('imputer', SimpleImputer(strategy='most_frequent')),
-            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
-        ])
+        num_transformer = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("scaler", StandardScaler()),
+            ]
+        )
+
+        cat_transformer = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+            ]
+        )
         # 3. Сборка ColumnTransformer
         transformers = []
         if cat_indices:
-            transformers.append(('cat', cat_transformer, cat_indices))
+            transformers.append(("cat", cat_transformer, cat_indices))
         if num_indices:
-            transformers.append(('num', num_transformer, num_indices))
+            transformers.append(("num", num_transformer, num_indices))
         return ColumnTransformer(
-            transformers=(transformers if transformers 
-                          else [('pass', 'passthrough', [0])]),
-            remainder='drop' 
+            transformers=(
+                transformers if transformers else [("pass", "passthrough", [0])]
+            ),
+            remainder="drop",
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
-        """Валидировать входные типы данных 
-            и разделить признаки от целевой переменной."""
+        """Валидировать входные типы данных
+        и разделить признаки от целевой переменной."""
         try:
-            self.feature_names = self._extract_metadata(X) 
+            self.feature_names = self._extract_metadata(X)
 
             self._detected_dtypes = X.dtypes if isinstance(X, pd.DataFrame) else None
             # 1. Проверка типов
@@ -379,8 +389,9 @@ class ModelTrainer:
 
             if isinstance(y, str):
                 if not isinstance(X, pd.DataFrame):
-                    raise TrainingError(f"Target column '{y}' specified,"
-                                        " but X is not a DataFrame")
+                    raise TrainingError(
+                        f"Target column '{y}' specified, but X is not a DataFrame"
+                    )
                 self.feature_names = [col for col in X.columns if col != y]
                 X_obj = X[self.feature_names]
                 y_obj = X[y]
@@ -390,20 +401,20 @@ class ModelTrainer:
                     y_obj = y
                 elif isinstance(y, pd.DataFrame):
                     y_obj = y.iloc[:, 0]
-                elif hasattr(y, 'get_view'): # Поддержка SharedDataFrame для y
+                elif hasattr(y, "get_view"):  # Поддержка SharedDataFrame для y
                     y_obj = y.get_view().iloc[:, 0]
                 else:
                     y_obj = np.asarray(y)
-            # Консолидированная валидация 
+            # Консолидированная валидация
             n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
-            if n_samples == 0: 
+            if n_samples == 0:
                 raise TrainingError("Data is empty")
             nx = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
             ny = y_obj.shape[0] if hasattr(y_obj, "shape") else len(y_obj)
-            
+
             if nx != ny:
                 raise TrainingError(f"Mismatched samples: X has {nx}, y has {ny}")
-            
+
             return X_obj, y_obj
         except (ValueError, TypeError, IndexError) as e:
             if str(e) == "Data is empty":
@@ -411,14 +422,14 @@ class ModelTrainer:
             raise TrainingError(f"Data transformation error: {e}")
 
     def _fit_internal(
-        self, 
-        X_train: Any, 
-        y_train: Any, 
-        preprocessor: ColumnTransformer, 
-        base_model: Any
+        self,
+        X_train: Any,
+        y_train: Any,
+        preprocessor: ColumnTransformer,
+        base_model: Any,
     ) -> Pipeline:
-        """Собрать финальный пайплайн и запустить 
-            процесс обучения на подготовленных данных."""
+        """Собрать финальный пайплайн и запустить
+        процесс обучения на подготовленных данных."""
         # 1) Формируем шаги пайплайна
         steps = [("preprocessor", preprocessor)]
         # 2) Добавляем оверсэмплинг, если он активирован
@@ -454,34 +465,31 @@ class ModelTrainer:
         Включает обязательное разбиение выборки для оценки качества."""
 
         with self.lock:
-            
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
             n_samples = (
-                X_prepared.shape[0] 
-                if hasattr(X_prepared, "shape") 
-                else len(X_prepared)
+                X_prepared.shape[0] if hasattr(X_prepared, "shape") else len(X_prepared)
             )
             if n_samples < 2:
                 raise TrainingError("Insufficient records for training")
 
             if isinstance(X_prepared, pd.DataFrame):
-                self._detect_feature_types(X_prepared, target_column="") 
+                self._detect_feature_types(X_prepared, target_column="")
             else:
-                if self.categorical_features is None: 
+                if self.categorical_features is None:
                     self.categorical_features = []
                 if self.numerical_features is None:
                     n_cols = X_prepared.shape[1] if len(X_prepared.shape) > 1 else 1
                     self.numerical_features = [f"col_{i}" for i in range(n_cols)]
-                if self.feature_names is None: 
+                if self.feature_names is None:
                     self.feature_names = self.numerical_features
 
-            # Этап 2: Определение ключа алгоритма 
+            # Этап 2: Определение ключа алгоритма
             # (перенесено выше для использования в препроцессоре)
             _ALIASES.get(self.algorithm, self.algorithm)
 
-            # Этап 3: Создаём препроцессор через делегирование 
+            # Этап 3: Создаём препроцессор через делегирование
             if self.feature_names is None:
                 # Если имен нет, пытаемся извлечь их снова или создаем пустой список
                 self.feature_names = self._extract_metadata(X_prepared) or []
@@ -494,31 +502,30 @@ class ModelTrainer:
                 base_model = create_model(self.algorithm, **model_kwargs)
             except (ValueError, ImportError) as e:
                 raise TrainingError(f"Error creating model: {e}")
-            
+
             # Этап 5: Сборка и обучение пайплайна
             # Здесь автоматически применится оверсэмплинг, если он включен
-            self.pipeline = self._fit_internal(X_prepared, 
-                                               y_s, 
-                                               preprocessor, 
-                                               base_model)
+            self.pipeline = self._fit_internal(
+                X_prepared, y_s, preprocessor, base_model
+            )
 
             # Этап 6: Валидация и расчет метрик (финальный шаг)
             try:
                 # 1. Получаем объект-скорер
                 scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
-                
+
                 # 2. Вычисляем raw_score (для ошибок sklearn вернет отрицательное число)
                 raw_score = scorer(self.pipeline, X_prepared, y_s)
                 if raw_score is None:
                     raise TrainingError("Scorer returned None")
-                
-                # 3. Инвертируем знак обратно, если это метрика-ошибка 
+
+                # 3. Инвертируем знак обратно, если это метрика-ошибка
                 # (RMSE, MAE и т.д.)
-                # Чтобы в val_score всегда лежало "честное" 
+                # Чтобы в val_score всегда лежало "честное"
                 # положительное значение ошибки
                 if not is_greater_better(self.metric):
                     # Если sklearn вернул отрицательную ошибку (neg_rmse), берем модуль
-                    # Если вдруг вернул положительную (custom scorer), 
+                    # Если вдруг вернул положительную (custom scorer),
                     # оставляем как есть
                     self.val_score = float(abs(raw_score))
                 else:
@@ -529,15 +536,14 @@ class ModelTrainer:
                     " final val_score={self.val_score:.4f} "
                     f"(greater_is_better={is_greater_better(self.metric)})"
                 )
-            except Exception as e: # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 raise TrainingError(f"Error calculating metrics on validation: {e}")
-            
+
             return self
 
-
     def predict(self, X: Any) -> np.ndarray:
-        """Получить предсказания модели для новых данных, 
-            используя обученный пайплайн."""
+        """Получить предсказания модели для новых данных,
+        используя обученный пайплайн."""
 
         with self.lock:
             # 1) Проверка: обучена ли модель
@@ -554,50 +560,44 @@ class ModelTrainer:
                     X_input = X.shared_array
                 else:
                     X_input = np.asarray(X)
-                
+
                 preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
-                
-            except Exception as e: # noqa: BLE001
-                raise TrainingError(f"Error during prediction: {e}")
 
+            except Exception as e:  # noqa: BLE001
+                raise TrainingError(f"Error during prediction: {e}")
 
     def save(self, path: str | Path) -> None:
         """Сериализовать и сохранить текущий экземпляр тренера на диск."""
         with self.lock:
             if self.pipeline is None and self.base_model is None:
                 raise TrainingError("Nothing to save: model is not trained")
-            
+
             path_obj = Path(path)
             # Создаем директории, если они не существуют
             path_obj.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Вызываем новую утилиту вместо pickle.dump
-            save_artifact(
-                obj=self, 
-                path=path_obj, 
-                fmt=self.serialization_format
-            )
+            save_artifact(obj=self, path=path_obj, fmt=self.serialization_format)
 
     @classmethod
-    def load(cls, 
-             path: str | Path, 
-             fmt: SerializationFormat = SerializationFormat.pickle
-             ) -> ModelTrainer:
+    def load(
+        cls, path: str | Path, fmt: SerializationFormat = SerializationFormat.pickle
+    ) -> ModelTrainer:
         """Загрузить ранее сохраненный объект ModelTrainer из файла."""
         path_obj = Path(path)
-        
+
         # Попытка загрузки через утилиту
         try:
             obj = load_artifact(path=path_obj, fmt=fmt)
         except FileNotFoundError:
             raise TrainingError(f"File not found: {path}")
-        except Exception as e: # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             raise TrainingError(f"Error loading artifact: {e}")
         # Проверка типа загруженного объекта
         if not isinstance(obj, cls):
             raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
-            
+
         return obj
 
 
@@ -632,8 +632,8 @@ def train_model(
     # Случай «config dict»
     if isinstance(cfg_or_algo, dict):
         cfg: dict = cfg_or_algo  # type: ignore
-        algo = str(cfg.get("algorithm",""))
-        metric = str(cfg.get("metric",""))
+        algo = str(cfg.get("algorithm", ""))
+        metric = str(cfg.get("metric", ""))
         hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
         rs = cast(int | None, cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
@@ -644,9 +644,9 @@ def train_model(
         # Простой API
         # Если пришел None, мы НЕ превращаем его в строку "None" сразу,
         # чтобы сохранить логику оригинальной валидации для тестов.
-        algo = cfg_or_algo if cfg_or_algo is not None else "" 
-        metric = str(metric_or_testsize)  
-        hyperparams = cast(dict[str, Any], params_or_metric) 
+        algo = cfg_or_algo if cfg_or_algo is not None else ""
+        metric = str(metric_or_testsize)
+        hyperparams = cast(dict[str, Any], params_or_metric)
         rs = random_state
         data_os = False
         data_os_mult = 1.0
@@ -659,7 +659,6 @@ def train_model(
 
     if not hyperparams and algo_key not in ["isotonic", "isotonic_regression"]:
         raise TrainingError("Model parameters are not specified")
-
 
     # Создаём и обучаем ModelTrainer
     trainer = ModelTrainer(
@@ -678,7 +677,6 @@ def train_model(
 
     # Логирование (если enable_logging=True)
     if enable_logging:
-        
         # Получаем логгер и пишем сообщение
         logger = logging.getLogger(__name__)
         # Определяем тип метрики для понятного лога

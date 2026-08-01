@@ -1,26 +1,25 @@
 """
-    Regression Metric Ecosystem: Профессиональный реестр и адаптер метрик.
-    Модуль расширяет стандартный набор `scikit-learn` 
-    кастомными реализациями RMSE и NRMSE, 
-    обеспечивая их бесшовную интеграцию в процессы автоматического 
-    подбора гиперпараметров (GridSearchCV, Optuna) и кросс-валидацию.
-    
-    Ключевые возможности:
-        1. Dual-Normalization NRMSE: 
-            Поддержка двух стратегий нормализации — локальной 
-            (динамический размах внутри фолда) 
-            и глобальной (фиксированный размах всего датасета).
-        2. Scorer API Compatibility: Автоматическая инверсия знака метрик-ошибок 
-           (меньше -> лучше) в формат скореров (больше -> лучше) 
-            для корректной оптимизации.
-        3. Numeric Stability: Встроенная защита от деления на ноль 
-           при встрече с константным таргетом — возврат `inf` 
-           вместо ошибки для сохранения стабильности пайплайна.
-        4. Smart Discovery: Единая точка доступа `get_scorer_object` 
-           с механизмом алиасов,  упрощающая вызов кастомных метрик 
-           по коротким именам (например, "rmse").
-"""
+Regression Metric Ecosystem: Профессиональный реестр и адаптер метрик.
+Модуль расширяет стандартный набор `scikit-learn`
+кастомными реализациями RMSE и NRMSE,
+обеспечивая их бесшовную интеграцию в процессы автоматического
+подбора гиперпараметров (GridSearchCV, Optuna) и кросс-валидацию.
 
+Ключевые возможности:
+    1. Dual-Normalization NRMSE:
+        Поддержка двух стратегий нормализации — локальной
+        (динамический размах внутри фолда)
+        и глобальной (фиксированный размах всего датасета).
+    2. Scorer API Compatibility: Автоматическая инверсия знака метрик-ошибок
+       (меньше -> лучше) в формат скореров (больше -> лучше)
+        для корректной оптимизации.
+    3. Numeric Stability: Встроенная защита от деления на ноль
+       при встрече с константным таргетом — возврат `inf`
+       вместо ошибки для сохранения стабильности пайплайна.
+    4. Smart Discovery: Единая точка доступа `get_scorer_object`
+       с механизмом алиасов,  упрощающая вызов кастомных метрик
+       по коротким именам (например, "rmse").
+"""
 
 from __future__ import annotations
 
@@ -39,13 +38,11 @@ from sklearn.metrics import (
 
 logger = logging.getLogger(__name__)
 
+
 # --------------------------------------------------------------------------- #
 #  Сами метрики
 # --------------------------------------------------------------------------- #
-def _rmse(
-        y_true: np.ndarray, 
-        y_pred: np.ndarray
-        ) -> float:
+def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Рассчитать корень из среднеквадратичной ошибки (RMSE).
     Логика расчета:
     1. Вычисляется MSE с использованием стандартной функции `mean_squared_error`.
@@ -59,22 +56,20 @@ def _rmse(
     """
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
+
 class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 
 
 # NRMSE для одного фолда
-def _nrmse(
-        y_true: Any,
-        y_pred: Any
-        ) -> float:
+def _nrmse(y_true: Any, y_pred: Any) -> float:
     """Рассчитать локальный нормализованный RMSE (NRMSE).
     Логика расчета:
     1. Вычисляется стандартное значение RMSE для текущей выборки.
-    2. Определяется диапазон (max - min) на основе 
+    2. Определяется диапазон (max - min) на основе
     переданных истинных значений `y_true`.
-    3. Обработка константного таргета: если диапазон < 1e-6, 
-    возвращается `inf` (бесконечная ошибка) 
+    3. Обработка константного таргета: если диапазон < 1e-6,
+    возвращается `inf` (бесконечная ошибка)
     с логированием предупреждения, чтобы избежать деления на ноль.
     4. RMSE делится на вычисленный локальный диапазон.
     Args:
@@ -91,21 +86,18 @@ def _nrmse(
             f"NRMSE: target is constant (range < 1e-6) for split of size "
             f"{len(y_true)}. Returning +inf (will be inverted to -inf by scorer)."
         )
-        return float('inf')
+        return float("inf")
     return float(rmse / denom)
 
-def _global_nrmse(
-    y_true: np.ndarray, 
-    y_pred: np.ndarray, 
-    target_range: float
-) -> float:
-    """Рассчитать глобальный нормализованный RMSE 
+
+def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -> float:
+    """Рассчитать глобальный нормализованный RMSE
     с использованием фиксированного диапазона.
     Логика расчета:
-    1. Валидация входного диапазона: если `target_range` меньше порога 1e-6, 
+    1. Валидация входного диапазона: если `target_range` меньше порога 1e-6,
     возвращается `inf` для предотвращения численной нестабильности.
     2. Вычисляется стандартное значение RMSE.
-    3. Ошибка нормализуется на заранее вычисленный глобальный диапазон 
+    3. Ошибка нормализуется на заранее вычисленный глобальный диапазон
     (не зависящий от текущего сплита).
     Args:
         y_true (np.ndarray): Истинные значения целевой переменной.
@@ -116,23 +108,24 @@ def _global_nrmse(
     """
     if target_range < 1e-6:
         logger.warning("Global target_range is too small. Returning +inf.")
-        return float('inf')
-        
+        return float("inf")
+
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     return rmse / target_range
+
 
 def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
     """Создать объект-скорер для глобального NRMSE, совместимый с Scikit-Learn.
     Логика создания:
-    1. Вычисляются минимальное и максимальное значения 
+    1. Вычисляются минимальное и максимальное значения
     из переданного полного вектора `global_y`.
     2. Рассчитывается глобальный диапазон `target_range`.
-    3. Формируется объект-скорер через `make_scorer`, 
+    3. Формируется объект-скорер через `make_scorer`,
     куда упаковывается функция `_global_nrmse`.
-    4. Устанавливается флаг `greater_is_better=False`, 
+    4. Устанавливается флаг `greater_is_better=False`,
     чтобы sklearn инвертировал метрику для максимизации.
     Args:
-        global_y (np.ndarray): Полный вектор целевой переменной 
+        global_y (np.ndarray): Полный вектор целевой переменной
         для расчета глобального диапазона.
     Returns:
         Any: Объект Scorer для использования в GridSearchCV или cross_validate.
@@ -140,14 +133,13 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
     y_max = np.max(global_y)
     y_min = np.min(global_y)
     target_range = float(y_max - y_min)
-    
+
     scorer = make_scorer(
-        _global_nrmse, 
-        greater_is_better=False, 
-        target_range=target_range
+        _global_nrmse, greater_is_better=False, target_range=target_range
     )
 
     return cast(Callable[..., Any], scorer)
+
 
 # --------------------------------------------------------------------------- #
 #  Частный реестр «сырой» (без переворота знака и прочего)
@@ -156,11 +148,9 @@ _METRICS: dict[str, Callable[..., Any]] = {
     # «меньше → лучше»
     "rmse": _rmse,
     "nrmse": _nrmse,
-    "global_nrmse": _global_nrmse, 
-
+    "global_nrmse": _global_nrmse,
     # «больше → лучше»
     "r2": r2_score,
-
     # alias: «больше → лучше» (отрицательный RMSE)
     "neg_root_mean_squared_error": lambda y_t, y_p: -_rmse(y_t, y_p),
 }
@@ -170,7 +160,7 @@ _METRICS: dict[str, Callable[..., Any]] = {
 #  Реестр готовых объектов-скореров для использования в sklearn API
 # --------------------------------------------------------------------------- #
 _SCORER_OBJECTS: dict[str, Callable[..., Any]] = {
-    # Для ошибок устанавливаем greater_is_better=False, 
+    # Для ошибок устанавливаем greater_is_better=False,
     # sklearn сам будет возвращать отрицательные значения для максимизации
     "nrmse": make_scorer(_nrmse, greater_is_better=False),
     "rmse": make_scorer(_rmse, greater_is_better=False),
@@ -184,11 +174,7 @@ AVAILABLE_METRICS = list(_SCORER_OBJECTS.keys())
 
 # Какие метрики ИЗНАЧАЛЬНО интерпретируются как «чем выше — тем лучше»
 # (те, которые не требуют инверсии знака для понимания пользователем)
-_GREATER_IS_BETTER = {
-    "r2", 
-    "explained_variance", 
-    "adjusted_r2"
-}
+_GREATER_IS_BETTER = {"r2", "explained_variance", "adjusted_r2"}
 
 
 # --------------------------------------------------------------------------- #
@@ -212,9 +198,9 @@ def get_metric(name: str) -> Callable[..., Any]:
 
 
 def is_greater_better(name: str) -> bool:
-    """Определить, является ли метрика максимизируемой (Score) 
+    """Определить, является ли метрика максимизируемой (Score)
     или минимизируемой (Error).
-    
+
     Args:
         name (str): Название метрики.
     Returns:
@@ -227,19 +213,20 @@ def is_greater_better(name: str) -> bool:
     # Если метрика содержит префиксы ошибки или наши стандартные регрессионные ошибки
     if any(prefix in lname for prefix in ["rmse", "nrmse", "error", "mae", "mse"]):
         return False
-    # По умолчанию для sklearn scorers, если не уверены, 
+    # По умолчанию для sklearn scorers, если не уверены,
     # проверяем наличие 'neg_' в названии (стандарт sklearn для ошибок)
     return not lname.startswith("neg_")
 
-def get_scorer_object(name: str,
-                      global_y: np.ndarray | None = None
-                      ) -> Callable[..., Any] | str:
+
+def get_scorer_object(
+    name: str, global_y: np.ndarray | None = None
+) -> Callable[..., Any] | str:
     """Получить объект-скорер, готовый для использования в инструментах sklearn.
     Логика получения:
-    1. Обработка 'global_nrmse': требует обязательного наличия `global_y` 
+    1. Обработка 'global_nrmse': требует обязательного наличия `global_y`
     для создания динамического скорера.
     2. Поиск в реестре `_SCORER_OBJECTS`: возвращает преднастроенные кастомные скореры.
-    3. Fallback: если имя не в реестре, используется 
+    3. Fallback: если имя не в реестре, используется
     стандартный `sklearn.metrics.get_scorer`.
     Args:
         name (str): Название требуемого скорера.
@@ -253,17 +240,19 @@ def get_scorer_object(name: str,
     if lname == "global_nrmse":
         if global_y is None:
             raise ValueError(
-                "For 'global_nrmse', 'global_y' must be passed to get_scorer_object")
+                "For 'global_nrmse', 'global_y' must be passed to get_scorer_object"
+            )
         return get_global_nrmse_scorer(global_y)
 
     # Если это наша кастомная метрика (nrmse, rmse и т.д.)
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname]
-    
-    # В остальных случаях возвращаем имя как есть 
+
+    # В остальных случаях возвращаем имя как есть
     # (sklearn сам найдет встроенную метрику)
     scorer = sklearn_get_scorer(lname)
     return cast("Callable[..., Any] | str", scorer)
+
 
 # --------------------------------------------------------------------------- #
 #  Приведение пользовательских alias-ов к тому, что понимает sklearn
@@ -271,7 +260,7 @@ def get_scorer_object(name: str,
 _ALIAS_TO_SKLEARN = {
     # т.к. sklearn оптимизирует «чем выше — тем лучше»
     # nrmse регистрируется напрямую
-    "rmse": "neg_root_mean_squared_error",  
+    "rmse": "neg_root_mean_squared_error",
 }
 
 
@@ -279,7 +268,7 @@ def to_sklearn_name(name: str) -> str:
     """Привести пользовательский алиас метрики к системному названию sklearn.
     Логика преобразования:
     1. Имя приводится к нижнему регистру.
-    2. Выполняется поиск по словарю `_ALIAS_TO_SKLEARN` 
+    2. Выполняется поиск по словарю `_ALIAS_TO_SKLEARN`
     (например, 'rmse' -> 'neg_root_mean_squared_error').
     3. Если алиас не найден, возвращается исходное имя в нижнем регистре.
     Args:

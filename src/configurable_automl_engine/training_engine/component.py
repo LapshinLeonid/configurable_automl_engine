@@ -59,12 +59,14 @@ def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
         for name in algorithms_cfg.model_fields
         if (algo_cfg := getattr(algorithms_cfg, name)) is not None
     }
+
+
 # --------------------------------------------------------------------------- #
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
 def _load_module(path: str) -> ModuleType:
     """Импортировать модуль по указанному пути.
-    Динамически загружает Python-модуль, используя dotted-path нотацию. 
+    Динамически загружает Python-модуль, используя dotted-path нотацию.
     В случае неудачи генерирует информативное исключение.
     Args:
         path (str): Путь к модулю в формате 'package.module'.
@@ -100,9 +102,9 @@ def _run_hpo(
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
     1. Загрузка тюнера: Импортируется модуль, указанный в `algo_cfg.tuner`.
-    2. Проверка сигнатуры: Метод `optimize` тюнера проверяется на поддержку 
+    2. Проверка сигнатуры: Метод `optimize` тюнера проверяется на поддержку
        специфичных параметров (n_folds, oversampling, space_overrides).
-    3. Выполнение: Запускается оптимизация. Если алгоритм признан невалидным 
+    3. Выполнение: Запускается оптимизация. Если алгоритм признан невалидным
        через `InvalidAlgorithmError`, выбрасывается каноничное исключение.
     Args:
         algo_name (str): Название алгоритма.
@@ -111,17 +113,17 @@ def _run_hpo(
         y (pd.Series): Вектор целевой переменной.
         metric_name_sklearn (str): Название метрики в формате sklearn.
         n_trials (int): Количество итераций поиска.
-        validation_strategy (ValidationStrategy): Стратегия валидации 
+        validation_strategy (ValidationStrategy): Стратегия валидации
             (k_fold, loo и т.д.).
         n_folds (int | None): Количество фолдов для кросс-валидации.
-        search_space_override (Dict[str, Any] | None): 
+        search_space_override (Dict[str, Any] | None):
             Переопределенное пространство поиска.
         data_oversampling (bool): Флаг включения оверсэмплинга.
         data_oversampling_multiplier (float): Коэффициент увеличения выборки.
         data_oversampling_algorithm (str): Название алгоритма оверсэмплинга.
     Returns:
-        Optional[Tuple[float, Dict[str, Any]]]: 
-            Кортеж (лучшая метрика, лучшие параметры) 
+        Optional[Tuple[float, Dict[str, Any]]]:
+            Кортеж (лучшая метрика, лучшие параметры)
             или None, если произошла ошибка при выполнении HPO.
     Raises:
         _CanonicalIAE: Если тюнер сообщает о несовместимости алгоритма с данными.
@@ -215,18 +217,19 @@ def _fit_and_save(
         )
 
     trainer = trainer_module.ModelTrainer(
-        algorithm=algo_name, 
+        algorithm=algo_name,
         hyperparams=best_params,
         metric=metric_name_sklearn,
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
         data_oversampling=cfg.oversampling.enable,
         data_oversampling_multiplier=cfg.oversampling.multiplier,
         data_oversampling_algorithm=cfg.oversampling.algorithm,
-        serialization_format=cfg.general.serialization_format
+        serialization_format=cfg.general.serialization_format,
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
+
 
 # --------------------------------------------------------------------------- #
 #  Public API                                                                 #
@@ -238,18 +241,18 @@ def train_best_model(
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
-)-> dict[str, Any]:
+) -> dict[str, Any]:
     """Основной интерфейс обучения лучшей модели.
-    Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO) 
+    Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO)
     -> выбор победителя -> финальное обучение -> сохранение.
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения. 
+        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения.
             Может быть путем к файлу, словарем или объектом Config.
         df (pd.DataFrame): Исходные данные.
         target (str | None): Имя целевого столбца. По умолчанию 'target'.
         model_path_override (str | Path | None): Альтернативный путь сохранения модели.
     Returns:
-        Dict[str, Any]: Словарь с результатами: название алгоритма, score, 
+        Dict[str, Any]: Словарь с результатами: название алгоритма, score,
             параметры и путь к файлу.
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
@@ -260,23 +263,27 @@ def train_best_model(
     # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
     target_col = target or "target"
 
-    #Проверка наличия таргета до инициализации тяжелых ресурсов
+    # Проверка наличия таргета до инициализации тяжелых ресурсов
     check_target_exists(df, target_col)
 
-    # Если передана строка или Path, читаем файл. 
+    # Если передана строка или Path, читаем файл.
     # Если объект Config или dict, обрабатываем их.
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
         _LOG.debug("CONFIG TYPE:", type(config))
-        _LOG.debug("ALGORITHMS:", (
-            config.get("algorithms") if isinstance(config, dict) else "N/A"))
+        _LOG.debug(
+            "ALGORITHMS:",
+            (config.get("algorithms") if isinstance(config, dict) else "N/A"),
+        )
         cfg = Config.model_validate(config)
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
     else:
-        raise TypeError(f"Unsupported config type: {type(config)}. "
-                        f"Expected Config, dict, str, or Path.")
+        raise TypeError(
+            f"Unsupported config type: {type(config)}. "
+            f"Expected Config, dict, str, or Path."
+        )
 
     # Если в конфиге указан путь к лог-файлу, настраиваем логирование
     if cfg.general.log_to_file:
@@ -288,10 +295,11 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
-    def prepare_search_space(algo_name: str, user_overrides: dict[str, Any] | None
-                             ) -> dict[str, Any]:
+    def prepare_search_space(
+        algo_name: str, user_overrides: dict[str, Any] | None
+    ) -> dict[str, Any]:
         """Подготовить пространство поиска гиперпараметров.
-        Объединяет системные значения по умолчанию с пользовательскими 
+        Объединяет системные значения по умолчанию с пользовательскими
         переопределениями из конфигурации.
         Args:
             algo_name (str): Имя алгоритма для поиска дефолтов.
@@ -299,23 +307,23 @@ def train_best_model(
         Returns:
             Dict[str, Any]: Итоговое пространство поиска.
         """
-        # Получаем базовый спейс для алгоритма 
+        # Получаем базовый спейс для алгоритма
         # (копируем, чтобы не менять глобальный объект)
         space = DEFAULT_SPACES.get(algo_name, {}).copy()
-        
+
         if user_overrides:
             # Перезаписываем или добавляем параметры из конфига пользователя
             space.update(user_overrides)
-            
+
         return space
 
     def _execute_hpo_phase(
-            phase_name: str, 
-            algo: str, 
-            a_cfg: AlgoCfg, 
-            n_trials: int, 
-            search_space: dict[str, Any] | None = None
-            ) -> tuple[float, dict[str, Any]] | None:
+        phase_name: str,
+        algo: str,
+        a_cfg: AlgoCfg,
+        n_trials: int,
+        search_space: dict[str, Any] | None = None,
+    ) -> tuple[float, dict[str, Any]] | None:
         """Выполнить конкретную фазу HPO для алгоритма.
         Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
         Args:
@@ -330,10 +338,10 @@ def train_best_model(
             ValueError: Если HPO вернул пустой результат.
         """
         _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
-        
+
         # Обращаемся к полям согласно определению в config_parser.py
-        ovr = cfg.oversampling 
-        
+        ovr = cfg.oversampling
+
         try:
             result = _run_hpo(
                 algo_name=algo,
@@ -347,14 +355,14 @@ def train_best_model(
                 search_space_override=search_space,
                 data_oversampling=ovr.enable,
                 data_oversampling_multiplier=ovr.multiplier,
-                data_oversampling_algorithm=ovr.algorithm.value, # .value т.к. это Enum
+                data_oversampling_algorithm=ovr.algorithm.value,  # .value т.к. это Enum
             )
-            
+
             if result is None:
                 return None
 
             score, params = result
-            
+
             disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score
             _LOG.info(f"{phase_name} {algo:15} | score {disp:.5f} | params {params}")
             return score, params
@@ -367,39 +375,41 @@ def train_best_model(
     current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
     phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
     for phase in cfg.general.phases:
-        _LOG.info(f"--- Starting Phase: {phase.name} ({phase.n_trials}"
-                  f" trials, action: {phase.action}) ---")
-        
+        _LOG.info(
+            f"--- Starting Phase: {phase.name} ({phase.n_trials}"
+            f" trials, action: {phase.action}) ---"
+        )
+
         # Если фаза требует только победителя, фильтруем кандидатов
         if phase.action == "refine_winner":
             if not phase_results:
-                raise RuntimeError(f"Phase '{phase.name}' requires a winner,"
-                                   f" but no previous results exist.")
-            
+                raise RuntimeError(
+                    f"Phase '{phase.name}' requires a winner,"
+                    f" but no previous results exist."
+                )
+
             select = max
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
         # Очищаем результаты для текущей фазы
         phase_results = {}
-        
+
         def _worker(
-                algo_name: str, 
-                algo_cfg: AlgoCfg,
-                p=phase
-                ) -> tuple[str, float, dict[str, Any]] | None:
+            algo_name: str, algo_cfg: AlgoCfg, p=phase
+        ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
                 algo_name (str): Имя алгоритма.
                 algo_cfg (AlgoCfg): Конфигурация алгоритма.
             Returns:
-                Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры 
+                Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
                     или None в случае ошибки.
             """
             # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
             full_search_space = prepare_search_space(
-                algo_name, 
-                algo_cfg.hyperparameters # это dict из вашего config_parser
+                algo_name,
+                algo_cfg.hyperparameters,  # это dict из вашего config_parser
             )
             try:
                 result = _execute_hpo_phase(
@@ -414,12 +424,15 @@ def train_best_model(
                 return algo_name, score, params
             except _CanonicalIAE:
                 raise
-            except Exception as e: # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
                 return None
+
         # Выполнение (параллельное или последовательное)
-        if (cfg.general.parallel_strategy == "algorithms"
-            and len(current_candidates) > 1):
+        if (
+            cfg.general.parallel_strategy == "algorithms"
+            and len(current_candidates) > 1
+        ):
             results = run_parallel(
                 _worker,
                 args_seq=[(n, a) for n, a in current_candidates.items()],
@@ -457,14 +470,20 @@ def train_best_model(
     final_score, final_params = phase_results[winner_algo]
     winner_cfg = all_algorithms[winner_algo]
 
-    
-    
-    
     # ------------------ FINAL FIT & SAVE -------------------------- #
     model_path = Path(model_path_override or cfg.general.path_to_model)
 
     try:
-        _fit_and_save(winner_algo,winner_cfg, X,y, final_params, model_path, cfg, metric_name_sklearn=metric_sklearn)
+        _fit_and_save(
+            winner_algo,
+            winner_cfg,
+            X,
+            y,
+            final_params,
+            model_path,
+            cfg,
+            metric_name_sklearn=metric_sklearn,
+        )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
         _LOG.error(f"Failed to save final model: {e}")

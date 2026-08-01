@@ -26,7 +26,7 @@ def test_pipeline_with_fractional_os(tmp_path: Path):
         f"""
 general:
   comparison_metric: "r2"
-  path_to_model: {tmp_path/'model.pkl'}
+  path_to_model: {tmp_path / "model.pkl"}
   phases:
     - name: "fast_search"
       n_trials: 5

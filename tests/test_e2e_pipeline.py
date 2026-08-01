@@ -1,45 +1,48 @@
 import pandas as pd
-import yaml # не забудьте import yaml
+import yaml  # не забудьте import yaml
 from pathlib import Path
 from configurable_automl_engine.training_engine.component import train_best_model
+
 
 def test_full_pipeline(tmp_path):
     # 1. Создаем временный конфиг БЕЗ ошибок (без extra_trees)
     # Используем tmp_path, чтобы модель сохранялась в изолированную папку
     model_save_path = tmp_path / "best_model.pkl"
-    
+
     config_dict = {
         "general": {
             "comparison_metric": "rmse",
             "phases": [
                 {"name": "search", "n_trials": 1, "action": "all_algorithms"},
-                {"name": "refine", "n_trials": 1, "action": "refine_winner"}
+                {"name": "refine", "n_trials": 1, "action": "refine_winner"},
             ],
-            "path_to_model": str(model_save_path)
+            "path_to_model": str(model_save_path),
         },
         "algorithms": {
-            "random_forest": { 
+            "random_forest": {
                 "enable": True,
                 "limit_hyperparameters": True,
-                "hyperparameters": {"n_estimators": [5, 10]}
+                "hyperparameters": {"n_estimators": [5, 10]},
             },
             "decision_tree": {
                 "enable": True,
                 "limit_hyperparameters": True,
-                "hyperparameters": {"max_depth": [2, 5]}
-            }
-        }
+                "hyperparameters": {"max_depth": [2, 5]},
+            },
+        },
     }
-    
+
     cfg_file = tmp_path / "test_config.yaml"
     with open(cfg_file, "w") as f:
         yaml.dump(config_dict, f)
     # 2. Данные
-    df = pd.DataFrame({
-        "feat1": range(10),
-        "feat2": [x * 0.1 for x in range(10)],
-        "target": [1.0 + x * 0.05 for x in range(10)],
-    })
+    df = pd.DataFrame(
+        {
+            "feat1": range(10),
+            "feat2": [x * 0.1 for x in range(10)],
+            "target": [1.0 + x * 0.05 for x in range(10)],
+        }
+    )
     # 3. Запуск
     # Передаем путь к временному конфигу
     res = train_best_model(str(cfg_file), df, target="target")

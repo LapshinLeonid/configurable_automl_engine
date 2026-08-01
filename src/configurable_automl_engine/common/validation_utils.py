@@ -19,6 +19,7 @@ def validate_df_not_empty(df: pd.DataFrame) -> None:
     if df.empty:
         raise ValueError("Input dataframe is empty")
 
+
 def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
     """
     Verifies that the target column exists in the DataFrame.
@@ -29,10 +30,11 @@ def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
             f" in dataframe columns: {list(df.columns)}"
         )
 
+
 def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
     """
     Splits the DataFrame into features (X) and target (y).
-    
+
     Assumptions:
     - df is a valid non-empty DataFrame.
     - target_col exists in df.
@@ -41,16 +43,17 @@ def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Ser
     y = df[target_col]
     return X, y
 
+
 def get_effective_train_size(
-n_total: int,
-strategy: ValidationStrategy | str,
-n_folds: int = 5,
-test_size: float = 0.2
+    n_total: int,
+    strategy: ValidationStrategy | str,
+    n_folds: int = 5,
+    test_size: float = 0.2,
 ) -> int:
     """
     Рассчитывает количество строк, которые модель фактически "видит" во время fit()
     в рамках одной итерации HPO или кросс-валидации.
-    Rationale: Это значение критично для динамического клиппинга пространства поиска 
+    Rationale: Это значение критично для динамического клиппинга пространства поиска
     (например, n_neighbors в KNN не может быть больше количества обучающих примеров).
 
     Args:
@@ -88,7 +91,7 @@ test_size: float = 0.2
         # Ограничиваем в диапазоне [0.01, 0.99], чтобы не получить 0 или n_total,
         # что привело бы к падению большинства алгоритмов обучения.
         safe_test_size = max(0.01, min(0.99, test_size))
-        
+
         effective_size = math.floor(n_total * (1 - safe_test_size))
         # Гарантируем, что если есть хотя бы 2 строки, то Neff будет минимум 1
         return max(1 if n_total >= 2 else 0, effective_size)

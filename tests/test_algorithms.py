@@ -5,15 +5,37 @@ from configurable_automl_engine.trainer import ModelTrainer
 
 # Список всех поддерживаемых сокращений из вашего models.py
 ALGORITHMS = [
-    "elasticnet", "dt", "sgd", "knn", "gpr", "svr",
-    "isotonic", "ard", "rf", "glm", "xgboost", "ridge_regression"
+    "elasticnet",
+    "dt",
+    "sgd",
+    "knn",
+    "gpr",
+    "svr",
+    "isotonic",
+    "ard",
+    "rf",
+    "glm",
+    "xgboost",
+    "ridge_regression",
 ]
 
 # Список всех поддерживаемых алгоритмов
 ALGORITHMS = [
-    "elasticnet", "dt", "sgd", "knn", "gpr", "svr",
-    "isotonic", "ard", "rf", "glm", "xgboost", "ridge_regression"
+    "elasticnet",
+    "dt",
+    "sgd",
+    "knn",
+    "gpr",
+    "svr",
+    "isotonic",
+    "ard",
+    "rf",
+    "glm",
+    "xgboost",
+    "ridge_regression",
 ]
+
+
 @pytest.mark.parametrize("algo", ALGORITHMS)
 def test_every_algorithm_can_fit_and_predict(algo, small_dataset):
     """
@@ -35,11 +57,16 @@ def test_every_algorithm_can_fit_and_predict(algo, small_dataset):
     # 5. Предсказание
     preds = trainer.predict(X)
     # 6. Проверки (Assertions)
-# 6. Проверки (Assertions)
-    assert preds.shape[0] == y.shape[0], f"Алгоритм {algo}: несоответствие размера предсказаний"
+    # 6. Проверки (Assertions)
+    assert preds.shape[0] == y.shape[0], (
+        f"Алгоритм {algo}: несоответствие размера предсказаний"
+    )
     assert not np.isnan(preds).any(), f"Алгоритм {algo} вернул NaN в предсказаниях"
-    
-    # Проверка наличия рассчитанной метрики в универсальном атрибуте val_score
-    assert hasattr(trainer, 'val_score'), f"Алгоритм {algo} не установил атрибут val_score"
-    assert trainer.val_score is not None, f"Алгоритм {algo}: val_score пуст после обучения"
 
+    # Проверка наличия рассчитанной метрики в универсальном атрибуте val_score
+    assert hasattr(trainer, "val_score"), (
+        f"Алгоритм {algo} не установил атрибут val_score"
+    )
+    assert trainer.val_score is not None, (
+        f"Алгоритм {algo}: val_score пуст после обучения"
+    )

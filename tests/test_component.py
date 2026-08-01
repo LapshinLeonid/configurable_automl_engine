@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from configurable_automl_engine.training_engine.component import (
     _run_hpo,
     _fit_and_save,
-    train_best_model
+    train_best_model,
 )
 from configurable_automl_engine.training_engine.config_parser import (
-    Config, AlgoCfg, ValidationStrategy
+    Config,
+    AlgoCfg,
+    ValidationStrategy,
 )
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
@@ -89,6 +91,7 @@ algorithms:
     enable: true
 """
 
+
 # --------------------------------------------------------------------------- #
 #  HAPPY PATH
 # --------------------------------------------------------------------------- #
@@ -99,10 +102,10 @@ def test_happy_path(tmp_path: Path, small_dataset):
     cfg_file = tmp_path / "cfg.yaml"
     model_path = tmp_path / "model.pkl"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
-    
+
     # Используем фикстуру small_dataset вместо локальной функции
     res = train_best_model(cfg_file, small_dataset, model_path_override=model_path)
-    
+
     assert Path(res["model_path"]).exists()
     assert res["algorithm"] in {
         "random_forest",
@@ -116,6 +119,7 @@ def test_happy_path(tmp_path: Path, small_dataset):
     }
     assert isinstance(res["score"], float)
 
+
 # --------------------------------------------------------------------------- #
 #  BAD INPUT TYPE
 # --------------------------------------------------------------------------- #
@@ -125,10 +129,13 @@ def test_bad_input_type(tmp_path: Path):
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
-    
+
     with pytest.raises(TypeError):
         # Передаем список вместо pandas.DataFrame
-        train_best_model(cfg_file, ["not", "a", "df"], model_path_override=tmp_path / "m.pkl")
+        train_best_model(
+            cfg_file, ["not", "a", "df"], model_path_override=tmp_path / "m.pkl"
+        )
+
 
 # --------------------------------------------------------------------------- #
 #  NO ALGORITHMS ENABLED
@@ -147,9 +154,10 @@ algorithms:
 """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(empty_cfg, "utf-8")
-    
+
     with pytest.raises(ValueError):
         train_best_model(cfg_file, small_dataset)
+
 
 # --------------------------------------------------------------------------- #
 #  UNSUPPORTED ALGORITHM SHOULD RAISE
@@ -160,9 +168,12 @@ def _make_iae(message: str):
     Нужно потому что _run_hpo проверяет имя класса строкой,
     а не через isinstance — это позволяет поймать IAE из любого модуля.
     """
+
     class InvalidAlgorithmError(Exception):
         pass
+
     return InvalidAlgorithmError(message)
+
 
 def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     """
@@ -188,6 +199,7 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
                 cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
             )
 
+
 from unittest.mock import patch
 from configurable_automl_engine import train_best_model
 
@@ -207,26 +219,30 @@ def test_train_best_model_lazy_proxy():
 
     with patch(
         "configurable_automl_engine.training_engine.component.train_best_model",
-        return_value=expected_result
+        return_value=expected_result,
     ) as mocked_tbm:
-
         result = train_best_model(1, 2, foo="bar")
 
         mocked_tbm.assert_called_once_with(1, 2, foo="bar")
         assert result == expected_result
 
+
 # --- Исправленные фикстуры ---
 @pytest.fixture
 def sample_df():
     return pd.DataFrame({"feature": [1, 2], "target": [0, 1]})
+
+
 @pytest.fixture
 def mock_algo_cfg():
     return AlgoCfg(
         enable=True,
         tuner="mock.mock_tuner",
         trainer_module="mock.mock_trainer",
-        hyperparameters=None
+        hyperparameters=None,
     )
+
+
 @pytest.fixture
 def base_config_dict():
     """Полный валидный словарь для Pydantic модели Config"""
@@ -236,101 +252,132 @@ def base_config_dict():
             "validation_strategy": "k_fold",
             "n_folds": 5,
             "phases": [
-                {"name": "fast", "n_trials": 2, "action": "all_algorithms"} # Исправлено 'all' -> 'all_algorithms'
+                {
+                    "name": "fast",
+                    "n_trials": 2,
+                    "action": "all_algorithms",
+                }  # Исправлено 'all' -> 'all_algorithms'
             ],
             "path_to_model": "model.pkl",
-            "log_to_file": None
+            "log_to_file": None,
         },
         "algorithms": {
             "random_forest": {
                 "enable": True,
                 "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer"
+                "trainer_module": "mock.mock_trainer",
             }
         },
-        "oversampling": {"data_oversampling": False}
+        "oversampling": {"data_oversampling": False},
     }
+
 
 class TestTrainingEngineCoverage:
     @patch("configurable_automl_engine.training_engine.component._load_module")
     def test_run_hpo_invalid_algorithm_error(self, mock_load, mock_algo_cfg, sample_df):
         mock_tuner = MagicMock()
-        
+
         # Динамически создаем класс с ТОЧНЫМ именем, которое ждет код
         CustomIAE = type("InvalidAlgorithmError", (Exception,), {})
-        
+
         mock_tuner.optimize.side_effect = CustomIAE("Test Error")
         mock_load.return_value = mock_tuner
         # Мы ожидаем проброса канонического исключения InvalidAlgorithmError
         # (которое в компоненте импортировано как _CanonicalIAE)
         with pytest.raises(InvalidAlgorithmError) as excinfo:
             _run_hpo(
-                algo_name="rf", 
-                algo_cfg=mock_algo_cfg, 
-                X=sample_df.drop(columns="target"), 
+                algo_name="rf",
+                algo_cfg=mock_algo_cfg,
+                X=sample_df.drop(columns="target"),
                 y=sample_df["target"],
-                metric_name_sklearn="mae", 
+                metric_name_sklearn="mae",
                 n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold
+                validation_strategy=ValidationStrategy.k_fold,
             )
-        
+
         # Проверяем, что текст ошибки сохранился
         assert "Test Error" in str(excinfo.value)
+
     # Исправленный тест на отсутствие ModelTrainer
     @patch("configurable_automl_engine.training_engine.component._load_module")
-    def test_fit_and_save_missing_trainer_class(self, mock_load, mock_algo_cfg, sample_df, base_config_dict):
-        mock_load.return_value = MagicMock(spec=[]) 
+    def test_fit_and_save_missing_trainer_class(
+        self, mock_load, mock_algo_cfg, sample_df, base_config_dict
+    ):
+        mock_load.return_value = MagicMock(spec=[])
         # Используем валидный конфиг вместо неполного словаря
         cfg = Config.model_validate(base_config_dict)
-        
+
         with pytest.raises(AttributeError, match="lacks `ModelTrainer` class"):
-            _fit_and_save("rf", mock_algo_cfg, sample_df, sample_df["target"], {}, Path("mod.pkl"), cfg)
+            _fit_and_save(
+                "rf",
+                mock_algo_cfg,
+                sample_df,
+                sample_df["target"],
+                {},
+                Path("mod.pkl"),
+                cfg,
+            )
+
     # Исправленный тест логирования
     @patch("configurable_automl_engine.training_engine.component.setup_logging")
     @patch("configurable_automl_engine.training_engine.component.read_config")
     def test_logging_setup(self, mock_read, mock_setup, sample_df, base_config_dict):
         base_config_dict["general"]["log_to_file"] = "test.log"
         mock_read.return_value = Config.model_validate(base_config_dict)
-        
+
         # Мокаем HPO, чтобы не запускать реальное обучение
-        with patch("configurable_automl_engine.training_engine.component._run_hpo", return_value=(0.9, {})):
-            with patch("configurable_automl_engine.training_engine.component._fit_and_save"):
+        with patch(
+            "configurable_automl_engine.training_engine.component._run_hpo",
+            return_value=(0.9, {}),
+        ):
+            with patch(
+                "configurable_automl_engine.training_engine.component._fit_and_save"
+            ):
                 train_best_model(config="cfg.yaml", df=sample_df, target="target")
-        
+
         mock_setup.assert_called_once()
+
     # Исправленный тест на ошибку в воркере
     @patch("configurable_automl_engine.training_engine.component._run_hpo")
     def test_worker_exception_handling(self, mock_hpo, sample_df, base_config_dict):
         # Настраиваем HPO на выброс исключения, которое НЕ является InvalidAlgorithmError
         mock_hpo.side_effect = ValueError("Something went wrong")
         cfg = Config.model_validate(base_config_dict)
-        
+
         # Ожидаем RuntimeError, так как phase_results останется пустым (строка 279)
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=cfg, df=sample_df, target="target")
+
     # Исправленный тест на ошибку сохранения
-    @patch("configurable_automl_engine.training_engine.component._run_hpo", return_value=(0.9, {"p": 1}))
+    @patch(
+        "configurable_automl_engine.training_engine.component._run_hpo",
+        return_value=(0.9, {"p": 1}),
+    )
     @patch("configurable_automl_engine.training_engine.component._fit_and_save")
-    def test_fit_and_save_failure(self, mock_fit, mock_hpo, sample_df, base_config_dict):
+    def test_fit_and_save_failure(
+        self, mock_fit, mock_hpo, sample_df, base_config_dict
+    ):
         mock_fit.side_effect = RuntimeError("Disk full")
         cfg = Config.model_validate(base_config_dict)
-        
+
         with pytest.raises(RuntimeError, match="Disk full"):
             train_best_model(config=cfg, df=sample_df, target="target")
+
     # Неподдерживаемый тип конфига
     def test_train_best_model_invalid_config_type(self, sample_df):
         with pytest.raises(TypeError, match="Unsupported config type"):
             train_best_model(config=123.45, df=sample_df)
-            
+
     # Пустой DataFrame
     def test_train_best_model_empty_df(self):
         with pytest.raises(ValueError, match="Input dataframe is empty"):
             train_best_model(config={}, df=pd.DataFrame())
 
+
 # Проверка отсутствия функции optimize в тюнере
 def test_run_hpo_lacks_optimize_attr():
     # Создаем mock-модуль без атрибута optimize
-    mock_tuner = MagicMock(spec=[]) 
+    mock_tuner = MagicMock(spec=[])
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=mock_tuner):
@@ -342,14 +389,16 @@ def test_run_hpo_lacks_optimize_attr():
                 y=pd.Series([1]),
                 metric_name_sklearn="mae",
                 n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold
+                validation_strategy=ValidationStrategy.k_fold,
             )
+
+
 # Проверка успешного возврата из блока try в _run_hpo
 def test_run_hpo_success_return():
     mock_tuner = MagicMock()
     # Настраиваем mock так, чтобы он возвращал кортеж (модель, параметры, скор)
     mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
-    
+
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=mock_tuner):
@@ -360,16 +409,19 @@ def test_run_hpo_success_return():
             y=pd.Series([1]),
             metric_name_sklearn="mae",
             n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split
+            validation_strategy=ValidationStrategy.train_test_split,
         )
         assert score == 0.95
         assert params == {"param": 1}
+
+
 # Ошибка, если target_col отсутствует в DataFrame
 def test_train_best_model_missing_target_column():
     df = pd.DataFrame({"feature1": [1, 2], "feature2": [3, 4]})
-    config = {"dummy": "config"} # Неважно, так как упадет раньше
+    config = {"dummy": "config"}  # Неважно, так как упадет раньше
     with pytest.raises(ValueError, match="Target column 'missing_col' not found"):
         train_best_model(config=config, df=df, target="missing_col")
+
 
 def test_train_best_model_config_from_dict_and_refine_flow():
     valid_config_dict = {
@@ -380,86 +432,97 @@ def test_train_best_model_config_from_dict_and_refine_flow():
             "parallel_strategy": "algorithms",
             "phases": [
                 {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
-                {"name": "p2", "n_trials": 1, "action": "refine_winner"}
+                {"name": "p2", "n_trials": 1, "action": "refine_winner"},
             ],
-            "path_to_model": "model.pkl"
+            "path_to_model": "model.pkl",
         },
         "algorithms": {
             "elasticnet": {
-                "enable": True, 
-                "tuner": "unittest.mock", 
-                "trainer_module": "unittest.mock"
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
             }
         },
-        "oversampling": {
-            "enable": False,
-            "multiplier": 1.0,
-            "algorithm": "random"
-        }
+        "oversampling": {"enable": False, "multiplier": 1.0, "algorithm": "random"},
     }
-    
+
     df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
     # Патчим _run_hpo (вызывается внутри вложенной _execute_hpo_phase)
     # и _fit_and_save (вызывается в конце)
-    with patch("configurable_automl_engine.training_engine.component._run_hpo", return_value=(0.9, {"C": 1.0})) as mock_hpo:
-        with patch("configurable_automl_engine.training_engine.component._fit_and_save") as mock_save:
+    with patch(
+        "configurable_automl_engine.training_engine.component._run_hpo",
+        return_value=(0.9, {"C": 1.0}),
+    ) as mock_hpo:
+        with patch(
+            "configurable_automl_engine.training_engine.component._fit_and_save"
+        ) as mock_save:
             result = train_best_model(config=valid_config_dict, df=df, target="target")
-            
+
             assert result["algorithm"] == "elasticnet"
             # Ожидаем 2 вызова: по одному на каждую фазу
             assert mock_hpo.call_count == 2
             mock_save.assert_called_once()
+
+
 def test_train_best_model_refine_winner_error_coverage():
-    """ Ошибка при refine_winner в самой первой фазе"""
+    """Ошибка при refine_winner в самой первой фазе"""
     invalid_dict = {
         "general": {
             "comparison_metric": "mae",
             "validation_strategy": "train_test_split",
             "phases": [{"name": "fail", "n_trials": 1, "action": "refine_winner"}],
-            "path_to_model": "test.pkl"
+            "path_to_model": "test.pkl",
         },
         "algorithms": {"elasticnet": {"enable": True}},
-        "oversampling": {"enable": False}
+        "oversampling": {"enable": False},
     }
     df = pd.DataFrame({"f": [1, 2], "target": [0, 1]})
     with pytest.raises(RuntimeError, match="requires a winner"):
         train_best_model(config=invalid_dict, df=df, target="target")
 
+
 # 1. Тест на логирование ошибки в _run_hpo
 def test_run_hpo_logs_error_on_exception():
-    with patch("configurable_automl_engine.training_engine.component._load_module") as mock_load:
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module"
+    ) as mock_load:
         # Имитируем ошибку в тюнере
         mock_tuner = MagicMock()
         mock_tuner.optimize.side_effect = Exception("HPO failure")
         mock_load.return_value = mock_tuner
-        
-        with patch("configurable_automl_engine.training_engine.component._LOG") as mock_log:
+
+        with patch(
+            "configurable_automl_engine.training_engine.component._LOG"
+        ) as mock_log:
             result = _run_hpo(
-                algo_name="test_algo", 
-                algo_cfg=MagicMock(), 
-                X=MagicMock(), y=MagicMock(),
-                metric_name_sklearn="accuracy", n_trials=1,
-                validation_strategy=MagicMock()
+                algo_name="test_algo",
+                algo_cfg=MagicMock(),
+                X=MagicMock(),
+                y=MagicMock(),
+                metric_name_sklearn="accuracy",
+                n_trials=1,
+                validation_strategy=MagicMock(),
             )
-            
+
             assert result is None
             # Проверяем, что была вызвана ошибка логгера
             mock_log.error.assert_called()
+
 
 # ---------------------------------------------------------------- #
 # 1️⃣ Test ValueError when tuner is None
 # ---------------------------------------------------------------- #
 def test_run_hpo_raises_when_tuner_none():
     algo_cfg = AlgoCfg(
-        tuner=None,
-        trainer_module="some.module",
-        enable=True,
-        hyperparameters={}
+        tuner=None, trainer_module="some.module", enable=True, hyperparameters={}
     )
-    X = pd.DataFrame({"a": [1,2]})
-    y = pd.Series([0,1])
-    
-    from configurable_automl_engine.training_engine.config_parser import ValidationStrategy
+    X = pd.DataFrame({"a": [1, 2]})
+    y = pd.Series([0, 1])
+
+    from configurable_automl_engine.training_engine.config_parser import (
+        ValidationStrategy,
+    )
+
     with pytest.raises(ValueError, match="Tuner path is not configured"):
         _run_hpo(
             algo_name="dummy_algo",
@@ -468,18 +531,16 @@ def test_run_hpo_raises_when_tuner_none():
             y=y,
             metric_name_sklearn="accuracy",
             n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold
+            validation_strategy=ValidationStrategy.k_fold,
         )
+
 
 # ---------------------------------------------------------------- #
 # 2️⃣ Test ValueError when trainer_module is None
 # ---------------------------------------------------------------- #
 def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
     algo_cfg = AlgoCfg(
-        tuner="some.tuner",
-        trainer_module=None,
-        enable=True,
-        hyperparameters={}
+        tuner="some.tuner", trainer_module=None, enable=True, hyperparameters={}
     )
     cfg = Mock()
     cfg.oversampling.enable = False
@@ -487,8 +548,8 @@ def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
     cfg.oversampling.algorithm = "random"
     cfg.general.serialization_format = "pickle"
 
-    X = pd.DataFrame({"a": [1,2]})
-    y = pd.Series([0,1])
+    X = pd.DataFrame({"a": [1, 2]})
+    y = pd.Series([0, 1])
     best_params = {"param": 1}
     model_path = tmp_path / "model.pkl"
 
@@ -500,8 +561,9 @@ def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
             y=y,
             best_params=best_params,
             model_path=model_path,
-            cfg=cfg
+            cfg=cfg,
         )
+
 
 # ---------------------------------------------------------------- #
 # 3️⃣ Test RuntimeError when _run_hpo returns None (HPO failure)
@@ -517,12 +579,14 @@ def test_run_hpo_returns_none_raises_runtime_error(mock_load):
         tuner="dummy.module",
         trainer_module="some.module",
         enable=True,
-        hyperparameters={}
+        hyperparameters={},
     )
-    X = pd.DataFrame({"a": [1,2]})
-    y = pd.Series([0,1])
+    X = pd.DataFrame({"a": [1, 2]})
+    y = pd.Series([0, 1])
 
-    from configurable_automl_engine.training_engine.config_parser import ValidationStrategy
+    from configurable_automl_engine.training_engine.config_parser import (
+        ValidationStrategy,
+    )
 
     # Patch _run_hpo inside _execute_hpo_phase to force None
     # Since _run_hpo returning None triggers RuntimeError in _execute_hpo_phase
@@ -536,13 +600,17 @@ def test_run_hpo_returns_none_raises_runtime_error(mock_load):
     result = None
     with pytest.raises(RuntimeError, match="failed to return a valid result"):
         if result is None:
-            raise RuntimeError(f"HPO phase 'dummy_phase' failed to return a valid result.")
+            raise RuntimeError(
+                f"HPO phase 'dummy_phase' failed to return a valid result."
+            )
+
 
 # Путь к модулю где реально живут _run_hpo и _fit_and_save
 _MODULE = "configurable_automl_engine.training_engine.component"
 
 
 # ── Фикстуры ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def minimal_df():
@@ -636,6 +704,7 @@ def config_two_algos(tmp_path):
 
 # ── Тест 1: _run_hpo → None, цепочка None-веток → RuntimeError ──────────────
 
+
 class TestExecuteHpoPhaseReturnsNone:
     """
     Цепочка: _run_hpo() → None
@@ -667,15 +736,14 @@ class TestExecuteHpoPhaseReturnsNone:
         self, mock_hpo, minimal_df, config_single_algo
     ):
         with pytest.raises(RuntimeError):
-            train_best_model(
-                config=config_single_algo, df=minimal_df, target="target"
-            )
+            train_best_model(config=config_single_algo, df=minimal_df, target="target")
 
         assert mock_hpo.call_count == 1
         assert mock_hpo.call_args.kwargs["algo_name"] == "random_forest"
 
 
 # ── Тест 2: Два алгоритма — один None, второй валидный ──────────────────────
+
 
 class TestPartialNoneResults:
     """

@@ -12,12 +12,13 @@ def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
     Сохраняет объект на диск в выбранном формате.
     """
     path = Path(path)
-    
+
     if fmt == SerializationFormat.joblib:
         joblib.dump(obj, path)
     else:
-        with open(path, 'wb') as f:
+        with open(path, "wb") as f:
             pickle.dump(obj, f)
+
 
 def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
     """
@@ -30,5 +31,5 @@ def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
     if fmt == SerializationFormat.joblib:
         return joblib.load(path)
     else:
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             return pickle.load(f)
