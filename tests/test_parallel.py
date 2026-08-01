@@ -920,3 +920,21 @@ def test_force_shutdown_processes_terminate_and_kill():
     
     assert mock_worker.terminate.called
     assert mock_worker.kill.called
+
+
+def test_run_parallel_generic_exception_no_timeout(caplog):
+    """Покрытие except Exception в else-ветке (timeout_for_ac is None)."""
+    def failing_task():
+        raise ValueError("No-timeout failure")
+    
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(
+            failing_task,
+            args_seq=[()],
+            mode="threads",
+            timeout=None  # отключаем глобальный таймаут
+        )
+    
+    assert results == [None]
+    assert "Task 0 failed" in caplog.text
+    assert "No-timeout failure" in caplog.text

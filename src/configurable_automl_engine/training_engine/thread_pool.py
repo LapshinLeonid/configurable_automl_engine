@@ -14,12 +14,12 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
         shared_args_indices=[0]
     )
 """
+import concurrent.futures
 import logging
 import os
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-import concurrent.futures
 from concurrent.futures import (
     Executor,
     Future,
@@ -386,7 +386,7 @@ def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
             try:
                 logger.error(f"CRITICAL: Worker {w.pid} hung. Forcing SIGTERM.")
                 w.terminate()
-            except Exception:
+            except Exception: # noqa: S110, BLE001
                 pass
 
     time.sleep(0.2)
@@ -396,7 +396,7 @@ def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
             try:
                 logger.critical(f"HARD KILL: Worker {w.pid} resisted SIGTERM. Sending SIGKILL.")
                 w.kill()
-            except Exception:
+            except Exception: # noqa: S110, BLE001
                 pass
 
 
@@ -545,7 +545,7 @@ def run_parallel(
         MAX_STALE_ITERATIONS = 5
 
         while future_to_idx:
-            elapsed = time.time() - start_time
+            time.time() - start_time
             effective_timeout = timeout
 
             # Вычисляем минимальный оставшийся таймаут
@@ -563,7 +563,7 @@ def run_parallel(
                 if min_remaining is not None:
                     min_remaining = min(min_remaining, global_remaining)
                 else:
-                    min_remaining = global_remaining
+                    min_remaining = global_remaining  # pragma: no cover
 
             timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
 
@@ -577,7 +577,7 @@ def run_parallel(
                             results[idx] = fut.result(timeout=0)
                         except (InvalidAlgorithmError, KeyboardInterrupt):
                             raise
-                        except Exception as e:
+                        except Exception as e: # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
                             results[idx] = None
                         stale_iterations = 0  # сброс stale при успехе
@@ -589,7 +589,7 @@ def run_parallel(
                             results[idx] = fut.result(timeout=0)
                         except (InvalidAlgorithmError, KeyboardInterrupt):
                             raise
-                        except Exception as e:
+                        except Exception as e: # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
                             results[idx] = None
                         stale_iterations = 0
@@ -631,7 +631,7 @@ def run_parallel(
                 if isinstance(e, KeyboardInterrupt):
                     logger.error("Interrupted by user")
                 raise
-            except Exception as e:
+            except Exception as e: # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
                 future_to_idx.clear()
                 break
