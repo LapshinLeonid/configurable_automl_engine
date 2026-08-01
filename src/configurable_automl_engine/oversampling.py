@@ -97,12 +97,16 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         # (Total), а не дельту
         return {cls: ceil(cnt * multiplier) for cls, cnt in counts.items()}
 
-    def _add_gaussian_noise(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _add_gaussian_noise(
+        self, df: pd.DataFrame, exclude_cols: list[str] | None = None
+    ) -> pd.DataFrame:
         """Добавить Гауссов шум в числовые столбцы и числовые элементы столбцов object.
         Применяет векторизированное вычисление шума для повышения производительности.
         Для нечисловых колонок пытается выполнить безопасное приведение типов.
         Args:
             df (pd.DataFrame): Набор данных для модификации.
+            exclude_cols (list[str] | None): Колонки, к которым НЕ нужно применять шум
+                (например, ordinal-закодированные категориальные).
         Returns:
             pd.DataFrame: Набор данных с добавленным шумом.
         """
@@ -120,6 +124,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         # 2. Теперь выбираем ВСЕ числовые колонки
         # (включая те, что только что конвертировали)
         numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+        # Исключаем колонки, которые не нужно шуметь (например, ordinal-encoded)
+        if exclude_cols:
+            numeric_cols = numeric_cols.difference(exclude_cols)
 
         if not numeric_cols.empty:
             # Векторизованное добавление шума для всех числовых колонок сразу
@@ -149,7 +157,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     #  Пункт 1: Переопределение fit_resample для обхода _check_X_y       #
     # ------------------------------------------------------------------ #
 
-    def fit_resample(self, X, y, **params):  # type: ignore[override]
+    def fit_resample(self, X, y):  # type: ignore[override]
         """Выполнить ресемплирование, минуя _check_X_y (validate_data).
 
         Родительский ``BaseSampler.fit_resample`` → ``SamplerMixin.fit_resample``
@@ -170,7 +178,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         """
         # Базовая конвертация для совместимости с _fit_resample
         # Разреженные матрицы не конвертируем — это сломает формат
-        is_sparse = hasattr(X, "tocsr") or hasattr(X, "issparse")
+        is_sparse = hasattr(X, "tocsr")
         if not is_sparse and not isinstance(X, (pd.DataFrame, np.ndarray)):
             X = np.asarray(X)
         if not isinstance(y, (pd.Series, np.ndarray)):
@@ -285,7 +293,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             raise ValueError("multiplier must be >= 1")
 
         # Проверка на разреженные матрицы (scipy.sparse)
-        is_sparse = hasattr(X, "tocsr") or hasattr(X, "issparse")
+        is_sparse = hasattr(X, "tocsr")
 
         # Разреженные матрицы несовместимы с добавлением шума.
         # Наложение Гауссовского шума делает все нулевые элементы ненулевыми,
@@ -304,11 +312,14 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
             y_s = pd.Series(y_validated)
 
-            # Определяем индексы нечисловых колонок для SMOTENC
+            # Определяем индексы нечисловых колонок для SMOTENC.
+            # Колонки с числовыми строками ("1.0", "2.0") не считаются
+            # категориальными — они будут сконвертированы в числа.
             cat_features_idx = [
                 i
                 for i, col in enumerate(X_df.columns)
                 if not is_numeric_dtype(X_df[col])
+                and pd.to_numeric(X_df[col], errors="coerce").isna().any()
             ]
             cat_cols = [X_df.columns[i] for i in cat_features_idx]
             # Проверка на отсутствие числовых колонок для SMOTE/ADASYN
@@ -393,8 +404,11 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
 
             # Единая точка наложения шума для всех алгоритмов
+            # Категориальные колонки исключаются из шума, чтобы не сломать
+            # последующее декодирование через OrdinalEncoder.inverse_transform
             if self.add_noise:
-                X_res_df = self._add_gaussian_noise(X_res_df)
+                noise_exclude = cat_cols if ordinal_encoder is not None else None
+                X_res_df = self._add_gaussian_noise(X_res_df, exclude_cols=noise_exclude)
 
             # Декодирование категориальных колонок обратно (только для random)
             if ordinal_encoder is not None:
