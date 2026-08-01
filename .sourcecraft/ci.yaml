@@ -317,7 +317,7 @@ workflows:
                 storage: filesystem
                 EOF
 
-                # Сохраняем PATH для следующих кубов
+                # Сохраняем PATH для следующих кубов 
                 echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
 
           - name: apply-fixes
