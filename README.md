@@ -8,7 +8,7 @@
 
 AutoML Engine is a configuration-driven automated machine learning library for Python. 
 It provides a high-performance ecosystem for model selection and hyperparameter optimization, 
-designed to scale from local experimentation to large-scale data processing.
+designed to scale from local experimentation to large-scale data processing. 
 
 # Features
 
