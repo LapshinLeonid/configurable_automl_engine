@@ -9,7 +9,7 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
 * **Python Target:** Python 3.11+ (Use modern typing: `list[str]`, `dict[str, Any]`, `A | B`).
 * **Project Layout:** Code in `src/configurable_automl_engine/`, tests in `tests/`.
 * **Docstrings:** Google-style in English for all public modules, classes, and functions (`Args:`, `Returns:`, `Raises:`).
-* **Code Quality Baseline:** Zero Ruff warnings, 100% strict Mypy compliance, passing Pytest suite.
+* **Code Quality Baseline:** Zero Ruff warnings in /src/, 100% strict Mypy compliance in /src/, passing Pytest suite.
 
 ---
 
@@ -38,11 +38,13 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
      - **Edge cases:** Empty/boundary/invalid inputs.
   4. Run and fix all quality checks:
      ```bash
-     ruff check src/ tests/
-     ruff format --check src/ tests/
+     ruff check src/
+     ruff format --check src/
      mypy src
      pytest --cov=src --cov-report=term-missing
      ```
+    After your changes all tests must pass. If you changes breaks some old test you must fix that tests.
+    Remember you need to check in ruff and mypy only /src/ folder. Tests must not be checked with ruff and mypy.
   5. Commit changes with descriptive commit messages (add `[skip-sync]` if working on internal CI-only iterations).
 
 ---
