@@ -25,9 +25,9 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from unittest.mock import MagicMock, patch
 from configurable_automl_engine.tuner import (
     _apply_dynamic_space,
-    _build_scorer, 
-    HyperoptError
-    )
+    _build_scorer,
+    HyperoptError,
+)
 
 import optuna
 from optuna.trial import FixedTrial
@@ -87,7 +87,7 @@ def test_optimize_smoke(algo: str, toy_data):
         algo,
         X,
         y,
-        n_trials=3,          # минимально для быстроты
+        n_trials=3,  # минимально для быстроты
         random_state=0,
     )
 
@@ -135,39 +135,46 @@ def test_non_positive_trials(bad_trials, toy_data):
     with pytest.raises(ValueError):
         hyperopt.optimize("ridge", X, y, n_trials=bad_trials)
 
+
 def test_apply_dynamic_space_types(toy_data):
     """
     Покрывает логику _apply_dynamic_space.
     Используем алгоритм 'knn', так как для него в коде есть фабрика пространств.
     """
     X, y = toy_data
-    
+
     class MockEntry:
         def __init__(self, bounds):
             self.bounds = bounds
+
         @property
-        def low(self): return self.bounds[0]
+        def low(self):
+            return self.bounds[0]
+
         @property
-        def high(self): return self.bounds[1]
+        def high(self):
+            return self.bounds[1]
+
         @property
-        def dist_type(self): return self.bounds[2]
+        def dist_type(self):
+            return self.bounds[2]
+
         @property
-        def step(self): return self.bounds[3] if len(self.bounds) > 3 else None
+        def step(self):
+            return self.bounds[3] if len(self.bounds) > 3 else None
+
     # Имитируем структуру из YAML для KNN
     # Это покроет ветки int, float, float_log, categorical и константы
     dynamic_config = {
         "n_neighbors": MockEntry([5, 15, "int"]),
         "p": MockEntry([1, 2, "int"]),
         "weights": MockEntry([["uniform", "distance"], None, "categorical"]),
-        "leaf_size": 30  # Константа (строка 144)
+        "leaf_size": 30,  # Константа (строка 144)
     }
     model, params, score = hyperopt.optimize(
-        "knn",
-        X, y,
-        n_trials=2,
-        space_overrides={"knn": dynamic_config}
+        "knn", X, y, n_trials=2, space_overrides={"knn": dynamic_config}
     )
-    
+
     assert isinstance(params["n_neighbors"], int)
     assert params["weights"] in ["uniform", "distance"]
     # Проверяем, что константа попала в модель
@@ -181,48 +188,53 @@ def test_validate_data_mismatch():
     with pytest.raises(hyperopt.InvalidDataError, match="Size mismatch"):
         hyperopt._validate_data(X, y)
 
+
 def test_validate_data_invalid_y_type():
     """Проверка ошибки при недопустимом типе y (строка 155)."""
     X = np.zeros((5, 2))
-    y = {1: 0, 2: 0} # dict не входит в ok_types
+    y = {1: 0, 2: 0}  # dict не входит в ok_types
     with pytest.raises(hyperopt.InvalidDataError, match="y must be"):
         hyperopt._validate_data(X, y)
+
 
 def test_optimize_with_oversampling(toy_data):
     """
     Покрывает логику включения оверсэмплинга в Pipeline.
     """
     X, y = toy_data
-    y_bin = (y > y.mean()).astype(int) 
+    y_bin = (y > y.mean()).astype(int)
     model, params, score = hyperopt.optimize(
         "knn",
-        X, y_bin,
+        X,
+        y_bin,
         data_oversampling=True,
         data_oversampling_algorithm="random",
         data_oversampling_multiplier=1.2,
-        n_trials=2
+        n_trials=2,
     )
 
     print(model.steps)
     assert isinstance(model, ImbPipeline)
     assert any(isinstance(step[1], DataOversampler) for step in model.steps)
 
+
 def test_can_stratify_negative():
     """Проверка условий, когда стратификация невозможна (строки 182-183)."""
     # Много уникальных значений (регрессия)
     y_reg = np.linspace(0, 1, 100)
     assert hyperopt._can_stratify(y_reg) is False
-    
+
     # Многомерный y
     y_multi = np.zeros((10, 2))
     assert hyperopt._can_stratify(y_multi) is False
+
 
 def test_split_train_test_fallback():
     """Проверка fallback в train_test_split при ошибке стратификации (строки 194-196)."""
     # Создаем ситуацию, где стратификация невозможна из-за 1 экземпляра класса
     X = np.random.rand(10, 2)
-    y = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) 
-    
+    y = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+
     # Метод должен отработать без ошибок, поймав ValueError внутри
     res = hyperopt._split_train_test(X, y, test_size=0.5)
     assert len(res) == 4
@@ -234,85 +246,101 @@ def test_optimize_pruning(toy_data):
     Исправлено: параметры теперь регистрируются через trial.suggest_int.
     """
     X, y = toy_data
-    
+
     def pruning_space(trial):
         # Используем suggest_int, чтобы optuna зафиксировала параметры в trial.params
         if trial.number == 0:
             n_neighbors = trial.suggest_int("n_neighbors", 5, 5)
             return {"n_neighbors": n_neighbors, "weights": "uniform", "p": 2}
-        
+
         # Вторая попытка вызовет ошибку (n_neighbors <= 0)
         n_neighbors = trial.suggest_int("n_neighbors", 0, 0)
         return {"n_neighbors": n_neighbors, "weights": "uniform", "p": 2}
+
     # Метод не должен упасть, Trial 1 просто будет помечен как Pruned
     model, params, score = hyperopt.optimize(
-        "knn", X, y,
+        "knn",
+        X,
+        y,
         n_trials=2,
         # Передаем как словарь для конкретного алгоритма
-        space_overrides={"knn": pruning_space}
+        space_overrides={"knn": pruning_space},
     )
-    
+
     # Теперь params не будет пустым, так как Trial 0 успешно завершился
     assert "n_neighbors" in params
     assert params["n_neighbors"] == 5
+
 
 def test_knn_space_dynamic_limit():
     """Проверка динамического ограничения k в KNN (строки 80-81)."""
     # Для 10 сэмплов 80% это 8. max_k должен быть 8.
     space_fn = hyperopt._make_knn_space(n_samples=10)
-    
 
     # Эмулируем запрос n_neighbors
     trial = FixedTrial({"n_neighbors": 5, "weights": "uniform", "p": 1})
     params = space_fn(trial)
     assert params["n_neighbors"] <= 8
 
+
 def test_apply_dynamic_space_floats():
     trial = MagicMock()
+
     class MockEntry:
         def __init__(self, bounds):
             self.bounds = bounds
+
         @property
-        def low(self): return self.bounds[0]
+        def low(self):
+            return self.bounds[0]
+
         @property
-        def high(self): return self.bounds[1]
+        def high(self):
+            return self.bounds[1]
+
         @property
-        def dist_type(self): return self.bounds[2]
+        def dist_type(self):
+            return self.bounds[2]
+
         @property
-        def step(self): return self.bounds[3] if len(self.bounds) > 3 else None
+        def step(self):
+            return self.bounds[3] if len(self.bounds) > 3 else None
+
     space_dict = {
         "learning_rate": MockEntry([0.01, 0.1, "float"]),
         "gamma": MockEntry([1e-5, 1e-1, "float_log"]),
-        "constant": 42
+        "constant": 42,
     }
-    
+
     _apply_dynamic_space(trial, space_dict)
-    
+
     # Проверяем вызовы
     trial.suggest_float.assert_any_call("learning_rate", 0.01, 0.1, step=None)
     trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
+
 
 def test_build_scorer_error():
     with pytest.raises(HyperoptError, match="Unknown metric name"):
         _build_scorer("non_existent_metric_name_123")
 
+
 def test_can_stratify_pandas():
     y_series = pd.Series([0, 1, 0, 1])
     assert _can_stratify(y_series) is True
-    
+
     y_df = pd.DataFrame({"target": [0, 1, 0, 1]})
     assert _can_stratify(y_df) is False  # Т.к. ndim != 1 для DF с 1 колонкой (обычно)
 
+
 def test_optimize_train_test_split_mode(toy_data):
     X, y = toy_data
-    # Принудительно вызываем режим hold-out через передачу малого количества данных 
+    # Принудительно вызываем режим hold-out через передачу малого количества данных
     # или явное указание стратегии
     model, params, score = optimize(
-        "knn", X, y,
-        validation_strategy="train_test_split",
-        n_trials=1
+        "knn", X, y, validation_strategy="train_test_split", n_trials=1
     )
     assert score is not None
+
 
 def test_optimize_raises_when_no_search_space(monkeypatch):
     """Проверяет выброс HyperoptError если для алгоритма нет search-space."""
@@ -333,65 +361,61 @@ def test_optimize_raises_when_no_search_space(monkeypatch):
         return DummyModel()
 
     # --- делаем алгоритм валидным ---
-    monkeypatch.setattr(
-        hyperopt,
-        "_get_estimator",
-        lambda algo: True
-    )
+    monkeypatch.setattr(hyperopt, "_get_estimator", lambda algo: True)
 
     with pytest.raises(HyperoptError, match="нет search-space"):
-        optimize(
-            "fake_algo",
-            X,
-            y,
-            n_trials=1
-        )
+        optimize("fake_algo", X, y, n_trials=1)
 
 
 class TestTunerObjective:
     @pytest.fixture
     def dummy_data(self):
-        return pd.DataFrame({'a': [1, 2, 3, 4, 5]}), pd.Series([1, 0, 1, 0, 1])
+        return pd.DataFrame({"a": [1, 2, 3, 4, 5]}), pd.Series([1, 0, 1, 0, 1])
+
     @pytest.fixture
     def mock_space(self):
         return {"rf": lambda trial: {"n_estimators": 10}}
+
     def test_objective_trigger_fallback(self, dummy_data, mock_space):
         """
         Тест принудительно заставляет np.isfinite вернуть False,
         чтобы проверить возврат константы.
         """
         X, y = dummy_data
-        EXPECTED_FALLBACK = -3.4028235e+38
+        EXPECTED_FALLBACK = -3.4028235e38
         # 1. Патчим ВСЁ окружение, чтобы ни одна реальная функция не выполнилась
-        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
-             patch('configurable_automl_engine.tuner.create_model') as mock_create, \
-             patch('configurable_automl_engine.tuner._build_scorer') as mock_scorer_factory, \
-             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
-             patch('configurable_automl_engine.tuner.np.isfinite') as mock_finite, \
-             patch('configurable_automl_engine.tuner._validate_data'), \
-             patch('configurable_automl_engine.tuner._get_estimator'):
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch(
+                "configurable_automl_engine.tuner._build_scorer"
+            ) as mock_scorer_factory,
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner.np.isfinite") as mock_finite,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
             # ГАРАНТИРУЕМ:
             # 1. Мы в ветке k-fold
             mock_make_cv.return_value = ("k_fold", MagicMock())
             # 2. cross_val_score возвращает что-то
             mock_cv.return_value = np.array([0.5])
             # 3. КРИТИЧЕСКИЙ МОМЕНТ: Любое число НЕ конечное
-            mock_finite.return_value = False 
-            
+            mock_finite.return_value = False
+
             # Остальные заглушки
             mock_create.return_value = MagicMock()
             mock_scorer_factory.return_value = MagicMock()
             # Вызываем
             _, _, best_score = optimize(
-                algo_name="rf",
-                X=X,
-                y=y,
-                n_trials=1,
-                space_overrides=mock_space
+                algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
             # Проверяем
             assert best_score == EXPECTED_FALLBACK
             assert mock_finite.called
+
     def test_objective_via_actual_nan(self, dummy_data, mock_space):
         """
         Тест через подмену np.mean (более естественный путь).
@@ -399,25 +423,27 @@ class TestTunerObjective:
         Если 'from numpy import mean', патчим 'mean'.
         """
         X, y = dummy_data
-        
+
         # Попробуем запатчить mean в пространстве имен модуля tuner
-        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
-             patch('configurable_automl_engine.tuner.create_model'), \
-             patch('configurable_automl_engine.tuner._build_scorer'), \
-             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
-             patch('configurable_automl_engine.tuner.np.mean', return_value=np.nan), \
-             patch('configurable_automl_engine.tuner._validate_data'), \
-             patch('configurable_automl_engine.tuner._get_estimator'):
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner.np.mean", return_value=np.nan),
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
             mock_make_cv.return_value = ("k_fold", MagicMock())
-            mock_cv.return_value = np.array([1.0]) # значение не важно, так как mean вернет nan
+            mock_cv.return_value = np.array(
+                [1.0]
+            )  # значение не важно, так как mean вернет nan
             _, _, best_score = optimize(
-                algo_name="rf",
-                X=X,
-                y=y,
-                n_trials=1,
-                space_overrides=mock_space
+                algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
-            assert best_score == -3.4028235e+38
+            assert best_score == -3.4028235e38
 
     def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
         """
@@ -426,22 +452,23 @@ class TestTunerObjective:
         MAX_CONSECUTIVE_FAILURES (5) последовательных ошибок.
         """
         X, y = dummy_data
-        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
-             patch('configurable_automl_engine.tuner.create_model'), \
-             patch('configurable_automl_engine.tuner._build_scorer'), \
-             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
-             patch('configurable_automl_engine.tuner._validate_data'), \
-             patch('configurable_automl_engine.tuner._get_estimator'):
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
             mock_make_cv.return_value = ("k_fold", MagicMock())
             # Каждый вызов cross_val_score кидает ValueError
             mock_cv.side_effect = ValueError("cv failed")
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
                 optimize(
-                    algo_name="rf",
-                    X=X, y=y,
-                    n_trials=10,
-                    space_overrides=mock_space
+                    algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
                 )
 
     def test_four_failures_one_success_not_disqualified(self, dummy_data, mock_space):
@@ -451,12 +478,16 @@ class TestTunerObjective:
         запуске cross_val_score оптимизация завершается успешно.
         """
         X, y = dummy_data
-        with patch('configurable_automl_engine.tuner.model_selection.cross_val_score') as mock_cv, \
-             patch('configurable_automl_engine.tuner.create_model'), \
-             patch('configurable_automl_engine.tuner._build_scorer'), \
-             patch('configurable_automl_engine.tuner.make_cv') as mock_make_cv, \
-             patch('configurable_automl_engine.tuner._validate_data'), \
-             patch('configurable_automl_engine.tuner._get_estimator'):
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
             mock_make_cv.return_value = ("k_fold", MagicMock())
             # 4 ошибки подряд, затем успех
             mock_cv.side_effect = [
@@ -468,9 +499,105 @@ class TestTunerObjective:
             ]
 
             _, _, best_score = optimize(
-                algo_name="rf",
-                X=X, y=y,
-                n_trials=5,
-                space_overrides=mock_space
+                algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
+            )
+            assert best_score == 0.85
+
+    def test_consecutive_failures_with_train_test_split(self, dummy_data, mock_space):
+        """
+        5 последовательных ValueError в train_test_split → InvalidAlgorithmError.
+        Проверяет, что circuit breaker работает при train_test_split,
+        а не только при k-fold/Leave-One-Out.
+        """
+        X, y = dummy_data
+        with (
+            patch("configurable_automl_engine.tuner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch(
+                "configurable_automl_engine.tuner._build_scorer"
+            ) as mock_scorer_factory,
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
+            # Принудительно выбираем train_test_split
+            mock_make_cv.return_value = ("train_test_split", None)
+
+            # iter_splits должен возвращать свежий итератор при каждом вызове
+            def fresh_iter(*args, **kwargs):
+                return iter(
+                    [
+                        (
+                            np.array([[1], [2]]),
+                            np.array([[1], [2]]),
+                            np.array([0, 1]),
+                            np.array([0, 1]),
+                        )
+                    ]
+                )
+
+            mock_iter_splits.side_effect = fresh_iter
+
+            # Модель: fit всегда падает с ValueError
+            mock_model = MagicMock()
+            mock_model.fit.side_effect = ValueError("fit failed")
+            mock_create.return_value = mock_model
+            mock_scorer_factory.return_value = MagicMock()
+
+            with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
+                optimize(
+                    algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
+                )
+
+    def test_train_test_split_success_resets_counter(self, dummy_data, mock_space):
+        """
+        4 ошибки + 1 успех при train_test_split → алгоритм НЕ дисквалифицируется.
+        Проверяет, что успешный train_test_split сбрасывает consecutive_failures.
+        """
+        X, y = dummy_data
+        with (
+            patch("configurable_automl_engine.tuner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch(
+                "configurable_automl_engine.tuner._build_scorer"
+            ) as mock_scorer_factory,
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
+            mock_make_cv.return_value = ("train_test_split", None)
+
+            def fresh_iter(*args, **kwargs):
+                return iter(
+                    [
+                        (
+                            np.array([[1], [2]]),
+                            np.array([[1], [2]]),
+                            np.array([0, 1]),
+                            np.array([0, 1]),
+                        )
+                    ]
+                )
+
+            mock_iter_splits.side_effect = fresh_iter
+
+            # 4 ошибки подряд, затем успех
+            mock_model = MagicMock()
+            mock_model.fit.side_effect = [
+                ValueError("fit failed"),
+                ValueError("fit failed"),
+                ValueError("fit failed"),
+                ValueError("fit failed"),
+                None,  # trial 5 success → _objective возвращает score
+                None,  # финальный best_model.fit(X, y)
+            ]
+            mock_create.return_value = mock_model
+
+            # Скор возвращает 0.85 при успешном вызове
+            mock_scorer = MagicMock(return_value=0.85)
+            mock_scorer_factory.return_value = mock_scorer
+
+            _, _, best_score = optimize(
+                algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
             assert best_score == 0.85

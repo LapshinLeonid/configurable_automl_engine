@@ -1,26 +1,25 @@
-""" Hyperparameter Optimisation Module: 
-Двигатель автоматизированного поиска параметров. 
+"""Hyperparameter Optimisation Module:
+Двигатель автоматизированного поиска параметров.
 
-Модуль обеспечивает высокоуровневую обертку над Optuna для 
-автоматического подбора конфигураций моделей с поддержкой 
+Модуль обеспечивает высокоуровневую обертку над Optuna для
+автоматического подбора конфигураций моделей с поддержкой
 динамических пространств поиска, кросс-валидации и интегрированного оверсэмплинга.
 
 Ключевые возможности:
-    1. Hybrid Model Zoo: Полная поддержка базового пула моделей AutoML-движка 
+    1. Hybrid Model Zoo: Полная поддержка базового пула моделей AutoML-движка
        с расширением за счет SGD, GaussianProcess, Isotonic и GLM-семейства.
-    2. Neural Filter: Автоматическая детекция и исключение нейросетевых архитектур 
+    2. Neural Filter: Автоматическая детекция и исключение нейросетевых архитектур
        (alias "nn") для оптимизации ресурсов в классическом ML-пайплайне.
-    3. Adaptive Validation: Интеллектуальное переключение между k-fold, 
-       Leave-One-Out и Train-Test Split (80/20) в зависимости от объема выборки 
+    3. Adaptive Validation: Интеллектуальное переключение между k-fold,
+       Leave-One-Out и Train-Test Split (80/20) в зависимости от объема выборки
        (fallback при n_samples < 2k).
-    4. Integrated Oversampling: Бесшовная интеграция балансировки классов через 
+    4. Integrated Oversampling: Бесшовная интеграция балансировки классов через
        Imbalance-Pipeline прямо внутри процесса оптимизации.
-    5. Dynamic Search Spaces: Поддержка как жестко заданных пространств (например, 
+    5. Dynamic Search Spaces: Поддержка как жестко заданных пространств (например,
        адаптивный KNN-space), так и внешних конфигураций через YAML/SearchSpaceEntry.
-    6. Metric Agnostic: Возможность оптимизации по любой стандартной или 
+    6. Metric Agnostic: Возможность оптимизации по любой стандартной или
        кастомной метрике Sklearn (по умолчанию R²).
 """
-
 
 from __future__ import annotations
 
@@ -52,12 +51,15 @@ from configurable_automl_engine.validation import iter_splits, make_cv
 
 logging = _logging  # alias
 
+
 # ═════════════════════════════════════ exceptions ════════════════════════════
 class HyperoptError(Exception):
     """Базовая ошибка модуля гиперпараметрической оптимизации."""
 
+
 class InvalidAlgorithmError(HyperoptError):
     """Ошибка, возникающая, если алгоритм не найден или помечен как неиспользуемый."""
+
 
 class InvalidDataError(HyperoptError):
     """Ошибка, возникающая при передаче некорректных структур данных X или y."""
@@ -68,40 +70,42 @@ log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
+
 # ══════════ KNN-space зависит от размера выборки ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
     """Создать генератор пространства поиска для алгоритма KNN."""
+
     def _space(t: Trial) -> dict[str, Any]:
         # Ограничение n_neighbors физическим пределом обучающей выборки (N_eff - 1).
         # Используем n_samples_eff вместо общего количества строк в датасете.
         physical_limit = max(1, n_samples - 1)
         max_k = int(min(30, physical_limit))
-        
+
         return {
             "n_neighbors": t.suggest_int("n_neighbors", 1, max_k),
-            "weights": t.suggest_categorical(
-                "weights", ["uniform", "distance"]
-            ),
+            "weights": t.suggest_categorical("weights", ["uniform", "distance"]),
             "p": t.suggest_int("p", 1, 2),
         }
 
     return _space
 
+
 # ═════════════════════════════ helper-utilities ═════════════════════════════
+
 
 def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
     """Преобразовать конфигурационный словарь в параметры модели через методы Optuna.
     Args:
         trial (Trial): Объект текущей итерации Optuna.
-        space_dict (dict[str, Any]): Словарь, содержащий объекты SearchSpaceEntry 
+        space_dict (dict[str, Any]): Словарь, содержащий объекты SearchSpaceEntry
             (с границами и типами распределений) или константные значения.
     Returns:
         dict[str, Any]: Словарь конкретных значений гиперпараметров для данной итерации.
     """
     params: dict[str, Any] = {}
     for key, value in space_dict.items():
-        # Если это SearchSpaceEntry 
-         # (используем свойства low, high, dist_type, step)
+        # Если это SearchSpaceEntry
+        # (используем свойства low, high, dist_type, step)
         if hasattr(value, "dist_type"):
             low, high = value.low, value.high
             dist_type = value.dist_type
@@ -109,49 +113,44 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
             if dist_type == "int":
                 low_val, high_val = int(cast(float, low)), int(cast(float, high))
                 params[key] = trial.suggest_int(
-                    key, 
-                    low_val, 
-                    high_val,
-                    step=int(step) if step is not None else 1
-                    )
+                    key, low_val, high_val, step=int(step) if step is not None else 1
+                )
             elif dist_type == "float":
                 params[key] = trial.suggest_float(
-                    key, 
-                    float(low), 
+                    key,
+                    float(low),
                     float(high),
-                    step=float(step) if step is not None else None
-                    )
+                    step=float(step) if step is not None else None,
+                )
             elif dist_type == "float_log":
                 params[key] = trial.suggest_float(
-                    key, 
-                    float(low), 
-                    float(high), 
-                    log=True
-                    )
+                    key, float(low), float(high), log=True
+                )
             elif dist_type == "categorical":
                 # Извлекаем список опций из атрибута options или из вложенного config
                 options = getattr(value, "options", None)
                 if options is None and hasattr(value, "config"):
                     options = getattr(value.config, "options", None)
-                
+
                 # Если всё еще None, откатываемся к low (для совместимости)
                 if options is None:
                     options = low
-                    
+
                 params[key] = trial.suggest_categorical(key, options)
         else:
             # Если это просто значение (константа), используем как есть
             params[key] = value
     return params
 
+
 def _validate_data(X: Any, y: Any) -> None:
     """Проверить типы и размеры входных данных X и y.
     Args:
         X (Any): Признаковое описание (ожидается np.ndarray или pd.DataFrame).
-        y (Any): Вектор целевой переменной 
+        y (Any): Вектор целевой переменной
             (ожидается np.ndarray, pd.Series или pd.DataFrame).
     Raises:
-        InvalidDataError: Если типы данных не поддерживаются 
+        InvalidDataError: Если типы данных не поддерживаются
             или размеры X и y не совпадают.
     """
     ok_types = (np.ndarray, pd.DataFrame)
@@ -172,7 +171,7 @@ def _get_estimator(algo: str) -> Any:
     Returns:
         Any: Возвращает True, если модель успешно создается базовой фабрикой.
     Raises:
-        InvalidAlgorithmError: Если алгоритм не поддерживается или отсутствует 
+        InvalidAlgorithmError: Если алгоритм не поддерживается или отсутствует
             необходимая зависимость (библиотека).
     """
     try:
@@ -185,10 +184,10 @@ def _get_estimator(algo: str) -> Any:
         raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
 
 
-def _build_scorer(name: str)-> Any:
+def _build_scorer(name: str) -> Any:
     """Создать объект метрики (scorer) по названию.
     Args:
-        name (str): Строковое название метрики 
+        name (str): Строковое название метрики
             (например, 'r2' или 'neg_mean_squared_error').
     Returns:
         Any: Объект метрики, совместимый с API sklearn.
@@ -207,7 +206,7 @@ def _can_stratify(y: Any) -> bool:
     Args:
         y (Any): Вектор целевой переменной.
     Returns:
-        bool: True, если данные дискретны (целые числа/bool) и количество уникальных 
+        bool: True, если данные дискретны (целые числа/bool) и количество уникальных
             классов не превышает 15. В противном случае — False.
     """
     # np.asarray гарантирует чистый np.ndarray и np.dtype для mypy (без ExtensionArray/Dtype)
@@ -215,24 +214,16 @@ def _can_stratify(y: Any) -> bool:
 
     if arr.ndim != 1:
         return False
-        
+
     uniq = np.unique(arr)
-    return (
-        uniq.size <= 15
-        and (
-            np.issubdtype(arr.dtype, np.integer)
-            or np.issubdtype(arr.dtype, np.bool_)
-        )
+    return uniq.size <= 15 and (
+        np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.bool_)
     )
 
 
 def _split_train_test(
-        X: Any, 
-        y: Any,
-        *,
-        test_size: float =0.2,
-        random_state: int | None =42
-        ) -> tuple[Any, Any, Any, Any]:
+    X: Any, y: Any, *, test_size: float = 0.2, random_state: int | None = 42
+) -> tuple[Any, Any, Any, Any]:
     """Разбить данные на обучающую и тестовую выборки с автоматической стратификацией.
     Args:
         X (Any): Матрица признаков.
@@ -244,26 +235,31 @@ def _split_train_test(
     """
     strat = y if _can_stratify(y) else None
     try:
-        return cast(tuple[Any, Any, Any, Any], train_test_split(
-            X,
-            y,
-            test_size=test_size,
-            shuffle=True,
-            random_state=random_state,
-            stratify=strat,
-        ))
+        return cast(
+            tuple[Any, Any, Any, Any],
+            train_test_split(
+                X,
+                y,
+                test_size=test_size,
+                shuffle=True,
+                random_state=random_state,
+                stratify=strat,
+            ),
+        )
     except ValueError:
-        return cast(tuple[Any, Any, Any, Any], train_test_split(
-            X, y, test_size=test_size, shuffle=True, random_state=random_state
-        ))
-
+        return cast(
+            tuple[Any, Any, Any, Any],
+            train_test_split(
+                X, y, test_size=test_size, shuffle=True, random_state=random_state
+            ),
+        )
 
 
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
 def optimize(
     algo_name: str,
-    X:Any,
-    y:Any,
+    X: Any,
+    y: Any,
     *,
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
@@ -272,7 +268,7 @@ def optimize(
     # старый аргумент оставляем-для-совместимости
     val_method: ValidationStrategy | str = "k_fold",
     # alias, который шлёт training_engine.component
-    validation_strategy: ValidationStrategy |str | None = None,
+    validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int = 5,
     n_trials: int = 50,
     random_state: int | None = 42,
@@ -280,28 +276,28 @@ def optimize(
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
 ) -> tuple[Any, dict[str, Any], float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
-    Функция автоматически выбирает стратегию валидации, настраивает пространство поиска 
+    Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
     параметров и обучает финальную модель на всех предоставленных данных.
     Args:
         algo_name (str): Название алгоритма для оптимизации.
         X (Any): Входные признаки.
         y (Any): Целевая переменная.
-        data_oversampling (bool): Флаг включения балансировки классов. 
+        data_oversampling (bool): Флаг включения балансировки классов.
             По умолчанию False.
-        data_oversampling_multiplier (float): Коэффициент масштабирования 
+        data_oversampling_multiplier (float): Коэффициент масштабирования
             (для оверсэмплинга).
-        data_oversampling_algorithm (str): Название алгоритма балансировки 
+        data_oversampling_algorithm (str): Название алгоритма балансировки
             (например, 'random', 'smote').
         metric (str): Название метрики для максимизации. По умолчанию 'r2'.
-        val_method (ValidationStrategy | str): Метод валидации 
+        val_method (ValidationStrategy | str): Метод валидации
             ('k_fold', 'leave_one_out', 'train_test_split').
-        validation_strategy (ValidationStrategy | str | None): Алиас для val_method 
+        validation_strategy (ValidationStrategy | str | None): Алиас для val_method
             (имеет приоритет).
         n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
         n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
-        random_state (int | None): Состояние случайности для воспроизводимости. 
+        random_state (int | None): Состояние случайности для воспроизводимости.
             По умолчанию 42.
-        train_test_split_test_size (float): Размер теста для валидации через split. 
+        train_test_split_test_size (float): Размер теста для валидации через split.
             По умолчанию 0.2.
         space_overrides (dict | None): Словарь для переопределения пространств поиска.
     Returns:
@@ -319,14 +315,14 @@ def optimize(
         "params": {
             "multiplier": data_oversampling_multiplier,
             "algorithm": data_oversampling_algorithm,
-        }
+        },
     }
-    
+
     if not isinstance(n_trials, int) or n_trials <= 0:
         raise ValueError(f"n_trials must be a positive integer, got {n_trials}")
-    
+
     # -------------------- 0. нормализация входа -------------------- #
-    if validation_strategy is not None:       # alias имеет приоритет
+    if validation_strategy is not None:  # alias имеет приоритет
         val_method = validation_strategy
 
     algo = algo_name.lower()
@@ -341,14 +337,14 @@ def optimize(
         n_total=n_samples,
         strategy=validation_strategy or val_method,
         n_folds=n_folds,
-        test_size=train_test_split_test_size
+        test_size=train_test_split_test_size,
     )
     val_method_eff, cv_obj = make_cv(
         n_samples,
         val_method=val_method,
         n_folds=n_folds,
         random_state=random_state,
-        test_size= train_test_split_test_size
+        test_size=train_test_split_test_size,
     )
 
     # -------------------- 2. estimator + поисковое пространство ---- #
@@ -360,14 +356,14 @@ def optimize(
     # Приоритет 1: Прямые переопределения (функции)
     # Приоритет 2: Динамический конфиг из YAML (dict с SearchSpaceEntry)
     external_config = (space_overrides or {}).get(algo)
-    
+
     # Если пришла функция (старый механизм) — используем её
     if callable(external_config):
-        space_fn : Callable[[Trial], dict[str, Any]] | None = external_config
+        space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
     # Если пришел словарь (новый механизм из YAML) — создаем обертку
     elif isinstance(external_config, dict):
         clipped_config = clip_search_space(external_config, n_samples_eff)
-        space_fn  = partial(_apply_dynamic_space, space_dict=clipped_config)
+        space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
     else:
         space_fn = base_space_fn
     if space_fn is None:
@@ -381,13 +377,13 @@ def optimize(
 
     def _objective(trial: Trial) -> float:
         """Целевая функция для минимизации/максимизации в Optuna.
-    Args:
-        trial (Trial): Объект текущего испытания Optuna.
-    Returns:
-        float: Значение целевой метрики на текущем наборе параметров.
-    Raises:
-        optuna.TrialPruned: Если в процессе обучения возникла ошибка (ValueError).
-    """
+        Args:
+            trial (Trial): Объект текущего испытания Optuna.
+        Returns:
+            float: Значение целевой метрики на текущем наборе параметров.
+        Raises:
+            optuna.TrialPruned: Если в процессе обучения возникла ошибка (ValueError).
+        """
         nonlocal consecutive_failures
 
         # 1. гиперпараметры и модель
@@ -398,44 +394,41 @@ def optimize(
         if oversampling_config["active"]:
             # Важно: используем DataOversampler
             sampler = DataOversampler(**oversampling_config["params"])
-            current_estimator = ImbPipeline([
-                ('sampler', sampler),
-                ('model', model)
-            ])
+            current_estimator = ImbPipeline([("sampler", sampler), ("model", model)])
         else:
             current_estimator = model
 
         # -------------------------------------------
 
-        if val_method_eff == "train_test_split":
-            # Используем iter_splits для унификации
-            # Так как это генератор, берем next()
-            X_tr, X_te, y_tr, y_te = next(iter_splits(
-                X, y, method="train_test_split", 
-                test_size=train_test_split_test_size, random_state=random_state
-            ))
-            current_estimator.fit(X_tr, y_tr)
-            consecutive_failures = 0
-            return float(scorer(current_estimator, X_te, y_te))
-            
-        # 3. k-fold или Leave-One-Out
         try:
-            # cv_obj здесь гарантированно не None, 
-            # так как мы проверили final_method выше
-            scores = model_selection.cross_val_score(
-                current_estimator,
-                X, y,
-                cv=cv_obj,
-                scoring=scorer,
-                n_jobs=1
-            )
-            avg_score = float(np.mean(scores))
-            # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
-            if not np.isfinite(avg_score):
-                consecutive_failures = 0
-                return -3.4028235e+38 # аналог минимального float32 или float('-inf')
-            consecutive_failures = 0
-            return avg_score
+            if val_method_eff == "train_test_split":
+                # Используем iter_splits для унификации
+                # Так как это генератор, берем next()
+                X_tr, X_te, y_tr, y_te = next(
+                    iter_splits(
+                        X,
+                        y,
+                        method="train_test_split",
+                        test_size=train_test_split_test_size,
+                        random_state=random_state,
+                    )
+                )
+                current_estimator.fit(X_tr, y_tr)
+                _score = float(scorer(current_estimator, X_te, y_te))
+            else:
+                # cv_obj здесь гарантированно не None,
+                # так как мы проверили final_method выше
+                scores = model_selection.cross_val_score(
+                    current_estimator, X, y, cv=cv_obj, scoring=scorer, n_jobs=1
+                )
+                avg_score = float(np.mean(scores))
+                # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
+                if not np.isfinite(avg_score):
+                    _score = (
+                        -3.4028235e38
+                    )  # аналог минимального float32 или float('-inf')
+                else:
+                    _score = avg_score
         except ValueError as err:
             trial.set_user_attr("fail_reason", str(err))
             consecutive_failures += 1
@@ -445,6 +438,9 @@ def optimize(
                     f"{consecutive_failures} consecutive failures"
                 )
             raise optuna.TrialPruned()
+
+        consecutive_failures = 0
+        return _score
 
     # -------------------- 4. запуск Optuna ------------------------- #
     study = optuna.create_study(
@@ -461,7 +457,6 @@ def optimize(
         )
         raise
 
-
     best_params = study.best_params
     best_score = study.best_value
 
@@ -469,10 +464,12 @@ def optimize(
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!
     if oversampling_config["active"]:
         best_sampler = DataOversampler(**oversampling_config["params"])
-        best_model = ImbPipeline([
-            ('sampler', best_sampler),
-            ('model', create_model(algo, **study.best_params))
-        ])
+        best_model = ImbPipeline(
+            [
+                ("sampler", best_sampler),
+                ("model", create_model(algo, **study.best_params)),
+            ]
+        )
     else:
         best_model = create_model(algo, **study.best_params)
 
@@ -485,5 +482,5 @@ def optimize(
         best_score,
         best_params,
     )
-    
+
     return best_model, best_params, best_score
