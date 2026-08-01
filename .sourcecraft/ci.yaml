@@ -49,7 +49,7 @@ workflows:
 
   # ----------------------------------------------------
   # Единый пайплайн: планирование → код → ревью → правки → ревью → правки
-  # Все шаги в одном task, чтобы артефакты (pr_number.txt)
+  # Все шаги в одном task, чтобы артефакты (pr_number.txt, review_output.txt)
   # были доступны между кубами.
   # ----------------------------------------------------
   ai-development-pipeline:
@@ -131,6 +131,9 @@ workflows:
                 fi
 
                 echo "Ревью #1 завершено."
+            artifacts:
+              paths:
+                - review_output.txt
 
           # Шаг 4: Первые правки
           - name: fix-1
@@ -145,43 +148,39 @@ workflows:
                   exit 0
                 fi
 
-                # Получаем комментарии ревью
-                echo "📋 Получаем комментарии ревью для PR #$PR_NUMBER..."
-                src pr list-comments "$PR_NUMBER" --json 2>/dev/null > pr_comments.json || echo "[]" > pr_comments.json
-
-                REVIEW_TEXT=$(python3 -c "
-                import json, sys
-                try:
-                    with open('pr_comments.json') as f:
-                        comments = json.load(f)
-                    texts = []
-                    for c in comments:
-                        body = c.get('body', c.get('text', ''))
-                        if body and 'Automated review' not in body:
-                            texts.append(body)
-                    if texts:
-                        print('\\n---\\n'.join(texts))
-                    else:
-                        print('')
-                except:
-                    print('')
-                " 2>/dev/null || echo "")
-
-                if [ -z "$REVIEW_TEXT" ]; then
-                  echo "✅ Замечаний ревью не найдено. Правки не требуются."
+                # Читаем вывод ревью из review_output.txt
+                echo "📋 Анализируем результаты ревью из review_output.txt..."
+                if [ ! -f review_output.txt ]; then
+                  echo "⚠️ Файл review_output.txt не найден. Правки не требуются."
                   exit 0
                 fi
 
-                echo "📝 Итерация 1: найдены замечания. Применяем правки..."
+                REVIEW_CONTENT=$(cat review_output.txt)
+
+                if [ -z "$REVIEW_CONTENT" ]; then
+                  echo "✅ Вывод ревью пуст. Правки не требуются."
+                  exit 0
+                fi
+
+                echo "📝 Итерация 1: передаём результаты ревью AI для анализа и исправления..."
                 src pr checkout "$PR_NUMBER"
 
                 src do --autoinstall "
-                Внеси исправления в код согласно следующим замечаниям ревью:
+                Ниже приведён результат код-ревью. Проанализируй его.
 
-                ${REVIEW_TEXT}
+                Если в ревью есть замечания, требующие исправлений (CRITICAL ISSUES, CODE QUALITY, WARNING, REQUEST CHANGES и т.п.):
+                  - Внеси соответствующие исправления в код
+                  - Добавь тесты при необходимости
+                  - Выполни все проверки (ruff, mypy, pytest)
+                  - При успешном прохождении закоммить изменения и запуши их в текущую ветку
 
-                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                Если в ревью написано, что всё хорошо (LGTM, ✅, нет замечаний) — ничего не делай, просто заверши работу.
+
+                === НАЧАЛО РЕЗУЛЬТАТА РЕВЬЮ ===
+
+                ${REVIEW_CONTENT}
+
+                === КОНЕЦ РЕЗУЛЬТАТА РЕВЬЮ ===
                 "
 
           # --------------------------------------------------
@@ -206,6 +205,9 @@ workflows:
                 fi
 
                 echo "Ревью #2 завершено."
+            artifacts:
+              paths:
+                - review_output_2.txt
 
           # Шаг 6: Вторые правки (если ревью всё ещё недовольно)
           - name: fix-2
@@ -220,43 +222,39 @@ workflows:
                   exit 0
                 fi
 
-                # Получаем комментарии ревью
-                echo "📋 Получаем комментарии ревью для PR #$PR_NUMBER (итерация 2)..."
-                src pr list-comments "$PR_NUMBER" --json 2>/dev/null > pr_comments_2.json || echo "[]" > pr_comments_2.json
-
-                REVIEW_TEXT=$(python3 -c "
-                import json, sys
-                try:
-                    with open('pr_comments_2.json') as f:
-                        comments = json.load(f)
-                    texts = []
-                    for c in comments:
-                        body = c.get('body', c.get('text', ''))
-                        if body and 'Automated review' not in body:
-                            texts.append(body)
-                    if texts:
-                        print('\\n---\\n'.join(texts))
-                    else:
-                        print('')
-                except:
-                    print('')
-                " 2>/dev/null || echo "")
-
-                if [ -z "$REVIEW_TEXT" ]; then
-                  echo "✅ После второй итерации замечаний нет. PR чист!"
+                # Читаем вывод ревью из review_output_2.txt
+                echo "📋 Анализируем результаты ревью из review_output_2.txt..."
+                if [ ! -f review_output_2.txt ]; then
+                  echo "⚠️ Файл review_output_2.txt не найден. Правки не требуются."
                   exit 0
                 fi
 
-                echo "📝 Итерация 2: применяем финальные правки..."
+                REVIEW_CONTENT=$(cat review_output_2.txt)
+
+                if [ -z "$REVIEW_CONTENT" ]; then
+                  echo "✅ Вывод ревью пуст. Правки не требуются."
+                  exit 0
+                fi
+
+                echo "📝 Итерация 2: передаём результаты ревью AI для анализа и исправления..."
                 src pr checkout "$PR_NUMBER"
 
                 src do --autoinstall "
-                Внеси исправления в код согласно следующим замечаниям ревью (финальная итерация):
+                Ниже приведён результат код-ревью (финальная итерация). Проанализируй его.
 
-                ${REVIEW_TEXT}
+                Если в ревью есть замечания, требующие исправлений (CRITICAL ISSUES, CODE QUALITY, WARNING, REQUEST CHANGES и т.п.):
+                  - Внеси соответствующие исправления в код
+                  - Добавь тесты при необходимости
+                  - Выполни все проверки (ruff, mypy, pytest)
+                  - При успешном прохождении закоммить изменения и запуши их в текущую ветку
 
-                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                Если в ревью написано, что всё хорошо (LGTM, ✅, нет замечаний) — ничего не делай, просто заверши работу.
+
+                === НАЧАЛО РЕЗУЛЬТАТА РЕВЬЮ ===
+
+                ${REVIEW_CONTENT}
+
+                === КОНЕЦ РЕЗУЛЬТАТА РЕВЬЮ ===
                 "
 
   # ----------------------------------------------------
