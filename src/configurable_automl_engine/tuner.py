@@ -372,8 +372,8 @@ def optimize(
     scorer = _build_scorer(metric)
 
     # -------------------- 3. objective для Optuna ------------------ #
-    MAX_CONSECUTIVE_FAILURES = 5
-    consecutive_failures = 0
+    MAX_FATAL_FAILURES = 5
+    consecutive_fatal_failures = 0
 
     def _objective(trial: Trial) -> float:
         """Целевая функция для минимизации/максимизации в Optuna.
@@ -382,9 +382,10 @@ def optimize(
         Returns:
             float: Значение целевой метрики на текущем наборе параметров.
         Raises:
-            optuna.TrialPruned: Если в процессе обучения возникла ошибка (ValueError).
+            optuna.TrialPruned: Если в процессе обучения возникла ошибка.
+            InvalidAlgorithmError: При превышении лимита фатальных ошибок.
         """
-        nonlocal consecutive_failures
+        nonlocal consecutive_fatal_failures
 
         # 1. гиперпараметры и модель
         params = space_fn(trial)
@@ -431,15 +432,18 @@ def optimize(
                     _score = avg_score
         except ValueError as err:
             trial.set_user_attr("fail_reason", str(err))
-            consecutive_failures += 1
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            raise optuna.TrialPruned()
+        except (MemoryError, RuntimeError, InvalidDataError) as err:
+            trial.set_user_attr("fail_reason", str(err))
+            consecutive_fatal_failures += 1
+            if consecutive_fatal_failures >= MAX_FATAL_FAILURES:
                 raise InvalidAlgorithmError(
                     f"Algorithm '{algo}' disqualified after "
-                    f"{consecutive_failures} consecutive failures"
+                    f"{consecutive_fatal_failures} consecutive fatal failures"
                 )
             raise optuna.TrialPruned()
 
-        consecutive_failures = 0
+        consecutive_fatal_failures = 0
         return _score
 
     # -------------------- 4. запуск Optuna ------------------------- #
@@ -451,9 +455,9 @@ def optimize(
         study.optimize(_objective, n_trials=n_trials)
     except InvalidAlgorithmError:
         log.warning(
-            "Algorithm %s disqualified after %d consecutive failures",
+            "Algorithm %s disqualified after %d consecutive fatal failures",
             algo,
-            MAX_CONSECUTIVE_FAILURES,
+            MAX_FATAL_FAILURES,
         )
         raise
 

@@ -12,30 +12,24 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Tuple
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from imblearn.pipeline import Pipeline as ImbPipeline
+from optuna.trial import FixedTrial
 from sklearn.datasets import make_regression
+
 from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.oversampling import DataOversampler
-from imblearn.pipeline import Pipeline as ImbPipeline
-
-from unittest.mock import MagicMock, patch
 from configurable_automl_engine.tuner import (
+    HyperoptError,
     _apply_dynamic_space,
     _build_scorer,
-    HyperoptError,
+    _can_stratify,
+    optimize,
 )
-
-import optuna
-from optuna.trial import FixedTrial
-
-
-from configurable_automl_engine.tuner import _can_stratify
-from configurable_automl_engine.tuner import optimize
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. Делаем пакет видимым и импортируем модуль
@@ -48,7 +42,7 @@ sys.path.append(str(ROOT))
 # 1. Фикстура с игрушечными данными
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
-def toy_data() -> Tuple[pd.DataFrame, pd.Series]:
+def toy_data() -> tuple[pd.DataFrame, pd.Series]:
     X, y = make_regression(
         n_samples=120,
         n_features=10,
@@ -447,9 +441,9 @@ class TestTunerObjective:
 
     def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
         """
-        5 последовательных ValueError в cross_val_score → InvalidAlgorithmError.
+        5 последовательных RuntimeError в cross_val_score → InvalidAlgorithmError.
         Проверяет, что optimize() выбрасывает InvalidAlgorithmError после
-        MAX_CONSECUTIVE_FAILURES (5) последовательных ошибок.
+        MAX_FATAL_FAILURES (5) последовательных фатальных ошибок.
         """
         X, y = dummy_data
         with (
@@ -463,8 +457,8 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock())
-            # Каждый вызов cross_val_score кидает ValueError
-            mock_cv.side_effect = ValueError("cv failed")
+            # Каждый вызов cross_val_score кидает RuntimeError
+            mock_cv.side_effect = RuntimeError("fatal failure")
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
                 optimize(
@@ -473,8 +467,8 @@ class TestTunerObjective:
 
     def test_four_failures_one_success_not_disqualified(self, dummy_data, mock_space):
         """
-        4 ошибки + 1 успех → алгоритм НЕ дисквалифицируется.
-        Проверяет, что при 4 последовательных ValueError и 1 успешном
+        4 фатальных ошибки + 1 успех → алгоритм НЕ дисквалифицируется.
+        Проверяет, что при 4 последовательных RuntimeError и 1 успешном
         запуске cross_val_score оптимизация завершается успешно.
         """
         X, y = dummy_data
@@ -491,10 +485,10 @@ class TestTunerObjective:
             mock_make_cv.return_value = ("k_fold", MagicMock())
             # 4 ошибки подряд, затем успех
             mock_cv.side_effect = [
-                ValueError("cv failed"),
-                ValueError("cv failed"),
-                ValueError("cv failed"),
-                ValueError("cv failed"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
                 np.array([0.85]),
             ]
 
@@ -505,7 +499,7 @@ class TestTunerObjective:
 
     def test_consecutive_failures_with_train_test_split(self, dummy_data, mock_space):
         """
-        5 последовательных ValueError в train_test_split → InvalidAlgorithmError.
+        5 последовательных RuntimeError в train_test_split → InvalidAlgorithmError.
         Проверяет, что circuit breaker работает при train_test_split,
         а не только при k-fold/Leave-One-Out.
         """
@@ -538,9 +532,9 @@ class TestTunerObjective:
 
             mock_iter_splits.side_effect = fresh_iter
 
-            # Модель: fit всегда падает с ValueError
+            # Модель: fit всегда падает с RuntimeError
             mock_model = MagicMock()
-            mock_model.fit.side_effect = ValueError("fit failed")
+            mock_model.fit.side_effect = RuntimeError("fatal failure")
             mock_create.return_value = mock_model
             mock_scorer_factory.return_value = MagicMock()
 
@@ -551,8 +545,8 @@ class TestTunerObjective:
 
     def test_train_test_split_success_resets_counter(self, dummy_data, mock_space):
         """
-        4 ошибки + 1 успех при train_test_split → алгоритм НЕ дисквалифицируется.
-        Проверяет, что успешный train_test_split сбрасывает consecutive_failures.
+        4 фатальных ошибки + 1 успех при train_test_split → алгоритм НЕ дисквалифицируется.
+        Проверяет, что успешный train_test_split сбрасывает consecutive_fatal_failures.
         """
         X, y = dummy_data
         with (
@@ -584,10 +578,10 @@ class TestTunerObjective:
             # 4 ошибки подряд, затем успех
             mock_model = MagicMock()
             mock_model.fit.side_effect = [
-                ValueError("fit failed"),
-                ValueError("fit failed"),
-                ValueError("fit failed"),
-                ValueError("fit failed"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
+                RuntimeError("fatal failure"),
                 None,  # trial 5 success → _objective возвращает score
                 None,  # финальный best_model.fit(X, y)
             ]
@@ -601,3 +595,34 @@ class TestTunerObjective:
                 algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
             assert best_score == 0.85
+
+    def test_valueerror_not_fatal(self, dummy_data, mock_space):
+        """
+        10 последовательных ValueError → алгоритм НЕ дисквалифицируется.
+        Проверяет, что ValueError считается нефатальной ошибкой и не
+        увеличивает счётчик consecutive_fatal_failures.
+        """
+        X, y = dummy_data
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            # Все 10 вызовов cross_val_score кидают ValueError
+            mock_cv.side_effect = ValueError("non-fatal value error")
+
+            # Оптимизация завершается без InvalidAlgorithmError,
+            # ValueError просто прерывает trial (optuna.TrialPruned)
+            best_algo, best_model, best_score = optimize(
+                algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
+            )
+            # best_score остаётся минимальным (ни один trial не успешен)
+            assert best_algo is None
+            assert best_model is None
+            assert best_score == -3.4028235e38
