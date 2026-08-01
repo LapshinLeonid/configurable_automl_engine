@@ -168,7 +168,7 @@ class GeneralCfg(BaseModel):
         ge=1.0,
         description=(
             "Глобальный таймаут на всю фазу HPO (в секундах). "
-            "Если None — используется значение по умолчанию run_parallel (3600)."
+            "Если None — используется значение по умолчанию 3600 секунд (1 час)."
         )
     )
     task_timeout: float | None = Field(

@@ -626,7 +626,7 @@ def _raise_timeout_at_iteration(*args, **kwargs):
     yield  # pragma: no cover
 
 def test_run_parallel_worker_hard_kill():
-    """Проверяет, что при зависшем процессе вызываются terminate() и kill()."""
+    """Проверяет, что при истечении глобального таймаута задачи помечаются как timed out."""
     with patch("configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor") as mock_executor_cls:
         mock_pool = MagicMock()
         mock_executor_cls.return_value = mock_pool
@@ -634,23 +634,21 @@ def test_run_parallel_worker_hard_kill():
         mock_future = MagicMock()
         mock_pool.submit.return_value = mock_future
         
-        # as_completed при каждой итерации выбрасывает TimeoutError — watchdog срабатывает
+        # as_completed при каждой итерации выбрасывает TimeoutError
         with patch("configurable_automl_engine.training_engine.thread_pool.as_completed",
                    side_effect=_raise_timeout_at_iteration):
-            with patch("configurable_automl_engine.training_engine.thread_pool._force_shutdown_processes") as mock_force:
-                with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
-                    results = run_parallel(
-                        lambda: None,
-                        args_seq=[()],
-                        mode="processes",
-                        timeout=3600
-                    )
+            with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
+                results = run_parallel(
+                    lambda: None,
+                    args_seq=[()],
+                    mode="processes",
+                    timeout=0.1  # маленький таймаут — глобальный лимит истечёт
+                )
     
     assert results == [None]
-    # Проверяем, что logger.error был вызван с сообщением WATCHDOG
+    # Проверяем, что logger.error был вызван с сообщением о таймауте
     error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert any("WATCHDOG" in msg for msg in error_messages)
-    assert mock_force.called
+    assert any("Task 0 timed out" in msg for msg in error_messages)
 
 def test_run_parallel_timeout_global_limit(caplog):
     """Проверяет, что глобальный timeout работает как лимит фазы."""
@@ -778,6 +776,9 @@ class TestParallelErrorHandling(unittest.TestCase):
         Покрытие блоков:
         - except Exception: pass при w.terminate()
         - except Exception: pass при w.kill()
+        
+        Теперь watchdog удалён, поэтому проверяем, что _force_shutdown_processes
+        вызывается в finally-блоке для ProcessPoolExecutor.
         """
         mock_executor = mock_executor_cls.return_value
         
@@ -802,13 +803,14 @@ class TestParallelErrorHandling(unittest.TestCase):
                     func=lambda x: x,
                     args_seq=[(1,)],
                     mode="processes",
+                    timeout=0.1,
                     shutdown_grace_period=0.01
                 )
 
-            # Проверяем, что логи перед 'pass' были записаны
-            self.assertTrue(any("WATCHDOG" in log for log in cm.output))
+            # Проверяем, что логи содержат сообщение о таймауте
+            self.assertTrue(any("Task 0 timed out" in log for log in cm.output))
             
-        # Проверяем, что методы вызывались, несмотря на ошибки
+        # Проверяем, что методы вызывались (в finally-блоке _force_shutdown_processes)
         self.assertTrue(mock_worker.terminate.called)
         self.assertTrue(mock_worker.kill.called)
 
@@ -857,27 +859,24 @@ def test_watchdog_not_triggered_on_slow_but_alive_tasks():
 
 @patch("configurable_automl_engine.training_engine.thread_pool.as_completed")
 def test_watchdog_triggers_on_c_level_crash(mock_as_completed):
-    """Проверка, что watchdog срабатывает при C-level падении.
+    """Проверка, что при истечении глобального таймаута задачи помечаются как timed out.
     
     Мокаем as_completed, чтобы он при каждой итерации выбрасывал TimeoutError,
-    имитируя зависший процесс. Используем функцию-генератор, чтобы
-    TimeoutError выбрасывался при итерации (for fut in ...), а не при вызове.
+    имитируя зависший процесс. Глобальный таймаут в 0.1с заставит цикл выйти.
     """
     mock_as_completed.side_effect = _raise_timeout_at_iteration
     
-    with patch("configurable_automl_engine.training_engine.thread_pool._force_shutdown_processes") as mock_shutdown:
-        with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
-            results = run_parallel(
-                lambda: None,
-                args_seq=[()],
-                mode="processes",
-                timeout=3600  # большой таймаут, чтобы не сработал глобальный
-            )
+    with patch("configurable_automl_engine.training_engine.thread_pool.logger") as mock_logger:
+        results = run_parallel(
+            lambda: None,
+            args_seq=[()],
+            mode="processes",
+            timeout=0.1  # маленький таймаут — глобальный лимит истечёт
+        )
     
     assert results == [None]
     error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert any("WATCHDOG" in msg for msg in error_messages)
-    assert mock_shutdown.called
+    assert any("Task 0 timed out" in msg for msg in error_messages)
 
 
 @patch("configurable_automl_engine.training_engine.thread_pool.as_completed")

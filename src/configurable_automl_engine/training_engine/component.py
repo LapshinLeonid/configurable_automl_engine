@@ -425,7 +425,7 @@ def train_best_model(
                 args_seq=[(n, a) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
-                timeout=cfg.general.phase_timeout,
+                timeout=cfg.general.phase_timeout or 3600,
                 task_timeout=cfg.general.task_timeout,
             )
 

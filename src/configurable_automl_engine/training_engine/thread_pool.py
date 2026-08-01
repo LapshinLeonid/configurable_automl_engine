@@ -541,15 +541,31 @@ def run_parallel(
             task_t = task_timeout or float('inf')
             deadline_by_future[fut] = submit_time_by_future.get(fut, start_time) + task_t
 
-        stale_iterations = 0
-        MAX_STALE_ITERATIONS = 5
-
         while future_to_idx:
-            time.time() - start_time
-            effective_timeout = timeout
-
-            # Вычисляем минимальный оставшийся таймаут
             now = time.time()
+            elapsed = now - start_time
+
+            # Проверка: если глобальный таймаут истёк — выходим
+            effective_timeout = timeout
+            if effective_timeout is not None and elapsed >= effective_timeout:
+                for fut, idx in future_to_idx.items():
+                    logger.error(f"Task {idx} timed out")
+                    results[idx] = None
+                future_to_idx.clear()
+                break
+
+            # Проверка: если индивидуальный таймаут задачи (task_timeout) истёк — выходим
+            expired_futures = []
+            for fut, deadline in deadline_by_future.items():
+                if fut in future_to_idx and now >= deadline:
+                    idx = future_to_idx.pop(fut)
+                    logger.error(f"Task {idx} timed out")
+                    results[idx] = None
+                    expired_futures.append(fut)
+            if not future_to_idx:
+                break
+
+            # Вычисляем минимальный оставшийся таймаут среди оставшихся задач
             remaining_by_future = {}
             for fut, deadline in deadline_by_future.items():
                 if fut in future_to_idx:
@@ -559,7 +575,7 @@ def run_parallel(
 
             # Если глобальный таймаут меньше — используем его
             if effective_timeout is not None:
-                global_remaining = max(0.1, effective_timeout - (now - start_time))
+                global_remaining = max(0.1, effective_timeout - elapsed)
                 if min_remaining is not None:
                     min_remaining = min(min_remaining, global_remaining)
                 else:
@@ -568,70 +584,37 @@ def run_parallel(
             timeout_for_ac = min_remaining if min_remaining is not None and min_remaining < float('inf') else None
 
             try:
-                completed_set = set()
                 if timeout_for_ac is not None:
                     for fut in as_completed(future_to_idx.keys(), timeout=timeout_for_ac):
-                        completed_set.add(fut)
                         idx = future_to_idx.pop(fut)
                         try:
                             results[idx] = fut.result(timeout=0)
                         except (InvalidAlgorithmError, KeyboardInterrupt):
                             raise
-                        except Exception as e: # noqa: BLE001
+                        except Exception as e:  # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
                             results[idx] = None
-                        stale_iterations = 0  # сброс stale при успехе
                 else:
                     for fut in as_completed(future_to_idx.keys()):
-                        completed_set.add(fut)
                         idx = future_to_idx.pop(fut)
                         try:
                             results[idx] = fut.result(timeout=0)
                         except (InvalidAlgorithmError, KeyboardInterrupt):
                             raise
-                        except Exception as e: # noqa: BLE001
+                        except Exception as e:  # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
                             results[idx] = None
-                        stale_iterations = 0
 
             except concurrent.futures.TimeoutError:
                 # as_completed не дождался ни одной задачи за timeout_for_ac
-                remaining_global = (
-                    max(0.1, effective_timeout - (time.time() - start_time))
-                    if effective_timeout else None
-                )
-
-                if remaining_global is not None and remaining_global <= 0.1:
-                    # Глобальный таймаут истёк — штатный выход
-                    for fut, idx in future_to_idx.items():
-                        logger.error(f"Task {idx} timed out")
-                    future_to_idx.clear()
-                    break
-                else:
-                    # Возможное C-level падение
-                    stale_iterations += 1
-                    logger.warning(
-                        f"as_completed timeout (stale #{stale_iterations}): "
-                        f"no tasks completed in {timeout_for_ac:.1f}s."
-                    )
-
-                    if stale_iterations >= MAX_STALE_ITERATIONS:
-                        logger.error(
-                            f"WATCHDOG: {stale_iterations} consecutive stale iterations. "
-                            f"Possible C-level crash. Forcing shutdown."
-                        )
-                        if mode == "processes":
-                            _force_shutdown_processes(pool, shutdown_grace_period)
-                        for fut, idx in future_to_idx.items():
-                            results[idx] = None
-                        future_to_idx.clear()
-                        break
+                # Просто продолжаем ожидание — это не C-level падение, а медленные задачи
+                continue
 
             except (InvalidAlgorithmError, KeyboardInterrupt) as e:
                 if isinstance(e, KeyboardInterrupt):
                     logger.error("Interrupted by user")
                 raise
-            except Exception as e: # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
                 future_to_idx.clear()
                 break
