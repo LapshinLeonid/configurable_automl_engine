@@ -38,8 +38,11 @@ workflows:
                 git config user.name "SourceCraft Sync"
                 git config user.email "noreply@sourcecraft.dev"
 
+                # Очищаем токен от возможных пробелов и переносов строк
+                CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\n\r ')
+
                 # Добавляем GitHub как remote и пушим через HEAD (detached HEAD в CI/CD)
-                git remote add github "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+                git remote add github "https://x-access-token:${CLEAN_TOKEN}@github.com/${GITHUB_REPO}.git"
                 git push github "HEAD:refs/heads/${BRANCH}"
 
                 echo "✅ Ветка '$BRANCH' синхронизирована в GitHub"
