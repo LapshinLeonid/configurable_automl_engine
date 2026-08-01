@@ -57,4 +57,4 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
   - [ ] **Types:** Are all inputs/outputs explicitly typed without using `Any` unnecessarily?
   - [ ] **Docstrings:** Are public interfaces documented in English (Google style)?
   - [ ] **Performance & Security:** Are there memory leaks, unnecessary copy operations, or unvalidated inputs?
-* **Behavior:** Provide constructive, precise feedback pointing to specific lines of code. Do not push commits directly during a review step.
+* **Behavior:** Provide constructive, precise feedback pointing to specific lines of code. Do not push commits directly during a review step. 

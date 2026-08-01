@@ -8,6 +8,9 @@ on:
     - workflows: [sync-to-github]
       filter:
         branches: ["main"]
+    - workflows: [quality-checks]
+      filter:
+        branches: ["**"]
 
 workflows:
   # ----------------------------------------------------
@@ -27,7 +30,7 @@ workflows:
 
                 echo "🔍 Проверяем commit title на флаг пропуска..."
                 COMMIT_TITLE=$(git log -1 --pretty=%s)
-                if echo "$COMMIT_TITLE" | grep -q "\[skip-sync\]"; then
+                if echo "$COMMIT_TITLE" | grep -q "\\[skip-sync\\]"; then
                   echo "⏭️ Commit title содержит [skip-sync], пропускаем синхронизацию в GitHub"
                   exit 0
                 fi
@@ -64,10 +67,31 @@ workflows:
         env:
           ISSUE_ID: ${{ inputs.issue_id }}
         cubes:
-          # Шаг 0: Установка CLI и настройка auth
+          # Шаг 0: Установка Python 3.11, зависимостей проекта, CLI и настройка auth
           - name: setup-cli
             script:
               - |
+                set -e
+
+                # Установка Python 3.11
+                echo "🐍 Устанавливаем Python 3.11..."
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-distutils python3.11-venv
+                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+                update-alternatives --set python3 /usr/bin/python3.11
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3 --version
+
+                # Установка зависимостей проекта из pyproject.toml
+                echo "📦 Устанавливаем зависимости проекта..."
+                python3 -m pip install --upgrade pip
+                python3 -m pip install -e ".[all,test]"
+
+                # Установка SourceCraft CLI
+                echo "🔧 Устанавливаем SourceCraft CLI..."
                 curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
                 export PATH="/root/sourcecraft/bin:$PATH"
 
@@ -171,7 +195,7 @@ workflows:
                 ${REVIEW_CONTENT}
 
                 Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${SOURCECRAFT_COMMIT_REF_NAME}'.
                
                 === НАЧАЛО РЕЗУЛЬТАТА РЕВЬЮ ===
 
@@ -241,7 +265,7 @@ workflows:
                 ${REVIEW_CONTENT}
 
                 Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${SOURCECRAFT_COMMIT_REF_NAME}'.
                 "
 
   # ----------------------------------------------------
@@ -262,6 +286,27 @@ workflows:
           - name: setup-cli
             script:
               - |
+                set -e
+
+                # Установка Python 3.11
+                echo "🐍 Устанавливаем Python 3.11..."
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-distutils python3.11-venv
+                update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+                update-alternatives --set python3 /usr/bin/python3.11
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3 --version
+
+                # Установка зависимостей проекта из pyproject.toml
+                echo "📦 Устанавливаем зависимости проекта..."
+                python3 -m pip install --upgrade pip
+                python3 -m pip install -e ".[all,test]"
+
+                # Установка SourceCraft CLI
+                echo "🔧 Устанавливаем SourceCraft CLI..."
                 curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
                 export PATH="/root/sourcecraft/bin:$PATH"
 
@@ -285,5 +330,23 @@ workflows:
                 ${REVIEW_COMMENTS}
 
                 Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в текущую ветку.
+                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${SOURCECRAFT_COMMIT_REF_NAME}'.
                 "
+
+# ----------------------------------------------------
+  # Проверка качества кода при каждом пуше
+  # ----------------------------------------------------
+  quality-checks:
+    tasks:
+      - name: run-quality-checks
+        cubes:
+          - name: lint-and-test
+            image: python:3.11-slim
+            script:
+              - pip install --upgrade pip
+              - pip install -e .
+              - pip install -r requirements.txt
+              - pip install pytest pytest-cov ruff mypy types-PyYAML
+              - ruff check src/
+              - mypy src --install-types --non-interactive
+              - pytest --cov=src
