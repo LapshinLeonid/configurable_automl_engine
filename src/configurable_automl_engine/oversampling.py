@@ -157,7 +157,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     #  Пункт 1: Переопределение fit_resample для обхода _check_X_y       #
     # ------------------------------------------------------------------ #
 
-    def fit_resample(self, X, y):  # type: ignore[override]
+    def fit_resample(self, X, y, **params):  # type: ignore[override]
         """Выполнить ресемплирование, минуя _check_X_y (validate_data).
 
         Родительский ``BaseSampler.fit_resample`` → ``SamplerMixin.fit_resample``
@@ -172,6 +172,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         Args:
             X: Признаки (DataFrame, ndarray или array-like).
             y: Целевая переменная.
+            **params: Дополнительные параметры (принимаются для совместимости
+                с sklearn-интерфейсом, но не используются; передаются напрямую
+                в _fit_resample, который их не поддерживает).
 
         Returns:
             tuple: (X_resampled, y_resampled) — результаты ресемплинга.
@@ -408,7 +411,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # последующее декодирование через OrdinalEncoder.inverse_transform
             if self.add_noise:
                 noise_exclude = cat_cols if ordinal_encoder is not None else None
-                X_res_df = self._add_gaussian_noise(X_res_df, exclude_cols=noise_exclude)
+                X_res_df = self._add_gaussian_noise(
+                    X_res_df, exclude_cols=noise_exclude
+                )
 
             # Декодирование категориальных колонок обратно (только для random)
             if ordinal_encoder is not None:
@@ -464,13 +469,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # числовыми (хотя бы один). Эта проверка выбрасывает TypeError
             # ДО вызова self.fit_resample(), предотвращая падение imblearn
             # с неинформативным ValueError на этапе _check_X_y.
-            if algo_local in ("smote", "adasyn"):
-                _X_check = data.drop(target, axis=1)
-                if all(not is_numeric_dtype(_X_check[col]) for col in _X_check.columns):
-                    raise TypeError(
-                        f"{self.algorithm.upper()} requires "
-                        "at least one numeric feature."
-                    )
+            if algo_local in ("smote", "adasyn") and all(
+                not is_numeric_dtype(data[col]) for col in data.columns if col != target
+            ):
+                raise TypeError(
+                    f"{self.algorithm.upper()} requires at least one numeric feature."
+                )
 
             # Если таргет не указан, создаем фиктивный вектор для
             # совместимости с API imblearn,

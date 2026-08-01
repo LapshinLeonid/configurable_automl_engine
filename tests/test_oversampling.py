@@ -675,3 +675,40 @@ def test_restore_dtypes_noise_numeric_pass():
     assert is_numeric_dtype(result_df["feature_col"])
     assert result_df["feature_col"].dtype != object
     assert result_df["feature_col"].iloc[0] == 1.1
+
+
+def test_random_oversampling_noise_with_categoricals():
+    """
+    Проверка, что при Random + add_noise=True категориальные колонки
+    не повреждаются шумом: шум исключается из ordinal-закодированных колонок,
+    а затем они корректно декодируются обратно в исходные категории.
+    """
+    df = pd.DataFrame(
+        {
+            "numeric": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "category": ["low", "medium", "high", "low", "high"],
+            "target": [0, 0, 0, 1, 1],
+        }
+    )
+    sampler = DataOversampler(
+        multiplier=2,
+        algorithm="random",
+        add_noise=True,
+        noise_level=0.5,
+        random_state=42,
+    )
+    result = sampler.oversample(df, target="target")
+
+    # Проверка 1: Размер увеличился (5 * 2 = 10)
+    assert len(result) == 10
+    # Проверка 2: Категориальная колонка содержит ТОЛЬКО исходные метки
+    valid_categories = {"low", "medium", "high"}
+    assert set(result["category"].unique()) == valid_categories, (
+        "Шум не должен создавать новые значения в категориальной колонке"
+    )
+    # Проверка 3: Числовая колонка изменилась (шум применён)
+    assert not np.array_equal(
+        result["numeric"].values[:5], df["numeric"].values
+    ), "Шум должен изменить числовые значения"
+    # Проверка 4: Все значения не NaN
+    assert result.notna().all().all()
