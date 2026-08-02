@@ -677,7 +677,40 @@ def test_restore_dtypes_noise_numeric_pass():
     assert result_df["feature_col"].iloc[0] == 1.1
 
 
-def test_random_oversampling_noise_with_categoricals():
+def test_fit_resample_smote_requires_numeric_feature():
+    """
+    Покрытие строк 332-334: проверка TypeError в _fit_resample
+    при вызове SMOTE на данных без числовых признаков.
+    """
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5)
+    X = pd.DataFrame(
+        {
+            "cat1": ["a", "b", "c", "d", "e", "f"],
+            "cat2": ["x", "y", "x", "y", "x", "y"],
+        }
+    )
+    y = pd.Series([0, 0, 0, 0, 1, 1])
+
+    with pytest.raises(TypeError, match="SMOTE requires at least one numeric feature"):
+        sampler._fit_resample(X, y)
+
+
+def test_fit_resample_adasyn_requires_numeric_feature():
+    """
+    Покрытие строк 332-334: проверка TypeError в _fit_resample
+    при вызове ADASYN на данных без числовых признаков.
+    """
+    sampler = DataOversampler(algorithm="adasyn", multiplier=1.5)
+    X = pd.DataFrame(
+        {
+            "cat1": ["a", "b", "c", "d", "e", "f"],
+            "cat2": ["x", "y", "x", "y", "x", "y"],
+        }
+    )
+    y = pd.Series([0, 0, 0, 0, 1, 1])
+
+    with pytest.raises(TypeError, match="ADASYN requires at least one numeric feature"):
+        sampler._fit_resample(X, y)
     """
     Проверка, что при Random + add_noise=True категориальные колонки
     не повреждаются шумом: шум исключается из ordinal-закодированных колонок,
