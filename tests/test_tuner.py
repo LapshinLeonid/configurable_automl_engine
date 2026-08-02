@@ -17,12 +17,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import FixedTrial
 from sklearn.datasets import make_regression
 
 from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.tuner import (
     HyperoptError,
     _apply_dynamic_space,
@@ -700,3 +702,82 @@ class TestTunerObjective:
             assert best_algo is None
             assert best_model is None
             assert best_score == -3.4028235e38
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. Сквозной тест training_engine (train_best_model)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_full_training_engine_pipeline(tmp_path: Path) -> None:
+    """
+    Сквозной интеграционный тест полного пайплайна обучения.
+
+    Проверяет:
+    1. Чтение YAML-конфига.
+    2. Выполнение двух фаз HPO (all_algorithms → refine_winner).
+    3. Сохранение итоговой модели на диск (.pkl).
+    4. Возврат корректной структуры результата.
+    """
+    from configurable_automl_engine.training_engine import train_best_model
+
+    model_path = tmp_path / "models" / "best_model.pkl"
+    config_path = tmp_path / "config.yaml"
+
+    config: dict[str, Any] = {
+        "general": {
+            "comparison_metric": "rmse",
+            "path_to_model": str(model_path),
+            "serialization_format": "pickle",
+            "validation_strategy": "train_test_split",
+            "n_folds": 2,
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {"name": "refine", "n_trials": 1, "action": "refine_winner"},
+            ],
+        },
+        "algorithms": {
+            "ridge": {"enable": True},
+            "random_forest": {"enable": True},
+        },
+    }
+
+    with open(config_path, "w") as f:
+        yaml.dump(config, f)
+
+    # Генерируем синтетические данные регрессии
+    X, y = make_regression(n_samples=120, n_features=5, noise=0.1, random_state=42)
+    df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
+    df["target"] = y
+
+    result = train_best_model(
+        config=str(config_path),
+        df=df,
+        target="target",
+    )
+
+    # Проверка структуры результата
+    assert isinstance(result, dict), f"Ожидался dict, получен {type(result)}"
+    assert "algorithm" in result, "Нет ключа 'algorithm'"
+    assert "score" in result, "Нет ключа 'score'"
+    assert "params" in result, "Нет ключа 'params'"
+    assert "model_path" in result, "Нет ключа 'model_path'"
+
+    assert result["algorithm"] in ("ridge", "random_forest"), (
+        f"Неизвестный алгоритм-победитель: {result['algorithm']}"
+    )
+    assert isinstance(result["score"], float), f"score не float: {result['score']}"
+    assert isinstance(result["params"], dict) and result["params"], (
+        "best_params пуст или не dict"
+    )
+
+    # Проверка сохранения файла модели на диск
+    saved_path = Path(result["model_path"])
+    assert saved_path.exists(), f"Файл модели не найден: {saved_path}"
+
+    # Проверка, что модель можно загрузить обратно
+    loaded = ModelTrainer.load(str(saved_path))
+    assert loaded.pipeline is not None, "Загруженная модель не содержит pipeline"
+    assert loaded.algorithm == result["algorithm"], (
+        f"Алгоритм не совпадает: {loaded.algorithm} != {result['algorithm']}"
+    )

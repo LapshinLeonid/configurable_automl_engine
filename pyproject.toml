@@ -48,9 +48,12 @@
 
     xgboost = ["xgboost>=3.1.3"]
 
-    test = ["pytest>=9.0.2"]
+    # Логирование с поддержкой многопоточности
+    logging = ["concurrent-log-handler>=0.9.25"]
 
-    all = ["configurable-automl-engine[xgboost]"]
+    test = ["pytest>=9.0.2", "pytest-mock>=3.14.0"]
+
+    all = ["configurable-automl-engine[xgboost,logging]"]
 
     dev = ["configurable-automl-engine[all,test]"]
 

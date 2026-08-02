@@ -335,8 +335,7 @@ workflows:
                 export PATH="/root/sourcecraft/bin:$PATH"
 
                 # Получаем имя текущей ветки (ветка PR, на которой запущен workflow)
-                PR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-                echo "🌿 Текущая ветка: $PR_BRANCH"
+                echo "🌿 Текущая ветка: ${SOURCECRAFT_COMMIT_REF_NAME}"
 
                 src do --autoinstall "
                 Внеси исправления в код согласно следующим замечаниям ревью:
@@ -344,7 +343,7 @@ workflows:
                 ${REVIEW_COMMENTS}
 
                 Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${PR_BRANCH}'.
+                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${SOURCECRAFT_COMMIT_REF_NAME}'.
                 "
 
 # ----------------------------------------------------
