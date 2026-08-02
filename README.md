@@ -12,15 +12,19 @@ designed to scale from local experimentation to large-scale data processing.
 
 # Features
 
-* Configuration-Driven Architecture: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments.
-* Flexible Validation Strategies: Supports various splitting techniques including KFold, StratifiedKFold, GroupKFold.
-* Dynamic Hyperparameter Optimization: Integrated wrapper for Optuna to automate search space configuration and trial management.
-* Extensible Model Factory: Built-in support for multiple regression algorithms.
-* Robust Preprocessing Pipeline: Automated handling of scaling, encoding, and missing value imputation.
-* Advanced Imbalance Handling: Built-in oversampling module supporting SMOTE, ADASYN, and BorderlineSMOTE.
-* Nested Validation Support: Ability to perform complex nested cross-validation to ensure model generalizability.
-* Parallel Execution: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
-* Seamless Serialization: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
+* **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments.
+* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split.
+* **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
+* **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, encoding, and missing value imputation.
+* **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, BorderlineSMOTE, and Random oversampling with noise injection.
+* **Nested Validation Support**: Ability to perform complex nested cross-validation to ensure model generalizability.
+* **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
+* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
+* **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
+* **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
+* **Granular Phase/Task Timeouts**: Configurable global phase timeout and per-task timeout with a watchdog mechanism to prevent deadlocks.
+* **Signature-Aware Hyperparameter Cleaning**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression), and unknown parameters are safely dropped.
 
 # Dependencies
 
@@ -34,15 +38,15 @@ These distributions are essential for the core functionality and will be install
 * **PyArrow** (>=23.0.0): Provides a cross-language development platform for in-memory data, enabling efficient data exchange and high-performance integration with Pandas through the Arrow columnar format.
 * **Scikit-learn** (>=1.8.0): The primary library for machine learning algorithms, preprocessing tools, and validation frameworks.
 * **Imbalanced-learn** (>=0.14.1): Provides oversampling algorithms (like SMOTE) for handling datasets with skewed class distributions.
-* **Optuna**(>=4.7.0): Powers the engine to perform automated hyperparameter optimization searches.
+* **Optuna** (>=4.7.0): Powers the engine to perform automated hyperparameter optimization searches.
 * **Pydantic** (>=2.12.5): Data validation and settings management using Python type annotations.
-* **PyYAML**(>=6.0.3): Implements the standard configuration schema, allowing the system to parse YAML files for model parameters and training setups.
+* **PyYAML** (>=6.0.3): Implements the standard configuration schema, allowing the system to parse YAML files for model parameters and training setups.
 * **Joblib** (>=1.5.3): Provides lightweight pipelining and model serialization (saving/loading).
 
 
 ## Optional Dependencies
 
-These distributions will not be installed automatically. Tou can install them using the bracket syntax (e.g., pip install "automl-engine[xgboost]").
+These distributions will not be installed automatically. You can install them using the bracket syntax (e.g., pip install "automl-engine[xgboost]").
 
 * **XGBoost**: Adds support for high-performance gradient boosting models.
 
@@ -109,137 +113,53 @@ The example can be run from [example.py](example.py).
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
-# Configuration File Structure
-
-The system uses a typed YAML or JSON config based on Pydantic.
-
-Scheme: [config.schema.json](config.schema.json).
-
-Some Pydantic validation rules cannot be described in the schema. See [config_parser.py](/src/configurable_automl_engine/training_engine/config_parser.py) for details.
-
-The file must contain two sections: "general" and "alghorithms". Additionally, it may include an optional "oversampling" section.
-
-## General section
-The "general" section may include the following attributes:
-* "phases" - required section (array) of hyperparameter optimization phases
-* "comparison_metric" - (optional) accuracy metric for model comparison. Defaults to "r2" if not specified
-* "path_to_model" - (optional) path to save the best model
-* "serialization_format" - (optional) format for saving the model
-* "log_to_file" - (optional) path to the log file
-* "validation_strategy" - (optional) strategy for evaluating model accuracy
-* "n_folds" - (optional) number of folds for cross-validation; used only if "validation_strategy" = "k_fold"
-* "max_workers" - (optional) maximum number of threads/processes. If not specified the number of CPU cores is used
-
-Structure of an optimization phase ("phases"):
-* "n_trials" - number of iterations within this phase
-* "name" - (optional) user-defined name of the optimization phase
-* "action" - (optional) action for the phase, default is "all_algorithms"
-
-Allowed actions for an optimization phase:
-* "all_algorithms" - for each algorithm, performs "n_trials" hyperparameter optimization attempts. The best algorithm is passed to the next phase.
-* "refine_winner" - performs "n_trials" hyperparameter optimization attempts for the best algorithm from the previous phase.
-
-Allowed values for "comparison_metric":
-* "nrmse"
-* "rmse"
-* "mae"
-* "mse"
-* "r2"
-
-Allowed values for "serialization_format":
-* "pickle"
-* "joblib"
-
-Allowed values for "validation_strategy":
-* "train_test_split"
-* "k_fold"
-* "loo"
-
-## Alghorithms section
-
-The "alghorithms" section is a dictionary where the key is the algorithm name, and the value is a set of configurations for that algorithm.
-
-Supported algorithms:
-* "elasticnet"
-* "sgdregressor"
-* "decision_tree"
-* "random_forest"
-* "extra_trees"
-* "gradient_boosting"
-* "adaboost"
-* "poissonregressor"
-* "gammaregressor"
-* "tweedieregressor"
-* "gaussian_process_regression"
-* "isotonic_regression"
-* "nearest_neighbors_regression"
-* "svr"
-* "ardregression"
-* "glm"
-* "ridge"
-* "lasso"
-* "xgboosting"
-
-Algorithm configuration consists of:
-* "enable" - boolean flag, whether hyperparameter search is performed for the algorithm
-* "limit_hyperparameters" - (optional) boolean flag to set limits for hyperparameter search
-* "hyperparameters" - (optional) hyperparameter value constraints, unique to each algorithm. See [ALGO_HYPERPARAMETER_REGISTRY](/src/configurable_automl_engine/common/hyperopt_defaults.py) for details
-
-## Oversampling section
-
-The optional "oversampling" section may include:
-* "enable" - (optional) enable oversampling
-* "multiplier" - (optional) factor to increase dataset size
-* "algorithm" - (optional) oversampling algorithm
-
-#### Supported oversampling algorithms:
-* "random"
-* "random_with_noise"
-* "smote"
-* "adasyn"
+📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # Contributing
 
-Small improvements, fixes, reporting issues, requesting features are always appreciated. Use [ GitHub issue tracker](https://github.com/LapshinLeonid/configurable_automl_engine/issues) 
+Small improvements, fixes, reporting issues, requesting features are always appreciated. Use [GitHub issue tracker](https://github.com/LapshinLeonid/configurable_automl_engine/issues).
 
-If you are considering larger contributions to the source code, please contact author first.
+If you are considering larger contributions to the source code, please contact the author first.
 
 If you contribute, please ensure your code:
-* 100% covered by tests 
-* has 0 errors when checked by the ruff linter
-* has 0 errors when checked by the mypy static analyzer with the --strict key
-* All docstrings written on English or Russian
+
+* 100% covered by tests.
+* Has 0 errors when checked by the ruff linter.
+* Has 0 errors when checked by the mypy static analyzer.
+* All docstrings written in English or Russian.
 
 # Project Structure
+
 ```
-├── src                                     # Project source code root  
-│   └── configurable_automl_engine          # Main AutoML engine package  
-│       ├── common                          # Shared utilities and helper functions  
-│       │   ├── definitions.py              # Constants, enums, and schema definitions  
-│       │   ├── dependency_utils.py         # Optional library and dependency checks  
-│       │   ├── hyperopt_defaults.py        # Default search spaces for tuning  
-│       │   ├── serialization_utils.py      # Model/pipeline serialization logic  
-│       │   └── validation_utils.py         # Low-level data validation helpers  
-│       ├── training_engine                 # Core orchestration and execution logic  
-│       │   ├── component.py                # Pipeline building block base classes  
-│       │   ├── config_parser.py            # Configuration parsing and validation  
-│       │   ├── logger.py                   # Centralized logging management  
-│       │   ├── metrics.py                  # Evaluation metrics implementation  
-│       │   └── thread_pool.py              # Multi-threading and parallel execution  
-│       ├── models.py                       # Model factory and algorithm wrappers  
-│       ├── oversampling.py                 # Imbalance handling and resampling  
-│       ├── trainer.py                      # Training process orchestrator  
-│       ├── tuner.py                        # Hyperparameter optimization logic  
-│       └── validation.py                   # High-level cross-validation strategies  
-└── tests                                   # Unit and integration test suites  
+├── src                                     # Project source code root
+│   └── configurable_automl_engine          # Main AutoML engine package
+│       ├── common                          # Shared utilities and helper functions
+│       │   ├── definitions.py              # Constants, enums, and schema definitions
+│       │   ├── dependency_utils.py         # Optional library and dependency checks
+│       │   ├── hyperopt_defaults.py        # Default search spaces, clipping, and constraints
+│       │   ├── serialization_utils.py      # Model/pipeline serialization logic
+│       │   └── validation_utils.py         # Low-level data validation and effective train size
+│       ├── training_engine                 # Core orchestration and execution logic
+│       │   ├── component.py                # Pipeline building block base classes
+│       │   ├── config_parser.py            # Configuration parsing and validation
+│       │   ├── logger.py                   # Centralized logging management
+│       │   ├── metrics.py                  # Evaluation metrics implementation
+│       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
+│       ├── models.py                       # Model factory, aliases, hyperparameter cleaning
+│       ├── oversampling.py                 # Imbalance handling and resampling
+│       ├── trainer.py                      # Training process orchestrator
+│       ├── tuner.py                        # Hyperparameter optimization, circuit breaker
+│       └── validation.py                   # High-level cross-validation strategies
+└── tests                                   # Unit and integration test suites
 ```
+
 # ⚠️ NeuroSlop Warning
 
 This project utilizes Large Language Models (LLMs) to assist in development and maintenance. To ensure transparency regarding the origin of the codebase, please note the following:
 
 * Original Core & Architecture: The fundamental architecture, core logic, and overall project conceptualization are 100% original and authored by the human creator.
 * Automated Testing: The test suite is almost entirely LLM-generated. While these tests aim for high coverage and functional verification, they were synthesized based on the provided source code.
-* Source Code Generation: Portions of non-critical source code were also LLM-generated. However, all generated code has undergone a manual code review by the author to the full extent of their technical expertise and competence to ensure quality and logic. Additionally, the code is fully compliant with modern development standards, showing no issues or warnings from ruff and mypy, and maintains 100% unit test coverage to ensure reliability and correctness.    
+* Source Code Generation: Portions of non-critical source code were also LLM-generated. However, all generated code has undergone a manual code review by the author to the full extent of their technical expertise and competence to ensure quality and logic. Additionally, the code is fully compliant with modern development standards, showing no issues or warnings from ruff and mypy, and maintains 100% unit test coverage to ensure reliability and correctness.
 * Commit History: All commit messages and titles have been generated by an LLM. This ensures a consistent (though automated) narrative of the project's evolution.
 * Documentation: The project documentation, including parts of this README and inline comments, is partially LLM-generated. AI was used to expand on technical details and improve readability based on the original technical specifications.
 
