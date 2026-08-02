@@ -266,6 +266,80 @@ def test_optimize_pruning(toy_data):
     assert params["n_neighbors"] == 5
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. initial_params: enqueue_trial tests
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_with_initial_params_enqueues_trial(toy_data):
+    """Проверяет, что study.enqueue_trial() вызывается с initial_params."""
+    X, y = toy_data
+    initial_params = {"alpha": 0.5, "l1_ratio": 0.3}
+
+    with patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create:
+        mock_study = MagicMock()
+        mock_study.best_params = {"alpha": 0.6, "l1_ratio": 0.4}
+        mock_study.best_value = 0.9
+        mock_create.return_value = mock_study
+
+        # Мокаем create_model и _validate_data/_get_estimator
+        with (
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        ):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_model = MagicMock()
+            mock_create_model.return_value = mock_model
+
+            optimize(
+                "elasticnet", X, y, n_trials=1,
+                initial_params=initial_params,
+                space_overrides={
+                    "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
+                },
+            )
+
+            # Проверяем, что enqueue_trial вызван с правильными параметрами
+            mock_study.enqueue_trial.assert_called_once_with(initial_params)
+            # Проверяем, что optimize все еще вызывается
+            mock_study.optimize.assert_called_once()
+
+
+def test_optimize_without_initial_params_does_not_enqueue(toy_data):
+    """Проверяет, что без initial_params enqueue_trial НЕ вызывается."""
+    X, y = toy_data
+
+    with patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create:
+        mock_study = MagicMock()
+        mock_study.best_params = {"alpha": 0.6}
+        mock_study.best_value = 0.9
+        mock_create.return_value = mock_study
+
+        with (
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        ):
+            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_model = MagicMock()
+            mock_create_model.return_value = mock_model
+
+            optimize(
+                "elasticnet", X, y, n_trials=1,
+                initial_params=None,
+                space_overrides={
+                    "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
+                },
+            )
+
+            # enqueue_trial НЕ должен быть вызван
+            mock_study.enqueue_trial.assert_not_called()
+            mock_study.optimize.assert_called_once()
+
+
 def test_knn_space_dynamic_limit():
     """Проверка динамического ограничения k в KNN (строки 80-81)."""
     # Для 10 сэмплов 80% это 8. max_k должен быть 8.

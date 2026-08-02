@@ -464,6 +464,79 @@ def test_train_best_model_config_from_dict_and_refine_flow():
             mock_save.assert_called_once()
 
 
+# --------------------------------------------------------------------------- #
+#  initial_params integration test: monotonicity across phases
+# --------------------------------------------------------------------------- #
+def test_refine_winner_uses_initial_params_from_phase1():
+    """
+    Проверяет, что Phase 2 (refine_winner) передаёт initial_params из Phase 1.
+    Если initial_params передан — Phase 2 возвращает улучшенный score (0.9).
+    Если не передан — Phase 2 возвращает худший score (0.7).
+    Финальный победитель должен использовать лучший score (0.9).
+    """
+    config_dict = {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "train_test_split",
+            "phases": [
+                {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+            ],
+            "path_to_model": "model.pkl",
+        },
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            }
+        },
+        "oversampling": {"enable": False},
+    }
+
+    df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+    # Счётчик вызовов для возврата разных результатов
+    call_count = 0
+
+    def hpo_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Phase 1: возвращаем высокий score
+            return 0.8, {"alpha": 0.5, "l1_ratio": 0.3}
+        elif call_count == 2:
+            # Phase 2: проверяем, что initial_params передан
+            assert "initial_params" in kwargs, (
+                "Phase 2 должна получить initial_params из Phase 1"
+            )
+            assert kwargs["initial_params"] == {"alpha": 0.5, "l1_ratio": 0.3}, (
+                f"expected Phase 1 params, got {kwargs['initial_params']}"
+            )
+            # Возвращаем улучшенный score
+            return 0.9, {"alpha": 0.6, "l1_ratio": 0.4}
+        return None
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._run_hpo",
+        side_effect=hpo_side_effect,
+    ) as mock_hpo:
+        with patch(
+            "configurable_automl_engine.training_engine.component._fit_and_save"
+        ) as mock_save:
+            result = train_best_model(config=config_dict, df=df, target="target")
+
+            # Финальный score должен быть 0.9 (лучший, из Phase 2)
+            assert result["score"] == 0.9
+            # Монотонность: Phase 2 (0.9) >= Phase 1 (0.8)
+            assert result["score"] >= 0.8, (
+                "Score должен монотонно не убывать между фазами"
+            )
+            assert result["params"] == {"alpha": 0.6, "l1_ratio": 0.4}
+            assert mock_hpo.call_count == 2
+            mock_save.assert_called_once()
+
+
 def test_train_best_model_refine_winner_error_coverage():
     """Ошибка при refine_winner в самой первой фазе"""
     invalid_dict = {

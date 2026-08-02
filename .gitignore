@@ -130,3 +130,5 @@ src/configurable_automl_engine/_version.py
 *.joblib
 
 .gigacode/
+
+plan.json

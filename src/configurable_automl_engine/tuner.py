@@ -274,6 +274,7 @@ def optimize(
     random_state: int | None = 42,
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
+    initial_params: dict[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
     Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
@@ -300,6 +301,8 @@ def optimize(
         train_test_split_test_size (float): Размер теста для валидации через split.
             По умолчанию 0.2.
         space_overrides (dict | None): Словарь для переопределения пространств поиска.
+        initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы
+            для enqueue_trial. Позволяет сохранить монотонность улучшения между фазами HPO.
     Returns:
         tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
             - best_model: Обученная модель с лучшими параметрами.
@@ -451,6 +454,10 @@ def optimize(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=random_state),
     )
+    # Если есть параметры из предыдущей фазы — enqueue как первый trial
+    if initial_params is not None:
+        study.enqueue_trial(initial_params)
+        log.info("Enqueued initial params from previous phase: %s", initial_params)
     try:
         study.optimize(_objective, n_trials=n_trials)
     except InvalidAlgorithmError:

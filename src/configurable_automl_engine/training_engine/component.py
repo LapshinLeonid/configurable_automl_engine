@@ -98,6 +98,7 @@ def _run_hpo(
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
+    initial_params: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -121,6 +122,8 @@ def _run_hpo(
         data_oversampling (bool): Флаг включения оверсэмплинга.
         data_oversampling_multiplier (float): Коэффициент увеличения выборки.
         data_oversampling_algorithm (str): Название алгоритма оверсэмплинга.
+        initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы HPO
+            для enqueue_trial (монотонность улучшения между фазами).
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
             Кортеж (лучшая метрика, лучшие параметры)
@@ -169,6 +172,10 @@ def _run_hpo(
         overrides = {algo_name: search_space_override}
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
+
+    # прокидываем initial_params, если есть (для refine_winner phase)
+    if initial_params is not None and "initial_params" in sig.parameters:
+        kwargs["initial_params"] = initial_params
 
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
@@ -323,6 +330,7 @@ def train_best_model(
         a_cfg: AlgoCfg,
         n_trials: int,
         search_space: dict[str, Any] | None = None,
+        initial_params: dict[str, Any] | None = None,
     ) -> tuple[float, dict[str, Any]] | None:
         """Выполнить конкретную фазу HPO для алгоритма.
         Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
@@ -356,6 +364,7 @@ def train_best_model(
                 data_oversampling=ovr.enable,
                 data_oversampling_multiplier=ovr.multiplier,
                 data_oversampling_algorithm=ovr.algorithm.value,  # .value т.к. это Enum
+                initial_params=initial_params,
             )
 
             if result is None:
@@ -392,8 +401,6 @@ def train_best_model(
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
-        # Очищаем результаты для текущей фазы
-        phase_results = {}
 
         def _worker(
             algo_name: str, algo_cfg: AlgoCfg, p=phase
@@ -406,6 +413,13 @@ def train_best_model(
                 Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
                     или None в случае ошибки.
             """
+            # Определяем initial_params для refine_winner: сохраняем лучшие
+            # параметры предыдущей фазы для enqueue_trial
+            init_params = None
+            if p.action == "refine_winner" and algo_name in phase_results:
+                _, prev_params = phase_results[algo_name]
+                init_params = prev_params
+
             # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
             full_search_space = prepare_search_space(
                 algo_name,
@@ -413,7 +427,12 @@ def train_best_model(
             )
             try:
                 result = _execute_hpo_phase(
-                    p.name, algo_name, algo_cfg, p.n_trials, full_search_space
+                    p.name,
+                    algo_name,
+                    algo_cfg,
+                    p.n_trials,
+                    full_search_space,
+                    initial_params=init_params,
                 )
 
                 if result is None:
