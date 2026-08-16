@@ -10,6 +10,8 @@ Validation Engine: Единая фабрика разбиений для обу�
     • train_test_split : Классическое разделение (по умолчанию 80/20).
     • k_fold           : Перекрестная проверка (K-Fold CV) с фиксированным сидом.
     • loo              : Leave-One-Out (валидация на каждом объекте), для малых выборок.
+    • auto             : Автоматический выбор между LOO/k_fold/train_test_split
+                         на основе размера выборки (N) и числа признаков (P).
 Особенности реализации:
     1. Robustness: Автоматический fallback-механизм в `make_cv` предотвращает падение
        процесса обучения при малом количестве наблюдений (N < 2*Folds).
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -30,7 +33,11 @@ from sklearn import model_selection
 from sklearn.model_selection import KFold, LeaveOneOut, train_test_split
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
-from configurable_automl_engine.common.validation_utils import validate_df_not_empty
+from configurable_automl_engine.common.validation_utils import (
+    choose_validation_method,
+    resolve_auto_no_features_fallback,
+    validate_df_not_empty,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,29 +74,43 @@ def make_cv(
     n_folds: int,
     random_state: int | None,
     test_size: float,
-) -> tuple[str, model_selection.BaseCrossValidator | None]:
+    n_features: int | None = None,
+) -> tuple[str, model_selection.BaseCrossValidator | None, dict[str, Any] | None]:
     """
     Фабрика объектов валидации scikit-learn с механизмом адаптации под объем данных.
     Args:
         n_samples: Общее количество объектов в выборке.
         val_method: Желаемая стратегия
-        (Enum или строка: 'k_fold', 'loo', 'train_test_split').
+        (Enum или строка: 'k_fold', 'loo', 'train_test_split', 'auto').
         n_folds: Количество фолдов (используется для 'k_fold').
         random_state: Инициализатор генератора случайных чисел для воспроизводимости.
+        n_features: Количество признаков P. Требуется для стратегии 'auto'.
     Returns:
         tuple: Кортеж, содержащий:
             - final_method (str): Реально выбранный метод
             (может отличаться от запрошенного при fallback).
             - cv_object (BaseCrossValidator | None): Объект валидатора sklearn
             или None, если выбран 'train_test_split'.
+            - decision (dict[str, Any] | None): Разрешённое решение стратегии
+            'auto' (от choose_validation_method) для синхронизации test_size
+            между точками принятия решения. None для не-auto стратегий.
     Note:
         Если n_samples < max(4, 2 * n_folds), стратегия 'k_fold' будет автоматически
         заменена на 'train_test_split' для сохранения статистической значимости.
     """
     method = norm_val_method(val_method)
 
+    if method == "auto":
+        return _resolve_auto_cv(
+            n_samples=n_samples,
+            n_features=n_features,
+            n_folds=n_folds,
+            random_state=random_state,
+            test_size=test_size,
+        )
+
     if method == "train_test_split":
-        return "train_test_split", None
+        return "train_test_split", None, None
 
     if method == "k_fold":
         # Логика защиты: K-Fold требует минимум 2*k образцов для репрезентативности.
@@ -104,9 +125,11 @@ def make_cv(
                 min_required,
                 test_size,
             )
-            return "train_test_split", None
-        return "k_fold", KFold(
-            n_splits=n_folds, shuffle=True, random_state=random_state
+            return "train_test_split", None, None
+        return (
+            "k_fold",
+            KFold(n_splits=n_folds, shuffle=True, random_state=random_state),
+            None,
         )
 
     if method == "loo":
@@ -114,11 +137,67 @@ def make_cv(
             raise InvalidDataError(
                 "Leave-One-Out validation requires at least 2 samples."
             )
-        return "loo", LeaveOneOut()
+        return "loo", LeaveOneOut(), None
 
     raise ValueError(
-        "Unknown validation method. Must be 'train_test_split', 'k_fold' or 'loo'"
+        "Unknown validation method. Must be 'train_test_split', 'k_fold', 'loo' or 'auto'"
     )
+
+
+def _resolve_auto_cv(
+    *,
+    n_samples: int,
+    n_features: int | None,
+    n_folds: int,
+    random_state: int | None,
+    test_size: float,
+) -> tuple[str, model_selection.BaseCrossValidator | None, dict[str, Any] | None]:
+    """Resolve the 'auto' validation strategy into a concrete sklearn CV object.
+
+    Uses choose_validation_method(n_samples, n_features) to pick between LOO,
+    k-fold and train-test split. When P is unavailable/invalid, safely falls
+    back to the default k-fold behaviour with a warning. The resolved decision
+    (when available) is returned so callers can reuse the computed test size.
+    """
+    if n_features is None or n_features <= 0:
+        log.warning(
+            "Auto validation requires n_features (P); got %r. "
+            "Falling back to k_fold with n_folds=%d.",
+            n_features,
+            n_folds,
+        )
+        method, k = resolve_auto_no_features_fallback(n_samples, n_folds)
+        if method == "train_test_split":
+            return "train_test_split", None, None
+        return (
+            "k_fold",
+            KFold(n_splits=k, shuffle=True, random_state=random_state),
+            None,
+        )
+
+    decision = choose_validation_method(n_samples, n_features)
+    method = decision["method"]
+
+    # Предупреждения (low confidence) единообразно логируются для всех веток.
+    if "warning" in decision:
+        log.warning("Auto validation: %s", decision["warning"])
+
+    if method == "LOO":
+        return "loo", LeaveOneOut(), decision
+
+    if method == "kfold":
+        k = max(2, int(decision["k"]))
+        return (
+            "k_fold",
+            KFold(n_splits=k, shuffle=True, random_state=random_state),
+            decision,
+        )
+
+    if method == "train_test_split":
+        return "train_test_split", None, decision
+
+    # method == "invalid" (N < 2)
+    raise InvalidDataError(decision.get("reason", "Insufficient data for validation."))
 
 
 def iter_splits(
@@ -138,7 +217,7 @@ def iter_splits(
         X: Признаки (массив numpy или DataFrame pandas).
         y: Целевая переменная. Если None, возвращает None для y_train и y_val.
         method: Стратегия разделения.
-        Поддерживаются 'k_fold', 'loo', 'train_test_split'.
+        Поддерживаются 'k_fold', 'loo', 'train_test_split', 'auto'.
         n_folds: Количество блоков для кросс-валидации.
         test_size: Доля валидационной выборки
         (используется только при методе 'train_test_split').
@@ -163,20 +242,27 @@ def iter_splits(
     if y is not None and len(X) != len(y):
         raise InvalidDataError(f"X and y length mismatch: {len(X)} != {len(y)}")
     # 2. Получение финальной стратегии (с учетом возможного отката/fallback)
-    final_method, cv = make_cv(
+    n_features = X.shape[1] if method_str == "auto" else None
+    final_method, cv, decision = make_cv(
         len(X),
         val_method=method_str,
         n_folds=n_folds,
         random_state=random_state,
         test_size=test_size,
+        n_features=n_features,
     )
     # 3. Генерация разбиений
     if final_method == "train_test_split":
+        # Для 'auto' используем динамический размер теста, вычисленный
+        # choose_validation_method (целое число строк), а не фиксированный.
+        effective_test_size: float | int = test_size
+        if method_str == "auto" and decision is not None:
+            effective_test_size = int(decision["test_size"])
         # y может быть None, sklearn.train_test_split это корректно обрабатывает
         X_tr, X_te, y_tr, y_te = train_test_split(
             X,
             y,
-            test_size=test_size,
+            test_size=effective_test_size,
             shuffle=True,
             random_state=random_state,
         )

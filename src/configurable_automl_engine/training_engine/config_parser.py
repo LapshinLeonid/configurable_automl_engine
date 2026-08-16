@@ -150,10 +150,11 @@ class GeneralCfg(BaseModel):
         ..., description="Список последовательных фаз оптимизации гиперпараметров"
     )
     validation_strategy: ValidationStrategy = Field(
-        default=ValidationStrategy.k_fold,
+        default=ValidationStrategy.auto,
         description=(
             "Стратегия оценки качества:"
-            "k-fold кросс-валидация или фиксированный hold-out"
+            "k-fold кросс-валидация, фиксированный hold-out,"
+            "LOO или автоматический выбор"
         ),
     )
     n_folds: int = Field(

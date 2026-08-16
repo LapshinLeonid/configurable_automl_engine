@@ -47,7 +47,7 @@ from configurable_automl_engine.common.validation_utils import get_effective_tra
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
-from configurable_automl_engine.validation import iter_splits, make_cv
+from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
 logging = _logging  # alias
 
@@ -335,20 +335,27 @@ def optimize(
 
     # -------------------- 1. стратегия CV -------------------------- #
     n_samples = len(y)
+    n_features = X.shape[1]
     # Определяем, сколько строк реально "увидит" модель при обучении внутри CV/Split
     n_samples_eff = get_effective_train_size(
         n_total=n_samples,
         strategy=validation_strategy or val_method,
         n_folds=n_folds,
         test_size=train_test_split_test_size,
+        n_features=n_features,
     )
-    val_method_eff, cv_obj = make_cv(
+    val_method_eff, cv_obj, auto_decision = make_cv(
         n_samples,
         val_method=val_method,
         n_folds=n_folds,
         random_state=random_state,
         test_size=train_test_split_test_size,
+        n_features=n_features,
     )
+    # 'auto' разрешается ровно один раз (здесь, в make_cv). Полученное решение
+    # передаётся ниже в iter_splits, чтобы test-size не пересчитывался повторно
+    # и не мог разойтись между n_samples_eff и фактическим разбиением.
+    resolved_via_auto = norm_val_method(val_method) == "auto"
 
     # -------------------- 2. estimator + поисковое пространство ---- #
     base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
@@ -406,6 +413,13 @@ def optimize(
 
         try:
             if val_method_eff == "train_test_split":
+                # Если 'auto' было разрешено здесь (в make_cv) — используем уже
+                # вычисленный (dataset-зависимый) целочисленный test_size, чтобы
+                # iter_splits не пересчитывал решение повторно. Иначе — фиксированная доля.
+                if resolved_via_auto and auto_decision is not None:
+                    split_test_size: float | int = int(auto_decision["test_size"])
+                else:
+                    split_test_size = train_test_split_test_size
                 # Используем iter_splits для унификации
                 # Так как это генератор, берем next()
                 X_tr, X_te, y_tr, y_te = next(
@@ -413,7 +427,7 @@ def optimize(
                         X,
                         y,
                         method="train_test_split",
-                        test_size=train_test_split_test_size,
+                        test_size=split_test_size,
                         random_state=random_state,
                     )
                 )

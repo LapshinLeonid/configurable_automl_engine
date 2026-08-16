@@ -13,7 +13,7 @@ designed to scale from local experimentation to large-scale data processing.
 # Features
 
 * **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments.
-* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split.
+* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, encoding, and missing value imputation.

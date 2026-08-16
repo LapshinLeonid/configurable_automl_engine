@@ -290,7 +290,7 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
             patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
             patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_model = MagicMock()
             mock_create_model.return_value = mock_model
 
@@ -325,7 +325,7 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
             patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
             patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_model = MagicMock()
             mock_create_model.return_value = mock_model
 
@@ -469,7 +469,7 @@ class TestTunerObjective:
         ):
             # ГАРАНТИРУЕМ:
             # 1. Мы в ветке k-fold
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # 2. cross_val_score возвращает что-то
             mock_cv.return_value = np.array([0.5])
             # 3. КРИТИЧЕСКИЙ МОМЕНТ: Любое число НЕ конечное
@@ -506,7 +506,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_cv.return_value = np.array(
                 [1.0]
             )  # значение не важно, так как mean вернет nan
@@ -532,7 +532,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # Каждый вызов cross_val_score кидает RuntimeError
             mock_cv.side_effect = RuntimeError("fatal failure")
 
@@ -558,7 +558,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # 4 ошибки подряд, затем успех
             mock_cv.side_effect = [
                 RuntimeError("fatal failure"),
@@ -591,7 +591,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             # Принудительно выбираем train_test_split
-            mock_make_cv.return_value = ("train_test_split", None)
+            mock_make_cv.return_value = ("train_test_split", None, None)
 
             # iter_splits должен возвращать свежий итератор при каждом вызове
             def fresh_iter(*args, **kwargs):
@@ -635,7 +635,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            mock_make_cv.return_value = ("train_test_split", None)
+            mock_make_cv.return_value = ("train_test_split", None, None)
 
             def fresh_iter(*args, **kwargs):
                 return iter(
@@ -689,7 +689,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            mock_make_cv.return_value = ("k_fold", MagicMock())
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # Все 10 вызовов cross_val_score кидают ValueError
             mock_cv.side_effect = ValueError("non-fatal value error")
 

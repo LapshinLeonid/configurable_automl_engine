@@ -29,7 +29,7 @@ def _dummy_data(n=100):
 def test_norm_val_method_enum():
     """Покрытие строк 41-42: передача ValidationStrategy (Enum)."""
     # Тестируем через прямое обращение к стратегии
-    method_name, _ = make_cv(
+    method_name, _, _ = make_cv(
         100,
         val_method=ValidationStrategy.k_fold,
         n_folds=5,
@@ -51,14 +51,14 @@ def test_make_cv_loo_error():
 def test_make_cv_kfold_fallback():
     """Покрытие веток fallback: когда данных слишком мало для KFold."""
     # Случай 1: n_samples < 4 (даже если n_folds маленькое)
-    method_name, cv = make_cv(
+    method_name, cv, _ = make_cv(
         3, val_method="k_fold", n_folds=2, random_state=42, test_size=0.2
     )
     assert method_name == "train_test_split"
     assert cv is None
 
     # Случай 2: n_samples < 2 * n_folds (например, 5 < 2*3)
-    method_name2, cv2 = make_cv(
+    method_name2, cv2, _ = make_cv(
         5, val_method="k_fold", n_folds=3, random_state=42, test_size=0.2
     )
     assert method_name2 == "train_test_split"
@@ -67,7 +67,7 @@ def test_make_cv_kfold_fallback():
 
 def test_make_cv_loo_success():
     """Покрытие успешного создания LOO."""
-    method_name, cv = make_cv(
+    method_name, cv, _ = make_cv(
         10, val_method="loo", n_folds=5, random_state=42, test_size=0.2
     )
     assert method_name == "loo"
@@ -151,7 +151,7 @@ def test_make_cv_train_test_split_branch():
     """
     Покрывает строку 92: возврат для 'train_test_split' в make_cv.
     """
-    method_name, cv_obj = make_cv(
+    method_name, cv_obj, _ = make_cv(
         n_samples=100,
         val_method="train_test_split",
         n_folds=5,
@@ -175,7 +175,7 @@ class TestValidationEngineCoverage:
         y = np.array([0, 1])
         # Патчим make_cv именно по тому пути, который указан в логах ошибки
         with patch("configurable_automl_engine.validation.make_cv") as mocked_make_cv:
-            mocked_make_cv.return_value = ("k_fold", None)
+            mocked_make_cv.return_value = ("k_fold", None, None)
 
             gen = iter_splits(X, y, method="k_fold")
 

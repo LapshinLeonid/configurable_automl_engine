@@ -8,6 +8,7 @@ class ValidationStrategy(str, Enum):
     train_test_split = "train_test_split"
     k_fold = "k_fold"
     loo = "loo"
+    auto = "auto"
 
 
 # ──────────────── serialization enum ─────────────── #

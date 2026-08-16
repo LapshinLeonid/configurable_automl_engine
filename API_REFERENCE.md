@@ -17,8 +17,8 @@ The `general` section may include the following attributes:
 * `path_to_model` — (optional) path to save the best model.
 * `serialization_format` — (optional) format for saving the model (`"pickle"` or `"joblib"`).
 * `log_to_file` — (optional) path to the log file.
-* `validation_strategy` — (optional) strategy for evaluating model accuracy (`"train_test_split"`, `"k_fold"`, `"loo"`).
-* `n_folds` — (optional) number of folds for cross-validation; used only if `validation_strategy = "k_fold"`.
+* `validation_strategy` — (optional) strategy for evaluating model accuracy (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). With `"auto"` the engine automatically picks between LOO, k-fold and train-test split based on the number of observations and features.
+* `n_folds` — (optional) number of folds for cross-validation; used only if `validation_strategy = "k_fold"`. Ignored when `validation_strategy = "auto"`.
 * `max_workers` — (optional) maximum number of threads/processes. If not specified, the number of CPU cores is used.
 * `parallel_mode` — (optional) parallelism mode (`"threads"` or `"processes"`). Defaults to `"threads"`.
 * `parallel_strategy` — (optional) controls parallel execution strategy. Defaults to `"algorithms"`.
@@ -132,8 +132,8 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm. |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
 | `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
-| `validation_strategy` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method. |
-| `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. |
+| `validation_strategy` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). |
+| `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. Ignored when using `"auto"`. |
 | `n_folds` | `int` | `5` | Number of CV folds. |
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
 | `random_state` | `int` or `None` | `42` | Random seed. |
