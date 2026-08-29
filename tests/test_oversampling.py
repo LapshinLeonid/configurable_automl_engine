@@ -13,6 +13,7 @@ from pandas.api.types import is_numeric_dtype
 # Импорты согласно вашей структуре
 from configurable_automl_engine.oversampling import (
     DataOversampler,
+    _is_categorical_col,
     oversample as functional_oversample,
     oversample,
 )
@@ -745,3 +746,46 @@ def test_fit_resample_adasyn_requires_numeric_feature():
     ), "Шум должен изменить числовые значения"
     # Проверка 4: Все значения не NaN
     assert result.notna().all().all()
+
+
+# ------------------------------------------------------------------ #
+#  Детекция категориальных колонок (numeric-strings edge cases)      #
+# ------------------------------------------------------------------ #
+
+
+def test_numeric_strings_treated_as_numeric():
+    """'Числовые строки' ('10','20') считаются числовыми, а не категориями."""
+    assert _is_categorical_col(pd.Series(["10", "20", "30"])) is False
+
+
+def test_mixed_strings_treated_as_categorical():
+    """Смешанные значения (числа + буквы) — категориальная колонка."""
+    assert _is_categorical_col(pd.Series(["10", "a", "20"])) is True
+
+
+def test_true_category_treated_as_categorical():
+    """Нечисловые категории остаются категориальными."""
+    assert _is_categorical_col(pd.Series(["red", "green", "blue"])) is True
+
+
+def test_numeric_dtype_treated_as_numeric():
+    """Числовой dtype не является категорией."""
+    assert _is_categorical_col(pd.Series([1.0, 2.0, 3.0])) is False
+
+
+def test_smote_guard_not_triggered_for_numeric_strings():
+    """
+    Оверсэмплинг (oversample) с колонкой 'числовых строк' не должен
+    ошибочно считать её категориальной и кидать TypeError
+    "requires at least one numeric feature" (согласованность guard-проверки
+    в oversample() и детекции в _fit_resample).
+    """
+    df = pd.DataFrame(
+        {
+            "f1": ["1.0", "2.0", "3.0", "4.0", "5.0", "6.0"],
+            "target": [0, 0, 0, 0, 1, 1],
+        }
+    )
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    result = sampler.oversample(df, target="target")
+    assert len(result) > len(df)

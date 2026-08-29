@@ -46,6 +46,10 @@ from configurable_automl_engine.common.hyperopt_defaults import clip_search_spac
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.preprocessing import (
+    build_preprocessor,
+    detect_feature_types,
+)
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
@@ -275,6 +279,9 @@ def optimize(
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
     initial_params: dict[str, Any] | None = None,
+    preprocessor: Any | None = None,
+    categorical_features: list[str] | None = None,
+    numerical_features: list[str] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
     Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
@@ -303,6 +310,13 @@ def optimize(
         space_overrides (dict | None): Словарь для переопределения пространств поиска.
         initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы
             для enqueue_trial. Позволяет сохранить монотонность улучшения между фазами HPO.
+        preprocessor (Any | None): Готовый ``ColumnTransformer`` для предобработки
+            признаков (категории -> one-hot, числа -> StandardScaler). Если передан,
+            имеет приоритет над ``categorical_features``/``numerical_features``.
+        categorical_features (list[str] | None): Имена категориальных колонок.
+            Если ``preprocessor`` не передан, по ним строится препроцессор.
+        numerical_features (list[str] | None): Имена числовых колонок.
+            Используется вместе с ``categorical_features``.
     Returns:
         tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
             - best_model: Обученная модель с лучшими параметрами.
@@ -381,6 +395,55 @@ def optimize(
 
     scorer = _build_scorer(metric)
 
+    # -------------------- 2.5 preprocessing (categorical features) ---------- #
+    # Единая точка построения препроцессора для фазы HPO: категории -> one-hot,
+    # числа -> StandardScaler. Используется та же логика, что и в финальном
+    # обучении (trainer.ModelTrainer), поэтому HPO и финальный fit согласованы.
+    if preprocessor is None:
+        if categorical_features is not None or numerical_features is not None:
+            # Явно переданные списки колонок (основной путь из training_engine)
+            if isinstance(X, pd.DataFrame):
+                preprocessor = build_preprocessor(
+                    list(X.columns),
+                    categorical_features or [],
+                    numerical_features or [],
+                )
+            else:
+                log.warning(
+                    "categorical/numerical_features provided, but X is not a "
+                    "pandas.DataFrame — skipping automatic preprocessor."
+                )
+        elif isinstance(X, pd.DataFrame):
+            # Автодетекция категорий (default-поведение при вызове вне движка).
+            # Препроцессор строится при наличии ЛЮБЫХ признаков (и категориальных,
+            # и числовых): это гарантирует, что на чисто числовом DataFrame в фазе
+            # HPO применяется StandardScaler так же, как в финальном ModelTrainer.
+            cats, nums = detect_feature_types(X)
+            if cats or nums:
+                preprocessor = build_preprocessor(list(X.columns), cats, nums)
+        else:
+            log.warning(
+                "X is not a pandas.DataFrame and categorical_features/"
+                "numerical_features were not provided — categorical columns "
+                "(if any) will be treated as numeric."
+            )
+
+    def _assemble_estimator(model_impl: Any) -> Any:
+        """Собрать пайплайн в порядке preprocessor -> [sampler] -> model.
+
+        Оверсэмплинг получает уже закодированные числовые признаки (one-hot),
+        поэтому SMOTE/ADASYN всегда работают с числовыми данными.
+        """
+        steps: list[tuple[str, Any]] = []
+        if preprocessor is not None:
+            steps.append(("preprocessor", preprocessor))
+        if oversampling_config["active"]:
+            steps.append(("sampler", DataOversampler(**oversampling_config["params"])))
+        steps.append(("model", model_impl))
+        if len(steps) == 1:
+            return model_impl
+        return ImbPipeline(steps)
+
     # -------------------- 3. objective для Optuna ------------------ #
     MAX_FATAL_FAILURES = 5
     consecutive_fatal_failures = 0
@@ -402,12 +465,7 @@ def optimize(
         model = create_model(algo, **params)
 
         # --- ШАГ 2: ПОДГОТОВКА ОБЕРТКИ (WRAPPER) ---
-        if oversampling_config["active"]:
-            # Важно: используем DataOversampler
-            sampler = DataOversampler(**oversampling_config["params"])
-            current_estimator = ImbPipeline([("sampler", sampler), ("model", model)])
-        else:
-            current_estimator = model
+        current_estimator = _assemble_estimator(model)
 
         # -------------------------------------------
 
@@ -490,16 +548,7 @@ def optimize(
 
     # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!
-    if oversampling_config["active"]:
-        best_sampler = DataOversampler(**oversampling_config["params"])
-        best_model = ImbPipeline(
-            [
-                ("sampler", best_sampler),
-                ("model", create_model(algo, **study.best_params)),
-            ]
-        )
-    else:
-        best_model = create_model(algo, **study.best_params)
+    best_model = _assemble_estimator(create_model(algo, **study.best_params))
 
     best_model.fit(X, y)
 

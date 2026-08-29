@@ -28,6 +28,29 @@ from sklearn.preprocessing import OrdinalEncoder
 logger = logging.getLogger(__name__)
 
 
+def _is_categorical_col(s: pd.Series) -> bool:
+    """Определить, следует ли колонку считать категориальной.
+
+    Правило детекции:
+    * Числовой dtype (``is_numeric_dtype``) → колонка числовая.
+    * Нечисловой dtype (``object``/``category``/``string``):
+        - если все значения являются 'чистым числовым' (``pd.to_numeric`` без NaN)
+          → колонка трактуется как числовая (крайний случай 'числовых строк',
+          например ID ``'10'``, ``'20'``);
+        - иначе (есть хотя бы одно нечисловое значение) → категориальная.
+
+    Returns:
+        bool: ``True``, если колонка категориальная.
+    """
+    if is_numeric_dtype(s):
+        return False
+    try:
+        converted = pd.to_numeric(s, errors="coerce")
+    except (TypeError, ValueError):
+        return True
+    return bool(converted.isna().any())
+
+
 class DataOversampler(BaseSampler):  # type: ignore[misc]
     """Увеличить объем данных и сбалансировать классы.
 
@@ -321,8 +344,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             cat_features_idx = [
                 i
                 for i, col in enumerate(X_df.columns)
-                if not is_numeric_dtype(X_df[col])
-                and pd.to_numeric(X_df[col], errors="coerce").isna().any()
+                if _is_categorical_col(X_df[col])
             ]
             cat_cols = [X_df.columns[i] for i in cat_features_idx]
             # Проверка на отсутствие числовых колонок для SMOTE/ADASYN
@@ -469,8 +491,11 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # числовыми (хотя бы один). Эта проверка выбрасывает TypeError
             # ДО вызова self.fit_resample(), предотвращая падение imblearn
             # с неинформативным ValueError на этапе _check_X_y.
+            # Используем ту же детекцию категорий, что и в _fit_resample,
+            # чтобы 'числовые строки' не считались категориальными.
+            feature_cols = [col for col in data.columns if col != target]
             if algo_local in ("smote", "adasyn") and all(
-                not is_numeric_dtype(data[col]) for col in data.columns if col != target
+                _is_categorical_col(data[col]) for col in feature_cols
             ):
                 raise TypeError(
                     f"{self.algorithm.upper()} requires at least one numeric feature."

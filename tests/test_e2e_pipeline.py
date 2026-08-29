@@ -180,11 +180,15 @@ def _n_trials_for(algo: str) -> int:
       a configuration that yields R² ≥ 0.70 — 35 trials.
     * Slow GLM-based algorithms (Gamma, Tweedie) are expensive per
       trial (log-link IRLS fitting) so they get fewer trials to keep
-      the suite under the AC-5 budget (< 60 s).
+      the suite under budget.
+    * ``gammaregressor`` получил 15 испытаний вместо 6: с тех пор как HPO
+      на чисто числовых данных стал применять ``StandardScaler`` (единая
+      логика с финальным ``ModelTrainer``), гамма-регрессия сходится медленнее
+      и нуждается в более широком поиске, чтобы достичь планки R² ≥ 0.70.
     * All others run with the standard 25 trials.
     """
     if algo in _SLOW_ALGORITHMS:
-        return 6 if algo == "gammaregressor" else 15
+        return 15
     return 20 if algo in _WEAK_LEARNERS else 25
 
 

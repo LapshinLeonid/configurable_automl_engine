@@ -34,6 +34,7 @@ from configurable_automl_engine.common.validation_utils import (
     prepare_X_y,
     validate_df_not_empty,
 )
+from configurable_automl_engine.preprocessing import detect_feature_types
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -99,6 +100,8 @@ def _run_hpo(
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
     initial_params: dict[str, Any] | None = None,
+    categorical_features: list[str] | None = None,
+    numerical_features: list[str] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -124,6 +127,9 @@ def _run_hpo(
         data_oversampling_algorithm (str): Название алгоритма оверсэмплинга.
         initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы HPO
             для enqueue_trial (монотонность улучшения между фазами).
+        categorical_features (list[str] | None): Имена категориальных колонок,
+            определённые один раз в ``train_best_model`` и передаваемые тюнеру.
+        numerical_features (list[str] | None): Имена числовых колонок.
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
             Кортеж (лучшая метрика, лучшие параметры)
@@ -176,6 +182,14 @@ def _run_hpo(
     # прокидываем initial_params, если есть (для refine_winner phase)
     if initial_params is not None and "initial_params" in sig.parameters:
         kwargs["initial_params"] = initial_params
+
+    # прокидываем детектированные категориальные/числовые колонки,
+    # чтобы фаза HPO строила препроцессор согласованно с финальным обучением
+    if "categorical_features" in sig.parameters:
+        kwargs["categorical_features"] = categorical_features
+
+    if "numerical_features" in sig.parameters:
+        kwargs["numerical_features"] = numerical_features
 
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
@@ -302,6 +316,11 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    # Определяем типы колонок ровно один раз на входном DataFrame и прокидываем
+    # в фазу HPO. Это гарантирует одинаковую предобработку (one-hot) между HPO
+    # и финальным обучением ModelTrainer.
+    categorical_features, numerical_features = detect_feature_types(X)
+
     def prepare_search_space(
         algo_name: str, user_overrides: dict[str, Any] | None
     ) -> dict[str, Any]:
@@ -365,6 +384,8 @@ def train_best_model(
                 data_oversampling_multiplier=ovr.multiplier,
                 data_oversampling_algorithm=ovr.algorithm.value,  # .value т.к. это Enum
                 initial_params=initial_params,
+                categorical_features=categorical_features,
+                numerical_features=numerical_features,
             )
 
             if result is None:

@@ -43,8 +43,6 @@ import pandas as pd
 from imblearn.pipeline import Pipeline
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (
@@ -52,6 +50,7 @@ from configurable_automl_engine.common.serialization_utils import (
     save_artifact,
 )
 from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.preprocessing import build_preprocessor
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_greater_better,
@@ -279,7 +278,7 @@ class ModelTrainer:
             # Авто-определение категориальных (object, category, bool)
             if self.categorical_features is None:
                 self.categorical_features = df_to_analyze.select_dtypes(
-                    include=["object", "category", "bool"]
+                    include=["object", "str", "category", "bool"]
                 ).columns.tolist()
             # Авто-определение числовых (все оставшиеся типы 'number')
             if self.numerical_features is None:
@@ -323,9 +322,12 @@ class ModelTrainer:
         self.logger = logging.getLogger(__name__)
 
     def _build_preprocessor(self, feature_names: list[str]) -> ColumnTransformer:
-        """Сконструировать ColumnTransformer для раздельной обработки типов данных."""
-        # 1. Получаем индексы колонок на основе подготовленных списков
-        # Используем feature_names для сопоставления имен с порядковыми номерами
+        """Сконструировать ColumnTransformer для раздельной обработки типов данных.
+
+        Делегирует сборку в общий модуль :mod:`preprocessing`, который
+        используется также фазой HPO в ``tuner.optimize`` (DRY, единая логика).
+        """
+        # Логируем предупреждение, если ни одна колонка не совпала
         cat_indices = [
             feature_names.index(col)
             for col in (self.categorical_features or [])
@@ -336,40 +338,14 @@ class ModelTrainer:
             for col in (self.numerical_features or [])
             if col in feature_names
         ]
-
         if not cat_indices and not num_indices:
             self.logger.warning(
                 "No features matched for preprocessing. Defaulting to passthrough."
             )
-            return ColumnTransformer(
-                [("bypass", "passthrough", slice(None))], remainder="drop"
-            )
-
-        # 2. Пайплайны трансформации
-        num_transformer = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="mean")),
-                ("scaler", StandardScaler()),
-            ]
-        )
-
-        cat_transformer = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="most_frequent")),
-                ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
-            ]
-        )
-        # 3. Сборка ColumnTransformer
-        transformers = []
-        if cat_indices:
-            transformers.append(("cat", cat_transformer, cat_indices))
-        if num_indices:
-            transformers.append(("num", num_transformer, num_indices))
-        return ColumnTransformer(
-            transformers=(
-                transformers if transformers else [("pass", "passthrough", [0])]
-            ),
-            remainder="drop",
+        return build_preprocessor(
+            feature_names,
+            self.categorical_features or [],
+            self.numerical_features or [],
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:

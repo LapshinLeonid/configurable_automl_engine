@@ -173,8 +173,11 @@ def test_apply_dynamic_space_types(toy_data):
 
     assert isinstance(params["n_neighbors"], int)
     assert params["weights"] in ["uniform", "distance"]
-    # Проверяем, что константа попала в модель
-    assert model.leaf_size == 30
+    # Проверяем, что константа попала в модель.
+    # С автодетекцией препроцессора модель оборачивается в ImbPipeline
+    # (даже для чисто числовых данных), поэтому извлекаем шаг 'model'.
+    assert isinstance(model, ImbPipeline)
+    assert model.named_steps["model"].leaf_size == 30
 
 
 def test_validate_data_mismatch():
@@ -212,6 +215,34 @@ def test_optimize_with_oversampling(toy_data):
     print(model.steps)
     assert isinstance(model, ImbPipeline)
     assert any(isinstance(step[1], DataOversampler) for step in model.steps)
+
+
+def test_optimize_pure_numeric_builds_preprocessor(toy_data):
+    """На чисто числовом DataFrame без явных списков колонок optimize
+    строит препроцессор с StandardScaler (рассинхрон ветки ``if cats:``)."""
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = toy_data  # полностью числовой DataFrame
+
+    model, _, _ = hyperopt.optimize(
+        "knn",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+    )
+
+    # Препроцессор должен быть собран даже при отсутствии категорий
+    assert isinstance(model, ImbPipeline)
+    assert "preprocessor" in [step[0] for step in model.steps]
+
+    preprocessor = model.named_steps["preprocessor"]
+    transformers = dict(
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
+    )
+    assert "num" in transformers
+    num_pipeline = transformers["num"]
+    assert isinstance(num_pipeline.named_steps["scaler"], StandardScaler)
 
 
 def test_can_stratify_negative():
