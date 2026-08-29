@@ -42,6 +42,30 @@ def test_n_folds_ok():
     assert cfg.general.n_folds == 5
 
 
+def test_categorical_encoding_ordinal_valid():
+    """Конфиг с categorical_encoding='ordinal' проходит валидацию Config."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "categorical_encoding": "ordinal"}
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.categorical_encoding == "ordinal"
+
+
+def test_categorical_encoding_default_one_hot():
+    """По умолчанию categorical_encoding='one_hot'."""
+    cfg = Config.model_validate(BASE)
+    assert cfg.general.categorical_encoding == "one_hot"
+
+
+def test_categorical_encoding_invalid_rejected():
+    """Конфиг с categorical_encoding='target' отклоняется (Literal)."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "categorical_encoding": "target"}
+    }
+    with pytest.raises(ValidationError):
+        Config.model_validate(cfg_data)
+
+
 def test_n_folds_bad():
     bad = BASE | {"general": {**BASE["general"], "n_folds": 1}}
     with pytest.raises(ValidationError):

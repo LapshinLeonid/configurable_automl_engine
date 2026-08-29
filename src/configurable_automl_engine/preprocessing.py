@@ -7,7 +7,9 @@
     2. :func:`build_preprocessor` — сборка ``sklearn.ColumnTransformer``
        с предобработкой по умолчанию **one-hot encoding** для категорий
        (импутация ``most_frequent`` + ``OneHotEncoder``) и
-       ``StandardScaler`` для числовых признаков.
+       ``StandardScaler`` для числовых признаков. Поддерживается также
+       альтернативная стратегия **ordinal encoding** (``OrdinalEncoder``)
+       через аргумент ``encoding='ordinal'``.
 
 Единая точка построения препроцессора используется в ОБОИХ местах обучения —
 фазе подбора гиперпараметров (``tuner.optimize``) и финальном обучении
@@ -18,15 +20,23 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    OneHotEncoder,
+    OrdinalEncoder,
+    StandardScaler,
+)
 
 logger = logging.getLogger(__name__)
+
+EncodingStrategy = Literal["one_hot", "ordinal"]
 
 
 def _to_string_array(X):
@@ -75,16 +85,21 @@ def build_preprocessor(
     feature_names: list[str],
     categorical_features: list[str],
     numerical_features: list[str],
+    encoding: EncodingStrategy = "one_hot",
 ) -> ColumnTransformer:
     """Сконструировать ColumnTransformer для раздельной обработки типов данных.
 
     По умолчанию применяется стратегия **one-hot encoding** для категориальных
-    признаков (требование задачи) и скалирование для числовых.
+    признаков (требование задачи) и скалирование для числовых. При
+    ``encoding='ordinal'`` категории кодируются ``OrdinalEncoder`` (1 выходной
+    столбец на категориальную колонку) вместо one-hot.
 
     Args:
         feature_names: Полный список имён признаков в порядке следования колонок.
-        categorical_features: Имена колонок, кодируемых one-hot.
+        categorical_features: Имена колонок, кодируемых one-hot/ordinal.
         numerical_features: Имена колонок, подлежащих импутации и скалированию.
+        encoding: Стратегия кодирования категорий: ``'one_hot'`` (по умолчанию)
+            или ``'ordinal'``.
 
     Returns:
         ``ColumnTransformer``, преобразующий исходный DataFrame в числовую
@@ -93,12 +108,26 @@ def build_preprocessor(
 
     Note:
         Категориальные колонки приводятся к строковому объектному массиву перед
-        импутацией и one-hot-кодированием, поэтому ``bool``-колонки обрабатываются
+        импутацией и кодированием, поэтому ``bool``-колонки обрабатываются
         корректно (без падения ``SimpleImputer`` на dtype bool).
 
+    Note:
+        При ``encoding='ordinal'`` категории кодируются целочисленными кодами,
+        которые НЕ масштабируются (в отличие от числовых колонок, проходящих
+        через ``StandardScaler``). Для линейных моделей (например,
+        ``elasticnet``) несопоставимый масштаб кодов с категориями высокого
+        порядка может доминировать над числовыми признаками.
+
     Raises:
-        ValueError: Если имя колонки отсутствует в ``feature_names``.
+        ValueError: Если имя колонки отсутствует в ``feature_names`` либо
+            передано невалидное значение ``encoding``.
     """
+    if encoding not in ("one_hot", "ordinal"):
+        raise ValueError(
+            f"Unknown encoding strategy: {encoding!r}. "
+            "Expected one of ('one_hot', 'ordinal')."
+        )
+
     # Сопоставляем имена колонок с порядковыми номерами
     cat_indices = [
         feature_names.index(col) for col in categorical_features if col in feature_names
@@ -123,16 +152,27 @@ def build_preprocessor(
         ]
     )
 
+    if encoding == "ordinal":
+        encoder = OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1,
+            encoded_missing_value=-1,
+        )
+        encoder_step_name = "ordinal"
+    else:
+        encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        encoder_step_name = "onehot"
+
     cat_transformer = Pipeline(
         steps=[
             # Приводим категориальные колонки к строковому объектному массиву.
             # Это делает пайплайн устойчивым к bool-колонкам: SimpleImputer со
             # strategy="most_frequent" падает на numpy-bool ("SimpleImputer does
             # not support data with dtype bool"), поэтому bool-признаки приводятся
-            # к строкам ("True"/"False") и кодируются one-hot как обычные категории.
+            # к строкам ("True"/"False") и кодируются как обычные категории.
             ("to_string", FunctionTransformer(_to_string_array)),
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+            (encoder_step_name, encoder),
         ]
     )
 

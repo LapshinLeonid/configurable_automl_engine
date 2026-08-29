@@ -50,7 +50,10 @@ from configurable_automl_engine.common.serialization_utils import (
     save_artifact,
 )
 from configurable_automl_engine.oversampling import DataOversampler
-from configurable_automl_engine.preprocessing import build_preprocessor
+from configurable_automl_engine.preprocessing import (
+    EncodingStrategy,
+    build_preprocessor,
+)
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_greater_better,
@@ -170,6 +173,8 @@ class ModelTrainer:
         categorical_features (list[str] | None): Список колонок для One-Hot кодирования.
         numerical_features (list[str] | None): Список колонок для скалирования.
         id_column (str | None): Идентификатор, исключаемый из процесса обучения.
+        encoding_strategy (str): Стратегия кодирования категорий
+            ('one_hot' или 'ordinal'). По умолчанию 'one_hot'.
         os_enable (bool): Флаг активации балансировки/увеличения выборки.
         os_multiplier (float): Коэффициент генерации синтетических данных.
         os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
@@ -193,6 +198,7 @@ class ModelTrainer:
         categorical_features: list[str] | None = None,
         numerical_features: list[str] | None = None,
         id_column: str | None = None,
+        encoding_strategy: str = "one_hot",
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки."""
 
@@ -220,6 +226,16 @@ class ModelTrainer:
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.id_column = id_column
+        # Стратегия кодирования категорий: 'one_hot' (по умолчанию) или 'ordinal'.
+        # Хранится как строковый примитив, чтобы сохранять picklable-совместимость.
+        if encoding_strategy not in ("one_hot", "ordinal"):
+            raise TrainingError(
+                f"Unknown encoding_strategy: {encoding_strategy!r}. "
+                "Expected one of ('one_hot', 'ordinal')."
+            )
+        self.encoding_strategy: EncodingStrategy = cast(
+            EncodingStrategy, encoding_strategy
+        )
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -342,10 +358,17 @@ class ModelTrainer:
             self.logger.warning(
                 "No features matched for preprocessing. Defaulting to passthrough."
             )
+        # Обратная совместимость: модели, сериализованные до появления
+        # параметра encoding_strategy (атрибут отсутствует у распикленных
+        # объектов), по умолчанию обрабатываются как one_hot.
+        encoding: EncodingStrategy = cast(
+            EncodingStrategy, getattr(self, "encoding_strategy", "one_hot")
+        )
         return build_preprocessor(
             feature_names,
             self.categorical_features or [],
             self.numerical_features or [],
+            encoding=encoding,
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:

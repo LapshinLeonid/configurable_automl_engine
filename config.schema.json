@@ -2,7 +2,7 @@
   "$defs": {
     "AlgoCfg": {
       "additionalProperties": false,
-      "description": "Техническая конфигурация конкретного ML-алгоритма в пайплайне.\n\nХранит настройки включения алгоритма, переопределенные пространства \nпоиска и пути к программным модулям тренера и тюнера.\nAttributes:\n    enable (bool): Флаг участия алгоритма в текущем эксперименте.\n    limit_hyperparameters (bool): Режим сокращенного пространства поиска.\n    hyperparameters (Dict | None): Кастомные границы параметров, \n        перекрывающие значения по умолчанию.\n    tuner (str): Dotted-path к модулю оптимизатора.\n    trainer_module (str): Dotted-path к реализации обучения модели.",
+      "description": "Техническая конфигурация конкретного ML-алгоритма в пайплайне.\n\nХранит настройки включения алгоритма, переопределенные пространства\nпоиска и пути к программным модулям тренера и тюнера.\nAttributes:\n    enable (bool): Флаг участия алгоритма в текущем эксперименте.\n    limit_hyperparameters (bool): Режим сокращенного пространства поиска.\n    hyperparameters (Dict | None): Кастомные границы параметров,\n        перекрывающие значения по умолчанию.\n    tuner (str): Dotted-path к модулю оптимизатора.\n    trainer_module (str): Dotted-path к реализации обучения модели.",
       "properties": {
         "enable": {
           "default": true,
@@ -356,7 +356,7 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор \nметрик, стратегий оценки качества (Cross-Validation / Hold-out) \nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').",
+      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').",
       "properties": {
         "comparison_metric": {
           "default": "r2",
@@ -373,6 +373,7 @@
           "type": "string"
         },
         "path_to_model": {
+          "default": "model.pkl",
           "description": "Путь для сохранения/загрузки результирующей обученной модели",
           "format": "path",
           "title": "Path To Model",
@@ -407,14 +408,24 @@
         },
         "validation_strategy": {
           "$ref": "#/$defs/ValidationStrategy",
-          "default": "k_fold",
-          "description": "Стратегия оценки качества:k-fold кросс-валидация или фиксированный hold-out"
+          "default": "auto",
+          "description": "Стратегия оценки качества:k-fold кросс-валидация, фиксированный hold-out,LOO или автоматический выбор"
         },
         "n_folds": {
           "default": 5,
           "description": "Количество блоков (фолдов) для кросс-валидации.Используется только если validation_strategy = 'k_fold'",
           "title": "N Folds",
           "type": "integer"
+        },
+        "categorical_encoding": {
+          "default": "one_hot",
+          "description": "Стратегия кодирования категориальных признаков: 'one_hot' (каждая категория -> отдельный бинарный столбец) или 'ordinal' (каждая категориальная колонка -> один числовой столбец с наложенным порядком). Ordinal кодирование не расширяет число колонок и полезно для линейных моделей, однако навязывает искусственный порядок категориям.",
+          "enum": [
+            "one_hot",
+            "ordinal"
+          ],
+          "title": "Categorical Encoding",
+          "type": "string"
         },
         "parallel_strategy": {
           "$ref": "#/$defs/ParallelStrategy",
@@ -445,20 +456,32 @@
           "type": "string"
         },
         "phase_timeout": {
-          "description": "Глобальный таймаут на всю фазу HPO (в секундах). Если None — используется значение по умолчанию run_parallel (3600).",
-          "default": null,
           "anyOf": [
-            {"type": "number", "minimum": 1.0},
-            {"type": "null"}
-          ]
+            {
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Глобальный таймаут на всю фазу HPO (в секундах). Если None — используется значение по умолчанию 3600 секунд (1 час).",
+          "title": "Phase Timeout"
         },
         "task_timeout": {
-          "description": "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). Если None — используется phase_timeout или глобальный timeout.",
-          "default": null,
           "anyOf": [
-            {"type": "number", "minimum": 1.0},
-            {"type": "null"}
-          ]
+            {
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). Если None — используется phase_timeout или глобальный timeout.",
+          "title": "Task Timeout"
         }
       },
       "required": [
@@ -469,10 +492,10 @@
     },
     "HPOPhaseCfg": {
       "additionalProperties": false,
-      "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя \nвыстраивать многоступенчатые стратегии поиска (например, сначала \nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'), \n        определяющий область поиска.",
+      "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя\nвыстраивать многоступенчатые стратегии поиска (например, сначала\nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'),\n        определяющий область поиска.",
       "properties": {
         "name": {
-          "default": null,
+          "default": "phase",
           "description": "Определенное пользователем название фазы оптимизации (например, 'coarse_search' или 'fine_tuning')",
           "title": "Name",
           "type": "string"
@@ -549,7 +572,7 @@
     },
     "OversamplingCfg": {
       "additionalProperties": false,
-      "description": "Параметры балансировки классов и синтеза данных.\n\nОбеспечивает конфигурацию методов устранения дисбаланса целевой переменной. \nИспользует механизм псевдонимов (aliases) для маппинга плоских ключей \nYAML в структурированный объект.\nAttributes:\n    enable (bool): Глобальный флаг включения оверсэмплинга.\n    multiplier (float): Целевой коэффициент увеличения выборки.\n    algorithm (OversamplingAlgorithm): Выбранный метод генерации \n        (SMOTE, ADASYN и др.).",
+      "description": "Параметры балансировки классов и синтеза данных.\n\nОбеспечивает конфигурацию методов устранения дисбаланса целевой переменной.\nИспользует механизм псевдонимов (aliases) для маппинга плоских ключей\nYAML в структурированный объект.\nAttributes:\n    enable (bool): Глобальный флаг включения оверсэмплинга.\n    multiplier (float): Целевой коэффициент увеличения выборки.\n    algorithm (OversamplingAlgorithm): Выбранный метод генерации\n        (SMOTE, ADASYN и др.).",
       "properties": {
         "data_oversampling": {
           "default": false,
@@ -581,7 +604,7 @@
       "type": "string"
     },
     "SearchSpaceEntry": {
-      "description": "Описание пространства поиска для отдельного гиперпараметра.\n\nУниверсальный контейнер, поддерживающий как категориальные списки, \nтак и числовые диапазоны. Реализует логику прозрачной конвертации \nиз сокращенной YAML-записи в типизированные объекты распределений.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный \n        объект конкретного типа распределения.",
+      "description": "Описание пространства поиска для отдельного гиперпараметра.\n\nУниверсальный контейнер, поддерживающий как категориальные списки,\nтак и числовые диапазоны. Реализует логику прозрачной конвертации\nиз сокращенной YAML-записи в типизированные объекты распределений.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный\n        объект конкретного типа распределения.",
       "properties": {
         "config": {
           "discriminator": {
@@ -627,14 +650,15 @@
       "enum": [
         "train_test_split",
         "k_fold",
-        "loo"
+        "loo",
+        "auto"
       ],
       "title": "ValidationStrategy",
       "type": "string"
     }
   },
   "additionalProperties": false,
-  "description": "Корневой объект всей системы конфигурации AutoML.\n\nАгрегирует все секции настроек и выполняет финальную валидацию \nцелостности графа параметров, включая проверку системных зависимостей.\nAttributes:\n    general (GeneralCfg): Общие параметры эксперимента.\n    oversampling (OversamplingCfg): Настройки предобработки данных.\n    algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.",
+  "description": "Корневой объект всей системы конфигурации AutoML.\n\nАгрегирует все секции настроек и выполняет финальную валидацию\nцелостности графа параметров, включая проверку системных зависимостей.\nAttributes:\n    general (GeneralCfg): Общие параметры эксперимента.\n    oversampling (OversamplingCfg): Настройки предобработки данных.\n    algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.",
   "properties": {
     "general": {
       "$ref": "#/$defs/GeneralCfg",

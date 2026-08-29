@@ -47,6 +47,7 @@ from configurable_automl_engine.common.validation_utils import get_effective_tra
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
+    EncodingStrategy,
     build_preprocessor,
     detect_feature_types,
 )
@@ -282,6 +283,7 @@ def optimize(
     preprocessor: Any | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
+    encoding: EncodingStrategy | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
     Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
@@ -317,6 +319,10 @@ def optimize(
             Если ``preprocessor`` не передан, по ним строится препроцессор.
         numerical_features (list[str] | None): Имена числовых колонок.
             Используется вместе с ``categorical_features``.
+        encoding (EncodingStrategy | None): Стратегия кодирования категорий
+            ('one_hot' или 'ordinal'). По умолчанию ``None`` — используется
+            'one_hot'. Применяется при построении препроцессора, когда
+            ``preprocessor`` не передан.
     Returns:
         tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
             - best_model: Обученная модель с лучшими параметрами.
@@ -396,10 +402,12 @@ def optimize(
     scorer = _build_scorer(metric)
 
     # -------------------- 2.5 preprocessing (categorical features) ---------- #
-    # Единая точка построения препроцессора для фазы HPO: категории -> one-hot,
-    # числа -> StandardScaler. Используется та же логика, что и в финальном
-    # обучении (trainer.ModelTrainer), поэтому HPO и финальный fit согласованы.
+    # Единая точка построения препроцессора для фазы HPO: категории -> one-hot
+    # (или ordinal, если задан encoding), числа -> StandardScaler. Используется та же
+    # логика, что и в финальном обучении (trainer.ModelTrainer), поэтому HPO и
+    # финальный fit согласованы.
     if preprocessor is None:
+        encoding_strategy: EncodingStrategy = encoding or "one_hot"
         if categorical_features is not None or numerical_features is not None:
             # Явно переданные списки колонок (основной путь из training_engine)
             if isinstance(X, pd.DataFrame):
@@ -407,6 +415,7 @@ def optimize(
                     list(X.columns),
                     categorical_features or [],
                     numerical_features or [],
+                    encoding=encoding_strategy,
                 )
             else:
                 log.warning(
@@ -420,7 +429,9 @@ def optimize(
             # HPO применяется StandardScaler так же, как в финальном ModelTrainer.
             cats, nums = detect_feature_types(X)
             if cats or nums:
-                preprocessor = build_preprocessor(list(X.columns), cats, nums)
+                preprocessor = build_preprocessor(
+                    list(X.columns), cats, nums, encoding=encoding_strategy
+                )
         else:
             log.warning(
                 "X is not a pandas.DataFrame and categorical_features/"

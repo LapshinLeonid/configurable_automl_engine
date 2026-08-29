@@ -102,6 +102,7 @@ def _run_hpo(
     initial_params: dict[str, Any] | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
+    encoding: str = "one_hot",
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -130,6 +131,8 @@ def _run_hpo(
         categorical_features (list[str] | None): Имена категориальных колонок,
             определённые один раз в ``train_best_model`` и передаваемые тюнеру.
         numerical_features (list[str] | None): Имена числовых колонок.
+        encoding (str): Стратегия кодирования категорий ('one_hot' или 'ordinal'),
+            прокидываемая тюнеру для согласованной предобработки с финальным fit.
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
             Кортеж (лучшая метрика, лучшие параметры)
@@ -191,6 +194,21 @@ def _run_hpo(
     if "numerical_features" in sig.parameters:
         kwargs["numerical_features"] = numerical_features
 
+    # прокидываем стратегию кодирования, если тюнер её поддерживает
+    if "encoding" in sig.parameters:
+        kwargs["encoding"] = encoding
+    else:
+        # Кастомный тюнер не принимает encoding: стратегия молча игнорируется
+        # в фазе HPO, но применяется в финальном обучении -> рассинхрон
+        # представления признаков. Предупреждаем, чтобы пользователь мог
+        # обновить тюнер до поддерживающего аргумент `encoding`.
+        _LOG.warning(
+            "Tuner %s does not accept `encoding`; categorical_encoding=%r "
+            "will NOT be applied during HPO (final fit may diverge).",
+            algo_cfg.tuner,
+            encoding,
+        )
+
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
@@ -246,6 +264,7 @@ def _fit_and_save(
         data_oversampling_multiplier=cfg.oversampling.multiplier,
         data_oversampling_algorithm=cfg.oversampling.algorithm,
         serialization_format=cfg.general.serialization_format,
+        encoding_strategy=cfg.general.categorical_encoding,
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +405,7 @@ def train_best_model(
                 initial_params=initial_params,
                 categorical_features=categorical_features,
                 numerical_features=numerical_features,
+                encoding=cfg.general.categorical_encoding,
             )
 
             if result is None:

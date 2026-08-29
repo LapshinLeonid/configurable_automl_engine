@@ -16,7 +16,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, encoding, and missing value imputation.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. Two encoding strategies are supported via the `general.categorical_encoding` config key: `one_hot` (default) and `ordinal`.
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, BorderlineSMOTE, and Random oversampling with noise injection.
 * **Nested Validation Support**: Ability to perform complex nested cross-validation to ensure model generalizability.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
@@ -79,6 +79,9 @@ The example can be run from [example.py](example.py).
     config = {
         "general": {
             "comparison_metric": "r2",
+            # Стратегия кодирования категориальных признаков:
+            # 'one_hot' (по умолчанию) или 'ordinal'.
+            "categorical_encoding": "one_hot",
             "phases": [
                 {"n_trials": 100, "action": "all_algorithms"},
                 {"n_trials": 200, "action": "refine_winner"}

@@ -183,6 +183,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `categorical_features` | `list[str]` or `None` | `None` | Categorical column names. |
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
+| `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy (`"one_hot"` or `"ordinal"`). |
 
 **Key methods:**
 
@@ -190,6 +191,13 @@ Orchestrator class for training, validation, and serialization of regression mod
 * `predict(X)` — Make predictions on new data.
 * `save(path)` — Serialize to disk.
 * `load(path)` — Load from disk (class method).
+
+**Categorical encoding**
+
+Categorical columns are encoded by a single shared preprocessor used both during HPO and final training. Two strategies are available via the `general.categorical_encoding` config key (or the `encoding` argument of `tuner.optimize`):
+
+* `one_hot` (default) — each category becomes a binary column via `OneHotEncoder`. Unknown categories on prediction are ignored.
+* `ordinal` — each categorical column becomes a single numeric column via `OrdinalEncoder` (categories ordered alphabetically). Unknown categories map to `-1`, so prediction never fails. Does not expand the number of columns but imposes an artificial ordering on categories.
 
 ---
 

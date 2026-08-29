@@ -118,6 +118,8 @@ class GeneralCfg(BaseModel):
         phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.
         validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).
         n_folds (int): Количество разбиений для кросс-валидации.
+        categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования
+            категориальных признаков. По умолчанию 'one_hot'.
         parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).
         max_workers (int | None): Лимит потоков или процессов.
         parallel_mode (str): Технический режим исполнения ('threads' или 'processes').
@@ -162,6 +164,16 @@ class GeneralCfg(BaseModel):
         description=(
             "Количество блоков (фолдов) для кросс-валидации."
             "Используется только если validation_strategy = 'k_fold'"
+        ),
+    )
+    categorical_encoding: Literal["one_hot", "ordinal"] = Field(
+        default="one_hot",
+        description=(
+            "Стратегия кодирования категориальных признаков: 'one_hot' (каждая "
+            "категория -> отдельный бинарный столбец) или 'ordinal' (каждая "
+            "категориальная колонка -> один числовой столбец с наложенным порядком). "
+            "Ordinal кодирование не расширяет число колонок и полезно для "
+            "линейных моделей, однако навязывает искусственный порядок категориям."
         ),
     )
     parallel_strategy: ParallelStrategy = Field(
