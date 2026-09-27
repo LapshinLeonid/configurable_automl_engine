@@ -812,3 +812,112 @@ def test_full_training_engine_pipeline(tmp_path: Path) -> None:
     assert loaded.algorithm == result["algorithm"], (
         f"Алгоритм не совпадает: {loaded.algorithm} != {result['algorithm']}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. Adaptive preprocessing presets in optimize() (issue #18)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _num_transformer_of(preprocessor):
+    """Извлечь числовой трансформер из ColumnTransformer."""
+    transformers = dict(
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
+    )
+    return transformers["num"]
+
+
+def test_optimize_trees_preprocessor_without_scaling(toy_data):
+    """AC-3 в фазе HPO: для деревьев масштабирование не применяется."""
+    from sklearn.preprocessing import RobustScaler, StandardScaler
+
+    X, y = toy_data
+
+    model, _, _ = hyperopt.optimize(
+        "random_forest",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+        space_overrides={
+            "random_forest": lambda t: {"n_estimators": t.suggest_int("n_estimators", 5, 20)}
+        },
+    )
+
+    preprocessor = model.named_steps["preprocessor"]
+    num = _num_transformer_of(preprocessor)
+    step_names = [s[0] for s in num.steps]
+    assert "scaler" not in step_names
+    assert num.named_steps["imputer"].strategy == "median"
+    assert not isinstance(num.named_steps.get("scaler"), (StandardScaler, RobustScaler))
+
+
+def test_optimize_glm_uses_robust_scaler(toy_data):
+    """AC-5 в фазе HPO: GLM использует RobustScaler + median-импутацию."""
+    from sklearn.preprocessing import RobustScaler
+
+    X, y = toy_data
+    y_pos = pd.Series(np.abs(y) + 1.0)
+
+    model, _, _ = hyperopt.optimize(
+        "gammaregressor",
+        X,
+        y_pos,
+        n_trials=2,
+        random_state=0,
+        space_overrides={
+            "gammaregressor": lambda t: {
+                "alpha": t.suggest_float("alpha", 1e-6, 1e-1),
+                "max_iter": t.suggest_int("max_iter", 50, 100),
+            }
+        },
+    )
+
+    num = _num_transformer_of(model.named_steps["preprocessor"])
+    assert isinstance(num.named_steps["scaler"], RobustScaler)
+    assert num.named_steps["imputer"].strategy == "median"
+
+
+def test_optimize_preprocessing_override_applied(toy_data):
+    """AC-7 в фазе HPO: явное переопределение пресета имеет приоритет."""
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = toy_data
+
+    # Для дерева пользователь явно просит standard scaling
+    model, _, _ = hyperopt.optimize(
+        "random_forest",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+        preprocessing_override={"scaling": "standard"},
+        space_overrides={
+            "random_forest": lambda t: {"n_estimators": t.suggest_int("n_estimators", 5, 20)}
+        },
+    )
+
+    num = _num_transformer_of(model.named_steps["preprocessor"])
+    assert isinstance(num.named_steps["scaler"], StandardScaler)
+    # Импутация осталась автовыбором класса деревьев
+    assert num.named_steps["imputer"].strategy == "median"
+
+
+def test_optimize_logs_resolved_preset(toy_data, caplog):
+    """AC-9 в фазе HPO: выбранный пресет фиксируется в логах."""
+    X, y = toy_data
+
+    with caplog.at_level("INFO", logger="configurable_automl_engine.tuner"):
+        hyperopt.optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            random_state=0,
+            space_overrides={
+                "ridge": lambda t: {"alpha": t.suggest_float("alpha", 1e-4, 1.0)}
+            },
+        )
+
+    assert "Resolved preprocessing preset" in caplog.text
+    assert "scale_sensitive" in caplog.text

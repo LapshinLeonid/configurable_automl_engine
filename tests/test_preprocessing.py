@@ -6,7 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import (
+    OneHotEncoder,
+    OrdinalEncoder,
+    RobustScaler,
+    StandardScaler,
+)
 
 from configurable_automl_engine.preprocessing import (
     build_preprocessor,
@@ -313,3 +319,136 @@ def test_build_preprocessor_ordinal_empty_features_passthrough():
         assert isinstance(preprocessor, ColumnTransformer)
         assert preprocessor.transformers[0][0] == "bypass"
         assert preprocessor.transformers[0][1] == "passthrough"
+
+
+# ───────────────────────── Adaptive presets (issue #18) ─────────────────────────
+
+
+def _num_pipeline(preprocessor: ColumnTransformer):
+    """Извлечь числовой пайплайн из ColumnTransformer."""
+    transformers = dict(
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
+    )
+    assert "num" in transformers, "числовой трансформер отсутствует"
+    return transformers["num"]
+
+
+def test_build_preprocessor_default_imputation_is_mean():
+    """По умолчанию (пресет scale_sensitive) — импутация mean."""
+    preprocessor = build_preprocessor(
+        ["a", "b"], categorical_features=[], numerical_features=["a", "b"]
+    )
+    num = _num_pipeline(preprocessor)
+    assert isinstance(num.named_steps["imputer"], SimpleImputer)
+    assert num.named_steps["imputer"].strategy == "mean"
+
+
+def test_build_preprocessor_median_imputation():
+    """imputation_strategy='median' → SimpleImputer(strategy='median')."""
+    preprocessor = build_preprocessor(
+        ["a", "b"],
+        categorical_features=[],
+        numerical_features=["a", "b"],
+        imputation_strategy="median",
+    )
+    num = _num_pipeline(preprocessor)
+    assert num.named_steps["imputer"].strategy == "median"
+
+
+def test_build_preprocessor_scaling_none_omits_scaler():
+    """scaling='none' → шаг масштабирования отсутствует (AC-3 для деревьев)."""
+    preprocessor = build_preprocessor(
+        ["a", "b"],
+        categorical_features=[],
+        numerical_features=["a", "b"],
+        scaling="none",
+    )
+    num = _num_pipeline(preprocessor)
+    step_names = [s[0] for s in num.steps]
+    assert step_names == ["imputer"]
+    assert "scaler" not in step_names
+
+
+def test_build_preprocessor_scaling_standard_uses_standard_scaler():
+    """scaling='standard' → StandardScaler (AC-4 для масштабо-чувствительных)."""
+    preprocessor = build_preprocessor(
+        ["a", "b"],
+        categorical_features=[],
+        numerical_features=["a", "b"],
+        scaling="standard",
+    )
+    num = _num_pipeline(preprocessor)
+    assert isinstance(num.named_steps["scaler"], StandardScaler)
+
+
+def test_build_preprocessor_scaling_robust_uses_robust_scaler():
+    """scaling='robust' → RobustScaler (AC-5 для GLM со скошенными распределениями)."""
+    preprocessor = build_preprocessor(
+        ["a", "b"],
+        categorical_features=[],
+        numerical_features=["a", "b"],
+        scaling="robust",
+    )
+    num = _num_pipeline(preprocessor)
+    assert isinstance(num.named_steps["scaler"], RobustScaler)
+
+
+def test_build_preprocessor_invalid_imputation_strategy_raises():
+    with pytest.raises(ValueError, match="Unknown imputation strategy"):
+        build_preprocessor(
+            ["a"],
+            categorical_features=[],
+            numerical_features=["a"],
+            imputation_strategy="mode",
+        )
+
+
+def test_build_preprocessor_invalid_scaling_raises():
+    with pytest.raises(ValueError, match="Unknown scaling type"):
+        build_preprocessor(
+            ["a"],
+            categorical_features=[],
+            numerical_features=["a"],
+            scaling="quantile",
+        )
+
+
+def test_tree_preset_end_to_end_no_scaling():
+    """Пресет деревьев (median + none): пропуски заполняются медианой, данные
+    передаются в модель без масштабирования."""
+    df = pd.DataFrame(
+        {"num_a": [1.0, 2.0, np.nan, 4.0], "num_b": [10.0, 20.0, 30.0, np.nan]}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        imputation_strategy="median",
+        scaling="none",
+    )
+    out = preprocessor.fit_transform(df)
+    assert out.shape == (4, 2)
+    assert np.isfinite(out).all()
+    # Без масштабирования значения остаются в исходном диапазоне
+    assert set(np.round(out[:, 0]).astype(int)) <= {1, 2, 4}
+    assert set(np.round(out[:, 1]).astype(int)) <= {10, 20, 30}
+
+
+def test_glm_preset_end_to_end_robust():
+    """Пресет GLM (median + robust): корректная обработка выбросов и пропусков."""
+    df = pd.DataFrame(
+        {
+            "num_a": [1.0, 2.0, np.nan, 4.0, 1000.0],
+            "num_b": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        imputation_strategy="median",
+        scaling="robust",
+    )
+    out = preprocessor.fit_transform(df)
+    assert out.shape == (5, 2)
+    assert np.isfinite(out).all()

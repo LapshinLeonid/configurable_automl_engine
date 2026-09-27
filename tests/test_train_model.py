@@ -10,7 +10,7 @@ import os
 
 from sklearn.compose import ColumnTransformer
 
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from sklearn.base import BaseEstimator, TransformerMixin
 
@@ -1162,3 +1162,116 @@ def test_metric_calculation_debug_log_formats_val_score(caplog):
     assert "{self.val_score" not in caplog.text
     # Фактическое значение должно быть отформатировано с 4 знаками после запятой
     assert re.search(r"final val_score=-?\d+\.\d{4}", caplog.text)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Adaptive preprocessing presets in ModelTrainer (issue #18)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _num_transformer_of(trainer: ModelTrainer):
+    """Извлечь числовой трансформер из обученного пайплайна тренера."""
+    assert trainer.pipeline is not None, "pipeline не обучен"
+    preprocessor = trainer.pipeline.named_steps["preprocessor"]
+    transformers = dict(
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
+    )
+    return transformers["num"]
+
+
+def test_trainer_scale_sensitive_has_standard_scaler():
+    """Масштабо-чувствительная модель (ridge): StandardScaler применяется всегда (AC-4)."""
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+    num = _num_transformer_of(trainer)
+    assert isinstance(num.named_steps["scaler"], StandardScaler)
+    assert num.named_steps["imputer"].strategy == "mean"
+    assert trainer.preprocessing_preset is not None
+    assert trainer.preprocessing_preset.scaling == "standard"
+
+
+def test_trainer_tree_has_no_scaler():
+    """Деревья и ансамбли: масштабирование не применяется (AC-3)."""
+    trainer = ModelTrainer(
+        algorithm="random_forest", hyperparams={"n_estimators": 5}
+    ).fit(X, y)
+    num = _num_transformer_of(trainer)
+    step_names = [s[0] for s in num.steps]
+    assert "scaler" not in step_names
+    assert num.named_steps["imputer"].strategy == "median"
+    assert trainer.preprocessing_preset.scaling == "none"
+
+
+def test_trainer_glm_uses_robust_scaler_and_median():
+    """GLM со скошенными распределениями: median + RobustScaler (AC-5)."""
+    y_pos = np.abs(y) + 1.0
+    trainer = ModelTrainer(
+        algorithm="gammaregressor",
+        hyperparams={"alpha": 0.001, "max_iter": 100},
+    ).fit(X, y_pos)
+    num = _num_transformer_of(trainer)
+    assert isinstance(num.named_steps["scaler"], RobustScaler)
+    assert num.named_steps["imputer"].strategy == "median"
+
+
+def test_trainer_univariate_no_scaling():
+    """Одномерный алгоритм (isotonic): без масштабирования."""
+    X1 = X.iloc[:, [0]]
+    trainer = ModelTrainer(algorithm="isotonic").fit(X1, y)
+    assert trainer.preprocessing_preset.scaling == "none"
+    num = _num_transformer_of(trainer)
+    assert "scaler" not in [s[0] for s in num.steps]
+
+
+def test_trainer_override_has_priority_over_automatic_selection():
+    """Явное переопределение пресета имеет приоритет над автовыбором (AC-7)."""
+    # Дерево по умолчанию не масштабируется, но пользователь просит standard scaling
+    trainer = ModelTrainer(
+        algorithm="random_forest",
+        hyperparams={"n_estimators": 5},
+        preprocessing_override={"scaling": "standard"},
+    ).fit(X, y)
+    num = _num_transformer_of(trainer)
+    assert isinstance(num.named_steps["scaler"], StandardScaler)
+    # Импутация осталась автовыбором класса деревьев (median)
+    assert num.named_steps["imputer"].strategy == "median"
+
+    # Масштабо-чувствительная модель, пользователь отключает масштабирование
+    trainer2 = ModelTrainer(
+        algorithm="ridge",
+        hyperparams={"alpha": 0.1},
+        preprocessing_override={"scaling": "none"},
+    ).fit(X, y)
+    num2 = _num_transformer_of(trainer2)
+    assert "scaler" not in [s[0] for s in num2.steps]
+
+
+def test_trainer_override_invalid_value_rejected_at_init():
+    """Некорректное переопределение отклоняется на этапе инициализации тренера."""
+    with pytest.raises(TrainingError, match="Invalid preprocessing_override"):
+        ModelTrainer(algorithm="ridge", preprocessing_override={"scaling": "bogus"})
+
+    with pytest.raises(TrainingError, match="preprocessing_override"):
+        ModelTrainer(algorithm="ridge", preprocessing_override="standard")
+
+
+def test_trainer_logs_resolved_preset(caplog):
+    """Выбранный пресет фиксируется в логах (AC-9)."""
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+        ModelTrainer(algorithm="random_forest", hyperparams={"n_estimators": 5}).fit(
+            X, y
+        )
+
+    assert "Resolved preprocessing preset" in caplog.text
+    assert "trees" in caplog.text
+    assert "scaling='none'" in caplog.text
+
+
+def test_trainer_preset_survives_save_load(tmp_path):
+    """Пресет сохраняется в сериализованном тренере."""
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+    pkl = tmp_path / "preset.pkl"
+    trainer.save(pkl)
+    restored = ModelTrainer.load(pkl)
+    assert restored.preprocessing_preset == trainer.preprocessing_preset
+    assert restored.preprocessing_preset.scaling == "standard"

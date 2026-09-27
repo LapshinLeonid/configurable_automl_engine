@@ -17,6 +17,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. Two encoding strategies are supported via the `general.categorical_encoding` config key: `one_hot` (default) and `ordinal`.
+* **Adaptive Preprocessing Presets**: The feature preprocessing strategy (missing-value imputation and scaling) is selected automatically from the regression algorithm class — scale-sensitive models get `StandardScaler` + mean imputation, trees and ensembles are trained without scaling, GLMs with skewed distributions use median imputation + `RobustScaler`. Each algorithm's class is fixed in a declarative mapping table, and the user can explicitly override the preset per algorithm via config (see [API Reference](API_REFERENCE.md)).
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, BorderlineSMOTE, and Random oversampling with noise injection.
 * **Nested Validation Support**: Ability to perform complex nested cross-validation to ensure model generalizability.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.

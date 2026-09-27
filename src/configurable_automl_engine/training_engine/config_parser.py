@@ -52,6 +52,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     SearchSpaceEntry,
 )
 from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.training_engine.metrics import AVAILABLE_METRICS
 
 # Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
@@ -452,6 +453,16 @@ class AlgoCfg(BaseModel):
         description=(
             "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. "
             "См. ALGO_HYPERPARAMETER_REGISTRY."
+        ),
+    )
+    preprocessing: PreprocessingOverride | None = Field(
+        default=None,
+        description=(
+            "Явное переопределение пресета предобработки признаков для данного "
+            "алгоритма (FR-5). Задаётся частично или полностью: 'imputation_strategy' "
+            "('mean'|'median') и/или 'scaling' ('standard'|'robust'|'none'). "
+            "Имеет приоритет над автоматическим выбором по классу алгоритма. "
+            "None — автоматический выбор."
         ),
     )
     tuner: str | None = Field(

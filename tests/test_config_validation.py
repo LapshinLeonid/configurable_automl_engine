@@ -432,6 +432,63 @@ def test_validator_invalid_path():
         AlgoCfg(tuner="invalid-path")
 
 
+# --- Тесты для preprocessing override (FR-5) ---
+def test_algo_cfg_preprocessing_valid_override():
+    """Валидный блок переопределения пресета принимается конфигом."""
+    cfg = AlgoCfg(
+        preprocessing={"imputation_strategy": "median", "scaling": "none"}
+    )
+    assert cfg.preprocessing is not None
+    assert cfg.preprocessing.imputation_strategy == "median"
+    assert cfg.preprocessing.scaling == "none"
+
+
+def test_algo_cfg_preprocessing_partial_override():
+    """Частичное переопределение: незаданные поля остаются None."""
+    cfg = AlgoCfg(preprocessing={"scaling": "robust"})
+    assert cfg.preprocessing.scaling == "robust"
+    assert cfg.preprocessing.imputation_strategy is None
+
+
+def test_algo_cfg_preprocessing_default_none():
+    """Без блока preprocessing автовыбор (None)."""
+    assert AlgoCfg().preprocessing is None
+
+
+def test_algo_cfg_preprocessing_invalid_scaling_rejected():
+    """Некорректное значение scaling отклоняется на этапе валидации
+    с понятным сообщением (негативный сценарий)."""
+    with pytest.raises(ValidationError, match="scaling"):
+        AlgoCfg(preprocessing={"scaling": "quantile"})
+
+
+def test_algo_cfg_preprocessing_invalid_imputation_rejected():
+    with pytest.raises(ValidationError, match="imputation_strategy"):
+        AlgoCfg(preprocessing={"imputation_strategy": "mode"})
+
+
+def test_algo_cfg_preprocessing_unknown_field_rejected():
+    """Неизвестные поля в блоке переопределения отклоняются (extra='forbid')."""
+    with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
+        AlgoCfg(preprocessing={"unknown_field": 1})
+
+
+def test_config_preprocessing_override_end_to_end():
+    """Блок preprocessing в конфиге алгоритма доходит до Config без потерь."""
+    cfg_data = BASE | {
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "preprocessing": {"imputation_strategy": "median"},
+            }
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    algo_cfg = getattr(cfg.algorithms, "elasticnet")
+    assert algo_cfg.preprocessing.imputation_strategy == "median"
+    assert algo_cfg.preprocessing.scaling is None
+
+
 def test_hyperparameter_compatibility_error(monkeypatch):
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 

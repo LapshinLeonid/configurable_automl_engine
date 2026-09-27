@@ -213,6 +213,12 @@ def _run_hpo(
             encoding,
         )
 
+# прокидываем переопределение пресета предобработки (FR-5): явное указание
+    # пользователя из конфигурации применяется и в HPO, и в финальном обучении
+    preprocessing_override = getattr(algo_cfg, "preprocessing", None)
+    if "preprocessing_override" in sig.parameters:
+        kwargs["preprocessing_override"] = preprocessing_override
+
     # прокидываем настройки ранней остановки (pruning), если тюнер их
     # поддерживает; кастомные тюнеры без аргумента `pruning` не затрагиваются
     if pruning is not None and "pruning" in sig.parameters:
@@ -274,6 +280,9 @@ def _fit_and_save(
         data_oversampling_algorithm=cfg.oversampling.algorithm,
         serialization_format=cfg.general.serialization_format,
         encoding_strategy=cfg.general.categorical_encoding,
+        # Явное переопределение пресета предобработки из конфига (FR-5):
+        # применяется согласованно с фазой HPO (AC-7).
+        preprocessing_override=getattr(algo_cfg, "preprocessing", None),
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)

@@ -120,6 +120,48 @@ Algorithm configuration consists of:
 * `enable` — boolean flag, whether hyperparameter search is performed for the algorithm.
 * `limit_hyperparameters` — (optional) boolean flag to set limits for hyperparameter search.
 * `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. See [`ALGO_HYPERPARAMETER_REGISTRY`](src/configurable_automl_engine/common/hyperopt_defaults.py) for details.
+* `preprocessing` — (optional) explicit override of the feature preprocessing preset for this algorithm. Takes priority over the automatic class-based selection (FR-5). May override the whole preset or only some fields:
+
+```yaml
+algorithms:
+  ridge:
+    enable: true
+    preprocessing:
+      imputation_strategy: median   # optional: "mean" | "median"
+      scaling: standard              # optional: "standard" | "robust" | "none"
+```
+
+Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message.
+
+## Adaptive Feature Preprocessing (preprocessing presets)
+
+The engine automatically chooses the feature preprocessing strategy based on the selected regression algorithm (FR-1). A **preprocessing preset** declaratively describes the numeric-feature handling rules: the missing-value imputation strategy and whether/how scaling is applied. Each supported algorithm is assigned to an **algorithm class** with common preprocessing requirements; membership is fixed in the default mapping table (see [`preprocessing_presets.py`](src/configurable_automl_engine/preprocessing_presets.py)) — adding a new algorithm only requires registering it there (FR-6).
+
+### Algorithm classes
+
+| Class | Algorithms | Imputation | Scaling |
+|-------|-----------|------------|---------|
+| `scale_sensitive` — scale-sensitive models (linear, kernel, distance-based) | `elasticnet`, `sgdregressor`, `ridge`, `lasso`, `ardregression`, `svr`, `nearest_neighbors_regression`, `gaussian_process_regression` | `mean` (standard) | `standard` (always applied) |
+| `trees` — trees and tree ensembles | `decision_tree`, `random_forest`, `extra_trees`, `gradient_boosting`, `adaboost`, `xgboosting` | `median` (robust to outliers) | `none` (never applied) |
+| `glm_skewed` — GLMs with skewed distributions | `poissonregressor`, `gammaregressor`, `tweedieregressor`, `glm` | `median` (skewness-aware, robust to outliers) | `robust` (RobustScaler) |
+| `univariate` — specialized univariate algorithms | `isotonic_regression` | `median` | `none` |
+| `default` — fallback for supported algorithms without an explicit registration | any supported algorithm missing from the mapping | `mean` | `standard` |
+
+Unknown algorithm names (typos) are rejected with a `ValueError` listing the available algorithms, instead of silently falling back to the default preset.
+
+### Composition of a preset
+
+Each preset defines:
+
+* `imputation_strategy` — missing-value imputation strategy for numeric features: `mean` (standard) or `median` (robust to outliers / skewed distributions).
+* `scaling` — whether scaling is needed and its type: `standard` (`StandardScaler`), `robust` (`RobustScaler`, robust to outliers), or `none` (numeric features are passed to the model without scaling).
+
+### Selection and override rules
+
+* The preset is resolved automatically from the algorithm name (aliases are supported) before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.
+* The same preset is applied at every lifecycle stage — hyperparameter optimization (HPO), final training, and prediction — through the single resolution point used by both `tuner.optimize` and `ModelTrainer` (FR-4).
+* Explicit user override (the `preprocessing` block in the algorithm config, or the `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize`) takes priority over the automatic selection (FR-5). Fields left unset keep the automatically chosen values.
+* The resolved preset is logged (INFO level) and stored on the trainer as `preprocessing_preset`, so the applied preprocessing can always be determined from logs (AC-9).
 
 ## Oversampling section
 
@@ -180,6 +222,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
 | `random_state` | `int` or `None` | `42` | Random seed. |
 | `space_overrides` | `dict[str, Callable]` or `None` | `None` | Custom search space overrides. |
+| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 
 **Returns:** `tuple[Any | None, dict[str, Any] | None, float]` — `(best_model, best_params, best_score)`. Returns `(None, None, -3.4028235e38)` when no trials succeed.
@@ -227,6 +270,11 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
 | `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy (`"one_hot"` or `"ordinal"`). |
+| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial or full overrides are supported; takes priority over the automatic class-based selection. |
+
+**Key attributes:**
+
+* `preprocessing_preset` — the resolved `PreprocessingPreset` (algorithm class, imputation strategy, scaling type) applied during `fit()`. Useful for observability and serialization.
 
 **Key methods:**
 

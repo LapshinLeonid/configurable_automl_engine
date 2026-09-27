@@ -1,4 +1,4 @@
-"""Preprocessing: единая точка построения препроцессора категориальных признаков.
+"""Preprocessing: единая точка построения препроцессора признаков.
 
 Модуль инкапсулирует два низкоуровневых кирпича подготовки данных:
 
@@ -6,15 +6,19 @@
        числовых колонок по ``pd.DataFrame``.
     2. :func:`build_preprocessor` — сборка ``sklearn.ColumnTransformer``
        с предобработкой по умолчанию **one-hot encoding** для категорий
-       (импутация ``most_frequent`` + ``OneHotEncoder``) и
-       ``StandardScaler`` для числовых признаков. Поддерживается также
-       альтернативная стратегия **ordinal encoding** (``OrdinalEncoder``)
+       (импутация ``most_frequent`` + ``OneHotEncoder``) и скалированием
+       для числовых признаков. Стратегия обработки числовых признаков
+       (стратегия импутации и тип масштабирования) задаётся параметрами
+       ``imputation_strategy``/``scaling`` и обычно берётся из адаптивного
+       пресета предобработки (:mod:`preprocessing_presets`), который
+       автоматически выбирается по регрессионному алгоритму. Поддерживается
+       также альтернативная стратегия **ordinal encoding** (``OrdinalEncoder``)
        через аргумент ``encoding='ordinal'``.
 
 Единая точка построения препроцессора используется в ОБОИХ местах обучения —
 фазе подбора гиперпараметров (``tuner.optimize``) и финальном обучении
 (``trainer.ModelTrainer``), что исключает рассинхрон логики предобработки
-между этапами.
+между этапами (FR-4).
 """
 
 from __future__ import annotations
@@ -31,7 +35,13 @@ from sklearn.preprocessing import (
     FunctionTransformer,
     OneHotEncoder,
     OrdinalEncoder,
+    RobustScaler,
     StandardScaler,
+)
+
+from configurable_automl_engine.preprocessing_presets import (
+    ImputationStrategy,
+    ScalingType,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +96,8 @@ def build_preprocessor(
     categorical_features: list[str],
     numerical_features: list[str],
     encoding: EncodingStrategy = "one_hot",
+    imputation_strategy: ImputationStrategy = "mean",
+    scaling: ScalingType = "standard",
 ) -> ColumnTransformer:
     """Сконструировать ColumnTransformer для раздельной обработки типов данных.
 
@@ -94,12 +106,25 @@ def build_preprocessor(
     ``encoding='ordinal'`` категории кодируются ``OrdinalEncoder`` (1 выходной
     столбец на категориальную колонку) вместо one-hot.
 
+    Стратегия предобработки числовых признаков задаётся параметрами
+    ``imputation_strategy`` и ``scaling`` и обычно берётся из адаптивного
+    пресета предобработки (:mod:`preprocessing_presets`): разные классы
+    регрессионных алгоритмов получают подходящий именно им набор
+    преобразований.
+
     Args:
         feature_names: Полный список имён признаков в порядке следования колонок.
         categorical_features: Имена колонок, кодируемых one-hot/ordinal.
         numerical_features: Имена колонок, подлежащих импутации и скалированию.
         encoding: Стратегия кодирования категорий: ``'one_hot'`` (по умолчанию)
             или ``'ordinal'``.
+        imputation_strategy: Стратегия заполнения пропусков для числовых
+            признаков: ``'mean'`` (по умолчанию) или ``'median'`` (устойчива
+            к выбросам, учитывает скошенность распределений).
+        scaling: Масштабирование числовых признаков: ``'standard'``
+            (``StandardScaler``, по умолчанию), ``'robust'`` (``RobustScaler``,
+            устойчив к выбросам) или ``'none'`` (масштабирование не
+            применяется — данные передаются в модель без него).
 
     Returns:
         ``ColumnTransformer``, преобразующий исходный DataFrame в числовую
@@ -114,18 +139,29 @@ def build_preprocessor(
     Note:
         При ``encoding='ordinal'`` категории кодируются целочисленными кодами,
         которые НЕ масштабируются (в отличие от числовых колонок, проходящих
-        через ``StandardScaler``). Для линейных моделей (например,
-        ``elasticnet``) несопоставимый масштаб кодов с категориями высокого
-        порядка может доминировать над числовыми признаками.
+        через скалер). Для линейных моделей (например, ``elasticnet``)
+        несопоставимый масштаб кодов с категориями высокого порядка может
+        доминировать над числовыми признаками.
 
     Raises:
         ValueError: Если имя колонки отсутствует в ``feature_names`` либо
-            передано невалидное значение ``encoding``.
+            передано невалидное значение ``encoding``, ``imputation_strategy``
+            или ``scaling``.
     """
     if encoding not in ("one_hot", "ordinal"):
         raise ValueError(
             f"Unknown encoding strategy: {encoding!r}. "
             "Expected one of ('one_hot', 'ordinal')."
+        )
+    if imputation_strategy not in ("mean", "median"):
+        raise ValueError(
+            f"Unknown imputation strategy: {imputation_strategy!r}. "
+            "Expected one of ('mean', 'median')."
+        )
+    if scaling not in ("standard", "robust", "none"):
+        raise ValueError(
+            f"Unknown scaling type: {scaling!r}. "
+            "Expected one of ('standard', 'robust', 'none')."
         )
 
     # Сопоставляем имена колонок с порядковыми номерами
@@ -144,13 +180,16 @@ def build_preprocessor(
             [("bypass", "passthrough", slice(None))], remainder="drop"
         )
 
-    # Пайплайны трансформации
-    num_transformer = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="mean")),
-            ("scaler", StandardScaler()),
-        ]
-    )
+    # Пайплайн трансформации числовых признаков: импутация + (опционально) скалер.
+    # При scaling='none' шаг масштабирования отсутствует — данные передаются
+    # в модель без него (AC-3 для деревьев и ансамблей).
+    num_steps: list[tuple[str, object]] = [
+        ("imputer", SimpleImputer(strategy=imputation_strategy))
+    ]
+    if scaling != "none":
+        scaler = RobustScaler() if scaling == "robust" else StandardScaler()
+        num_steps.append(("scaler", scaler))
+    num_transformer = Pipeline(steps=num_steps)
 
     if encoding == "ordinal":
         encoder = OrdinalEncoder(

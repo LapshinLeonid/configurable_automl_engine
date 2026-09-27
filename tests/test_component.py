@@ -935,3 +935,123 @@ class TestPartialNoneResults:
         )
 
         assert result["algorithm"] != "random_forest"
+
+
+# --------------------------------------------------------------------------- #
+#  Adaptive preprocessing preset override propagation (issue #18)
+# --------------------------------------------------------------------------- #
+def test_run_hpo_passes_preprocessing_override_to_tuner():
+    """Блок preprocessing из конфига алгоритма передаётся в tuner.optimize (FR-5)."""
+    from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
+
+    class FakeTuner:
+        """Тюнер с реальной сигнатурой optimize (принимает preprocessing_override)."""
+
+        def __init__(self) -> None:
+            self.received: dict = {}
+
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric="r2",
+            n_trials=1,
+            validation_strategy="k_fold",
+            *,
+            preprocessing_override=None,
+            **kwargs,
+        ):
+            self.received["preprocessing_override"] = preprocessing_override
+            return ("model", {"param": 1}, 0.95)
+
+    fake_tuner = FakeTuner()
+    algo_cfg = AlgoCfg(
+        tuner="some.module",
+        preprocessing={"imputation_strategy": "median", "scaling": "none"},
+    )
+
+    with patch("importlib.import_module", return_value=fake_tuner):
+        _run_hpo(
+            algo_name="random_forest",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="r2",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+        )
+
+    received = fake_tuner.received["preprocessing_override"]
+    assert isinstance(received, PreprocessingOverride)
+    assert received.scaling == "none"
+    assert received.imputation_strategy == "median"
+
+
+def test_run_hpo_no_override_when_absent():
+    """Без блока preprocessing тюнеру передаётся None."""
+    mock_tuner = MagicMock()
+    mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
+
+    algo_cfg = AlgoCfg(tuner="some.module")
+
+    with patch("importlib.import_module", return_value=mock_tuner):
+        _run_hpo(
+            algo_name="ridge",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="r2",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+        )
+
+    kwargs = mock_tuner.optimize.call_args.kwargs
+    assert kwargs.get("preprocessing_override") is None
+
+
+def test_train_best_model_applies_preprocessing_override(tmp_path, regression_dataset):
+    """AC-7 end-to-end: переопределение пресета из конфига применяется в финальной модели.
+
+    Для random_forest автовыбор класса деревьев — 'none'/'median'; явное
+    переопределение ('standard'/'mean') должно победить.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    from configurable_automl_engine.trainer import ModelTrainer
+
+    model_path = tmp_path / "best.pkl"
+    config = {
+        "general": {
+            "comparison_metric": "r2",
+            "path_to_model": str(model_path),
+            "validation_strategy": "train_test_split",
+            "phases": [{"name": "search", "n_trials": 2, "action": "all_algorithms"}],
+        },
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "preprocessing": {
+                    "scaling": "standard",
+                    "imputation_strategy": "mean",
+                },
+            },
+        },
+    }
+
+    result = train_best_model(
+        config=config, df=regression_dataset, target="yield_score"
+    )
+
+    loaded = ModelTrainer.load(result["model_path"])
+    assert loaded.algorithm == "random_forest"
+    assert loaded.preprocessing_preset.scaling == "standard"
+    assert loaded.preprocessing_preset.imputation_strategy == "mean"
+
+    preprocessor = loaded.pipeline.named_steps["preprocessor"]
+    transformers = dict(
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
+    )
+    num = transformers["num"]
+    assert isinstance(num.named_steps["scaler"], StandardScaler)
+    assert num.named_steps["imputer"].strategy == "mean"

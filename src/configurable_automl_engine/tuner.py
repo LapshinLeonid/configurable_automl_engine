@@ -52,6 +52,10 @@ from configurable_automl_engine.preprocessing import (
     build_preprocessor,
     detect_feature_types,
 )
+from configurable_automl_engine.preprocessing_presets import (
+    PreprocessingOverride,
+    resolve_preprocessing_preset,
+)
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
@@ -441,6 +445,7 @@ def optimize(
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: EncodingStrategy | None = None,
+    preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     pruning: dict[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
@@ -481,6 +486,10 @@ def optimize(
             ('one_hot' или 'ordinal'). По умолчанию ``None`` — используется
             'one_hot'. Применяется при построении препроцессора, когда
             ``preprocessor`` не передан.
+preprocessing_override (PreprocessingOverride | dict | None): Явное
+            переопределение пресета предобработки признаков (FR-5). Задаётся
+            частично или полностью; имеет приоритет над автоматическим выбором
+            и применяется согласованно с финальным обучением (AC-6, AC-7).
         pruning (dict[str, Any] | None): Настройки ранней остановки (pruning).
             Словарь с полями: ``enable`` (bool, False по умолчанию),
             ``strategy`` ('median' | 'hyperband', 'median' по умолчанию),
@@ -585,11 +594,17 @@ def optimize(
 
     # -------------------- 2.5 preprocessing (categorical features) ---------- #
     # Единая точка построения препроцессора для фазы HPO: категории -> one-hot
-    # (или ordinal, если задан encoding), числа -> StandardScaler. Используется та же
-    # логика, что и в финальном обучении (trainer.ModelTrainer), поэтому HPO и
-    # финальный fit согласованы.
+    # (или ordinal, если задан encoding), числа -> пресет предобработки,
+    # выбранный автоматически по алгоритму (FR-1). Используется та же логика,
+    # что и в финальном обучении (trainer.ModelTrainer), поэтому HPO и
+    # финальный fit согласованы (AC-6).
     if preprocessor is None:
         encoding_strategy: EncodingStrategy = encoding or "one_hot"
+        # Автоматический выбор пресета + применение явного override (FR-5).
+        # Пресет разрешается один раз до обучения (производительность)
+        # и логируется для наблюдаемости (AC-9).
+        preset = resolve_preprocessing_preset(algo, preprocessing_override)
+        log.info("Resolved preprocessing preset for algorithm '%s': %s", algo, preset)
         if categorical_features is not None or numerical_features is not None:
             # Явно переданные списки колонок (основной путь из training_engine)
             if isinstance(X, pd.DataFrame):
@@ -598,6 +613,8 @@ def optimize(
                     categorical_features or [],
                     numerical_features or [],
                     encoding=encoding_strategy,
+                    imputation_strategy=preset.imputation_strategy,
+                    scaling=preset.scaling,
                 )
             else:
                 log.warning(
@@ -608,11 +625,16 @@ def optimize(
             # Автодетекция категорий (default-поведение при вызове вне движка).
             # Препроцессор строится при наличии ЛЮБЫХ признаков (и категориальных,
             # и числовых): это гарантирует, что на чисто числовом DataFrame в фазе
-            # HPO применяется StandardScaler так же, как в финальном ModelTrainer.
+            # HPO применяется скалирование так же, как в финальном ModelTrainer.
             cats, nums = detect_feature_types(X)
             if cats or nums:
                 preprocessor = build_preprocessor(
-                    list(X.columns), cats, nums, encoding=encoding_strategy
+                    list(X.columns),
+                    cats,
+                    nums,
+                    encoding=encoding_strategy,
+                    imputation_strategy=preset.imputation_strategy,
+                    scaling=preset.scaling,
                 )
         else:
             log.warning(

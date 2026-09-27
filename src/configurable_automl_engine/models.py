@@ -222,6 +222,20 @@ def clean_hyperparameters(
 # ----------------------------------------------------------------------------- #
 
 
+def resolve_algorithm_name(algorithm: str) -> str:
+    """Нормализовать имя алгоритма: lowercase + раскрытие алиасов.
+
+    Args:
+        algorithm: Имя алгоритма или алиас (например, ``'RF'``, ``'xgboost'``).
+
+    Returns:
+        Каноническое имя алгоритма для поиска в реестре поддерживаемых
+        алгоритмов (:data:`AVAILABLE_ALGORITHMS`).
+    """
+    algo_key = algorithm.lower()
+    return _ALIASES.get(algo_key, algo_key)
+
+
 def create_model(
     algorithm: Algorithm = "elasticnet", **hyperparams: Any
 ) -> RegressorMixin:
@@ -236,8 +250,7 @@ def create_model(
             f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}"
         )
 
-    algo_key = algorithm.lower()
-    algo_key = _ALIASES.get(algo_key, algo_key)
+    algo_key = resolve_algorithm_name(algorithm)
 
     if algo_key not in _FACTORY:
         raise ValueError(f"Неизвестный алгоритм: {algorithm!r}")

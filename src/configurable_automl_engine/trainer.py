@@ -54,6 +54,11 @@ from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
     build_preprocessor,
 )
+from configurable_automl_engine.preprocessing_presets import (
+    PreprocessingOverride,
+    PreprocessingPreset,
+    resolve_preprocessing_preset,
+)
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_greater_better,
@@ -175,6 +180,9 @@ class ModelTrainer:
         id_column (str | None): Идентификатор, исключаемый из процесса обучения.
         encoding_strategy (str): Стратегия кодирования категорий
             ('one_hot' или 'ordinal'). По умолчанию 'one_hot'.
+        preprocessing_override (PreprocessingOverride | dict | None): Явное
+            переопределение пресета предобработки признаков (FR-5). Задаётся
+            частично или полностью и имеет приоритет над автоматическим выбором.
         os_enable (bool): Флаг активации балансировки/увеличения выборки.
         os_multiplier (float): Коэффициент генерации синтетических данных.
         os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
@@ -182,6 +190,8 @@ class ModelTrainer:
         val_score (float | None): Значение метрики, полученное на hold-out выборке.
         feature_names (list[str] | None): Список имен признаков,
             определенных при обучении.
+        preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
+            предобработки (заполняется в процессе fit()).
         lock (threading.RLock): Рекурсивная блокировка для потокобезопасного обучения.
     """
 
@@ -199,6 +209,7 @@ class ModelTrainer:
         numerical_features: list[str] | None = None,
         id_column: str | None = None,
         encoding_strategy: str = "one_hot",
+        preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки."""
 
@@ -236,6 +247,14 @@ class ModelTrainer:
         self.encoding_strategy: EncodingStrategy = cast(
             EncodingStrategy, encoding_strategy
         )
+
+        # Явное переопределение пресета предобработки (FR-5): валидируем сразу,
+        # чтобы некорректные значения отклонялись на этапе инициализации.
+        self.preprocessing_override: PreprocessingOverride | None = (
+            self._validate_preprocessing_override(preprocessing_override)
+        )
+        # Разрешённый пресет — заполняется в _build_preprocessor во время fit().
+        self.preprocessing_preset: PreprocessingPreset | None = None
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -306,6 +325,51 @@ class ModelTrainer:
                 f"{len(self.numerical_features)} num."
             )
 
+    def _validate_preprocessing_override(
+        self,
+        override: PreprocessingOverride | dict[str, Any] | None,
+    ) -> PreprocessingOverride | None:
+        """Валидировать и нормализовать пользовательское переопределение пресета.
+
+        Args:
+            override: Словарь или модель :class:`PreprocessingOverride`.
+
+        Returns:
+            Нормализованная модель переопределения либо ``None``.
+
+        Raises:
+            TrainingError: Если передан объект неподдерживаемого типа или
+                словарь с некорректными значениями.
+        """
+        if override is None:
+            return None
+        if isinstance(override, PreprocessingOverride):
+            return override
+        try:
+            if isinstance(override, dict):
+                return PreprocessingOverride.model_validate(override)
+        except Exception as e:
+            raise TrainingError(
+                f"Invalid preprocessing_override: {e}"
+            ) from e
+        raise TrainingError(
+            "preprocessing_override must be a dict or PreprocessingOverride, "
+            f"got {type(override).__name__}"
+        )
+
+    def _resolve_preprocessing_preset(self) -> PreprocessingPreset:
+        """Разрешить пресет предобработки для текущего алгоритма.
+
+        Автоматический выбор по таблице соответствия
+        (:func:`resolve_preprocessing_preset`) + применение явного
+        пользовательского переопределения (FR-5).
+
+        Returns:
+            Итоговый пресет предобработки.
+        """
+        override = getattr(self, "preprocessing_override", None)
+        return resolve_preprocessing_preset(self.algorithm, override)
+
     def _extract_metadata(self, X: Any) -> list[str] | None:
         """Получить имена колонок из различных структур данных
         без копирования содержимого."""
@@ -342,6 +406,9 @@ class ModelTrainer:
 
         Делегирует сборку в общий модуль :mod:`preprocessing`, который
         используется также фазой HPO в ``tuner.optimize`` (DRY, единая логика).
+        Стратегия обработки числовых признаков (импутация и масштабирование)
+        выбирается автоматически по алгоритму через адаптивный пресет
+        предобработки и логируется (AC-9).
         """
         # Логируем предупреждение, если ни одна колонка не совпала
         cat_indices = [
@@ -364,11 +431,23 @@ class ModelTrainer:
         encoding: EncodingStrategy = cast(
             EncodingStrategy, getattr(self, "encoding_strategy", "one_hot")
         )
+        # Автоматический выбор пресета предобработки по алгоритму (FR-1)
+        # с учётом явного переопределения (FR-5). Пресет разрешается один раз
+        # до обучения (производительность) и фиксируется для наблюдаемости (AC-9).
+        preset = self._resolve_preprocessing_preset()
+        self.preprocessing_preset = preset
+        self.logger.info(
+            "Resolved preprocessing preset for algorithm '%s': %s",
+            self.algorithm,
+            preset,
+        )
         return build_preprocessor(
             feature_names,
             self.categorical_features or [],
             self.numerical_features or [],
             encoding=encoding,
+            imputation_strategy=preset.imputation_strategy,
+            scaling=preset.scaling,
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
@@ -488,19 +567,22 @@ class ModelTrainer:
             # (перенесено выше для использования в препроцессоре)
             _ALIASES.get(self.algorithm, self.algorithm)
 
-            # Этап 3: Создаём препроцессор через делегирование
-            if self.feature_names is None:
-                # Если имен нет, пытаемся извлечь их снова или создаем пустой список
-                self.feature_names = self._extract_metadata(X_prepared) or []
-            preprocessor = self._build_preprocessor(self.feature_names)
-
-            # Этап 4: Создаём модель через фабрику
+            # Этап 3: Создаём модель через фабрику.
+            # Выполняется ДО сборки препроцессора, чтобы неизвестный алгоритм
+            # (опечатка в имени) отклонялся здесь с понятным сообщением,
+            # а не маскировался default-пресетом предобработки.
             try:
                 model_kwargs = self.hyperparams.copy()
                 model_kwargs.pop("feature_index", None)
                 base_model = create_model(self.algorithm, **model_kwargs)
             except (ValueError, ImportError) as e:
                 raise TrainingError(f"Error creating model: {e}")
+
+            # Этап 4: Создаём препроцессор через делегирование
+            if self.feature_names is None:
+                # Если имен нет, пытаемся извлечь их снова или создаем пустой список
+                self.feature_names = self._extract_metadata(X_prepared) or []
+            preprocessor = self._build_preprocessor(self.feature_names)
 
             # Этап 5: Сборка и обучение пайплайна
             # Здесь автоматически применится оверсэмплинг, если он включен

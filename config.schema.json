@@ -32,6 +32,18 @@
           "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. См. ALGO_HYPERPARAMETER_REGISTRY.",
           "title": "Hyperparameters"
         },
+        "preprocessing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreprocessingOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Явное переопределение пресета предобработки признаков для данного алгоритма (FR-5). Задаётся частично или полностью: 'imputation_strategy' ('mean'|'median') и/или 'scaling' ('standard'|'robust'|'none'). Имеет приоритет над автоматическим выбором по классу алгоритма. None — автоматический выбор."
+        },
         "tuner": {
           "anyOf": [
             {
@@ -606,6 +618,49 @@
       ],
       "title": "ParallelStrategy",
       "type": "string"
+    },
+    "PreprocessingOverride": {
+      "additionalProperties": false,
+      "description": "Явное переопределение пресета предобработки пользователем (FR-5).\n\nЗадаётся частично или полностью: ``None`` в поле означает «оставить\nзначение, выбранное автоматически». Некорректные значения отклоняются\nна этапе валидации конфигурации (Pydantic) с понятным сообщением.",
+      "properties": {
+        "imputation_strategy": {
+          "anyOf": [
+            {
+              "enum": [
+                "mean",
+                "median"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Переопределение стратегии заполнения пропусков ('mean' или 'median'). None — автовыбор.",
+          "title": "Imputation Strategy"
+        },
+        "scaling": {
+          "anyOf": [
+            {
+              "enum": [
+                "standard",
+                "robust",
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Переопределение масштабирования ('standard', 'robust' или 'none'). None — автовыбор.",
+          "title": "Scaling"
+        }
+      },
+      "title": "PreprocessingOverride",
+      "type": "object"
     },
     "PruningCfg": {
       "additionalProperties": false,
