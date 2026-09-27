@@ -1,0 +1,605 @@
+"""
+Тесты ранней остановки (pruning) в configurable_automl_engine.tuner.
+
+Покрывают ключевые сценарии фичи:
+• AC-1 — публикация промежуточных результатов и отсечение безнадёжных триалов.
+• AC-2 — реальный MedianPruner/HyperbandPruner отсекает часть триалов,
+  и это фиксируется в логах.
+• AC-3 — best_model/best_params/best_score выбираются только по завершённым
+  триалам (правило максимизации метрики).
+• AC-4 — при выключенном pruning поведение идентично текущему
+  (trial.report не вызывается, cross_val_score не меняется).
+• AC-5/AC-6 — отсечённые триалы не считаются фатальными сбоями; при
+  отсечении всех триалов сохраняется сценарий «нет результатов».
+• AC-7 — hold-out (train_test_split) без естественных шагов: прайнер
+  не применяется, поведение безопасно.
+• AC-9 — в логах фиксируется факт/количество отсечённых триалов.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import optuna
+import pandas as pd
+import pytest
+from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
+from sklearn.base import BaseEstimator, RegressorMixin
+
+from configurable_automl_engine import tuner
+from configurable_automl_engine.tuner import (
+    HyperoptError,
+    _build_pruner,
+    _evaluate_with_intermediate_reports,
+    _normalize_pruning_config,
+    optimize,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Вспомогательные объекты: детерминированная «модель» и «скорер»
+# ──────────────────────────────────────────────────────────────────────────────
+class FakeQualityModel(BaseEstimator, RegressorMixin):
+    """Модель, чей predict возвращает константу из гиперпараметра ``quality``.
+
+    Позволяет детерминированно управлять качеством триала: оценка каждого
+    фолда равна ``quality``, поэтому «плохие» триалы гарантированно хуже
+    «хороших» на каждом промежуточном шаге.
+    """
+
+    def __init__(self, quality: float = 0.5, **kwargs: object) -> None:
+        self.quality = quality
+
+    def fit(self, X, y):
+        self.fitted_ = True
+        return self
+
+    def predict(self, X):
+        return np.full(len(X), self.quality)
+
+
+def _quality_scorer_factory(name: str):
+    """Фабрика скорера: возвращает среднее предсказание модели."""
+    del name
+    return lambda est, X, y: float(np.mean(est.predict(X)))
+
+
+def _make_quality_space(good: float = 0.9, bad: float = 0.05):
+    """Пространство поиска: чётные триалы — хорошие, нечётные — заведомо плохие."""
+
+    def space_fn(trial):
+        trial.suggest_float("quality", 0.0, 1.0)
+        quality = good if trial.number % 2 == 0 else bad
+        return {"quality": quality}
+
+    return space_fn
+
+
+@pytest.fixture
+def toy_data() -> tuple[pd.DataFrame, pd.Series]:
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((120, 5)))
+    y = pd.Series(rng.random(120))
+    return X, y
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Юнит-тесты помощников
+# ──────────────────────────────────────────────────────────────────────────────
+def test_normalize_pruning_config_disabled():
+    """enable=False или None → конфигурация прайнера отсутствует (AC-4)."""
+    assert _normalize_pruning_config(None) is None
+    assert _normalize_pruning_config({}) is None
+    assert _normalize_pruning_config({"enable": False}) is None
+
+
+def test_normalize_pruning_config_defaults():
+    """Недостающие поля заполняются значениями по умолчанию."""
+    cfg = _normalize_pruning_config({"enable": True})
+    assert cfg == {
+        "strategy": "median",
+        "min_steps": 1,
+        "n_startup_trials": 5,
+        "reduction_factor": 3,
+    }
+
+
+def test_build_pruner_median():
+    pruner = _build_pruner({"strategy": "median", "min_steps": 2, "n_startup_trials": 3})
+    assert isinstance(pruner, MedianPruner)
+    assert pruner._n_warmup_steps == 2
+    assert pruner._n_startup_trials == 3
+
+
+def test_build_pruner_hyperband():
+    pruner = _build_pruner(
+        {"strategy": "hyperband", "min_steps": 1, "reduction_factor": 4}
+    )
+    assert isinstance(pruner, HyperbandPruner)
+    assert pruner._min_resource == 1
+    assert pruner._reduction_factor == 4
+
+
+def test_build_pruner_unknown_strategy_raises():
+    with pytest.raises(HyperoptError, match="Unknown pruning strategy"):
+        _build_pruner({"strategy": "quantile", "min_steps": 1})
+
+
+def test_build_pruner_invalid_min_steps_raises():
+    with pytest.raises(HyperoptError, match="min_steps"):
+        _build_pruner({"strategy": "median", "min_steps": 0})
+
+
+def test_build_pruner_invalid_n_startup_trials_raises():
+    with pytest.raises(HyperoptError, match="n_startup_trials"):
+        _build_pruner({"strategy": "median", "min_steps": 1, "n_startup_trials": 0})
+
+
+def test_build_pruner_invalid_reduction_factor_raises():
+    with pytest.raises(HyperoptError, match="reduction_factor"):
+        _build_pruner({"strategy": "hyperband", "min_steps": 1, "reduction_factor": 1})
+
+
+def test_evaluate_with_intermediate_reports_publishes_and_prunes():
+    """Публикуются промежуточные результаты; should_prune=True → TrialPruned (AC-1)."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(side_effect=[False, True])
+
+    model = FakeQualityModel(quality=0.7)
+    scorer = lambda est, X, y: float(np.mean(est.predict(X)))
+
+    X = pd.DataFrame(np.random.rand(30, 3))
+    y = pd.Series(np.random.rand(30))
+
+    with pytest.raises(optuna.TrialPruned):
+        _evaluate_with_intermediate_reports(
+            trial,
+            model,
+            X,
+            y,
+            method="k_fold",
+            n_folds=3,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+
+    # На каждом фолде публикуется кумулятивное среднее (шаги с 1).
+    assert trial.report.call_count == 2
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [1, 2]
+    values = [call.args[0] for call in trial.report.call_args_list]
+    assert all(v == pytest.approx(0.7) for v in values)
+
+
+def test_evaluate_with_intermediate_reports_returns_mean():
+    """Без отсечения возвращается среднее значение по всем фолдам."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.should_prune = MagicMock(return_value=False)
+
+    model = FakeQualityModel(quality=0.7)
+    scorer = lambda est, X, y: float(np.mean(est.predict(X)))
+
+    X = pd.DataFrame(np.random.rand(30, 3))
+    y = pd.Series(np.random.rand(30))
+
+    score = _evaluate_with_intermediate_reports(
+        trial,
+        model,
+        X,
+        y,
+        method="k_fold",
+        n_folds=3,
+        test_size=0.2,
+        random_state=42,
+        scorer=scorer,
+    )
+    assert score == pytest.approx(0.7)
+    assert trial.report.call_count == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Сквозные тесты optimize() с реальными прайнерами Optuna
+# ──────────────────────────────────────────────────────────────────────────────
+@pytest.fixture
+def quality_patches():
+    """Патчи активны на время теста: детерминированная модель и скорер."""
+    with (
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+    ):
+        yield
+
+
+def test_optimize_pruning_median_prunes_bad_trials(
+    toy_data, quality_patches, caplog
+):
+    """MedianPruner отсекает заведомо плохие триалы до завершения всех фолдов (AC-2).
+
+    Чётные триалы хорошие (quality=0.9), нечётные — заведомо плохие (0.05).
+    После первого завершённого триала каждый плохой триал отсекается на первом
+    же фолде. Лучший результат выбирается только из завершённых триалов (AC-3),
+    а факт отсечений фиксируется в логах (AC-9).
+    """
+    X, y = toy_data
+
+    with caplog.at_level(logging.INFO):
+        model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=4,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    # Лучший триал завершён полностью и имеет максимальное качество.
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert model is not None
+
+    # Факт и количество отсечений зафиксированы в логах.
+    assert "Early stopping: pruned 2 of 4 trials" in caplog.text
+    assert "Early stopping enabled: strategy=median" in caplog.text
+
+
+def test_optimize_pruning_hyperband_prunes_bad_trials(
+    toy_data, quality_patches, caplog
+):
+    """HyperbandPruner также отсекает часть триалов (AC-2, AC-3)."""
+    X, y = toy_data
+
+    with caplog.at_level(logging.INFO):
+        model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=8,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "hyperband",
+                "min_steps": 1,
+                "reduction_factor": 2,
+            },
+        )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert model is not None
+    assert "Early stopping: pruned" in caplog.text
+    assert "strategy=hyperband" in caplog.text
+
+
+def test_optimize_pruning_all_trials_pruned_returns_no_results(
+    toy_data, quality_patches, mocker
+):
+    """Все триалы отсечены → существующий сценарий «нет результатов» (AC-6)."""
+    X, y = toy_data
+
+    # Принудительно отсекаем каждый триал на первом же шаге.
+    mocker.patch.object(
+        tuner.optuna.trial.Trial, "should_prune", return_value=True
+    )
+
+    model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert model is None
+    assert params is None
+    assert score == -3.4028235e38
+
+
+def test_optimize_pruning_not_applied_for_train_test_split(
+    toy_data, quality_patches, caplog
+):
+    """Hold-out без шагов: прайнер не применяется, все триалы выполняются (AC-7, AC-4)."""
+    X, y = toy_data
+
+    with caplog.at_level(logging.WARNING):
+        _model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=4,
+            validation_strategy="train_test_split",
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    # Все триалы завершились — лучший найден обычным правилом максимизации.
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert "has no intermediate steps — pruning will not be applied" in caplog.text
+
+
+def test_optimize_pruning_loo_works(toy_data, quality_patches):
+    """LOO как стратегия с естественными шагами работает с pruning (AC-7)."""
+    X, y = toy_data
+
+    model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="loo",
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert model is not None
+
+
+def test_optimize_pruning_with_initial_params_refine_winner(
+    toy_data, quality_patches
+):
+    """refine_winner (initial_params + enqueue_trial) совместим с pruning."""
+    X, y = toy_data
+
+    _model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=3,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        initial_params={"quality": 0.9},
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+
+
+def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
+    """Малое число фолдов (2) работает с pruning (граничный сценарий)."""
+    X, y = toy_data
+
+    model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="k_fold",
+        n_folds=2,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert model is not None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Обратная совместимость (AC-4)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_without_pruning_never_reports(toy_data):
+    """Без блока pruning промежуточные результаты не публикуются — поведение
+    идентично текущему (каждый триал выполняется полностью)."""
+    X, y = toy_data
+
+    # Мокаем окружение так, чтобы гарантированно попасть в ветку
+    # cross_val_score (как в старом коде), и контролируем вызовы trial.report.
+    report_mock = MagicMock()
+    with (
+        patch.object(
+            tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(
+            tuner.model_selection,
+            "cross_val_score",
+            lambda est, Xt, yt, cv=None, scoring=None, n_jobs=1: [0.5, 0.5, 0.5],
+        ),
+        patch.object(tuner.optuna.trial.Trial, "report", report_mock),
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+        )
+
+    report_mock.assert_not_called()
+
+
+def test_optimize_disabled_pruning_uses_nop_pruner(toy_data):
+    """При выключенном pruning study создаётся с NopPruner — полное выполнение
+    триалов гарантировано даже при случайных вызовах report()."""
+    X, y = toy_data
+
+    with (
+        patch.object(
+            tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(
+            tuner.optuna, "create_study", wraps=tuner.optuna.create_study
+        ) as mock_create_study,
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+        )
+
+    assert isinstance(mock_create_study.call_args.kwargs["pruner"], NopPruner)
+
+
+def test_optimize_enabled_pruning_uses_configured_pruner(toy_data):
+    """При включённом pruning в study подключается настроенный прайнер."""
+    X, y = toy_data
+
+    with (
+        patch.object(
+            tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(
+            tuner.optuna, "create_study", wraps=tuner.optuna.create_study
+        ) as mock_create_study,
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    pruner = mock_create_study.call_args.kwargs["pruner"]
+    assert isinstance(pruner, MedianPruner)
+    assert pruner._n_warmup_steps == 1
+
+
+def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
+    """Отсечённые триалы не увеличивают счётчик фатальных сбоев (AC-5).
+
+    Много подряд отсечённых триалов не приводит к дисквалификации алгоритма.
+    """
+    X, y = toy_data
+    n_trials = 12
+
+    _model, _params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=n_trials,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    # Оптимизация завершилась без InvalidAlgorithmError.
+    assert score == pytest.approx(0.9)
+    assert "disqualified" not in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Сквозной сценарий через training_engine (конфиг → train_best_model)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
+    """Сквозной сценарий: конфиг с general.pruning.enable=true проходит через
+    train_best_model без ошибок (AC-1, AC-3, AC-9)."""
+    from pathlib import Path as _Path
+
+    from sklearn.datasets import make_regression
+
+    from configurable_automl_engine.training_engine import train_best_model
+
+    model_path = tmp_path / "models" / "best_model.pkl"
+    config = {
+        "general": {
+            "comparison_metric": "r2",
+            "path_to_model": str(model_path),
+            "validation_strategy": "k_fold",
+            "n_folds": 2,
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"}
+            ],
+            "pruning": {
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        },
+        "algorithms": {"ridge": {"enable": True}},
+    }
+
+    X, y = make_regression(
+        n_samples=120, n_features=5, noise=0.1, random_state=42
+    )
+    df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
+    df["target"] = y
+
+    result = train_best_model(config=config, df=df, target="target")
+
+    assert result["algorithm"] == "ridge"
+    assert isinstance(result["score"], float)
+    assert result["params"]
+    assert _Path(result["model_path"]).exists()

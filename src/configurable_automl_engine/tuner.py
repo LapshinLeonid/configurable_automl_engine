@@ -36,6 +36,7 @@ import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import Trial
 from sklearn import model_selection
+from sklearn.base import clone
 from sklearn.model_selection import (
     train_test_split,
 )
@@ -260,6 +261,162 @@ def _split_train_test(
         )
 
 
+# ═══════════════ early stopping (pruning) helpers ═══════════════════════════
+_DEFAULT_PRUNING_CONFIG: dict[str, Any] = {
+    "enable": False,
+    "strategy": "median",
+    "min_steps": 1,
+    "n_startup_trials": 5,
+    "reduction_factor": 3,
+}
+
+
+def _normalize_pruning_config(
+    pruning: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Нормализовать конфигурацию ранней остановки в словарь с валидными полями.
+
+    Принимает dict из настроек (например, прокинутый из ``training_engine``)
+    или None. Возвращает ``None``, если ранняя остановка выключена или
+    конфиг не передан — в этом случае поведение тюнера идентично текущему.
+
+    Args:
+        pruning (dict[str, Any] | None): Словарь с ключами enable, strategy,
+            min_steps, n_startup_trials, reduction_factor (или их подмножеством).
+    Returns:
+        dict[str, Any] | None: Нормализованная конфигурация прайнера или None.
+    """
+    if not pruning:
+        return None
+    enabled = bool(pruning.get("enable", False))
+    if not enabled:
+        return None
+    return {
+        "strategy": str(pruning.get("strategy", _DEFAULT_PRUNING_CONFIG["strategy"])),
+        "min_steps": int(pruning.get("min_steps", _DEFAULT_PRUNING_CONFIG["min_steps"])),
+        "n_startup_trials": int(
+            pruning.get("n_startup_trials", _DEFAULT_PRUNING_CONFIG["n_startup_trials"])
+        ),
+        "reduction_factor": int(
+            pruning.get("reduction_factor", _DEFAULT_PRUNING_CONFIG["reduction_factor"])
+        ),
+    }
+
+
+def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
+    """Создать объект прайнера Optuna по нормализованной конфигурации.
+
+    Args:
+        cfg (dict[str, Any]): Нормализованная конфигурация ранней остановки
+            (результат ``_normalize_pruning_config``).
+    Returns:
+        optuna.pruners.BasePruner: Настроенный прайнер Optuna.
+    Raises:
+        HyperoptError: Если указана неизвестная стратегия отсечения или
+            недопустимые значения параметров.
+    """
+    strategy = cfg["strategy"]
+    min_steps = cfg["min_steps"]
+    if min_steps < 1:
+        raise HyperoptError(
+            f"pruning.min_steps must be a positive integer, got {min_steps}"
+        )
+    if strategy == "median":
+        n_startup_trials = cfg["n_startup_trials"]
+        if n_startup_trials < 1:
+            raise HyperoptError(
+                "pruning.n_startup_trials must be a positive integer, "
+                f"got {n_startup_trials}"
+            )
+        # n_warmup_steps=min_steps: шаги нумеруются с 1, поэтому первое
+        # решение об отсечении возможно ровно после min_steps отчётов.
+        return optuna.pruners.MedianPruner(
+            n_startup_trials=n_startup_trials,
+            n_warmup_steps=min_steps,
+        )
+    if strategy == "hyperband":
+        reduction_factor = cfg["reduction_factor"]
+        if reduction_factor < 2:
+            raise HyperoptError(
+                "pruning.reduction_factor must be at least 2 (Hyperband), "
+                f"got {reduction_factor}"
+            )
+        return optuna.pruners.HyperbandPruner(
+            min_resource=min_steps,
+            reduction_factor=reduction_factor,
+        )
+    raise HyperoptError(
+        f"Unknown pruning strategy: '{strategy}'. Must be 'median' or 'hyperband'."
+    )
+
+
+def _evaluate_with_intermediate_reports(
+    trial: Trial,
+    estimator: Any,
+    X: Any,
+    y: Any,
+    *,
+    method: str,
+    n_folds: int,
+    test_size: float,
+    random_state: int | None,
+    scorer: Any,
+) -> float:
+    """Оценить estimator пофолдово с публикацией промежуточных результатов.
+
+    Является «энейблером» ранней остановки: после каждого фолда
+    публикуется кумулятивное среднее значение метрики через
+    ``trial.report``, после чего вызывается ``trial.should_prune()``.
+    Безнадёжный триал прерывается исключением ``optuna.TrialPruned`` до
+    завершения полного объёма оценки.
+
+    Args:
+        trial (Trial): Текущий триал Optuna.
+        estimator (Any): Оценщик (возможно, пайплайн) для оценки.
+        X (Any): Матрица признаков.
+        y (Any): Вектор целевой переменной.
+        method (str): Стратегия разбиения ('k_fold' или 'loo').
+        n_folds (int): Количество фолдов для k_fold.
+        test_size (float): Доля теста (не используется для k_fold/loo,
+            передаётся для унификации вызова iter_splits).
+        random_state (int | None): Зерно случайности.
+        scorer (Any): Объект метрики sklearn.
+    Returns:
+        float: Среднее значение метрики по всем фолдам.
+    Raises:
+        optuna.TrialPruned: Если прайнер решил отсечь триал.
+    """
+    fold_scores: list[float] = []
+    for fold_idx, (X_tr, X_te, y_tr, y_te) in enumerate(
+        iter_splits(
+            X,
+            y,
+            method=method,
+            n_folds=n_folds,
+            test_size=test_size,
+            random_state=random_state,
+        ),
+        start=1,
+    ):
+        # Клонируем оценщик на каждый фолд (как это делает cross_val_score),
+        # чтобы избежать накопления состояния между фолдами.
+        fold_estimator = clone(estimator)
+        fold_estimator.fit(X_tr, y_tr)
+        fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+        running_mean = float(np.mean(fold_scores))
+        # Публикуем промежуточный результат: кумулятивное среднее точнее
+        # оценивает финальную метрику (среднее по фолдам), чем одиночный фолд.
+        trial.report(running_mean, step=fold_idx)
+        if trial.should_prune():
+            log.debug(
+                "Trial %d pruned by early stopping at step %d",
+                trial.number,
+                fold_idx,
+            )
+            raise optuna.TrialPruned()
+    return float(np.mean(fold_scores))
+
+
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
 def optimize(
     algo_name: str,
@@ -284,6 +441,7 @@ def optimize(
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: EncodingStrategy | None = None,
+    pruning: dict[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
     Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
@@ -323,6 +481,16 @@ def optimize(
             ('one_hot' или 'ordinal'). По умолчанию ``None`` — используется
             'one_hot'. Применяется при построении препроцессора, когда
             ``preprocessor`` не передан.
+        pruning (dict[str, Any] | None): Настройки ранней остановки (pruning).
+            Словарь с полями: ``enable`` (bool, False по умолчанию),
+            ``strategy`` ('median' | 'hyperband', 'median' по умолчанию),
+            ``min_steps`` (int >= 1, 1 по умолчанию), ``n_startup_trials``
+            (int >= 1, только для 'median', 5 по умолчанию),
+            ``reduction_factor`` (int >= 2, только для 'hyperband', 3 по
+            умолчанию). При ``enable=False`` или ``None`` поведение идентично
+            текущему: каждый триал выполняется полностью. Для стратегий
+            валидации без естественных шагов (train_test_split) прайнер не
+            применяется.
     Returns:
         tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
             - best_model: Обученная модель с лучшими параметрами.
@@ -343,6 +511,20 @@ def optimize(
 
     if not isinstance(n_trials, int) or n_trials <= 0:
         raise ValueError(f"n_trials must be a positive integer, got {n_trials}")
+
+    # -------------------- 0. ранняя остановка (pruning) ------------- #
+    pruning_cfg = _normalize_pruning_config(pruning)
+    pruner: optuna.pruners.BasePruner | None = None
+    if pruning_cfg is not None:
+        pruner = _build_pruner(pruning_cfg)
+        log.info(
+            "Early stopping enabled: strategy=%s, min_steps=%d, "
+            "n_startup_trials=%d, reduction_factor=%d",
+            pruning_cfg["strategy"],
+            pruning_cfg["min_steps"],
+            pruning_cfg["n_startup_trials"],
+            pruning_cfg["reduction_factor"],
+        )
 
     # -------------------- 0. нормализация входа -------------------- #
     if validation_strategy is not None:  # alias имеет приоритет
@@ -456,6 +638,16 @@ def optimize(
         return ImbPipeline(steps)
 
     # -------------------- 3. objective для Optuna ------------------ #
+    # Прайнинг применяется только когда есть естественные шаги оценки
+    # (k_fold / loo). Для hold-out (train_test_split) промежуточных шагов нет,
+    # поэтому ранняя остановка не применяется (поведение задокументировано).
+    pruning_active = pruner is not None and val_method_eff != "train_test_split"
+    if pruner is not None and not pruning_active:
+        log.warning(
+            "Early stopping is enabled, but validation strategy '%s' has no "
+            "intermediate steps — pruning will not be applied.",
+            val_method_eff,
+        )
     MAX_FATAL_FAILURES = 5
     consecutive_fatal_failures = 0
 
@@ -502,6 +694,27 @@ def optimize(
                 )
                 current_estimator.fit(X_tr, y_tr)
                 _score = float(scorer(current_estimator, X_te, y_te))
+            elif pruning_active:
+                # Ранняя остановка: оцениваем пофолдово и публикуем
+                # промежуточные результаты для прайнера Optuna.
+                avg_score = _evaluate_with_intermediate_reports(
+                    trial,
+                    current_estimator,
+                    X,
+                    y,
+                    method=val_method_eff,
+                    n_folds=n_folds,
+                    test_size=train_test_split_test_size,
+                    random_state=random_state,
+                    scorer=scorer,
+                )
+                # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
+                if not np.isfinite(avg_score):
+                    _score = (
+                        -3.4028235e38
+                    )  # аналог минимального float32 или float('-inf')
+                else:
+                    _score = avg_score
             else:
                 # cv_obj здесь гарантированно не None,
                 # так как мы проверили final_method выше
@@ -533,9 +746,12 @@ def optimize(
         return _score
 
     # -------------------- 4. запуск Optuna ------------------------- #
+    # Если ранняя остановка выключена — явно отключаем любой прайнер
+    # (NopPruner), чтобы триалы гарантированно выполнялись полностью.
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=random_state),
+        pruner=pruner if pruning_active else optuna.pruners.NopPruner(),
     )
     # Если есть параметры из предыдущей фазы — enqueue как первый trial
     if initial_params is not None:
@@ -550,6 +766,18 @@ def optimize(
             MAX_FATAL_FAILURES,
         )
         raise
+
+    if pruning_active:
+        trials = study.get_trials(deepcopy=False)
+        n_pruned = sum(
+            1 for t in trials if t.state == optuna.trial.TrialState.PRUNED
+        )
+        log.info(
+            "Early stopping: pruned %d of %d trials (algo=%s)",
+            n_pruned,
+            len(trials),
+            algo,
+        )
 
     try:
         best_params = study.best_params

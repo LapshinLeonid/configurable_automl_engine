@@ -482,6 +482,10 @@
           "default": null,
           "description": "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). Если None — используется phase_timeout или глобальный timeout.",
           "title": "Task Timeout"
+        },
+        "pruning": {
+          "$ref": "#/$defs/PruningCfg",
+          "description": "Настройки ранней остановки (pruning) триалов Optuna. По умолчанию выключены: каждый триал выполняется полностью."
         }
       },
       "required": [
@@ -601,6 +605,55 @@
         "algorithms"
       ],
       "title": "ParallelStrategy",
+      "type": "string"
+    },
+    "PruningCfg": {
+      "additionalProperties": false,
+      "description": "Настройки ранней остановки (pruning) триалов в фазе HPO.\n\nМеханизм промежуточной оценки: при включении тюнер публикует оценку\nкачества после каждого естественного шага валидации (например, после\nкаждого фолда кросс-валидации), на основе которой прайнер Optuna может\nотсечь заведомо безнадёжный триал до завершения полной оценки.\nДля стратегий валидации без естественных шагов (hold-out /\ntrain_test_split) прайнер не применяется — поведение безопасно и\nзадокументировано (см. API_REFERENCE.md).\n\nAttributes:\n    enable (bool): Глобальный флаг включения ранней остановки.\n        По умолчанию False — фича выключена, триалы выполняются полностью.\n    strategy (PruningStrategy): Стратегия отсечения: 'median'\n        (optuna.pruners.MedianPruner) или 'hyperband'\n        (optuna.pruners.HyperbandPruner).\n    min_steps (int): Минимальное число промежуточных шагов (например,\n        фолдов CV) до первого решения об отсечении. Для 'median' это\n        n_warmup_steps, для 'hyperband' — min_resource.\n    n_startup_trials (int): Число завершённых триалов, после которого\n        включается отсечение (только для 'median'; аналог\n        n_startup_trials в Optuna).\n    reduction_factor (int): Коэффициент сокращения бюджета между раундами\n        Hyperband (только для 'hyperband'; контролирует агрессивность\n        отсечения).",
+      "properties": {
+        "enable": {
+          "default": false,
+          "description": "Флаг включения ранней остановки (pruning) триалов Optuna. По умолчанию False — каждый триал выполняется полностью.",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "strategy": {
+          "$ref": "#/$defs/PruningStrategy",
+          "default": "median",
+          "description": "Стратегия отсечения триалов: 'median' (MedianPruner) или 'hyperband' (HyperbandPruner)"
+        },
+        "min_steps": {
+          "default": 1,
+          "description": "Минимальное число промежуточных шагов (например, фолдов кросс-валидации) до первого решения об отсечении. Для 'median' соответствует n_warmup_steps, для 'hyperband' — min_resource",
+          "minimum": 1,
+          "title": "Min Steps",
+          "type": "integer"
+        },
+        "n_startup_trials": {
+          "default": 5,
+          "description": "Число завершённых триалов, после которого включается отсечение (только для 'median'; аналог n_startup_trials в Optuna)",
+          "minimum": 1,
+          "title": "N Startup Trials",
+          "type": "integer"
+        },
+        "reduction_factor": {
+          "default": 3,
+          "description": "Коэффициент сокращения бюджета между раундами Hyperband (только для 'hyperband'; агрессивность отсечения)",
+          "minimum": 2,
+          "title": "Reduction Factor",
+          "type": "integer"
+        }
+      },
+      "title": "PruningCfg",
+      "type": "object"
+    },
+    "PruningStrategy": {
+      "description": "Поддерживаемые стратегии ранней остановки (pruning) триалов Optuna.",
+      "enum": [
+        "median",
+        "hyperband"
+      ],
+      "title": "PruningStrategy",
       "type": "string"
     },
     "SearchSpaceEntry": {

@@ -103,6 +103,7 @@ def _run_hpo(
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: str = "one_hot",
+    pruning: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -133,6 +134,9 @@ def _run_hpo(
         numerical_features (list[str] | None): Имена числовых колонок.
         encoding (str): Стратегия кодирования категорий ('one_hot' или 'ordinal'),
             прокидываемая тюнеру для согласованной предобработки с финальным fit.
+        pruning (dict[str, Any] | None): Настройки ранней остановки (pruning)
+            из секции ``general.pruning``. Передаются только тюнерам, которые
+            поддерживают аргумент ``pruning``; кастомные тюнеры не затрагиваются.
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
             Кортеж (лучшая метрика, лучшие параметры)
@@ -208,6 +212,11 @@ def _run_hpo(
             algo_cfg.tuner,
             encoding,
         )
+
+    # прокидываем настройки ранней остановки (pruning), если тюнер их
+    # поддерживает; кастомные тюнеры без аргумента `pruning` не затрагиваются
+    if pruning is not None and "pruning" in sig.parameters:
+        kwargs["pruning"] = pruning
 
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
@@ -387,6 +396,15 @@ def train_best_model(
 
         # Обращаемся к полям согласно определению в config_parser.py
         ovr = cfg.oversampling
+        pruning_cfg: dict[str, Any] | None = None
+        if cfg.general.pruning.enable:
+            pruning_cfg = {
+                "enable": cfg.general.pruning.enable,
+                "strategy": cfg.general.pruning.strategy.value,
+                "min_steps": cfg.general.pruning.min_steps,
+                "n_startup_trials": cfg.general.pruning.n_startup_trials,
+                "reduction_factor": cfg.general.pruning.reduction_factor,
+            }
 
         try:
             result = _run_hpo(
@@ -406,6 +424,7 @@ def train_best_model(
                 categorical_features=categorical_features,
                 numerical_features=numerical_features,
                 encoding=cfg.general.categorical_encoding,
+                pruning=pruning_cfg,
             )
 
             if result is None:

@@ -68,6 +68,85 @@ __all__ = [
 ]
 
 
+# ─────────────────── pruning (early stopping) ──────────────────── #
+class PruningStrategy(str, Enum):
+    """Поддерживаемые стратегии ранней остановки (pruning) триалов Optuna."""
+
+    median = "median"
+    hyperband = "hyperband"
+
+
+class PruningCfg(BaseModel):
+    """Настройки ранней остановки (pruning) триалов в фазе HPO.
+
+    Механизм промежуточной оценки: при включении тюнер публикует оценку
+    качества после каждого естественного шага валидации (например, после
+    каждого фолда кросс-валидации), на основе которой прайнер Optuna может
+    отсечь заведомо безнадёжный триал до завершения полной оценки.
+    Для стратегий валидации без естественных шагов (hold-out /
+    train_test_split) прайнер не применяется — поведение безопасно и
+    задокументировано (см. API_REFERENCE.md).
+
+    Attributes:
+        enable (bool): Глобальный флаг включения ранней остановки.
+            По умолчанию False — фича выключена, триалы выполняются полностью.
+        strategy (PruningStrategy): Стратегия отсечения: 'median'
+            (optuna.pruners.MedianPruner) или 'hyperband'
+            (optuna.pruners.HyperbandPruner).
+        min_steps (int): Минимальное число промежуточных шагов (например,
+            фолдов CV) до первого решения об отсечении. Для 'median' это
+            n_warmup_steps, для 'hyperband' — min_resource.
+        n_startup_trials (int): Число завершённых триалов, после которого
+            включается отсечение (только для 'median'; аналог
+            n_startup_trials в Optuna).
+        reduction_factor (int): Коэффициент сокращения бюджета между раундами
+            Hyperband (только для 'hyperband'; контролирует агрессивность
+            отсечения).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enable: bool = Field(
+        default=False,
+        description=(
+            "Флаг включения ранней остановки (pruning) триалов Optuna. "
+            "По умолчанию False — каждый триал выполняется полностью."
+        ),
+    )
+    strategy: PruningStrategy = Field(
+        default=PruningStrategy.median,
+        description=(
+            "Стратегия отсечения триалов: 'median' (MedianPruner) "
+            "или 'hyperband' (HyperbandPruner)"
+        ),
+    )
+    min_steps: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Минимальное число промежуточных шагов (например, фолдов "
+            "кросс-валидации) до первого решения об отсечении. Для 'median' "
+            "соответствует n_warmup_steps, для 'hyperband' — min_resource"
+        ),
+    )
+    n_startup_trials: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Число завершённых триалов, после которого включается отсечение "
+            "(только для 'median'; аналог n_startup_trials в Optuna)"
+        ),
+    )
+    reduction_factor: int = Field(
+        default=3,
+        ge=2,
+        description=(
+            "Коэффициент сокращения бюджета между раундами Hyperband "
+            "(только для 'hyperband'; агрессивность отсечения)"
+        ),
+    )
+
+
 # ─────────────────── phases ──────────────────── #
 class HPOPhaseCfg(BaseModel):
     """Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).
@@ -214,6 +293,13 @@ class GeneralCfg(BaseModel):
             "Если None — используется phase_timeout или глобальный timeout."
         ),
     )
+    pruning: PruningCfg = Field(
+        default_factory=PruningCfg,
+        description=(
+            "Настройки ранней остановки (pruning) триалов Optuna. "
+            "По умолчанию выключены: каждый триал выполняется полностью."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_n_folds(self) -> GeneralCfg:
@@ -243,6 +329,45 @@ class GeneralCfg(BaseModel):
         # Строгая проверка только для k-fold
         if self.validation_strategy == ValidationStrategy.k_fold and self.n_folds < 2:
             raise ValueError("n_folds must be ≥ 2 for k-fold validation")
+        return self
+
+    @model_validator(mode="after")
+    def _check_pruning_consistency(self) -> GeneralCfg:
+        """Проверить согласованность настроек ранней остановки с валидацией.
+
+        Логика проверки:
+        1. Для 'k_fold' прайнер должен иметь возможность сработать раньше
+           окончания оценки: min_steps не может превышать n_folds.
+        2. Для 'train_test_split' естественных шагов нет — ранняя остановка
+           не применяется; выдаём предупреждение, а не ошибку (поведение
+           задокументировано и безопасно).
+
+        Returns:
+            GeneralCfg: Валидированный объект настроек.
+
+        Raises:
+            ValueError: Если настройки pruning конфликтуют с валидацией.
+        """
+        if not self.pruning.enable:
+            return self
+
+        if (
+            self.validation_strategy == ValidationStrategy.k_fold
+            and self.pruning.min_steps > self.n_folds
+        ):
+            raise ValueError(
+                f"pruning.min_steps ({self.pruning.min_steps}) cannot be greater "
+                f"than general.n_folds ({self.n_folds}) for k-fold validation: "
+                "the pruner would never get enough intermediate steps. "
+                "Decrease pruning.min_steps or increase general.n_folds."
+            )
+
+        if self.validation_strategy == ValidationStrategy.train_test_split:
+            logging.getLogger(__name__).warning(
+                "pruning.enable=true with validation_strategy='train_test_split': "
+                "early stopping will NOT be applied because hold-out evaluation "
+                "has no intermediate steps."
+            )
         return self
 
 

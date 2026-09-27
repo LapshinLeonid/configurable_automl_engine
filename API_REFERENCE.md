@@ -24,6 +24,48 @@ The `general` section may include the following attributes:
 * `parallel_strategy` — (optional) controls parallel execution strategy. Defaults to `"algorithms"`.
 * `phase_timeout` — (optional) global timeout for the entire HPO phase in seconds (minimum 1.0). If `null`, defaults to 3600.
 * `task_timeout` — (optional) per-task timeout in seconds (minimum 1.0). If `null`, uses `phase_timeout`.
+* `pruning` — (optional) early-stopping (pruning) settings for Optuna trials. Disabled by default.
+
+### Early stopping (`pruning`)
+
+The optional `pruning` block enables Optuna-based early stopping of unpromising trials during the HPO phase. When enabled, the tuner publishes an intermediate quality score after each natural validation step (e.g., after each cross-validation fold — the cumulative running mean), and the configured pruner may prune a hopeless trial before its full evaluation finishes. Pruned trials are **not** errors: they do not count as fatal failures, do not disqualify the algorithm, and do not stop the optimization. The best model is selected only from fully completed trials using the same metric-maximization rule as without pruning. If all trials are pruned, the standard "no successful trials" scenario applies (no new exceptions).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable` | `bool` | `false` | Master switch for early stopping. When `false` (default), every trial runs to completion — identical behavior to configurations without this block. |
+| `strategy` | `string` | `"median"` | Pruning strategy: `"median"` (Optuna `MedianPruner`) or `"hyperband"` (Optuna `HyperbandPruner`). |
+| `min_steps` | `int` | `1` | Minimum number of intermediate steps (e.g., CV folds) before the first pruning decision. For `"median"` it maps to `n_warmup_steps`; for `"hyperband"` it maps to `min_resource`. Must be ≥ 1. |
+| `n_startup_trials` | `int` | `5` | Number of completed trials before pruning is enabled (`"median"` only; Optuna `n_startup_trials`). Must be ≥ 1. |
+| `reduction_factor` | `int` | `3` | Budget reduction factor between Hyperband rounds (`"hyperband"` only; controls aggressiveness). Must be ≥ 2. |
+
+Example:
+
+```yaml
+general:
+  validation_strategy: "k_fold"
+  n_folds: 5
+  pruning:
+    enable: true
+    strategy: "median"
+    min_steps: 2
+    n_startup_trials: 5
+  phases:
+    - name: "search"
+      n_trials: 50
+      action: "all_algorithms"
+```
+
+Validation rules (rejected at config load with a clear message):
+
+* Unknown `strategy` (anything other than `"median"` / `"hyperband"`).
+* Non-positive `min_steps`, `n_startup_trials`, or `reduction_factor < 2`.
+* Conflict with validation settings: `pruning.enable: true` + `validation_strategy: "k_fold"` + `min_steps > n_folds` (the pruner would never get enough intermediate steps).
+
+Behavior by validation strategy:
+
+* `k_fold` / `loo` — pruning works on natural per-fold (per-sample) steps.
+* `auto` — pruning is applied when `auto` resolves to `k_fold` or `loo`; if it resolves to `train_test_split`, pruning is not applied (see below).
+* `train_test_split` (hold-out) — there are no intermediate steps, so the pruner is **not** applied; the configuration is accepted with a warning, and every trial runs to completion. This behavior is safe and documented.
 
 ### Structure of an optimization phase (`phases`)
 
@@ -138,6 +180,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
 | `random_state` | `int` or `None` | `42` | Random seed. |
 | `space_overrides` | `dict[str, Callable]` or `None` | `None` | Custom search space overrides. |
+| `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 
 **Returns:** `tuple[Any | None, dict[str, Any] | None, float]` — `(best_model, best_params, best_score)`. Returns `(None, None, -3.4028235e38)` when no trials succeed.
 

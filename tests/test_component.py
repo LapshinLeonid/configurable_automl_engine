@@ -415,6 +415,78 @@ def test_run_hpo_success_return():
         assert params == {"param": 1}
 
 
+# Ранняя остановка (pruning): прокидывание настроек в тюнер
+def test_run_hpo_passes_pruning_when_tuner_supports_it():
+    """Настройки ранней остановки передаются тюнеру, поддерживающему `pruning`."""
+    received: dict[str, object] = {}
+
+    class PruningAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            pruning=None,
+        ):
+            received["pruning"] = pruning
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    pruning_cfg = {
+        "enable": True,
+        "strategy": "median",
+        "min_steps": 1,
+        "n_startup_trials": 1,
+        "reduction_factor": 3,
+    }
+    with patch("importlib.import_module", return_value=PruningAwareTuner()):
+        score, params = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            pruning=pruning_cfg,
+        )
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    assert received["pruning"] == pruning_cfg
+
+
+def test_run_hpo_skips_pruning_for_legacy_tuner():
+    """Кастомный тюнер без аргумента `pruning` не получает его (не затрагивается)."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["pruning_passed"] = "pruning" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            pruning={"enable": True, "strategy": "median"},
+        )
+
+    assert result == (0.5, {})
+    assert calls["pruning_passed"] is False
+
+
 # Ошибка, если target_col отсутствует в DataFrame
 def test_train_best_model_missing_target_column():
     df = pd.DataFrame({"feature1": [1, 2], "feature2": [3, 4]})

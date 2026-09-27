@@ -451,3 +451,169 @@ def test_hyperparameter_compatibility_error(monkeypatch):
 
     with pytest.raises(ValueError, match="unknown hyperparameters"):
         Config.model_validate(cfg_data)
+
+
+# ─────────────────── Tests for PruningCfg (early stopping) ───────────────────
+def test_pruning_disabled_by_default():
+    """Ранняя остановка выключена по умолчанию: конфиг без блока работает как раньше."""
+    cfg = Config.model_validate(BASE)
+    assert cfg.general.pruning.enable is False
+    assert cfg.general.pruning.strategy.value == "median"
+    assert cfg.general.pruning.min_steps == 1
+    assert cfg.general.pruning.n_startup_trials == 5
+    assert cfg.general.pruning.reduction_factor == 3
+
+
+def test_pruning_valid_median_config():
+    """Корректная конфигурация median-прайнера проходит валидацию."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "pruning": {
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 2,
+                "n_startup_trials": 3,
+            },
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.pruning.enable is True
+    assert cfg.general.pruning.strategy.value == "median"
+    assert cfg.general.pruning.min_steps == 2
+    assert cfg.general.pruning.n_startup_trials == 3
+
+
+def test_pruning_valid_hyperband_config():
+    """Корректная конфигурация hyperband-прайнера проходит валидацию."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "pruning": {
+                "enable": True,
+                "strategy": "hyperband",
+                "min_steps": 1,
+                "reduction_factor": 2,
+            },
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.pruning.strategy.value == "hyperband"
+    assert cfg.general.pruning.reduction_factor == 2
+
+
+def test_pruning_unknown_strategy_rejected():
+    """Неизвестная стратегия отклоняется на этапе валидации конфигурации."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "pruning": {"enable": True, "strategy": "unknown_strategy"},
+        }
+    }
+    with pytest.raises(ValidationError, match="unknown_strategy"):
+        Config.model_validate(cfg_data)
+
+
+@pytest.mark.parametrize("bad_min_steps", [0, -1, -100])
+def test_pruning_invalid_min_steps_rejected(bad_min_steps):
+    """Недопустимые значения min_steps (< 1) отклоняются."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "pruning": {"enable": True, "min_steps": bad_min_steps},
+        }
+    }
+    with pytest.raises(ValidationError, match="min_steps"):
+        Config.model_validate(cfg_data)
+
+
+def test_pruning_invalid_n_startup_trials_rejected():
+    """Недопустимое значение n_startup_trials (< 1) отклоняется."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "pruning": {"enable": True, "n_startup_trials": 0},
+        }
+    }
+    with pytest.raises(ValidationError, match="n_startup_trials"):
+        Config.model_validate(cfg_data)
+
+
+def test_pruning_invalid_reduction_factor_rejected():
+    """Недопустимое значение reduction_factor (< 2) отклоняется."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "pruning": {"enable": True, "strategy": "hyperband", "reduction_factor": 1},
+        }
+    }
+    with pytest.raises(ValidationError, match="reduction_factor"):
+        Config.model_validate(cfg_data)
+
+
+def test_pruning_conflict_kfold_min_steps_exceeds_folds():
+    """Конфликт с валидацией: min_steps > n_folds при k_fold отклоняется."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "validation_strategy": "k_fold",
+            "n_folds": 2,
+            "pruning": {"enable": True, "min_steps": 3},
+        }
+    }
+    with pytest.raises(
+        ValidationError,
+        match="pruning.min_steps .* cannot be greater than general.n_folds",
+    ):
+        Config.model_validate(cfg_data)
+
+
+def test_pruning_disabled_skips_kfold_conflict_check():
+    """При enable=False конфликт min_steps/n_folds не проверяется (обратная совместимость)."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "validation_strategy": "k_fold",
+            "n_folds": 2,
+            "pruning": {"enable": False, "min_steps": 10},
+        }
+    }
+    cfg = Config.model_validate(cfg_data)  # не должно падать
+    assert cfg.general.pruning.enable is False
+
+
+def test_pruning_train_test_split_warns_and_allows(caplog):
+    """Прайнинг + train_test_split: конфиг принимается, выдаётся предупреждение.
+
+    Для стратегий валидации без естественных шагов прайнер не применяется —
+    поведение задокументировано и безопасно (AC-7).
+    """
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "validation_strategy": "train_test_split",
+            "pruning": {"enable": True, "min_steps": 1},
+        }
+    }
+    with caplog.at_level(logging.WARNING):
+        cfg = Config.model_validate(cfg_data)
+    assert cfg.general.pruning.enable is True
+    assert "early stopping will NOT be applied" in caplog.text
+
+
+def test_pruning_allows_loo_and_auto():
+    """Прайнинг разрешён для loo и auto (валидируется без ошибок)."""
+    for strategy in ("loo", "auto"):
+        cfg_data = BASE | {
+            "general": {
+                **BASE["general"],
+                "validation_strategy": strategy,
+                "pruning": {"enable": True, "min_steps": 1},
+            }
+        }
+        cfg = Config.model_validate(cfg_data)
+        assert cfg.general.pruning.enable is True
