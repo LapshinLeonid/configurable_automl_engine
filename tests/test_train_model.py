@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -1138,3 +1140,25 @@ def test_constructor_param_info_self_skipped(base_params):
     """
     result = train_model("ElasticNet", "r2", base_params, X, y)
     assert isinstance(result, float)
+
+
+def test_metric_calculation_debug_log_formats_val_score(caplog):
+    """
+    Регрессионный тест исправления логирования результирующей метрики.
+
+    Debug-сообщение "Metric calculation" должно содержать фактическое значение
+    val_score (например, final val_score=0.9421), а не литеральный текст
+    {self.val_score:.4f} из не-f-строки.
+    """
+    X = pd.DataFrame({"feature1": [1, 2, 3, 4], "feature2": [5, 6, 7, 8]})
+    y = pd.Series([10, 20, 30, 40])
+
+    model_trainer = ModelTrainer(algorithm="ridge")
+
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+        model_trainer.fit(X, y)
+
+    # Литерал плейсхолдера не должен попадать в лог
+    assert "{self.val_score" not in caplog.text
+    # Фактическое значение должно быть отформатировано с 4 знаками после запятой
+    assert re.search(r"final val_score=-?\d+\.\d{4}", caplog.text)

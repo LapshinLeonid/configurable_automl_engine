@@ -532,7 +532,7 @@ class ModelTrainer:
                     self.val_score = float(raw_score)
                 self.logger.debug(
                     f"Metric calculation: raw={raw_score:.4f},"
-                    " final val_score={self.val_score:.4f} "
+                    f" final val_score={self.val_score:.4f} "
                     f"(greater_is_better={is_greater_better(self.metric)})"
                 )
             except Exception as e:  # noqa: BLE001
