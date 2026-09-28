@@ -1,0 +1,14 @@
+codereview:
+  need_ships: 1
+  ignore_self_ship: false
+  ignore_non_reviewers_block: false
+  auto_assign: true
+  rules:
+    - patterns:
+        - "**"
+      reviewers:
+        usernames:
+          - "reviewer_ai"
+        assign: 1
+        need_ships: 1
+        ignore_self_ship: false
