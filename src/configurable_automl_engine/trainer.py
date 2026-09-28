@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -68,6 +68,27 @@ from configurable_automl_engine.training_engine.thread_pool import SharedDataFra
 from .models import _ALIASES, create_model
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
+
+
+def _sign_corrected_value(metric_name: str, raw_value: Any) -> float:
+    """Привести «сырое» значение скорера к пользовательскому представлению.
+
+    Логика работы:
+    1. Для метрик-ошибок (RMSE, MAE, MSE и т.д.) sklearn возвращает
+       отрицательное значение (так как оптимизирует максимизацию).
+       Пользователю возвращается «честное» положительное значение.
+    2. Для score-метрик (R² и т.д.) значение возвращается как есть.
+
+    Args:
+        metric_name (str): Имя метрики.
+        raw_value (Any): «Сырое» значение, возвращённое объектом-скорером.
+
+    Returns:
+        float: Значение метрики в пользовательском представлении.
+    """
+    if not is_greater_better(metric_name):
+        return float(abs(raw_value))
+    return float(raw_value)
 
 
 class TrainingError(RuntimeError):
@@ -180,6 +201,13 @@ class ModelTrainer:
         id_column (str | None): Идентификатор, исключаемый из процесса обучения.
         encoding_strategy (str): Стратегия кодирования категорий
             ('one_hot' или 'ordinal'). По умолчанию 'one_hot'.
+        additional_metrics (Iterable[str] | None): Дополнительные метрики качества,
+            рассчитываемые для обученной модели на том же наборе данных и тем же
+            способом, что и основная метрика. Принимается любая итерируемая
+            последовательность строк (list, tuple, set, генератор); имя метрики
+            нормализуется к нижнему регистру. Носят информационный характер и
+            не влияют на процесс обучения. Значения сохраняются в
+            ``additional_scores`` после вызова fit().
         preprocessing_override (PreprocessingOverride | dict | None): Явное
             переопределение пресета предобработки признаков (FR-5). Задаётся
             частично или полностью и имеет приоритет над автоматическим выбором.
@@ -188,6 +216,9 @@ class ModelTrainer:
         os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
         pipeline (Pipeline | None): Итоговый объект пайплайна после вызова fit().
         val_score (float | None): Значение метрики, полученное на hold-out выборке.
+        additional_scores (dict[str, float]): Значения дополнительных метрик,
+            рассчитанных для обученной модели (пустой словарь, если метрики
+            не заданы).
         feature_names (list[str] | None): Список имен признаков,
             определенных при обучении.
         preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
@@ -209,6 +240,7 @@ class ModelTrainer:
         numerical_features: list[str] | None = None,
         id_column: str | None = None,
         encoding_strategy: str = "one_hot",
+        additional_metrics: Iterable[str] | None = None,
         preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки."""
@@ -247,6 +279,23 @@ class ModelTrainer:
         self.encoding_strategy: EncodingStrategy = cast(
             EncodingStrategy, encoding_strategy
         )
+
+        # ---------- additional (informational) metrics ----------
+        # Допускается любая итерируемая последовательность строк (list, tuple,
+        # set, генератор и т.п.). Строки-скаляры и отображения (dict) отклоняются:
+        # строку нельзя разбирать посимвольно в имена метрик, а итерирование
+        # dict по ключам было бы неявным и неожиданным поведением.
+        # Итерируемый объект материализуется ровно один раз, чтобы генераторы
+        # и другие одноразовые итераторы валидировались корректно.
+        if additional_metrics is not None and isinstance(
+            additional_metrics, (str, bytes, Mapping)
+        ):
+            raise TrainingError("additional_metrics must be an iterable of strings")
+        normalized_metrics = list(additional_metrics or [])
+        if not all(isinstance(m, str) for m in normalized_metrics):
+            raise TrainingError("additional_metrics must be an iterable of strings")
+        self.additional_metrics: list[str] = [m.lower() for m in normalized_metrics]
+        self.additional_scores: dict[str, float] = {}
 
         # Явное переопределение пресета предобработки (FR-5): валидируем сразу,
         # чтобы некорректные значения отклонялись на этапе инициализации.
@@ -349,9 +398,7 @@ class ModelTrainer:
             if isinstance(override, dict):
                 return PreprocessingOverride.model_validate(override)
         except Exception as e:
-            raise TrainingError(
-                f"Invalid preprocessing_override: {e}"
-            ) from e
+            raise TrainingError(f"Invalid preprocessing_override: {e}") from e
         raise TrainingError(
             "preprocessing_override must be a dict or PreprocessingOverride, "
             f"got {type(override).__name__}"
@@ -604,19 +651,37 @@ class ModelTrainer:
                 # (RMSE, MAE и т.д.)
                 # Чтобы в val_score всегда лежало "честное"
                 # положительное значение ошибки
-                if not is_greater_better(self.metric):
-                    # Если sklearn вернул отрицательную ошибку (neg_rmse), берем модуль
-                    # Если вдруг вернул положительную (custom scorer),
-                    # оставляем как есть
-                    self.val_score = float(abs(raw_score))
-                else:
-                    # Для R2 и прочих score-метрик оставляем как есть
-                    self.val_score = float(raw_score)
+                self.val_score = _sign_corrected_value(self.metric, raw_score)
                 self.logger.debug(
                     f"Metric calculation: raw={raw_score:.4f},"
                     f" final val_score={self.val_score:.4f} "
                     f"(greater_is_better={is_greater_better(self.metric)})"
                 )
+
+                # 4. Дополнительные (информационные) метрики: рассчитываются для
+                # финальной модели на том же наборе данных и тем же способом, что
+                # и основная метрика. Они не влияют на ход обучения, выбор модели
+                # и сохранение артефакта: при сбое отдельной метрики она
+                # пропускается с предупреждением, обучение продолжается.
+                self.additional_scores = {}
+                for mname in self.additional_metrics:
+                    try:
+                        m_scorer = cast(Callable[..., Any], get_scorer_object(mname))
+                        m_raw = m_scorer(self.pipeline, X_prepared, y_s)
+                        if m_raw is None:
+                            raise TrainingError(
+                                f"Scorer returned None for additional metric '{mname}'"
+                            )
+                        self.additional_scores[mname] = _sign_corrected_value(
+                            mname, m_raw
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        self.logger.warning(
+                            "Additional metric '%s' could not be computed: %s. "
+                            "Training result and artifact are unaffected.",
+                            mname,
+                            err,
+                        )
             except Exception as e:  # noqa: BLE001
                 raise TrainingError(f"Error calculating metrics on validation: {e}")
 

@@ -53,7 +53,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 )
 from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
-from configurable_automl_engine.training_engine.metrics import AVAILABLE_METRICS
+from configurable_automl_engine.training_engine.metrics import (
+    AVAILABLE_METRICS,
+    to_sklearn_name,
+)
 
 # Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
 ComparisonMetric = Literal[*AVAILABLE_METRICS]  # type: ignore
@@ -192,6 +195,8 @@ class GeneralCfg(BaseModel):
     и распределение вычислительных ресурсов.
     Attributes:
         comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.
+        additional_metrics (List[ComparisonMetric]): Дополнительные информационные
+            метрики, рассчитываемые для финальной модели.
         path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.
         serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
         log_to_file (Path | None): Файл для записи логов работы движка.
@@ -212,6 +217,23 @@ class GeneralCfg(BaseModel):
         description=(
             "Метрика для сравнения моделей"
             " и выбора лучшей (например, r2, rmse, accuracy)"
+        ),
+    )
+    additional_metrics: list[ComparisonMetric] = Field(
+        default_factory=list,
+        description=(
+            "Список дополнительных метрик качества, значения которых рассчитываются "
+            "для финальной обученной модели и возвращаются вместе с результатами "
+            "обучения (ключ 'additional_metrics'). Метрики носят исключительно "
+            "информационный характер: они не участвуют в оптимизации гиперпараметров, "
+            "сравнении моделей и выборе победителя. Допустимые значения совпадают "
+            "с набором значений comparison_metric. Дубликаты в списке игнорируются "
+            "(значение считается один раз), а совпадение с основной метрикой сравнения "
+            "(включая алиасы, например rmse ↔ neg_root_mean_squared_error) исключается "
+            "из списка — её значение и так возвращается как 'score'. Оба правила "
+            "применяются на этапе валидации конфигурации, поэтому итоговый список "
+            "в general.additional_metrics может отличаться от исходного, переданного "
+            "пользователем."
         ),
     )
     path_to_model: Path = Field(
@@ -301,6 +323,56 @@ class GeneralCfg(BaseModel):
             "По умолчанию выключены: каждый триал выполняется полностью."
         ),
     )
+
+    @field_validator("additional_metrics")
+    @classmethod
+    def _deduplicate_additional_metrics(
+        cls, v: list[ComparisonMetric]
+    ) -> list[ComparisonMetric]:
+        """Устранить дубликаты в списке дополнительных метрик.
+
+        Задокументированное поведение: одна и та же метрика, указанная
+        несколько раз, вычисляется и возвращается ровно один раз
+        (порядок первого вхождения сохраняется). Дедупликация выполняется
+        по строковому представлению метрики в нижнем регистре: элементы
+        ``ComparisonMetric`` являются строками, поэтому вызов ``.lower()``
+        типобезопасен и не зависит от произвольного типа элемента.
+        """
+        seen: set[str] = set()
+        result: list[ComparisonMetric] = []
+        for name in v:
+            key = name.lower()
+            if key not in seen:
+                seen.add(key)
+                result.append(name)
+        return result
+
+    @model_validator(mode="after")
+    def _exclude_comparison_from_additional(self) -> GeneralCfg:
+        """Исключить основную метрику сравнения из списка дополнительных.
+
+        Значение основной метрики сравнения уже возвращается в результатах
+        обучения как ``score``, поэтому дублировать его в
+        ``additional_metrics`` не нужно. Сравнение выполняется по
+        sklearn-имени метрики, поэтому алиасы одной и той же метрики
+        (например, 'rmse' и 'neg_root_mean_squared_error') считаются
+        совпадением.
+        """
+        comparison_sklearn = to_sklearn_name(self.comparison_metric)
+        filtered = [
+            m
+            for m in self.additional_metrics
+            if to_sklearn_name(m) != comparison_sklearn
+        ]
+        if len(filtered) != len(self.additional_metrics):
+            logging.getLogger(__name__).warning(
+                "additional_metrics contains the comparison metric '%s'; "
+                "its value is already returned as 'score' and will not be "
+                "duplicated in 'additional_metrics'.",
+                self.comparison_metric,
+            )
+        self.additional_metrics = filtered
+        return self
 
     @model_validator(mode="after")
     def _check_n_folds(self) -> GeneralCfg:

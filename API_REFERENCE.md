@@ -14,6 +14,7 @@ The `general` section may include the following attributes:
 
 * `phases` — required section (array) of hyperparameter optimization phases.
 * `comparison_metric` — (optional) accuracy metric for model comparison. Defaults to `"r2"` if not specified.
+* `additional_metrics` — (optional) list of additional quality metrics computed for the final trained model and returned together with the training results (see [Additional metrics](#additional-metrics-additional_metrics)).
 * `path_to_model` — (optional) path to save the best model.
 * `serialization_format` — (optional) format for saving the model (`"pickle"` or `"joblib"`).
 * `log_to_file` — (optional) path to the log file.
@@ -86,6 +87,47 @@ Behavior by validation strategy:
 * `"mae"`
 * `"mse"`
 * `"r2"`
+
+### Additional metrics (`additional_metrics`)
+
+The optional `general.additional_metrics` parameter is a list of extra quality metrics whose values are computed for the **final trained model** (after the winner is selected) and returned together with the training results.
+
+Rules and behavior:
+
+* **Optional & backward compatible.** If the parameter is absent or empty, the system behaves exactly as before: no `additional_metrics` key is added to the results.
+* **Allowed values** — the same set as for `comparison_metric` (see above). An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
+* **Informational only.** Additional metrics do **not** participate in hyperparameter optimization, model comparison, or winner selection. The winner is determined solely by the main `comparison_metric`.
+* **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
+* **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
+* **Post-validation list.** Both rules above are applied at config validation time, so the resulting `general.additional_metrics` (as exposed on the validated config object and forwarded to the final `ModelTrainer`) may differ from the list the user provided: duplicates are removed and the comparison metric (with its aliases) is dropped. Only the metrics present in the final list are computed and returned.
+* **Computation.** Each additional metric is evaluated for the final model on the same dataset and with the same scorer mechanism as the main metric of the final model (i.e., on the full training dataset after the final fit). Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
+* **Failure tolerance.** If a single additional metric cannot be computed (scorer error), it is skipped with a warning and does not abort training, model selection, or artifact saving.
+
+Example:
+
+```yaml
+general:
+  comparison_metric: "rmse"
+  additional_metrics: ["r2", "mae", "mse"]
+  phases:
+    - name: "search"
+      n_trials: 50
+      action: "all_algorithms"
+```
+
+Result format (`train_best_model` return value):
+
+```python
+{
+    "algorithm": "ridge",
+    "score": 0.94,               # main comparison metric, as before
+    "params": {...},
+    "model_path": "model.pkl",
+    "additional_metrics": {"r2": 0.98, "mae": 0.07, "mse": 0.009},  # only when non-empty
+}
+```
+
+The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model.
 
 ## Algorithms section
 
@@ -194,7 +236,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"params"`, `"model_path"`.
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"params"`, `"model_path"`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model.
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
@@ -270,6 +312,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
 | `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy (`"one_hot"` or `"ordinal"`). |
+| `additional_metrics` | `Iterable[str]` or `None` | `None` | Additional (informational) metrics computed for the trained model on the same dataset as the main metric. Any iterable of strings is accepted (list, tuple, set, generator); names are normalized to lowercase. Stored in `additional_scores` after `fit()`. |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial or full overrides are supported; takes priority over the automatic class-based selection. |
 
 **Key attributes:**
@@ -282,6 +325,11 @@ Orchestrator class for training, validation, and serialization of regression mod
 * `predict(X)` — Make predictions on new data.
 * `save(path)` — Serialize to disk.
 * `load(path)` — Load from disk (class method).
+
+**Attributes after `fit()`:**
+
+* `val_score` — value of the main metric for the trained model.
+* `additional_scores` — `dict[str, float]` with values of the configured additional metrics (empty if none were set).
 
 **Categorical encoding**
 

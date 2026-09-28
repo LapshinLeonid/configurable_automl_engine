@@ -213,7 +213,7 @@ def _run_hpo(
             encoding,
         )
 
-# прокидываем переопределение пресета предобработки (FR-5): явное указание
+    # прокидываем переопределение пресета предобработки (FR-5): явное указание
     # пользователя из конфигурации применяется и в HPO, и в финальном обучении
     preprocessing_override = getattr(algo_cfg, "preprocessing", None)
     if "preprocessing_override" in sig.parameters:
@@ -247,7 +247,7 @@ def _fit_and_save(
     model_path: Path,
     cfg: Config,
     metric_name_sklearn: str = "r2",
-) -> None:
+) -> Any:
     """Выполнить финальное обучение модели и сохранить результат на диск.
     Args:
         algo_name (str): Название выбранного алгоритма.
@@ -257,8 +257,10 @@ def _fit_and_save(
         best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
         model_path (Path): Путь для сохранения файла модели.
         cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
+        metric_name_sklearn (str): Имя основной метрики в формате sklearn.
     Returns:
-        None
+        Any: Экземпляр ``ModelTrainer`` после обучения и сохранения
+            (используется для доступа к значениям дополнительных метрик).
     Raises:
         AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
     """
@@ -280,6 +282,7 @@ def _fit_and_save(
         data_oversampling_algorithm=cfg.oversampling.algorithm,
         serialization_format=cfg.general.serialization_format,
         encoding_strategy=cfg.general.categorical_encoding,
+        additional_metrics=cfg.general.additional_metrics,
         # Явное переопределение пресета предобработки из конфига (FR-5):
         # применяется согласованно с фазой HPO (AC-7).
         preprocessing_override=getattr(algo_cfg, "preprocessing", None),
@@ -287,6 +290,7 @@ def _fit_and_save(
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
+    return trainer
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +315,11 @@ def train_best_model(
         model_path_override (str | Path | None): Альтернативный путь сохранения модели.
     Returns:
         Dict[str, Any]: Словарь с результатами: название алгоритма, score,
-            параметры и путь к файлу.
+            параметры и путь к файлу. Если в конфигурации заданы дополнительные
+            метрики (``general.additional_metrics``), в результат добавляется
+            ключ ``additional_metrics`` — словарь {метрика: значение},
+            рассчитанных для финальной модели на том же наборе данных, что и
+            основная метрика.
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
         RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
@@ -562,7 +570,7 @@ def train_best_model(
     model_path = Path(model_path_override or cfg.general.path_to_model)
 
     try:
-        _fit_and_save(
+        trainer = _fit_and_save(
             winner_algo,
             winner_cfg,
             X,
@@ -576,9 +584,15 @@ def train_best_model(
     except Exception as e:
         _LOG.error(f"Failed to save final model: {e}")
         raise
-    return {
+    result: dict[str, Any] = {
         "algorithm": winner_algo,
         "score": final_score,
         "params": final_params,
         "model_path": str(model_path),
     }
+    # Дополнительные информационные метрики финальной модели. Ключ добавляется
+    # только при наличии метрик (после дедупликации и исключения основной
+    # метрики сравнения), иначе результаты идентичны прежнему поведению.
+    if cfg.general.additional_metrics:
+        result["additional_metrics"] = dict(trainer.additional_scores)
+    return result

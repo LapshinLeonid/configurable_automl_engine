@@ -25,6 +25,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials. Disabled by default — configurations without the `general.pruning` block behave exactly as before.
+* **Additional Metrics**: Optional `general.additional_metrics` list — extra quality metrics computed for the final trained model and returned with the training results (`results["additional_metrics"]`). Informational only: they never influence HPO, model comparison, or winner selection.
 * **Granular Phase/Task Timeouts**: Configurable global phase timeout and per-task timeout with a watchdog mechanism to prevent deadlocks.
 * **Signature-Aware Hyperparameter Cleaning**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression), and unknown parameters are safely dropped.
 
