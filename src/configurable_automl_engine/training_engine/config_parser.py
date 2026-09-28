@@ -52,6 +52,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     SearchSpaceEntry,
 )
 from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.training_engine.metrics import (
     AVAILABLE_METRICS,
@@ -268,14 +269,62 @@ class GeneralCfg(BaseModel):
             "Используется только если validation_strategy = 'k_fold'"
         ),
     )
-    categorical_encoding: Literal["one_hot", "ordinal"] = Field(
+    categorical_encoding: EncodingStrategy = Field(
         default="one_hot",
         description=(
             "Стратегия кодирования категориальных признаков: 'one_hot' (каждая "
-            "категория -> отдельный бинарный столбец) или 'ordinal' (каждая "
-            "категориальная колонка -> один числовой столбец с наложенным порядком). "
-            "Ordinal кодирование не расширяет число колонок и полезно для "
-            "линейных моделей, однако навязывает искусственный порядок категориям."
+            "категория -> отдельный бинарный столбец), 'ordinal' (каждая "
+            "категориальная колонка -> один числовой столбец с наложенным "
+            "порядком), 'target' (target encoding со сглаживанием), 'frequency' "
+            "(частота категории) или 'hashing' (детерминированное хеширование "
+            "в фиксированное число бинарных колонок). Ordinal кодирование не "
+            "расширяет число колонок и полезно для линейных моделей, однако "
+            "навязывает искусственный порядок категориям. Target/frequency/"
+            "hashing эффективны для колонок высокой кардинальности."
+        ),
+    )
+    high_cardinality_threshold: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Порог кардинальности для автоматического режима (>= 0). Колонки "
+            "с числом уникальных значений строго больше порога кодируются "
+            "стратегией high_cardinality_encoding, остальные — стратегией "
+            "categorical_encoding. Должен задаваться вместе с "
+            "high_cardinality_encoding. None — автоматический режим отключён."
+        ),
+    )
+    high_cardinality_encoding: EncodingStrategy | None = Field(
+        default=None,
+        description=(
+            "Стратегия кодирования для колонок высокой кардинальности "
+            "(выше high_cardinality_threshold). Должна задаваться вместе с "
+            "high_cardinality_threshold. None — режим отключён."
+        ),
+    )
+    hashing_n_components: int = Field(
+        default=16,
+        ge=1,
+        description=(
+            "Число бинарных колонок на одну категориальную колонку при "
+            "кодировании 'hashing' (>= 1). Управляет размерностью выходных "
+            "признаков: рост числа признаков не зависит от кардинальности колонки."
+        ),
+    )
+    target_encoding_smoothing: float = Field(
+        default=20.0,
+        ge=0,
+        description=(
+            "Параметр сглаживания (m) target encoding (>= 0). При m=0 "
+            "используется чистое среднее целевой переменной по категории; "
+            "при больших m редкие категории приближаются к глобальному среднему."
+        ),
+    )
+    target_encoding_fallback: float | None = Field(
+        default=None,
+        description=(
+            "Fallback-значение target encoding для категорий, отсутствующих "
+            "в обучающей выборке. None — глобальное среднее целевой переменной."
         ),
     )
     parallel_strategy: ParallelStrategy = Field(
@@ -440,6 +489,37 @@ class GeneralCfg(BaseModel):
                 "pruning.enable=true with validation_strategy='train_test_split': "
                 "early stopping will NOT be applied because hold-out evaluation "
                 "has no intermediate steps."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_high_cardinality_encoding(self) -> GeneralCfg:
+        """Проверить согласованность настроек кодирования high-cardinality колонок.
+
+        Логика проверки:
+        1. ``high_cardinality_threshold`` и ``high_cardinality_encoding``
+           задаются только вместе (иначе поведение неоднозначно — ошибка
+           отклоняется до запуска обучения).
+        2. Значения ``categorical_encoding`` / ``high_cardinality_encoding``
+           валидируются типом ``EncodingStrategy`` (неподдерживаемая стратегия
+           отклоняется на этапе парсинга конфигурации).
+
+        Returns:
+            GeneralCfg: Валидированный объект настроек.
+
+        Raises:
+            ValueError: Если задан только один из пары параметров
+                high-cardinality кодирования.
+        """
+        threshold = self.high_cardinality_threshold
+        hc_encoding = self.high_cardinality_encoding
+        if (threshold is None) != (hc_encoding is None):
+            raise ValueError(
+                "general.high_cardinality_threshold and "
+                "general.high_cardinality_encoding must be set together: "
+                f"got threshold={threshold!r}, encoding={hc_encoding!r}. "
+                "Provide both parameters to enable automatic high-cardinality "
+                "encoding, or omit both to disable it."
             )
         return self
 

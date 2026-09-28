@@ -449,67 +449,90 @@ def optimize(
     encoding: EncodingStrategy | None = None,
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     pruning: dict[str, Any] | None = None,
+    high_cardinality_threshold: int | None = None,
+    high_cardinality_encoding: EncodingStrategy | None = None,
+    hashing_n_components: int = 16,
+    target_encoding_smoothing: float = 20.0,
+    target_encoding_fallback: float | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
-        Функция автоматически выбирает стратегию валидации, настраивает пространство поиска
-        параметров и обучает финальную модель на всех предоставленных данных.
-        Args:
-            algo_name (str): Название алгоритма для оптимизации.
-            X (Any): Входные признаки.
-            y (Any): Целевая переменная.
-            data_oversampling (bool): Флаг включения балансировки классов.
-                По умолчанию False.
-            data_oversampling_multiplier (float): Коэффициент масштабирования
-                (для оверсэмплинга).
-            data_oversampling_algorithm (str): Название алгоритма балансировки
-                (например, 'random', 'smote').
-            metric (str): Название метрики для максимизации. По умолчанию 'r2'.
-            val_method (ValidationStrategy | str): Метод валидации
-                ('k_fold', 'leave_one_out', 'train_test_split').
-            validation_strategy (ValidationStrategy | str | None): Алиас для val_method
-                (имеет приоритет).
-            n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
-            n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
-            random_state (int | None): Состояние случайности для воспроизводимости.
-                По умолчанию 42.
-            train_test_split_test_size (float): Размер теста для валидации через split.
-                По умолчанию 0.2.
-            space_overrides (dict | None): Словарь для переопределения пространств поиска.
-            initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы
-                для enqueue_trial. Позволяет сохранить монотонность улучшения между фазами HPO.
-            preprocessor (Any | None): Готовый ``ColumnTransformer`` для предобработки
-                признаков (категории -> one-hot, числа -> StandardScaler). Если передан,
-                имеет приоритет над ``categorical_features``/``numerical_features``.
-            categorical_features (list[str] | None): Имена категориальных колонок.
-                Если ``preprocessor`` не передан, по ним строится препроцессор.
-            numerical_features (list[str] | None): Имена числовых колонок.
-                Используется вместе с ``categorical_features``.
-            encoding (EncodingStrategy | None): Стратегия кодирования категорий
-                ('one_hot' или 'ordinal'). По умолчанию ``None`` — используется
-                'one_hot'. Применяется при построении препроцессора, когда
-                ``preprocessor`` не передан.
-    preprocessing_override (PreprocessingOverride | dict | None): Явное
-                переопределение пресета предобработки признаков (FR-5). Задаётся
-                частично или полностью; имеет приоритет над автоматическим выбором
-                и применяется согласованно с финальным обучением (AC-6, AC-7).
-            pruning (dict[str, Any] | None): Настройки ранней остановки (pruning).
-                Словарь с полями: ``enable`` (bool, False по умолчанию),
-                ``strategy`` ('median' | 'hyperband', 'median' по умолчанию),
-                ``min_steps`` (int >= 1, 1 по умолчанию), ``n_startup_trials``
-                (int >= 1, только для 'median', 5 по умолчанию),
-                ``reduction_factor`` (int >= 2, только для 'hyperband', 3 по
-                умолчанию). При ``enable=False`` или ``None`` поведение идентично
-                текущему: каждый триал выполняется полностью. Для стратегий
-                валидации без естественных шагов (train_test_split) прайнер не
-                применяется.
-        Returns:
-            tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
-                - best_model: Обученная модель с лучшими параметрами.
-                - best_params: Словарь найденных оптимальных гиперпараметров.
-                - best_score: Лучшее значение метрики на валидации.
-        Raises:
-            ValueError: Если n_trials не является положительным целым числом.
-            HyperoptError: Если для выбранного алгоритма не определено пространство поиска.
+
+    Функция автоматически выбирает стратегию валидации, настраивает пространство
+    поиска параметров и обучает финальную модель на всех предоставленных данных.
+
+    Args:
+        algo_name (str): Название алгоритма для оптимизации.
+        X (Any): Входные признаки.
+        y (Any): Целевая переменная.
+        data_oversampling (bool): Флаг включения балансировки классов.
+            По умолчанию False.
+        data_oversampling_multiplier (float): Коэффициент масштабирования
+            (для оверсэмплинга).
+        data_oversampling_algorithm (str): Название алгоритма балансировки
+            (например, 'random', 'smote').
+        metric (str): Название метрики для максимизации. По умолчанию 'r2'.
+        val_method (ValidationStrategy | str): Метод валидации
+            ('k_fold', 'leave_one_out', 'train_test_split').
+        validation_strategy (ValidationStrategy | str | None): Алиас для
+            ``val_method`` (имеет приоритет).
+        n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
+        n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
+        random_state (int | None): Состояние случайности для воспроизводимости.
+            По умолчанию 42.
+        train_test_split_test_size (float): Размер теста для валидации через split.
+            По умолчанию 0.2.
+        space_overrides (dict | None): Словарь для переопределения пространств поиска.
+        initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы
+            для enqueue_trial. Позволяет сохранить монотонность улучшения между фазами HPO.
+        preprocessor (Any | None): Готовый ``ColumnTransformer`` для предобработки
+            признаков (категории -> one-hot, числа -> StandardScaler). Если передан,
+            имеет приоритет над ``categorical_features``/``numerical_features``.
+        categorical_features (list[str] | None): Имена категориальных колонок.
+            Если ``preprocessor`` не передан, по ним строится препроцессор.
+        numerical_features (list[str] | None): Имена числовых колонок.
+            Используется вместе с ``categorical_features``.
+        encoding (EncodingStrategy | None): Стратегия кодирования категорий
+            ('one_hot', 'ordinal', 'target', 'frequency' или 'hashing').
+            По умолчанию ``None`` — используется 'one_hot'. Применяется при
+            построении препроцессора, когда ``preprocessor`` не передан.
+        preprocessing_override (PreprocessingOverride | dict | None): Явное
+            переопределение пресета предобработки признаков (FR-5). Задаётся
+            частично или полностью; имеет приоритет над автоматическим выбором
+            и применяется согласованно с финальным обучением (AC-6, AC-7).
+        pruning (dict[str, Any] | None): Настройки ранней остановки (pruning).
+            Словарь с полями: ``enable`` (bool, False по умолчанию),
+            ``strategy`` ('median' | 'hyperband', 'median' по умолчанию),
+            ``min_steps`` (int >= 1, 1 по умолчанию), ``n_startup_trials``
+            (int >= 1, только для 'median', 5 по умолчанию),
+            ``reduction_factor`` (int >= 2, только для 'hyperband', 3 по
+            умолчанию). При ``enable=False`` или ``None`` поведение идентично
+            текущему: каждый триал выполняется полностью. Для стратегий
+            валидации без естественных шагов (train_test_split) прайнер не
+            применяется.
+        high_cardinality_threshold (int | None): Порог кардинальности для
+            автоматического режима (>= 0). Колонки с числом уникальных значений
+            строго больше порога кодируются ``high_cardinality_encoding``,
+            остальные — ``encoding``. ``None`` — режим отключён.
+        high_cardinality_encoding (EncodingStrategy | None): Стратегия
+            кодирования high-cardinality колонок. Задаётся вместе с
+            ``high_cardinality_threshold``.
+        hashing_n_components (int): Число бинарных колонок на категориальную
+            колонку при кодировании 'hashing' (>= 1).
+        target_encoding_smoothing (float): Параметр сглаживания target encoding
+            (>= 0).
+        target_encoding_fallback (float | None): Fallback-значение target
+            encoding для неизвестных категорий (None — глобальное среднее).
+
+    Returns:
+        tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
+            - best_model: Обученная модель с лучшими параметрами.
+            - best_params: Словарь найденных оптимальных гиперпараметров.
+            - best_score: Лучшее значение метрики на валидации.
+
+    Raises:
+        ValueError: Если ``n_trials`` не является положительным целым числом.
+        HyperoptError: Если для выбранного алгоритма не определено пространство
+            поиска.
     """
     # --- Формируем конфиг для использования внутри _objective ---
     oversampling_config: dict[str, Any] = {
@@ -617,6 +640,12 @@ def optimize(
                     encoding=encoding_strategy,
                     imputation_strategy=preset.imputation_strategy,
                     scaling=preset.scaling,
+                    high_cardinality_threshold=high_cardinality_threshold,
+                    high_cardinality_encoding=high_cardinality_encoding,
+                    hashing_n_components=hashing_n_components,
+                    target_encoding_smoothing=target_encoding_smoothing,
+                    target_encoding_fallback=target_encoding_fallback,
+                    random_state=random_state,
                 )
             else:
                 log.warning(
@@ -637,6 +666,12 @@ def optimize(
                     encoding=encoding_strategy,
                     imputation_strategy=preset.imputation_strategy,
                     scaling=preset.scaling,
+                    high_cardinality_threshold=high_cardinality_threshold,
+                    high_cardinality_encoding=high_cardinality_encoding,
+                    hashing_n_components=hashing_n_components,
+                    target_encoding_smoothing=target_encoding_smoothing,
+                    target_encoding_fallback=target_encoding_fallback,
+                    random_state=random_state,
                 )
         else:
             log.warning(

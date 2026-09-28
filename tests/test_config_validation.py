@@ -58,12 +58,132 @@ def test_categorical_encoding_default_one_hot():
 
 
 def test_categorical_encoding_invalid_rejected():
-    """Конфиг с categorical_encoding='target' отклоняется (Literal)."""
+    """Конфиг с categorical_encoding='binary' отклоняется (Literal)."""
+    cfg_data = BASE | {"general": {**BASE["general"], "categorical_encoding": "binary"}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(cfg_data)
+
+
+@pytest.mark.parametrize(
+    "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
+)
+def test_categorical_encoding_new_strategies_valid(enc):
+    """Все поддерживаемые стратегии (включая новые) проходят валидацию."""
+    cfg_data = BASE | {"general": {**BASE["general"], "categorical_encoding": enc}}
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.categorical_encoding == enc
+
+
+def test_high_cardinality_encoding_pair_valid():
+    """Согласованная пара threshold + high_cardinality_encoding проходит."""
     cfg_data = BASE | {
-        "general": {**BASE["general"], "categorical_encoding": "target"}
+        "general": {
+            **BASE["general"],
+            "categorical_encoding": "one_hot",
+            "high_cardinality_threshold": 20,
+            "high_cardinality_encoding": "target",
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.high_cardinality_threshold == 20
+    assert cfg.general.high_cardinality_encoding == "target"
+
+
+def test_high_cardinality_threshold_zero_allowed():
+    """Порог, равный нулю, допустим (все непустые колонки — high-cardinality)."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": 0,
+            "high_cardinality_encoding": "hashing",
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.high_cardinality_threshold == 0
+
+
+def test_high_cardinality_threshold_negative_rejected():
+    """Отрицательный порог отклоняется на этапе валидации конфигурации."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": -1,
+            "high_cardinality_encoding": "target",
+        }
+    }
+    with pytest.raises(ValidationError, match="high_cardinality_threshold"):
+        Config.model_validate(cfg_data)
+
+
+def test_high_cardinality_encoding_unsupported_rejected():
+    """Неподдерживаемая HC-стратегия отклоняется."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": 10,
+            "high_cardinality_encoding": "binary",
+        }
     }
     with pytest.raises(ValidationError):
         Config.model_validate(cfg_data)
+
+
+def test_high_cardinality_pair_must_be_set_together():
+    """Задан только один из пары параметров -> понятная ошибка."""
+    only_threshold = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": 10,
+        }
+    }
+    with pytest.raises(ValidationError, match="must be set together"):
+        Config.model_validate(only_threshold)
+
+    only_encoding = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_encoding": "target",
+        }
+    }
+    with pytest.raises(ValidationError, match="must be set together"):
+        Config.model_validate(only_encoding)
+
+
+def test_hashing_n_components_zero_rejected():
+    """hashing_n_components=0 отклоняется."""
+    cfg_data = BASE | {"general": {**BASE["general"], "hashing_n_components": 0}}
+    with pytest.raises(ValidationError, match="hashing_n_components"):
+        Config.model_validate(cfg_data)
+
+
+def test_target_encoding_smoothing_negative_rejected():
+    """Отрицательное сглаживание target encoding отклоняется."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "target_encoding_smoothing": -0.5}
+    }
+    with pytest.raises(ValidationError, match="target_encoding_smoothing"):
+        Config.model_validate(cfg_data)
+
+
+def test_target_encoding_fallback_any_float():
+    """target_encoding_fallback принимает float или None."""
+    for fallback in (0.0, -5.5, 42.0):
+        cfg_data = BASE | {
+            "general": {**BASE["general"], "target_encoding_fallback": fallback}
+        }
+        cfg = Config.model_validate(cfg_data)
+        assert cfg.general.target_encoding_fallback == fallback
+
+
+def test_new_params_absent_backward_compat():
+    """Конфигурация без новых параметров работает как раньше (обратная совместимость)."""
+    cfg = Config.model_validate(BASE)
+    assert cfg.general.categorical_encoding == "one_hot"
+    assert cfg.general.high_cardinality_threshold is None
+    assert cfg.general.high_cardinality_encoding is None
+    assert cfg.general.hashing_n_components == 16
+    assert cfg.general.target_encoding_smoothing == 20.0
+    assert cfg.general.target_encoding_fallback is None
 
 
 def test_n_folds_bad():
@@ -435,9 +555,7 @@ def test_validator_invalid_path():
 # --- Тесты для preprocessing override (FR-5) ---
 def test_algo_cfg_preprocessing_valid_override():
     """Валидный блок переопределения пресета принимается конфигом."""
-    cfg = AlgoCfg(
-        preprocessing={"imputation_strategy": "median", "scaling": "none"}
-    )
+    cfg = AlgoCfg(preprocessing={"imputation_strategy": "median", "scaling": "none"})
     assert cfg.preprocessing is not None
     assert cfg.preprocessing.imputation_strategy == "median"
     assert cfg.preprocessing.scaling == "none"

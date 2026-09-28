@@ -447,13 +447,77 @@
         },
         "categorical_encoding": {
           "default": "one_hot",
-          "description": "Стратегия кодирования категориальных признаков: 'one_hot' (каждая категория -> отдельный бинарный столбец) или 'ordinal' (каждая категориальная колонка -> один числовой столбец с наложенным порядком). Ordinal кодирование не расширяет число колонок и полезно для линейных моделей, однако навязывает искусственный порядок категориям.",
+          "description": "Стратегия кодирования категориальных признаков: 'one_hot' (каждая категория -> отдельный бинарный столбец), 'ordinal' (каждая категориальная колонка -> один числовой столбец с наложенным порядком), 'target' (target encoding со сглаживанием), 'frequency' (частота категории) или 'hashing' (детерминированное хеширование в фиксированное число бинарных колонок). Ordinal кодирование не расширяет число колонок и полезно для линейных моделей, однако навязывает искусственный порядок категориям. Target/frequency/hashing эффективны для колонок высокой кардинальности.",
           "enum": [
             "one_hot",
-            "ordinal"
+            "ordinal",
+            "target",
+            "frequency",
+            "hashing"
           ],
           "title": "Categorical Encoding",
           "type": "string"
+        },
+        "high_cardinality_threshold": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Порог кардинальности для автоматического режима (>= 0). Колонки с числом уникальных значений строго больше порога кодируются стратегией high_cardinality_encoding, остальные — стратегией categorical_encoding. Должен задаваться вместе с high_cardinality_encoding. None — автоматический режим отключён.",
+          "title": "High Cardinality Threshold"
+        },
+        "high_cardinality_encoding": {
+          "anyOf": [
+            {
+              "enum": [
+                "one_hot",
+                "ordinal",
+                "target",
+                "frequency",
+                "hashing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Стратегия кодирования для колонок высокой кардинальности (выше high_cardinality_threshold). Должна задаваться вместе с high_cardinality_threshold. None — режим отключён.",
+          "title": "High Cardinality Encoding"
+        },
+        "hashing_n_components": {
+          "default": 16,
+          "description": "Число бинарных колонок на одну категориальную колонку при кодировании 'hashing' (>= 1). Управляет размерностью выходных признаков: рост числа признаков не зависит от кардинальности колонки.",
+          "minimum": 1,
+          "title": "Hashing N Components",
+          "type": "integer"
+        },
+        "target_encoding_smoothing": {
+          "default": 20.0,
+          "description": "Параметр сглаживания (m) target encoding (>= 0). При m=0 используется чистое среднее целевой переменной по категории; при больших m редкие категории приближаются к глобальному среднему.",
+          "minimum": 0,
+          "title": "Target Encoding Smoothing",
+          "type": "number"
+        },
+        "target_encoding_fallback": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fallback-значение target encoding для категорий, отсутствующих в обучающей выборке. None — глобальное среднее целевой переменной.",
+          "title": "Target Encoding Fallback"
         },
         "parallel_strategy": {
           "$ref": "#/$defs/ParallelStrategy",

@@ -200,7 +200,8 @@ class ModelTrainer:
         numerical_features (list[str] | None): Список колонок для скалирования.
         id_column (str | None): Идентификатор, исключаемый из процесса обучения.
         encoding_strategy (str): Стратегия кодирования категорий
-            ('one_hot' или 'ordinal'). По умолчанию 'one_hot'.
+            ('one_hot', 'ordinal', 'target', 'frequency' или 'hashing').
+            По умолчанию 'one_hot'.
         additional_metrics (Iterable[str] | None): Дополнительные метрики качества,
             рассчитываемые для обученной модели на том же наборе данных и тем же
             способом, что и основная метрика. Принимается любая итерируемая
@@ -242,6 +243,11 @@ class ModelTrainer:
         encoding_strategy: str = "one_hot",
         additional_metrics: Iterable[str] | None = None,
         preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
+        high_cardinality_threshold: int | None = None,
+        high_cardinality_encoding: str | None = None,
+        hashing_n_components: int = 16,
+        target_encoding_smoothing: float = 20.0,
+        target_encoding_fallback: float | None = None,
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки."""
 
@@ -269,16 +275,62 @@ class ModelTrainer:
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.id_column = id_column
-        # Стратегия кодирования категорий: 'one_hot' (по умолчанию) или 'ordinal'.
-        # Хранится как строковый примитив, чтобы сохранять picklable-совместимость.
-        if encoding_strategy not in ("one_hot", "ordinal"):
+        # Стратегия кодирования категорий: 'one_hot' (по умолчанию), 'ordinal',
+        # 'target', 'frequency' или 'hashing'. Хранится как строковый примитив,
+        # чтобы сохранять picklable-совместимость.
+        if encoding_strategy not in (
+            "one_hot",
+            "ordinal",
+            "target",
+            "frequency",
+            "hashing",
+        ):
             raise TrainingError(
                 f"Unknown encoding_strategy: {encoding_strategy!r}. "
-                "Expected one of ('one_hot', 'ordinal')."
+                "Expected one of ('one_hot', 'ordinal', 'target', 'frequency', "
+                "'hashing')."
             )
         self.encoding_strategy: EncodingStrategy = cast(
             EncodingStrategy, encoding_strategy
         )
+
+        # Параметры high-cardinality кодирования и новых стратегий (issue #20).
+        # Валидируются сразу, чтобы некорректные значения отклонялись на этапе
+        # инициализации, до запуска обучения.
+        self.high_cardinality_threshold = high_cardinality_threshold
+        self.high_cardinality_encoding = high_cardinality_encoding
+        self.hashing_n_components = hashing_n_components
+        self.target_encoding_smoothing = target_encoding_smoothing
+        self.target_encoding_fallback = target_encoding_fallback
+        if (high_cardinality_threshold is None) != (high_cardinality_encoding is None):
+            raise TrainingError(
+                "high_cardinality_threshold and high_cardinality_encoding must "
+                "be set together (both provided or both None)."
+            )
+        if high_cardinality_threshold is not None and high_cardinality_threshold < 0:
+            raise TrainingError(
+                "high_cardinality_threshold must be >= 0, got "
+                f"{high_cardinality_threshold}."
+            )
+        if high_cardinality_encoding is not None and high_cardinality_encoding not in (
+            "one_hot",
+            "ordinal",
+            "target",
+            "frequency",
+            "hashing",
+        ):
+            raise TrainingError(
+                f"Unknown high_cardinality_encoding: {high_cardinality_encoding!r}."
+            )
+        if hashing_n_components < 1:
+            raise TrainingError(
+                f"hashing_n_components must be >= 1, got {hashing_n_components}."
+            )
+        if target_encoding_smoothing < 0:
+            raise TrainingError(
+                f"target_encoding_smoothing must be >= 0, got "
+                f"{target_encoding_smoothing}."
+            )
 
         # ---------- additional (informational) metrics ----------
         # Допускается любая итерируемая последовательность строк (list, tuple,
@@ -474,10 +526,23 @@ class ModelTrainer:
             )
         # Обратная совместимость: модели, сериализованные до появления
         # параметра encoding_strategy (атрибут отсутствует у распикленных
-        # объектов), по умолчанию обрабатываются как one_hot.
+        # объектов), по умолчанию обрабатываются как one_hot. Новые параметры
+        # кодирования (issue #20) также получают значения по умолчанию через
+        # getattr, чтобы старые сохранённые модели продолжали работать без
+        # изменений поведения.
         encoding: EncodingStrategy = cast(
             EncodingStrategy, getattr(self, "encoding_strategy", "one_hot")
         )
+        hc_threshold: int | None = getattr(self, "high_cardinality_threshold", None)
+        hc_encoding_raw: str | None = getattr(self, "high_cardinality_encoding", None)
+        hc_encoding: EncodingStrategy | None = (
+            cast(EncodingStrategy, hc_encoding_raw)
+            if hc_encoding_raw is not None
+            else None
+        )
+        hashing_n_components: int = getattr(self, "hashing_n_components", 16)
+        target_smoothing: float = getattr(self, "target_encoding_smoothing", 20.0)
+        target_fallback: float | None = getattr(self, "target_encoding_fallback", None)
         # Автоматический выбор пресета предобработки по алгоритму (FR-1)
         # с учётом явного переопределения (FR-5). Пресет разрешается один раз
         # до обучения (производительность) и фиксируется для наблюдаемости (AC-9).
@@ -495,6 +560,12 @@ class ModelTrainer:
             encoding=encoding,
             imputation_strategy=preset.imputation_strategy,
             scaling=preset.scaling,
+            high_cardinality_threshold=hc_threshold,
+            high_cardinality_encoding=hc_encoding,
+            hashing_n_components=hashing_n_components,
+            target_encoding_smoothing=target_smoothing,
+            target_encoding_fallback=target_fallback,
+            random_state=self.random_state,
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:

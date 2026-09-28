@@ -104,6 +104,11 @@ def _run_hpo(
     numerical_features: list[str] | None = None,
     encoding: str = "one_hot",
     pruning: dict[str, Any] | None = None,
+    high_cardinality_threshold: int | None = None,
+    high_cardinality_encoding: str | None = None,
+    hashing_n_components: int = 16,
+    target_encoding_smoothing: float = 20.0,
+    target_encoding_fallback: float | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -224,6 +229,23 @@ def _run_hpo(
     if pruning is not None and "pruning" in sig.parameters:
         kwargs["pruning"] = pruning
 
+    # прокидываем параметры high-cardinality кодирования и новых стратегий
+    # (issue #20), если тюнер их поддерживает; согласованно с финальным обучением
+    if "high_cardinality_threshold" in sig.parameters:
+        kwargs["high_cardinality_threshold"] = high_cardinality_threshold
+
+    if "high_cardinality_encoding" in sig.parameters:
+        kwargs["high_cardinality_encoding"] = high_cardinality_encoding
+
+    if "hashing_n_components" in sig.parameters:
+        kwargs["hashing_n_components"] = hashing_n_components
+
+    if "target_encoding_smoothing" in sig.parameters:
+        kwargs["target_encoding_smoothing"] = target_encoding_smoothing
+
+    if "target_encoding_fallback" in sig.parameters:
+        kwargs["target_encoding_fallback"] = target_encoding_fallback
+
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
@@ -286,6 +308,12 @@ def _fit_and_save(
         # Явное переопределение пресета предобработки из конфига (FR-5):
         # применяется согласованно с фазой HPO (AC-7).
         preprocessing_override=getattr(algo_cfg, "preprocessing", None),
+        # Параметры high-cardinality кодирования и новых стратегий (issue #20)
+        high_cardinality_threshold=cfg.general.high_cardinality_threshold,
+        high_cardinality_encoding=cfg.general.high_cardinality_encoding,
+        hashing_n_components=cfg.general.hashing_n_components,
+        target_encoding_smoothing=cfg.general.target_encoding_smoothing,
+        target_encoding_fallback=cfg.general.target_encoding_fallback,
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -442,6 +470,11 @@ def train_best_model(
                 numerical_features=numerical_features,
                 encoding=cfg.general.categorical_encoding,
                 pruning=pruning_cfg,
+                high_cardinality_threshold=cfg.general.high_cardinality_threshold,
+                high_cardinality_encoding=cfg.general.high_cardinality_encoding,
+                hashing_n_components=cfg.general.hashing_n_components,
+                target_encoding_smoothing=cfg.general.target_encoding_smoothing,
+                target_encoding_fallback=cfg.general.target_encoding_fallback,
             )
 
             if result is None:

@@ -179,10 +179,12 @@ def test_train_best_model_ordinal_with_smote(tmp_path: Path) -> None:
 def test_model_trainer_invalid_encoding_strategy() -> None:
     """Невалидная encoding_strategy у ModelTrainer вызывает TrainingError."""
     with pytest.raises(Exception, match="Unknown encoding_strategy"):
-        ModelTrainer(algorithm="elasticnet", encoding_strategy="target")
+        ModelTrainer(algorithm="elasticnet", encoding_strategy="binary")
 
 
-@pytest.mark.parametrize("fmt", [SerializationFormat.pickle, SerializationFormat.joblib])
+@pytest.mark.parametrize(
+    "fmt", [SerializationFormat.pickle, SerializationFormat.joblib]
+)
 def test_model_trainer_ordinal_serialization_roundtrip(
     tmp_path: Path, fmt: SerializationFormat
 ) -> None:
@@ -197,7 +199,9 @@ def test_model_trainer_ordinal_serialization_roundtrip(
     )
     trainer.fit(df.drop(columns=["target"]), df["target"])
 
-    path = tmp_path / f"ordinal.{'joblib' if fmt == SerializationFormat.joblib else 'pkl'}"
+    path = (
+        tmp_path / f"ordinal.{'joblib' if fmt == SerializationFormat.joblib else 'pkl'}"
+    )
     trainer.save(path)
 
     loaded = ModelTrainer.load(path, fmt=fmt)

@@ -16,7 +16,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. Two encoding strategies are supported via the `general.categorical_encoding` config key: `one_hot` (default) and `ordinal`.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. Five encoding strategies are supported via the `general.categorical_encoding` config key: `one_hot` (default), `ordinal`, `target` (target encoding with smoothing), `frequency` (category frequencies) and `hashing` (deterministic feature hashing into a fixed number of columns). Target/frequency/hashing statistics are computed on the training part only (no data leakage), and unknown categories are handled with a documented fallback at prediction time. An automatic high-cardinality mode encodes columns whose cardinality exceeds `general.high_cardinality_threshold` with a dedicated strategy (`general.high_cardinality_encoding`) while the remaining columns keep the default strategy.
 * **Adaptive Preprocessing Presets**: The feature preprocessing strategy (missing-value imputation and scaling) is selected automatically from the regression algorithm class — scale-sensitive models get `StandardScaler` + mean imputation, trees and ensembles are trained without scaling, GLMs with skewed distributions use median imputation + `RobustScaler`. Each algorithm's class is fixed in a declarative mapping table, and the user can explicitly override the preset per algorithm via config (see [API Reference](API_REFERENCE.md)).
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, BorderlineSMOTE, and Random oversampling with noise injection.
 * **Nested Validation Support**: Ability to perform complex nested cross-validation to ensure model generalizability.
@@ -83,8 +83,14 @@ The example can be run from [example.py](example.py).
         "general": {
             "comparison_metric": "r2",
             # Стратегия кодирования категориальных признаков:
-            # 'one_hot' (по умолчанию) или 'ordinal'.
+            # 'one_hot' (по умолчанию), 'ordinal', 'target', 'frequency'
+            # или 'hashing'.
             "categorical_encoding": "one_hot",
+            # Автоматический режим для колонок высокой кардинальности:
+            # колонки с числом уникальных значений > 100 кодируются
+            # high_cardinality_encoding, остальные — categorical_encoding.
+            "high_cardinality_threshold": 100,
+            "high_cardinality_encoding": "target",
             "phases": [
                 {"n_trials": 100, "action": "all_algorithms"},
                 {"n_trials": 200, "action": "refine_winner"}

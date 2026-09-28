@@ -26,6 +26,12 @@ The `general` section may include the following attributes:
 * `phase_timeout` — (optional) global timeout for the entire HPO phase in seconds (minimum 1.0). If `null`, defaults to 3600.
 * `task_timeout` — (optional) per-task timeout in seconds (minimum 1.0). If `null`, uses `phase_timeout`.
 * `pruning` — (optional) early-stopping (pruning) settings for Optuna trials. Disabled by default.
+* `categorical_encoding` — (optional) categorical encoding strategy: `"one_hot"` (default), `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. See [Categorical encoding](#categorical-encoding).
+* `high_cardinality_threshold` — (optional, `>= 0`) cardinality threshold for the automatic high-cardinality mode. Must be set together with `high_cardinality_encoding`.
+* `high_cardinality_encoding` — (optional) encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`.
+* `hashing_n_components` — (optional, `>= 1`, default `16`) number of binary columns per categorical column when `"hashing"` encoding is used.
+* `target_encoding_smoothing` — (optional, `>= 0`, default `20.0`) smoothing parameter `m` of target encoding.
+* `target_encoding_fallback` — (optional, default `null`) fallback value of target encoding for categories unseen in training; `null` means the global target mean.
 
 ### Early stopping (`pruning`)
 
@@ -311,9 +317,14 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `categorical_features` | `list[str]` or `None` | `None` | Categorical column names. |
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
-| `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy (`"one_hot"` or `"ordinal"`). |
+| `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy: `"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. |
 | `additional_metrics` | `Iterable[str]` or `None` | `None` | Additional (informational) metrics computed for the trained model on the same dataset as the main metric. Any iterable of strings is accepted (list, tuple, set, generator); names are normalized to lowercase. Stored in `additional_scores` after `fit()`. |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial or full overrides are supported; takes priority over the automatic class-based selection. |
+| `high_cardinality_threshold` | `int` or `None` | `None` | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding`; the rest use `encoding_strategy`. Must be set together with `high_cardinality_encoding`. `None` disables the mode. |
+| `high_cardinality_encoding` | `str` or `None` | `None` | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
+| `hashing_n_components` | `int` | `16` | Number of binary columns per categorical column when `"hashing"` encoding is used (`>= 1`). Controls output dimensionality regardless of column cardinality. |
+| `target_encoding_smoothing` | `float` | `20.0` | Smoothing parameter `m` of target encoding (`>= 0`). With `m=0` the raw per-category mean is used; larger values pull rare categories toward the global mean. |
+| `target_encoding_fallback` | `float` or `None` | `None` | Fallback value for categories unseen in training under target encoding. `None` means the global target mean. |
 
 **Key attributes:**
 
@@ -333,10 +344,24 @@ Orchestrator class for training, validation, and serialization of regression mod
 
 **Categorical encoding**
 
-Categorical columns are encoded by a single shared preprocessor used both during HPO and final training. Two strategies are available via the `general.categorical_encoding` config key (or the `encoding` argument of `tuner.optimize`):
+Categorical columns are encoded by a single shared preprocessor used both during HPO and final training. Five strategies are available via the `general.categorical_encoding` config key (or the `encoding` argument of `tuner.optimize`):
 
 * `one_hot` (default) — each category becomes a binary column via `OneHotEncoder`. Unknown categories on prediction are ignored.
 * `ordinal` — each categorical column becomes a single numeric column via `OrdinalEncoder` (categories ordered alphabetically). Unknown categories map to `-1`, so prediction never fails. Does not expand the number of columns but imposes an artificial ordering on categories.
+* `target` — target encoding (`TargetEncodingTransformer`): each category is replaced by the smoothed mean of the target for that category, `(n_cat * mean_cat + m * global_mean) / (n_cat + m)`, where `m = general.target_encoding_smoothing`. All statistics are computed on the training part only (inside `fit`), so no information from validation/test data leaks into the encoding — including cross-validation, where the preprocessor is refitted on every fold. Categories absent from the training data map to `general.target_encoding_fallback` (default: the global target mean). One output column per input column.
+* `frequency` — frequency encoding (`FrequencyEncodingTransformer`): each category is replaced by its relative frequency in the training data. Deterministic; unknown categories map to `0.0`. One output column per input column.
+* `hashing` — feature hashing (`HashingEncodingTransformer`): each category is deterministically hashed (blake2b, salt derived from the random seed) into `general.hashing_n_components` binary columns per input column. The output dimensionality is fixed and independent of column cardinality — unlike one-hot, high-cardinality columns do not cause feature explosion. Unknown categories are hashed the same way, so prediction never fails. Hash collisions (different categories landing in the same column) are a documented limitation.
+
+**High-cardinality mode**
+
+When `general.high_cardinality_threshold` and `general.high_cardinality_encoding` are set together, columns whose number of unique values strictly exceeds the threshold are encoded with `high_cardinality_encoding`, while the remaining categorical columns keep `categorical_encoding`. The split is computed at fit time from the training data only (via `SplitCategoricalEncoder`), so the decision never depends on validation/test observations. A threshold of `0` marks every non-empty column as high-cardinality; a threshold larger than every column's cardinality effectively disables the mode.
+
+**Edge cases**
+
+* Columns with a single unique category or fully missing columns are handled without failures for all strategies (missing values are imputed with the most frequent category before encoding).
+* NaNs in categorical columns are converted to strings and treated as ordinary categories.
+* Configurations without the new parameters and models saved before the introduction of these strategies keep their previous behavior (backward compatibility).
+* `target`/`frequency`/`hashing` encode columns before oversampling (the preprocessor step precedes the sampler step in the pipeline), so SMOTE/ADASYN always receive already-encoded numeric features.
 
 ---
 

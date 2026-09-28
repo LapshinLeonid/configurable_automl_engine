@@ -61,13 +61,14 @@ def test_build_preprocessor_onehot_for_categorical():
     assert "cat" in names
     assert "num" in names
 
-    # Проверяем, что категориальный трансформер содержит OneHotEncoder
+    # Категориальный трансформер использует SplitCategoricalEncoder с
+    # default-энкодером OneHotEncoder (high-cardinality режим отключён).
     cat_transformer = dict(
         (name, transformer) for name, transformer, _ in preprocessor.transformers
     )["cat"]
-    encoder_names = [step[0] for step in cat_transformer.steps]
-    assert "onehot" in encoder_names
-    assert isinstance(cat_transformer.named_steps["onehot"], OneHotEncoder)
+    encoder = cat_transformer.named_steps["encoder"]
+    assert isinstance(encoder.default_encoder_, OneHotEncoder)
+    assert encoder.hc_encoder_ is None
 
 
 def test_build_preprocessor_end_to_end_encoding():
@@ -186,10 +187,10 @@ def test_build_preprocessor_ordinal_uses_ordinal_encoder():
     cat_transformer = dict(
         (name, transformer) for name, transformer, _ in preprocessor.transformers
     )["cat"]
-    encoder_names = [step[0] for step in cat_transformer.steps]
-    assert "ordinal" in encoder_names
-    assert "onehot" not in encoder_names
-    assert isinstance(cat_transformer.named_steps["ordinal"], OrdinalEncoder)
+    encoder = cat_transformer.named_steps["encoder"]
+    assert isinstance(encoder.default_encoder_, OrdinalEncoder)
+    assert not isinstance(encoder.default_encoder_, OneHotEncoder)
+    assert encoder.hc_encoder_ is None
 
 
 def test_build_preprocessor_default_is_onehot():
@@ -204,7 +205,9 @@ def test_build_preprocessor_default_is_onehot():
         cat_transformer = dict(
             (name, transformer) for name, transformer, _ in preprocessor.transformers
         )["cat"]
-        assert isinstance(cat_transformer.named_steps["onehot"], OneHotEncoder)
+        assert isinstance(
+            cat_transformer.named_steps["encoder"].default_encoder_, OneHotEncoder
+        )
 
 
 def test_build_preprocessor_ordinal_end_to_end_shape():
@@ -274,7 +277,7 @@ def test_build_preprocessor_invalid_encoding_raises():
             ["cat"],
             categorical_features=["cat"],
             numerical_features=[],
-            encoding="target",
+            encoding="binary",
         )
 
 
