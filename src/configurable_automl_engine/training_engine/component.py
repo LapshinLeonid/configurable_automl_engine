@@ -55,9 +55,11 @@ _LOG = logging.getLogger("training_engine")
 
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
     """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
+    # model_fields через экземпляр тоже работает, но deprecated
+    # (PydanticDeprecatedSince211, удаление в V3.0) — используем класс
     return {
         name: algo_cfg
-        for name in algorithms_cfg.model_fields
+        for name in type(algorithms_cfg).model_fields
         if (algo_cfg := getattr(algorithms_cfg, name)) is not None
     }
 

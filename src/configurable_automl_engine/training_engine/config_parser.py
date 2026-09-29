@@ -742,10 +742,9 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> Config:
-
-        # Iterate safely over the fields defined in the model class
-        # Using __fields__ or model_fields to get the structure safely
-        for name in getattr(self.algorithms, "__fields__", {}):
+        # model_fields через экземпляр тоже работает, но deprecated
+        # (PydanticDeprecatedSince211, удаление в V3.0) — используем класс
+        for name in type(self.algorithms).model_fields:
             # Get the attribute value (could be None if not provided in data)
             algo_cfg = getattr(self.algorithms, name)
 
@@ -774,16 +773,16 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _check_hyperparameter_compatibility(self) -> Config:
         errors = []
-        for name in getattr(self.algorithms, "__fields__", {}):
+        for name in type(self.algorithms).model_fields:
             algo_cfg = getattr(self.algorithms, name)
             if algo_cfg is None or not algo_cfg.enable:
                 continue
             unknown = algo_cfg.get_unknown_hyperparameters(name)
             if unknown:
-                sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
+                allowed = sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
                 errors.append(
                     f"Algorithm '{name}': unknown hyperparameters {unknown}. "
-                    "Allowed parameters: {allowed}"
+                    f"Allowed parameters: {allowed}"
                 )
         if errors:
             raise ValueError("\n".join(errors))

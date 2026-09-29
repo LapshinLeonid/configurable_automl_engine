@@ -628,6 +628,108 @@ def test_hyperparameter_compatibility_error(monkeypatch):
         Config.model_validate(cfg_data)
 
 
+def test_hyperparameter_compatibility_error_lists_allowed(monkeypatch):
+    """Сообщение об ошибке содержит реальный список допустимых гиперпараметров.
+
+    Регрессионный тест: ранее в текст подставлялся литеральный ``{allowed}``
+    (результат ``sorted(...)`` отбрасывался), что делало сообщение бесполезным.
+    """
+    from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+    algo_name = AVAILABLE_ALGORITHMS[0]
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {algo_name: {"lr", "alpha"}},
+    )
+
+    cfg_data = BASE | {
+        "algorithms": {algo_name: {"enable": True, "hyperparameters": {"bad": [1, 10]}}}
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        Config.model_validate(cfg_data)
+
+    msg = str(exc_info.value)
+    assert "unknown hyperparameters ['bad']" in msg
+    assert "Allowed parameters: ['alpha', 'lr']" in msg
+    assert "{allowed}" not in msg
+
+
+def test_hyperparameter_compatibility_valid_hyperparameters_pass(monkeypatch):
+    """Совместимые гиперпараметры не приводят к ошибке валидации."""
+    from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+    algo_name = AVAILABLE_ALGORITHMS[0]
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {algo_name: {"lr"}},
+    )
+
+    cfg_data = BASE | {
+        "algorithms": {
+            algo_name: {"enable": True, "hyperparameters": {"lr": [0.0, 1.0]}}
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, algo_name).enable is True
+
+
+def test_hyperparameter_compatibility_skips_disabled(monkeypatch):
+    """Выключенные алгоритмы пропускаются проверкой совместимости.
+
+    algo_b присутствует в подменённом реестре и содержит недопустимый
+    гиперпараметр: тест проходит только благодаря guard'у ``enable=False``.
+    """
+    from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+    algo_a, algo_b = AVAILABLE_ALGORITHMS[0], AVAILABLE_ALGORITHMS[1]
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {algo_a: {"lr"}, algo_b: {"alpha"}},
+    )
+
+    cfg_data = BASE | {
+        "algorithms": {
+            algo_a: {"enable": True},
+            algo_b: {"enable": False, "hyperparameters": {"bad": [1, 10]}},
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)  # не должно падать
+    assert getattr(cfg.algorithms, algo_a).enable is True
+    assert getattr(cfg.algorithms, algo_b).enable is False
+
+
+def test_hyperparameter_compatibility_aggregates_errors(monkeypatch):
+    """Ошибки для нескольких алгоритмов собираются в одно исключение."""
+    from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+
+    algo_a, algo_b = AVAILABLE_ALGORITHMS[0], AVAILABLE_ALGORITHMS[1]
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
+        {algo_a: {"lr"}, algo_b: {"alpha"}},
+    )
+
+    cfg_data = BASE | {
+        "algorithms": {
+            algo_a: {"enable": True, "hyperparameters": {"bad": [1, 10]}},
+            algo_b: {"enable": True, "hyperparameters": {"wrong": [0, 1]}},
+        }
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        Config.model_validate(cfg_data)
+
+    msg = str(exc_info.value)
+    assert f"Algorithm '{algo_a}': unknown hyperparameters ['bad']" in msg
+    assert f"Algorithm '{algo_b}': unknown hyperparameters ['wrong']" in msg
+
+
 # ─────────────────── Tests for PruningCfg (early stopping) ───────────────────
 def test_pruning_disabled_by_default():
     """Ранняя остановка выключена по умолчанию: конфиг без блока работает как раньше."""

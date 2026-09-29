@@ -79,3 +79,12 @@
         "concurrent_log_handler.*",
     ]
     ignore_missing_imports = true
+
+    [tool.pytest.ini_options]
+    filterwarnings = [
+        # Поля модели через __fields__ / model_fields на экземпляре deprecated:
+        # __fields__ — PydanticDeprecatedSince20, instance-model_fields —
+        # PydanticDeprecatedSince211
+        "error::pydantic.warnings.PydanticDeprecatedSince20",
+        "error::pydantic.warnings.PydanticDeprecatedSince211",
+    ]
