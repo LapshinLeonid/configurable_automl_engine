@@ -28,6 +28,7 @@ import pandas as pd
 import pytest
 from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
 from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.model_selection import KFold
 
 from configurable_automl_engine import tuner
 from configurable_automl_engine.tuner import (
@@ -593,6 +594,436 @@ def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
 
     X, y = make_regression(
         n_samples=120, n_features=5, noise=0.1, random_state=42
+    )
+    df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
+    df["target"] = y
+
+    result = train_best_model(config=config, df=df, target="target")
+
+    assert result["algorithm"] == "ridge"
+    assert isinstance(result["score"], float)
+    assert result["params"]
+    assert _Path(result["model_path"]).exists()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# auto + pruning: синхронизация числа фолдов (issue #6)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_auto_kfold_pruning_passes_resolved_k():
+    """auto→kfold (k=10) + pruning: в _evaluate_with_intermediate_reports
+    передаётся вычисленное k, а не исходный n_folds.
+
+    Красный тест на старом коде: до фикса ветка ранней остановки получала
+    n_folds=5 (дефолт) вместо auto_decision['k']=10, и iter_splits откатывался
+    на дефолтное число фолдов (рассинхронизация с cross_val_score(cv=cv_obj)).
+    """
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((400, 5)))
+    y = pd.Series(rng.random(400))
+
+    captured = {}
+
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
+        # auto резолвится в kfold c k=10 (решение вернул make_cv).
+        return (
+            "k_fold",
+            KFold(n_splits=10, shuffle=True, random_state=random_state),
+            {"method": "kfold", "k": 10, "average_test_size": 40.0},
+        )
+
+    def fake_evaluate(
+        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+    ):
+        captured["method"] = method
+        captured["n_folds"] = n_folds
+        return 0.9
+
+    with (
+        patch.object(tuner, "make_cv", fake_make_cv),
+        patch.object(tuner, "get_effective_train_size", lambda *a, **k: 360),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate),
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert captured["method"] == "k_fold"
+    assert captured["n_folds"] == 10
+
+
+def test_optimize_auto_kfold_pruning_integration_seven_reports():
+    """Интеграция: N=150/P=5 → auto резолвится в k=7; pruning-ветка выполняет
+    ровно 7 фолдов и публикует 7 промежуточных шагов (AC-1).
+
+    На старом коде здесь было бы 5 шагов (дефолтный n_folds), т.е. оценка
+    расходилась бы с non-pruning веткой cross_val_score(cv=KFold(7)).
+    """
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((150, 5)))
+    y = pd.Series(rng.random(150))
+
+    # Эвристика для этих данных обязана выбрать k-fold c k=7.
+    from configurable_automl_engine.common.validation_utils import (
+        choose_validation_method,
+    )
+
+    decision = choose_validation_method(150, 5)
+    assert decision == {"method": "kfold", "k": 7, "average_test_size": 21.4}
+
+    report_steps: list[int] = []
+
+    def fake_report(self, value, step):
+        report_steps.append(step)
+
+    with (
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner.optuna.trial.Trial, "report", fake_report),
+    ):
+        _model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 5,
+            },
+        )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    # Ровно k=7 промежуточных отчётов (шаги 1..7) — по одному на фолд.
+    assert report_steps == list(range(1, 8))
+
+
+def test_optimize_auto_pruning_parity_with_cross_val():
+    """Parity: auto→kfold использует одно и то же число фолдов (k) и с pruning,
+    и без него — оценки не расходятся между ветками."""
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((150, 5)))  # auto -> k=7
+    y = pd.Series(rng.random(150))
+
+    cross_val_folds: list[int] = []
+    iter_splits_calls: list[tuple[str | None, int | None]] = []
+    real_iter_splits = tuner.iter_splits
+
+    def spy_cross_val(est, Xt, yt, cv=None, scoring=None, n_jobs=1):
+        cross_val_folds.append(cv.get_n_splits())
+        return [0.5] * cv.get_n_splits()
+
+    def spy_iter_splits(*args, **kwargs):
+        iter_splits_calls.append((kwargs.get("method"), kwargs.get("n_folds")))
+        yield from real_iter_splits(*args, **kwargs)
+
+    with (
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner.model_selection, "cross_val_score", spy_cross_val),
+        patch.object(tuner, "iter_splits", spy_iter_splits),
+    ):
+        # Без pruning: оценка через cross_val_score(cv=cv_obj из make_cv).
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+        )
+        # С pruning: оценка через iter_splits(method='k_fold', n_folds=k).
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 5,
+            },
+        )
+
+    assert cross_val_folds == [7]
+    assert iter_splits_calls == [("k_fold", 7)]
+
+
+def test_optimize_auto_no_features_fallback_clamps_n_folds():
+    """Негативный сценарий: auto без P (fallback, decision=None) с n_folds=1.
+
+    make_cv клампит k = max(2, n_folds) через resolve_auto_no_features_fallback;
+    pruning-ветка обязана повторить тот же клампинг, иначе KFold(n_splits=1)
+    внутри iter_splits упал бы (латентный крах).
+    """
+    # Ноль признаков — P недоступен, включается fallback-ветка make_cv.
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((400, 0)))
+    y = pd.Series(rng.random(400))
+
+    captured = {}
+
+    def fake_evaluate(
+        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+    ):
+        captured["method"] = method
+        captured["n_folds"] = n_folds
+        return 0.9
+
+    with (
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate),
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=1,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    # Fallback: method='k_fold' (N достаточно), число фолдов клампится до 2.
+    assert captured["method"] == "k_fold"
+    assert captured["n_folds"] == 2
+
+
+def test_optimize_auto_kfold_low_confidence_k2():
+    """Граничный сценарий: auto→kfold с k=2 (low confidence) — k передаётся
+    как есть (клампинг max(2, k) не изменяет значение)."""
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((31, 16)))  # auto -> kfold k=2
+    y = pd.Series(rng.random(31))
+
+    captured = {}
+
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
+        return (
+            "k_fold",
+            KFold(n_splits=2, shuffle=True, random_state=random_state),
+            {"method": "kfold", "k": 2, "average_test_size": 15.5},
+        )
+
+    def fake_evaluate(
+        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+    ):
+        captured["n_folds"] = n_folds
+        return 0.9
+
+    with (
+        patch.object(tuner, "make_cv", fake_make_cv),
+        patch.object(tuner, "get_effective_train_size", lambda *a, **k: 16),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate),
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert captured["n_folds"] == 2
+
+
+def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
+    """Явный k_fold без регрессии: pruning-ветка получает исходный n_folds
+    без изменений (эффективный клампинг не применяется)."""
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((120, 5)))
+    y = pd.Series(rng.random(120))
+
+    captured = {}
+
+    def fake_evaluate(
+        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+    ):
+        captured["method"] = method
+        captured["n_folds"] = n_folds
+        return 0.9
+
+    with (
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate),
+    ):
+        optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert captured["method"] == "k_fold"
+    assert captured["n_folds"] == 3
+
+
+def test_optimize_auto_loo_with_pruning_works():
+    """auto→LOO (N=10/P=3) + pruning: стратегия с естественными шагами работает;
+    число фолдов для k-fold не используется."""
+    X = pd.DataFrame(np.random.rand(10, 3))
+    y = pd.Series(np.random.rand(10))
+
+    report_steps: list[int] = []
+
+    def fake_report(self, value, step):
+        report_steps.append(step)
+
+    with (
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+        patch.object(tuner.optuna.trial.Trial, "report", fake_report),
+    ):
+        _model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 5,
+            },
+        )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    # LOO: по одному шагу на объект (10 объектов → 10 отчётов).
+    assert report_steps == list(range(1, 11))
+
+
+def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
+    """auto→train_test_split: естественных шагов нет — прайнер не применяется,
+    все триалы выполняются полностью (поведение задокументировано)."""
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(rng.random((1000, 5)))  # auto -> train_test_split
+    y = pd.Series(rng.random(1000))
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(tuner, "_build_scorer", _quality_scorer_factory),
+    ):
+        _model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="auto",
+            n_folds=5,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert score == pytest.approx(0.9)
+    assert params is not None
+    assert "has no intermediate steps — pruning will not be applied" in caplog.text
+
+
+def test_train_best_model_auto_pruning_e2e(tmp_path: Path) -> None:
+    """Сквозной сценарий: validation_strategy='auto' + pruning.enable=true
+    проходит через train_best_model; число фолдов берётся из auto-решения
+    (N=150/P=5 → k=7), а не из дефолтного n_folds=5."""
+    from pathlib import Path as _Path
+
+    from sklearn.datasets import make_regression
+
+    from configurable_automl_engine.training_engine import train_best_model
+
+    model_path = tmp_path / "models" / "best_model.pkl"
+    config = {
+        "general": {
+            "comparison_metric": "r2",
+            "path_to_model": str(model_path),
+            "validation_strategy": "auto",
+            "n_folds": 2,
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"}
+            ],
+            "pruning": {
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        },
+        "algorithms": {"ridge": {"enable": True}},
+    }
+
+    X, y = make_regression(
+        n_samples=150, n_features=5, noise=0.1, random_state=42
     )
     df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
     df["target"] = y

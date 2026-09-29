@@ -370,7 +370,9 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     def fake_make_cv(n_samples, *, val_method, n_folds, random_state, test_size, n_features=None):
         captured_cv["n_features"] = n_features
         captured_cv["n_samples"] = n_samples
-        return "k_fold", None, None
+        # k_fold всегда сопровождается готовым cv_obj (инвариант make_cv),
+        # из которого tuner берёт число фолдов для pruning-ветки.
+        return "k_fold", KFold(n_splits=2, shuffle=True, random_state=random_state), None
 
     def fake_get_effective_train_size(
         n_total, strategy, n_folds=5, test_size=0.2, n_features=None

@@ -593,6 +593,23 @@ def optimize(
     # и не мог разойтись между n_samples_eff и фактическим разбиением.
     resolved_via_auto = norm_val_method(val_method) == "auto"
 
+    # Единое число фолдов для ветки ранней остановки (k_fold). Стратегия 'auto'
+    # могла разрешиться в kfold с числом фолдов k, отличным от исходного n_folds:
+    # в этом случае pruning-ветка обязана использовать вычисленное k, иначе
+    # iter_splits внутри _evaluate_with_intermediate_reports откатится на
+    # дефолтный n_folds и оценка разойдётся с cross_val_score(cv=cv_obj).
+    if val_method_eff == "k_fold":
+        # Число фолдов берём из готового cv_obj (для k_fold он гарантированно
+        # не None — make_cv всегда создаёт KFold в этой ветке). Одна формула
+        # покрывает auto→kfold (k из решения), fallback 'auto' без P (клампинг
+        # до max(2, k)) и явный k_fold, поэтому значение всегда синхронизировано
+        # с cross_val_score(cv=cv_obj) без дублирования эвристик клампинга.
+        assert cv_obj is not None
+        effective_n_folds = int(cv_obj.get_n_splits())
+    else:
+        # Явный loo / train_test_split: число фолдов не используется.
+        effective_n_folds = n_folds
+
     # -------------------- 2. estimator + поисковое пространство ---- #
     base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
 
@@ -769,7 +786,7 @@ def optimize(
                     X,
                     y,
                     method=val_method_eff,
-                    n_folds=n_folds,
+                    n_folds=effective_n_folds,
                     test_size=train_test_split_test_size,
                     random_state=random_state,
                     scorer=scorer,
