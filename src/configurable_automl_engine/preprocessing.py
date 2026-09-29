@@ -399,19 +399,14 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         self.target_encoding_smoothing = target_encoding_smoothing
         self.target_encoding_fallback = target_encoding_fallback
         self.random_state = random_state
-        # Внутренние энкодеры создаются на этапе конструирования, чтобы их
-        # структура была интроспектируема без данных; обучение выполняется в
-        # fit(). При клонировании (clone) создаётся новый экземпляр со свежими
-        # внутренними энкодерами, поэтому состояние между фолдами не накапливается.
-        self.default_encoder_ = self._make_encoder(encoding)
-        self.hc_encoder_: BaseEstimator | None = (
-            self._make_encoder(high_cardinality_encoding)
-            if high_cardinality_encoding is not None
-            else None
-        )
 
     def _make_encoder(self, strategy: EncodingStrategy) -> BaseEstimator:
-        """Создать энкодер по имени стратегии."""
+        """Создать энкодер по имени стратегии.
+
+        Ветки покрывают все допустимые значения ``EncodingStrategy``;
+        валидация стратегии выполняется в :meth:`fit`, поэтому эта ветка
+        недостижима для корректных вызовов.
+        """
         if strategy == "one_hot":
             return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
         if strategy == "ordinal":
@@ -432,37 +427,19 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
                 n_components=self.hashing_n_components,
                 random_state=self.random_state,
             )
-        raise ValueError(
-            f"Unknown encoding strategy: {strategy!r}. "
-            f"Expected one of {_VALID_ENCODING_STRATEGIES}."
+        raise AssertionError(
+            f"Unreachable: strategy {strategy!r} must be validated in fit(), "
+            f"expected one of {_VALID_ENCODING_STRATEGIES}."
         )
-
-    def set_params(self, **params: Any) -> SplitCategoricalEncoder:
-        """Обновить параметры и пересоздать внутренние энкодеры.
-
-        Внутренние энкодеры создаются в :meth:`__init__`, поэтому изменение
-        параметров через ``set_params`` (механизм sklearn: GridSearchCV,
-        кастомные пайплайны) требует их пересоздания — иначе поведение
-        расходится с новыми значениями параметров (например,
-        ``set_params(encoding='target')`` оставило бы ``OneHotEncoder``).
-
-        Args:
-            **params: Параметры конструктора (см. :meth:`__init__`).
-
-        Returns:
-            Обновлённый энкодер.
-        """
-        super().set_params(**params)
-        self.default_encoder_ = self._make_encoder(self.encoding)
-        self.hc_encoder_ = (
-            self._make_encoder(self.high_cardinality_encoding)
-            if self.high_cardinality_encoding is not None
-            else None
-        )
-        return self
 
     def fit(self, X: Any, y: Any = None) -> SplitCategoricalEncoder:
         """Разделить колонки по кардинальности и обучить энкодеры.
+
+        Внутренние энкодеры (``default_encoder_``/``hc_encoder_``) создаются
+        только здесь, в :meth:`fit`: атрибуты с завершающим подчёркиванием
+        хранят обученное состояние, поэтому конструктор лишь сохраняет
+        параметры, а ``clone()``/``set_params()``/``get_params()`` работают
+        через базовую реализацию ``BaseEstimator`` без переопределений.
 
         Args:
             X: Матрица категориальных признаков (строки после импутации).
@@ -470,7 +447,34 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
 
         Returns:
             Обученный энкодер.
+
+        Raises:
+            ValueError: Если задана неизвестная стратегия кодирования либо
+                high-cardinality режим настроен некорректно.
         """
+        if self.encoding not in _VALID_ENCODING_STRATEGIES:
+            raise ValueError(
+                f"Unknown encoding strategy: {self.encoding!r}. "
+                f"Expected one of {_VALID_ENCODING_STRATEGIES}."
+            )
+        if (
+            self.high_cardinality_encoding is not None
+            and self.high_cardinality_encoding not in _VALID_ENCODING_STRATEGIES
+        ):
+            raise ValueError(
+                f"Unknown high_cardinality_encoding: "
+                f"{self.high_cardinality_encoding!r}. "
+                f"Expected one of {_VALID_ENCODING_STRATEGIES}."
+            )
+        if (
+            self.high_cardinality_threshold is not None
+            and self.high_cardinality_encoding is None
+        ):
+            raise ValueError(
+                "high_cardinality_encoding must be set when "
+                "high_cardinality_threshold is provided."
+            )
+
         X_arr = _as_2d(X)
         n_columns = X_arr.shape[1]
         cardinalities = [len(np.unique(X_arr[:, col])) for col in range(n_columns)]
@@ -490,15 +494,22 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         self.default_columns_ = default_columns
         self.hc_columns_ = hc_columns
 
+        # Внутренние энкодеры создаются и обучаются здесь, в fit(): атрибуты с
+        # завершающим подчёркиванием появляются только после обучения.
+        self.default_encoder_ = self._make_encoder(self.encoding)
+        self.hc_encoder_: BaseEstimator | None = (
+            self._make_encoder(self.high_cardinality_encoding)
+            if self.high_cardinality_encoding is not None
+            else None
+        )
+
         if default_columns:
             self.default_encoder_.fit(X_arr[:, default_columns], y)
 
         if hc_columns:
-            if self.high_cardinality_encoding is None or self.hc_encoder_ is None:
-                raise ValueError(
-                    "high_cardinality_encoding must be set when "
-                    "high_cardinality_threshold is provided."
-                )
+            # Инвариант гарантирован валидацией выше: при заданном пороге
+            # HC-стратегия обязана быть указана, значит hc_encoder_ создан.
+            assert self.hc_encoder_ is not None
             self.hc_encoder_.fit(X_arr[:, hc_columns], y)
 
         logger.debug(

@@ -14,7 +14,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 from configurable_automl_engine.preprocessing import (
@@ -603,20 +605,54 @@ def test_feature_names_wrong_length_rejected():
         enc.get_feature_names_out(["col_a", "col_b"])
 
 
-def test_split_encoder_invalid_strategy_at_init():
-    """Неизвестная стратегия отклоняется при конструировании энкодера."""
+def test_split_encoder_invalid_strategy_raises_at_fit():
+    """Неизвестная стратегия отклоняется в fit().
+
+    sklearn-конвенция: конструктор только сохраняет параметры (никаких
+    внутренних энкодеров до обучения), поэтому валидация стратегии
+    выполняется при обучении, а не в __init__.
+    """
+    enc = SplitCategoricalEncoder(encoding="binary")
+    assert not hasattr(enc, "default_encoder_")
     with pytest.raises(ValueError, match="Unknown encoding strategy"):
-        SplitCategoricalEncoder(encoding="binary")
+        enc.fit(np.array([["a"], ["b"]], dtype=object))
+
+
+def test_split_encoder_invalid_hc_strategy_raises_at_fit():
+    """Невалидная HC-стратегия отклоняется в fit()."""
+    enc = SplitCategoricalEncoder(
+        encoding="one_hot",
+        high_cardinality_threshold=1,
+        high_cardinality_encoding="binary",
+    )
+    with pytest.raises(ValueError, match="Unknown high_cardinality_encoding"):
+        enc.fit(np.array([["a"], ["b"]], dtype=object))
 
 
 def test_split_encoder_missing_hc_encoding_raises():
-    """HC-колонки без заданной HC-стратегии -> ValueError в fit."""
+    """Порог задан без HC-стратегии -> ValueError в fit.
+
+    Валидация выполняется до разделения колонок по кардинальности,
+    поэтому ошибка возникает независимо от фактических данных.
+    """
     enc = SplitCategoricalEncoder(
         encoding="one_hot",
         high_cardinality_threshold=1,
         high_cardinality_encoding=None,
     )
     X = np.array([["a"], ["b"], ["c"], ["a"]], dtype=object)  # кардинальность 3 > 1
+    with pytest.raises(ValueError, match="high_cardinality_encoding"):
+        enc.fit(X)
+
+
+def test_split_encoder_missing_hc_encoding_raises_without_hc_columns():
+    """Порог без HC-стратегии отклоняется и при отсутствии HC-колонок в данных."""
+    enc = SplitCategoricalEncoder(
+        encoding="one_hot",
+        high_cardinality_threshold=10,
+        high_cardinality_encoding=None,
+    )
+    X = np.array([["a"], ["b"], ["c"], ["a"]], dtype=object)  # кардинальность 3 <= 10
     with pytest.raises(ValueError, match="high_cardinality_encoding"):
         enc.fit(X)
 
@@ -630,27 +666,89 @@ def test_split_encoder_empty_parts_transform():
     assert out.shape == (3, 0)
 
 
-def test_split_encoder_set_params_recreates_internal_encoders():
-    """set_params пересоздаёт внутренние энкодеры (нет рассинхрона стратегий)."""
+def test_split_encoder_set_params_changes_behavior():
+    """set_params меняет поведение кодирования после повторного fit.
+
+    Внутренние энкодеры создаются в fit(), поэтому базовая реализация
+    set_params() корректно применяется при следующем обучении — кастомное
+    переопределение больше не требуется.
+    """
+    X = np.array([["a"], ["b"], ["a"]], dtype=object)
+    y = np.array([1.0, 2.0, 1.0])
+
     enc = SplitCategoricalEncoder(encoding="one_hot")
+    # one_hot: 2 бинарные колонки на 2 категории
+    out = enc.fit_transform(X, y)
+    assert out.shape == (3, 2)
+
+    # set_params(encoding='target') + повторный fit: 1 колонка на входную.
     enc.set_params(encoding="target")
+    out = enc.fit_transform(X, y)
+    assert out.shape == (3, 1)
     assert isinstance(enc.default_encoder_, TargetEncodingTransformer)
     assert not isinstance(enc.default_encoder_, OneHotEncoder)
 
-    # Поведение следует за новой стратегией: target даёт 1 колонку на входную.
-    X = np.array([["a"], ["b"], ["a"]], dtype=object)
-    out = enc.fit_transform(X, np.array([1.0, 2.0, 1.0]))
-    assert out.shape == (3, 1)
-
-    # HC-режим также пересоздаётся при изменении параметров.
+    # HC-режим: кардинальность 2 > порога 1 => колонка идёт в hashing.
     enc.set_params(
         encoding="one_hot",
         high_cardinality_threshold=1,
         high_cardinality_encoding="hashing",
         hashing_n_components=4,
     )
-    assert isinstance(enc.default_encoder_, OneHotEncoder)
+    out = enc.fit_transform(X, y)
+    assert out.shape == (3, 4)  # только hashing: n_components=4
     assert isinstance(enc.hc_encoder_, HashingEncodingTransformer)
 
-    enc.set_params(high_cardinality_encoding=None)
+    # Отключение HC-режима возвращает поведение one_hot.
+    enc.set_params(high_cardinality_threshold=None, high_cardinality_encoding=None)
+    out = enc.fit_transform(X, y)
+    assert out.shape == (3, 2)
     assert enc.hc_encoder_ is None
+
+
+def test_split_encoder_get_params_only_constructor_args():
+    """get_params() возвращает только параметры конструктора (никакого состояния)."""
+    enc = SplitCategoricalEncoder(encoding="ordinal", high_cardinality_threshold=5)
+    params = enc.get_params()
+    assert params["encoding"] == "ordinal"
+    assert params["high_cardinality_threshold"] == 5
+    assert params["high_cardinality_encoding"] is None
+    # До fit() обученных атрибутов нет (sklearn-конвенция).
+    assert not hasattr(enc, "default_encoder_")
+    assert not hasattr(enc, "hc_encoder_")
+    assert not hasattr(enc, "default_columns_")
+
+
+def test_split_encoder_clone_is_independent():
+    """clone() создаёт независимый экземпляр без обученного состояния."""
+    enc = SplitCategoricalEncoder(
+        encoding="one_hot",
+        high_cardinality_threshold=2,
+        high_cardinality_encoding="hashing",
+        hashing_n_components=8,
+        random_state=7,
+    )
+    cloned = clone(enc)
+    assert cloned is not enc
+    assert cloned.get_params() == enc.get_params()
+    # Клон не несёт обученное состояние оригинала.
+    assert not hasattr(cloned, "default_encoder_")
+    assert not hasattr(cloned, "hc_encoder_")
+
+    X = np.array([["a"], ["b"], ["a"]], dtype=object)
+    y = np.array([1.0, 2.0, 1.0])
+    cloned.fit(X, y)
+    assert hasattr(cloned, "default_encoder_")
+    # Обучение клона не влияет на оригинал.
+    assert not hasattr(enc, "default_encoder_")
+
+
+def test_split_encoder_pipeline_set_params_propagates():
+    """set_params с pipeline-префиксом корректно меняет поведение энкодера."""
+    X = np.array([["a"], ["b"], ["a"]], dtype=object)
+    y = np.array([1.0, 2.0, 1.0])
+    pipe = Pipeline(steps=[("encoder", SplitCategoricalEncoder(encoding="one_hot"))])
+
+    pipe.set_params(encoder__encoding="target")
+    out = pipe.fit_transform(X, y)
+    assert out.shape == (3, 1)  # target: 1 колонка на входную

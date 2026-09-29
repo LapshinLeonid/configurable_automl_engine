@@ -63,10 +63,15 @@ def test_build_preprocessor_onehot_for_categorical():
 
     # Категориальный трансформер использует SplitCategoricalEncoder с
     # default-энкодером OneHotEncoder (high-cardinality режим отключён).
-    cat_transformer = dict(
-        (name, transformer) for name, transformer, _ in preprocessor.transformers
-    )["cat"]
-    encoder = cat_transformer.named_steps["encoder"]
+    # Внутренние энкодеры создаются в fit() (sklearn-конвенция: атрибуты
+    # с завершающим подчёркиванием появляются только после обучения),
+    # поэтому сначала обучаем препроцессор на данных.
+    df = pd.DataFrame(
+        {"cat": ["red", "green", "red", "blue"], "num": [1.0, 2.0, 3.0, 4.0]}
+    )
+    preprocessor.fit(df)
+
+    encoder = preprocessor.named_transformers_["cat"].named_steps["encoder"]
     assert isinstance(encoder.default_encoder_, OneHotEncoder)
     assert encoder.hc_encoder_ is None
 
@@ -184,10 +189,11 @@ def test_build_preprocessor_ordinal_uses_ordinal_encoder():
     assert "cat" in names
     assert "num" in names
 
-    cat_transformer = dict(
-        (name, transformer) for name, transformer, _ in preprocessor.transformers
-    )["cat"]
-    encoder = cat_transformer.named_steps["encoder"]
+    # Внутренние энкодеры создаются в fit(), поэтому сначала обучаем.
+    df = pd.DataFrame({"cat": ["red", "green", "red"], "num": [1.0, 2.0, 3.0]})
+    preprocessor.fit(df)
+
+    encoder = preprocessor.named_transformers_["cat"].named_steps["encoder"]
     assert isinstance(encoder.default_encoder_, OrdinalEncoder)
     assert not isinstance(encoder.default_encoder_, OneHotEncoder)
     assert encoder.hc_encoder_ is None
@@ -195,6 +201,7 @@ def test_build_preprocessor_ordinal_uses_ordinal_encoder():
 
 def test_build_preprocessor_default_is_onehot():
     """По умолчанию (encoding не задан / 'one_hot') сохраняется OneHotEncoder."""
+    df = pd.DataFrame({"cat": ["red", "green", "red"], "num": [1.0, 2.0, 3.0]})
     for kwargs in ({}, {"encoding": "one_hot"}):
         preprocessor = build_preprocessor(
             ["cat", "num"],
@@ -202,11 +209,13 @@ def test_build_preprocessor_default_is_onehot():
             numerical_features=["num"],
             **kwargs,
         )
-        cat_transformer = dict(
-            (name, transformer) for name, transformer, _ in preprocessor.transformers
-        )["cat"]
+        # Внутренние энкодеры создаются в fit() (sklearn-конвенция).
+        preprocessor.fit(df)
         assert isinstance(
-            cat_transformer.named_steps["encoder"].default_encoder_, OneHotEncoder
+            preprocessor.named_transformers_["cat"].named_steps[
+                "encoder"
+            ].default_encoder_,
+            OneHotEncoder,
         )
 
 
