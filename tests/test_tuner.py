@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import optuna
 import pandas as pd
 import pytest
 import yaml
@@ -733,6 +734,92 @@ class TestTunerObjective:
             assert best_algo is None
             assert best_model is None
             assert best_score == -3.4028235e38
+
+    def test_pruned_trials_reset_fatal_counter(self, dummy_data, mock_space):
+        """
+        1 фатальная ошибка + триалы, отсечённые прунером, + 4 фатальные ошибки
+        → алгоритм НЕ дисквалифицируется (регрессия issue #22).
+
+        Проверяет, что optuna.TrialPruned из ранней остановки
+        (_evaluate_with_intermediate_reports) обрывает последовательность
+        фатальных сбоев и сбрасывает consecutive_fatal_failures: всего сбоев
+        набралось 5, но подряд — только 4.
+        """
+        X, y = dummy_data
+        with (
+            patch(
+                "configurable_automl_engine.tuner._evaluate_with_intermediate_reports"
+            ) as mock_eval,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+            # Триал 1 — фатальный сбой; триал 2 — штатно отсечён прунером;
+            # триалы 3–6 — фатальные сбои; триал 7 — успех.
+            mock_eval.side_effect = [
+                RuntimeError("fatal failure"),  # trial 1
+                optuna.TrialPruned(),  # trial 2 (early stopping)
+                RuntimeError("fatal failure"),  # trial 3
+                RuntimeError("fatal failure"),  # trial 4
+                RuntimeError("fatal failure"),  # trial 5
+                RuntimeError("fatal failure"),  # trial 6
+                0.85,  # trial 7
+            ]
+
+            _, _, best_score = optimize(
+                algo_name="rf",
+                X=X,
+                y=y,
+                n_trials=7,
+                space_overrides=mock_space,
+                pruning={
+                    "enable": True,
+                    "strategy": "median",
+                    "min_steps": 1,
+                    "n_startup_trials": 1,
+                },
+            )
+            assert best_score == 0.85
+
+    def test_valueerror_between_failures_resets_counter(self, dummy_data, mock_space):
+        """
+        1 фатальная ошибка + нефатальные ValueError + 4 фатальные ошибки
+        → алгоритм НЕ дисквалифицируется (регрессия issue #22).
+
+        Проверяет, что нефатальный ValueError обрывает последовательность
+        фатальных сбоев и сбрасывает consecutive_fatal_failures: всего сбоев
+        набралось 5, но подряд — только 4.
+        """
+        X, y = dummy_data
+        with (
+            patch(
+                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            ) as mock_cv,
+            patch("configurable_automl_engine.tuner.create_model"),
+            patch("configurable_automl_engine.tuner._build_scorer"),
+            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.tuner._validate_data"),
+            patch("configurable_automl_engine.tuner._get_estimator"),
+        ):
+            mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+            mock_cv.side_effect = [
+                RuntimeError("fatal failure"),  # trial 1
+                ValueError("non-fatal value error"),  # trial 2
+                ValueError("non-fatal value error"),  # trial 3
+                RuntimeError("fatal failure"),  # trial 4
+                RuntimeError("fatal failure"),  # trial 5
+                RuntimeError("fatal failure"),  # trial 6
+                RuntimeError("fatal failure"),  # trial 7
+                np.array([0.85]),  # trial 8
+            ]
+
+            _, _, best_score = optimize(
+                algo_name="rf", X=X, y=y, n_trials=8, space_overrides=mock_space
+            )
+            assert best_score == 0.85
 
 
 # ══════════════════════════════════════════════════════════════════════════════

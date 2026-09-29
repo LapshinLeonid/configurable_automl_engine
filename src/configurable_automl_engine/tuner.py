@@ -730,6 +730,11 @@ def optimize(
         current_estimator = _assemble_estimator(model)
 
         # -------------------------------------------
+        # Флаг «триал завершился фатальным сбоем». Счётчик consecutive_fatal_failures
+        # должен учитывать ТОЛЬКО подряд идущие фатальные ошибки: любой нефатальный
+        # исход триала (успех, отсечение прунером, нефатальный ValueError) обрывает
+        # последовательность и сбрасывает счётчик.
+        fatal_failure = False
 
         try:
             if val_method_eff == "train_test_split":
@@ -793,6 +798,7 @@ def optimize(
             raise optuna.TrialPruned()
         except (MemoryError, RuntimeError, InvalidDataError) as err:
             trial.set_user_attr("fail_reason", str(err))
+            fatal_failure = True
             consecutive_fatal_failures += 1
             if consecutive_fatal_failures >= MAX_FATAL_FAILURES:
                 raise InvalidAlgorithmError(
@@ -800,8 +806,16 @@ def optimize(
                     f"{consecutive_fatal_failures} consecutive fatal failures"
                 )
             raise optuna.TrialPruned()
+        finally:
+            # Любой нефатальный исход триала прерывает последовательность
+            # фатальных сбоев: успешный возврат _score, отсечение прунером
+            # (optuna.TrialPruned из _evaluate_with_intermediate_reports) или
+            # нефатальный ValueError. Без этого сброса счетчик накапливал бы
+            # ошибки, разделённые штатными триалами, и ложно дисквалифицировал
+            # алгоритм (см. issue про «ложную дисквалификацию»).
+            if not fatal_failure:
+                consecutive_fatal_failures = 0
 
-        consecutive_fatal_failures = 0
         return _score
 
     # -------------------- 4. запуск Optuna ------------------------- #
