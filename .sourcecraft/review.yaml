@@ -8,7 +8,7 @@ codereview:
         - "**"
       reviewers:
         usernames:
-          - "reviewer_ai"
+          - "code-reviewer_ai"
         assign: 1
         need_ships: 1
         ignore_self_ship: false
