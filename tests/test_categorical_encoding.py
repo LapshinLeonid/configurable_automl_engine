@@ -6,7 +6,10 @@
     * hashing encoding (фиксированная размерность, детерминизм, unknown);
     * автоматический high-cardinality режим (порог, threshold=0, крайние случаи);
     * валидацию параметров build_preprocessor;
-    * краевые случаи: одна категория, пустая колонка, NaN.
+    * краевые случаи: одна категория, пустая колонка, NaN;
+    * сохранение типов категорий в target encoding (issue #1): int/float/bool
+      standalone, int-fit/float-transform эквивалентность, консистентность с
+      frequency encoding.
 """
 
 from __future__ import annotations
@@ -188,6 +191,151 @@ def test_target_encoding_rare_category_smoothing():
     global_mean = float(np.mean(y))  # 100/101
     expected = (100.0 * 1 + global_mean * 20.0) / (1 + 20.0)
     assert out[0, 0] == pytest.approx(expected, rel=1e-6)
+
+
+# ─── Target encoding: сохранение типов категорий (issue #1) ───
+
+
+def test_target_encoding_int_categories_standalone():
+    """int-категории standalone кодируются своими средними, а не fallback'ом.
+
+    Регрессия issue #1: ранее ключи статистик приводились к строкам, и int-коды
+    в transform() не находили соответствий (всё тихо падало в fallback).
+    """
+    X = np.array([[1], [1], [2], [2], [2], [3]], dtype=np.int64)
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    out = enc.fit_transform(X, y)
+    assert out[:, 0].tolist() == pytest.approx(
+        [10.0, 10.0, 20.0, 20.0, 20.0, 30.0], rel=1e-6
+    )
+    # Ключи статистик сохраняют исходный числовой тип (не нормализуются к строкам)
+    assert not any(isinstance(k, str) for k in enc.statistics_[0].keys())
+    assert all(isinstance(k, (int, np.integer)) for k in enc.statistics_[0].keys())
+
+
+def test_target_encoding_float_categories_standalone():
+    """float-категории standalone кодируются своими средними, а не fallback'ом."""
+    X = np.array([[1.0], [1.0], [2.0], [2.0], [2.0], [3.0]])
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    out = enc.fit_transform(X, y)
+    assert out[:, 0].tolist() == pytest.approx(
+        [10.0, 10.0, 20.0, 20.0, 20.0, 30.0], rel=1e-6
+    )
+
+
+def test_target_encoding_bool_categories_standalone():
+    """bool-категории standalone кодируются средними по True/False."""
+    X = np.array([[True], [True], [False], [False], [False], [True]])
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    out = enc.fit_transform(X, y)
+    true_mean = float(np.mean(y[[0, 1, 5]]))  # (10+10+30)/3 = 16.67
+    false_mean = float(np.mean(y[[2, 3, 4]]))  # 20.0
+    assert out[:, 0].tolist() == pytest.approx(
+        [true_mean, true_mean, false_mean, false_mean, false_mean, true_mean],
+        rel=1e-6,
+    )
+
+
+def test_target_encoding_bool_int_mixing_documented_semantics():
+    """Смешивание bool и int 0/1 даёт задокументированное поведение (fallback).
+
+    pandas подбирает соответствия по dtype: ``bool`` — отдельный dtype, поэтому
+    bool-ключи статистик не находят int-значения (и наоборот), и все значения
+    уходят в fallback. Это фиксирует предупреждение из docstring класса: категории
+    одного признака должны сохранять один dtype в ``fit`` и ``transform``.
+    """
+    y = np.array([10.0, 10.0, 20.0, 20.0, 30.0])
+    X_bool = np.array([[True], [True], [False], [False], [True]])
+
+    enc = TargetEncodingTransformer(smoothing=0.0).fit(X_bool, y)
+    out = enc.transform(np.array([[1], [0]], dtype=np.int64))
+    assert out[:, 0].tolist() == pytest.approx([enc.fallback_, enc.fallback_])
+
+    enc_int = TargetEncodingTransformer(smoothing=0.0).fit(
+        np.array([[1], [1], [0], [0], [1]], dtype=np.int64), y
+    )
+    out_int = enc_int.transform(np.array([[True], [False]]))
+    assert out_int[:, 0].tolist() == pytest.approx(
+        [enc_int.fallback_, enc_int.fallback_]
+    )
+
+
+def test_target_encoding_int_fit_float_transform_equivalence():
+    """Кодирование, полученное на int-кодах, применимо к float-значениям.
+
+    pandas подбирает соответствия по dtype-совместимым ключам: int и float
+    взаимозаменяемы.
+    """
+    X = np.array([[1], [1], [2], [2], [2], [3]], dtype=np.int64)
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    enc.fit(X, y)
+    out = enc.transform(np.array([[1.0], [2.0], [3.0]]))
+    assert out[:, 0].tolist() == pytest.approx([10.0, 20.0, 30.0], rel=1e-6)
+
+
+def test_target_encoding_float_fit_int_transform_equivalence():
+    """Обратная совместимость: fit на float, transform на int-кодах."""
+    X = np.array([[1.0], [1.0], [2.0], [2.0], [2.0], [3.0]])
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    enc.fit(X, y)
+    out = enc.transform(np.array([[1], [2], [3]], dtype=np.int64))
+    assert out[:, 0].tolist() == pytest.approx([10.0, 20.0, 30.0], rel=1e-6)
+
+
+def test_target_encoding_key_types_match_frequency_encoding():
+    """Target- и Frequency-трансформеры одинаково сохраняют типы ключей.
+
+    Согласованность соседних классов (issue #1): оба хранят ключи статистик в
+    исходном типе категорий, поэтому int-колонка кодируется корректно в обоих.
+    """
+    X = np.array([[1], [1], [2], [2], [2], [3]], dtype=np.int64)
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    target = TargetEncodingTransformer(smoothing=0.0).fit(X, y)
+    freq = FrequencyEncodingTransformer().fit(X)
+    target_keys = set(target.statistics_[0].keys())
+    freq_keys = set(freq.frequencies_[0].keys())
+    assert target_keys == freq_keys == {1, 2, 3}
+    assert not any(isinstance(k, str) for k in target_keys | freq_keys)
+    # Оба корректно находят соответствия для int-кодов (не fallback)
+    assert target.transform(np.array([[3]], dtype=np.int64))[0, 0] == pytest.approx(30.0)
+    assert freq.transform(np.array([[3]], dtype=np.int64))[0, 0] == pytest.approx(1 / 6)
+
+
+def test_target_encoding_numeric_unknown_falls_back():
+    """Числовая категория, отсутствовавшая в обучении, -> fallback."""
+    X = np.array([[1], [1], [2], [2], [2], [3]], dtype=np.int64)
+    y = np.array([10.0, 10.0, 20.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    enc.fit(X, y)
+    out = enc.transform(np.array([[42], [1]], dtype=np.int64))
+    assert out[0, 0] == pytest.approx(float(np.mean(y)))  # неизвестная -> fallback
+    assert out[1, 0] == pytest.approx(10.0)  # известная кодируется как обычно
+
+
+def test_target_encoding_nan_dropped_in_fit_and_fallback_in_transform():
+    """NaN standalone: в fit группа NaN отбрасывается, в transform -> fallback."""
+    X = np.array([[1.0], [1.0], [np.nan], [2.0], [2.0]])
+    y = np.array([10.0, 10.0, 20.0, 20.0, 30.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    enc.fit(X, y)
+    assert set(enc.statistics_[0].keys()) == {1.0, 2.0}  # NaN-группа отброшена
+    out = enc.transform(np.array([[np.nan], [1.0]]))
+    assert out[0, 0] == pytest.approx(float(np.mean(y)))  # NaN -> fallback
+    assert out[1, 0] == pytest.approx(10.0)
+
+
+def test_target_encoding_single_int_category_standalone():
+    """Одна int-категория standalone: все значения = глобальное среднее."""
+    X = np.array([[7], [7], [7]], dtype=np.int64)
+    y = np.array([1.0, 2.0, 3.0])
+    enc = TargetEncodingTransformer(smoothing=0.0)
+    out = enc.fit_transform(X, y)
+    assert out[:, 0].tolist() == pytest.approx([2.0, 2.0, 2.0], rel=1e-6)
 
 
 # ─────────────────────── Frequency encoding ────────────────────────

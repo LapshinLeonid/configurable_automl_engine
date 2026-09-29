@@ -124,6 +124,19 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
             редкие категории приближаются к глобальному среднему.
         fallback: Значение для категорий, отсутствующих в обучающей выборке.
             ``None`` — использовать глобальное среднее целевой переменной.
+
+    Note:
+        Ключи статистик сохраняют исходные типы категорий (как и в
+        :class:`FrequencyEncodingTransformer`): standalone-вызовы с числовыми
+        категориями (``int``-коды, ``float``, ``bool``) корректно находят
+        соответствия в :meth:`transform`. Соответствие подбирается pandas по
+        совместимости dtype: ``int`` и ``float`` взаимозаменяемы, а ``bool`` —
+        отдельный dtype. Из-за стандартной Python-семантики равенства
+        (``True == 1``) при смешивании ``bool`` и ``int`` ``0/1`` возможны
+        неочевидные результаты, поэтому категории одного признака должны
+        сохранять один dtype в ``fit`` и ``transform``. При использовании через
+        :func:`build_preprocessor` категории заранее приводятся к строкам
+        (шаг ``to_string``), что исключает рассинхрон типов.
     """
 
     def __init__(self, smoothing: float = 20.0, fallback: float | None = None):
@@ -139,7 +152,9 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
                 невозможно.
 
         Returns:
-            Обученный трансформер.
+            Обученный трансформер. Статистики для каждой колонки хранятся в
+            ``statistics_`` как ``dict[Any, float]``: ключи повторяют исходные
+            значения категорий (типы не нормализуются к строкам).
 
         Raises:
             ValueError: Если ``y`` не передан либо содержит NaN.
@@ -163,7 +178,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         self.fallback_ = (
             self.global_mean_ if self.fallback is None else float(self.fallback)
         )
-        self.statistics_: list[dict[str, float]] = []
+        self.statistics_: list[dict[Any, float]] = []
         for col in range(X_arr.shape[1]):
             group = pd.DataFrame(
                 {"cat": pd.Series(X_arr[:, col]), "target": y_float}
@@ -173,7 +188,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
                 agg["mean"] * agg["count"] + self.global_mean_ * self.smoothing
             ) / (agg["count"] + self.smoothing)
             self.statistics_.append(
-                {str(cat): float(value) for cat, value in smoothed.items()}
+                {cat: float(value) for cat, value in smoothed.items()}
             )
         return self
 
@@ -185,7 +200,9 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
 
         Returns:
             Числовая матрица той же размерности (1 колонка на входную колонку).
-            Неизвестные категории отображаются в fallback-значение.
+            Неизвестные категории отображаются в fallback-значение. Соответствия
+            ищутся по dtype-совместимым ключам (см. docstring класса): числовые
+            категории в ``X`` должны иметь тот же dtype, что и в обучающей выборке.
         """
         check_is_fitted(self, attributes=["statistics_"])
         X_arr = _as_2d(X)
