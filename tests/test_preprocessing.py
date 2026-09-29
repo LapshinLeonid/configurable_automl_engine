@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +18,7 @@ from sklearn.preprocessing import (
 )
 
 from configurable_automl_engine.preprocessing import (
+    ColumnNameSelector,
     build_preprocessor,
     detect_feature_types,
 )
@@ -467,6 +470,184 @@ def test_glm_preset_end_to_end_robust():
     assert np.isfinite(out).all()
 
 
+# ─────────────────── Выбор колонок по имени (issue #2) ───────────────────────
+
+
+def _mixed_df() -> pd.DataFrame:
+    """DataFrame с категориальной и числовой колонками для тестов issue #2."""
+    return pd.DataFrame(
+        {
+            "cat": ["red", "green", "red", "blue"],
+            "num": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+
+
+def test_preprocessor_reordered_dataframe_transform_identical():
+    """Переупорядоченный DataFrame на transform даёт тот же результат (issue #2).
+
+    Регрессия: позиционные индексы в ColumnTransformer игнорируют имена колонок,
+    и энкодер применялся к числовым колонкам, а скалер — к категориальным.
+    """
+    df = _mixed_df()
+    preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
+    train_out = preprocessor.fit_transform(df)
+
+    reordered = df[["num", "cat"]]
+    out = preprocessor.transform(reordered)
+
+    assert out.shape == train_out.shape
+    assert np.allclose(out, train_out)
+
+
+def test_preprocessor_numpy_positional_fallback():
+    """numpy-вход в обучающем порядке обрабатывается позиционно (issue #2)."""
+    df = _mixed_df()
+    preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
+    train_out = preprocessor.fit_transform(df)
+
+    out = preprocessor.transform(df.to_numpy())
+
+    assert np.allclose(out, train_out)
+
+
+def test_preprocessor_missing_column_raises():
+    """Отсутствующая колонка на transform даёт явную ошибку (issue #2)."""
+    df = _mixed_df()
+    preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
+    preprocessor.fit(df)
+
+    with pytest.raises(ValueError):
+        preprocessor.transform(df[["num"]])  # колонки 'cat' нет
+
+
+def test_preprocessor_extra_columns_ignored():
+    """Лишние колонки на transform не влияют на результат (issue #2)."""
+    df = _mixed_df()
+    preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
+    train_out = preprocessor.fit_transform(df)
+
+    extra = df.copy()
+    extra["extra_col"] = 0.0
+    out = preprocessor.transform(extra)
+
+    assert np.allclose(out, train_out)
+
+
+def test_build_preprocessor_unknown_feature_name_raises():
+    """Имя колонки вне feature_names отклоняется на этапе сборки (issue #2).
+
+    Раньше отсутствующие имена молча пропускались; теперь это явная ошибка.
+    """
+    with pytest.raises(ValueError, match="Unknown feature name"):
+        build_preprocessor(
+            ["cat", "num"],
+            categorical_features=["cat", "missing_col"],
+            numerical_features=["num"],
+        )
+    with pytest.raises(ValueError, match="Unknown feature name"):
+        build_preprocessor(
+            ["cat", "num"],
+            categorical_features=["cat"],
+            numerical_features=["num", "missing_col"],
+        )
+
+
+def test_column_name_selector_picklable():
+    """ColumnNameSelector переживает pickle (важно для trainer.save())."""
+    selector = ColumnNameSelector(["cat", "num"], ["cat"])
+    restored = pickle.loads(pickle.dumps(selector))
+
+    assert restored.feature_names == ["cat", "num"]
+    assert restored.column_names == ["cat"]
+    df = pd.DataFrame({"num": [1.0], "cat": ["x"]})
+    assert restored(df) == [1]
+
+
+def test_column_name_selector_dataframe_matching():
+    """Для DataFrame селектор сопоставляет по имени, а не по позиции."""
+    selector = ColumnNameSelector(["cat", "num"], ["cat", "num"])
+    df = pd.DataFrame({"num": [1.0], "cat": ["x"]})  # порядок переставлен
+    assert selector(df) == [1, 0]
+
+
+def test_column_name_selector_numpy_fallback():
+    """Для numpy-входа селектор использует обучающий порядок (feature_names)."""
+    selector = ColumnNameSelector(["cat", "num"], ["num", "cat"])
+    assert selector(np.zeros((1, 2))) == [1, 0]
+
+
+def test_column_name_selector_missing_columns_raise():
+    """Отсутствующие колонки дают явную ошибку для обоих типов входов."""
+    selector = ColumnNameSelector(["a", "b"], ["a", "z"])
+    with pytest.raises(ValueError, match="not found"):
+        selector(pd.DataFrame({"a": [1]}))
+    with pytest.raises(ValueError, match="training order"):
+        selector(np.zeros((1, 2)))
+
+
+def test_column_name_selector_duplicated_columns_raise():
+    """Дублирующиеся колонки в DataFrame дают явную ошибку (неоднозначность)."""
+    selector = ColumnNameSelector(["a", "b"], ["a"])
+    df = pd.DataFrame([[1, 2]], columns=["a", "a"])
+    with pytest.raises(ValueError, match="more than once"):
+        selector(df)
+
+
+def test_preprocessor_hc_and_target_reorder_identical():
+    """High-cardinality + target кодирование устойчиво к переупорядочиванию."""
+    rng = np.random.default_rng(0)
+    n = 60
+    df = pd.DataFrame(
+        {
+            "low": rng.choice(["a", "b", "c"], size=n),
+            "high": [f"x{i % 40}" for i in range(n)],
+            "num": rng.normal(size=n),
+        }
+    )
+    y = pd.Series(
+        df["low"].map({"a": 1.0, "b": 2.0, "c": 3.0}).to_numpy()
+        + rng.normal(0, 0.1, n)
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["low", "high"],
+        numerical_features=["num"],
+        encoding="one_hot",
+        high_cardinality_threshold=10,
+        high_cardinality_encoding="target",
+    )
+    train_out = preprocessor.fit_transform(df, y)
+
+    out = preprocessor.transform(df[["num", "high", "low"]])
+    assert np.allclose(out, train_out)
+
+
+@pytest.mark.parametrize(
+    "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
+)
+def test_preprocessor_reorder_all_encoding_strategies(enc):
+    """Все стратегии кодирования корректны при переупорядочивании колонок."""
+    df = pd.DataFrame(
+        {"cat": ["a", "b", "a", "c"], "num": [1.0, 2.0, 3.0, 4.0]}
+    )
+    y = pd.Series([1.0, 2.0, 1.0, 3.0])
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["cat"],
+        numerical_features=["num"],
+        encoding=enc,
+    )
+    train_out = preprocessor.fit_transform(df, y)
+
+    out = preprocessor.transform(df[["num", "cat"]])
+    # hashing-кодирование возвращает sparse (csr_matrix, issue #4):
+    # np.allclose не поддерживает sparse-операнды, поэтому сравниваем плотно.
+    expected = train_out.toarray() if sparse.issparse(train_out) else train_out
+    actual = out.toarray() if sparse.issparse(out) else out
+    assert np.allclose(actual, expected), f"encoding={enc}"
+
+
 # ────────────────── Sparse-выход hashing (issue #4) ──────────────────
 
 
@@ -524,3 +705,4 @@ def test_build_preprocessor_force_dense_passthrough():
     out = preprocessor.fit_transform(pd.DataFrame({"some_random_column": [1, 2, 3]}))
     assert isinstance(out, np.ndarray)
     assert out.shape == (3, 1)
+

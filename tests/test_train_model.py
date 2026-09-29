@@ -1275,3 +1275,159 @@ def test_trainer_preset_survives_save_load(tmp_path):
     restored = ModelTrainer.load(pkl)
     assert restored.preprocessing_preset == trainer.preprocessing_preset
     assert restored.preprocessing_preset.scaling == "standard"
+
+
+# ─────────────────── Безопасность порядка колонок в predict (issue #2) ──────
+
+
+def _mixed_trainer() -> tuple[ModelTrainer, pd.DataFrame]:
+    """Обученный тренер на данных со смешанными типами колонок (cat + num)."""
+    X = pd.DataFrame(
+        {
+            "cat": ["a", "b", "a", "b", "a", "b", "a", "b"],
+            "num1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "num2": [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        }
+    )
+    y = X["num1"] * 2.0 + X["num2"] - 1.0
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+    return trainer, X
+
+
+def test_predict_reordered_columns_identical():
+    """Предсказание на переупорядоченном DataFrame совпадает с исходным (issue #2)."""
+    trainer, X = _mixed_trainer()
+    baseline = trainer.predict(X)
+
+    reordered = trainer.predict(X[["num2", "cat", "num1"]])
+    assert np.allclose(baseline, reordered)
+
+
+def test_predict_missing_column_raises():
+    """Отсутствующая колонка в predict даёт явную ошибку (issue #2)."""
+    trainer, X = _mixed_trainer()
+    with pytest.raises(TrainingError, match="Missing columns in prediction data"):
+        trainer.predict(X.drop(columns=["cat"]))
+
+
+def test_predict_extra_column_ignored():
+    """Лишние колонки в predict отбрасываются без влияния на результат."""
+    trainer, X = _mixed_trainer()
+    X_extra = X.copy()
+    X_extra["extra_col"] = 0.0
+
+    assert np.allclose(trainer.predict(X_extra), trainer.predict(X))
+
+
+def test_predict_duplicated_columns_raise():
+    """Дублирующиеся имена колонок в predict отклоняются (неоднозначность)."""
+    trainer, X = _mixed_trainer()
+    X_dup = pd.concat([X["cat"], X["num1"], X["num1"], X["num2"]], axis=1)
+    X_dup.columns = ["cat", "num1", "num1", "num2"]
+
+    with pytest.raises(TrainingError, match="Duplicated columns"):
+        trainer.predict(X_dup)
+
+
+def test_predict_numpy_after_dataframe_fit():
+    """numpy-вход в обучающем порядке после DataFrame-fit работает позиционно."""
+    trainer, X = _mixed_trainer()
+    baseline = trainer.predict(X)
+
+    arr = X[["cat", "num1", "num2"]].to_numpy()
+    assert np.allclose(trainer.predict(arr), baseline)
+
+
+def test_predict_shared_df_reordered_columns():
+    """SharedDataFrame с переупорядоченными колонками даёт корректный результат.
+
+    Регрессия issue #2: раньше predict() брал ``shared_array`` (numpy) напрямую,
+    и переупорядоченные колонки обрабатывались позиционно — модель получала
+    «переставленные» признаки. Теперь SharedDataFrame восстанавливается в
+    DataFrame и выравнивается к обучающему порядку колонок.
+    """
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(
+        {
+            "a": rng.normal(10, 3, 50),
+            "b": rng.normal(5, 2, 50),
+            "c": rng.normal(20, 5, 50),
+        }
+    )
+    y = 2.0 * X["a"] + 1.5 * X["b"] - 0.7 * X["c"] + rng.normal(0, 0.1, 50)
+    trainer = ModelTrainer(algorithm="ridge").fit(X, y)
+    baseline = trainer.predict(X)
+
+    sdf = SharedDataFrame(X[["c", "a", "b"]])
+    try:
+        reordered = trainer.predict(sdf)
+    finally:
+        sdf.close()
+        sdf.unlink()
+    assert np.allclose(reordered, baseline)
+
+
+def test_save_load_predict_reordered_columns(tmp_path):
+    """Сериализованная модель корректно предсказывает на переупорядоченном DF."""
+    trainer, X = _mixed_trainer()
+    baseline = trainer.predict(X)
+
+    pkl = tmp_path / "model.pkl"
+    trainer.save(pkl)
+    restored = ModelTrainer.load(pkl)
+
+    reordered = restored.predict(X[["num2", "cat", "num1"]])
+    assert np.allclose(reordered, baseline)
+
+
+def test_predict_legacy_positional_preprocessor_fixed_by_alignment():
+    """Выравнивание колонок чинит legacy-препроцессор с позиционными индексами.
+
+    Имитируем старый артефакт: препроцессор, собранный до issue #2
+    (ColumnTransformer со списками int-индексов вместо ColumnNameSelector).
+    predict() выравнивает колонки DataFrame к обучающему порядку, поэтому
+    позиционный срез снова попадает в те же колонки, что и при обучении.
+    """
+    from sklearn.compose import ColumnTransformer as SkColumnTransformer
+    from sklearn.impute import SimpleImputer as SkSimpleImputer
+    from sklearn.pipeline import Pipeline as SkPipeline
+    from sklearn.preprocessing import OneHotEncoder as SkOneHotEncoder
+    from sklearn.preprocessing import StandardScaler as SkStandardScaler
+
+    X = pd.DataFrame(
+        {
+            "cat": ["a", "b", "a", "b", "a", "b"],
+            "num": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    y = X["num"] * 2.0
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+    baseline = trainer.predict(X)
+
+    # Собираем препроцессор «в старом стиле» — позиционные индексы [0] и [1].
+    legacy_preprocessor = SkColumnTransformer(
+        transformers=[
+            (
+                "cat",
+                SkOneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                [0],
+            ),
+            (
+                "num",
+                SkPipeline(
+                    [
+                        ("imputer", SkSimpleImputer(strategy="mean")),
+                        ("scaler", SkStandardScaler()),
+                    ]
+                ),
+                [1],
+            ),
+        ],
+        remainder="drop",
+    )
+    legacy_preprocessor.fit(X)
+    assert trainer.pipeline is not None
+    trainer.pipeline.steps[0] = ("preprocessor", legacy_preprocessor)
+
+    reordered = trainer.predict(X[["num", "cat"]])
+    assert np.allclose(reordered, baseline)

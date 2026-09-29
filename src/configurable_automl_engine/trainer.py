@@ -370,6 +370,7 @@ class ModelTrainer:
         self.pipeline: Pipeline | None = None
         self.base_model: Any = None
         self.val_score: float | None = None
+        self.feature_names: list[str] | None = None
         self._last_train_y: pd.Series | None = None
         self._last_val_y: pd.Series | None = None
 
@@ -763,9 +764,85 @@ class ModelTrainer:
 
             return self
 
+    def _align_predict_columns(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Выровнять колонки DataFrame к обучающему порядку (issue #2).
+
+        Защитный слой для ``predict``: валидирует наличие всех
+        ``self.feature_names``, отбрасывает лишние колонки и возвращает
+        DataFrame с колонками в обучающем порядке. Это чинит и устаревшие
+        сериализованные модели, у которых препроцессор использует позиционные
+        индексы: после выравнивания позиционный срез снова указывает на те же
+        колонки, что и при обучении.
+
+        Args:
+            X: Входной DataFrame с предсказываемыми признаками.
+
+        Returns:
+            DataFrame с колонками в обучающем порядке (``self.feature_names``).
+
+        Raises:
+            TrainingError: Если часть ``self.feature_names`` отсутствует в ``X``
+                либо встречается в ``X`` более одного раза.
+        """
+        feature_names = self.feature_names
+        if not feature_names:
+            return X
+        missing = [col for col in feature_names if col not in X.columns]
+        if missing:
+            raise TrainingError(
+                f"Missing columns in prediction data: {missing}. "
+                f"Expected columns: {feature_names}."
+            )
+        duplicated = [col for col in feature_names if list(X.columns).count(col) > 1]
+        if duplicated:
+            raise TrainingError(
+                f"Duplicated columns in prediction data: {duplicated}. "
+                "Column selection by name is ambiguous."
+            )
+        return X[feature_names]
+
+    def _align_predict_shared_dataframe(self, X: SharedDataFrame) -> Any:
+        """Подготовить SharedDataFrame к предсказанию (issue #2).
+
+        Если контейнер хранит имена колонок, данные восстанавливаются в
+        DataFrame и выравниваются к обучающему порядку (те же гарантии, что
+        для обычного ``pd.DataFrame``); иначе используется позиционный
+        numpy-fallback по обучающему порядку.
+
+        Args:
+            X: Контейнер данных в разделяемой памяти.
+
+        Returns:
+            ``pd.DataFrame`` с колонками в обучающем порядке либо
+            ``np.ndarray`` из разделяемой памяти, если имена колонок
+            недоступны.
+
+        Raises:
+            TrainingError: Если часть ``self.feature_names`` отсутствует в
+                колонках контейнера.
+        """
+        if X.columns is None or not self.feature_names:
+            return X.shared_array
+        missing = [col for col in self.feature_names if col not in X.columns]
+        if missing:
+            raise TrainingError(
+                f"Missing columns in prediction data: {missing}. "
+                f"Expected columns: {self.feature_names}."
+            )
+        return X.get_view(self.feature_names)
+
     def predict(self, X: Any) -> np.ndarray:
         """Получить предсказания модели для новых данных,
-        используя обученный пайплайн."""
+        используя обученный пайплайн.
+
+        Для ``pd.DataFrame`` выполняется защитная валидация и выравнивание
+        порядка колонок к обучающему (``self.feature_names``): недостающие
+        колонки дают явную ошибку, лишние отбрасываются, дублирующиеся имена
+        отклоняются (issue #2). ``SharedDataFrame`` восстанавливается в
+        DataFrame и выравнивается так же, когда доступны имена колонок.
+        Для ``np.ndarray`` и прочих входов без имён используется позиционный
+        порядок колонок, зафиксированный при обучении.
+        """
 
         with self.lock:
             # 1) Проверка: обучена ли модель
@@ -775,11 +852,15 @@ class ModelTrainer:
                     " Perform fit() first."
                 )
             try:
-                # Избегаем конвертации, если X уже массив или DataFrame
-                if isinstance(X, (pd.DataFrame, pd.Series, np.ndarray)):
-                    X_input = X
+                # Выравниваем колонки для входов с именами; для остальных
+                # избегаем конвертации, если X уже массив или DataFrame
+                X_input: Any
+                if isinstance(X, pd.DataFrame):
+                    X_input = self._align_predict_columns(X)
                 elif isinstance(X, SharedDataFrame):
-                    X_input = X.shared_array
+                    X_input = self._align_predict_shared_dataframe(X)
+                elif isinstance(X, (pd.Series, np.ndarray)):
+                    X_input = X
                 else:
                     X_input = np.asarray(X)
 

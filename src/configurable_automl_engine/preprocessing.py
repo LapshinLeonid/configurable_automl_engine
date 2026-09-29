@@ -625,6 +625,109 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         return np.asarray(names, dtype=object)
 
 
+class ColumnNameSelector:
+    """Сериализуемый селектор колонок по именам для ``ColumnTransformer``.
+
+    Заменяет списки позиционных индексов при сборке препроцессора (issue #2):
+    ``ColumnTransformer`` трактует список ``int`` как срез по позициям и
+    игнорирует имена колонок ``pd.DataFrame``, из-за чего предсказание на
+    переупорядоченном DataFrame молча применяет энкодер к числовым колонкам,
+    а скалер — к категориальным.
+
+    Селектор — picklable-объект (обычный класс с простыми атрибутами, не
+    замыкание), поэтому он корректно переживает ``trainer.save()``/pickle.
+    На каждом вызове (sklearn резолвит callable-селекторы на этапе
+    ``fit_transform``/``transform``) имена сопоставляются с позициями по
+    фактическому входу ``X``:
+
+    * ``pd.DataFrame`` — сопоставление по имени колонки; порядок колонок не
+      важен, отсутствующие или дублирующиеся колонки дают явную ошибку;
+    * любые другие входы (``np.ndarray``, ``pd.Series`` и т.п.) — позиционный
+      fallback по обучающему порядку (``feature_names``).
+
+    Args:
+        feature_names: Полный список имён признаков в обучающем порядке.
+        column_names: Имена колонок, которые должен выбирать этот селектор.
+
+    Raises:
+        ValueError: Если для ``pd.DataFrame`` часть ``column_names``
+            отсутствует либо встречается более одного раза, или имя не
+            разрешается в обучающем порядке для не-DataFrame входов.
+    """
+
+    def __init__(self, feature_names: list[str], column_names: list[str]) -> None:
+        self.feature_names = list(feature_names)
+        self.column_names = list(column_names)
+
+    def __call__(self, X: Any) -> list[int]:
+        if isinstance(X, pd.DataFrame):
+            return _resolve_column_positions_by_name(X, self.column_names)
+        return _resolve_column_positions_by_order(self.feature_names, self.column_names)
+
+
+def _resolve_column_positions_by_name(
+    X: pd.DataFrame, column_names: list[str]
+) -> list[int]:
+    """Сопоставить имена колонок с позициями в фактическом DataFrame.
+
+    Args:
+        X: Входной DataFrame, против которого выполняется сопоставление.
+        column_names: Имена колонок для выбора.
+
+    Returns:
+        Список позиций выбранных колонок в порядке ``column_names``.
+
+    Raises:
+        ValueError: Если часть имён отсутствует в ``X`` либо встречается
+            в ``X`` более одного раза (неоднозначный выбор по имени).
+    """
+    missing = [name for name in column_names if name not in X.columns]
+    if missing:
+        raise ValueError(
+            f"Column(s) {missing} not found in the input DataFrame. "
+            f"Available columns: {list(X.columns)}."
+        )
+    duplicated = [name for name in column_names if list(X.columns).count(name) > 1]
+    if duplicated:
+        raise ValueError(
+            f"Column(s) {duplicated} appear more than once in the input "
+            "DataFrame; ambiguous selection by name is not supported."
+        )
+    # После проверки уникальности index() даёт точную позицию колонки
+    # (pandas-stubs: get_loc может вернуть slice/маску для дубликатов).
+    return [list(X.columns).index(name) for name in column_names]
+
+
+def _resolve_column_positions_by_order(
+    feature_names: list[str], column_names: list[str]
+) -> list[int]:
+    """Сопоставить имена колонок с позициями по обучающему порядку.
+
+    Используется как fallback для входов без имён колонок (``np.ndarray``):
+    позиция имени определяется его положением в ``feature_names``.
+
+    Args:
+        feature_names: Полный список имён признаков в обучающем порядке.
+        column_names: Имена колонок для выбора.
+
+    Returns:
+        Список позиций выбранных колонок в порядке ``column_names``.
+
+    Raises:
+        ValueError: Если имя не встречается в ``feature_names`` ровно один раз.
+    """
+    positions: list[int] = []
+    for name in column_names:
+        occurrences = feature_names.count(name)
+        if occurrences != 1:
+            raise ValueError(
+                f"Cannot resolve column {name!r} by training order: it occurs "
+                f"{occurrences} time(s) in feature_names {feature_names}."
+            )
+        positions.append(feature_names.index(name))
+    return positions
+
+
 def detect_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
     """Автоматически классифицировать колонки на числовые и категориальные.
 
@@ -747,6 +850,14 @@ def build_preprocessor(
         корректно (без падения ``SimpleImputer`` на dtype bool).
 
     Note:
+        Колонки выбираются по имени через :class:`ColumnNameSelector` (issue #2):
+        для ``pd.DataFrame`` порядок колонок на ``fit``/``transform`` не важен —
+        энкодер всегда применяется к категориальным колонкам, а скалер — к
+        числовым; отсутствующие/дублирующиеся колонки дают явную ошибку. Для
+        входов без имён (``np.ndarray``) используется позиционный fallback по
+        обучающему порядку ``feature_names``.
+
+    Note:
         При ``encoding='ordinal'`` категории кодируются целочисленными кодами,
         которые НЕ масштабируются (в отличие от числовых колонок, проходящих
         через скалер). Для линейных моделей (например, ``elasticnet``)
@@ -754,8 +865,9 @@ def build_preprocessor(
         доминировать над числовыми признаками.
 
     Raises:
-        ValueError: Если имя колонки отсутствует в ``feature_names`` либо
-            передано невалидное значение ``encoding``, ``imputation_strategy``,
+        ValueError: Если имя колонки из ``categorical_features``/
+            ``numerical_features`` отсутствует в ``feature_names`` либо передано
+            невалидное значение ``encoding``, ``imputation_strategy``,
             ``scaling``, нарушена согласованность high-cardinality параметров
             или некорректны ``hashing_n_components``/``target_encoding_smoothing``.
     """
@@ -801,15 +913,25 @@ def build_preprocessor(
             "Expected one of ('standard', 'robust', 'none')."
         )
 
-    # Сопоставляем имена колонок с порядковыми номерами
-    cat_indices = [
-        feature_names.index(col) for col in categorical_features if col in feature_names
-    ]
-    num_indices = [
-        feature_names.index(col) for col in numerical_features if col in feature_names
-    ]
+    # Валидируем, что все запрошенные имена колонок присутствуют в обучающем
+    # наборе (feature_names). Раньше отсутствующие имена молча пропускались;
+    # теперь это явная ошибка — селектор по именам не сможет их разрешить.
+    specified_features = list(categorical_features) + list(numerical_features)
+    missing_features = [col for col in specified_features if col not in feature_names]
+    if missing_features:
+        raise ValueError(
+            f"Unknown feature name(s): {missing_features}. "
+            f"Expected columns: {feature_names}."
+        )
 
-    if not cat_indices and not num_indices:
+    # Селекторы по именам (issue #2): для pd.DataFrame колонки выбираются по
+    # имени на каждом fit/transform (порядок колонок не важен), для входов без
+    # имён (np.ndarray) используется позиционный fallback по обучающему порядку.
+    # Селекторы — picklable-классы, поэтому trainer.save()/pickle работают.
+    cat_selector = ColumnNameSelector(feature_names, list(categorical_features))
+    num_selector = ColumnNameSelector(feature_names, list(numerical_features))
+
+    if not categorical_features and not numerical_features:
         logger.warning(
             "No features matched for preprocessing. Defaulting to passthrough."
         )
@@ -855,10 +977,10 @@ def build_preprocessor(
     )
 
     transformers = []
-    if cat_indices:
-        transformers.append(("cat", cat_transformer, cat_indices))
-    if num_indices:
-        transformers.append(("num", num_transformer, num_indices))
+    if categorical_features:
+        transformers.append(("cat", cat_transformer, cat_selector))
+    if numerical_features:
+        transformers.append(("num", num_transformer, num_selector))
 
     return ColumnTransformer(
         transformers=(transformers if transformers else [("pass", "passthrough", [0])]),
