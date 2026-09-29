@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -397,7 +398,13 @@ def test_hashing_encoding_dimension():
     enc = HashingEncodingTransformer(n_components=8)
     out = enc.fit_transform(X)
     assert out.shape == (3, 8)
-    assert np.isfinite(out).all()
+    # Выход разреженный (csr), как у sklearn FeatureHasher, — плотная матрица
+    # float64 размерности (n_rows, n_cols * n_components) вызвала бы OOM.
+    assert sparse.issparse(out)
+    assert out.format == "csr"
+    # nnz = n_rows * n_cols, значения бинарные (1.0)
+    assert out.nnz == 3
+    assert set(np.unique(out.data)).issubset({1.0})
 
 
 def test_hashing_encoding_multiple_columns():
@@ -406,6 +413,8 @@ def test_hashing_encoding_multiple_columns():
     enc = HashingEncodingTransformer(n_components=4)
     out = enc.fit_transform(X)
     assert out.shape == (2, 8)
+    assert sparse.issparse(out)
+    assert out.nnz == 4
 
 
 def test_hashing_encoding_deterministic():
@@ -415,7 +424,7 @@ def test_hashing_encoding_deterministic():
     enc2 = HashingEncodingTransformer(n_components=32, random_state=42)
     out1 = enc1.fit_transform(X)
     out2 = enc2.fit_transform(X)
-    np.testing.assert_array_equal(out1, out2)
+    assert (out1 != out2).nnz == 0
 
 
 def test_hashing_encoding_seed_changes_output():
@@ -423,7 +432,7 @@ def test_hashing_encoding_seed_changes_output():
     X = np.array([[f"cat_{i}"] for i in range(64)], dtype=object)
     out1 = HashingEncodingTransformer(n_components=64, random_state=1).fit_transform(X)
     out2 = HashingEncodingTransformer(n_components=64, random_state=2).fit_transform(X)
-    assert not np.array_equal(out1, out2)
+    assert (out1 != out2).nnz > 0
 
 
 def test_hashing_encoding_unknown_category():
@@ -433,10 +442,10 @@ def test_hashing_encoding_unknown_category():
     enc.fit(X_train)
     out = enc.transform(np.array([["never_seen"], ["a"]], dtype=object))
     assert out.shape == (2, 16)
-    assert np.isfinite(out).all()
+    assert sparse.issparse(out)
     # Повторный transform неизвестной категории даёт тот же результат
     out2 = enc.transform(np.array([["never_seen"]], dtype=object))
-    np.testing.assert_array_equal(out[0], out2[0])
+    assert (out[0] != out2[0]).nnz == 0
 
 
 def test_hashing_encoding_binary_indicators():
@@ -444,7 +453,10 @@ def test_hashing_encoding_binary_indicators():
     X = np.array([["a"], ["b"]], dtype=object)
     enc = HashingEncodingTransformer(n_components=16)
     out = enc.fit_transform(X)
-    assert out.sum(axis=1).tolist() == [1.0, 1.0]
+    assert np.asarray(out.sum(axis=1)).ravel().tolist() == [1.0, 1.0]
+    # Бинарность значений: любой элемент матрицы — 0 или 1
+    dense = out.toarray()
+    assert set(np.unique(dense)).issubset({0.0, 1.0})
 
 
 # ───────────────────── High-cardinality режим ──────────────────────
@@ -652,7 +664,12 @@ def test_build_preprocessor_invalid_threshold():
     "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
 )
 def test_build_preprocessor_all_strategies_end_to_end(enc):
-    """Все стратегии дают конечную числовую матрицу через препроцессор."""
+    """Все стратегии дают конечную числовую матрицу через препроцессор.
+
+    Для hashing выход разреженный (csr) — ColumnTransformer со стандартным
+    sparse_threshold отдаёт csr при любой sparse-части; остальные стратегии
+    дают плотный ndarray.
+    """
     df, y = _target_df()
     pre = build_preprocessor(
         list(df.columns),
@@ -663,7 +680,11 @@ def test_build_preprocessor_all_strategies_end_to_end(enc):
     out = pre.fit_transform(df, y)
     assert isinstance(pre, ColumnTransformer)
     assert out.shape[0] == len(df)
-    assert np.isfinite(out).all()
+    if sparse.issparse(out):
+        assert out.format == "csr"
+        assert np.isfinite(out.data).all()
+    else:
+        assert np.isfinite(out).all()
 
 
 def test_split_encoder_feature_names():
@@ -714,6 +735,7 @@ def test_transformers_accept_1d_input():
 
     out_hash = HashingEncodingTransformer(n_components=4).fit_transform(X_1d)
     assert out_hash.shape == (3, 4)
+    assert sparse.issparse(out_hash)
 
 
 def test_target_encoding_non_finite_y_rejected():
@@ -812,6 +834,37 @@ def test_split_encoder_empty_parts_transform():
     enc.fit(X_empty)
     out = enc.transform(X_empty)
     assert out.shape == (3, 0)
+
+
+def test_split_encoder_sparse_aware_hstack():
+    """SplitCategoricalEncoder склеивает sparse-части через sp.hstack:
+    default one_hot (dense) + HC hashing (sparse) -> csr."""
+    X = np.array([["a", "x"], ["b", "y"], ["c", "z"], ["d", "w"]], dtype=object)
+    enc = SplitCategoricalEncoder(
+        encoding="one_hot",
+        high_cardinality_threshold=1,
+        high_cardinality_encoding="hashing",
+        hashing_n_components=4,
+    )
+    enc.fit(X)
+    # 'a'..'d' -> кардинальность 4 > 1 => HC hashing; 'x'..'w' -> 4 > 1 => HC
+    assert enc.hc_columns_ == [0, 1]
+    out = enc.transform(X)
+    assert sparse.issparse(out)
+    assert out.format == "csr"
+    assert out.shape == (4, 8)
+    # nnz = n_rows * n_hc_cols (только hashing-части разреженные)
+    assert out.nnz == 8
+
+
+def test_split_encoder_pure_dense_stays_dense():
+    """Без sparse-частей (one_hot/ordinal/target/frequency) выход плотный."""
+    X = np.array([["a", "x"], ["b", "y"]], dtype=object)
+    enc = SplitCategoricalEncoder(encoding="target")
+    enc.fit(X, np.array([1.0, 2.0]))
+    out = enc.transform(X)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (2, 2)
 
 
 def test_split_encoder_set_params_changes_behavior():

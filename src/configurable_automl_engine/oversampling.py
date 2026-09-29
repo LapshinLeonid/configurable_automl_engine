@@ -288,7 +288,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
 
-    def _fit_resample(self, X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
+    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
         """Выполнить ресемплирование данных согласно выбранному алгоритму.
         Автоматически переключается на SMOTENC, если обнаружены нечисловые колонки.
         Для ADASYN реализован прозрачный fallback к SMOTENC при наличии категорий,
@@ -300,7 +300,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             X (Any): Признаки (массив, DataFrame или разреженная матрица).
             y (Any): Целевая переменная.
         Returns:
-            tuple: Кортеж из двух numpy-массивов (X_resampled, y_resampled).
+            tuple: Кортеж (X_resampled, y_resampled). При разреженном входе
+            (выход hashing-кодирования) X_resampled остаётся
+            ``scipy.sparse.csr_matrix`` для алгоритма 'random' и становится
+            плотным для SMOTE/ADASYN (они требуют dense).
         Raises:
 
             ValueError: Если `multiplier` < 1 или алгоритм не поддерживается.
@@ -335,8 +338,36 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         try:
             # Стандартная валидация входных данных
             y_validated = np.asarray(y)
-            X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
             y_s = pd.Series(y_validated)
+
+            # Разреженная ветка (выход hashing-кодирования, csr_matrix):
+            # данные уже числовые, категориальных колонок нет (OrdinalEncoder
+            # не нужен), а pd.DataFrame(csr) создал бы молчаливый мусорный
+            # объект-датафрейм. RandomOverSampler работает со sparse напрямую
+            # (эффективно по памяти); SMOTE/ADASYN математически требуют
+            # плотные матрицы расстояний, поэтому для них разреженный вход
+            # конвертируется в dense (как было до перевода hashing на sparse).
+            if is_sparse:
+                strategy_sparse = self._strategy(y_s, self.multiplier_)
+                if algo_local == "random":
+                    sampler = RandomOverSampler(
+                        sampling_strategy=strategy_sparse,
+                        random_state=self.random_state,
+                    )
+                    X_res_raw, y_res = sampler.fit_resample(X, y_s)
+                    logger.info(
+                        "%s resample: %d -> %d",
+                        algo_local.upper(),
+                        X.shape[0],
+                        X_res_raw.shape[0],
+                    )
+                    return X_res_raw, y_res.to_numpy()
+                if algo_local in ("smote", "adasyn"):
+                    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+                else:
+                    raise ValueError(f"Unsupported algorithm: {algo_local}")
+
+            X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
 
             # Определяем индексы нечисловых колонок для SMOTENC.
             # Колонки с числовыми строками ("1.0", "2.0") не считаются

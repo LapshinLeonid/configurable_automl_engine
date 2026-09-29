@@ -28,6 +28,11 @@
     * **hashing** — :class:`HashingEncodingTransformer`: детерминированное
       хеширование категорий в фиксированное число бинарных колонок
       (``n_components``); неизвестные категории хешируются тем же способом.
+      Выход разреженный (``scipy.sparse.csr_matrix``), как у стандартного
+      ``FeatureHasher`` из sklearn, — это исключает OOM на колонках высокой
+      кардинальности больших датасетов. Для алгоритмов, отвергающих sparse
+      (GPR/Isotonic/ARD), ``build_preprocessor`` принудительно возвращает
+      плотную матрицу (``force_dense_output``).
 
 Для колонок высокой кардинальности поддерживается автоматический режим:
 колонки, число уникальных значений которых превышает
@@ -46,10 +51,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
+from scipy import sparse as sp
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -279,6 +285,11 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
     (``n_components`` на входную колонку) и управляется конфигурацией — рост
     размерности не зависит от кардинальности колонки.
 
+    Выход :meth:`transform` — разреженная матрица ``scipy.sparse.csr_matrix``
+    (nnz = n_rows · n_cols), как у стандартного ``FeatureHasher``: плотная
+    ``float64``-матрица размерности ``(n_rows, n_cols · n_components)``
+    вызвала бы OOM на реальных таблицах с колонками высокой кардинальности.
+
     Хеширование полностью детерминировано при фиксированных настройках и
     ``random_state``: неизвестные категории на этапе предсказания хешируются
     тем же способом, поэтому падений не возникает. Возможны коллизии хеша
@@ -324,28 +335,48 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         ]
         return self
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: Any) -> sp.csr_matrix:
         """Закодировать категории бинарными хеш-колонками.
+
+        Возвращает разреженную матрицу ``scipy.sparse.csr_matrix``
+        (COO → CSR, ``nnz = n_samples * n_columns``, значения ``1.0``),
+        а не плотный массив: hashing предназначен для колонок с очень
+        высокой кардинальностью на больших датасетах, и плотная
+        ``float64``-матрица размерности ``(n_rows, n_cols * n_components)``
+        вызвала бы OOM. Формат соответствует стандартному
+        ``sklearn.feature_extraction.FeatureHasher``.
 
         Args:
             X: Матрица категориальных признаков.
 
         Returns:
-            Бинарная матрица размерности ``(n_samples, n_columns * n_components)``.
+            Разреженная бинарная матрица размерности
+            ``(n_samples, n_columns * n_components)``.
         """
         check_is_fitted(self, attributes=["salts_"])
         X_arr = _as_2d(X)
         n_rows, n_cols = X_arr.shape
-        out = np.zeros((n_rows, n_cols * self.n_components), dtype=np.float64)
+        # Каждая строка каждой колонки даёт ровно один ненулевой элемент,
+        # поэтому nnz = n_rows * n_cols. Коллизии хеша в рамках одной колонки
+        # невозможны для одной строки (одна категория на строку), дубликатов
+        # в COO не возникает, сумма по строкам всегда равна n_cols (бинарность).
+        col_blocks: list[np.ndarray] = []
         for col in range(n_cols):
             uniq, inverse = np.unique(X_arr[:, col], return_inverse=True)
             hashed = np.array(
                 [self._hash_token(token, self.salts_[col]) for token in uniq],
                 dtype=np.int64,
             )
-            flat_indices = col * self.n_components + hashed[inverse]
-            out[np.arange(n_rows), flat_indices] = 1.0
-        return out
+            col_blocks.append(col * self.n_components + hashed[inverse])
+        rows = np.tile(np.arange(n_rows), n_cols)
+        cols = np.concatenate(col_blocks) if col_blocks else np.empty(0, dtype=np.int64)
+        data = np.ones(n_rows * n_cols, dtype=np.float64)
+        out = sp.coo_matrix(
+            (data, (rows, cols)),
+            shape=(n_rows, n_cols * self.n_components),
+            dtype=np.float64,
+        )
+        return out.tocsr()
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
         """Вернуть имена выходных признаков (``n_components`` на входную)."""
@@ -539,19 +570,23 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         )
         return self
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: Any) -> np.ndarray | sp.spmatrix:
         """Закодировать колонки выбранными стратегиями и склеить результат.
+
+        Если хотя бы один из энкодеров вернул разреженную матрицу
+        (hashing-кодирование), части склеиваются через ``sp.hstack``
+        (CSR); иначе — через ``np.hstack`` (плотный случай).
 
         Args:
             X: Матрица категориальных признаков.
 
         Returns:
-            Числовая матрица, объединяющая выходы default- и
-            high-cardinality энкодеров.
+            Числовая матрица (плотная или разреженная), объединяющая
+            выходы default- и high-cardinality энкодеров.
         """
         check_is_fitted(self, attributes=["default_columns_"])
         X_arr = _as_2d(X)
-        parts: list[np.ndarray] = []
+        parts: list[np.ndarray | sp.spmatrix] = []
         if self.default_columns_:
             parts.append(
                 self.default_encoder_.transform(X_arr[:, self.default_columns_])
@@ -560,7 +595,14 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             parts.append(self.hc_encoder_.transform(X_arr[:, self.hc_columns_]))
         if not parts:
             return np.empty((X_arr.shape[0], 0), dtype=np.float64)
-        return np.hstack(parts)
+        if any(sp.issparse(part) for part in parts):
+            # scipy-stubs не описывают гетерогенные последовательности
+            # (ndarray | spmatrix) для hstack: приводим блоки к общему типу.
+            sparse_blocks = cast(list[sp.spmatrix], parts)
+            return sp.hstack(sparse_blocks).tocsr()
+        # Все части плотные (sparse-ветка выше) — обычный np.hstack.
+        dense_blocks = cast(list[np.ndarray], parts)
+        return np.hstack(dense_blocks)
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
         """Вернуть имена выходных признаков в порядке конкатенации."""
@@ -628,6 +670,7 @@ def build_preprocessor(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     random_state: int | None = 42,
+    force_dense_output: bool = False,
 ) -> ColumnTransformer:
     """Сконструировать ColumnTransformer для раздельной обработки типов данных.
 
@@ -685,6 +728,13 @@ def build_preprocessor(
             неизвестных категорий. ``None`` — глобальное среднее целевой
             переменной.
         random_state: Зерно для детерминированного hashing-кодирования.
+        force_dense_output: Принудительно вернуть плотную матрицу вместо
+            разреженной. Включается для алгоритмов, отвергающих
+            ``scipy.sparse`` (GPR/Isotonic/ARD, см.
+            :func:`~configurable_automl_engine.models.requires_dense_input`):
+            с ``sparse_threshold=0.0`` ``ColumnTransformer`` конвертирует
+            разреженные части в плотные. По умолчанию ``False`` — выход
+            остаётся разреженным при hashing-кодировании (экономия памяти).
 
     Returns:
         ``ColumnTransformer``, преобразующий исходный DataFrame в числовую
@@ -764,7 +814,9 @@ def build_preprocessor(
             "No features matched for preprocessing. Defaulting to passthrough."
         )
         return ColumnTransformer(
-            [("bypass", "passthrough", slice(None))], remainder="drop"
+            [("bypass", "passthrough", slice(None))],
+            remainder="drop",
+            sparse_threshold=0.0 if force_dense_output else 0.3,
         )
 
     # Пайплайн трансформации числовых признаков: импутация + (опционально) скалер.
@@ -811,4 +863,8 @@ def build_preprocessor(
     return ColumnTransformer(
         transformers=(transformers if transformers else [("pass", "passthrough", [0])]),
         remainder="drop",
+        # При force_dense_output всегда возвращаем плотную матрицу:
+        # разреженные части (hashing) конвертируются в ndarray, иначе —
+        # стандартный sparse_threshold=0.3 (csr при любой sparse-части).
+        sparse_threshold=0.0 if force_dense_output else 0.3,
     )

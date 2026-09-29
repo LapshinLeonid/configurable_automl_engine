@@ -65,7 +65,7 @@ from configurable_automl_engine.training_engine.metrics import (
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
 
-from .models import _ALIASES, create_model
+from .models import _ALIASES, create_model, requires_dense_input
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
@@ -553,6 +553,10 @@ class ModelTrainer:
             self.algorithm,
             preset,
         )
+        # Алгоритмы GPR/Isotonic/ARD отвергают разреженные матрицы: при
+        # hashing-кодировании (sparse-выход) препроцессор обязан вернуть
+        # плотную матрицу (issue: OOM fix, force_dense_output).
+        force_dense = requires_dense_input(self.algorithm)
         return build_preprocessor(
             feature_names,
             self.categorical_features or [],
@@ -566,6 +570,7 @@ class ModelTrainer:
             target_encoding_smoothing=target_smoothing,
             target_encoding_fallback=target_fallback,
             random_state=self.random_state,
+            force_dense_output=force_dense,
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:

@@ -100,6 +100,42 @@ AVAILABLE_ALGORITHMS = [
 _FACTORY = _get_factory()
 
 # ----------------------------------------------------------------------------- #
+#               Sparse-совместимость алгоритмов                                #
+# ----------------------------------------------------------------------------- #
+# Алгоритмы, которые отвергают разреженные входные матрицы (sklearn
+# вызывает check_array с accept_sparse=False): GaussianProcessRegressor,
+# IsotonicRegression и ARDRegression требуют плотные данные. При hashing-
+# кодировании (разреженный выход) для этих алгоритмов препроцессор обязан
+# вернуть плотную матрицу (force_dense_output).
+SPARSE_UNSUPPORTED_ALGORITHMS: frozenset[str] = frozenset(
+    {
+        "gaussian_process_regression",
+        "isotonic_regression",
+        "ardregression",
+    }
+)
+
+
+def requires_dense_input(algorithm: str) -> bool:
+    """Вернуть ``True``, если алгоритм не поддерживает разреженный вход.
+
+    Используется при построении препроцессора (``build_preprocessor``):
+    для алгоритмов, отвергающих ``scipy.sparse``, включается
+    ``force_dense_output``, чтобы hashing-кодирование отдавало плотную
+    матрицу (GPR/Isotonic/ARD физически не могут работать со sparse).
+
+    Args:
+        algorithm: Имя алгоритма или алиас (например, ``'gpr'``,
+            ``'isotonic'``, ``'ard'``).
+
+    Returns:
+        ``True`` — модели требуется плотный вход; ``False`` — поддерживает
+        разреженные матрицы (csr).
+    """
+    return resolve_algorithm_name(algorithm) in SPARSE_UNSUPPORTED_ALGORITHMS
+
+
+# ----------------------------------------------------------------------------- #
 #               Legacy parameter mappings (API drift)                          #
 # ----------------------------------------------------------------------------- #
 LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {

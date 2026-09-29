@@ -45,7 +45,7 @@ from sklearn.model_selection import (
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
-from configurable_automl_engine.models import create_model
+from configurable_automl_engine.models import create_model, requires_dense_input
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
@@ -646,6 +646,7 @@ def optimize(
                     target_encoding_smoothing=target_encoding_smoothing,
                     target_encoding_fallback=target_encoding_fallback,
                     random_state=random_state,
+                    force_dense_output=requires_dense_input(algo),
                 )
             else:
                 log.warning(
@@ -672,6 +673,7 @@ def optimize(
                     target_encoding_smoothing=target_encoding_smoothing,
                     target_encoding_fallback=target_encoding_fallback,
                     random_state=random_state,
+                    force_dense_output=requires_dense_input(algo),
                 )
         else:
             log.warning(

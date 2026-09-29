@@ -413,3 +413,78 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
     assert model is not None
     assert isinstance(params, dict) and params
     assert np.isfinite(score)
+
+
+# ───────────────── Sparse-выход hashing (issue #4) ─────────────────
+
+
+@pytest.mark.parametrize(
+    "algorithm, hyperparams",
+    [
+        ("gaussian_process_regression", {}),
+        ("ardregression", {"alpha": 1.0}),
+    ],
+)
+def test_model_trainer_sparse_rejecting_algos_with_hashing(
+    algorithm: str, hyperparams: dict[str, Any]
+) -> None:
+    """GPR/ARD отвергают scipy.sparse: для них автоматически активируется
+    force_dense_output, поэтому обучение с hashing-кодированием не падает."""
+    df = _make_regression_df(n=60, seed=17)
+    trainer = ModelTrainer(
+        algorithm=algorithm,
+        hyperparams=hyperparams,
+        metric="r2",
+        encoding_strategy="hashing",
+    )
+    trainer.fit(df.drop(columns=["target"]), df["target"])
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+
+    preds = trainer.predict(df.drop(columns=["target"]).head(5))
+    assert np.isfinite(preds).all()
+
+
+def test_model_trainer_isotonic_hashing_single_feature() -> None:
+    """Isotonic требует один признак и отвергает sparse: одна категориальная
+    колонка с hashing_n_components=1 даёт ровно одну колонку, а
+    force_dense_output активируется по флагу алгоритма."""
+    df = _make_regression_df(n=60, seed=19)[["color", "target"]]
+    trainer = ModelTrainer(
+        algorithm="isotonic_regression",
+        hyperparams={},
+        metric="r2",
+        encoding_strategy="hashing",
+        hashing_n_components=1,
+    )
+    trainer.fit(df.drop(columns=["target"]), df["target"])
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+
+    preds = trainer.predict(df.drop(columns=["target"]).head(5))
+    assert np.isfinite(preds).all()
+
+
+def test_hashing_preprocessor_output_is_sparse() -> None:
+    """Сквозная проверка OOM-фикса: препроцессор с hashing отдаёт csr_matrix
+    (а не плотную float64-матрицу), экономя память на больших таблицах."""
+    from scipy import sparse
+
+    from configurable_automl_engine.preprocessing import build_preprocessor
+
+    df = _make_regression_df(n=150, seed=21)
+    X = df.drop(columns=["target"])
+    pre = build_preprocessor(
+        list(X.columns),
+        categorical_features=["color", "size", "high_card"],
+        numerical_features=["num"],
+        encoding="hashing",
+        hashing_n_components=16,
+    )
+    out = pre.fit_transform(X, df["target"])
+    assert sparse.issparse(out)
+    assert out.format == "csr"
+    # nnz = n_rows * (n_cat_cols + n_num_cols): одна единица на строку на
+    # hashing-колонку плюс плотная числовая часть — а не n_rows * 48
+    assert out.nnz == len(df) * 4
+    assert out.shape[1] == 3 * 16 + 1

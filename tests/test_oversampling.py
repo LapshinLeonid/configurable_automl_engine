@@ -318,6 +318,87 @@ def test_sparse_matrix_noise_error():
         sampler.fit_resample(X_sparse, y)
 
 
+# ------------------------------------------------------------------ #
+#  Sparse-ветка (выход hashing-кодирования, issue #4)                #
+# ------------------------------------------------------------------ #
+
+
+def test_sparse_random_oversampling_keeps_sparse():
+    """Random-оверсэмплинг на csr_matrix остаётся разреженным
+    (pd.DataFrame(csr) не строится — молчаливый мусорный датафрейм)."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ]
+    )
+    y = np.array([0, 0, 0, 1, 1, 1])
+    sampler = DataOversampler(algorithm="random", multiplier=2.0, random_state=42)
+    X_res, y_res = sampler.fit_resample(X_sparse, y)
+    assert sparse.issparse(X_res)
+    assert X_res.format == "csr"
+    assert X_res.shape[0] == 12
+    assert len(y_res) == 12
+    # Значения бинарные, размерность сохранена
+    assert X_res.shape[1] == 3
+
+
+def test_sparse_smote_densifies():
+    """SMOTE на разреженном входе (hashing) конвертируется в dense:
+    синтетические алгоритмы требуют плотные матрицы расстояний."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ]
+    )
+    y = np.array([0, 0, 0, 1, 1, 1])
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    X_res, y_res = sampler.fit_resample(X_sparse, y)
+    assert isinstance(X_res, np.ndarray)
+    # multiplier=1.5: ceil(3 * 1.5) = 5 на каждый класс -> 10 строк
+    assert len(X_res) == 10
+    assert len(y_res) == 10
+    assert X_res.shape[1] == 3
+
+
+def test_sparse_adasyn_densifies():
+    """ADASYN на разреженном входе конвертируется в dense и работает."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ]
+    )
+    y = np.array([0, 0, 0, 1, 1, 1])
+    sampler = DataOversampler(algorithm="adasyn", multiplier=1.5, random_state=42)
+    X_res, y_res = sampler.fit_resample(X_sparse, y)
+    assert isinstance(X_res, np.ndarray)
+    assert len(X_res) > X_sparse.shape[0]
+    assert X_res.shape[1] == 3
+
+
+def test_sparse_unsupported_algorithm_raises():
+    """Неизвестный алгоритм на разреженном входе -> ValueError."""
+    X_sparse = sparse.csr_matrix([[1.0, 0.0], [0.0, 1.0]])
+    y = np.array([0, 1])
+    sampler = DataOversampler(algorithm="magic")
+    with pytest.raises(ValueError, match="Unsupported algorithm"):
+        sampler.fit_resample(X_sparse, y)
+
+
 # 6. Покрытие строки 259: Неподдерживаемый алгоритм
 def test_unsupported_algorithm():
     # Обходим валидатор через прямой вызов или изменение атрибута

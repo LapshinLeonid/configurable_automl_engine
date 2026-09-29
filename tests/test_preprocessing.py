@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import (
@@ -464,3 +465,62 @@ def test_glm_preset_end_to_end_robust():
     out = preprocessor.fit_transform(df)
     assert out.shape == (5, 2)
     assert np.isfinite(out).all()
+
+
+# ────────────────── Sparse-выход hashing (issue #4) ──────────────────
+
+
+def test_build_preprocessor_hashing_sparse_by_default():
+    """hashing-кодирование возвращает csr_matrix через ColumnTransformer
+    (стандартный sparse_threshold=0.3 отдаёт csr при любой sparse-части)."""
+    df = pd.DataFrame(
+        {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["cat"],
+        numerical_features=["num"],
+        encoding="hashing",
+        hashing_n_components=8,
+    )
+    out = preprocessor.fit_transform(df)
+    assert sparse.issparse(out)
+    assert out.format == "csr"
+    assert out.shape == (12, 9)
+    assert out.nnz <= 12 * 9
+
+
+def test_build_preprocessor_force_dense_output():
+    """force_dense_output=True конвертирует sparse-части (hashing) в dense:
+    требуется для GPR/Isotonic/ARD, отвергающих scipy.sparse."""
+    df = pd.DataFrame(
+        {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["cat"],
+        numerical_features=["num"],
+        encoding="hashing",
+        hashing_n_components=8,
+        force_dense_output=True,
+    )
+    out = preprocessor.fit_transform(df)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (12, 9)
+    assert np.isfinite(out).all()
+
+
+def test_build_preprocessor_force_dense_passthrough():
+    """force_dense_output не ломает passthrough-ветку (нет совпавших колонок)."""
+    preprocessor = build_preprocessor(
+        ["some_random_column"],
+        categorical_features=[],
+        numerical_features=[],
+        encoding="hashing",
+        force_dense_output=True,
+    )
+    assert isinstance(preprocessor, ColumnTransformer)
+    assert preprocessor.transformers[0][0] == "bypass"
+    out = preprocessor.fit_transform(pd.DataFrame({"some_random_column": [1, 2, 3]}))
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (3, 1)
