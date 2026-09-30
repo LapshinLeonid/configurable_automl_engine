@@ -272,8 +272,11 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `space_overrides` | `dict[str, Callable]` or `None` | `None` | Custom search space overrides. |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
+| `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 
 **Returns:** `tuple[Any | None, dict[str, Any] | None, float]` — `(best_model, best_params, best_score)`. Returns `(None, None, -3.4028235e38)` when no trials succeed.
+
+In `'auto'` mode `best_params` additionally contains the service key `use_feature_selection` (`True`/`False`) — the winner's decision about feature selection, which is preserved between multi-phase HPO runs (passed to the next phase via `initial_params`/`enqueue_trial`) and consumed by `train_best_model` for the final fit. The key is absent in `'always'`/`'disabled'` modes and for `isotonic_regression` (feature selection is forcibly turned off there). The key is never passed to the base model constructor.
 
 **Raises:** `ValueError` for invalid `n_trials`; `HyperoptError` for missing search spaces; `InvalidAlgorithmError` after 5 consecutive fatal failures.
 

@@ -24,6 +24,7 @@ from optuna.trial import FixedTrial
 from sklearn.datasets import make_regression
 
 from configurable_automl_engine import tuner as hyperopt
+from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.tuner import (
@@ -1008,3 +1009,411 @@ def test_optimize_logs_resolved_preset(toy_data, caplog):
 
     assert "Resolved preprocessing preset" in caplog.text
     assert "scale_sensitive" in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Feature selection integration (issue #11)
+# ──────────────────────────────────────────────────────────────────────────────
+@pytest.fixture(scope="session")
+def noisy_fs_data() -> tuple[pd.DataFrame, pd.Series]:
+    """Датасет для проверки отбора признаков: 2 информативных + 18 шумовых.
+
+    Чистый шум в 18 колонках делает отбор признаков полезным: модель,
+    обучающаяся на полном пространстве, вынуждена бороться с нерелевантными
+    признаками, тогда как селектор (importance через ExtraTreesRegressor)
+    оставляет информативные колонки.
+    """
+    rng = np.random.RandomState(7)
+    X_info, y = make_regression(
+        n_samples=250,
+        n_features=2,
+        n_informative=2,
+        noise=0.15,
+        random_state=7,
+    )
+    X_noise = rng.normal(size=(X_info.shape[0], 18))
+    X = np.hstack([X_info, X_noise])
+    columns = [f"info_{i}" for i in range(2)] + [f"noise_{i}" for i in range(18)]
+    return pd.DataFrame(X, columns=columns), pd.Series(y)
+
+
+_FS_ELASTICNET_SPACE = {
+    "elasticnet": lambda t: {
+        "alpha": t.suggest_float("alpha", 1e-3, 1.0, log=True),
+        "l1_ratio": t.suggest_float("l1_ratio", 0.0, 1.0),
+    }
+}
+
+_FS_ISOTONIC_SPACE = {
+    "isotonic_regression": lambda t: {
+        "increasing": t.suggest_categorical("increasing", [True, False])
+    }
+}
+
+
+def _run_optimize_with_captured_study(
+    *args: Any, **kwargs: Any
+) -> tuple[Any, optuna.Study, Any, dict[str, Any] | None, float]:
+    """Запустить optimize, перехватив реальный study Optuna через create_study.
+
+    Возвращает кортеж (model, study, params, score).
+    """
+    real_study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=kwargs.get("random_state") or 42),
+    )
+    with patch(
+        "configurable_automl_engine.tuner.optuna.create_study", return_value=real_study
+    ):
+        model, params, score = hyperopt.optimize(*args, **kwargs)
+    return model, real_study, params, score
+
+
+def test_auto_mode_explores_both_and_wins_with_fs(noisy_fs_data):
+    """mode='auto': Optuna пробует True/False и побеждает триал с отбором.
+
+    На датасете из 2 информативных признаков и 18 колонок чистого шума
+    сокращение пространства признаков объективно улучшает качество, поэтому
+    лучший триал обязан выбрать use_feature_selection=True.
+    """
+    X, y = noisy_fs_data
+    model, study, params, score = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=15,
+        random_state=42,
+        feature_selection_cfg={"mode": "auto"},
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+
+    # Optuna исследовала обе гипотезы отбора
+    tried = {
+        t.params["use_feature_selection"]
+        for t in study.trials
+        if "use_feature_selection" in t.params
+    }
+    assert tried == {True, False}
+
+    # Победивший триал — с отбором признаков
+    assert params["use_feature_selection"] is True
+    assert "feature_selector" in model.named_steps
+    assert isinstance(model.named_steps["feature_selector"], FeatureSelector)
+    assert isinstance(score, float) and not np.isnan(score)
+
+
+def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
+    """mode='auto': победитель выбрал False -> селектора нет в финальной модели.
+
+    Покрывает путь «auto → победитель выбрал False» в финальной сборке:
+    ``best_apply_fs`` обязан разрешиться в False, шаг feature_selector не
+    попадает в модель, а решение сохраняется в возвращаемом best_params.
+    """
+    X, y = toy_data
+    with (
+        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.tuner.create_model"),
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+    ):
+        mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+        mock_study = MagicMock()
+        mock_study.best_params = {
+            "alpha": 0.6,
+            "l1_ratio": 0.4,
+            "use_feature_selection": False,
+        }
+        mock_study.best_value = 0.9
+        mock_create.return_value = mock_study
+
+        model, params, _ = optimize(
+            "elasticnet",
+            X,
+            y,
+            n_trials=1,
+            feature_selection_cfg={"mode": "auto"},
+            space_overrides={
+                "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
+            },
+        )
+
+    # Победитель HPO явно отказался от отбора: селектор не встроен
+    assert "use_feature_selection" in params
+    assert params["use_feature_selection"] is False
+    assert "feature_selector" not in model.named_steps
+    assert "model" in model.named_steps
+
+
+def test_always_mode_forces_feature_selector(noisy_fs_data):
+    """mode='always': селектор в пайплайне, best_params без служебных подсказок."""
+    X, y = noisy_fs_data
+    model, _, params, _ = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "always"},
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+
+    # Служебного ключа тюнера нет в best_params (suggest_categorical не вызывался)
+    assert "use_feature_selection" not in params
+    # Финальная модель собрана с шагом отбора признаков
+    assert "feature_selector" in model.named_steps
+    assert isinstance(model.named_steps["feature_selector"], FeatureSelector)
+
+
+def test_disabled_mode_omits_feature_selector(noisy_fs_data):
+    """mode='disabled': селектор не появляется в финальной модели."""
+    X, y = noisy_fs_data
+    model, _, params, _ = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "disabled"},
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+
+    assert "use_feature_selection" not in params
+    assert "feature_selector" not in model.named_steps
+
+
+def test_auto_mode_default_is_disabled_when_cfg_none(noisy_fs_data):
+    """feature_selection_cfg=None равнозначен disabled (обратная совместимость)."""
+    X, y = noisy_fs_data
+    model, _, params, _ = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+
+    assert "use_feature_selection" not in params
+    assert "feature_selector" not in model.named_steps
+
+
+def test_auto_mode_initial_params_preserves_fs_decision(noisy_fs_data):
+    """enqueue_trial с use_feature_selection из фазы 1 стартует с этим решением."""
+    X, y = noisy_fs_data
+    initial = {"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True}
+    _, study, params, _ = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "auto"},
+        initial_params=initial,
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+
+    # Первый (enqueued) триал стартует с решением предыдущей фазы
+    first = study.trials[0]
+    assert first.params.get("use_feature_selection") is True
+    assert first.params.get("alpha") == 0.5
+    assert first.params.get("l1_ratio") == 0.3
+    # Ключ решения сохраняется в best_params (монотонность между фазами)
+    assert "use_feature_selection" in params
+
+
+def test_isotonic_regression_ignores_feature_selection(toy_data):
+    """Изотоническая регрессия: тюнинг не падает, отбор принудительно выключен."""
+    X, y = toy_data
+    X_iso = X.iloc[:, [0]]
+
+    # mode='always' — даже принудительный режим не ломает одномерный алгоритм
+    model_always, _, _ = hyperopt.optimize(
+        "isotonic_regression",
+        X_iso,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "always"},
+        space_overrides=_FS_ISOTONIC_SPACE,
+    )
+    assert hasattr(model_always, "predict")
+    steps_always = [name for name, _ in getattr(model_always, "steps", [])]
+    assert "feature_selector" not in steps_always
+
+    # mode='auto' — даже если Optuna выбрала True, селектор не попадает в модель
+    model_auto, params_auto, _ = hyperopt.optimize(
+        "isotonic_regression",
+        X_iso,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "auto"},
+        space_overrides=_FS_ISOTONIC_SPACE,
+    )
+    assert hasattr(model_auto, "predict")
+    steps_auto = [name for name, _ in getattr(model_auto, "steps", [])]
+    assert "feature_selector" not in steps_auto
+    # Для isotonic категория use_feature_selection не предлагается Optuna
+    # (флаг принудительно False), поэтому служебный ключ не попадает
+    # в best_params даже в режиме 'auto'.
+    assert "use_feature_selection" not in params_auto
+
+
+def test_invalid_feature_selection_cfg_rejected(toy_data):
+    """Невалидный feature_selection_cfg отклоняется до запуска поиска."""
+    X, y = toy_data
+
+    # Неверный тип: строка вместо dict/FeatureSelectionCfg
+    with pytest.raises(TypeError, match="feature_selection_cfg must be a"):
+        hyperopt.optimize(
+            "ridge", X, y, n_trials=2, feature_selection_cfg="always"
+        )
+
+    # Невалидный dict: неизвестный method отклоняется валидацией Pydantic
+    with pytest.raises(HyperoptError, match="Invalid feature_selection_cfg"):
+        hyperopt.optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            feature_selection_cfg={"mode": "always", "method": "not_a_method"},
+        )
+
+
+def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data):
+    """B2: при random_state=None FeatureSelector получает фиксированный seed 42.
+
+    Иначе каждый вызов fs_transformer_factory создавал бы селектор с новым
+    случайным зерном и отбор признаков был бы невоспроизводим.
+    """
+    X, y = toy_data
+    with (
+        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.tuner.create_model"),
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch(
+            "configurable_automl_engine.tuner.FeatureSelector", autospec=True
+        ) as mock_fs,
+    ):
+        mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+        mock_study = MagicMock()
+        mock_study.best_params = {"alpha": 0.6}
+        mock_study.best_value = 0.9
+        mock_create.return_value = mock_study
+
+        optimize(
+            "elasticnet",
+            X,
+            y,
+            n_trials=1,
+            random_state=None,
+            feature_selection_cfg={"mode": "always"},
+            space_overrides={"elasticnet": lambda t: {"alpha": 0.01}},
+        )
+
+        assert mock_fs.call_args.kwargs["random_state"] == 42
+
+
+def test_fs_reproducible_with_random_state_none(noisy_fs_data):
+    """B2: два запуска random_state=None дают одинаковый результат.
+
+    Случайность Optuna (TPE, разбиения) при random_state=None не
+    фиксируется, но отбор признаков использует фиксированный seed 42,
+    поэтому при константном пространстве поиска итоговые модели идентичны.
+    """
+    X, y = noisy_fs_data
+    run_kwargs = dict(
+        n_trials=2,
+        random_state=None,
+        feature_selection_cfg={"mode": "always"},
+        space_overrides={"elasticnet": lambda t: {"alpha": 0.01, "l1_ratio": 0.5}},
+    )
+    model1, _, _ = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
+    model2, _, _ = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
+
+    assert np.allclose(model1.predict(X), model2.predict(X))
+
+
+def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
+    """Служебный ключ use_feature_selection не попадает в конструктор модели.
+
+    Покрывает B4/B6: initial_params (enqueue_trial) переносит решение
+    предыдущей фазы между фазами HPO, но при создании модели через
+    create_model ключ обязан быть вычищен, а исходный study.best_params —
+    не мутирован.
+    """
+    X, y = toy_data
+    initial_params = {"alpha": 0.5, "use_feature_selection": True}
+    with (
+        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch(
+            "configurable_automl_engine.tuner.FeatureSelector", autospec=True
+        ),
+    ):
+        mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+        mock_study = MagicMock()
+        mock_study.best_params = {
+            "alpha": 0.6,
+            "l1_ratio": 0.4,
+            "use_feature_selection": True,
+        }
+        mock_study.best_value = 0.9
+        mock_create.return_value = mock_study
+
+        _, params, _ = optimize(
+            "elasticnet",
+            X,
+            y,
+            n_trials=1,
+            initial_params=initial_params,
+            feature_selection_cfg={"mode": "auto"},
+            space_overrides={
+                "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
+            },
+        )
+
+        # enqueue_trial получает решение предыдущей фазы (монотонность HPO)
+        mock_study.enqueue_trial.assert_called_once_with(initial_params)
+        # Финальный create_model не получает служебный ключ
+        assert "use_feature_selection" not in mock_create_model.call_args.kwargs
+        # Возвращаемый best_params сохраняет ключ (монотонность между фазами)
+        assert params["use_feature_selection"] is True
+
+
+def test_fs_pipeline_from_optimize_serializes(tmp_path: Path, noisy_fs_data):
+    """B6: пайплайн с шагом feature_selector корректно сериализуется.
+
+    Новый шаг не нарушает обратную совместимость сериализации пайплайнов:
+    после save/load predict идентичен, шаг присутствует в восстановленной
+    модели.
+    """
+    import joblib
+
+    X, y = noisy_fs_data
+    model, _, _, _ = _run_optimize_with_captured_study(
+        "elasticnet",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        feature_selection_cfg={"mode": "always"},
+        space_overrides=_FS_ELASTICNET_SPACE,
+    )
+    assert "feature_selector" in model.named_steps
+
+    path = tmp_path / "fs_pipeline.joblib"
+    joblib.dump(model, path)
+    restored = joblib.load(path)
+
+    assert "feature_selector" in restored.named_steps
+    assert np.array_equal(model.predict(X), restored.predict(X))

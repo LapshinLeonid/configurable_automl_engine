@@ -45,7 +45,12 @@ from sklearn.model_selection import (
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
-from configurable_automl_engine.models import create_model, requires_dense_input
+from configurable_automl_engine.feature_selection import FeatureSelector
+from configurable_automl_engine.models import (
+    create_model,
+    requires_dense_input,
+    resolve_algorithm_name,
+)
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
@@ -55,6 +60,10 @@ from configurable_automl_engine.preprocessing import (
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     resolve_preprocessing_preset,
+)
+from configurable_automl_engine.training_engine.config_parser import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
 )
 from configurable_automl_engine.training_engine.metrics import get_scorer_object
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
@@ -454,6 +463,7 @@ def optimize(
     hashing_n_components: int = 16,
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
 
@@ -478,7 +488,10 @@ def optimize(
         n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
         n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
         random_state (int | None): Состояние случайности для воспроизводимости.
-            По умолчанию 42.
+            По умолчанию 42. При ``None`` случайность Optuna (TPE-сэмплер,
+            разбиения) не фиксируется, однако шаг отбора признаков
+            (``FeatureSelector``) всегда использует фиксированный seed 42,
+            чтобы отбор оставался воспроизводимым между запусками.
         train_test_split_test_size (float): Размер теста для валидации через split.
             По умолчанию 0.2.
         space_overrides (dict | None): Словарь для переопределения пространств поиска.
@@ -522,17 +535,28 @@ def optimize(
             (>= 0).
         target_encoding_fallback (float | None): Fallback-значение target
             encoding для неизвестных категорий (None — глобальное среднее).
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): Настройки
+            отбора признаков (issue #11). ``None`` — режим ``'disabled'``
+            (отбор не применяется, поведение по умолчанию). В режиме
+            ``'always'`` шаг ``feature_selector`` присутствует в каждом
+            пайплайне триала; в режиме ``'disabled'`` — отсутствует; в
+            режиме ``'auto'`` Optuna сама выбирает ``use_feature_selection``
+            (True/False) на валидационных сплитах в конкуренции с
+            гиперпараметрами моделей. Для ``isotonic_regression`` отбор
+            принудительно отключается (одномерный алгоритм).
 
     Returns:
         tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
             - best_model: Обученная модель с лучшими параметрами.
-            - best_params: Словарь найденных оптимальных гиперпараметров.
+            - best_params: Словарь найденных оптимальных гиперпараметров
+              (в режиме ``'auto'`` содержит служебный ключ
+              ``use_feature_selection`` с решением по отбору).
             - best_score: Лучшее значение метрики на валидации.
 
     Raises:
         ValueError: Если ``n_trials`` не является положительным целым числом.
         HyperoptError: Если для выбранного алгоритма не определено пространство
-            поиска.
+            поиска или передан невалидный ``feature_selection_cfg``.
     """
     # --- Формируем конфиг для использования внутри _objective ---
     oversampling_config: dict[str, Any] = {
@@ -568,6 +592,51 @@ def optimize(
     _validate_data(X, y)
 
     _get_estimator(algo)
+
+    # -------------------- 0.5 feature selection (issue #11) -------- #
+    # Нормализуем конфигурацию отбора признаков: None -> дефолт
+    # (mode='disabled'), dict -> FeatureSelectionCfg (валидация на этапе
+    # запуска), объект FeatureSelectionCfg -> как есть. Изотоническая
+    # регрессия строго одномерная и использует собственный
+    # IsotonicDataTransformer, поэтому для неё отбор принудительно
+    # отключается независимо от режима.
+    if feature_selection_cfg is None:
+        fs_cfg = FeatureSelectionCfg()
+    elif isinstance(feature_selection_cfg, FeatureSelectionCfg):
+        fs_cfg = feature_selection_cfg
+    elif isinstance(feature_selection_cfg, dict):
+        try:
+            fs_cfg = FeatureSelectionCfg.model_validate(feature_selection_cfg)
+        except Exception as err:
+            raise HyperoptError(f"Invalid feature_selection_cfg: {err}") from err
+    else:
+        raise TypeError(
+            "feature_selection_cfg must be a FeatureSelectionCfg, dict or None, "
+            f"got {type(feature_selection_cfg).__name__}"
+        )
+    fs_mode = fs_cfg.mode
+    is_isotonic = resolve_algorithm_name(algo) == "isotonic_regression"
+    log.info("Feature selection mode for algorithm '%s': %s", algo, fs_mode.value)
+
+    def fs_transformer_factory() -> FeatureSelector:
+        """Создать свежий экземпляр селектора признаков для шага пайплайна.
+
+        Каждый вызов возвращает новый ``FeatureSelector`` с детерминированным
+        ``random_state`` (согласован с финальным обучением ModelTrainer),
+        что гарантирует воспроизводимость отбора между триалами и потоками.
+        При ``random_state=None`` (полностью недетерминированный запуск Optuna)
+        отбор всё равно использует фиксированный seed 42: иначе каждый вызов
+        фабрики создавал бы селектор с новым случайным зерном, и отбор был бы
+        невоспроизводим даже при детерминированных остальных этапах пайплайна.
+        """
+        return FeatureSelector(
+            method=fs_cfg.method.value,
+            percentile=fs_cfg.percentile,
+            min_features=fs_cfg.min_features,
+            variance_threshold=fs_cfg.variance_threshold,
+            n_estimators=fs_cfg.n_estimators,
+            random_state=random_state if random_state is not None else 42,
+        )
 
     # -------------------- 1. стратегия CV -------------------------- #
     n_samples = len(y)
@@ -699,15 +768,27 @@ def optimize(
                 "(if any) will be treated as numeric."
             )
 
-    def _assemble_estimator(model_impl: Any) -> Any:
-        """Собрать пайплайн в порядке preprocessor -> [sampler] -> model.
+    def _assemble_estimator(model_impl: Any, apply_fs: bool = False) -> Any:
+        """Собрать пайплайн в порядке preprocessor -> [selector] -> [sampler] -> model.
 
         Оверсэмплинг получает уже закодированные числовые признаки (one-hot),
-        поэтому SMOTE/ADASYN всегда работают с числовыми данными.
+        поэтому SMOTE/ADASYN всегда работают с числовыми данными. Отбор
+        признаков активируется строго между препроцессором и оверсэмплером:
+        синтетические строки генерируются только для информативных признаков
+        (порядок согласован с ModelTrainer, issue #11).
+
+        Args:
+            model_impl: Базовый регрессор.
+            apply_fs: Флаг включения шага ``feature_selector``.
         """
         steps: list[tuple[str, Any]] = []
         if preprocessor is not None:
             steps.append(("preprocessor", preprocessor))
+        # Новый шаг: отбор признаков активируется строго между preprocessor
+        # и oversampler (issue #11). Фабрика селектора всегда определена
+        # (замыкание над fs_cfg), поэтому дополнительная проверка не нужна.
+        if apply_fs:
+            steps.append(("feature_selector", fs_transformer_factory()))
         if oversampling_config["active"]:
             steps.append(("sampler", DataOversampler(**oversampling_config["params"])))
         steps.append(("model", model_impl))
@@ -746,7 +827,28 @@ def optimize(
         model = create_model(algo, **params)
 
         # --- ШАГ 2: ПОДГОТОВКА ОБЕРТКИ (WRAPPER) ---
-        current_estimator = _assemble_estimator(model)
+        # Определение необходимости отбора признаков для текущего испытания:
+        # в режиме 'auto' Optuna сама исследует пространство решений
+        # (выгодно ли сокращать признаки), в 'always'/'disabled' решение
+        # жёстко следует конфигурации.
+        # Для isotonic_regression категория use_feature_selection не
+        # предлагается даже в режиме 'auto': отбор принудительно выключен
+        # (одномерный алгоритм со своим IsotonicDataTransformer), поэтому
+        # предложение было бы бессмысленным, а служебный ключ не должен
+        # попадать в best_params.
+        if fs_mode == FeatureSelectionMode.auto and not is_isotonic:
+            apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
+        elif fs_mode == FeatureSelectionMode.always:
+            apply_fs = True
+        else:
+            apply_fs = False
+        # Изотоническая регрессия требует ровно один признак и использует
+        # собственный IsotonicDataTransformer — отбор принудительно выключен
+        # (в т.ч. если 'always' или enqueued initial_params пронесли флаг).
+        if is_isotonic:
+            apply_fs = False
+
+        current_estimator = _assemble_estimator(model, apply_fs=apply_fs)
 
         # -------------------------------------------
         # Флаг «триал завершился фатальным сбоем». Счётчик consecutive_fatal_failures
@@ -877,7 +979,34 @@ def optimize(
 
     # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!
-    best_model = _assemble_estimator(create_model(algo, **study.best_params))
+    # Решение по отбору признаков берётся из study.best_params (mode='auto':
+    # ключ "use_feature_selection" уже зафиксирован Optuna) либо из режима
+    # конфигурации ('always' -> True, 'disabled' -> False). Для
+    # isotonic_regression отбор принудительно игнорируется.
+    best_apply_fs = bool(
+        study.best_params.get(
+            "use_feature_selection", fs_mode == FeatureSelectionMode.always
+        )
+    )
+    if is_isotonic:
+        best_apply_fs = False
+    # Для isotonic_regression служебный ключ исключается и из возвращаемого
+    # best_params (защита от initial_params, пронесённых через enqueue_trial
+    # из предыдущей фазы с ключом use_feature_selection).
+    if is_isotonic:
+        best_params = {
+            k: v for k, v in best_params.items() if k != "use_feature_selection"
+        }
+    # Параметры для конструктора базовой модели очищаются от служебного
+    # ключа тюнера ("use_feature_selection" не является гиперпараметром
+    # модели). Явное копирование: исходный study.best_params не мутируется,
+    # а ключ гарантированно не попадает в конструктор модели (issue #11).
+    clean_model_params = dict(study.best_params)
+    clean_model_params.pop("use_feature_selection", None)
+    best_model = _assemble_estimator(
+        create_model(algo, **clean_model_params),
+        apply_fs=best_apply_fs,
+    )
 
     best_model.fit(X, y)
 

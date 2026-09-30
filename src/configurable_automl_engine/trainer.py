@@ -956,7 +956,12 @@ class ModelTrainer:
                 min_features=cfg.min_features,
                 variance_threshold=cfg.variance_threshold,
                 n_estimators=cfg.n_estimators,
-                random_state=self.random_state,
+                # Фикс-фолбэк зерна отбора (согласован с тюнером и
+                # _check_auto_feature_selection): при random_state=None
+                # основного обучения селектор всё равно обязан использовать
+                # фиксированный seed 42, иначе отбор не воспроизводим между
+                # вызовами fit() и расходится с фазой HPO.
+                random_state=self.random_state if self.random_state is not None else 42,
             )
             steps.append(("feature_selector", selector))
         if self.os_enable:

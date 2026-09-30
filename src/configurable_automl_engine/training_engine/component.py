@@ -38,6 +38,8 @@ from configurable_automl_engine.preprocessing import detect_feature_types
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
     HPOPhaseCfg,
     ValidationStrategy,
     read_config,
@@ -63,6 +65,28 @@ def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
         for name in type(algorithms_cfg).model_fields
         if (algo_cfg := getattr(algorithms_cfg, name)) is not None
     }
+
+
+def _feature_selection_mode(
+    cfg: FeatureSelectionCfg | dict[str, Any] | None,
+) -> str | None:
+    """Извлечь строковое значение ``mode`` из конфигурации отбора признаков.
+
+    Args:
+        cfg: Объект ``FeatureSelectionCfg``, словарь конфигурации или ``None``.
+
+    Returns:
+        str | None: Режим ('disabled'/'always'/'auto') либо ``None``, если
+            конфигурация не задана или не содержит режима.
+    """
+    if isinstance(cfg, FeatureSelectionCfg):
+        return cfg.mode.value
+    if isinstance(cfg, dict):
+        mode = cfg.get("mode")
+        if isinstance(mode, FeatureSelectionMode):
+            return mode.value
+        return mode if isinstance(mode, str) else None
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -112,6 +136,7 @@ def _run_hpo(
     hashing_n_components: int = 16,
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
     """Запустить поиск оптимальных гиперпараметров для алгоритма.
     Логика работы:
@@ -145,6 +170,12 @@ def _run_hpo(
         pruning (dict[str, Any] | None): Настройки ранней остановки (pruning)
             из секции ``general.pruning``. Передаются только тюнерам, которые
             поддерживают аргумент ``pruning``; кастомные тюнеры не затрагиваются.
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): Конфигурация
+            отбора признаков из корневого ``Config.general.feature_selection``.
+            Передаётся только тюнерам, которые поддерживают аргумент
+            ``feature_selection_cfg`` или принимают ``**kwargs`` (сигнатура
+            проверяется через ``inspect.signature``); кастомные тюнеры не
+            затрагиваются.
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
             Кортеж (лучшая метрика, лучшие параметры)
@@ -160,6 +191,12 @@ def _run_hpo(
         raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
 
     sig = inspect.signature(tuner.optimize)
+    # Сигнатура с **kwargs считается совместимой (аналогично _fit_and_save):
+    # тюнер сам решает, что делать с лишними ключами, поэтому служебные
+    # аргументы отбора признаков можно безопасно прокидывать.
+    tuner_accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
     kwargs: dict[str, Any] = {
         "algo_name": algo_name,
         "X": X,
@@ -249,6 +286,22 @@ def _run_hpo(
     if "target_encoding_fallback" in sig.parameters:
         kwargs["target_encoding_fallback"] = target_encoding_fallback
 
+    # прокидываем конфигурацию отбора признаков (issue #11), если тюнер
+    # поддерживает аргумент `feature_selection_cfg` или принимает **kwargs;
+    # кастомные тюнеры без поддержки не затрагиваются. При активном режиме
+    # отбора предупреждаем о рассинхроне HPO ↔ финальный fit (аналогично
+    # encoding): конфигурация не будет применена в фазе поиска.
+    if "feature_selection_cfg" in sig.parameters or tuner_accepts_var_kwargs:
+        kwargs["feature_selection_cfg"] = feature_selection_cfg
+    elif _feature_selection_mode(feature_selection_cfg) not in (None, "disabled"):
+        _LOG.warning(
+            "Tuner %s does not accept `feature_selection_cfg`; feature "
+            "selection mode=%r will NOT be applied during HPO "
+            "(final fit may diverge).",
+            algo_cfg.tuner,
+            _feature_selection_mode(feature_selection_cfg),
+        )
+
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
         return best_score, best_params
@@ -297,27 +350,78 @@ def _fit_and_save(
             f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
         )
 
-    trainer = trainer_module.ModelTrainer(
-        algorithm=algo_name,
-        hyperparams=best_params,
-        metric=metric_name_sklearn,
+    # Решение победителя HPO по отбору признаков (issue #11): в режиме
+    # 'auto' ключ "use_feature_selection" зафиксирован в best_params Optuna;
+    # в режимах 'always'/'disabled' ключа нет -> None, и ModelTrainer сам
+    # разрешает активность по конфигурации. Служебный ключ извлекается из
+    # копии: исходный best_params (он же возвращается в result["params"]) не
+    # мутируется, а "use_feature_selection" гарантированно не попадает в
+    # гиперпараметры ModelTrainer (раньше выпадал только неявно через
+    # clean_hyperparameters).
+    trainer_params = dict(best_params)
+    fs_active = trainer_params.pop("use_feature_selection", None)
+
+    # Проверяем сигнатуру ModelTrainer (аналогично тюнерам в _run_hpo):
+    # кастомные тренеры без поддержки отбора признаков не должны получать
+    # новые аргументы (иначе TypeError). Сигнатура с **kwargs считается
+    # совместимой — тренер сам решает, что делать с лишними ключами.
+    trainer_sig = inspect.signature(trainer_module.ModelTrainer)
+    trainer_accepts_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in trainer_sig.parameters.values()
+    )
+    trainer_has_fs_cfg = "feature_selection_cfg" in trainer_sig.parameters
+    trainer_has_fs_active = "feature_selection_active" in trainer_sig.parameters
+
+    trainer_kwargs: dict[str, Any] = {
+        "algorithm": algo_name,
+        "hyperparams": trainer_params,
+        "metric": metric_name_sklearn,
         # Пробрасываем настройки оверсэмплинга из конфига в тренер
-        data_oversampling=cfg.oversampling.enable,
-        data_oversampling_multiplier=cfg.oversampling.multiplier,
-        data_oversampling_algorithm=cfg.oversampling.algorithm,
-        serialization_format=cfg.general.serialization_format,
-        encoding_strategy=cfg.general.categorical_encoding,
-        additional_metrics=cfg.general.additional_metrics,
+        "data_oversampling": cfg.oversampling.enable,
+        "data_oversampling_multiplier": cfg.oversampling.multiplier,
+        "data_oversampling_algorithm": cfg.oversampling.algorithm,
+        "serialization_format": cfg.general.serialization_format,
+        "encoding_strategy": cfg.general.categorical_encoding,
+        "additional_metrics": cfg.general.additional_metrics,
         # Явное переопределение пресета предобработки из конфига (FR-5):
         # применяется согласованно с фазой HPO (AC-7).
-        preprocessing_override=getattr(algo_cfg, "preprocessing", None),
+        "preprocessing_override": getattr(algo_cfg, "preprocessing", None),
         # Параметры high-cardinality кодирования и новых стратегий (issue #20)
-        high_cardinality_threshold=cfg.general.high_cardinality_threshold,
-        high_cardinality_encoding=cfg.general.high_cardinality_encoding,
-        hashing_n_components=cfg.general.hashing_n_components,
-        target_encoding_smoothing=cfg.general.target_encoding_smoothing,
-        target_encoding_fallback=cfg.general.target_encoding_fallback,
-    )
+        "high_cardinality_threshold": cfg.general.high_cardinality_threshold,
+        "high_cardinality_encoding": cfg.general.high_cardinality_encoding,
+        "hashing_n_components": cfg.general.hashing_n_components,
+        "target_encoding_smoothing": cfg.general.target_encoding_smoothing,
+        "target_encoding_fallback": cfg.general.target_encoding_fallback,
+    }
+    # Отбор признаков: конфигурация из корневого Config + решение
+    # победителя HPO (issue #11). Аргументы передаются только тренерам,
+    # которые их поддерживают; при активном режиме отбора предупреждаем
+    # о молчаливом игнорировании.
+    if trainer_has_fs_cfg or trainer_accepts_var_kwargs:
+        trainer_kwargs["feature_selection_cfg"] = cfg.general.feature_selection
+    elif _feature_selection_mode(cfg.general.feature_selection) not in (
+        None,
+        "disabled",
+    ):
+        _LOG.warning(
+            "ModelTrainer %s does not accept `feature_selection_cfg`; "
+            "feature selection mode=%r will NOT be applied in the final fit.",
+            algo_cfg.trainer_module,
+            _feature_selection_mode(cfg.general.feature_selection),
+        )
+
+    if trainer_has_fs_active or trainer_accepts_var_kwargs:
+        trainer_kwargs["feature_selection_active"] = fs_active
+    elif fs_active is not None:
+        _LOG.warning(
+            "ModelTrainer %s does not accept `feature_selection_active`; "
+            "the HPO decision use_feature_selection=%r will NOT be applied "
+            "in the final fit.",
+            algo_cfg.trainer_module,
+            fs_active,
+        )
+
+    trainer = trainer_module.ModelTrainer(**trainer_kwargs)
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
@@ -478,6 +582,7 @@ def train_best_model(
                 hashing_n_components=cfg.general.hashing_n_components,
                 target_encoding_smoothing=cfg.general.target_encoding_smoothing,
                 target_encoding_fallback=cfg.general.target_encoding_fallback,
+                feature_selection_cfg=cfg.general.feature_selection,
             )
 
             if result is None:

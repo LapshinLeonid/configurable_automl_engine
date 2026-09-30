@@ -1992,6 +1992,50 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
     assert mocked_split.call_args.kwargs["random_state"] == 42
 
 
+def test_feature_selection_selector_seed_fallback_when_random_state_none():
+    """random_state=None тренера: FeatureSelector получает фикс. seed 42.
+
+    Согласовано с тюнером (fs_transformer_factory) и auto-check: при
+    None-зерне основного обучения селектор обязан использовать
+    фиксированный seed-фолбэк, иначе отбор невоспроизводим между вызовами
+    fit() и расходится с фазой HPO.
+    """
+    X, y = _fs_dataset()
+    tr = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={"mode": "always", "method": "percentile"},
+        random_state=None,
+    )
+
+    with patch(
+        "configurable_automl_engine.trainer.FeatureSelector",
+        wraps=trainer.FeatureSelector,
+    ) as mock_fs:
+        tr.fit(X, y)
+
+    assert mock_fs.called
+    assert mock_fs.call_args.kwargs["random_state"] == 42
+
+
+def test_feature_selection_selector_uses_explicit_random_state_when_set():
+    """Явный random_state тренера пробрасывается селектору как есть."""
+    X, y = _fs_dataset()
+    tr = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={"mode": "always", "method": "percentile"},
+        random_state=7,
+    )
+
+    with patch(
+        "configurable_automl_engine.trainer.FeatureSelector",
+        wraps=trainer.FeatureSelector,
+    ) as mock_fs:
+        tr.fit(X, y)
+
+    assert mock_fs.called
+    assert mock_fs.call_args.kwargs["random_state"] == 7
+
+
 # ──────────────────────────────────────────────────────────────────────────
 #  FeatureSelector unit tests (public API, issue #31 dependency)
 # ──────────────────────────────────────────────────────────────────────────

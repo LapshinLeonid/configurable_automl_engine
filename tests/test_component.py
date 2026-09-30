@@ -3,6 +3,12 @@ import pandas as pd
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
+import inspect
+
+import numpy as np
+from sklearn.datasets import make_regression
+
+from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import (
     _run_hpo,
     _fit_and_save,
@@ -11,6 +17,8 @@ from configurable_automl_engine.training_engine.component import (
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     AlgoCfg,
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
     ValidationStrategy,
 )
 from configurable_automl_engine.tuner import InvalidAlgorithmError
@@ -1055,3 +1063,644 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
     num = transformers["num"]
     assert isinstance(num.named_steps["scaler"], StandardScaler)
     assert num.named_steps["imputer"].strategy == "mean"
+
+
+# --------------------------------------------------------------------------- #
+#  Feature selection integration (issue #11)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
+    """feature_selection_cfg из корневого Config пробрасывается в tuner.optimize."""
+    received: dict[str, object] = {}
+
+    class FsAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            feature_selection_cfg=None,
+        ):
+            received["feature_selection_cfg"] = feature_selection_cfg
+            return ("model", {"param": 1}, 0.95)
+
+    fs_cfg = FeatureSelectionCfg(mode=FeatureSelectionMode.always)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=FsAwareTuner()):
+        score, params = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            feature_selection_cfg=fs_cfg,
+        )
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    assert received["feature_selection_cfg"] is fs_cfg
+
+
+def test_run_hpo_skips_feature_selection_cfg_for_legacy_tuner():
+    """Кастомный тюнер без аргумента feature_selection_cfg не затрагивается."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["fs_passed"] = "feature_selection_cfg" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            feature_selection_cfg=FeatureSelectionCfg(
+                mode=FeatureSelectionMode.always
+            ),
+        )
+
+    assert result == (0.5, {})
+    assert calls["fs_passed"] is False
+
+
+def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
+    """A1: legacy-тюнер + активный режим отбора -> warning о рассинхроне."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["fs_passed"] = "feature_selection_cfg" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        with caplog.at_level("WARNING", logger="training_engine"):
+            result = _run_hpo(
+                algo_name="test_algo",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1]}),
+                y=pd.Series([1]),
+                metric_name_sklearn="mae",
+                n_trials=1,
+                validation_strategy=ValidationStrategy.k_fold,
+                feature_selection_cfg=FeatureSelectionCfg(
+                    mode=FeatureSelectionMode.always
+                ),
+            )
+
+    # Тюнер не затрагивается, но пользователь предупреждён
+    assert result == (0.5, {})
+    assert calls["fs_passed"] is False
+    assert "does not accept `feature_selection_cfg`" in caplog.text
+    assert "will NOT be applied during HPO" in caplog.text
+
+
+def test_run_hpo_no_warning_when_fs_disabled_for_legacy_tuner(caplog):
+    """A1: режим 'disabled' (или None) для legacy-тюнера — warning не нужен."""
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        with caplog.at_level("WARNING", logger="training_engine"):
+            _run_hpo(
+                algo_name="test_algo",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1]}),
+                y=pd.Series([1]),
+                metric_name_sklearn="mae",
+                n_trials=1,
+                validation_strategy=ValidationStrategy.k_fold,
+                feature_selection_cfg=FeatureSelectionCfg(),  # disabled по умолчанию
+            )
+
+    assert "does not accept `feature_selection_cfg`" not in caplog.text
+
+
+def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
+    """A1: тюнер с **kwargs считается совместимым (симметрия с _fit_and_save).
+
+    Раньше ``_run_hpo`` проверял только наличие имени ``feature_selection_cfg``
+    в сигнатуре, поэтому тюнер с ``**kwargs`` получал вводящий в заблуждение
+    warning о рассинхроне, хотя конфигурацию можно было безопасно прокинуть —
+    при активном режиме отбора это приводило к молчаливому рассинхрону
+    HPO ↔ финальный fit.
+    """
+    received: dict[str, object] = {}
+
+    class VarKwargsTuner:
+        def optimize(
+            self, algo_name, X, y, metric, n_trials, validation_strategy, **kwargs
+        ):
+            received["feature_selection_cfg"] = kwargs.get("feature_selection_cfg")
+            return ("model", {"param": 1}, 0.95)
+
+    fs_cfg = FeatureSelectionCfg(mode=FeatureSelectionMode.always)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.var_kwargs.module"
+    with patch("importlib.import_module", return_value=VarKwargsTuner()):
+        with caplog.at_level("WARNING", logger="training_engine"):
+            score, params = _run_hpo(
+                algo_name="test_algo",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1, 2, 3]}),
+                y=pd.Series([1, 2, 3]),
+                metric_name_sklearn="mae",
+                n_trials=1,
+                validation_strategy=ValidationStrategy.k_fold,
+                feature_selection_cfg=fs_cfg,
+            )
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    # Конфигурация доставлена через **kwargs, warning о рассинхроне отсутствует
+    assert received["feature_selection_cfg"] is fs_cfg
+    assert "does not accept `feature_selection_cfg`" not in caplog.text
+
+
+def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
+    """A1: тюнер с **kwargs получает конфигурацию и в режиме 'disabled'."""
+    received: dict[str, object] = {}
+
+    class VarKwargsTuner:
+        def optimize(
+            self, algo_name, X, y, metric, n_trials, validation_strategy, **kwargs
+        ):
+            received["feature_selection_cfg"] = kwargs.get("feature_selection_cfg")
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.var_kwargs.module"
+    with patch("importlib.import_module", return_value=VarKwargsTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            feature_selection_cfg=FeatureSelectionCfg(),  # disabled по умолчанию
+        )
+
+    assert result == (0.5, {})
+    assert isinstance(received["feature_selection_cfg"], FeatureSelectionCfg)
+    assert received["feature_selection_cfg"].mode == FeatureSelectionMode.disabled
+
+
+def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
+    """_fit_and_save передаёт feature_selection_cfg и feature_selection_active."""
+    mock_trainer_cls = Mock()
+    mock_trainer_instance = mock_trainer_cls.return_value
+    mock_trainer_instance.additional_scores = {}
+
+    algo_cfg = AlgoCfg(
+        enable=True,
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
+        hyperparameters=None,
+    )
+    cfg = Config.model_validate(
+        {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "k_fold",
+                "n_folds": 2,
+                "phases": [
+                    {
+                        "name": "fast",
+                        "n_trials": 2,
+                        "action": "all_algorithms",
+                    }
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "mock.mock_tuner",
+                    "trainer_module": "mock.mock_trainer",
+                }
+            },
+        }
+    )
+
+    best_params = {
+        "n_estimators": 100,
+        "use_feature_selection": True,
+    }
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=Mock(ModelTrainer=mock_trainer_cls),
+    ):
+        _fit_and_save(
+            algo_name="random_forest",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            y=pd.Series([1, 2, 3]),
+            best_params=best_params,
+            model_path=Path("mod.pkl"),
+            cfg=cfg,
+        )
+
+    call_kwargs = mock_trainer_cls.call_args.kwargs
+    assert call_kwargs["feature_selection_active"] is True
+    assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
+    assert isinstance(call_kwargs["feature_selection_cfg"], FeatureSelectionCfg)
+    # B5: служебный ключ вычищен из гиперпараметров тренера
+    assert "use_feature_selection" not in call_kwargs["hyperparams"]
+    # Исходный best_params (возвращается в result["params"]) не мутирован
+    assert "use_feature_selection" in best_params
+    mock_trainer_instance.fit.assert_called_once()
+    mock_trainer_instance.save.assert_called_once()
+
+
+def test_fit_and_save_fs_active_none_when_key_absent():
+    """Без ключа use_feature_selection тренеру передаётся None (решение по конфигу)."""
+    mock_trainer_cls = Mock()
+    mock_trainer_instance = mock_trainer_cls.return_value
+    mock_trainer_instance.additional_scores = {}
+
+    algo_cfg = AlgoCfg(
+        enable=True,
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
+        hyperparameters=None,
+    )
+    cfg = Config.model_validate(
+        {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "k_fold",
+                "n_folds": 2,
+                "phases": [
+                    {
+                        "name": "fast",
+                        "n_trials": 2,
+                        "action": "all_algorithms",
+                    }
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "mock.mock_tuner",
+                    "trainer_module": "mock.mock_trainer",
+                }
+            },
+        }
+    )
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=Mock(ModelTrainer=mock_trainer_cls),
+    ):
+        _fit_and_save(
+            algo_name="random_forest",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            y=pd.Series([1, 2, 3]),
+            best_params={"n_estimators": 50},
+            model_path=Path("mod.pkl"),
+            cfg=cfg,
+        )
+
+    call_kwargs = mock_trainer_cls.call_args.kwargs
+    assert call_kwargs["feature_selection_active"] is None
+    assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
+
+
+def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
+    """B5: путь «auto → победитель выбрал False» в финальной сборке модели.
+
+    Если Optuna зафиксировала use_feature_selection=False в best_params
+    победителя, ``_fit_and_save`` обязан передать тренеру
+    feature_selection_active=False (а не None/True) и вычистить служебный
+    ключ из гиперпараметров.
+    """
+    mock_trainer_cls = Mock()
+    mock_trainer_instance = mock_trainer_cls.return_value
+    mock_trainer_instance.additional_scores = {}
+
+    algo_cfg = AlgoCfg(
+        enable=True,
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
+        hyperparameters=None,
+    )
+    cfg = Config.model_validate(_fs_cfg_dict("auto"))
+
+    best_params = {
+        "n_estimators": 100,
+        "use_feature_selection": False,
+    }
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=Mock(ModelTrainer=mock_trainer_cls),
+    ):
+        _fit_and_save(
+            algo_name="random_forest",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+            y=pd.Series([1, 2, 3]),
+            best_params=best_params,
+            model_path=Path("mod.pkl"),
+            cfg=cfg,
+        )
+
+    call_kwargs = mock_trainer_cls.call_args.kwargs
+    assert call_kwargs["feature_selection_active"] is False
+    assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
+    # Служебный ключ вычищен из гиперпараметров тренера
+    assert "use_feature_selection" not in call_kwargs["hyperparams"]
+    # Исходный best_params (возвращается в result["params"]) не мутирован
+    assert best_params["use_feature_selection"] is False
+
+
+class _LegacyTrainerNoFs:
+    """Кастомный ModelTrainer БЕЗ аргументов отбора признаков (A2).
+
+    Сигнатура покрывает все «старые» аргументы, которые передаёт
+    ``_fit_and_save``, но не содержит ``feature_selection_cfg`` /
+    ``feature_selection_active`` и не принимает ``**kwargs`` — раньше такой
+    тренер падал бы с TypeError.
+    """
+
+    def __init__(
+        self,
+        algorithm="elasticnet",
+        hyperparams=None,
+        metric="r2",
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        serialization_format="pickle",
+        encoding_strategy="one_hot",
+        additional_metrics=None,
+        preprocessing_override=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+    ):
+        self.hyperparams = dict(hyperparams or {})
+        self.additional_scores = {}
+
+    def fit(self, X, y):
+        return self
+
+    def save(self, path):
+        return None
+
+
+def _fs_cfg_dict(mode: str) -> dict:
+    """Валидный конфиг Config с указанным режимом отбора признаков."""
+    return {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "k_fold",
+            "n_folds": 2,
+            "phases": [
+                {"name": "fast", "n_trials": 2, "action": "all_algorithms"}
+            ],
+            "path_to_model": "model.pkl",
+            "feature_selection": {"mode": mode},
+        },
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "tuner": "mock.mock_tuner",
+                "trainer_module": "mock.mock_trainer",
+            }
+        },
+    }
+
+
+def test_feature_selection_mode_helper():
+    """_feature_selection_mode: FeatureSelectionCfg/dict/None -> строка режима."""
+    from configurable_automl_engine.training_engine.component import (
+        _feature_selection_mode,
+    )
+
+    assert _feature_selection_mode(None) is None
+    assert _feature_selection_mode({}) is None
+    assert _feature_selection_mode({"mode": "always"}) == "always"
+    assert _feature_selection_mode({"mode": FeatureSelectionMode.auto}) == "auto"
+    assert _feature_selection_mode(FeatureSelectionCfg()) == "disabled"
+    assert _feature_selection_mode(FeatureSelectionCfg(mode=FeatureSelectionMode.always)) == "always"
+    assert _feature_selection_mode("not-a-cfg") is None
+
+
+def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
+    """A2: legacy ModelTrainer без fs-аргументов не получает их (warning).
+
+    Раньше ``_fit_and_save`` передавал ``feature_selection_cfg`` /
+    ``feature_selection_active`` безусловно -> TypeError для кастомных
+    тренеров без этих аргументов.
+    """
+    algo_cfg = AlgoCfg(
+        enable=True,
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
+        hyperparameters=None,
+    )
+    cfg = Config.model_validate(_fs_cfg_dict("always"))
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
+    ):
+        with caplog.at_level("WARNING", logger="training_engine"):
+            trainer = _fit_and_save(
+                algo_name="random_forest",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+                y=pd.Series([1, 2, 3]),
+                best_params={"n_estimators": 50, "use_feature_selection": True},
+                model_path=tmp_path / "mod.pkl",
+                cfg=cfg,
+            )
+
+    # Обучение/сохранение прошли без TypeError, служебный ключ вычищен
+    assert isinstance(trainer, _LegacyTrainerNoFs)
+    assert trainer.hyperparams == {"n_estimators": 50}
+    # Пользователь предупреждён о молчаливом игнорировании обоих аргументов
+    assert "does not accept `feature_selection_cfg`" in caplog.text
+    assert "does not accept `feature_selection_active`" in caplog.text
+
+
+def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
+    caplog, tmp_path
+):
+    """A2: режим 'disabled' для legacy-тренера — предупреждений нет."""
+    algo_cfg = AlgoCfg(
+        enable=True,
+        tuner="mock.mock_tuner",
+        trainer_module="mock.mock_trainer",
+        hyperparameters=None,
+    )
+    cfg = Config.model_validate(_fs_cfg_dict("disabled"))
+
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
+    ):
+        with caplog.at_level("WARNING", logger="training_engine"):
+            _fit_and_save(
+                algo_name="random_forest",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
+                y=pd.Series([1, 2, 3]),
+                best_params={"n_estimators": 50},
+                model_path=tmp_path / "mod.pkl",
+                cfg=cfg,
+            )
+
+    assert "does not accept `feature_selection_cfg`" not in caplog.text
+    assert "does not accept `feature_selection_active`" not in caplog.text
+
+
+def test_refine_winner_preserves_feature_selection_status_between_phases():
+    """Статус отбора (use_feature_selection) из фазы 1 не теряется в фазе 2."""
+    config_dict = {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "train_test_split",
+            "phases": [
+                {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+            ],
+            "path_to_model": "model.pkl",
+            "feature_selection": {"mode": "auto", "method": "importance"},
+        },
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            }
+        },
+        "oversampling": {"enable": False},
+    }
+
+    df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+    call_count = 0
+
+    def hpo_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Phase 1: победитель зафиксировал use_feature_selection=True
+            return 0.8, {"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True}
+        # Phase 2: initial_params обязан содержать статус отбора из фазы 1
+        assert kwargs.get("initial_params") == {
+            "alpha": 0.5,
+            "l1_ratio": 0.3,
+            "use_feature_selection": True,
+        }, f"expected fs status in initial_params, got {kwargs.get('initial_params')}"
+        return 0.9, {"alpha": 0.6, "l1_ratio": 0.4, "use_feature_selection": True}
+
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.component._run_hpo",
+            side_effect=hpo_side_effect,
+        ) as mock_hpo,
+        patch(
+            "configurable_automl_engine.training_engine.component._fit_and_save"
+        ) as mock_save,
+    ):
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+    # Финальный победитель сохранил решение по отбору из обеих фаз
+    assert result["params"]["use_feature_selection"] is True
+    assert mock_hpo.call_count == 2
+    # _fit_and_save получил параметры победителя с сохранённым статусом отбора.
+    # Аргументы маппятся по сигнатуре функции, а не по позиции
+    # (call_args.args[4] хрупок при добавлении новых параметров).
+    fit_sig = inspect.signature(_fit_and_save)
+    fit_call = dict(zip(fit_sig.parameters, mock_save.call_args.args))
+    fit_call.update(mock_save.call_args.kwargs)
+    fs_active = fit_call["best_params"].get("use_feature_selection", None)
+    assert fs_active is True
+
+
+def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
+    """E2E «тюнер→компонент→тренер» в auto-режиме отбора признаков.
+
+    Реальный tuner.optimize (mode='auto') -> train_best_model -> реальный
+    ModelTrainer: решение Optuna по use_feature_selection доезжает до
+    финальной сборки модели — фактический статус отбора тренера совпадает
+    с best_params победителя, а пайплайн содержит/не содержит шаг
+    feature_selector согласованно.
+    """
+    rng = np.random.RandomState(7)
+    X_info, y = make_regression(
+        n_samples=200,
+        n_features=2,
+        n_informative=2,
+        noise=0.15,
+        random_state=7,
+    )
+    X_noise = rng.normal(size=(X_info.shape[0], 12))
+    X = np.hstack([X_info, X_noise])
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+    df["target"] = y
+
+    model_path = tmp_path / "e2e_auto.pkl"
+    config_dict = {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "train_test_split",
+            "n_folds": 2,
+            "phases": [
+                {"name": "auto_fs", "n_trials": 3, "action": "all_algorithms"}
+            ],
+            "path_to_model": str(model_path),
+            "feature_selection": {"mode": "auto", "method": "importance"},
+        },
+        "algorithms": {
+            "elasticnet": {"enable": True},
+        },
+        "oversampling": {"enable": False},
+    }
+
+    result = train_best_model(config=config_dict, df=df, target="target")
+
+    assert result["algorithm"] == "elasticnet"
+    assert isinstance(result["score"], float)
+    # В auto-режиме решение Optuna по отбору сохраняется в best_params
+    assert isinstance(result["params"].get("use_feature_selection"), bool)
+    assert model_path.exists()
+
+    loaded = ModelTrainer.load(str(model_path))
+    assert loaded.pipeline is not None
+    # Решение победителя HPO применено в финальной сборке модели
+    assert loaded.feature_selection_active_ is result["params"]["use_feature_selection"]
+    if loaded.feature_selection_active_:
+        assert "feature_selector" in loaded.pipeline.named_steps
+    else:
+        assert "feature_selector" not in loaded.pipeline.named_steps
