@@ -180,7 +180,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     #  Пункт 1: Переопределение fit_resample для обхода _check_X_y       #
     # ------------------------------------------------------------------ #
 
-    def fit_resample(self, X, y, **params):  # type: ignore[override]
+    def fit_resample(self, X: Any, y: Any, **params: Any) -> tuple[Any, Any]:
         """Выполнить ресемплирование, минуя _check_X_y (validate_data).
 
         Родительский ``BaseSampler.fit_resample`` → ``SamplerMixin.fit_resample``

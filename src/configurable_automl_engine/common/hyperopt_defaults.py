@@ -80,7 +80,7 @@ class SearchSpaceEntry(BaseModel):
     """
 
     config: Annotated[
-        CategoricalSpace | FloatSpace | IntSpace, Field(discriminator="type")
+        CategoricalSpace[Any] | FloatSpace | IntSpace, Field(discriminator="type")
     ]
 
     @model_validator(mode="before")

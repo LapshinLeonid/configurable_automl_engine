@@ -562,6 +562,58 @@ def test_invalid_n_estimators_raises_value_error():
         selector.fit(X, np.arange(10, dtype=float))
 
 
+@pytest.mark.parametrize("threshold", [-0.1, -1.0, -100.0])
+def test_invalid_negative_variance_threshold_raises_value_error(threshold):
+    """Отрицательный variance_threshold -> ValueError (ревью PR #8).
+
+    Регрессия: отрицательный порог не имеет смысла для VarianceThreshold и
+    приводил к тихому удалению всех колонок; теперь отклоняется на fit()
+    с понятным сообщением.
+    """
+    selector = FeatureSelector(method="variance", variance_threshold=threshold)
+    X = np.random.default_rng(0).normal(size=(10, 4))
+    with pytest.raises(ValueError, match="variance_threshold"):
+        selector.fit(X)
+
+
+def test_refit_on_columnless_input_drops_stale_feature_names_in():
+    """Повторный fit на входе без имён удаляет устаревшие feature_names_in_.
+
+    Регрессия (ревью PR #8): после fit на DataFrame последующий fit на
+    ndarray оставлял feature_names_in_ от DataFrame, из-за чего transform
+    позиционно корректного массива некорректно сверял «имена» и падал либо
+    брал не те колонки.
+    """
+    rng = np.random.default_rng(6)
+    df = pd.DataFrame(
+        np.column_stack([rng.normal(size=40), rng.normal(size=40), np.ones(40)]),
+        columns=["a", "b", "const"],
+    )
+    arr = np.asarray(df)
+
+    selector = FeatureSelector(
+        method="variance", variance_threshold=0.0, min_features=1
+    )
+    selector.fit(df)
+    assert hasattr(selector, "feature_names_in_")
+    # Константная колонка отсечена, вариативные остаются.
+    assert list(selector.get_support()) == [True, True, False]
+
+    # Повторный fit на ndarray (без имён): устаревшие имена удаляются,
+    # transform на массиве работает без сверки имён.
+    selector.fit(arr)
+    assert not hasattr(selector, "feature_names_in_")
+    Xt = selector.transform(arr)
+    assert Xt.shape == (40, 2)
+
+    # Обратный переход: fit на DataFrame снова фиксирует имена.
+    selector.fit(df)
+    assert hasattr(selector, "feature_names_in_")
+    np.testing.assert_array_equal(
+        selector.feature_names_in_, np.asarray(["a", "b", "const"], dtype=object)
+    )
+
+
 def test_sparse_mutual_info_rejects_continuous_features():
     """float-sparse + mutual_info -> понятный ValueError (не cryptic-ошибка sklearn).
 

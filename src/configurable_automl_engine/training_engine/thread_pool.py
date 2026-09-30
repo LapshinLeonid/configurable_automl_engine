@@ -282,7 +282,7 @@ def _worker_proxy(
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     disk_indices: list[int] | None,
-    shm_info: dict[int, tuple],
+    shm_info: dict[int, tuple[Any, ...]],
 ) -> Any:
     """Десериализовать данные и выполнить целевую функцию внутри воркера.
     Логика выполнения:
@@ -368,7 +368,7 @@ def _perform_cleanup(
             logger.error(f"Unexpected persistence cleanup error: {e}")
 
 
-def _force_shutdown_processes(pool, shutdown_grace_period=5.0):
+def _force_shutdown_processes(pool: Any, shutdown_grace_period: float = 5.0) -> None:
     """Принудительное завершение всех процессов в пуле.
 
     Используется watchdog-механизмом при обнаружении зависших задач
@@ -538,7 +538,7 @@ def run_parallel(
         pool = executor_cls(max_workers)
 
         future_to_idx = {}
-        submit_time_by_future: dict[Future, float] = {}
+        submit_time_by_future: dict[Future[Any], float] = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes" and (shared_args_indices or disk_args_indices):
                 fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
@@ -548,7 +548,7 @@ def run_parallel(
             submit_time_by_future[fut] = time.time()
 
         # Абсолютные дедлайны для каждой задачи (от времени submit)
-        deadline_by_future: dict[Future, float] = {}
+        deadline_by_future: dict[Future[Any], float] = {}
         for fut, idx in future_to_idx.items():
             task_t = task_timeout or float("inf")
             deadline_by_future[fut] = (

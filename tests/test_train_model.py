@@ -13,6 +13,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.exceptions import NotFittedError
 
 
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
@@ -1431,3 +1432,651 @@ def test_predict_legacy_positional_preprocessor_fixed_by_alignment():
 
     reordered = trainer.predict(X[["num", "cat"]])
     assert np.allclose(reordered, baseline)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Feature selection integration in ModelTrainer (issue #31)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _fs_dataset(
+    seed: int = 42, n: int = 120, p: int = 10, noise_sigma: float = 0.1
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Синтетический DataFrame в стиле существующих тестов:
+    первый признак информативен, остальные — независимый шум."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(rng.normal(size=(n, p)))
+    y = pd.Series(X[0] * 2.0 + rng.normal(0, noise_sigma, n))
+    return X, y
+
+
+def _fs_noisy_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
+    """90% шумных признаков: только первый признак связан с таргетом."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(rng.normal(size=(200, 10)))
+    y = pd.Series(X[0] * 3.0 + rng.normal(0, 0.3, 200))
+    return X, y
+
+
+def _fs_all_important_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
+    """Все признаки критически важны: удаление любого ломает качество."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(rng.normal(size=(200, 10)))
+    y = pd.Series(sum(X[i] for i in range(10)) + rng.normal(0, 0.1, 200))
+    return X, y
+
+
+def test_feature_selection_always_present_and_reduces_features():
+    """Режим always: шаг feature_selector присутствует, модель получает
+    меньше признаков, чем отдаёт препроцессор."""
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+    assert trainer.feature_selection_active_ is True
+
+    pre_n = trainer.pipeline.named_steps["preprocessor"].transform(X).shape[1]
+    model_n = trainer.pipeline.named_steps["model"].n_features_in_
+    assert model_n < pre_n
+
+
+def test_feature_selection_disabled_default_identical_to_baseline():
+    """Режим disabled (по умолчанию): селектор отсутствует, поведение
+    полностью идентично тренеру без параметров отбора."""
+    X, y = _fs_dataset()
+    baseline = ModelTrainer(algorithm="ridge").fit(X, y)
+    trainer = ModelTrainer(
+        algorithm="ridge", feature_selection_cfg={"mode": "disabled"}
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+    assert trainer.feature_selection_active_ is False
+    assert trainer.selected_features_mask_ is None
+    assert baseline.val_score == trainer.val_score
+    assert np.array_equal(baseline.predict(X), trainer.predict(X))
+
+    # Дефолт конструктора — тоже disabled.
+    default_trainer = ModelTrainer(algorithm="ridge").fit(X, y)
+    assert "feature_selector" not in default_trainer.pipeline.named_steps
+
+
+def test_feature_selection_explicit_flag_overrides_config():
+    """Явный флаг feature_selection_active имеет приоритет над конфигом."""
+    X, y = _fs_dataset()
+
+    # active=True поверх mode='disabled' → селектор включён.
+    on = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={"mode": "disabled"},
+        feature_selection_active=True,
+    ).fit(X, y)
+    assert on.pipeline is not None
+    assert "feature_selector" in on.pipeline.named_steps
+    assert on.feature_selection_active_ is True
+
+    # active=False поверх mode='always' → селектор выключен.
+    off = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={"mode": "always"},
+        feature_selection_active=False,
+    ).fit(X, y)
+    assert off.pipeline is not None
+    assert "feature_selector" not in off.pipeline.named_steps
+    assert off.feature_selection_active_ is False
+
+
+def test_feature_selection_auto_noisy_activates():
+    """Standalone auto: на данных с 90% шумных признаков отбор включается."""
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    ).fit(X, y)
+
+    assert trainer.feature_selection_active_ is True
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+
+
+def test_feature_selection_auto_all_important_disables():
+    """Standalone auto: когда все признаки важны, отбор деактивируется."""
+    X, y = _fs_all_important_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    ).fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert trainer.pipeline is not None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+
+
+def test_feature_selection_auto_logs_info_message(caplog):
+    """INFO-лог автономной проверки строго в заданном формате."""
+    X, y = _fs_noisy_dataset()
+    with caplog.at_level(logging.INFO, logger="configurable_automl_engine.trainer"):
+        ModelTrainer(
+            algorithm="knn",
+            hyperparams={"n_neighbors": 20},
+            feature_selection_cfg={
+                "mode": "auto",
+                "method": "percentile",
+                "percentile": 10.0,
+                "min_features": 1,
+            },
+            random_state=7,
+        ).fit(X, y)
+
+    assert re.search(
+        r"Standalone feature selection auto-check: score_full=\d+\.\d{4}, "
+        r"score_reduced=\d+\.\d{4} -> active=(True|False)",
+        caplog.text,
+    )
+
+
+def test_feature_selection_isotonic_forced_disabled(caplog):
+    """IsotonicRegression: отбор принудительно отключается, обучение проходит."""
+    X = pd.DataFrame({"f": np.linspace(0, 10, 60)})
+    y = pd.Series(np.linspace(0, 10, 60) ** 2)
+
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+        trainer = ModelTrainer(
+            algorithm="isotonic", feature_selection_cfg={"mode": "always"}
+        ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+    assert trainer.feature_selection_active_ is False
+    assert "IsotonicRegression" in caplog.text
+    preds = trainer.predict(X)
+    assert len(preds) == len(y)
+
+
+def test_feature_selection_step_order_with_oversampler():
+    """Порядок шагов: preprocessor → feature_selector → oversampler → model."""
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(80, 6)))
+    y = pd.Series(np.where(X[0] > 0, 1.0, 0.0))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        data_oversampling=True,
+        data_oversampling_algorithm="random",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    step_names = [name for name, _ in trainer.pipeline.steps]
+    assert step_names == ["preprocessor", "feature_selector", "oversampler", "model"]
+
+
+def test_feature_selection_mask_state():
+    """Маска selected_features_mask_ корректна при отборе и None без него."""
+    X, y = _fs_dataset()
+
+    sel = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    ).fit(X, y)
+    assert sel.selected_features_mask_ is not None
+    pre_n = sel.pipeline.named_steps["preprocessor"].transform(X).shape[1]
+    assert len(sel.selected_features_mask_) == pre_n
+    assert sel.selected_features_mask_.sum() < pre_n
+    assert sel.selected_features_mask_.dtype == bool
+
+    no_sel = ModelTrainer(algorithm="ridge").fit(X, y)
+    assert no_sel.selected_features_mask_ is None
+
+
+def test_feature_selection_save_load_roundtrip(tmp_path):
+    """Save/load roundtrip (.pkl и .joblib): predict идентичен до машинного нуля."""
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    ).fit(X, y)
+    baseline = trainer.predict(X)
+
+    pkl_path = tmp_path / "fs_model.pkl"
+    trainer.save(pkl_path)
+    restored_pkl = ModelTrainer.load(pkl_path)
+    assert np.array_equal(restored_pkl.predict(X), baseline)
+    assert np.array_equal(
+        restored_pkl.selected_features_mask_, trainer.selected_features_mask_
+    )
+    assert restored_pkl.feature_selection_active_ is True
+    assert restored_pkl.feature_selection_cfg.mode == "always"
+
+    joblib_path = tmp_path / "fs_model.joblib"
+    trainer.serialization_format = SerializationFormat.joblib
+    trainer.save(joblib_path)
+    restored_joblib = ModelTrainer.load(
+        joblib_path, fmt=SerializationFormat.joblib
+    )
+    assert np.array_equal(restored_joblib.predict(X), baseline)
+
+
+@pytest.mark.parametrize(
+    "bad_cfg",
+    [
+        5,
+        "string",
+        {"percentile": 150},
+        {"percentile": 0},
+        {"method": "pca"},
+        {"mode": "magic"},
+        {"unknown_param": 1},
+    ],
+)
+def test_feature_selection_cfg_invalid_rejected_at_init(bad_cfg):
+    """Невалидный feature_selection_cfg отклоняется на этапе __init__."""
+    with pytest.raises(TrainingError, match="feature_selection_cfg"):
+        ModelTrainer(feature_selection_cfg=bad_cfg)
+
+
+@pytest.mark.parametrize("bad_flag", ["false", "true", "yes", "disabled", 1, 0, 1.0])
+def test_feature_selection_active_invalid_type_rejected_at_init(bad_flag):
+    """Небулевый feature_selection_active отклоняется на этапе __init__.
+
+    Ревью PR #8: строка "false" из конфигурации/YAML не должна молча
+    включать отбор через bool("false") == True.
+    """
+    with pytest.raises(TrainingError, match="feature_selection_active"):
+        ModelTrainer(feature_selection_active=bad_flag)
+
+
+def test_feature_selection_active_none_and_bool_accepted():
+    """bool и None принимаются; None означает «решение по конфигурации»."""
+    for flag in (None, True, False):
+        trainer_obj = ModelTrainer(feature_selection_active=flag)
+        assert trainer_obj.feature_selection_active is flag
+
+
+def test_feature_selection_auto_tiny_dataset_warning(caplog):
+    """Auto-check на очень малой выборке: WARNING + отбор выключен, обучение успешно."""
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame(rng.normal(size=(8, 3)))
+    y = pd.Series(X[0] * 2.0 + rng.normal(0, 0.1, 8))
+
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+        trainer = ModelTrainer(
+            algorithm="ridge", feature_selection_cfg={"mode": "auto"}
+        ).fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert trainer.pipeline is not None
+    assert "auto-check" in caplog.text
+    assert trainer.val_score is not None
+
+
+def test_feature_selection_passthrough_when_p_le_min_features():
+    """P <= min_features: селектор присутствует, но маска all-True (passthrough)."""
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame(rng.normal(size=(50, 3)))
+    y = pd.Series(X[0] * 2.0)
+
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={"mode": "always", "min_features": 5},
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+    assert trainer.selected_features_mask_ is not None
+    assert trainer.selected_features_mask_.all()
+    assert trainer.pipeline.named_steps["model"].n_features_in_ == 3
+
+
+def test_feature_selection_old_model_without_new_attrs_compatible():
+    """Экземпляр без новых атрибутов (имитация старого pickle):
+    fit/predict работают как раньше (поведение disabled)."""
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(algorithm="ridge")
+    for attr in (
+        "feature_selection_cfg",
+        "feature_selection_active",
+        "feature_selection_active_",
+        "selected_features_mask_",
+    ):
+        if hasattr(trainer, attr):
+            delattr(trainer, attr)
+
+    trainer.fit(X, y)
+    assert trainer.pipeline is not None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+    # _fit_internal фиксирует фактический статус даже для «старого» объекта.
+    assert trainer.feature_selection_active_ is False
+    assert trainer.selected_features_mask_ is None
+    assert len(trainer.predict(X)) == len(y)
+
+
+def test_feature_selection_numpy_input_always():
+    """numpy-вход без имён колонок + always: обучение и маска корректны."""
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(120, 10))
+    y = X[:, 0] * 2.0 + rng.normal(0, 0.1, 120)
+
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+    assert trainer.selected_features_mask_ is not None
+    assert len(trainer.selected_features_mask_) == X.shape[1]
+    preds = trainer.predict(X)
+    assert preds.shape == (120,)
+
+
+def test_feature_selection_importance_method():
+    """Метод importance (по умолчанию) корректно работает в режиме always."""
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge", feature_selection_cfg={"mode": "always"}
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+    assert trainer.feature_selection_active_ is True
+    assert trainer.selected_features_mask_ is not None
+    pre_n = trainer.pipeline.named_steps["preprocessor"].transform(X).shape[1]
+    assert len(trainer.selected_features_mask_) == pre_n
+
+
+def test_feature_selection_refit_resets_state():
+    """Повторный fit() перезаписывает статус и маску, состояние не копится."""
+    from configurable_automl_engine.training_engine.config_parser import (
+        FeatureSelectionCfg,
+    )
+
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    )
+    trainer.fit(X, y)
+    assert trainer.feature_selection_active_ is True
+    assert trainer.selected_features_mask_ is not None
+
+    trainer.feature_selection_cfg = FeatureSelectionCfg(mode="disabled")
+    trainer.fit(X, y)
+    assert trainer.feature_selection_active_ is False
+    assert trainer.selected_features_mask_ is None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+
+
+def test_feature_selection_failed_fit_resets_state():
+    """Падение pipeline.fit сбрасывает статус и маску от предыдущего обучения."""
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    )
+    trainer.fit(X, y)
+    assert trainer.feature_selection_active_ is True
+    assert trainer.selected_features_mask_ is not None
+
+    # Мок-модель, падающая на fit (аналогично test_fit_internal_unexpected_error).
+    mock_model = MagicMock()
+    if hasattr(mock_model, "transform"):
+        del mock_model.transform
+    mock_model.fit.side_effect = RuntimeError("System failure")
+    mock_model._estimator_type = "regressor"
+
+    with pytest.raises(TrainingError):
+        trainer._fit_internal(
+            X_train=X,
+            y_train=y,
+            preprocessor=StandardScaler(),
+            base_model=mock_model,
+            feature_selection_active=True,
+        )
+
+    # Неудачный фит не оставляет устаревшие значения от прошлого обучения.
+    assert trainer.feature_selection_active_ is False
+    assert trainer.selected_features_mask_ is None
+
+
+def test_feature_selection_state_reset_on_failure_before_fit_internal():
+    """Сбой до _fit_internal (подготовка данных) тоже сбрасывает статус/маску.
+
+    Ревью PR #8: сброс жил только в _fit_internal; теперь состояние
+    очищается в начале fit(), поэтому ошибки на более ранних этапах
+    (валидация и подготовка данных) не оставляют значения от предыдущего
+    обучения.
+    """
+    X, y = _fs_dataset()
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        feature_selection_cfg={
+            "mode": "always",
+            "method": "percentile",
+            "percentile": 50.0,
+        },
+    )
+    trainer.fit(X, y)
+    assert trainer.feature_selection_active_ is True
+    assert trainer.selected_features_mask_ is not None
+
+    # Ошибка в _prepare_data (несовпадение длин X и y) — до _fit_internal.
+    with pytest.raises(TrainingError, match="Mismatched samples"):
+        trainer.fit(X, y[:-5])
+
+    assert trainer.feature_selection_active_ is False
+    assert trainer.selected_features_mask_ is None
+
+
+def test_feature_selection_auto_scorer_none_falls_back(caplog):
+    """Fail-safe: None-скоры на hold-out → WARNING + отбор выключен, fit успешен."""
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    )
+
+    def flaky_scorer(model, X_val, y_val):  # noqa: ANN001
+        # Fail-safe ветка: контрольный пайплайн auto-check со шагом
+        # feature_selector возвращает None, а скоринг финальной метрики
+        # в fit() (пайплайн без селектора, т.к. отбор выключен) — валидное
+        # значение. Различаем вызовы по составу пайплайна, а не по числу/
+        # порядку вызовов: изменение числа скорингов в auto-check не
+        # сломает тест молча.
+        if "feature_selector" in model.named_steps:
+            return None
+        return 0.9
+
+    with (
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=flaky_scorer,
+        ),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+    ):
+        trainer.fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert "non-finite scores" in caplog.text
+    assert trainer.val_score == 0.9
+
+
+def test_feature_selection_auto_check_deterministic_when_random_state_none():
+    """random_state=None тренера: hold-out сплит auto-check детерминирован.
+
+    Ревью PR #8: при None-зерне основного обучения сплит auto-check обязан
+    использовать фиксированное зерно-фолбэк, иначе решение об отборе
+    менялось бы между вызовами fit().
+    """
+    from configurable_automl_engine.trainer import train_test_split as real_split
+
+    X, y = _fs_noisy_dataset()
+    tr = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=None,
+    )
+
+    with patch(
+        "configurable_automl_engine.trainer.train_test_split",
+        wraps=real_split,
+    ) as mocked_split:
+        tr.fit(X, y)
+
+    # auto-check — единственный потребитель train_test_split в fit();
+    # все вызовы обязаны идти с непустым random_state (фикс-фолбэк вместо None).
+    non_none_calls = [
+        call
+        for call in mocked_split.call_args_list
+        if call.kwargs.get("random_state") is not None
+    ]
+    assert non_none_calls, "auto-check split must use a fixed random_state"
+    assert len(mocked_split.call_args_list) == 1
+    assert mocked_split.call_args.kwargs["random_state"] == 42
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  FeatureSelector unit tests (public API, issue #31 dependency)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestFeatureSelectorUnit:
+    """Модульные тесты FeatureSelector из feature_selection.py."""
+
+    def test_variance_method_drops_constant_features(self):
+        """Метод variance: константные признаки отбрасываются."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame({"const": 1.0, "noise": rng.normal(size=50)})
+        selector = FeatureSelector(
+            method="variance", variance_threshold=0.0, min_features=1
+        ).fit(X)
+        assert list(selector.support_) == [False, True]
+        assert selector.transform(X).shape == (50, 1)
+
+    def test_mutual_info_method(self):
+        """Метод mutual_info: работает и возвращает корректную размерность."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        X, y = _fs_dataset(seed=11)
+        selector = FeatureSelector(
+            method="mutual_info", percentile=50.0
+        ).fit(X, y)
+        assert len(selector.support_) == X.shape[1]
+        assert selector.support_.sum() > 0
+        assert selector.transform(X).shape[1] == selector.support_.sum()
+
+    def test_min_features_expansion(self):
+        """Расширение маски до min_features, если метод отобрал слишком мало."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        X, y = _fs_dataset(seed=13)
+        selector = FeatureSelector(
+            method="percentile", percentile=5.0, min_features=6
+        ).fit(X, y)
+        assert selector.support_.sum() == 6
+        assert selector.transform(X).shape[1] == 6
+
+    def test_transform_before_fit_raises(self):
+        """transform/get_feature_names_out до fit → NotFittedError."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        selector = FeatureSelector()
+        with pytest.raises(NotFittedError):
+            selector.transform(np.zeros((3, 2)))
+        with pytest.raises(NotFittedError):
+            selector.get_feature_names_out()
+
+    def test_get_feature_names_out(self):
+        """Имена отобранных признаков (из DataFrame и автосгенерированные)."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(rng.normal(size=(60, 4)))
+        X.columns = ["a", "b", "c", "d"]
+        y = X["a"] * 2.0 + rng.normal(0, 0.1, 60)
+        selector = FeatureSelector(
+            method="percentile", percentile=50.0
+        ).fit(X, y)
+        names = selector.get_feature_names_out()
+        assert set(names) <= {"a", "b", "c", "d"}
+        assert len(names) == selector.support_.sum()
+
+        arr_selector = FeatureSelector(
+            method="percentile", percentile=50.0
+        ).fit(np.asarray(X), np.asarray(y))
+        auto_names = arr_selector.get_feature_names_out()
+        assert auto_names[0].startswith("x")
+
+    def test_supervised_methods_require_y(self):
+        """Супервизорные методы отклоняют fit без y."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        X = np.zeros((5, 3))
+        for method in ("importance", "percentile", "mutual_info"):
+            with pytest.raises(ValueError, match="requires y"):
+                FeatureSelector(method=method).fit(X)
+
+    def test_invalid_method_rejected(self):
+        """Неизвестный метод отклоняется с понятной ошибкой."""
+        from configurable_automl_engine.feature_selection import FeatureSelector
+
+        with pytest.raises(ValueError, match="Unknown method"):
+            FeatureSelector(method="pca").fit(np.zeros((5, 3)), np.zeros(5))

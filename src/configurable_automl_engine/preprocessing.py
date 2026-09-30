@@ -87,7 +87,7 @@ _VALID_ENCODING_STRATEGIES = (
 )
 
 
-def _to_string_array(X):
+def _to_string_array(X: Any) -> np.ndarray:
     """Привести категориальную матрицу к строковому объектному массиву.
 
     ``np.ndarray.astype(str)`` даёт fixed-width unicode (``<U``), а

@@ -21,6 +21,12 @@ TrainingError: Специализированное исключение
 
 Pipeline Integration: Использование imblearn.pipeline позволяет бесшовно интегрировать
     механизмы оверсэмплинга (SMOTE, ADASYN) непосредственно в процесс обучения.
+Feature Selection: Опциональный шаг отбора признаков (FeatureSelector) встраивается
+    строго между preprocessor и oversampler; активность управляется явным флагом
+    (результат HPO) либо режимом конфигурации (always/disabled/auto). Режим ``auto``
+    выполняет автономную проверку целесообразности на каждом fit() (два
+    дополнительных обучения пайплайна, ~2–3x времени), поэтому в цикле HPO
+    рекомендуется явный флаг ``feature_selection_active``.
 Automated Feature Engineering: Встроенный ColumnTransformer автоматически применяет
     One-Hot кодирование для категорий и StandardScaler для числовых признаков.
 Thread Safety: Использование рекурсивных блокировок (threading.RLock) гарантирует
@@ -41,14 +47,16 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split
 
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (
     load_artifact,
     save_artifact,
 )
+from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
@@ -59,15 +67,29 @@ from configurable_automl_engine.preprocessing_presets import (
     PreprocessingPreset,
     resolve_preprocessing_preset,
 )
+from configurable_automl_engine.training_engine.config_parser import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+)
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_greater_better,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
 
-from .models import _ALIASES, create_model, requires_dense_input
+from .models import (
+    _ALIASES,
+    create_model,
+    requires_dense_input,
+    resolve_algorithm_name,
+)
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
+
+#: Минимальное число строк для автономной проверки отбора признаков (режим
+#: ``auto``). Порог выбран так, чтобы обе части hold-out сплита (80/20)
+#: содержали не менее 2 примеров: 10 * 0.8 = 8 и 10 * 0.2 = 2.
+_MIN_AUTO_CHECK_SAMPLES = 10
 
 
 def _sign_corrected_value(metric_name: str, raw_value: Any) -> float:
@@ -224,6 +246,21 @@ class ModelTrainer:
             определенных при обучении.
         preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
             предобработки (заполняется в процессе fit()).
+        feature_selection_cfg (FeatureSelectionCfg): Валидированная
+            конфигурация отбора признаков (метод, процентиль, min_features
+            и т.д.). По умолчанию ``FeatureSelectionCfg()`` (mode='disabled').
+        feature_selection_active (bool | None): Явный флаг активности отбора
+            признаков, переданный извне (результат триала HPO). Приоритетнее
+            режима из ``feature_selection_cfg``; ``None`` — решение принимается
+            по конфигурации.
+        feature_selection_active_ (bool): Фактический статус отбора признаков
+            в итоговом обучении (заполняется в fit(); False до первого fit).
+        selected_features_mask_ (np.ndarray | None): Булева маска отобранных
+            колонок после fit() (None, если отбор не применялся). Важно: маска
+            имеет размерность пост-препроцессорной матрицы (после one-hot-
+            раскрытия/скалирования), а не исходных колонок; сопоставление с
+            исходными именами не выполняется — фильтрация прозрачна через
+            pipeline.
         lock (threading.RLock): Рекурсивная блокировка для потокобезопасного обучения.
     """
 
@@ -248,8 +285,21 @@ class ModelTrainer:
         hashing_n_components: int = 16,
         target_encoding_smoothing: float = 20.0,
         target_encoding_fallback: float | None = None,
+        feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+        feature_selection_active: bool | None = None,
     ):
-        """Инициализировать тренер с параметрами модели и настройками предобработки."""
+        """Инициализировать тренер с параметрами модели и настройками предобработки.
+
+        Args:
+            feature_selection_cfg: Объект или словарь настроек отбора признаков
+                (метод, процентиль, min_features и т.д.). ``None`` —
+                ``FeatureSelectionCfg()`` (mode='disabled', отбор выключен).
+            feature_selection_active: Явный булев флаг активности отбора
+                (приоритет над режимом из ``feature_selection_cfg``). Передаётся
+                внешним циклом HPO, который уже решил, нужен ли отбор
+                (интеграция с component.py/tuner.py отслеживается в follow-up
+                issue). ``None`` — решение по конфигурации.
+        """
 
         self.logger = logging.getLogger(__name__)
 
@@ -357,6 +407,32 @@ class ModelTrainer:
         # Разрешённый пресет — заполняется в _build_preprocessor во время fit().
         self.preprocessing_preset: PreprocessingPreset | None = None
 
+        # ---------- feature selection (issue #31) ----------
+        # Валидируем конфигурацию отбора признаков сразу, чтобы некорректные
+        # значения (percentile=150, неизвестный method/mode, лишние ключи)
+        # отклонялись на этапе инициализации, до тяжёлого обучения.
+        self.feature_selection_cfg: FeatureSelectionCfg = (
+            self._validate_feature_selection_cfg(feature_selection_cfg)
+        )
+        # Явный флаг из HPO/component.py (приоритет над конфигом); None —
+        # решение принимается в fit() по режиму из конфигурации. Тип строго
+        # bool | None: строка "false" из конфигурации/YAML не должна молча
+        # приводиться к True через bool("false") в _resolve_feature_selection_active
+        # (ревью PR #8), поэтому небулевые значения отклоняются на этапе
+        # инициализации, как и остальные параметры конструктора.
+        if feature_selection_active is not None and not isinstance(
+            feature_selection_active, bool
+        ):
+            raise TrainingError(
+                "feature_selection_active must be a bool or None, got "
+                f"{type(feature_selection_active).__name__}"
+            )
+        self.feature_selection_active: bool | None = feature_selection_active
+        # Фактический статус отбора в итоговом обучении (заполняется в fit()).
+        self.feature_selection_active_: bool = False
+        # Булева маска отобранных колонок пост-препроцессорной размерности.
+        self.selected_features_mask_: np.ndarray | None = None
+
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
         self.os_multiplier = data_oversampling_multiplier
@@ -457,6 +533,42 @@ class ModelTrainer:
             f"got {type(override).__name__}"
         )
 
+    def _validate_feature_selection_cfg(
+        self,
+        cfg: FeatureSelectionCfg | dict[str, Any] | None,
+    ) -> FeatureSelectionCfg:
+        """Валидировать и нормализовать конфигурацию отбора признаков.
+
+        Логика по образцу :meth:`_validate_preprocessing_override`:
+        ``None`` → дефолт ``FeatureSelectionCfg()`` (mode='disabled');
+        ``dict`` → ``FeatureSelectionCfg.model_validate(...)``, ошибка → TrainingError;
+        ``FeatureSelectionCfg`` → как есть;
+        иной тип → TrainingError.
+
+        Args:
+            cfg: Словарь или модель :class:`FeatureSelectionCfg`.
+
+        Returns:
+            Нормализованная модель конфигурации отбора признаков.
+
+        Raises:
+            TrainingError: Если передан объект неподдерживаемого типа или
+                словарь с некорректными значениями.
+        """
+        if cfg is None:
+            return FeatureSelectionCfg()
+        if isinstance(cfg, FeatureSelectionCfg):
+            return cfg
+        try:
+            if isinstance(cfg, dict):
+                return FeatureSelectionCfg.model_validate(cfg)
+        except Exception as e:
+            raise TrainingError(f"Invalid feature_selection_cfg: {e}") from e
+        raise TrainingError(
+            "feature_selection_cfg must be a dict or FeatureSelectionCfg, "
+            f"got {type(cfg).__name__}"
+        )
+
     def _resolve_preprocessing_preset(self) -> PreprocessingPreset:
         """Разрешить пресет предобработки для текущего алгоритма.
 
@@ -476,7 +588,7 @@ class ModelTrainer:
         if hasattr(X, "get_data_info"):
             return cast(list[str], X.get_data_info()["columns"])
         if isinstance(X, pd.DataFrame):
-            return cast(list[str], X.columns.tolist())
+            return X.columns.tolist()
         if hasattr(X, "shape") and len(X.shape) > 1:
             return [str(f"col_{i}") for i in range(X.shape[1])]
         return None
@@ -623,30 +735,275 @@ class ModelTrainer:
                 raise
             raise TrainingError(f"Data transformation error: {e}")
 
-    def _fit_internal(
+    def _resolve_feature_selection_active(
         self,
         X_train: Any,
         y_train: Any,
         preprocessor: ColumnTransformer,
         base_model: Any,
-    ) -> Pipeline:
-        """Собрать финальный пайплайн и запустить
-        процесс обучения на подготовленных данных."""
-        # 1) Формируем шаги пайплайна
-        steps = [("preprocessor", preprocessor)]
-        # 2) Добавляем оверсэмплинг, если он активирован
+    ) -> bool:
+        """Разрешить фактическую активность отбора признаков для fit().
+
+        Приоритет (строго в этом порядке):
+        1. IsotonicRegression — отбор принудительно отключается (алгоритм
+           строго одномерный, использует собственный ``IsotonicDataTransformer``);
+        2. явный флаг ``feature_selection_active`` (из HPO/component.py) —
+           имеет приоритет над конфигурацией;
+        3. режим из ``feature_selection_cfg.mode``: ``always`` → True,
+           ``disabled`` → False, ``auto`` → Standalone Auto-Check.
+
+        Обратная совместимость со старыми pickle: атрибуты читаются через
+        ``getattr`` (аналогично ``encoding_strategy`` в ``_build_preprocessor``),
+        отсутствующие атрибуты дают поведение disabled.
+
+        Args:
+            X_train: Обучающая матрица признаков (для режима ``auto``).
+            y_train: Целевая переменная (для режима ``auto``).
+            preprocessor: ``ColumnTransformer`` предобработки (для режима ``auto``).
+            base_model: Финальный регрессор (для режима ``auto``).
+
+        Returns:
+            ``True``, если шаг отбора должен присутствовать в пайплайне.
+        """
+        # 1. Isotonic-байпас: одномерный алгоритм несовместим с отбором признаков.
+        algo_key = resolve_algorithm_name(self.algorithm)
+        if algo_key == "isotonic_regression":
+            self.logger.debug(
+                "Feature selection is forcibly disabled for IsotonicRegression "
+                "(univariate algorithm with its own data transformer)."
+            )
+            return False
+
+        # 2. Явный флаг из HPO/component.py имеет приоритет над конфигом.
+        explicit_flag = getattr(self, "feature_selection_active", None)
+        if explicit_flag is not None:
+            return bool(explicit_flag)
+
+        # 3. Решение по режиму конфигурации.
+        cfg = getattr(self, "feature_selection_cfg", None)
+        if not isinstance(cfg, FeatureSelectionCfg):
+            cfg = FeatureSelectionCfg()
+        mode = cfg.mode
+        if mode == FeatureSelectionMode.always:
+            return True
+        if mode == FeatureSelectionMode.disabled:
+            return False
+        # mode == auto: автономная проверка целесообразности отбора.
+        return self._run_feature_selection_auto_check(
+            X_train, y_train, preprocessor, base_model
+        )
+
+    def _run_feature_selection_auto_check(
+        self,
+        X_train: Any,
+        y_train: Any,
+        preprocessor: ColumnTransformer,
+        base_model: Any,
+    ) -> bool:
+        """Выполнить Standalone Auto-Check целесообразности отбора признаков.
+
+        Режим ``auto`` используется при прямом вызове ``ModelTrainer.fit()``
+        без HPO. Логика:
+        1. Hold-out сплит 80/20 с фиксированным ``random_state``.
+        2. Два контрольных пайплайна (без селектора и с селектором) обучаются
+           на train-части; скоринг на hold-out через
+           ``get_scorer_object(self.metric)`` + ``_sign_corrected_value``.
+        3. Направленное сравнение с учётом ``is_greater_better(self.metric)``:
+           отбор включается только при строгом улучшении качества.
+        4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
+           дают WARNING и возвращают ``False`` — проверка не роняет fit().
+
+        Стоимость: каждый ``fit()`` в режиме ``auto`` дополнительно обучает
+        два полных пайплайна на 80% данных — для тяжёлых алгоритмов это
+        ~2–3x времени обычного обучения. Режим рассчитан на прямые вызовы
+        без HPO; в цикле HPO активность отбора должна передаваться явным
+        флагом ``feature_selection_active``, чтобы проверка не выполнялась
+        для каждого триала.
+
+        Побочных эффектов нет: метод не трогает ``self.pipeline``,
+        ``self.val_score`` и ``self.feature_names``.
+
+        Args:
+            X_train: Обучающая матрица признаков.
+            y_train: Целевая переменная.
+            preprocessor: ``ColumnTransformer`` предобработки.
+            base_model: Финальный регрессор.
+
+        Returns:
+            ``True``, если качество с отбором строго выше, иначе ``False``.
+        """
+        n_samples = X_train.shape[0] if hasattr(X_train, "shape") else len(X_train)
+        if n_samples < _MIN_AUTO_CHECK_SAMPLES:
+            self.logger.warning(
+                "Standalone feature selection auto-check skipped: only %d "
+                "samples available, need at least %d. Feature selection "
+                "disabled.",
+                n_samples,
+                _MIN_AUTO_CHECK_SAMPLES,
+            )
+            return False
+        try:
+            # Детерминированность hold-out сплита: при random_state=None
+            # тренера (нефиксированное основное обучение) сплит всё равно
+            # обязан быть воспроизводимым, иначе решение об отборе будет
+            # меняться между вызовами fit() (ревью PR #8). Используем фикс.
+            # зерно-фолбэк, не трогая конфигурацию основного обучения.
+            check_random_state = (
+                self.random_state if self.random_state is not None else 42
+            )
+            X_sub, X_hold, y_sub, y_hold = train_test_split(
+                X_train,
+                y_train,
+                test_size=0.2,
+                random_state=check_random_state,
+            )
+            # Контрольные пайплайны изолированы друг от друга и от финального
+            # обучения: sklearn Pipeline не клонирует переданные шаги, поэтому
+            # общие экземпляры preprocessor/base_model мутировали бы состояние
+            # соседнего пайплайна при повторном fit.
+            pipe_full = Pipeline(
+                self._assemble_steps(
+                    clone(preprocessor),
+                    clone(base_model),
+                    feature_selection_active=False,
+                )
+            )
+            pipe_reduced = Pipeline(
+                self._assemble_steps(
+                    clone(preprocessor),
+                    clone(base_model),
+                    feature_selection_active=True,
+                )
+            )
+            pipe_full.fit(X_sub, y_sub)
+            pipe_reduced.fit(X_sub, y_sub)
+
+            scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
+            raw_full = scorer(pipe_full, X_hold, y_hold)
+            raw_reduced = scorer(pipe_reduced, X_hold, y_hold)
+            if (
+                raw_full is None
+                or raw_reduced is None
+                or not np.isfinite(float(raw_full))
+                or not np.isfinite(float(raw_reduced))
+            ):
+                self.logger.warning(
+                    "Standalone feature selection auto-check produced "
+                    "non-finite scores (full=%r, reduced=%r). Feature "
+                    "selection disabled.",
+                    raw_full,
+                    raw_reduced,
+                )
+                return False
+
+            score_full = _sign_corrected_value(self.metric, raw_full)
+            score_reduced = _sign_corrected_value(self.metric, raw_reduced)
+            greater_better = is_greater_better(self.metric)
+            if greater_better:
+                active = score_reduced > score_full
+            else:
+                active = score_reduced < score_full
+            self.logger.info(
+                "Standalone feature selection auto-check: score_full=%.4f, "
+                "score_reduced=%.4f -> active=%s",
+                score_full,
+                score_reduced,
+                active,
+            )
+            return active
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(
+                "Standalone feature selection auto-check failed: %s. "
+                "Feature selection disabled.",
+                e,
+            )
+            return False
+
+    def _assemble_steps(
+        self,
+        preprocessor: ColumnTransformer,
+        base_model: Any,
+        *,
+        feature_selection_active: bool,
+    ) -> list[tuple[str, Any]]:
+        """Собрать список шагов обучающего пайплайна.
+
+        Строгий порядок шагов (issue #31):
+        ``preprocessor → [feature_selector] → [oversampler] → model``.
+        Селектор признаков встраивается строго между препроцессором и
+        оверсэмплером, чтобы синтетические строки генерировались только для
+        информативных признаков.
+
+        Args:
+            preprocessor: ``ColumnTransformer`` предобработки признаков.
+            base_model: Финальный регрессор.
+            feature_selection_active: Флаг включения шага отбора признаков.
+
+        Returns:
+            Список кортежей ``(name, transformer)`` для построения Pipeline.
+        """
+        steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
+        if feature_selection_active:
+            # Обратная совместимость со старыми pickle: конфигурация читается
+            # через getattr (аналогично encoding_strategy в _build_preprocessor),
+            # отсутствие атрибута даёт дефолт FeatureSelectionCfg().
+            cfg = getattr(self, "feature_selection_cfg", None)
+            if not isinstance(cfg, FeatureSelectionCfg):
+                cfg = FeatureSelectionCfg()
+            selector = FeatureSelector(
+                method=cfg.method.value,
+                percentile=cfg.percentile,
+                min_features=cfg.min_features,
+                variance_threshold=cfg.variance_threshold,
+                n_estimators=cfg.n_estimators,
+                random_state=self.random_state,
+            )
+            steps.append(("feature_selector", selector))
         if self.os_enable:
             oversampler = DataOversampler(
                 algorithm=self.os_algorithm,
                 multiplier=self.os_multiplier,
             )
             steps.append(("oversampler", oversampler))
-        # 3) Добавляем саму модель
         steps.append(("model", base_model))
-        # 4) Инициализируем пайплайн
+        return steps
+
+    def _fit_internal(
+        self,
+        X_train: Any,
+        y_train: Any,
+        preprocessor: ColumnTransformer,
+        base_model: Any,
+        *,
+        feature_selection_active: bool = False,
+    ) -> Pipeline:
+        """Собрать финальный пайплайн и запустить
+        процесс обучения на подготовленных данных.
+
+        Args:
+            X_train: Обучающая матрица признаков.
+            y_train: Целевая переменная.
+            preprocessor: ``ColumnTransformer`` предобработки признаков.
+            base_model: Финальный регрессор.
+            feature_selection_active: Флаг включения шага отбора признаков
+                (keyword-only; по умолчанию ``False`` — поведение без отбора).
+        """
+        # 0) Сбрасываем фактический статус отбора и маску отобранных колонок.
+        # Если pipeline.fit упадёт, у тренера не должны остаться значения от
+        # предыдущего обучения (рекомендация ревью PR #8). После успешного
+        # фита значения перезаписываются в шаге 4.
+        self.feature_selection_active_ = False
+        self.selected_features_mask_ = None
+        # 1) Формируем шаги пайплайна
+        steps = self._assemble_steps(
+            preprocessor,
+            base_model,
+            feature_selection_active=feature_selection_active,
+        )
+        # 2) Инициализируем пайплайн
         # Используем Pipeline из imblearn, чтобы шаги ресэмплинга работали корректно
         self.pipeline = Pipeline(steps=steps)
-        # 5) Выполняем обучение
+        # 3) Выполняем обучение
         try:
             self.pipeline.fit(X_train, y_train)
         except (ValueError, TypeError):
@@ -660,6 +1017,17 @@ class ModelTrainer:
             self.logger.debug("Unexpected pipeline fit failure trace:", exc_info=True)
             self.logger.error(f"Unexpected error in pipeline fit: {e}")
             raise TrainingError(f"Internal training failure: {e}")
+        # 4) Фиксируем фактический статус отбора и маску отобранных колонок.
+        # Маска берётся с шага селектора внутри пайплайна и имеет размерность
+        # пост-препроцессорной матрицы (после one-hot-раскрытия/скалирования).
+        self.feature_selection_active_ = feature_selection_active
+        selector_step = self.pipeline.named_steps.get("feature_selector")
+        if selector_step is not None and hasattr(selector_step, "support_"):
+            self.selected_features_mask_ = np.asarray(
+                selector_step.support_, dtype=bool
+            )
+        else:
+            self.selected_features_mask_ = None
         return self.pipeline
 
     def fit(self, X: Any, y: Any) -> ModelTrainer:
@@ -667,6 +1035,15 @@ class ModelTrainer:
         Включает обязательное разбиение выборки для оценки качества."""
 
         with self.lock:
+            # Этап 0: Сбрасываем фактический статус отбора и маску отобранных
+            # колонок в начале fit(), до какой-либо обработки данных. Если
+            # обучение упадёт на любом этапе (подготовка данных, разрешение
+            # активности, pipeline.fit), у тренера не останутся значения от
+            # предыдущего обучения (ревью PR #8). Дублирующий сброс в
+            # _fit_internal сохраняется для прямых вызовов этого метода.
+            self.feature_selection_active_ = False
+            self.selected_features_mask_ = None
+
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
 
@@ -708,10 +1085,22 @@ class ModelTrainer:
                 self.feature_names = self._extract_metadata(X_prepared) or []
             preprocessor = self._build_preprocessor(self.feature_names)
 
-            # Этап 5: Сборка и обучение пайплайна
-            # Здесь автоматически применится оверсэмплинг, если он включен
-            self.pipeline = self._fit_internal(
+            # Этап 4.5: Разрешаем активность отбора признаков (issue #31).
+            # Приоритет: isotonic-байпас → явный флаг → режим конфигурации
+            # (always/disabled) → standalone auto-check для mode='auto'.
+            feature_selection_active = self._resolve_feature_selection_active(
                 X_prepared, y_s, preprocessor, base_model
+            )
+
+            # Этап 5: Сборка и обучение пайплайна
+            # Здесь автоматически применится оверсэмплинг, если он включен,
+            # и отбор признаков, если он разрешён на этапе 4.5.
+            self.pipeline = self._fit_internal(
+                X_prepared,
+                y_s,
+                preprocessor,
+                base_model,
+                feature_selection_active=feature_selection_active,
             )
 
             # Этап 6: Валидация и расчет метрик (финальный шаг)

@@ -821,7 +821,7 @@ class Config(BaseModel):
             "Словарь алгоритмов, где ключ — имя алгоритма "
             "(например, 'xgboost', 'random_forest')"
         ),
-    )  # type: ignore[valid-type]
+    )
 
     @field_validator("algorithms")
     @classmethod

@@ -38,6 +38,7 @@ from configurable_automl_engine.preprocessing import detect_feature_types
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
+    HPOPhaseCfg,
     ValidationStrategy,
     read_config,
 )
@@ -515,7 +516,7 @@ def train_best_model(
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
 
         def _worker(
-            algo_name: str, algo_cfg: AlgoCfg, p=phase
+            algo_name: str, algo_cfg: AlgoCfg, p: HPOPhaseCfg = phase
         ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
