@@ -8,7 +8,7 @@ codereview:
         - "**"
       reviewers:
         usernames:
-          - "code-reviewer_ai"
+          - "gentle-nuclear-summoning-listener"
         assign: 1
         need_ships: 1
         ignore_self_ship: false
