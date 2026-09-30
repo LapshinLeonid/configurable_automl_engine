@@ -409,6 +409,8 @@ Legacy facade function for training a single model. Accepts either a config dict
 | `enable_logging` | `bool` | Enable result logging. |
 | `random_state` | `int` or `None` | Random seed. |
 | `log_path` | `str`, `Path`, or `None` | Log file path. |
+| `feature_selection_cfg` (keyword-only) | `FeatureSelectionCfg`, `dict`, or `None` | Feature selection config (method, percentile, `min_features`, etc.). In the config-dict branch the `feature_selection_cfg` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; `None` means `FeatureSelectionCfg()` (`mode='disabled'`). |
+| `feature_selection_active` (keyword-only) | `bool` or `None` | Explicit feature selection activity flag (takes precedence over the config mode). In the config-dict branch the `feature_selection_active` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; non-bool values are rejected by `ModelTrainer`; `None` defers the decision to the config. |
 
 **Returns:** `float` — validation metric value.
 

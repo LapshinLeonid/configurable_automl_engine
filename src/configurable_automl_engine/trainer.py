@@ -1302,14 +1302,23 @@ def train_model(
     enable_logging: bool = False,
     random_state: int | None = 42,
     log_path: str | Path | None = None,
+    *,
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    feature_selection_active: bool | None = None,
 ) -> float:
-    algo: str = ""
-    metric: str = ""
-    hyperparams: dict[str, Any] = {}
-    rs: int | None = random_state
     """Обеспечить совместимость со старым API для обучения моделей.
     Функция-фасад, которая принимает конфигурацию или набор позиционных аргументов,
     инициирует ModelTrainer и возвращает результат валидации.
+
+    Параметры отбора признаков (``feature_selection_cfg`` /
+    ``feature_selection_active``) — keyword-only: в ветке «config dict»
+    одноимённые ключи словаря имеют приоритет над явными аргументами
+    (аналогично ``data_oversampling``). Ключ, присутствующий в конфиге со
+    значением ``None``, трактуется как «значение не задано»: в этом случае,
+    как и при отсутствии ключа, используется явный аргумент функции
+    (фолбэк). В ветке простого API используются непосредственно аргументы
+    функции.
+
     Attributes:
         cfg_or_algo (dict | str): Словарь конфигурации или название алгоритма.
         metric_or_testsize (str | float): Метрика или размер тестовой выборки.
@@ -1319,11 +1328,34 @@ def train_model(
         enable_logging (bool): Флаг активации ведения журналов.
         random_state (int | None): Зерно случайности.
         log_path (str | Path | None): Путь к файлу логов.
+        feature_selection_cfg (FeatureSelectionCfg | dict | None):
+            Конфигурация отбора признаков (метод, процентиль, min_features
+            и т.д.). В ветке «config dict» значение ключа
+            ``feature_selection_cfg`` имеет приоритет над этим аргументом,
+            кроме случая, когда ключ присутствует со значением ``None`` —
+            тогда используется этот аргумент (фолбэк).
+            ``None`` — ``FeatureSelectionCfg()`` (mode='disabled').
+        feature_selection_active (bool | None): Явный булев флаг активности
+            отбора признаков (приоритет над режимом из
+            ``feature_selection_cfg``). В ветке «config dict» значение ключа
+            ``feature_selection_active`` имеет приоритет над этим аргументом,
+            кроме случая, когда ключ присутствует со значением ``None`` —
+            тогда используется этот аргумент (фолбэк).
+            Небулевые значения отклоняются конструктором ``ModelTrainer``
+            (строгая типизация, ревью PR #8). ``None`` — решение по
+            конфигурации.
     """
+    algo: str = ""
+    metric: str = ""
+    hyperparams: dict[str, Any] = {}
+    rs: int | None = random_state
+
+    fs_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    fs_active: bool | None
 
     # Случай «config dict»
     if isinstance(cfg_or_algo, dict):
-        cfg: dict = cfg_or_algo  # type: ignore
+        cfg: dict[str, Any] = cfg_or_algo
         algo = str(cfg.get("algorithm", ""))
         metric = str(cfg.get("metric", ""))
         hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
@@ -1332,6 +1364,23 @@ def train_model(
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
+        # Ключи конфига имеют приоритет над явными аргументами (аналогично
+        # ``data_oversampling``); ключ со значением None трактуется как
+        # «значение не задано» и даёт фолбэк на аргумент функции (см. docstring).
+        if "feature_selection_cfg" in cfg and cfg["feature_selection_cfg"] is not None:
+            fs_cfg = cast(
+                FeatureSelectionCfg | dict[str, Any] | None,
+                cfg["feature_selection_cfg"],
+            )
+        else:
+            fs_cfg = feature_selection_cfg
+        if (
+            "feature_selection_active" in cfg
+            and cfg["feature_selection_active"] is not None
+        ):
+            fs_active = cast(bool | None, cfg["feature_selection_active"])
+        else:
+            fs_active = feature_selection_active
     else:
         # Простой API
         # Если пришел None, мы НЕ превращаем его в строку "None" сразу,
@@ -1343,6 +1392,8 @@ def train_model(
         data_os = False
         data_os_mult = 1.0
         data_os_alg = "random"
+        fs_cfg = feature_selection_cfg
+        fs_active = feature_selection_active
 
     # Проверка алгоритма
     if not isinstance(cfg_or_algo, (str, dict)):
@@ -1361,6 +1412,8 @@ def train_model(
         data_oversampling=data_os,
         data_oversampling_multiplier=data_os_mult,
         data_oversampling_algorithm=data_os_alg,
+        feature_selection_cfg=fs_cfg,
+        feature_selection_active=fs_active,
     )
     trainer.fit(X, y)
     val_score = trainer.val_score

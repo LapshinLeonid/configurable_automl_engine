@@ -2080,3 +2080,274 @@ class TestFeatureSelectorUnit:
 
         with pytest.raises(ValueError, match="Unknown method"):
             FeatureSelector(method="pca").fit(np.zeros((5, 3)), np.zeros(5))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  train_model facade: feature selection passthrough (issue #10)
+# ──────────────────────────────────────────────────────────────────────────
+
+_FS_CFG_ALWAYS = {
+    "mode": "always",
+    "method": "percentile",
+    "percentile": 50.0,
+}
+
+
+def _patched_facade_trainer():
+    """Вернуть патчер ``ModelTrainer`` для проверки вызова фасада.
+
+    Патчит ``ModelTrainer`` в модуле trainer.py; тест самостоятельно
+    настраивает возвращаемый экземпляр (fit/val_score).
+    """
+    return patch("configurable_automl_engine.trainer.ModelTrainer")
+
+
+def _facade_xy(n: int = 20) -> tuple[np.ndarray, np.ndarray]:
+    """Синтетические X/y для unit-проверок проброса аргументов."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(n, 2))
+    y = X[:, 0] * 2.0 + rng.normal(0, 0.1, n)
+    return X, y
+
+
+def test_train_model_forwards_feature_selection_from_dict_config():
+    """dict-конфиг: feature_selection_cfg / active пробрасываются в ModelTrainer."""
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": dict(_FS_CFG_ALWAYS),
+        "feature_selection_active": True,
+    }
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        score = train_model(config, "r2", {}, X, y)
+
+    assert isinstance(score, float)
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
+
+
+def test_train_model_forwards_feature_selection_explicit_args():
+    """Простой API: явные keyword-only аргументы пробрасываются в ModelTrainer."""
+    X, y = _facade_xy()
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        score = train_model(
+            "elasticnet",
+            "r2",
+            {"alpha": 0.1},
+            X,
+            y,
+            feature_selection_cfg=dict(_FS_CFG_ALWAYS),
+            feature_selection_active=True,
+        )
+
+    assert isinstance(score, float)
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
+
+
+def test_train_model_feature_selection_omitted_defaults_to_none():
+    """Обратная совместимость: без параметров отбора поведение не меняется.
+
+    Фасад передаёт конструктору None/None, что соответствует дефолтному
+    поведению ModelTrainer (mode='disabled', отбор выключен).
+    """
+    X, y = _facade_xy()
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        train_model("elasticnet", "r2", {"alpha": 0.1}, X, y)
+
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] is None
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is None
+
+
+def test_train_model_config_dict_wins_over_explicit_args():
+    """Ветка «config dict»: ключи конфига имеют приоритет над явными аргументами."""
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": dict(_FS_CFG_ALWAYS),
+        "feature_selection_active": True,
+    }
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        train_model(
+            config,
+            "r2",
+            {},
+            X,
+            y,
+            feature_selection_cfg={"mode": "disabled"},
+            feature_selection_active=False,
+        )
+
+    # Значения из словаря перекрывают явные аргументы функции.
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
+
+
+def test_train_model_config_dict_falls_back_to_explicit_args():
+    """Ветка «config dict»: отсутствующие ключи — фолбэк на явные аргументы."""
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+    }
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        train_model(
+            config,
+            "r2",
+            {},
+            X,
+            y,
+            feature_selection_cfg=dict(_FS_CFG_ALWAYS),
+            feature_selection_active=True,
+        )
+
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
+
+
+def test_train_model_config_dict_none_key_falls_back_to_explicit_args():
+    """Ветка «config dict»: ключ со значением None трактуется как «не задан».
+
+    Присутствующий в конфиге ключ ``feature_selection_cfg`` /
+    ``feature_selection_active`` со значением ``None`` не переопределяет
+    явные аргументы функции — используется аргумент (фолбэк, ревью PR #9).
+    """
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": None,
+        "feature_selection_active": None,
+    }
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        train_model(
+            config,
+            "r2",
+            {},
+            X,
+            y,
+            feature_selection_cfg=dict(_FS_CFG_ALWAYS),
+            feature_selection_active=True,
+        )
+
+    # Ключи со значением None дают фолбэк на явные аргументы функции.
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
+
+
+def test_train_model_config_dict_none_key_without_explicit_args_defaults():
+    """Ветка «config dict»: ключи со значением None без явных аргументов.
+
+    Если явные аргументы не заданы (дефолт None), ключи конфига со значением
+    ``None`` дают тот же результат — фасад передаёт конструктору None/None.
+    """
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": None,
+        "feature_selection_active": None,
+    }
+    with _patched_facade_trainer() as MockTrainer:
+        instance = MagicMock()
+        MockTrainer.return_value = instance
+        instance.fit.return_value = instance
+        instance.val_score = 0.9
+
+        train_model(config, "r2", {}, X, y)
+
+    assert MockTrainer.call_args.kwargs["feature_selection_cfg"] is None
+    assert MockTrainer.call_args.kwargs["feature_selection_active"] is None
+
+
+def test_train_model_feature_selection_invalid_active_from_config_raises():
+    """Строка "false" из dict-конфига отклоняется (строгая типизация, PR #8)."""
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_active": "false",
+    }
+    with pytest.raises(TrainingError, match="feature_selection_active"):
+        train_model(config, "r2", {}, X, y)
+
+
+def test_train_model_feature_selection_invalid_cfg_from_config_raises():
+    """Невалидный feature_selection_cfg из dict-конфига отклоняется в __init__."""
+    X, y = _facade_xy()
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": {"mode": "magic"},
+    }
+    with pytest.raises(TrainingError, match="feature_selection_cfg"):
+        train_model(config, "r2", {}, X, y)
+
+
+def test_train_model_feature_selection_explicit_args_real_training():
+    """Интеграция: реальное обучение через фасад с включённым отбором."""
+    X, y = _fs_dataset(n=120, p=10)
+    score = train_model(
+        "ridge",
+        "r2",
+        {"alpha": 0.1},
+        X,
+        y,
+        feature_selection_cfg=dict(_FS_CFG_ALWAYS),
+    )
+    assert isinstance(score, float)
+    assert 0.0 < score <= 1.0
+
+
+def test_train_model_feature_selection_dict_config_real_training():
+    """Интеграция: реальное обучение через dict-конфиг с отбором признаков."""
+    X, y = _fs_dataset(n=120, p=10)
+    config = {
+        "algorithm": "ridge",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "feature_selection_cfg": dict(_FS_CFG_ALWAYS),
+        "feature_selection_active": True,
+    }
+    score = train_model(config, "r2", {}, X, y)
+    assert isinstance(score, float)
+    assert 0.0 < score <= 1.0
