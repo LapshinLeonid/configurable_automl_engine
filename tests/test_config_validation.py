@@ -10,6 +10,9 @@ from configurable_automl_engine.training_engine.config_parser import (
     Config,
     read_config,
     HPOPhaseCfg,
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+    FeatureSelectionMethod,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
     NumericSpace,
@@ -894,3 +897,253 @@ def test_pruning_allows_loo_and_auto():
         }
         cfg = Config.model_validate(cfg_data)
         assert cfg.general.pruning.enable is True
+
+
+# ─────────────── Tests for feature_selection (issue #8) ───────────────
+def test_feature_selection_defaults_backward_compat():
+    """Конфиг без блока feature_selection парсится с дефолтным disabled-режимом.
+
+    Обратная совместимость: отсутствие секции не меняет поведение библиотеки,
+    все параметры принимают значения по умолчанию.
+    """
+    cfg = Config.model_validate(BASE)
+    fs = cfg.general.feature_selection
+    assert fs.mode == FeatureSelectionMode.disabled
+    assert fs.method == FeatureSelectionMethod.importance
+    assert fs.percentile == 50.0
+    assert fs.min_features == 2
+    assert fs.variance_threshold == 0.0
+    assert fs.n_estimators == 50
+
+
+@pytest.mark.parametrize("mode", ["disabled", "always", "auto"])
+def test_feature_selection_explicit_modes_valid(mode):
+    """Все поддерживаемые режимы отбора признаков проходят валидацию."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"mode": mode}}
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.feature_selection.mode == FeatureSelectionMode(mode)
+
+
+@pytest.mark.parametrize(
+    "method", ["importance", "percentile", "mutual_info", "variance"]
+)
+def test_feature_selection_methods_valid(method):
+    """Каждый из четырёх методов отбора признаков парсится корректно."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"method": method}}
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.feature_selection.method == FeatureSelectionMethod(method)
+
+
+def test_feature_selection_full_block_end_to_end():
+    """Полный блок feature_selection доходит до Config без потерь."""
+    fs_block = {
+        "mode": "always",
+        "method": "mutual_info",
+        "percentile": 20.5,
+        "min_features": 3,
+        "variance_threshold": 0.1,
+        "n_estimators": 100,
+    }
+    cfg_data = BASE | {"general": {**BASE["general"], "feature_selection": fs_block}}
+    cfg = Config.model_validate(cfg_data)
+    fs = cfg.general.feature_selection
+    assert fs.mode == FeatureSelectionMode.always
+    assert fs.method == FeatureSelectionMethod.mutual_info
+    assert fs.percentile == 20.5
+    assert fs.min_features == 3
+    assert fs.variance_threshold == 0.1
+    assert fs.n_estimators == 100
+
+
+def test_feature_selection_percentile_int_coerced_to_float():
+    """Целочисленный литерал percentile из YAML приводится к float без ошибок."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"percentile": 50}}
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.feature_selection.percentile == 50.0
+    assert isinstance(cfg.general.feature_selection.percentile, float)
+
+
+def test_feature_selection_model_standalone():
+    """FeatureSelectionCfg можно использовать напрямую (без Config)."""
+    fs = FeatureSelectionCfg(mode="auto", method="variance", n_estimators=25)
+    assert fs.mode == FeatureSelectionMode.auto
+    assert fs.method == FeatureSelectionMethod.variance
+    assert fs.n_estimators == 25
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("percentile", 100.0),
+        ("percentile", 0.01),
+        ("min_features", 1),
+        ("variance_threshold", 0.0),
+        ("n_estimators", 10),
+    ],
+)
+def test_feature_selection_boundary_values_valid(field, value):
+    """Граничные валидные значения параметров принимаются схемой."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {field: value}}
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.general.feature_selection, field) == value
+
+
+@pytest.mark.parametrize("mode", ["magic", 123, "ALWAYS"])
+def test_feature_selection_invalid_mode_rejected(mode):
+    """Неизвестный или несовпадающий по регистру mode отклоняется.
+
+    Сравнение значений enum строгое: 'ALWAYS' не равен 'always'.
+    """
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"mode": mode}}
+    }
+    with pytest.raises(ValidationError, match="feature_selection"):
+        Config.model_validate(cfg_data)
+    with pytest.raises(ValidationError, match=str(mode)):
+        Config.model_validate(cfg_data)
+
+
+@pytest.mark.parametrize("method", ["pca", "rfe"])
+def test_feature_selection_invalid_method_rejected(method):
+    """Неизвестный метод отбора признаков отклоняется на этапе парсинга."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"method": method}}
+    }
+    with pytest.raises(ValidationError, match=method):
+        Config.model_validate(cfg_data)
+
+
+@pytest.mark.parametrize("percentile", [0.0, -10.0, 105.0])
+def test_feature_selection_invalid_percentile_rejected(percentile):
+    """percentile вне диапазона (0, 100] отклоняется."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"percentile": percentile}}
+    }
+    with pytest.raises(ValidationError, match="percentile"):
+        Config.model_validate(cfg_data)
+
+
+@pytest.mark.parametrize("min_features", [0, -1])
+def test_feature_selection_invalid_min_features_rejected(min_features):
+    """min_features < 1 отклоняется (защита от опустошения матрицы)."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"min_features": min_features}}
+    }
+    with pytest.raises(ValidationError, match="min_features"):
+        Config.model_validate(cfg_data)
+
+
+def test_feature_selection_negative_variance_threshold_rejected():
+    """Отрицательный variance_threshold отклоняется."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "feature_selection": {"variance_threshold": -0.01},
+        }
+    }
+    with pytest.raises(ValidationError, match="variance_threshold"):
+        Config.model_validate(cfg_data)
+
+
+def test_feature_selection_small_n_estimators_rejected():
+    """n_estimators < 10 отклоняется (порог ge=10)."""
+    cfg_data = BASE | {
+        "general": {**BASE["general"], "feature_selection": {"n_estimators": 5}}
+    }
+    with pytest.raises(ValidationError, match="n_estimators"):
+        Config.model_validate(cfg_data)
+
+
+def test_feature_selection_extra_field_rejected():
+    """Лишние ключи внутри блока отклоняются (extra='forbid')."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "feature_selection": {"unknown_param": 42},
+        }
+    }
+    with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
+        Config.model_validate(cfg_data)
+
+
+def test_feature_selection_invalid_rejected_even_when_disabled():
+    """Строгая схема: невалидные параметры отклоняются даже при mode='disabled'."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "feature_selection": {"mode": "disabled", "n_estimators": 3},
+        }
+    }
+    with pytest.raises(ValidationError, match="n_estimators"):
+        Config.model_validate(cfg_data)
+
+
+def test_read_config_feature_selection_yaml(tmp_path):
+    """Реальный YAML с секцией feature_selection парсится в корректный Config."""
+    yaml_content = """
+    general:
+      comparison_metric: "r2"
+      phases:
+        - name: "search"
+          n_trials: 5
+          action: "all_algorithms"
+      validation_strategy: "k_fold"
+      n_folds: 3
+      feature_selection:
+        mode: "always"
+        method: "percentile"
+        percentile: 25
+        min_features: 4
+        variance_threshold: 0.0
+        n_estimators: 30
+    algorithms:
+      elasticnet:
+        enable: true
+    """
+    config_file = tmp_path / "test_config_fs.yaml"
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    config = read_config(config_file)
+    fs = config.general.feature_selection
+    assert fs.mode == FeatureSelectionMode.always
+    assert fs.method == FeatureSelectionMethod.percentile
+    assert fs.percentile == 25.0
+    assert fs.min_features == 4
+    assert fs.variance_threshold == 0.0
+    assert fs.n_estimators == 30
+
+
+def test_read_config_feature_selection_absent_defaults(tmp_path):
+    """YAML без секции feature_selection даёт disabled-режим по умолчанию."""
+    yaml_content = """
+    general:
+      comparison_metric: "r2"
+      phases:
+        - name: "search"
+          n_trials: 5
+          action: "all_algorithms"
+      validation_strategy: "k_fold"
+      n_folds: 3
+    algorithms:
+      elasticnet:
+        enable: true
+    """
+    config_file = tmp_path / "test_config_no_fs.yaml"
+    config_file.write_text(yaml_content, encoding="utf-8")
+
+    config = read_config(config_file)
+    fs = config.general.feature_selection
+    assert fs.mode == FeatureSelectionMode.disabled
+    assert fs.method == FeatureSelectionMethod.importance
+    assert fs.percentile == 50.0
+    assert fs.min_features == 2
+    assert fs.variance_threshold == 0.0
+    assert fs.n_estimators == 50

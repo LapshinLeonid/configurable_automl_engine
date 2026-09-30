@@ -326,6 +326,74 @@
       "title": "CategoricalSpace",
       "type": "object"
     },
+    "FeatureSelectionCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/FeatureSelectionMode",
+          "default": "disabled",
+          "description": "Feature selection mode: 'disabled', 'always' or 'auto'. By default 'disabled' — feature selection is not applied."
+        },
+        "method": {
+          "$ref": "#/$defs/FeatureSelectionMethod",
+          "default": "importance",
+          "description": "Selection algorithm: 'importance' (tree-based), 'percentile' (f_regression), 'mutual_info' (mutual information) or 'variance' (variance filter)."
+        },
+        "percentile": {
+          "default": 50.0,
+          "description": "Percentage of features to keep (for the 'percentile' and 'mutual_info' methods).",
+          "exclusiveMinimum": 0.0,
+          "maximum": 100.0,
+          "title": "Percentile",
+          "type": "number"
+        },
+        "min_features": {
+          "default": 2,
+          "description": "Lower bound on the number of features kept (protection against an empty feature matrix).",
+          "minimum": 1,
+          "title": "Min Features",
+          "type": "integer"
+        },
+        "variance_threshold": {
+          "default": 0.0,
+          "description": "Minimum feature variance for the 'variance' method.",
+          "minimum": 0.0,
+          "title": "Variance Threshold",
+          "type": "number"
+        },
+        "n_estimators": {
+          "default": 50,
+          "description": "Number of trees used to estimate feature importance in the 'importance' method.",
+          "minimum": 10,
+          "title": "N Estimators",
+          "type": "integer"
+        }
+      },
+      "title": "FeatureSelectionCfg",
+      "type": "object"
+    },
+    "FeatureSelectionMethod": {
+      "description": "Supported algorithms for reducing the feature space.",
+      "enum": [
+        "importance",
+        "percentile",
+        "mutual_info",
+        "variance"
+      ],
+      "title": "FeatureSelectionMethod",
+      "type": "string"
+    },
+    "FeatureSelectionMode": {
+      "description": "Operation modes of the feature space reduction mechanism.",
+      "enum": [
+        "disabled",
+        "always",
+        "auto"
+      ],
+      "title": "FeatureSelectionMode",
+      "type": "string"
+    },
     "FloatSpace": {
       "description": "Распределение для чисел с плавающей точкой: [min, max, 'float', step?].",
       "properties": {
@@ -368,7 +436,7 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    additional_metrics (List[ComparisonMetric]): Дополнительные информационные\n        метрики, рассчитываемые для финальной модели.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').",
+      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    additional_metrics (List[ComparisonMetric]): Дополнительные информационные\n        метрики, рассчитываемые для финальной модели.\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').\n    feature_selection (FeatureSelectionCfg): Настройки сокращения пространства\n        признаков. По умолчанию mode='disabled' — отбор признаков не применяется.",
       "properties": {
         "comparison_metric": {
           "default": "r2",
@@ -578,6 +646,10 @@
         "pruning": {
           "$ref": "#/$defs/PruningCfg",
           "description": "Настройки ранней остановки (pruning) триалов Optuna. По умолчанию выключены: каждый триал выполняется полностью."
+        },
+        "feature_selection": {
+          "$ref": "#/$defs/FeatureSelectionCfg",
+          "description": "Настройки сокращения пространства признаков. По умолчанию mode='disabled' — отбор признаков не применяется."
         }
       },
       "required": [
