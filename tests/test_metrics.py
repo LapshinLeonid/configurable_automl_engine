@@ -115,8 +115,12 @@ def test_is_greater_better_contract_from_issue():
 
 
 def test_is_greater_better_unknown_metric_raises():
-    """Неизвестная метрика не имеет направления — честный ValueError."""
-    with pytest.raises(ValueError):
+    """Неизвестная метрика не имеет направления — понятный ValueError.
+
+    Сообщение об ошибке объясняет, как исправить (реестр или sklearn),
+    аналогично get_metric (ревью PR #18).
+    """
+    with pytest.raises(ValueError, match="not implemented"):
         is_greater_better("unknown_custom_metric")
 
 

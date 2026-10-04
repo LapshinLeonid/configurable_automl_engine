@@ -245,7 +245,14 @@ def _sklearn_direction(name: str) -> bool:
     Raises:
         ValueError: Если метрика неизвестна sklearn.
     """
-    scorer = sklearn_get_scorer(name)
+    try:
+        scorer = sklearn_get_scorer(name)
+    except ValueError as err:
+        raise ValueError(
+            f"Metric '{name}' not implemented. Use one of the registered "
+            "metrics or a valid sklearn scorer name "
+            "(see sklearn.metrics.get_scorer_names())."
+        ) from err
     sign = getattr(scorer, "_sign", None)
     if sign is not None:
         return bool(sign > 0) or name.startswith("neg_")
