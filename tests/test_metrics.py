@@ -6,6 +6,7 @@ from configurable_automl_engine.training_engine.metrics import (
     _rmse,
     _nrmse,
     get_metric,
+    is_error_metric,
     is_greater_better,
     get_scorer_object,
     to_sklearn_name,
@@ -122,6 +123,35 @@ def test_is_greater_better_unknown_metric_raises():
     """
     with pytest.raises(ValueError, match="not implemented"):
         is_greater_better("unknown_custom_metric")
+
+
+def test_is_greater_better_global_nrmse():
+    """global_nrmse — динамическая ошибка: «меньше — лучше».
+
+    Регрессия ревью PR #18: до фикса is_greater_better('global_nrmse')
+    падал с ValueError (sklearn не знает такого скорера), что роняло
+    ModelTrainer.fit() с metric='global_nrmse' (вызов из debug-лога).
+    """
+    assert is_greater_better("global_nrmse") is False
+
+
+def test_is_error_metric_user_presentation():
+    """is_error_metric отражает пользовательское представление метрики.
+
+    Инвертированные скореры ошибок (в т.ч. neg_-метрики) помечаются как
+    ошибки, score-метрики — нет (ревью PR #18: лейбл в логе train_model).
+    """
+    assert is_error_metric("global_nrmse") is True
+    assert is_error_metric("rmse") is True
+    assert is_error_metric("mae") is True
+    assert is_error_metric("mse") is True
+    assert is_error_metric("nrmse") is True
+    assert is_error_metric("neg_root_mean_squared_error") is True
+    assert is_error_metric("neg_log_loss") is True
+    assert is_error_metric("r2") is False
+    assert is_error_metric("accuracy") is False
+    with pytest.raises(ValueError, match="not implemented"):
+        is_error_metric("unknown_custom_metric")
 
 
 def test_to_user_value_natural_semantics():

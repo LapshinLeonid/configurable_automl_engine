@@ -214,12 +214,20 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
         Callable[..., Any]: Объект-скорер, совместимый с API sklearn.
 
     Raises:
-        ValueError: Если имя метрики не найдено ни в реестре, ни в sklearn.
+        ValueError: Если имя метрики не найдено ни в реестре, ни в sklearn
+            (с понятным сообщением в стиле ``get_metric``).
     """
     lname = name.lower()
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][0]
-    return cast(Callable[..., Any], sklearn_get_scorer(lname))
+    try:
+        return cast(Callable[..., Any], sklearn_get_scorer(lname))
+    except ValueError as err:
+        raise ValueError(
+            f"Metric '{name}' not implemented. Use one of the registered "
+            "metrics or a valid sklearn scorer name "
+            "(see sklearn.metrics.get_scorer_names())."
+        ) from err
 
 
 @lru_cache(maxsize=256)
@@ -243,16 +251,9 @@ def _sklearn_direction(name: str) -> bool:
         bool: True, если значение метрики максимизируется.
 
     Raises:
-        ValueError: Если метрика неизвестна sklearn.
+        ValueError: Если метрика неизвестна sklearn (см. ``_resolve_scorer``).
     """
-    try:
-        scorer = sklearn_get_scorer(name)
-    except ValueError as err:
-        raise ValueError(
-            f"Metric '{name}' not implemented. Use one of the registered "
-            "metrics or a valid sklearn scorer name "
-            "(see sklearn.metrics.get_scorer_names())."
-        ) from err
+    scorer = _resolve_scorer(name)
     sign = getattr(scorer, "_sign", None)
     if sign is not None:
         return bool(sign > 0) or name.startswith("neg_")
@@ -280,7 +281,7 @@ def is_greater_better(name: str) -> bool:
 
     Returns:
         bool: True, если значение метрики максимизируется (r2, neg_*-метрики),
-            False для метрик-ошибок (RMSE, MAE, MSE, NRMSE).
+            False для метрик-ошибок (RMSE, MAE, MSE, NRMSE, global_nrmse).
 
     Raises:
         ValueError: Если метрика неизвестна ни реестру, ни sklearn.
@@ -289,8 +290,39 @@ def is_greater_better(name: str) -> bool:
     # 1. Явное направление из собственного реестра — без кэша.
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][1]
-    # 2. Стабильные sklearn-скореры — с кэшированием результата.
+    # 2. Динамический глобальный NRMSE — ошибка («меньше — лучше»), как и
+    #    обычный NRMSE. Скорер требует global_y и не резолвится sklearn,
+    #    поэтому обрабатывается явно (синхронно с to_user_value).
+    if lname == "global_nrmse":
+        return False
+    # 3. Стабильные sklearn-скореры — с кэшированием результата.
     return _sklearn_direction(lname)
+
+
+def is_error_metric(name: str) -> bool:
+    """Является ли метрика ошибкой в пользовательском представлении.
+
+    Определяется по фактическому объекту-скореру (атрибут ``_sign``):
+    инвертированные скореры ошибок (-RMSE, -MAE, все neg_-метрики)
+    возвращают пользователю положительное значение ошибки → True;
+    score-метрики (R² и т.п.) возвращаются как есть → False.
+
+    Args:
+        name (str): Название метрики.
+
+    Returns:
+        bool: True для метрик-ошибок (RMSE, MAE, MSE, NRMSE, neg_*-метрики),
+            False для score-метрик (R², accuracy и т.п.).
+
+    Raises:
+        ValueError: Если метрика неизвестна ни реестру, ни sklearn.
+    """
+    lname = name.lower()
+    if lname == "global_nrmse":
+        return True
+    scorer = _resolve_scorer(lname)
+    sign = getattr(scorer, "_sign", None)
+    return sign is not None and sign < 0
 
 
 def to_user_value(name: str, raw_value: float) -> float:

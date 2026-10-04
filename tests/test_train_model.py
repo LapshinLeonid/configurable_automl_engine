@@ -959,6 +959,30 @@ class TestModelTrainerCoverage2:
         # Note: raw_score from sklearn is -RMSE
         assert hasattr(trainer, "val_score")
 
+    def test_global_nrmse_metric_fit_does_not_crash(self):
+        """Регрессия ревью PR #18: metric='global_nrmse' не роняет fit().
+
+        Раньше is_greater_better('global_nrmse') кидал ValueError (sklearn не
+        знает такого скорера), а вызов шёл безусловно из eager f-string
+        debug-лога _score_on_validation_splits на каждом fit(). На main путь
+        работал; теперь снова работает и возвращает положительный NRMSE.
+        """
+        df = pd.DataFrame(
+            {
+                "feature1": np.arange(10, dtype=float),
+                "target": np.arange(10, dtype=float) * 10.0,
+            }
+        )
+
+        trainer = ModelTrainer(
+            algorithm="ridge", metric="global_nrmse", random_state=42
+        )
+        trainer.fit(df, "target")
+
+        assert trainer.val_score is not None
+        assert trainer.val_score >= 0
+        assert isinstance(trainer.val_score, float)
+
     # --------------------------------------------------------------------------
     # 2. Покрытие веток predict (SharedDataFrame vs np.asarray)
     # --------------------------------------------------------------------------

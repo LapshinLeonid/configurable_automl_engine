@@ -76,6 +76,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
+    is_error_metric,
     is_greater_better,
     to_user_value,
 )
@@ -847,39 +848,39 @@ class ModelTrainer:
     ) -> bool:
         """Выполнить Standalone Auto-Check целесообразности отбора признаков.
 
-                Режим ``auto`` используется при прямом вызове ``ModelTrainer.fit()``
-                без HPO. Логика:
-                1. Hold-out сплит 80/20 с фиксированным ``random_state``.
-                2. Два контрольных пайплайна (без селектора и с селектором) обучаются
-                   на train-части; скоринг на hold-out через
-        ``get_scorer_object(self.metric, global_y=y_train)``.
-                3. Направленное сравнение «сырых» значений скорера: любой скорер
-                   (реестра или sklearn) устроен так, что большее значение лучше
-                   (neg_-метрики уже инвертированы для максимизации), поэтому
-                   эвристика по имени метрики не нужна и не ломается для neg_*-метрик.
-                   В лог выводятся значения в пользовательской семантике
-                   (``to_user_value``).
-                4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
-                   дают WARNING и возвращают ``False`` — проверка не роняет fit().
+        Режим ``auto`` используется при прямом вызове ``ModelTrainer.fit()``
+        без HPO. Логика:
+        1. Hold-out сплит 80/20 с фиксированным ``random_state``.
+        2. Два контрольных пайплайна (без селектора и с селектором) обучаются
+           на train-части; скоринг на hold-out через
+           ``get_scorer_object(self.metric, global_y=y_train)``.
+        3. Направленное сравнение «сырых» значений скорера: любой скорер
+           (реестра или sklearn) устроен так, что большее значение лучше
+           (neg_-метрики уже инвертированы для максимизации), поэтому
+           эвристика по имени метрики не нужна и не ломается для neg_*-метрик.
+           В лог выводятся значения в пользовательской семантике
+           (``to_user_value``).
+        4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
+           дают WARNING и возвращают ``False`` — проверка не роняет fit().
 
-                Стоимость: каждый ``fit()`` в режиме ``auto`` дополнительно обучает
-                два полных пайплайна на 80% данных — для тяжёлых алгоритмов это
-                ~2–3x времени обычного обучения. Режим рассчитан на прямые вызовы
-                без HPO; в цикле HPO активность отбора должна передаваться явным
-                флагом ``feature_selection_active``, чтобы проверка не выполнялась
-                для каждого триала.
+        Стоимость: каждый ``fit()`` в режиме ``auto`` дополнительно обучает
+        два полных пайплайна на 80% данных — для тяжёлых алгоритмов это
+        ~2–3x времени обычного обучения. Режим рассчитан на прямые вызовы
+        без HPO; в цикле HPO активность отбора должна передаваться явным
+        флагом ``feature_selection_active``, чтобы проверка не выполнялась
+        для каждого триала.
 
-                Побочных эффектов нет: метод не трогает ``self.pipeline``,
-                ``self.val_score`` и ``self.feature_names``.
+        Побочных эффектов нет: метод не трогает ``self.pipeline``,
+        ``self.val_score`` и ``self.feature_names``.
 
-                Args:
-                    X_train: Обучающая матрица признаков.
-                    y_train: Целевая переменная.
-                    preprocessor: ``ColumnTransformer`` предобработки.
-                    base_model: Финальный регрессор.
+        Args:
+            X_train: Обучающая матрица признаков.
+            y_train: Целевая переменная.
+            preprocessor: ``ColumnTransformer`` предобработки.
+            base_model: Финальный регрессор.
 
-                Returns:
-                    ``True``, если качество с отбором строго выше, иначе ``False``.
+        Returns:
+            ``True``, если качество с отбором строго выше, иначе ``False``.
         """
         n_samples = X_train.shape[0] if hasattr(X_train, "shape") else len(X_train)
         if n_samples < _MIN_AUTO_CHECK_SAMPLES:
@@ -1619,8 +1620,10 @@ def train_model(
     if enable_logging:
         # Получаем логгер и пишем сообщение
         logger = logging.getLogger(__name__)
-        # Определяем тип метрики для понятного лога
-        metric_type = "Score" if is_greater_better(metric) else "Error (Natural)"
+        # Тип метрики — по пользовательскому представлению: ошибки (RMSE/MAE,
+        # в т.ч. neg_-метрики, чьё значение инвертировано обратно) помечаются
+        # как "Error (Natural)", score-метрики (R² и т.п.) — как "Score".
+        metric_type = "Error (Natural)" if is_error_metric(metric) else "Score"
 
         logger.info(
             f"Training finished: Algorithm={algo_key}, "
