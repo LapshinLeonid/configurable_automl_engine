@@ -472,9 +472,9 @@ def train_best_model(
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
-        _LOG.debug("CONFIG TYPE:", type(config))
+        _LOG.debug("CONFIG TYPE: %s", type(config))
         _LOG.debug(
-            "ALGORITHMS:",
+            "ALGORITHMS: %s",
             (config.get("algorithms") if isinstance(config, dict) else "N/A"),
         )
         cfg = Config.model_validate(config)

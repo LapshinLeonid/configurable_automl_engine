@@ -1,5 +1,6 @@
 import pytest
 import pandas as pd
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
@@ -542,6 +543,83 @@ def test_train_best_model_config_from_dict_and_refine_flow():
             # Ожидаем 2 вызова: по одному на каждую фазу
             assert mock_hpo.call_count == 2
             mock_save.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+#  Debug-логи в ветке dict-конфига (issue #23)
+# --------------------------------------------------------------------------- #
+def test_train_best_model_debug_logs_formatted_no_logging_error(
+    caplog, capsys, sample_df, base_config_dict
+):
+    """
+    Проверка корректного форматирования debug-вызовов логирования
+    в ветке dict-конфига ``train_best_model`` (issue #23).
+
+    Раньше сообщения не содержали %s-плейсхолдеров, из-за чего при уровне
+    DEBUG ``LogRecord.getMessage()`` падал с TypeError и пользователь видел
+    ``--- Logging error ---`` в stderr, а само сообщение терялось.
+
+    Проверяем:
+    - сообщения CONFIG TYPE / ALGORITHMS содержат подставленные значения;
+    - ни одна запись не падает в ``getMessage()`` (форматирование корректно);
+    - в caplog попадают записи именно от логгера ``training_engine``;
+    - в stderr не появляется ``--- Logging error ---`` даже при обработке
+      реальным StreamHandler.
+    """
+    import logging
+
+    # Ожидаемое значение алгоритма из base_config_dict
+    expected_algorithm = "random_forest"
+    # Проверяем, что конфигурация действительно содержит ожидаемый алгоритм,
+    # на который рассчитаны проверки сообщений ниже
+    assert expected_algorithm in base_config_dict["algorithms"]
+
+    # Реальный StreamHandler(stderr) на DEBUG — имитация продакшн-обработчика,
+    # который форматирует запись и триггерит handleError при ошибке
+    logger = logging.getLogger("training_engine")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.DEBUG)
+    logger.addHandler(stream_handler)
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "configurable_automl_engine.training_engine.component._run_hpo",
+                    return_value=(0.9, {}),
+                )
+            )
+            mock_save = stack.enter_context(
+                patch(
+                    "configurable_automl_engine.training_engine.component._fit_and_save"
+                )
+            )
+            with caplog.at_level(logging.DEBUG, logger="training_engine"):
+                train_best_model(
+                    config=base_config_dict, df=sample_df, target="target"
+                )
+            mock_save.assert_called_once()
+    finally:
+        logger.removeHandler(stream_handler)
+
+    # Форматирование не падает: getMessage() возвращает подставленную строку.
+    # Фильтруем записи строго по имени тестируемого логгера, чтобы исключить
+    # посторонние логгеры с тем же именем
+    debug_msgs = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG and record.name == "training_engine"
+    ]
+    assert any(
+        msg.startswith("CONFIG TYPE:") and "<class 'dict'>" in msg
+        for msg in debug_msgs
+    )
+    assert any(
+        msg.startswith("ALGORITHMS:") and expected_algorithm in msg
+        for msg in debug_msgs
+    )
+
+    # Никакого "--- Logging error ---" в stderr
+    assert "--- Logging error ---" not in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #
