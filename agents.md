@@ -17,7 +17,6 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
 
 ### 1. Role: Planner / Architect (`generate-plan`)
 **Goal:** Analyze task `#ISSUE_ID` and produce a structured, high-level architecture plan.
-* **Output:** Save the plan as `plan.json`.
 * **Focus Areas:**
   - Break down the task into clear logical steps / components.
   - Identify affected files in `src/` and `tests/`.
