@@ -417,7 +417,9 @@ def test_train_best_model_returns_additional_metrics(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {"alpha": 0.1}),
+            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
+            # result["score"] — положительный RMSE (issue #26)
+            return_value=(-0.9, {"alpha": 0.1}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -432,6 +434,7 @@ def test_train_best_model_returns_additional_metrics(tiny_df):
 
     assert result["additional_metrics"] == {"r2": 0.87, "mae": 0.12}
     assert result["score"] == 0.9
+    assert result["metric"] == "rmse"
     mock_save.assert_called_once()
     # Дополнительные метрики проброшены из конфига в финальное обучение
     cfg_passed = mock_save.call_args.args[6]
@@ -444,7 +447,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {}),
+            return_value=(-0.9, {}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -456,7 +459,13 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         )
 
     assert "additional_metrics" not in result
-    assert set(result.keys()) == {"algorithm", "score", "params", "model_path"}
+    assert set(result.keys()) == {
+        "algorithm",
+        "score",
+        "metric",
+        "params",
+        "model_path",
+    }
 
 
 def test_train_best_model_no_key_when_additional_empty(tiny_df):
@@ -464,7 +473,7 @@ def test_train_best_model_no_key_when_additional_empty(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {}),
+            return_value=(-0.9, {}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -482,7 +491,7 @@ def test_train_best_model_comparison_only_not_duplicated(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {}),
+            return_value=(-0.9, {}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -514,10 +523,12 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
     }
 
     def hpo_side_effect(**kwargs):
-        # ridge даёт лучший score — он и должен победить
+        # ridge даёт лучший MAE (0.60) — он и должен победить.
+        # «Сырые» значения скорера отрицательные (-MAE): максимизация
+        # выбирает большее (-0.60 > -0.95).
         if kwargs["algo_name"] == "ridge":
-            return 0.95, {"alpha": 0.5}
-        return 0.60, {"alpha": 0.1}
+            return -0.60, {"alpha": 0.5}
+        return -0.95, {"alpha": 0.1}
 
     with (
         patch(
@@ -532,7 +543,7 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
         result = train_best_model(config=cfg, df=tiny_df, target="target")
 
     assert result["algorithm"] == "ridge"
-    assert result["score"] == 0.95
+    assert result["score"] == 0.60
     assert result["additional_metrics"] == {"r2": 0.9, "mae": 0.1}
 
 

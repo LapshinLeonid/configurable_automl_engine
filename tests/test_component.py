@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
 import importlib
 import inspect
+import logging
+import re
 
 import numpy as np
 from sklearn.datasets import make_regression
@@ -826,9 +828,12 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
 def test_refine_winner_uses_initial_params_from_phase1():
     """
     Проверяет, что Phase 2 (refine_winner) передаёт initial_params из Phase 1.
-    Если initial_params передан — Phase 2 возвращает улучшенный score (0.9).
-    Если не передан — Phase 2 возвращает худший score (0.7).
-    Финальный победитель должен использовать лучший score (0.9).
+    Если initial_params передан — Phase 2 возвращает улучшенный score.
+    Финальный победитель должен использовать лучший score.
+
+    Метрика сравнения — 'mae' (ошибка): `_run_hpo` возвращает «сырые»
+    значения скорера (-MAE), а result["score"] — естественное положительное
+    значение MAE (issue #26).
     """
     config_dict = {
         "general": {
@@ -859,8 +864,8 @@ def test_refine_winner_uses_initial_params_from_phase1():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # Phase 1: возвращаем высокий score
-            return 0.8, {"alpha": 0.5, "l1_ratio": 0.3}
+            # Phase 1: MAE = 0.9 (raw = -0.9)
+            return -0.9, {"alpha": 0.5, "l1_ratio": 0.3}
         elif call_count == 2:
             # Phase 2: проверяем, что initial_params передан
             assert "initial_params" in kwargs, (
@@ -869,8 +874,8 @@ def test_refine_winner_uses_initial_params_from_phase1():
             assert kwargs["initial_params"] == {"alpha": 0.5, "l1_ratio": 0.3}, (
                 f"expected Phase 1 params, got {kwargs['initial_params']}"
             )
-            # Возвращаем улучшенный score
-            return 0.9, {"alpha": 0.6, "l1_ratio": 0.4}
+            # Возвращаем улучшенный score: MAE = 0.8 (raw = -0.8)
+            return -0.8, {"alpha": 0.6, "l1_ratio": 0.4}
         return None
 
     with patch(
@@ -882,15 +887,63 @@ def test_refine_winner_uses_initial_params_from_phase1():
         ) as mock_save:
             result = train_best_model(config=config_dict, df=df, target="target")
 
-            # Финальный score должен быть 0.9 (лучший, из Phase 2)
-            assert result["score"] == 0.9
-            # Монотонность: Phase 2 (0.9) >= Phase 1 (0.8)
-            assert result["score"] >= 0.8, (
+            # Финальный score — пользовательская семантика MAE (положительная):
+            # победитель Phase 2 (MAE=0.8), а не «сырое» значение -0.8
+            assert result["score"] == 0.8
+            # Монотонность: MAE Phase 2 (0.8) <= MAE Phase 1 (0.9)
+            assert result["score"] <= 0.9, (
                 "Score должен монотонно не убывать между фазами"
             )
             assert result["params"] == {"alpha": 0.6, "l1_ratio": 0.4}
             assert mock_hpo.call_count == 2
             mock_save.assert_called_once()
+
+
+def test_result_score_matches_logged_user_value(caplog):
+    """Логи фаз HPO и result["score"] используют единую семантику (issue #26).
+
+    «Сырое» значение скорера для rmse — -RMSE. И фазовый лог, и
+    result["score"]/result["metric"] отдают пользователю положительный RMSE.
+    """
+    config_dict = {
+        "general": {
+            "comparison_metric": "rmse",
+            "validation_strategy": "train_test_split",
+            "phases": [{"name": "p1", "n_trials": 1, "action": "all_algorithms"}],
+            "path_to_model": "model.pkl",
+        },
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            }
+        },
+        "oversampling": {"enable": False},
+    }
+
+    df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.component._run_hpo",
+            return_value=(-0.12345, {"alpha": 0.1}),
+        ),
+        patch(
+            "configurable_automl_engine.training_engine.component._fit_and_save",
+            return_value=SimpleNamespace(additional_scores={}),
+        ),
+        caplog.at_level(logging.INFO, logger="training_engine"),
+    ):
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+    # Пользовательская семантика: положительный RMSE + имя метрики
+    assert result["score"] == pytest.approx(0.12345)
+    assert result["metric"] == "rmse"
+    # Фазовый лог выводит то же значение (пользовательская семантика)
+    assert re.search(r"score 0\.12345 \| params", caplog.text)
+    # «Сырое» инвертированное значение наружу не утекает
+    assert "score -0.12345" not in caplog.text
 
 
 def test_train_best_model_refine_winner_error_coverage():
@@ -1201,7 +1254,9 @@ class TestPartialNoneResults:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return None
-            return (0.42, {"n_estimators": 10})
+            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
+            # пользователю возвращается положительный RMSE (issue #26)
+            return (-0.42, {"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
