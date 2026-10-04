@@ -142,6 +142,10 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     step=float(step) if step is not None else None,
                 )
             elif dist_type == "float_log":
+                if float(low) <= 0:
+                    raise ValueError(
+                        f"low must be > 0 for log-scale distributions. Got low={low}"
+                    )
                 params[key] = trial.suggest_float(
                     key, float(low), float(high), log=True
                 )

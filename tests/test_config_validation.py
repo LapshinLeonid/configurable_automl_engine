@@ -410,6 +410,54 @@ def test_float_log_step_forbidden():
         FloatSpace(type="float_log", low=1.0, high=10.0, step=0.1)
 
 
+# 2a. Тест для: float_log требует low > 0 (issue #20)
+@pytest.mark.parametrize("bad_low", [0.0, -1.0, -0.0001])
+def test_float_log_non_positive_low_rejected(bad_low):
+    """float_log c low <= 0 отклоняется на этапе валидации SearchSpaceEntry."""
+    with pytest.raises(
+        ValidationError, match="low must be > 0 for log-scale distributions"
+    ):
+        SearchSpaceEntry.model_validate([bad_low, 1.0, "float_log"])
+
+    with pytest.raises(
+        ValidationError, match="low must be > 0 for log-scale distributions"
+    ):
+        FloatSpace(type="float_log", low=bad_low, high=1.0)
+
+
+def test_float_log_zero_low_rejected_via_short_form():
+    """Краткая запись [0, 1, 'float_log'] падает с понятной ошибкой."""
+    with pytest.raises(
+        ValidationError, match="low must be > 0 for log-scale distributions"
+    ):
+        SearchSpaceEntry.model_validate([0, 1, "float_log"])
+
+
+def test_float_log_positive_low_valid():
+    """Позитивный сценарий: float_log со строго положительным low проходит."""
+    entry = SearchSpaceEntry.model_validate([1e-6, 1.0, "float_log"])
+    assert entry.dist_type == "float_log"
+    assert entry.low == 1e-6
+    assert entry.high == 1.0
+    assert entry.step is None
+
+
+def test_float_log_non_positive_low_rejected_in_config():
+    """Конфиг с float_log и low <= 0 отклоняется на этапе Config.model_validate."""
+    cfg_data = BASE | {
+        "algorithms": {
+            "ridge": {
+                "enable": True,
+                "hyperparameters": {"alpha": [0.0, 1.0, "float_log"]},
+            }
+        }
+    }
+    with pytest.raises(
+        ValidationError, match="low must be > 0 for log-scale distributions"
+    ):
+        Config.model_validate(cfg_data)
+
+
 # 3. Тест для: if self.step is not None and self.step <= 0: (в FloatSpace и IntSpace)
 def test_step_positive_validation():
     # Для FloatSpace

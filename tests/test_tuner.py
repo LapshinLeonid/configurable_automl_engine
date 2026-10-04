@@ -422,6 +422,46 @@ def test_apply_dynamic_space_floats():
     trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
 
 
+def test_apply_dynamic_space_float_log_rejects_non_positive_low():
+    """Защита в _apply_dynamic_space: float_log с low <= 0 отклоняется.
+
+    Дублирует Pydantic-валидацию на случай прямого вызова тюнера мимо
+    конфигурационной схемы (например, словарный конфиг в старом формате).
+    """
+    trial = MagicMock()
+
+    class MockEntry:
+        def __init__(self, bounds):
+            self.bounds = bounds
+
+        @property
+        def low(self):
+            return self.bounds[0]
+
+        @property
+        def high(self):
+            return self.bounds[1]
+
+        @property
+        def dist_type(self):
+            return self.bounds[2]
+
+        @property
+        def step(self):
+            return self.bounds[3] if len(self.bounds) > 3 else None
+
+    for bad_low in (0.0, -1.0):
+        space_dict = {"alpha": MockEntry([bad_low, 1.0, "float_log"])}
+        with pytest.raises(ValueError, match="low must be > 0 for log-scale"):
+            _apply_dynamic_space(trial, space_dict)
+    assert trial.suggest_float.call_count == 0
+
+    # Позитивный сценарий: low > 0 уходит в suggest_float(log=True)
+    ok_space = {"alpha": MockEntry([1e-6, 1.0, "float_log"])}
+    _apply_dynamic_space(trial, ok_space)
+    trial.suggest_float.assert_called_once_with("alpha", 1e-06, 1.0, log=True)
+
+
 def test_build_scorer_error():
     with pytest.raises(HyperoptError, match="Unknown metric name"):
         _build_scorer("non_existent_metric_name_123")
