@@ -47,11 +47,11 @@ from configurable_automl_engine.common.definitions import (
     ValidationStrategy,
 )
 from configurable_automl_engine.common.dependency_utils import is_installed
-from configurable_automl_engine.common.hyperopt_defaults import (
-    ALGO_HYPERPARAMETER_REGISTRY,
-    SearchSpaceEntry,
+from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
+from configurable_automl_engine.models import (
+    AVAILABLE_ALGORITHMS,
+    get_allowed_hyperparameters,
 )
-from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.training_engine.metrics import (
@@ -701,8 +701,10 @@ class AlgoCfg(BaseModel):
     hyperparameters: dict[str, SearchSpaceEntry] | None = Field(
         default=None,
         description=(
-            "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. "
-            "См. ALGO_HYPERPARAMETER_REGISTRY."
+            "Ключи должны соответствовать допустимым гиперпараметрам алгоритма: "
+            "параметрам конструктора sklearn-оценщика (включая legacy-имена из "
+            "LEGACY_PARAM_MAPPINGS). Источник истины — "
+            "models.get_allowed_hyperparameters."
         ),
     )
     preprocessing: PreprocessingOverride | None = Field(
@@ -746,9 +748,12 @@ class AlgoCfg(BaseModel):
     def get_unknown_hyperparameters(self, algo_name: str) -> list[str]:
         """Вернуть список гиперпараметров, несовместимых с данным алгоритмом.
 
-        Сверяет ключи `self.hyperparameters` с допустимым множеством из
-        `ALGO_HYPERPARAMETER_REGISTRY`. Если алгоритм отсутствует в реестре —
-        проверка пропускается (мягкий fallback).
+        Сверяет ключи `self.hyperparameters` с допустимым множеством
+        параметров конструктора оценки (см.
+        `models.get_allowed_hyperparameters`), включая legacy-имена из
+        `LEGACY_PARAM_MAPPINGS`. Если допустимое множество определить нельзя
+        (алгоритм неизвестен, зависимость не установлена или конструктор
+        принимает **kwargs) — проверка пропускается (мягкий fallback).
 
         Args:
             algo_name (str): Уникальный идентификатор алгоритма.
@@ -757,9 +762,9 @@ class AlgoCfg(BaseModel):
         """
         if self.hyperparameters is None:
             return []
-        allowed = ALGO_HYPERPARAMETER_REGISTRY.get(algo_name)
+        allowed = get_allowed_hyperparameters(algo_name)
 
-        if not allowed:
+        if allowed is None:
             return []
 
         return [k for k in self.hyperparameters if k not in allowed]
@@ -877,7 +882,7 @@ class Config(BaseModel):
                 continue
             unknown = algo_cfg.get_unknown_hyperparameters(name)
             if unknown:
-                allowed = sorted(ALGO_HYPERPARAMETER_REGISTRY.get(name, set()))
+                allowed = sorted(get_allowed_hyperparameters(name) or set())
                 errors.append(
                     f"Algorithm '{name}': unknown hyperparameters {unknown}. "
                     f"Allowed parameters: {allowed}"

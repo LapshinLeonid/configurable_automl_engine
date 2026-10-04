@@ -29,7 +29,7 @@
             }
           ],
           "default": null,
-          "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма. См. ALGO_HYPERPARAMETER_REGISTRY.",
+          "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма: параметрам конструктора sklearn-оценщика (включая legacy-имена из LEGACY_PARAM_MAPPINGS). Источник истины — models.get_allowed_hyperparameters.",
           "title": "Hyperparameters"
         },
         "preprocessing": {

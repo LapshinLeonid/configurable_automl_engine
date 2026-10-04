@@ -276,6 +276,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "gaussian_process_regression": {},
 }
 
+# Проекция ключей DEFAULT_SPACES. Информационная сводка параметров, для которых
+# заданы дефолтные пространства поиска. НЕ используется валидацией конфигурации:
+# допустимое множество гиперпараметров определяется сигнатурой конструктора
+# оценщика (models.get_allowed_hyperparameters), поэтому параметры вне этого
+# реестра (например, min_samples_split) также разрешены, если их принимает оценщик.
 ALGO_HYPERPARAMETER_REGISTRY: dict[str, set[str]] = {
     algo: set(params.keys()) for algo, params in DEFAULT_SPACES.items()
 }

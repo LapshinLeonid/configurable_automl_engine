@@ -167,7 +167,7 @@ Algorithm configuration consists of:
 
 * `enable` — boolean flag, whether hyperparameter search is performed for the algorithm.
 * `limit_hyperparameters` — (optional) boolean flag to set limits for hyperparameter search.
-* `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. See [`ALGO_HYPERPARAMETER_REGISTRY`](src/configurable_automl_engine/common/hyperopt_defaults.py) for details.
+* `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. Keys must match hyperparameters accepted by the estimator constructor (including legacy names from `LEGACY_PARAM_MAPPINGS`, e.g. `n_iter` → `max_iter` for ARDRegression). The allowed set is derived from the estimator signature via [`get_allowed_hyperparameters`](src/configurable_automl_engine/models.py), not from the default search space — so parameters outside `DEFAULT_SPACES` (e.g. `min_samples_split`, `max_features`) are valid as long as the estimator accepts them. Unknown names (typos) are rejected at configuration validation.
 * `preprocessing` — (optional) explicit override of the feature preprocessing preset for this algorithm. Takes priority over the automatic class-based selection (FR-5). May override the whole preset or only some fields:
 
 ```yaml

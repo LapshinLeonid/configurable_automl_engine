@@ -11,6 +11,7 @@ from configurable_automl_engine.models import (
     _get_factory,
     clean_hyperparameters,
     create_model,
+    get_allowed_hyperparameters,
 )
 
 
@@ -206,3 +207,68 @@ def test_create_model_gpr_default_kernel():
     assert hasattr(model, "kernel")
     # В sklearn GPR после инициализации kernel сохраняется в параметрах
     assert "RBF" in str(model.get_params()["kernel"])
+
+
+# --- get_allowed_hyperparameters (единый источник истины валидации) ---
+def test_get_allowed_hyperparameters_constructor_params():
+    """Допустимое множество строится по сигнатуре конструктора оценщика."""
+    allowed = get_allowed_hyperparameters("elasticnet")
+    assert "alpha" in allowed
+    assert "l1_ratio" in allowed
+    assert "fit_intercept" in allowed
+    assert "bad_param" not in allowed
+
+
+def test_get_allowed_hyperparameters_nondefault_params_included():
+    """Параметры вне DEFAULT_SPACES (issue #15) входят в допустимое множество."""
+    rf_allowed = get_allowed_hyperparameters("random_forest")
+    assert "min_samples_split" in rf_allowed
+    assert "max_features" in rf_allowed
+    assert "warm_start" in rf_allowed
+
+    gpr_allowed = get_allowed_hyperparameters("gaussian_process_regression")
+    assert "alpha" in gpr_allowed
+
+
+def test_get_allowed_hyperparameters_legacy_names_included():
+    """Legacy-имена из LEGACY_PARAM_MAPPINGS считаются допустимыми."""
+    allowed = get_allowed_hyperparameters("ardregression")
+    assert "max_iter" in allowed
+    assert "n_iter" in allowed  # ремапится в max_iter
+
+
+def test_get_allowed_hyperparameters_alias_resolution():
+    """Алиасы алгоритма дают то же множество, что и каноническое имя."""
+    assert get_allowed_hyperparameters("rf") == get_allowed_hyperparameters(
+        "random_forest"
+    )
+    assert get_allowed_hyperparameters("xgboost") == get_allowed_hyperparameters(
+        "xgboosting"
+    )
+
+
+def test_get_allowed_hyperparameters_unknown_algo():
+    """Неизвестный алгоритм → None (проверка мягко пропускается)."""
+    assert get_allowed_hyperparameters("no_such_algo") is None
+
+
+def test_get_allowed_hyperparameters_missing_dependency(monkeypatch):
+    """Отсутствующая зависимость (estimator=None) → None."""
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY", {"xgboosting": None}
+    )
+    assert get_allowed_hyperparameters("xgboosting") is None
+
+
+def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
+    """Конструктор с **kwargs не ограничивает множество параметров → None."""
+
+    class _FlexibleEstimator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"flex": _FlexibleEstimator},
+    )
+    assert get_allowed_hyperparameters("flex") is None

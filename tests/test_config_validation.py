@@ -545,43 +545,33 @@ def test_get_unknown_hyperparameters_none():
     assert cfg.get_unknown_hyperparameters("xgboosting") == []
 
 
-def test_get_unknown_hyperparameters_empty_allowed(monkeypatch):
+def test_get_unknown_hyperparameters_skipped_when_unresolvable():
+    """Если оценщик не разрешается (неизвестный алгоритм / нет зависимости),
+    проверка мягко пропускается — список неизвестных пуст."""
+    cfg = AlgoCfg(hyperparameters={"a": [1, 10]})
+    assert cfg.get_unknown_hyperparameters("no_such_algo") == []
+
+
+def test_get_unknown_hyperparameters_valid():
     cfg = AlgoCfg(
-        hyperparameters={"a": [1, 10]}  # ✅ как в YAML
+        hyperparameters={"alpha": [1e-4, 10.0]}  # ✅ валидный параметр ElasticNet
     )
 
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {"xgboost": set()},
-    )
-
-    assert cfg.get_unknown_hyperparameters("xgboost") == []
+    assert cfg.get_unknown_hyperparameters("elasticnet") == []
 
 
-def test_get_unknown_hyperparameters_valid(monkeypatch):
+def test_get_unknown_hyperparameters_legacy_name_valid():
+    """Legacy-имя n_iter для ardregression считается допустимым."""
+    cfg = AlgoCfg(hyperparameters={"n_iter": [100, 500]})
+    assert cfg.get_unknown_hyperparameters("ardregression") == []
+
+
+def test_get_unknown_hyperparameters_unknown():
     cfg = AlgoCfg(
-        hyperparameters={"lr": [0.0, 1.0]}  # ✅
+        hyperparameters={"bad_param": [1, 10]}  # ❌ не в сигнатуре ElasticNet
     )
 
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {"xgboost": {"lr"}},
-    )
-
-    assert cfg.get_unknown_hyperparameters("xgboost") == []
-
-
-def test_get_unknown_hyperparameters_unknown(monkeypatch):
-    cfg = AlgoCfg(
-        hyperparameters={"bad_param": [1, 10]}  # ✅
-    )
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {"xgboost": {"lr"}},
-    )
-
-    assert cfg.get_unknown_hyperparameters("xgboost") == ["bad_param"]
+    assert cfg.get_unknown_hyperparameters("elasticnet") == ["bad_param"]
 
 
 def test_validator_allows_none():
@@ -655,15 +645,10 @@ def test_config_preprocessing_override_end_to_end():
     assert algo_cfg.preprocessing.scaling is None
 
 
-def test_hyperparameter_compatibility_error(monkeypatch):
+def test_hyperparameter_compatibility_error():
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
-    algo_name = AVAILABLE_ALGORITHMS[0]
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {algo_name: {"lr"}},
-    )
+    algo_name = AVAILABLE_ALGORITHMS[0]  # elasticnet
 
     cfg_data = {
         "general": {"phases": [{"name": "p1", "n_trials": 1}]},
@@ -676,20 +661,16 @@ def test_hyperparameter_compatibility_error(monkeypatch):
         Config.model_validate(cfg_data)
 
 
-def test_hyperparameter_compatibility_error_lists_allowed(monkeypatch):
+def test_hyperparameter_compatibility_error_lists_allowed():
     """Сообщение об ошибке содержит реальный список допустимых гиперпараметров.
 
     Регрессионный тест: ранее в текст подставлялся литеральный ``{allowed}``
     (результат ``sorted(...)`` отбрасывался), что делало сообщение бесполезным.
+    Допустимое множество теперь строится по сигнатуре конструктора оценщика.
     """
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
-    algo_name = AVAILABLE_ALGORITHMS[0]
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {algo_name: {"lr", "alpha"}},
-    )
+    algo_name = AVAILABLE_ALGORITHMS[0]  # elasticnet
 
     cfg_data = BASE | {
         "algorithms": {algo_name: {"enable": True, "hyperparameters": {"bad": [1, 10]}}}
@@ -700,24 +681,21 @@ def test_hyperparameter_compatibility_error_lists_allowed(monkeypatch):
 
     msg = str(exc_info.value)
     assert "unknown hyperparameters ['bad']" in msg
-    assert "Allowed parameters: ['alpha', 'lr']" in msg
+    assert "Allowed parameters:" in msg
+    assert "'alpha'" in msg  # реальный параметр ElasticNet присутствует в списке
+    assert "'l1_ratio'" in msg
     assert "{allowed}" not in msg
 
 
-def test_hyperparameter_compatibility_valid_hyperparameters_pass(monkeypatch):
+def test_hyperparameter_compatibility_valid_hyperparameters_pass():
     """Совместимые гиперпараметры не приводят к ошибке валидации."""
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
-    algo_name = AVAILABLE_ALGORITHMS[0]
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {algo_name: {"lr"}},
-    )
+    algo_name = AVAILABLE_ALGORITHMS[0]  # elasticnet
 
     cfg_data = BASE | {
         "algorithms": {
-            algo_name: {"enable": True, "hyperparameters": {"lr": [0.0, 1.0]}}
+            algo_name: {"enable": True, "hyperparameters": {"alpha": [1e-4, 10.0]}}
         }
     }
 
@@ -725,20 +703,130 @@ def test_hyperparameter_compatibility_valid_hyperparameters_pass(monkeypatch):
     assert getattr(cfg.algorithms, algo_name).enable is True
 
 
-def test_hyperparameter_compatibility_skips_disabled(monkeypatch):
+def test_hyperparameter_compatibility_nondefault_valid_params():
+    """Нестандартные, но валидные для оценщика параметры проходят валидацию.
+
+    Регрессионный тест на issue #15: min_samples_split и max_features
+    отсутствуют в DEFAULT_SPACES['random_forest'], но принимаются
+    конструктором RandomForestRegressor.
+    """
+    cfg_data = BASE | {
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "hyperparameters": {
+                    "min_samples_split": [2, 10],
+                    "max_features": [0.1, 1.0],
+                    "warm_start": [[True, False], "categorical"],
+                },
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    rf_cfg = getattr(cfg.algorithms, "random_forest")
+    assert rf_cfg.enable is True
+    assert set(rf_cfg.hyperparameters) == {"min_samples_split", "max_features", "warm_start"}
+
+
+def test_hyperparameter_compatibility_gpr_alpha():
+    """alpha для gaussian_process_regression проходит валидацию.
+
+    Регрессионный тест на issue #15: DEFAULT_SPACES['gaussian_process_regression']
+    пуст, но alpha — штатный параметр GaussianProcessRegressor.
+    """
+    cfg_data = BASE | {
+        "algorithms": {
+            "gaussian_process_regression": {
+                "enable": True,
+                "hyperparameters": {"alpha": [1e-10, 1.0]},
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, "gaussian_process_regression").enable is True
+
+
+def test_hyperparameter_compatibility_constant_value():
+    """Одиночное (константное) значение валидного параметра проходит.
+
+    SearchSpaceEntry трактует [value] как categorical с одним вариантом —
+    фиксация любого валидного параметра не должна отклоняться.
+    """
+    cfg_data = BASE | {
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "hyperparameters": {"min_samples_split": [2]},
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, "random_forest").hyperparameters[
+        "min_samples_split"
+    ].dist_type == "categorical"
+
+
+def test_hyperparameter_compatibility_legacy_name():
+    """Legacy-имя n_iter для ardregression проходит валидацию."""
+    cfg_data = BASE | {
+        "algorithms": {
+            "ardregression": {
+                "enable": True,
+                "hyperparameters": {"n_iter": [100, 500]},
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, "ardregression").enable is True
+
+
+def test_hyperparameter_compatibility_typo_rejected():
+    """Опечатка в имени параметра по-прежнему отклоняется."""
+    cfg_data = BASE | {
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "hyperparameters": {"min_samples_spilt": [2, 10]},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="unknown hyperparameters"):
+        Config.model_validate(cfg_data)
+
+
+def test_hyperparameter_compatibility_gpr_typo_rejected():
+    """Опечатка для gaussian_process_regression теперь тоже отклоняется.
+
+    Ранее пустой реестр DEFAULT_SPACES['gaussian_process_regression']
+    молча пропускал любые ключи, включая опечатки.
+    """
+    cfg_data = BASE | {
+        "algorithms": {
+            "gaussian_process_regression": {
+                "enable": True,
+                "hyperparameters": {"aplha": [1e-10, 1.0]},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="unknown hyperparameters"):
+        Config.model_validate(cfg_data)
+
+
+def test_hyperparameter_compatibility_skips_disabled():
     """Выключенные алгоритмы пропускаются проверкой совместимости.
 
-    algo_b присутствует в подменённом реестре и содержит недопустимый
-    гиперпараметр: тест проходит только благодаря guard'у ``enable=False``.
+    algo_b выключен и содержит недопустимый гиперпараметр: тест проходит
+    только благодаря guard'у ``enable=False``.
     """
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
     algo_a, algo_b = AVAILABLE_ALGORITHMS[0], AVAILABLE_ALGORITHMS[1]
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {algo_a: {"lr"}, algo_b: {"alpha"}},
-    )
 
     cfg_data = BASE | {
         "algorithms": {
@@ -752,16 +840,11 @@ def test_hyperparameter_compatibility_skips_disabled(monkeypatch):
     assert getattr(cfg.algorithms, algo_b).enable is False
 
 
-def test_hyperparameter_compatibility_aggregates_errors(monkeypatch):
+def test_hyperparameter_compatibility_aggregates_errors():
     """Ошибки для нескольких алгоритмов собираются в одно исключение."""
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
     algo_a, algo_b = AVAILABLE_ALGORITHMS[0], AVAILABLE_ALGORITHMS[1]
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.config_parser.ALGO_HYPERPARAMETER_REGISTRY",
-        {algo_a: {"lr"}, algo_b: {"alpha"}},
-    )
 
     cfg_data = BASE | {
         "algorithms": {

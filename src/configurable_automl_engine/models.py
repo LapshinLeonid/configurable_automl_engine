@@ -254,6 +254,54 @@ def clean_hyperparameters(
 
 
 # ----------------------------------------------------------------------------- #
+#                  Allowed hyperparameter lookup (validation)                   #
+# ----------------------------------------------------------------------------- #
+
+
+@lru_cache(maxsize=64)
+def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
+    """Return the set of hyperparameter names valid for the estimator.
+
+    Single source of truth for configuration validation: the allowed set is
+    derived from the estimator constructor signature (same criterion as
+    :func:`clean_hyperparameters`) plus the legacy parameter names from
+    :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to a still-existing
+    constructor parameter.
+
+    Returns ``None`` when validation must be skipped:
+    - the algorithm is unknown or its optional dependency is missing
+      (estimator class is ``None``);
+    - the constructor accepts ``**kwargs``, in which case
+      :func:`clean_hyperparameters` keeps every key, so no name can be
+      considered unknown.
+
+    The result is cached per algorithm key.
+
+    Args:
+        algo_key: Normalised or aliased algorithm key (e.g. ``'rf'``,
+            ``'xgboost'``).
+
+    Returns:
+        Frozen set of accepted hyperparameter names, or ``None`` if the
+        allowed set cannot be determined or is unrestricted.
+    """
+    resolved = resolve_algorithm_name(algo_key)
+    estimator_cls = _FACTORY.get(resolved)
+    if estimator_cls is None:
+        return None
+
+    accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
+    if accepts_var_kwargs:
+        return None
+
+    allowed = set(accepted_params)
+    for legacy, target in LEGACY_PARAM_MAPPINGS.get(resolved, {}).items():
+        if target in accepted_params:
+            allowed.add(legacy)
+    return frozenset(allowed)
+
+
+# ----------------------------------------------------------------------------- #
 #                  Public factory                                                 #
 # ----------------------------------------------------------------------------- #
 
