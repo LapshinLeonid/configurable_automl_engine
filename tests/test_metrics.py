@@ -142,6 +142,23 @@ def test_to_user_value_global_nrmse():
     assert to_user_value("global_nrmse", -0.25) == pytest.approx(0.25)
 
 
+def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
+    """Скорер без атрибута _sign: консервативный фолбэк True.
+
+    Покрывает защитную ветку для гипотетических кастомных скореров,
+    у которых направление не экспонировано.
+    """
+    import configurable_automl_engine.training_engine.metrics as metrics_mod
+
+    class NoSignScorer:
+        pass
+
+    monkeypatch.setattr(
+        metrics_mod, "sklearn_get_scorer", lambda name: NoSignScorer()
+    )
+    assert is_greater_better("some_custom_metric") is True
+
+
 def test_get_scorer_object():
     # Проверка кастомных объектов (включая лямбды в _SCORER_OBJECTS)
     scorer = get_scorer_object("rmse")

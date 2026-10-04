@@ -1699,6 +1699,46 @@ def test_feature_selection_auto_check_direction_follows_raw_scorer():
     assert "feature_selector" not in trainer.pipeline.named_steps
 
 
+def test_feature_selection_auto_check_exception_falls_back(caplog):
+    """Fail-safe: исключение в auto-check → WARNING + отбор выключен."""
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    )
+
+    # Первый вызов — контрольный пайплайн auto-check: он падает, после
+    # fail-safe автономная проверка прерывается, а финальный скоринг fit()
+    # получает валидное значение.
+    scorer_calls = {"n": 0}
+
+    def exploding_scorer(model, X_val, y_val):  # noqa: ANN001
+        scorer_calls["n"] += 1
+        if scorer_calls["n"] == 1:
+            raise RuntimeError("scorer exploded")
+        return 0.9
+
+    with (
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=exploding_scorer,
+        ),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+    ):
+        trainer.fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert "auto-check failed" in caplog.text
+    assert trainer.val_score == 0.9
+
+
 def test_feature_selection_isotonic_forced_disabled(caplog):
     """IsotonicRegression: отбор принудительно отключается, обучение проходит.
 

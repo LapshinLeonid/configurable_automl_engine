@@ -217,10 +217,6 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
         ValueError: Если имя метрики не найдено ни в реестре, ни в sklearn.
     """
     lname = name.lower()
-    if lname == "global_nrmse":
-        raise ValueError(
-            "For 'global_nrmse', 'global_y' must be passed to get_scorer_object"
-        )
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][0]
     return cast(Callable[..., Any], sklearn_get_scorer(lname))
