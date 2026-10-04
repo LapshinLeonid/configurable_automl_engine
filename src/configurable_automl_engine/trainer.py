@@ -485,7 +485,7 @@ class ModelTrainer:
         self.os_algorithm = data_oversampling_algorithm
         if self.os_multiplier < 1:
             raise TrainingError("data_oversampling_multiplier must be ≥ 1")
-        if self.os_algorithm not in {"random", "random_with_noise", "smote", "adasyn"}:
+        if self.os_algorithm not in {"random", "smote", "adasyn"}:
             raise TrainingError("Unknown data_oversampling_algorithm")
 
         # Поля, которые заполняются после fit(...)

@@ -731,7 +731,6 @@
     "OversamplingAlgorithm": {
       "enum": [
         "random",
-        "random_with_noise",
         "smote",
         "adasyn"
       ],

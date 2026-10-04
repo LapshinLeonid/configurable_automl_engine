@@ -230,7 +230,6 @@ The optional `oversampling` section may include:
 ### Supported oversampling algorithms
 
 * `"random"`
-* `"random_with_noise"`
 * `"smote"`
 * `"adasyn"`
 
@@ -439,7 +438,7 @@ Oversampling wrapper compatible with imbalanced-learn pipelines.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `multiplier` | `float` | `1.0` | Dataset size multiplier. |
-| `algorithm` | `str` | `"random"` | Algorithm (`"random"`, `"random_with_noise"`, `"smote"`, `"adasyn"`). |
+| `algorithm` | `str` | `"random"` | Algorithm (`"random"`, `"smote"`, `"adasyn"`). |
 | `add_noise` | `bool` | `False` | Add Gaussian noise to numeric features. |
 | `balance` | `bool` | `False` | Balance all classes to majority class size. |
 | `random_state` | `int` or `None` | `42` | Random seed. |

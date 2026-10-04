@@ -212,6 +212,19 @@ def test_oversampling_warn_useless_multiplier(caplog):
     assert "Oversampling multiplier = 1 ➜ class balance will not change" in caplog.text
 
 
+def test_oversampling_algorithm_random_with_noise_rejected():
+    """random_with_noise удалён из интерфейса (issue #27): конфиг с ним
+    отклоняется на этапе валидации с понятным сообщением."""
+    with pytest.raises(ValidationError, match="random_with_noise"):
+        OversamplingCfg(enable=True, multiplier=2.0, algorithm="random_with_noise")
+
+
+def test_oversampling_unknown_algorithm_rejected():
+    """Неизвестный алгоритм отклоняется валидацией конфига."""
+    with pytest.raises(ValidationError):
+        OversamplingCfg(enable=True, multiplier=2.0, algorithm="magic_boost")
+
+
 # --- Тесты для AlgoCfg ---
 def test_algo_cfg_empty_paths():
     # Пустые пути модулей

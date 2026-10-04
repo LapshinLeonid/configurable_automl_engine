@@ -628,7 +628,6 @@ class GeneralCfg(BaseModel):
 # ──────────────── oversampling ──────────────── #
 class OversamplingAlgorithm(str, Enum):
     random = "random"
-    random_with_noise = "random_with_noise"
     smote = "smote"
     adasyn = "adasyn"
 

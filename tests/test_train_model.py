@@ -161,6 +161,9 @@ def test_trainer_init_invalid_params():
     # неизвестный алгоритм оверсэмплинга
     with pytest.raises(TrainingError, match="Unknown data_oversampling_algorithm"):
         ModelTrainer(data_oversampling_algorithm="magic_boost")
+    # random_with_noise удалён из интерфейса (issue #27) и отклоняется
+    with pytest.raises(TrainingError, match="Unknown data_oversampling_algorithm"):
+        ModelTrainer(data_oversampling_algorithm="random_with_noise")
 
 
 # --- Тесты подготовки данных ---
