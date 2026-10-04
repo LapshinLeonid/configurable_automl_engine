@@ -13,20 +13,17 @@ designed to scale from local experimentation to large-scale data processing.
 # Features
 
 * **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments.
-* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality. The final model's quality estimate (`ModelTrainer.val_score` and additional metrics) is computed with the same validation method used by HPO to compare models — an honest hold-out/CV estimate, not a train score.
+* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality. 
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. Five encoding strategies are supported via the `general.categorical_encoding` config key: `one_hot` (default), `ordinal`, `target` (target encoding with smoothing), `frequency` (category frequencies) and `hashing` (deterministic feature hashing into a fixed number of columns). Target/frequency/hashing statistics are computed on the training part only (no data leakage), and unknown categories are handled with a documented fallback at prediction time. The hashing encoder returns a `scipy.sparse.csr_matrix` (like sklearn's `FeatureHasher`), avoiding OOM on high-cardinality columns; for models that reject sparse input (GPR/Isotonic/ARD) the preprocessor automatically returns a dense matrix. An automatic high-cardinality mode encodes columns whose cardinality exceeds `general.high_cardinality_threshold` with a dedicated strategy (`general.high_cardinality_encoding`) while the remaining columns keep the default strategy.
-* **Adaptive Preprocessing Presets**: The feature preprocessing strategy (missing-value imputation and scaling) is selected automatically from the regression algorithm class — scale-sensitive models get `StandardScaler` + mean imputation, trees and ensembles are trained without scaling, GLMs with skewed distributions use median imputation + `RobustScaler`. Each algorithm's class is fixed in a declarative mapping table, and the user can explicitly override the preset per algorithm via config (see [API Reference](API_REFERENCE.md)).
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding.
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
-* **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials. Disabled by default — configurations without the `general.pruning` block behave exactly as before.
-* **Additional Metrics**: Optional `general.additional_metrics` list — extra quality metrics computed for the final trained model with the same validation method as the comparison metric (hold-out score or CV-fold mean, never a train score) and returned with the training results (`results["additional_metrics"]`). Informational only: they never influence HPO, model comparison, or winner selection.
-* **Unified metric semantics**: `results["score"]` always carries the natural user-facing value of the comparison metric — positive RMSE/MAE/MSE/NRMSE, plain R² — and `results["metric"]` its user-facing name (e.g. `"rmse"`). The internal sklearn negative scorers (`neg_root_mean_squared_error` and other `neg_*`) are an optimizer detail: their inverted values are converted back before being returned or logged.
-* **Granular Phase/Task Timeouts**: Configurable global phase timeout and per-task timeout with a watchdog mechanism to prevent deadlocks. In `"threads"` mode timeouts are **soft**: an already running Python function cannot be killed, so a timed-out task's result is discarded (`None`) while the thread keeps executing until it finishes. Use `"processes"` mode when a hard, killable timeout is required.
+* **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
+* **Granular Phase/Task Timeouts**: Configurable global phase timeout and per-task timeout with a watchdog mechanism to prevent deadlocks. In `"threads"` mode timeouts are **soft**: an already running Python function cannot be killed.
 * **Signature-Aware Hyperparameter Cleaning**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression), and unknown parameters are safely dropped.
 
 # Dependencies
@@ -82,15 +79,6 @@ The example can be run from [example.py](example.py).
     config = {
         "general": {
             "comparison_metric": "r2",
-            # Стратегия кодирования категориальных признаков:
-            # 'one_hot' (по умолчанию), 'ordinal', 'target', 'frequency'
-            # или 'hashing'.
-            "categorical_encoding": "one_hot",
-            # Автоматический режим для колонок высокой кардинальности:
-            # колонки с числом уникальных значений > 100 кодируются
-            # high_cardinality_encoding, остальные — categorical_encoding.
-            "high_cardinality_threshold": 100,
-            "high_cardinality_encoding": "target",
             "phases": [
                 {"n_trials": 100, "action": "all_algorithms"},
                 {"n_trials": 200, "action": "refine_winner"}
@@ -124,20 +112,6 @@ The example can be run from [example.py](example.py).
     results = caml.train_best_model(config=config, df=df, target='target')
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
-
-### Multi-phase HPO semantics
-
-* Phase results are **not accumulated** across phases: each phase is re-run from
-  a clean slate, so an algorithm that fails completely in the current phase
-  (HPO returned no valid result) is excluded and never competes with a stale
-  record from a previous phase.
-* The **final winner is chosen by the last phase's results**: for the typical
-  `all_algorithms → refine_winner` pipeline this is the refined winner. A
-  failure of the winner during `refine_winner` raises `RuntimeError` instead of
-  silently rolling back to the previous phase.
-* Algorithms disqualified by the circuit breaker (5 consecutive fatal errors)
-  do not re-run in later phases and are reported via
-  `results["disqualified_algorithms"]`.
 
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
