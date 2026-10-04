@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -426,27 +427,42 @@ def test_apply_dynamic_space_floats():
     trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
 
 
-def test_apply_dynamic_space_float_log_rejects_non_positive_low():
-    """Защита в _apply_dynamic_space: float_log с low <= 0 отклоняется.
+@pytest.fixture
+def log_space_entry() -> Callable[[float], SearchSpaceEntry]:
+    """Фабрика реальных SearchSpaceEntry с распределением float_log.
 
-    Используются реальные SearchSpaceEntry/FloatSpace, созданные через
-    ``model_construct`` (в обход Pydantic-валидации) — это имитирует
-    словарный конфиг старого формата, попадающий в тюнер мимо схемы.
+    Негативные значения создаются через ``model_construct`` — в обход
+    Pydantic-валидации. Штатная схема намеренно отклоняет ``low <= 0``
+    для float_log (issue #20), поэтому проверить защиту тюнера можно только
+    объектами, собранными мимо валидации: это в точности имитирует
+    словарный конфиг старого формата, попадающий в тюнер напрямую.
     """
-    trial = MagicMock()
 
-    def entry_with(low: float) -> SearchSpaceEntry:
+    def _make(low: float) -> SearchSpaceEntry:
         return SearchSpaceEntry.model_construct(
             config=FloatSpace.model_construct(type="float_log", low=low, high=1.0)
         )
 
+    return _make
+
+
+def test_apply_dynamic_space_float_log_rejects_non_positive_low(log_space_entry):
+    """Защита в _apply_dynamic_space: float_log с low <= 0 отклоняется.
+
+    Негативные сценарии используют реальные SearchSpaceEntry из фикстуры
+    (собранные в обход валидации); позитивный проходит штатную валидацию
+    через ``SearchSpaceEntry.model_validate`` — полный интеграционный путь.
+    """
+    trial = MagicMock()
+
     for bad_low in (0.0, -1.0):
         with pytest.raises(ValueError, match="low must be > 0 for log-scale"):
-            _apply_dynamic_space(trial, {"alpha": entry_with(bad_low)})
+            _apply_dynamic_space(trial, {"alpha": log_space_entry(bad_low)})
     assert trial.suggest_float.call_count == 0
 
-    # Позитивный сценарий: low > 0 уходит в suggest_float(log=True)
-    _apply_dynamic_space(trial, {"alpha": entry_with(1e-6)})
+    # Позитивный сценарий: валидный entry уходит в suggest_float(log=True)
+    valid_entry = SearchSpaceEntry.model_validate([1e-6, 1.0, "float_log"])
+    _apply_dynamic_space(trial, {"alpha": valid_entry})
     trial.suggest_float.assert_called_once_with("alpha", 1e-06, 1.0, log=True)
 
 
