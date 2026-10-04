@@ -454,10 +454,16 @@ def train_best_model(
             метрики (``general.additional_metrics``), в результат добавляется
             ключ ``additional_metrics`` — словарь {метрика: значение},
             рассчитанных для финальной модели на том же наборе данных, что и
-            основная метрика.
+            основная метрика. Если в ходе запуска какие-либо алгоритмы были
+            дисквалифицированы circuit breaker'ом (5 подряд фатальных ошибок),
+            в результат добавляется ключ ``disqualified_algorithms`` —
+            словарь {имя алгоритма: причина дисквалификации}.
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
         RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
+            Дисквалификация отдельного алгоритма (``InvalidAlgorithmError``)
+            запуск НЕ прерывает: алгоритм исключается из кандидатов, остальные
+            продолжают обучение (issue #12).
     """
     # Centralized validation
     validate_df_not_empty(df)
@@ -601,6 +607,10 @@ def train_best_model(
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
     current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
     phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
+    # Дисквалифицированные алгоритмы (circuit breaker): имя -> причина.
+    # Дисквалификация не прерывает запуск: алгоритм исключается из
+    # кандидатов и результатов, остальные продолжают обучение (issue #12).
+    disqualified_algorithms: dict[str, str] = {}
     for phase in cfg.general.phases:
         _LOG.info(
             f"--- Starting Phase: {phase.name} ({phase.n_trials}"
@@ -619,6 +629,10 @@ def train_best_model(
             winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
+
+        # Кандидаты, участвующие в текущей фазе (нужны для диагностики
+        # в сообщении об отсутствии валидных результатов)
+        phase_candidates = list(current_candidates.keys())
 
         def _worker(
             algo_name: str, algo_cfg: AlgoCfg, p: HPOPhaseCfg = phase
@@ -659,8 +673,19 @@ def train_best_model(
                 score, params = result
 
                 return algo_name, score, params
-            except _CanonicalIAE:
-                raise
+            except _CanonicalIAE as err:
+                # Circuit breaker (issue #12): алгоритм дисквалифицирован после
+                # MAX_FATAL_FAILURES подряд фатальных ошибок. Это НЕ аварийный
+                # стоп всего запуска — алгоритм исключается из кандидатов,
+                # остальные продолжают обучение (аналогично None-результату).
+                _LOG.warning(
+                    "Algorithm %s disqualified in phase %s: %s",
+                    algo_name,
+                    p.name,
+                    err,
+                )
+                disqualified_algorithms[algo_name] = str(err)
+                return None
             except Exception as e:  # noqa: BLE001
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
                 return None
@@ -689,6 +714,14 @@ def train_best_model(
                 if res:
                     name, sc, pr = res
                     phase_results[name] = (sc, pr)
+
+        # Дисквалифицированные алгоритмы (circuit breaker) исключаются из
+        # результатов и кандидатов следующих фаз: они не могут стать
+        # победителем и не должны повторно тратить вычислительные ресурсы.
+        for name in list(disqualified_algorithms):
+            phase_results.pop(name, None)
+            current_candidates.pop(name, None)
+
         valid_results = {
             name: (score, params)
             for name, (score, params) in phase_results.items()
@@ -696,7 +729,7 @@ def train_best_model(
         }
 
         if not valid_results:
-            failed_algos = list(current_candidates.keys())
+            failed_algos = [n for n in phase_candidates if n not in valid_results]
             raise RuntimeError(
                 f"No algorithms produced valid scores in phase '{phase.name}'. "
                 f"Failed algorithms: {failed_algos}"
@@ -731,6 +764,11 @@ def train_best_model(
         "params": final_params,
         "model_path": str(model_path),
     }
+    # Диагностика circuit breaker (issue #12): какие алгоритмы и почему были
+    # дисквалифицированы. Ключ добавляется только при наличии дисквалификаций,
+    # иначе результаты идентичны прежнему поведению.
+    if disqualified_algorithms:
+        result["disqualified_algorithms"] = dict(disqualified_algorithms)
     # Дополнительные информационные метрики финальной модели. Ключ добавляется
     # только при наличии метрик (после дедупликации и исключения основной
     # метрики сравнения), иначе результаты идентичны прежнему поведению.
