@@ -411,26 +411,23 @@ def test_float_log_step_forbidden():
 
 
 # 2a. Тест для: float_log требует low > 0 (issue #20)
-@pytest.mark.parametrize("bad_low", [0.0, -1.0, -0.0001])
+@pytest.mark.parametrize("bad_low", [0, -1, -0.0001])
 def test_float_log_non_positive_low_rejected(bad_low):
-    """float_log c low <= 0 отклоняется на этапе валидации SearchSpaceEntry."""
+    """float_log c low <= 0 отклоняется на этапе валидации.
+
+    Параметризовано по значению lower-границы: покрывает как краткую
+    списочную форму ``[low, high, \"float_log\"]`` через SearchSpaceEntry
+    (в т.ч. с целочисленным ``0``), так и словарную форму через FloatSpace.
+    """
     with pytest.raises(
         ValidationError, match="low must be > 0 for log-scale distributions"
     ):
-        SearchSpaceEntry.model_validate([bad_low, 1.0, "float_log"])
+        SearchSpaceEntry.model_validate([bad_low, 1, "float_log"])
 
     with pytest.raises(
         ValidationError, match="low must be > 0 for log-scale distributions"
     ):
         FloatSpace(type="float_log", low=bad_low, high=1.0)
-
-
-def test_float_log_zero_low_rejected_via_short_form():
-    """Краткая запись [0, 1, 'float_log'] падает с понятной ошибкой."""
-    with pytest.raises(
-        ValidationError, match="low must be > 0 for log-scale distributions"
-    ):
-        SearchSpaceEntry.model_validate([0, 1, "float_log"])
 
 
 def test_float_log_positive_low_valid():

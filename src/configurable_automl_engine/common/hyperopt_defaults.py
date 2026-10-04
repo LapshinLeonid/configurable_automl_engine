@@ -44,14 +44,28 @@ class FloatSpace(NumericSpace):
     type: Literal["float", "float_log"]
     step: float | None = None
 
+    @staticmethod
+    def validate_log_low(low: float) -> None:
+        """Проверить нижнюю границу на пригодность для логарифмической шкалы.
+
+        Optuna требует строго положительный ``low`` для
+        ``trial.suggest_float(..., log=True)``.
+        Args:
+            low (float): Нижняя граница распределения.
+        Raises:
+            ValueError: Если ``low <= 0``.
+        """
+        if low <= 0:
+            raise ValueError(
+                f"low must be > 0 for log-scale distributions. Got low={low}"
+            )
+
     @model_validator(mode="after")
     def _validate_float_constraints(self) -> "FloatSpace":
         if self.type == "float_log" and self.step is not None:
             raise ValueError("The 'step' parameter is not supported for 'float_log'")
-        if self.type == "float_log" and self.low <= 0:
-            raise ValueError(
-                f"low must be > 0 for log-scale distributions. Got low={self.low}"
-            )
+        if self.type == "float_log":
+            self.validate_log_low(self.low)
         if self.step is not None and self.step <= 0:
             raise ValueError(f"Step must be positive. Got {self.step}")
         return self

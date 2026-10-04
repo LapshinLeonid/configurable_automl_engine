@@ -43,7 +43,10 @@ from sklearn.model_selection import (
 
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
-from configurable_automl_engine.common.hyperopt_defaults import clip_search_space
+from configurable_automl_engine.common.hyperopt_defaults import (
+    FloatSpace,
+    clip_search_space,
+)
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
@@ -142,10 +145,7 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     step=float(step) if step is not None else None,
                 )
             elif dist_type == "float_log":
-                if float(low) <= 0:
-                    raise ValueError(
-                        f"low must be > 0 for log-scale distributions. Got low={low}"
-                    )
+                FloatSpace.validate_log_low(float(low))
                 params[key] = trial.suggest_float(
                     key, float(low), float(high), log=True
                 )

@@ -24,6 +24,10 @@ from optuna.trial import FixedTrial
 from sklearn.datasets import make_regression
 
 from configurable_automl_engine import tuner as hyperopt
+from configurable_automl_engine.common.hyperopt_defaults import (
+    FloatSpace,
+    SearchSpaceEntry,
+)
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.trainer import ModelTrainer
@@ -425,40 +429,24 @@ def test_apply_dynamic_space_floats():
 def test_apply_dynamic_space_float_log_rejects_non_positive_low():
     """Защита в _apply_dynamic_space: float_log с low <= 0 отклоняется.
 
-    Дублирует Pydantic-валидацию на случай прямого вызова тюнера мимо
-    конфигурационной схемы (например, словарный конфиг в старом формате).
+    Используются реальные SearchSpaceEntry/FloatSpace, созданные через
+    ``model_construct`` (в обход Pydantic-валидации) — это имитирует
+    словарный конфиг старого формата, попадающий в тюнер мимо схемы.
     """
     trial = MagicMock()
 
-    class MockEntry:
-        def __init__(self, bounds):
-            self.bounds = bounds
-
-        @property
-        def low(self):
-            return self.bounds[0]
-
-        @property
-        def high(self):
-            return self.bounds[1]
-
-        @property
-        def dist_type(self):
-            return self.bounds[2]
-
-        @property
-        def step(self):
-            return self.bounds[3] if len(self.bounds) > 3 else None
+    def entry_with(low: float) -> SearchSpaceEntry:
+        return SearchSpaceEntry.model_construct(
+            config=FloatSpace.model_construct(type="float_log", low=low, high=1.0)
+        )
 
     for bad_low in (0.0, -1.0):
-        space_dict = {"alpha": MockEntry([bad_low, 1.0, "float_log"])}
         with pytest.raises(ValueError, match="low must be > 0 for log-scale"):
-            _apply_dynamic_space(trial, space_dict)
+            _apply_dynamic_space(trial, {"alpha": entry_with(bad_low)})
     assert trial.suggest_float.call_count == 0
 
     # Позитивный сценарий: low > 0 уходит в suggest_float(log=True)
-    ok_space = {"alpha": MockEntry([1e-6, 1.0, "float_log"])}
-    _apply_dynamic_space(trial, ok_space)
+    _apply_dynamic_space(trial, {"alpha": entry_with(1e-6)})
     trial.suggest_float.assert_called_once_with("alpha", 1e-06, 1.0, log=True)
 
 
