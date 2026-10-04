@@ -95,7 +95,7 @@ The example can be run from [example.py](example.py).
                 {"n_trials": 100, "action": "all_algorithms"},
                 {"n_trials": 200, "action": "refine_winner"}
             ],
-            "path_to_model": "diabetes_model.joblib"
+            "path_to_model": "diabetes_model.pkl"
         },
         "algorithms": {
             "random_forest": {

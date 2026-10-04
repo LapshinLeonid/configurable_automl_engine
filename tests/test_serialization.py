@@ -2,6 +2,7 @@ import pytest
 import pickle
 import os
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.serialization_utils import (
@@ -82,3 +83,128 @@ class TestSerializationUtils:
 
         result = load_artifact(str_path, SerializationFormat.pickle)
         assert result == TEST_DATA
+
+    # --- Тесты предупреждения о несоответствии расширения формату ---
+
+    _LOGGER_NAME = "configurable_automl_engine.common.serialization_utils"
+
+    def _records_from_module(self, caplog):
+        """Записи логов только от модуля serialization_utils."""
+        return [r for r in caplog.records if r.name == self._LOGGER_NAME]
+
+    def test_save_artifact_warns_on_extension_mismatch(self, tmp_path, caplog):
+        """Предупреждение при сохранении pickle в файл с расширением .joblib."""
+        path = tmp_path / "model.joblib"
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            save_artifact(TEST_DATA, path, SerializationFormat.pickle)
+
+        assert path.exists()
+        records = self._records_from_module(caplog)
+        assert any(
+            ".joblib" in record.message and "pickle" in record.message
+            for record in records
+        )
+
+    def test_load_artifact_warns_on_extension_mismatch(self, tmp_path, caplog):
+        """Предупреждение при загрузке pickle из файла с расширением .joblib."""
+        path = tmp_path / "model.joblib"
+        with open(path, "wb") as f:
+            pickle.dump(TEST_DATA, f)
+
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            result = load_artifact(path, SerializationFormat.pickle)
+
+        assert result == TEST_DATA
+        records = self._records_from_module(caplog)
+        assert any(
+            ".joblib" in record.message and "pickle" in record.message
+            for record in records
+        )
+
+    def test_save_artifact_no_warning_on_matching_extension(self, tmp_path, caplog):
+        """Предупреждения нет, если расширение соответствует формату (.pkl + pickle)."""
+        path = tmp_path / "model.pkl"
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            save_artifact(TEST_DATA, path, SerializationFormat.pickle)
+
+        records = self._records_from_module(caplog)
+        assert not any(record.levelno >= 30 for record in records)
+
+    def test_save_artifact_joblib_warns_on_pkl_extension(self, tmp_path, caplog):
+        """Предупреждение при сохранении joblib в файл с расширением .pkl."""
+        path = tmp_path / "model.pkl"
+        with (
+            caplog.at_level("WARNING", logger=self._LOGGER_NAME),
+            patch("joblib.dump") as mock_dump,
+        ):
+            save_artifact(TEST_DATA, path, SerializationFormat.joblib)
+            mock_dump.assert_called_once_with(TEST_DATA, Path(path))
+
+        records = self._records_from_module(caplog)
+        assert any(
+            ".pkl" in record.message and "joblib" in record.message
+            for record in records
+        )
+
+    def test_load_artifact_joblib_warns_on_pkl_extension(self, tmp_path, caplog):
+        """Предупреждение при загрузке joblib из файла с расширением .pkl."""
+        path = tmp_path / "model.pkl"
+        path.touch()
+
+        with (
+            caplog.at_level("WARNING", logger=self._LOGGER_NAME),
+            patch("joblib.load") as mock_load,
+        ):
+            mock_load.return_value = TEST_DATA
+            result = load_artifact(path, SerializationFormat.joblib)
+
+        assert result == TEST_DATA
+        records = self._records_from_module(caplog)
+        assert any(
+            ".pkl" in record.message and "joblib" in record.message
+            for record in records
+        )
+
+    def test_save_artifact_case_insensitive_extension_no_warning(
+        self, tmp_path, caplog
+    ):
+        """Предупреждения нет для расширения в другом регистре (.PKL + pickle)."""
+        path = tmp_path / "model.PKL"
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            save_artifact(TEST_DATA, path, SerializationFormat.pickle)
+
+        records = self._records_from_module(caplog)
+        assert not any(record.levelno >= 30 for record in records)
+
+    def test_save_artifact_no_extension_warns(self, tmp_path, caplog):
+        """Предупреждение для пути без расширения (соглашение о расширении нарушено)."""
+        path = tmp_path / "model"
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            save_artifact(TEST_DATA, path, SerializationFormat.pickle)
+
+        records = self._records_from_module(caplog)
+        assert any(
+            "does not match serialization format" in record.message
+            and "pickle" in record.message
+            for record in records
+        )
+
+    def test_save_artifact_no_warning_on_unknown_format(self, tmp_path, caplog):
+        """Предупреждения нет для формата, отсутствующего в справочнике расширений.
+
+        Корректность формата обеспечивается типизацией и проверками
+        в save_artifact/load_artifact, поэтому при неизвестном формате
+        предупреждение выдаваться не должно. Неизвестное значение
+        приводится к типу через cast, чтобы остаться в домене функции.
+        """
+        path = tmp_path / "model.pkl"
+        unknown_fmt = cast(SerializationFormat, "unknown_format")
+        with caplog.at_level("WARNING", logger=self._LOGGER_NAME):
+            save_artifact(TEST_DATA, path, unknown_fmt)
+
+        assert path.exists()
+        with open(path, "rb") as f:
+            assert pickle.load(f) == TEST_DATA
+
+        records = self._records_from_module(caplog)
+        assert not any(record.levelno >= 30 for record in records)
