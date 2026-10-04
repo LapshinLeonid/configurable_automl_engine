@@ -23,7 +23,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionMode,
     ValidationStrategy,
 )
-from configurable_automl_engine.tuner import InvalidAlgorithmError
+from configurable_automl_engine.tuner import HPO_WORST_SCORE, InvalidAlgorithmError
 
 import textwrap
 
@@ -924,43 +924,56 @@ def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
 
 
 # ---------------------------------------------------------------- #
-# 3️⃣ Test RuntimeError when _run_hpo returns None (HPO failure)
+# 3️⃣ _run_hpo: тюнер сигнализирует отказ (issue #13)
 # ---------------------------------------------------------------- #
-@patch("configurable_automl_engine.training_engine.component._load_module")
-def test_run_hpo_returns_none_raises_runtime_error(mock_load):
-    # Dummy tuner module with optimize returning None
-    dummy_tuner = Mock()
-    dummy_tuner.optimize.return_value = (None, None, None)
-    mock_load.return_value = dummy_tuner
+def test_run_hpo_returns_none_when_tuner_reports_failure():
+    """Тюнер без валидного результата → _run_hpo возвращает None.
 
-    algo_cfg = AlgoCfg(
-        tuner="dummy.module",
-        trainer_module="some.module",
-        enable=True,
-        hyperparameters={},
-    )
-    X = pd.DataFrame({"a": [1, 2]})
-    y = pd.Series([0, 1])
-
-    from configurable_automl_engine.training_engine.config_parser import (
-        ValidationStrategy,
-    )
-
-    # Patch _run_hpo inside _execute_hpo_phase to force None
-    # Since _run_hpo returning None triggers RuntimeError in _execute_hpo_phase
-    # We'll simulate calling the internal logic
-    # Here we directly call _run_hpo and assert None handling separately
-    # The actual RuntimeError is raised in _execute_hpo_phase wrapper
-    # So in pure unit test, we can test _run_hpo output and RuntimeError in wrapper
-    # But since wrapper is internal, in integration test it would be triggered
-
-    # For demonstration, we simulate RuntimeError
-    result = None
-    with pytest.raises(RuntimeError, match="failed to return a valid result"):
-        if result is None:
-            raise RuntimeError(
-                f"HPO phase 'dummy_phase' failed to return a valid result."
+    Покрывает оба сигнала отказа из tuner.optimize (issue #13):
+    - (модель, None, HPO_WORST_SCORE) — старый «фиктивный» результат;
+    - (None, None, None) — новый канонический сигнал отказа.
+    В обоих случаях оркестратор должен исключить алгоритм из кандидатов,
+    а не тащить params=None до финального обучения.
+    """
+    cases = [
+        ("model", None, HPO_WORST_SCORE),
+        (None, None, None),
+    ]
+    for tuner_result in cases:
+        mock_tuner = MagicMock()
+        mock_tuner.optimize.return_value = tuner_result
+        algo_cfg = MagicMock(spec=AlgoCfg)
+        algo_cfg.tuner = "some.module"
+        with patch("importlib.import_module", return_value=mock_tuner):
+            result = _run_hpo(
+                algo_name="test_algo",
+                algo_cfg=algo_cfg,
+                X=pd.DataFrame({"a": [1]}),
+                y=pd.Series([1]),
+                metric_name_sklearn="mae",
+                n_trials=1,
+                validation_strategy=ValidationStrategy.train_test_split,
             )
+        assert result is None
+
+
+def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_dict):
+    """best_params=None → понятный ValueError, а не TypeError iterable.
+
+    Защита от TypeError вида ``'NoneType' object is not iterable``
+    в ``dict(best_params)`` (issue #13).
+    """
+    cfg = Config.model_validate(base_config_dict)
+    with pytest.raises(ValueError, match="produced no hyperparameters"):
+        _fit_and_save(
+            "rf",
+            mock_algo_cfg,
+            pd.DataFrame({"a": [1]}),
+            pd.Series([1]),
+            None,
+            tmp_path / "model.pkl",
+            cfg,
+        )
 
 
 # Путь к модулю где реально живут _run_hpo и _fit_and_save
@@ -1148,6 +1161,462 @@ class TestPartialNoneResults:
         )
 
         assert result["algorithm"] != "random_forest"
+
+
+# ── Тест 3: «Худший скор» HPO_WORST_SCORE исключается (issue #13) ────────────
+
+
+class TestWorstScoreResultsExcluded:
+    """
+    Алгоритмы, вернувшие «худший скор» HPO_WORST_SCORE (-3.4028235e38),
+    считаются провалившимися: результат отбрасывается фильтром valid_results.
+    """
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_all_worst_scores_raise_runtime_error(
+        self, mock_hpo, mock_save, minimal_df, config_two_algos
+    ):
+        """Все алгоритмы вернули HPO_WORST_SCORE → чистая RuntimeError."""
+        mock_hpo.side_effect = lambda **kwargs: (HPO_WORST_SCORE, {"n_estimators": 10})
+
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
+            train_best_model(config=config_two_algos, df=minimal_df, target="target")
+
+        # До финального обучения дело не доходит: TypeError 'NoneType' object
+        # is not iterable больше не возникает.
+        mock_save.assert_not_called()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_worst_score_algorithm_excluded_when_mixed(
+        self, mock_hpo, mock_save, minimal_df, config_two_algos
+    ):
+        """Один алгоритм с HPO_WORST_SCORE, второй валидный → побеждает второй."""
+        def hpo_side_effect(**kwargs):
+            if kwargs["algo_name"] == "random_forest":
+                return HPO_WORST_SCORE, {"n_estimators": 10}
+            return 0.42, {"n_estimators": 10}
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(
+            config=config_two_algos, df=minimal_df, target="target"
+        )
+
+        assert result["algorithm"] == "extra_trees"
+        assert result["score"] == 0.42
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_defensive_filter_drops_none_nan_inf(
+        self, mock_hpo, mock_save, minimal_df, config_single_algo
+    ):
+        """Защитный фильтр valid_results: None/NaN/-inf/params=None отбрасываются.
+
+        Эти сигналы не должны возникать после фикса в _run_hpo (issue #13),
+        но фильтр страхует оркестратор от кастомных тюнеров и регрессий.
+        """
+        bad_results = [
+            (None, {"n_estimators": 10}),  # score is None
+            (0.5, None),  # params is None
+            (float("nan"), {"n_estimators": 10}),  # NaN
+            (float("-inf"), {"n_estimators": 10}),  # -inf
+            (float("inf"), {"n_estimators": 10}),  # +inf
+        ]
+        for bad_result in bad_results:
+            mock_hpo.side_effect = lambda br=bad_result, **kwargs: br
+            with pytest.raises(
+                RuntimeError, match="No algorithms produced valid scores"
+            ):
+                train_best_model(
+                    config=config_single_algo, df=minimal_df, target="target"
+                )
+        # Ни одна итерация не должна дойти до финального обучения.
+        mock_save.assert_not_called()
+
+
+class TestWorstScoreIntegrationThroughTuner:
+    """Полный путь: реальный _run_hpo + тюнер, вернувший HPO_WORST_SCORE."""
+
+    @patch(f"{_MODULE}._load_module")
+    def test_tuner_worst_score_excluded_end_to_end(
+        self, mock_load, minimal_df, config_single_algo
+    ):
+        """Тюнер вернул (модель, params, HPO_WORST_SCORE) → алгоритм исключён.
+
+        Интеграционный сценарий (замечание ревью к
+        test_optimize_pruning_nonfinite_score_uses_worst_score): не мокаем
+        _run_hpo, а прогоняем всю цепочку _run_hpo → _execute_hpo_phase →
+        фильтр valid_results → RuntimeError. Финальное обучение не вызывается,
+        TypeError 'NoneType' object is not iterable не возникает.
+        """
+
+        class WorstScoreTuner:
+            def optimize(self, **kwargs):
+                del kwargs
+                return object(), {"n_estimators": 10}, HPO_WORST_SCORE
+
+        mock_load.return_value = WorstScoreTuner()
+
+        with patch(f"{_MODULE}._fit_and_save") as mock_save:
+            with pytest.raises(
+                RuntimeError, match="No algorithms produced valid scores"
+            ):
+                train_best_model(
+                    config=config_single_algo, df=minimal_df, target="target"
+                )
+            mock_save.assert_not_called()
+
+
+# ── Тест 4: провал победителя в refine_winner не коррумпирует результат ─────
+
+
+class TestRefineWinnerFailureCleanup:
+    """Полный провал в фазе refine_winner → RuntimeError, а не искажение."""
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_refine_winner_total_failure_raises_runtime_error(
+        self, mock_hpo, mock_save, minimal_df, config_two_algos
+    ):
+        """Phase 1 успешна; Phase 2 (refine_winner) полностью провалилась.
+
+        Раньше «фиктивный» результат со скором -3.4e38 перезаписывал валидный
+        результат победителя и доходил до финального обучения. Теперь фаза
+        завершается чистой RuntimeError со списком упавших алгоритмов.
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                }
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        call_count = 0
+
+        def hpo_side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1: валидный результат
+                return 0.8, {"alpha": 0.5}
+            # Phase 2 (refine_winner): полный провал — тюнер вернул
+            # «худший скор» с параметрами (все триалы с нефинитной метрикой)
+            return HPO_WORST_SCORE, {"alpha": 0.9}
+
+        mock_hpo.side_effect = hpo_side_effect
+
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
+            train_best_model(config=config_dict, df=df, target="target")
+
+        mock_save.assert_not_called()
+
+
+# ── Тест 5: многофазные регрессии S1–S4 (issue #13) ─────────────────────────
+
+
+class TestMultiPhaseFailureExclusion:
+    """Провал алгоритма в поздней фазе не «воскрешает» его запись из прошлой.
+
+    Регрессии из повторного ревью: phase_results пересобирается по итогам
+    только текущей фазы, поэтому «протухшие» записи прошлых фаз не выживают.
+    """
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_s1_two_all_algorithms_phases_failed_in_phase2_excluded(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """S1: две фазы all_algorithms; rf валиден в фазе 1, в фазе 2 — None.
+
+        Раньше rf побеждал со «протухшими» параметрами фазы 1. Теперь rf
+        исключён, а победитель определяется по результатам фазы 2.
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {"name": "p2", "n_trials": 1, "action": "all_algorithms"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        calls: dict[str, int] = {}
+
+        def hpo_side_effect(**kwargs):
+            algo = kwargs["algo_name"]
+            calls[algo] = calls.get(algo, 0) + 1
+            if algo == "random_forest":
+                if calls[algo] == 1:
+                    return 0.9, {"n_estimators": 50}
+                return None  # полный провал во 2-й фазе
+            # elasticnet — валиден в обеих фазах
+            if calls[algo] == 1:
+                return 0.7, {"alpha": 0.5}
+            return 0.8, {"alpha": 0.7}
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "elasticnet"
+        assert result["score"] == 0.8
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_s2_refine_winner_none_failure_raises_runtime_error(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """S2/S4: победитель падает через None в refine_winner → RuntimeError.
+
+        Раньше — молчаливый откат к результату фазы 1 и финальное обучение.
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                }
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        call_count = 0
+
+        def hpo_side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 0.9, {"alpha": 0.5}
+            return None  # канонический сигнал отказа (все триалы отсечены)
+
+        mock_hpo.side_effect = hpo_side_effect
+
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
+            train_best_model(config=config_dict, df=df, target="target")
+
+        mock_save.assert_not_called()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_s3_refine_winner_loser_does_not_survive(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """S3: два алгоритма; победитель падает в refine → RuntimeError.
+
+        Проигравший из фазы 1 не должен «воскресать» и становиться
+        финальным победителем.
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        calls: dict[str, int] = {}
+
+        def hpo_side_effect(**kwargs):
+            algo = kwargs["algo_name"]
+            calls[algo] = calls.get(algo, 0) + 1
+            if algo == "random_forest":
+                if calls[algo] == 1:
+                    return 0.9, {"n_estimators": 50}
+                return None  # победитель падает в фазе refine_winner
+            # elasticnet — проигравший фазы 1, в рефайне не участвует
+            return 0.5, {"alpha": 0.5}
+
+        mock_hpo.side_effect = hpo_side_effect
+
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
+            train_best_model(config=config_dict, df=df, target="target")
+
+        mock_save.assert_not_called()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_s5_refined_but_worse_winner_beats_unrefined_runner_up(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """Пин семантики «победитель = последняя фаза» (issue #13).
+
+        Фаза 1: rf 0.9 (победитель), et 0.5 (проигравший). Фаза 2
+        (refine_winner): rf рефайнится до 0.4 — хуже результата проигравшего
+        из фазы 1. Так как phase_results пересобирается по фазам, финальным
+        победителем остаётся отрефайненный rf (0.4): запись et из фазы 1
+        не участвует в выборе по последней фазе.
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {"name": "p2", "n_trials": 1, "action": "refine_winner"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        calls: dict[str, int] = {}
+
+        def hpo_side_effect(**kwargs):
+            algo = kwargs["algo_name"]
+            calls[algo] = calls.get(algo, 0) + 1
+            if algo == "random_forest":
+                if calls[algo] == 1:
+                    return 0.9, {"n_estimators": 50}
+                # Рефайн дал худший скор, чем у проигравшего фазы 1 (et: 0.5),
+                # но запись et в выборе по последней фазе не участвует.
+                return 0.4, {"n_estimators": 30}
+            return 0.5, {"alpha": 0.5}
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "random_forest"
+        assert result["score"] == 0.4
+        mock_save.assert_called_once()
+
+
+# ── Тест 6: комбинированная регрессия circuit breaker (issue #12) +           #
+#           пересборка фаз (issue #13)                                         #
+# --------------------------------------------------------------------------- #
+def test_disqualified_algorithm_not_rerun_in_later_all_algorithms_phase(
+    tmp_path: Path, small_dataset
+):
+    """Дисквалифицированный алгоритм не возвращается в следующие фазы.
+
+    Комбинированная регрессия (замечание ревью): при пересборке
+    current_candidates для all_algorithms-фазы дисквалифицированные circuit
+    breaker'ом алгоритмы должны исключаться (issue #12) — иначе они повторно
+    тратят вычислительные ресурсы и могут «воскресать» в следующих фазах.
+    """
+    cfg_text = """
+general:
+  comparison_metric: rmse
+  path_to_model: '{model_path}'
+  phases:
+    - name: "Coarse Search"
+      n_trials: 2
+      action: "all_algorithms"
+    - name: "Fine Search"
+      n_trials: 2
+      action: "all_algorithms"
+algorithms:
+  ridge:
+    enable: true
+    tuner: "mock.tuner_ridge"
+    trainer_module: "configurable_automl_engine.trainer"
+    hyperparameters:
+      alpha: [0.1, 1.0]
+  random_forest:
+    enable: true
+    tuner: "mock.tuner_rf"
+    trainer_module: "configurable_automl_engine.trainer"
+    hyperparameters:
+      n_estimators: [10, 20]
+"""
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(cfg_text.format(model_path="dummy_path"), "utf-8")
+
+    broken_tuner = _make_broken_tuner("disqualified after 5 fatal failures")
+    good_tuner = _make_good_tuner({"n_estimators": 20})
+
+    with _patch_load_modules(broken_tuner, good_tuner):
+        res = train_best_model(
+            cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
+        )
+
+    # Победил рабочий алгоритм, дисквалифицированный зафиксирован.
+    assert res["algorithm"] == "random_forest"
+    assert Path(res["model_path"]).exists()
+    assert res["disqualified_algorithms"] == {
+        "ridge": "disqualified after 5 fatal failures"
+    }
+    # Ridge НЕ перезапускался во второй all_algorithms-фазе: тюнер вызван ровно
+    # один раз (только в фазе 1, где произошла дисквалификация).
+    assert broken_tuner.optimize.call_count == 1
+    # Рабочий алгоритм отработал в обеих фазах.
+    assert good_tuner.optimize.call_count == 2
 
 
 # --------------------------------------------------------------------------- #

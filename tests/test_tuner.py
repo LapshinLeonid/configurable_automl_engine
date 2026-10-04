@@ -33,6 +33,7 @@ from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.tuner import (
+    HPO_WORST_SCORE,
     HyperoptError,
     _apply_dynamic_space,
     _build_scorer,
@@ -526,10 +527,10 @@ class TestTunerObjective:
     def test_objective_trigger_fallback(self, dummy_data, mock_space):
         """
         Тест принудительно заставляет np.isfinite вернуть False,
-        чтобы проверить возврат константы.
+        чтобы проверить возврат константы HPO_WORST_SCORE.
         """
         X, y = dummy_data
-        EXPECTED_FALLBACK = -3.4028235e38
+        EXPECTED_FALLBACK = HPO_WORST_SCORE
         # 1. Патчим ВСЁ окружение, чтобы ни одна реальная функция не выполнилась
         with (
             patch(
@@ -590,7 +591,7 @@ class TestTunerObjective:
             _, _, best_score = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
-            assert best_score == -3.4028235e38
+            assert best_score == HPO_WORST_SCORE
 
     def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
         """
@@ -775,10 +776,13 @@ class TestTunerObjective:
             best_algo, best_model, best_score = optimize(
                 algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
             )
-            # best_score остаётся минимальным (ни один trial не успешен)
+            # Ни один trial не успешен: study.best_params бросает ValueError,
+            # и optimize() сигнализирует отказ полным None (issue #13) —
+            # это НЕ «магическая» константа -3.4028235e38, которая выглядела
+            # как валидный результат для оркестратора.
             assert best_algo is None
             assert best_model is None
-            assert best_score == -3.4028235e38
+            assert best_score is None
 
     def test_pruned_trials_reset_fatal_counter(self, dummy_data, mock_space):
         """

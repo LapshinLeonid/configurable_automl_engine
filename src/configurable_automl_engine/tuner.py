@@ -90,6 +90,24 @@ class InvalidDataError(HyperoptError):
 # ═══════════════════════════════════ logging setup ═══════════════════════════
 log = logging.getLogger(__name__)
 
+
+# ═══════════════════════════════════ constants ═══════════════════════════════
+# The worst possible trial score — an analog of the float32 minimum or
+# float('-inf'). Returned as the objective value when the real metric is not
+# finite (NaN/+inf, e.g. an nrmse error). The value equals the float32 minimum:
+# practically unreachable for real metrics, hence used as a sentinel.
+#
+# Used in two places:
+# 1. Inside `_objective`: a non-finite trial avg_score is replaced with this
+#    constant (the trial completes, but with a deliberately worst score).
+# 2. On the orchestrator side: the `valid_results` filter in
+#    `training_engine/component.py` drops results whose score matches
+#    HPO_WORST_SCORE via math.isclose (rel_tol=1e-9), treating the algorithm
+#    as failed (issue #13). The relative tolerance keeps valid but very small
+#    custom metric scores (e.g., < -3.4e38) from being dropped; only scores
+#    practically equal to the float32 minimum are excluded.
+HPO_WORST_SCORE = -3.4028235e38
+
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
 
@@ -468,7 +486,7 @@ def optimize(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
-) -> tuple[Any | None, dict[str, Any] | None, float]:
+) -> tuple[Any | None, dict[str, Any] | None, float | None]:
     """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
 
     Функция автоматически выбирает стратегию валидации, настраивает пространство
@@ -556,6 +574,10 @@ def optimize(
               (в режиме ``'auto'`` содержит служебный ключ
               ``use_feature_selection`` с решением по отбору).
             - best_score: Лучшее значение метрики на валидации.
+            If no trial finished with a valid result (e.g., every trial was
+            turned into ``optuna.TrialPruned`` by a non-fatal error),
+            ``(None, None, None)`` is returned — the failure signal for the
+            caller (the algorithm is excluded from candidates).
 
     Raises:
         ValueError: Если ``n_trials`` не является положительным целым числом.
@@ -900,8 +922,8 @@ def optimize(
                 # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
                 if not np.isfinite(avg_score):
                     _score = (
-                        -3.4028235e38
-                    )  # аналог минимального float32 или float('-inf')
+                        HPO_WORST_SCORE  # аналог минимального float32 или float('-inf')
+                    )
                 else:
                     _score = avg_score
             else:
@@ -914,8 +936,8 @@ def optimize(
                 # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
                 if not np.isfinite(avg_score):
                     _score = (
-                        -3.4028235e38
-                    )  # аналог минимального float32 или float('-inf')
+                        HPO_WORST_SCORE  # аналог минимального float32 или float('-inf')
+                    )
                 else:
                     _score = avg_score
         except ValueError as err:
@@ -979,7 +1001,13 @@ def optimize(
         best_params = study.best_params
         best_score = study.best_value
     except ValueError:
-        return None, None, -3.4028235e38
+        # All trials of the algorithm finished without a valid result (e.g.,
+        # each was interrupted by a non-fatal ValueError and turned into
+        # optuna.TrialPruned). Return all-None instead of the "magic"
+        # HPO_WORST_SCORE constant so the caller (component._run_hpo) can
+        # distinguish a failure from a valid result and exclude the algorithm
+        # from candidates (issue #13).
+        return None, None, None
 
     # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!

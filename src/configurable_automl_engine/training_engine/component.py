@@ -46,6 +46,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 # ───────────────────────── canonical IAE ─────────────────────── #
+from ..tuner import HPO_WORST_SCORE
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
@@ -304,12 +305,26 @@ def _run_hpo(
 
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)
+        if best_score is None or best_params is None:
+            # Tuner couldn't get a valid result: either all trials failed
+            # (optuna.TrialPruned) or it failed otherwise. Return None so the
+            # main loop knows the algorithm didn't pass (issue #13): the dummy
+            # candidate with score -3.4e38 and params=None should no longer
+            # end up in phase_results.
+            _LOG.error(
+                "Algorithm %s failed during HPO: no valid result "
+                "(best_score=%r, best_params=%r)",
+                algo_name,
+                best_score,
+                best_params,
+            )
+            return None
         return best_score, best_params
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
         _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
-        # возвращаем None, чтобы главный цикл знал, что алгоритм не прошёл
+        # Return None so the main loop knows the algorithm didn't pass.
         return None
 
 
@@ -341,9 +356,18 @@ def _fit_and_save(
             (используется для доступа к значениям дополнительных метрик).
     Raises:
         AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
+        ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
+            no valid hyperparameters (protection against the TypeError
+            'NoneType' object is not iterable, issue #13).
     """
     if algo_cfg.trainer_module is None:
         raise ValueError("Trainer module path is not configured")
+    if best_params is None:
+        raise ValueError(
+            f"Algorithm '{algo_name}' produced no hyperparameters "
+            "(best_params is None): HPO phase failed completely. The algorithm "
+            "should have been excluded before the final fit."
+        )
     trainer_module = _load_module(algo_cfg.trainer_module)
     if not hasattr(trainer_module, "ModelTrainer"):
         raise AttributeError(
@@ -442,6 +466,15 @@ def train_best_model(
     """Основной интерфейс обучения лучшей модели.
     Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO)
     -> выбор победителя -> финальное обучение -> сохранение.
+
+    Multi-phase semantics (issue #13): phase results are not accumulated — each
+    phase rebuilds its results from scratch, so an algorithm that fails in the
+    current phase (total HPO failure: returned ``None`` or an invalid score) is
+    fully excluded and does not keep a stale record from a previous phase.
+    The final winner is chosen by the results of the LAST phase: for the typical
+    ``all_algorithms → refine_winner`` pipeline this is the refined winner;
+    a winner failure during ``refine_winner`` raises ``RuntimeError`` instead of
+    silently rolling back to the previous phase results.
     Args:
         config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения.
             Может быть путем к файлу, словарем или объектом Config.
@@ -546,9 +579,12 @@ def train_best_model(
             n_trials (int): Количество итераций в этой фазе.
             search_space (Dict[str, Any] | None): Пространство поиска для фазы.
         Returns:
-            Tuple[float, Dict[str, Any]]: Кортеж (метрика, параметры).
+            Tuple[float, Dict[str, Any]] | None: tuple (score, params),
+                or ``None`` when HPO did not return a valid result (the
+                algorithm is excluded from candidates, issue #13).
         Raises:
-            ValueError: Если HPO вернул пустой результат.
+            Exception: Exceptions from ``_run_hpo`` are logged and re-raised
+                (including ``InvalidAlgorithmError``).
         """
         _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
 
@@ -605,7 +641,6 @@ def train_best_model(
 
     # Начальный список кандидатов (все включенные алгоритмы)
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
-    current_candidates = {n: a for n, a in all_algorithms.items() if a.enable}
     phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
     # Дисквалифицированные алгоритмы (circuit breaker): имя -> причина.
     # Дисквалификация не прерывает запуск: алгоритм исключается из
@@ -617,25 +652,56 @@ def train_best_model(
             f" trials, action: {phase.action}) ---"
         )
 
-        # Если фаза требует только победителя, фильтруем кандидатов
+        # Snapshot of the previous phases' results. Used ONLY to select the
+        # refine_winner and to pass initial_params to the worker. Records from
+        # previous phases are NOT carried into the current one: phase_results
+        # is rebuilt from the current phase only, so an algorithm that failed
+        # in it (returned None or an invalid score) does not keep a stale
+        # record from a previous phase and does not compete with real results
+        # (issue #13). Consequence: the final winner is chosen by the results
+        # of the LAST phase.
+        prev_results = phase_results
+
         if phase.action == "refine_winner":
-            if not phase_results:
+            if not prev_results:
                 raise RuntimeError(
                     f"Phase '{phase.name}' requires a winner,"
                     f" but no previous results exist."
                 )
 
             select = max
-            winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
+            winner_algo = select(prev_results.items(), key=lambda kv: kv[1][0])[0]
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
+            # Only the previous phase's winner takes part in refine_winner:
+            # the losers' records must not "resurrect" if the winner fails
+            # during refinement. The refine result replaces the winner's
+            # record; if the winner fails (None/invalid score) the phase ends
+            # with RuntimeError — no silent rollback to phase 1.
+        else:
+            # all_algorithms phase: every enabled algorithm, results from
+            # previous phases are not accumulated. Algorithms disqualified by
+            # the circuit breaker do not return to the phase (issue #12).
+            current_candidates = {
+                n: a
+                for n, a in all_algorithms.items()
+                if a.enable and n not in disqualified_algorithms
+            }
+
+        # Each phase starts with an empty phase_results: it is rebuilt from the
+        # current phase only, so an algorithm that fails in this phase does not
+        # keep a stale record from a previous phase (issue #13).
+        phase_results = {}
 
         # Кандидаты, участвующие в текущей фазе (нужны для диагностики
         # в сообщении об отсутствии валидных результатов)
         phase_candidates = list(current_candidates.keys())
 
         def _worker(
-            algo_name: str, algo_cfg: AlgoCfg, p: HPOPhaseCfg = phase
+            algo_name: str,
+            algo_cfg: AlgoCfg,
+            p: HPOPhaseCfg = phase,
+            pr: dict[str, tuple[float, dict[str, Any]]] = prev_results,
         ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
@@ -645,11 +711,17 @@ def train_best_model(
                 Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
                     или None в случае ошибки.
             """
-            # Определяем initial_params для refine_winner: сохраняем лучшие
-            # параметры предыдущей фазы для enqueue_trial
+            # Determine initial_params for refine_winner: keep the best parameters of
+            # the previous phase for enqueue_trial. The prev_results snapshot is
+            # fixed via a default argument (like `p`), so the worker uses the
+            # state at definition time (B023). Workers only READ this dict;
+            # writes to phase_results happen after all phase workers finish, and
+            # at the end of the phase phase_results is re-bound to the filtered
+            # valid_results (objects are never mutated) — therefore the snapshot
+            # is stable in both parallel and sequential modes.
             init_params = None
-            if p.action == "refine_winner" and algo_name in phase_results:
-                _, prev_params = phase_results[algo_name]
+            if p.action == "refine_winner" and algo_name in pr:
+                _, prev_params = pr[algo_name]
                 init_params = prev_params
 
             # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
@@ -715,18 +787,57 @@ def train_best_model(
                     name, sc, pr = res
                     phase_results[name] = (sc, pr)
 
-        # Дисквалифицированные алгоритмы (circuit breaker) исключаются из
-        # результатов и кандидатов следующих фаз: они не могут стать
-        # победителем и не должны повторно тратить вычислительные ресурсы.
+        # Disqualified algorithms (circuit breaker) are removed from the results and
+        # from the candidates of the following phases: they must not win and must
+        # not waste compute again.
+        # phase_results.pop is a safety net for disqualification in the same
+        # phase (a no-op for the already-rebuilt dict).
         for name in list(disqualified_algorithms):
             phase_results.pop(name, None)
             current_candidates.pop(name, None)
 
-        valid_results = {
-            name: (score, params)
-            for name, (score, params) in phase_results.items()
-            if score is not None and not math.isnan(score) and score != float("-inf")
-        }
+        # Filter out invalid phase results: None, NaN, ±inf and the worst-score
+        # sentinel (HPO_WORST_SCORE from the tuner — used when a trial metric is
+        # non-finite). The sentinel is matched with math.isclose (relative
+        # tolerance 1e-9): HPO_WORST_SCORE equals the float32 minimum and cannot
+        # be a real metric value, while valid but very small custom metric
+        # scores (e.g., < -3.4e38) are NOT dropped. params=None is the tuner
+        # failure signal (issue #13).
+        valid_results: dict[str, tuple[float, dict[str, Any]]] = {}
+        for name, (score, params) in phase_results.items():
+            if score is None or params is None:
+                _LOG.warning(
+                    "Algorithm %s produced no valid result (score=%r, "
+                    "params=%r); excluding from phase candidates",
+                    name,
+                    score,
+                    params,
+                )
+                continue
+            if math.isnan(score) or score in (float("-inf"), float("inf")):
+                _LOG.warning(
+                    "Algorithm %s produced non-finite score %r; excluding "
+                    "from phase candidates",
+                    name,
+                    score,
+                )
+                continue
+            if math.isclose(score, HPO_WORST_SCORE, rel_tol=1e-9, abs_tol=0.0):
+                _LOG.warning(
+                    "Algorithm %s produced the worst-score sentinel %r "
+                    "(no trial yielded a finite metric); excluding from "
+                    "phase candidates",
+                    name,
+                    score,
+                )
+                continue
+            valid_results[name] = (score, params)
+
+        # Keep only the valid results of the current phase in phase_results: entries
+        # with an invalid score (HPO_WORST_SCORE etc.) are removed. Since
+        # phase_results started the phase empty, here it is guaranteed to
+        # contain only this phase's results (issue #13).
+        phase_results = valid_results
 
         if not valid_results:
             failed_algos = [n for n in phase_candidates if n not in valid_results]
@@ -734,7 +845,9 @@ def train_best_model(
                 f"No algorithms produced valid scores in phase '{phase.name}'. "
                 f"Failed algorithms: {failed_algos}"
             )
-    # После завершения всех фаз определяем финального победителя
+    # After all phases, pick the final winner. Since phase_results is rebuilt per
+    # phase, the winner is chosen by the LAST phase's results (for the typical
+    # all_algorithms → refine_winner pipeline this is the refined winner).
     select = max
     winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
     final_score, final_params = phase_results[winner_algo]

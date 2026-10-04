@@ -125,6 +125,20 @@ The example can be run from [example.py](example.py).
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
+### Multi-phase HPO semantics
+
+* Phase results are **not accumulated** across phases: each phase is re-run from
+  a clean slate, so an algorithm that fails completely in the current phase
+  (HPO returned no valid result) is excluded and never competes with a stale
+  record from a previous phase.
+* The **final winner is chosen by the last phase's results**: for the typical
+  `all_algorithms → refine_winner` pipeline this is the refined winner. A
+  failure of the winner during `refine_winner` raises `RuntimeError` instead of
+  silently rolling back to the previous phase.
+* Algorithms disqualified by the circuit breaker (5 consecutive fatal errors)
+  do not re-run in later phases and are reported via
+  `results["disqualified_algorithms"]`.
+
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # Contributing

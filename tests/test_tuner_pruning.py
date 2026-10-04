@@ -32,6 +32,7 @@ from sklearn.model_selection import KFold
 
 from configurable_automl_engine import tuner
 from configurable_automl_engine.tuner import (
+    HPO_WORST_SCORE,
     HyperoptError,
     _build_pruner,
     _evaluate_with_intermediate_reports,
@@ -292,7 +293,12 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
 def test_optimize_pruning_all_trials_pruned_returns_no_results(
     toy_data, quality_patches, mocker
 ):
-    """Все триалы отсечены → существующий сценарий «нет результатов» (AC-6)."""
+    """Все триалы отсечены → сценарий «нет результатов» (AC-6, issue #13).
+
+    Раньше optimize() возвращал «магическую» константу -3.4028235e38,
+    которая выглядела как валидный результат для оркестратора. Теперь
+    полный провал сигнализируется сплошным None.
+    """
     X, y = toy_data
 
     # Принудительно отсекаем каждый триал на первом же шаге.
@@ -319,7 +325,49 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
 
     assert model is None
     assert params is None
-    assert score == -3.4028235e38
+    assert score is None
+
+
+def test_optimize_pruning_nonfinite_score_uses_worst_score(
+    toy_data, quality_patches
+):
+    """Нефинитный avg_score в pruning-ветке → триал получает HPO_WORST_SCORE.
+
+    Покрывает ветку ``if not np.isfinite(avg_score)`` внутри
+    ``_evaluate_with_intermediate_reports``-пути (issue #13): все триалы
+    завершаются с «худшим скором», но не отсекаются, поэтому optimize()
+    возвращает HPO_WORST_SCORE с валидными параметрами — а отбрасывает такой
+    результат уже фильтр valid_results в оркестраторе.
+    """
+    X, y = toy_data
+
+    def fake_evaluate(
+        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+    ):
+        del trial, estimator, X, y, method, n_folds, test_size, random_state, scorer
+        return np.nan
+
+    with patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate):
+        model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert score == HPO_WORST_SCORE
+    assert params is not None
+    assert model is not None
 
 
 def test_optimize_pruning_not_applied_for_train_test_split(
