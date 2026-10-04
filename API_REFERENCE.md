@@ -233,6 +233,8 @@ The optional `oversampling` section may include:
 * `"smote"`
 * `"adasyn"`
 
+Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of `DataOversampler` (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
+
 
 # API Reference
 
@@ -268,7 +270,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `y` | `np.ndarray`, `pd.Series`, or `pd.DataFrame` | — | Target vector. |
 | `data_oversampling` | `bool` | `False` | Enable oversampling. |
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
-| `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm. |
+| `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
 | `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
 | `validation_strategy` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). |
@@ -322,7 +324,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `random_state` | `int` or `None` | `42` | Random seed. |
 | `data_oversampling` | `bool` | `False` | Enable oversampling. |
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
-| `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm. |
+| `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
 | `serialization_format` | `SerializationFormat` | `pickle` | Save format. |
 | `categorical_features` | `list[str]` or `None` | `None` | Categorical column names. |
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
