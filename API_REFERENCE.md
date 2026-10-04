@@ -23,8 +23,8 @@ The `general` section may include the following attributes:
 * `max_workers` — (optional) maximum number of threads/processes. If not specified, the number of CPU cores is used.
 * `parallel_mode` — (optional) parallelism mode (`"threads"` or `"processes"`). Defaults to `"threads"`.
 * `parallel_strategy` — (optional) controls parallel execution strategy. Defaults to `"algorithms"`.
-* `phase_timeout` — (optional) global timeout for the entire HPO phase in seconds (minimum 1.0). If `null`, defaults to 3600.
-* `task_timeout` — (optional) per-task timeout in seconds (minimum 1.0). If `null`, uses `phase_timeout`.
+* `phase_timeout` — (optional) global timeout for the entire HPO phase in seconds (minimum 1.0). If `null`, defaults to 3600. In `"threads"` mode this is a **soft timeout**: an already running Python function cannot be reliably killed, so an expired task's result is discarded (`None`) while the thread keeps executing until it finishes.
+* `task_timeout` — (optional) per-task timeout in seconds (minimum 1.0). If `null`, uses `phase_timeout`. The same soft-timeout semantics apply in `"threads"` mode (see `phase_timeout`).
 * `pruning` — (optional) early-stopping (pruning) settings for Optuna trials. Disabled by default.
 * `categorical_encoding` — (optional) categorical encoding strategy: `"one_hot"` (default), `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. See [Categorical encoding](#categorical-encoding).
 * `high_cardinality_threshold` — (optional, `>= 0`) cardinality threshold for the automatic high-cardinality mode. Must be set together with `high_cardinality_encoding`.
@@ -399,8 +399,8 @@ Executes a function in parallel across multiple workers with shared memory and d
 | `kwargs_seq` | `Iterable[Mapping]` | — | Sequence of keyword argument dicts. |
 | `max_workers` | `int` or `None` | `None` | Max worker count (defaults to CPU count). |
 | `mode` | `str` | `"threads"` | `"threads"` or `"processes"`. |
-| `timeout` | `float` or `None` | `3600` | Global timeout in seconds. |
-| `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds. |
+| `timeout` | `float` or `None` | `3600` | Global timeout in seconds. In `"threads"` mode it is a **soft timeout**: the running function cannot be interrupted and keeps executing in the background after the limit expires — only its result is discarded (`None`). |
+| `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds. In `"threads"` mode it is a **soft timeout** (the already running Python function cannot be killed); its result is discarded while the thread continues running. |
 | `shared_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to share via shared memory. |
 | `disk_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to persist to disk. |
 
