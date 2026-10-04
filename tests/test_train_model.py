@@ -959,6 +959,30 @@ class TestModelTrainerCoverage2:
         # Note: raw_score from sklearn is -RMSE
         assert hasattr(trainer, "val_score")
 
+    def test_global_nrmse_metric_fit_does_not_crash(self):
+        """Регрессия ревью PR #18: metric='global_nrmse' не роняет fit().
+
+        Раньше is_greater_better('global_nrmse') кидал ValueError (sklearn не
+        знает такого скорера), а вызов шёл безусловно из eager f-string
+        debug-лога _score_on_validation_splits на каждом fit(). На main путь
+        работал; теперь снова работает и возвращает положительный NRMSE.
+        """
+        df = pd.DataFrame(
+            {
+                "feature1": np.arange(10, dtype=float),
+                "target": np.arange(10, dtype=float) * 10.0,
+            }
+        )
+
+        trainer = ModelTrainer(
+            algorithm="ridge", metric="global_nrmse", random_state=42
+        )
+        trainer.fit(df, "target")
+
+        assert trainer.val_score is not None
+        assert trainer.val_score >= 0
+        assert isinstance(trainer.val_score, float)
+
     # --------------------------------------------------------------------------
     # 2. Покрытие веток predict (SharedDataFrame vs np.asarray)
     # --------------------------------------------------------------------------
@@ -1626,6 +1650,117 @@ def test_feature_selection_auto_logs_info_message(caplog):
         r"score_reduced=\d+\.\d{4} -> active=(True|False)",
         caplog.text,
     )
+
+
+def test_feature_selection_auto_check_with_neg_error_metric():
+    """Standalone auto-check с neg_-метрикой реестра (issue #26).
+
+    metric='neg_root_mean_squared_error' — инвертированная ошибка: «сырое»
+    значение скорера (-RMSE) максимизируется. На данных с 90% шумных
+    признаков отбор обязан включиться, как и для обычного 'rmse'.
+    """
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        metric="neg_root_mean_squared_error",
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    ).fit(X, y)
+
+    assert trainer.feature_selection_active_ is True
+    assert trainer.pipeline is not None
+    assert "feature_selector" in trainer.pipeline.named_steps
+    # Пользовательская семантика val_score: положительный RMSE
+    assert trainer.val_score is not None
+    assert trainer.val_score >= 0
+
+
+def test_feature_selection_auto_check_direction_follows_raw_scorer():
+    """auto-check сравнивает «сырые» значения скорера, а не имя метрики.
+
+    Направление сравнения определяется объектом-скорером: любое «сырое»
+    значение устроено так, что большее лучше (neg_-метрики уже инвертированы
+    для максимизации). Старая эвристика по подстрокам имени (issue #26)
+    трактовала neg_*-метрику как ошибку и сравнивала модули значений, что
+    давало противоположный ответ при разных знаках raw-скор.
+    """
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        metric="neg_root_mean_squared_error",
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    )
+
+    def mixed_sign_scorer(model, X_val, y_val):  # noqa: ANN001
+        # Контрольный пайплайн auto-check со шагом feature_selector
+        # (reduced) получает МЕНЬШЕЕ «сырое» значение, чем полный (full):
+        # raw_reduced < raw_full -> отбор НЕ включается.
+        if "feature_selector" in model.named_steps:
+            return -0.20
+        return 0.50
+
+    with patch(
+        "configurable_automl_engine.trainer.get_scorer_object",
+        return_value=mixed_sign_scorer,
+    ):
+        trainer.fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert trainer.pipeline is not None
+    assert "feature_selector" not in trainer.pipeline.named_steps
+
+
+def test_feature_selection_auto_check_exception_falls_back(caplog):
+    """Fail-safe: исключение в auto-check → WARNING + отбор выключен."""
+    X, y = _fs_noisy_dataset()
+    trainer = ModelTrainer(
+        algorithm="knn",
+        hyperparams={"n_neighbors": 20},
+        feature_selection_cfg={
+            "mode": "auto",
+            "method": "percentile",
+            "percentile": 10.0,
+            "min_features": 1,
+        },
+        random_state=7,
+    )
+
+    # Первый вызов — контрольный пайплайн auto-check: он падает, после
+    # fail-safe автономная проверка прерывается, а финальный скоринг fit()
+    # получает валидное значение.
+    scorer_calls = {"n": 0}
+
+    def exploding_scorer(model, X_val, y_val):  # noqa: ANN001
+        scorer_calls["n"] += 1
+        if scorer_calls["n"] == 1:
+            raise RuntimeError("scorer exploded")
+        return 0.9
+
+    with (
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=exploding_scorer,
+        ),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+    ):
+        trainer.fit(X, y)
+
+    assert trainer.feature_selection_active_ is False
+    assert "auto-check failed" in caplog.text
+    assert trainer.val_score == 0.9
 
 
 def test_feature_selection_isotonic_forced_disabled(caplog):

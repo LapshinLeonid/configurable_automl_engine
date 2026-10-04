@@ -52,6 +52,7 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
     to_sklearn_name,
+    to_user_value,
 )
 from .thread_pool import run_parallel
 
@@ -532,15 +533,19 @@ def train_best_model(
         target (str | None): Имя целевого столбца. По умолчанию 'target'.
         model_path_override (str | Path | None): Альтернативный путь сохранения модели.
     Returns:
-        Dict[str, Any]: Словарь с результатами: название алгоритма, score,
-            параметры и путь к файлу. Если в конфигурации заданы дополнительные
-            метрики (``general.additional_metrics``), в результат добавляется
-            ключ ``additional_metrics`` — словарь {метрика: значение},
-            рассчитанных для финальной модели на том же наборе данных, что и
-            основная метрика. Если в ходе запуска какие-либо алгоритмы были
-            дисквалифицированы circuit breaker'ом (5 подряд фатальных ошибок),
-            в результат добавляется ключ ``disqualified_algorithms`` —
-            словарь {имя алгоритма: причина дисквалификации}.
+        Dict[str, Any]: Словарь с результатами: название алгоритма,
+            ``score`` — значение метрики в пользовательской семантике
+            (положительный RMSE/MAE, обычный R²; для neg_-скореров значение
+            инвертировано обратно), ``metric`` — пользовательское имя метрики
+            сравнения, параметры и путь к файлу. Если в конфигурации заданы
+            дополнительные метрики (``general.additional_metrics``),
+            в результат добавляется ключ ``additional_metrics`` — словарь
+            {метрика: значение}, рассчитанных для финальной модели на том же
+            наборе данных, что и основная метрика. Если в ходе запуска
+            какие-либо алгоритмы были дисквалифицированы circuit breaker'ом
+            (5 подряд фатальных ошибок), в результат добавляется ключ
+            ``disqualified_algorithms`` — словарь {имя алгоритма: причина
+            дисквалификации}.
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
         RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
@@ -712,7 +717,10 @@ def train_best_model(
 
             score, params = result
 
-            disp = -score if metric_sklearn == "neg_root_mean_squared_error" else score
+            # Логируем значение в пользовательской семантике: для neg_*-метрик
+            # (например, neg_root_mean_squared_error) «сырое» значение скорера
+            # инвертировано, пользователю показываем естественное (положительное).
+            disp = to_user_value(metric_sklearn, score)
             _LOG.info(f"{phase_name} {algo:15} | score {disp:.5f} | params {params}")
             return score, params
         except Exception as err:
@@ -956,7 +964,13 @@ def train_best_model(
         raise
     result: dict[str, Any] = {
         "algorithm": winner_algo,
-        "score": final_score,
+        # Единая пользовательская семантика (issue #26): score всегда отражает
+        # естественное значение метрики (положительный RMSE/MAE, обычный R²),
+        # metric — пользовательское имя метрики сравнения из конфигурации.
+        # «Сырое» (инвертированное для neg_*-скореров) значение остаётся
+        # внутренней деталью оптимизатора и до пользователя не доходит.
+        "score": to_user_value(metric_user, final_score),
+        "metric": metric_user,
         "params": final_params,
         "model_path": str(model_path),
     }

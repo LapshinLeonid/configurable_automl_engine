@@ -126,14 +126,22 @@ Result format (`train_best_model` return value):
 ```python
 {
     "algorithm": "ridge",
-    "score": 0.94,               # main comparison metric, as before
+    "score": 0.123,              # main comparison metric in natural (user-facing) semantics
+    "metric": "rmse",            # user-facing name of the comparison metric
     "params": {...},
     "model_path": "model.pkl",
     "additional_metrics": {"r2": 0.98, "mae": 0.07, "mse": 0.009},  # only when non-empty
 }
 ```
 
-The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model.
+Metric semantics (issue #26): `score` always reflects the natural value of the
+metric as the user knows it — positive RMSE/MAE/MSE/NRMSE, plain R². The
+internal sklearn negative scorers (`neg_root_mean_squared_error` and other
+`neg_*`) are an optimizer detail: their inverted values never leak into
+`result["score"]`. `metric` carries the user-facing name of the comparison
+metric from the configuration (`general.comparison_metric`).
+
+The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model (same natural semantics as `score`).
 
 ## Algorithms section
 
@@ -242,7 +250,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"params"`, `"model_path"`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model.
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics).
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 

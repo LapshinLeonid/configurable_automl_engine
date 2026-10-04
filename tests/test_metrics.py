@@ -6,9 +6,11 @@ from configurable_automl_engine.training_engine.metrics import (
     _rmse,
     _nrmse,
     get_metric,
+    is_error_metric,
     is_greater_better,
     get_scorer_object,
     to_sklearn_name,
+    to_user_value,
     NRMSEZeroRangeError,
     _global_nrmse,
     get_global_nrmse_scorer,
@@ -83,26 +85,146 @@ def test_get_metric():
 @pytest.mark.parametrize(
     "metric_name, expected",
     [
-        # 1. Тесты для явного списка _GREATER_IS_BETTER
+        # 1. Собственный реестр: направление хранится явно рядом со скорером
         ("r2", True),
         ("R2", True),
-        ("accuracy", True),
-        # 2. Тесты для вхождения ключевых слов ошибок
         ("rmse", False),
-        ("mean_squared_error", False),
-        ("my_custom_mae_metric", False),
-        ("NRMSE_score", False),
-        # 3. КРИТИЧЕСКИЙ ТЕСТ: Покрытие строки if lname.startswith("neg_")
-        # Эти метрики не входят в список _GREATER_IS_BETTER и не содержат "mse/mae/error"
-        ("neg_log_loss", False),
-        ("neg_mean_absolute_percentage_error", False),
-        ("NEG_WHATEVER", False),
-        # 4. Тест на значение по умолчанию (если не подошло ни одно условие)
-        ("unknown_custom_metric", True),
+        ("mae", False),
+        ("mse", False),
+        ("nrmse", False),
+        # neg_-метрика реестра: инвертированная ошибка → максимизация
+        ("neg_root_mean_squared_error", True),
+        # 2. sklearn-скореры: большее значение всегда лучше — метрики-ошибки
+        # уже инвертированы в neg_-скореры, score-метрики возвращаются как есть
+        ("accuracy", True),
+        ("explained_variance", True),
+        ("neg_log_loss", True),
+        ("neg_mean_absolute_percentage_error", True),
+        ("neg_mean_squared_error", True),
+        ("neg_mean_absolute_error", True),
     ],
 )
 def test_is_greater_better(metric_name, expected):
     assert is_greater_better(metric_name) == expected
+
+
+def test_is_greater_better_contract_from_issue():
+    """Контракт из issue #26: направление определяется объектом-скорером."""
+    assert is_greater_better("neg_root_mean_squared_error") is True
+    assert is_greater_better("r2") is True
+    assert is_greater_better("mae") is False
+
+
+def test_is_greater_better_unknown_metric_raises():
+    """Неизвестная метрика не имеет направления — понятный ValueError.
+
+    Сообщение об ошибке объясняет, как исправить (реестр или sklearn),
+    аналогично get_metric (ревью PR #18).
+    """
+    with pytest.raises(ValueError, match="not implemented"):
+        is_greater_better("unknown_custom_metric")
+
+
+def test_is_greater_better_global_nrmse():
+    """global_nrmse — динамическая ошибка: «меньше — лучше».
+
+    Регрессия ревью PR #18: до фикса is_greater_better('global_nrmse')
+    падал с ValueError (sklearn не знает такого скорера), что роняло
+    ModelTrainer.fit() с metric='global_nrmse' (вызов из debug-лога).
+    """
+    assert is_greater_better("global_nrmse") is False
+
+
+def test_is_error_metric_user_presentation():
+    """is_error_metric отражает пользовательское представление метрики.
+
+    Инвертированные скореры ошибок (в т.ч. neg_-метрики) помечаются как
+    ошибки, score-метрики — нет (ревью PR #18: лейбл в логе train_model).
+    """
+    assert is_error_metric("global_nrmse") is True
+    assert is_error_metric("rmse") is True
+    assert is_error_metric("mae") is True
+    assert is_error_metric("mse") is True
+    assert is_error_metric("nrmse") is True
+    assert is_error_metric("neg_root_mean_squared_error") is True
+    assert is_error_metric("neg_log_loss") is True
+    assert is_error_metric("r2") is False
+    assert is_error_metric("accuracy") is False
+    with pytest.raises(ValueError, match="not implemented"):
+        is_error_metric("unknown_custom_metric")
+
+
+def test_to_user_value_natural_semantics():
+    """«Сырые» значения скореров приводятся к пользовательской семантике.
+
+    RMSE/MAE/MSE/NRMSE и все neg_-метрики возвращаются положительными,
+    score-метрики (R², accuracy) — как есть.
+    """
+    assert to_user_value("rmse", -0.123) == pytest.approx(0.123)
+    assert to_user_value("neg_root_mean_squared_error", -0.123) == pytest.approx(0.123)
+    assert to_user_value("mae", -0.05) == pytest.approx(0.05)
+    assert to_user_value("mse", -1.5) == pytest.approx(1.5)
+    assert to_user_value("nrmse", -0.3) == pytest.approx(0.3)
+    assert to_user_value("neg_log_loss", -0.6) == pytest.approx(0.6)
+    assert to_user_value("neg_mean_squared_error", -2.0) == pytest.approx(2.0)
+    assert to_user_value("r2", 0.85) == pytest.approx(0.85)
+    assert to_user_value("accuracy", 0.9) == pytest.approx(0.9)
+
+
+def test_to_user_value_global_nrmse():
+    """global_nrmse — динамическая ошибка: значение инвертируется."""
+    assert to_user_value("global_nrmse", -0.25) == pytest.approx(0.25)
+
+
+def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
+    """Скорер без атрибута _sign: консервативный фолбэк True.
+
+    Покрывает защитную ветку для гипотетических кастомных скореров,
+    у которых направление не экспонировано.
+    """
+    import configurable_automl_engine.training_engine.metrics as metrics_mod
+
+    class NoSignScorer:
+        pass
+
+    monkeypatch.setattr(
+        metrics_mod, "sklearn_get_scorer", lambda name: NoSignScorer()
+    )
+    assert is_greater_better("some_custom_metric") is True
+
+
+def test_is_greater_better_reflects_registry_mutation():
+    """Мутация реестра _SCORER_OBJECTS видна сразу, без устаревшего кэша.
+
+    Регрессия ревью PR #18: направление из собственного реестра читается
+    без кэширования, поэтому изменение реестра в рантайме (регистрация
+    кастомной метрики, смена направления) подхватывается немедленно.
+    """
+    from sklearn.metrics import make_scorer, mean_squared_error
+
+    import configurable_automl_engine.training_engine.metrics as metrics_mod
+
+    custom_name = "dyn_registry_metric"
+    assert custom_name not in metrics_mod._SCORER_OBJECTS
+
+    # До регистрации метрика неизвестна → ValueError.
+    with pytest.raises(ValueError):
+        is_greater_better(custom_name)
+
+    # Регистрируем «ошибку» (меньше — лучше) и проверяем направление.
+    metrics_mod._SCORER_OBJECTS[custom_name] = (
+        make_scorer(mean_squared_error, greater_is_better=False),
+        False,
+    )
+    try:
+        assert is_greater_better(custom_name) is False
+        # Меняем направление в реестре — результат обязан обновиться,
+        # несмотря на предшествующие вызовы (кэш реестра отсутствует).
+        scorer, _ = metrics_mod._SCORER_OBJECTS[custom_name]
+        metrics_mod._SCORER_OBJECTS[custom_name] = (scorer, True)
+        assert is_greater_better(custom_name) is True
+    finally:
+        del metrics_mod._SCORER_OBJECTS[custom_name]
 
 
 def test_get_scorer_object():

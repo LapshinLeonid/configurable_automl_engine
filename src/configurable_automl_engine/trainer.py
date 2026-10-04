@@ -76,7 +76,9 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
+    is_error_metric,
     is_greater_better,
+    to_user_value,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
 from configurable_automl_engine.validation import iter_splits, norm_val_method
@@ -94,27 +96,6 @@ __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 #: ``auto``). Порог выбран так, чтобы обе части hold-out сплита (80/20)
 #: содержали не менее 2 примеров: 10 * 0.8 = 8 и 10 * 0.2 = 2.
 _MIN_AUTO_CHECK_SAMPLES = 10
-
-
-def _sign_corrected_value(metric_name: str, raw_value: Any) -> float:
-    """Привести «сырое» значение скорера к пользовательскому представлению.
-
-    Логика работы:
-    1. Для метрик-ошибок (RMSE, MAE, MSE и т.д.) sklearn возвращает
-       отрицательное значение (так как оптимизирует максимизацию).
-       Пользователю возвращается «честное» положительное значение.
-    2. Для score-метрик (R² и т.д.) значение возвращается как есть.
-
-    Args:
-        metric_name (str): Имя метрики.
-        raw_value (Any): «Сырое» значение, возвращённое объектом-скорером.
-
-    Returns:
-        float: Значение метрики в пользовательском представлении.
-    """
-    if not is_greater_better(metric_name):
-        return float(abs(raw_value))
-    return float(raw_value)
 
 
 class TrainingError(RuntimeError):
@@ -872,10 +853,13 @@ class ModelTrainer:
         1. Hold-out сплит 80/20 с фиксированным ``random_state``.
         2. Два контрольных пайплайна (без селектора и с селектором) обучаются
            на train-части; скоринг на hold-out через
-           ``get_scorer_object(self.metric, global_y=y)`` +
-           ``_sign_corrected_value``.
-        3. Направленное сравнение с учётом ``is_greater_better(self.metric)``:
-           отбор включается только при строгом улучшении качества.
+           ``get_scorer_object(self.metric, global_y=y_train)``.
+        3. Направленное сравнение «сырых» значений скорера: любой скорер
+           (реестра или sklearn) устроен так, что большее значение лучше
+           (neg_-метрики уже инвертированы для максимизации), поэтому
+           эвристика по имени метрики не нужна и не ломается для neg_*-метрик.
+           В лог выводятся значения в пользовательской семантике
+           (``to_user_value``).
         4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
            дают WARNING и возвращают ``False`` — проверка не роняет fit().
 
@@ -966,13 +950,16 @@ class ModelTrainer:
                 )
                 return False
 
-            score_full = _sign_corrected_value(self.metric, raw_full)
-            score_reduced = _sign_corrected_value(self.metric, raw_reduced)
-            greater_better = is_greater_better(self.metric)
-            if greater_better:
-                active = score_reduced > score_full
-            else:
-                active = score_reduced < score_full
+            # Направление сравнения определяется самим объектом-скорером:
+            # любой скорер (реестра или sklearn) устроен так, что большее
+            # «сырое» значение лучше — neg_-метрики уже инвертированы для
+            # максимизации. Эвристика по имени метрики здесь не используется,
+            # поэтому направление не ломается для neg_*-метрик (issue #26).
+            active = raw_reduced > raw_full
+            # В лог выводим значения в пользовательской семантике
+            # (для ошибок — положительные), а решение принимаем по «сырым».
+            score_full = to_user_value(self.metric, raw_full)
+            score_reduced = to_user_value(self.metric, raw_reduced)
             self.logger.info(
                 "Standalone feature selection auto-check: score_full=%.4f, "
                 "score_reduced=%.4f -> active=%s",
@@ -1226,8 +1213,8 @@ class ModelTrainer:
            признаков, вынесенный в общий ``_assemble_steps``).
         2. На val-части фолда считаются «сырые» значения основной метрики и
            всех дополнительных метрик.
-        3. ``val_score = _sign_corrected_value(metric, mean(raw))``;
-           ``additional_scores[m] = _sign_corrected_value(m, mean(raw_m))``.
+        3. ``val_score = to_user_value(metric, mean(raw))``;
+           ``additional_scores[m] = to_user_value(m, mean(raw_m))``.
 
         Сбой отдельной дополнительной метрики (ошибка скорера/None на фолде) →
         WARNING + пропуск метрики; падение всех фолдов основной метрики →
@@ -1343,7 +1330,7 @@ class ModelTrainer:
             raise TrainingError(f"Validation scoring failed for all folds: {detail}")
 
         raw_mean = float(np.mean(fold_raw))
-        self.val_score = _sign_corrected_value(self.metric, raw_mean)
+        self.val_score = to_user_value(self.metric, raw_mean)
         self.logger.debug(
             f"Metric calculation: raw={raw_mean:.4f},"
             f" final val_score={self.val_score:.4f} "
@@ -1355,7 +1342,7 @@ class ModelTrainer:
             if not raw_values:
                 # Все фолды упали для этой метрики — уже пропущена с WARNING.
                 continue
-            self.additional_scores[mname] = _sign_corrected_value(
+            self.additional_scores[mname] = to_user_value(
                 mname, float(np.mean(raw_values))
             )
 
@@ -1633,8 +1620,10 @@ def train_model(
     if enable_logging:
         # Получаем логгер и пишем сообщение
         logger = logging.getLogger(__name__)
-        # Определяем тип метрики для понятного лога
-        metric_type = "Score" if is_greater_better(metric) else "Error (Natural)"
+        # Тип метрики — по пользовательскому представлению: ошибки (RMSE/MAE,
+        # в т.ч. neg_-метрики, чьё значение инвертировано обратно) помечаются
+        # как "Error (Natural)", score-метрики (R² и т.п.) — как "Score".
+        metric_type = "Error (Natural)" if is_error_metric(metric) else "Score"
 
         logger.info(
             f"Training finished: Algorithm={algo_key}, "
