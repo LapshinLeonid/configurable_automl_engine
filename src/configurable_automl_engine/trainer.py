@@ -51,7 +51,10 @@ from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 
-from configurable_automl_engine.common.definitions import SerializationFormat
+from configurable_automl_engine.common.definitions import (
+    SerializationFormat,
+    ValidationStrategy,
+)
 from configurable_automl_engine.common.serialization_utils import (
     load_artifact,
     save_artifact,
@@ -76,6 +79,7 @@ from configurable_automl_engine.training_engine.metrics import (
     is_greater_better,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
+from configurable_automl_engine.validation import iter_splits, norm_val_method
 
 from .models import (
     _ALIASES,
@@ -225,11 +229,12 @@ class ModelTrainer:
             ('one_hot', 'ordinal', 'target', 'frequency' или 'hashing').
             По умолчанию 'one_hot'.
         additional_metrics (Iterable[str] | None): Дополнительные метрики качества,
-            рассчитываемые для обученной модели на том же наборе данных и тем же
-            способом, что и основная метрика. Принимается любая итерируемая
-            последовательность строк (list, tuple, set, генератор); имя метрики
-            нормализуется к нижнему регистру. Носят информационный характер и
-            не влияют на процесс обучения. Значения сохраняются в
+            рассчитываемые для обученной модели тем же методом валидации, что
+            и основная метрика (``train_test_split`` — hold-out скоринг,
+            ``k_fold``/``loo`` — среднее по фолдам). Принимается любая
+            итерируемая последовательность строк (list, tuple, set, генератор);
+            имя метрики нормализуется к нижнему регистру. Носят информационный
+            характер и не влияют на процесс обучения. Значения сохраняются в
             ``additional_scores`` после вызова fit().
         preprocessing_override (PreprocessingOverride | dict | None): Явное
             переопределение пресета предобработки признаков (FR-5). Задаётся
@@ -238,10 +243,23 @@ class ModelTrainer:
         os_multiplier (float): Коэффициент генерации синтетических данных.
         os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
         pipeline (Pipeline | None): Итоговый объект пайплайна после вызова fit().
-        val_score (float | None): Значение метрики, полученное на hold-out выборке.
+        val_score (float | None): Значение основной метрики, полученное на
+            отложенной (hold-out) части данных либо усреднённое по фолдам
+            кросс-валидации — тем же методом валидации, которым HPO сравнивает
+            модели (``validation.iter_splits``). Не является train-скором:
+            оценка всегда считается на данных, не участвовавших в обучении
+            пайплайна этого фолда. Для метрик-ошибок значение положительное
+            (sign-corrected).
         additional_scores (dict[str, float]): Значения дополнительных метрик,
-            рассчитанных для обученной модели (пустой словарь, если метрики
-            не заданы).
+            рассчитанных тем же методом валидации, что и основная метрика
+            (пустой словарь, если метрики не заданы).
+        validation_strategy (str): Стратегия валидации финальной модели:
+            ``'train_test_split'`` (дефолт), ``'k_fold'``, ``'loo'`` или
+            ``'auto'``. ``'auto'`` разрешается внутри fit() через
+            ``validation.make_cv``; engine-путь передаёт уже разрешённый метод.
+        n_folds (int): Число фолдов для стратегии ``'k_fold'`` (по умолчанию 5).
+        test_size (float | int): Размер hold-out части: доля в (0, 1) либо целое
+            число строк (как в sklearn ``train_test_split``). По умолчанию 0.2.
         feature_names (list[str] | None): Список имен признаков,
             определенных при обучении.
         preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
@@ -287,6 +305,9 @@ class ModelTrainer:
         target_encoding_fallback: float | None = None,
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
         feature_selection_active: bool | None = None,
+        validation_strategy: ValidationStrategy | str = "train_test_split",
+        n_folds: int = 5,
+        test_size: float = 0.2,
     ):
         """Инициализировать тренер с параметрами модели и настройками предобработки.
 
@@ -299,6 +320,14 @@ class ModelTrainer:
                 внешним циклом HPO, который уже решил, нужен ли отбор
                 (интеграция с component.py/tuner.py отслеживается в follow-up
                 issue). ``None`` — решение по конфигурации.
+            validation_strategy: Стратегия валидации финальной модели
+                ('train_test_split', 'k_fold', 'loo' или 'auto'). Строки
+                нормализуются через ``validation.norm_val_method`` (единый
+                источник с HPO). По умолчанию 'train_test_split' — одно
+                hold-out разбиение (дешёвая «честная» оценка качества).
+            n_folds: Количество фолдов для стратегии 'k_fold' (>= 2).
+            test_size: Размер hold-out части: доля в (0, 1) либо целое число
+                строк (как sklearn ``train_test_split``). По умолчанию 0.2.
         """
 
         self.logger = logging.getLogger(__name__)
@@ -432,6 +461,42 @@ class ModelTrainer:
         self.feature_selection_active_: bool = False
         # Булева маска отобранных колонок пост-препроцессорной размерности.
         self.selected_features_mask_: np.ndarray | None = None
+
+        # ---------- validation (issue #24) ----------
+        # Стратегия оценки качества финальной модели. Хранится строковым
+        # примитивом (pickle-совместимость); строки нормализуются через
+        # validation.norm_val_method — единый источник маппинга с HPO
+        # (validation.make_cv / iter_splits). Валидируется сразу, чтобы
+        # неизвестная стратегия отклонялась на этапе инициализации.
+        normalized_strategy = norm_val_method(validation_strategy)
+        if normalized_strategy not in ("train_test_split", "k_fold", "loo", "auto"):
+            raise TrainingError(
+                f"Unknown validation_strategy: {validation_strategy!r}. "
+                "Expected one of ('train_test_split', 'k_fold', 'loo', 'auto')."
+            )
+        self.validation_strategy: str = normalized_strategy
+        if not isinstance(n_folds, int) or isinstance(n_folds, bool) or n_folds < 1:
+            raise TrainingError(f"n_folds must be a positive integer, got {n_folds!r}")
+        if normalized_strategy == "k_fold" and n_folds < 2:
+            raise TrainingError(
+                f"n_folds must be >= 2 for k_fold validation, got {n_folds}"
+            )
+        self.n_folds: int = n_folds
+        # test_size принимает долю в (0, 1) или целое число строк (как sklearn
+        # train_test_split): целочисленный test_size приходит из engine-пути
+        # после резолюции 'auto' (choose_validation_method возвращает число
+        # строк, см. D3 issue #24).
+        if isinstance(test_size, bool) or not isinstance(test_size, (int, float)):
+            raise TrainingError(f"test_size must be a number, got {test_size!r}")
+        if isinstance(test_size, float) and not (0.0 < test_size < 1.0):
+            raise TrainingError(
+                f"test_size must be a fraction in (0, 1), got {test_size!r}"
+            )
+        if isinstance(test_size, int) and test_size < 1:
+            raise TrainingError(
+                f"test_size must be a positive integer (row count), got {test_size!r}"
+            )
+        self.test_size: float = test_size
 
         # ---------- oversampling ----------
         self.os_enable = data_oversampling
@@ -807,7 +872,8 @@ class ModelTrainer:
         1. Hold-out сплит 80/20 с фиксированным ``random_state``.
         2. Два контрольных пайплайна (без селектора и с селектором) обучаются
            на train-части; скоринг на hold-out через
-           ``get_scorer_object(self.metric)`` + ``_sign_corrected_value``.
+           ``get_scorer_object(self.metric, global_y=y)`` +
+           ``_sign_corrected_value``.
         3. Направленное сравнение с учётом ``is_greater_better(self.metric)``:
            отбор включается только при строгом улучшении качества.
         4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
@@ -878,7 +944,11 @@ class ModelTrainer:
             pipe_full.fit(X_sub, y_sub)
             pipe_reduced.fit(X_sub, y_sub)
 
-            scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
+            # global_y=y_train: глобальный NRMSE нормализуется по полному
+            # таргету (как в HPO и финальном валидационном скоринге).
+            scorer = cast(
+                Callable[..., Any], get_scorer_object(self.metric, global_y=y_train)
+            )
             raw_full = scorer(pipe_full, X_hold, y_hold)
             raw_reduced = scorer(pipe_reduced, X_hold, y_hold)
             if (
@@ -1037,15 +1107,26 @@ class ModelTrainer:
 
     def fit(self, X: Any, y: Any) -> ModelTrainer:
         """Запустить полный цикл подготовки данных, обучения модели и оценки метрик.
-        Включает обязательное разбиение выборки для оценки качества."""
+
+        Оценка качества (``val_score`` / ``additional_scores``) выполняется на
+        отложенных данных тем же методом валидации, которым HPO сравнивает
+        модели (``validation.iter_splits``): ``train_test_split`` — одно
+        hold-out разбиение со скорингом на отложенной части; ``k_fold``/``loo``
+        — среднее по фолдам. После валидационного скоринга финальный пайплайн
+        обучается на полных данных: артефакт хранит обучение на 100% выборки,
+        а ``val_score`` остаётся честной оценкой качества (не train-скором).
+        """
 
         with self.lock:
-            # Этап 0: Сбрасываем фактический статус отбора и маску отобранных
-            # колонок в начале fit(), до какой-либо обработки данных. Если
-            # обучение упадёт на любом этапе (подготовка данных, разрешение
-            # активности, pipeline.fit), у тренера не останутся значения от
-            # предыдущего обучения (ревью PR #8). Дублирующий сброс в
-            # _fit_internal сохраняется для прямых вызовов этого метода.
+            # Этап 0: Сбрасываем состояние обучения в начале fit(), до какой-либо
+            # обработки данных. Если обучение упадёт на любом этапе (подготовка
+            # данных, разрешение активности, валидационный скоринг, pipeline.fit),
+            # у тренера не останутся значения от предыдущего обучения (ревью PR #8
+            # и issue #24: негативный сценарий «все фолды упали»). Дублирующий
+            # сброс в _fit_internal сохраняется для прямых вызовов этого метода.
+            self.pipeline = None
+            self.val_score = None
+            self.additional_scores = {}
             self.feature_selection_active_ = False
             self.selected_features_mask_ = None
 
@@ -1097,9 +1178,21 @@ class ModelTrainer:
                 X_prepared, y_s, preprocessor, base_model
             )
 
-            # Этап 5: Сборка и обучение пайплайна
-            # Здесь автоматически применится оверсэмплинг, если он включен,
-            # и отбор признаков, если он разрешён на этапе 4.5.
+            # Этап 5: Валидационный скоринг (issue #24). Оценка качества
+            # выполняется тем же методом разбиения, что и сравнение моделей
+            # в HPO (validation.iter_splits), чтобы val_score/additional_scores
+            # были честными hold-out/CV-оценками, а не train-скорами.
+            self._score_on_validation_splits(
+                X_prepared,
+                y_s,
+                preprocessor,
+                base_model,
+                feature_selection_active=feature_selection_active,
+            )
+
+            # Этап 6: Финальное обучение на полных данных (артефакт как сейчас):
+            # пайплайн обучается на 100% выборки, val_score при этом остаётся
+            # оценкой, посчитанной на отложенных данных (этап 5).
             self.pipeline = self._fit_internal(
                 X_prepared,
                 y_s,
@@ -1108,55 +1201,163 @@ class ModelTrainer:
                 feature_selection_active=feature_selection_active,
             )
 
-            # Этап 6: Валидация и расчет метрик (финальный шаг)
+            return self
+
+    def _score_on_validation_splits(
+        self,
+        X: Any,
+        y: Any,
+        preprocessor: ColumnTransformer,
+        base_model: Any,
+        *,
+        feature_selection_active: bool,
+    ) -> None:
+        """Оценить качество модели на отложенных данных (issue #24).
+
+        Единый механизм с HPO: разбиения строятся через
+        ``validation.iter_splits`` (та же фабрика, что и ``tuner.optimize``),
+        поэтому ``val_score``/``additional_scores`` соответствуют оценке, по
+        которой сравниваются модели, с точностью до sign-коррекции.
+
+        Логика работы:
+        1. На каждом фолде собирается свежий пайплайн из клонов
+           ``preprocessor``/``base_model`` (+ селектор/оверсэмплер по конфигу)
+           и обучается на train-части фолда (паттерн из auto-check отбора
+           признаков, вынесенный в общий ``_assemble_steps``).
+        2. На val-части фолда считаются «сырые» значения основной метрики и
+           всех дополнительных метрик.
+        3. ``val_score = _sign_corrected_value(metric, mean(raw))``;
+           ``additional_scores[m] = _sign_corrected_value(m, mean(raw_m))``.
+
+        Сбой отдельной дополнительной метрики (ошибка скорера/None на фолде) →
+        WARNING + пропуск метрики; падение всех фолдов основной метрики →
+        ``TrainingError`` (fail-fast, до финального обучения). Не-конечные скоры
+        фолдов (например, inf для NRMSE на константном таргете) возвращаются
+        как есть.
+
+        Args:
+            X: Матрица признаков (полные данные).
+            y: Целевая переменная (полные данные).
+            preprocessor: ``ColumnTransformer`` предобработки.
+            base_model: Базовый регрессор.
+            feature_selection_active: Флаг включения шага отбора признаков.
+
+        Raises:
+            TrainingError: Если ни один фолд не дал валидного скора основной
+                метрики либо критическая ошибка инициализации разбиений.
+        """
+        # Детерминированность сплитов: при random_state=None тренера
+        # (нефиксированное основное обучение) валидационные разбиения всё
+        # равно обязаны быть воспроизводимыми (фикс-зерно-фолбэк, как в
+        # _run_feature_selection_auto_check, ревью PR #8).
+        splits_seed = self.random_state if self.random_state is not None else 42
+        # Обратная совместимость со старыми pickle: параметры валидации
+        # читаются через getattr с дефолтами (паттерн как для
+        # feature_selection_cfg/encoding_strategy).
+        method = getattr(self, "validation_strategy", "train_test_split")
+        n_folds = getattr(self, "n_folds", 5)
+        test_size = getattr(self, "test_size", 0.2)
+
+        # global_y=y: глобальный NRMSE нормализуется по полному таргету
+        # (размах не зависит от конкретного фолда).
+        try:
+            scorer = cast(
+                Callable[..., Any], get_scorer_object(self.metric, global_y=y)
+            )
+        except Exception as err:  # noqa: BLE001
+            raise TrainingError(f"Error calculating metrics on validation: {err}")
+        add_scorers: dict[str, Callable[..., Any]] = {}
+        for mname in self.additional_metrics:
             try:
-                # 1. Получаем объект-скорер
-                scorer = cast(Callable[..., Any], get_scorer_object(self.metric))
-
-                # 2. Вычисляем raw_score (для ошибок sklearn вернет отрицательное число)
-                raw_score = scorer(self.pipeline, X_prepared, y_s)
-                if raw_score is None:
-                    raise TrainingError("Scorer returned None")
-
-                # 3. Инвертируем знак обратно, если это метрика-ошибка
-                # (RMSE, MAE и т.д.)
-                # Чтобы в val_score всегда лежало "честное"
-                # положительное значение ошибки
-                self.val_score = _sign_corrected_value(self.metric, raw_score)
-                self.logger.debug(
-                    f"Metric calculation: raw={raw_score:.4f},"
-                    f" final val_score={self.val_score:.4f} "
-                    f"(greater_is_better={is_greater_better(self.metric)})"
+                add_scorers[mname] = cast(
+                    Callable[..., Any], get_scorer_object(mname, global_y=y)
+                )
+            except Exception as err:  # noqa: BLE001
+                self.logger.warning(
+                    "Additional metric '%s' could not be computed: %s. "
+                    "Training result and artifact are unaffected.",
+                    mname,
+                    err,
                 )
 
-                # 4. Дополнительные (информационные) метрики: рассчитываются для
-                # финальной модели на том же наборе данных и тем же способом, что
-                # и основная метрика. Они не влияют на ход обучения, выбор модели
-                # и сохранение артефакта: при сбое отдельной метрики она
-                # пропускается с предупреждением, обучение продолжается.
-                self.additional_scores = {}
-                for mname in self.additional_metrics:
+        # Материализуем разбиения до цикла по фолдам: ошибки инициализации
+        # валидации (недостаточно данных, неизвестный метод и т.п.) должны
+        # прерывать обучение сразу, а не маскироваться под «упавший фолд».
+        try:
+            splits = list(
+                iter_splits(
+                    X,
+                    y,
+                    method=method,
+                    n_folds=n_folds,
+                    test_size=test_size,
+                    random_state=splits_seed,
+                )
+            )
+        except Exception as err:  # noqa: BLE001
+            raise TrainingError(f"Error calculating metrics on validation: {err}")
+
+        fold_raw: list[float] = []
+        add_raw: dict[str, list[float]] = {m: [] for m in add_scorers}
+        fold_errors: list[str] = []
+        for X_tr, X_te, y_tr, y_te in splits:
+            try:
+                # Свежий пайплайн на каждый фолд: клоны preprocessor/base_model
+                # (sklearn Pipeline не клонирует переданные шаги, поэтому общие
+                # экземпляры мутировали бы состояние соседнего фолда).
+                fold_pipe = Pipeline(
+                    self._assemble_steps(
+                        clone(preprocessor),
+                        clone(base_model),
+                        feature_selection_active=feature_selection_active,
+                    )
+                )
+                fold_pipe.fit(X_tr, y_tr)
+
+                raw = scorer(fold_pipe, X_te, y_te)
+                if raw is None:
+                    raise TrainingError("Scorer returned None")
+                fold_raw.append(float(raw))
+
+                for mname, m_scorer in add_scorers.items():
                     try:
-                        m_scorer = cast(Callable[..., Any], get_scorer_object(mname))
-                        m_raw = m_scorer(self.pipeline, X_prepared, y_s)
+                        m_raw = m_scorer(fold_pipe, X_te, y_te)
                         if m_raw is None:
                             raise TrainingError(
                                 f"Scorer returned None for additional metric '{mname}'"
                             )
-                        self.additional_scores[mname] = _sign_corrected_value(
-                            mname, m_raw
-                        )
+                        add_raw[mname].append(float(m_raw))
                     except Exception as err:  # noqa: BLE001
                         self.logger.warning(
-                            "Additional metric '%s' could not be computed: %s. "
-                            "Training result and artifact are unaffected.",
+                            "Additional metric '%s' could not be computed on a "
+                            "validation fold: %s. Training result and artifact "
+                            "are unaffected.",
                             mname,
                             err,
                         )
-            except Exception as e:  # noqa: BLE001
-                raise TrainingError(f"Error calculating metrics on validation: {e}")
+            except Exception as err:  # noqa: BLE001
+                fold_errors.append(str(err))
 
-            return self
+        if not fold_raw:
+            detail = "; ".join(dict.fromkeys(fold_errors)) or "unknown failure"
+            raise TrainingError(f"Validation scoring failed for all folds: {detail}")
+
+        raw_mean = float(np.mean(fold_raw))
+        self.val_score = _sign_corrected_value(self.metric, raw_mean)
+        self.logger.debug(
+            f"Metric calculation: raw={raw_mean:.4f},"
+            f" final val_score={self.val_score:.4f} "
+            f"(greater_is_better={is_greater_better(self.metric)})"
+        )
+
+        self.additional_scores = {}
+        for mname, raw_values in add_raw.items():
+            if not raw_values:
+                # Все фолды упали для этой метрики — уже пропущена с WARNING.
+                continue
+            self.additional_scores[mname] = _sign_corrected_value(
+                mname, float(np.mean(raw_values))
+            )
 
     def _align_predict_columns(self, X: pd.DataFrame) -> pd.DataFrame:
         """Выровнять колонки DataFrame к обучающему порядку (issue #2).
@@ -1313,7 +1514,10 @@ def train_model(
 ) -> float:
     """Обеспечить совместимость со старым API для обучения моделей.
     Функция-фасад, которая принимает конфигурацию или набор позиционных аргументов,
-    инициирует ModelTrainer и возвращает результат валидации.
+    инициирует ModelTrainer и возвращает значение метрики, полученное на
+    отложенных данных (hold-out либо среднее по фолдам CV) — тем же методом
+    валидации, которым оценивается качество в ``ModelTrainer.fit()``
+    (не train-скор).
 
     Параметры отбора признаков (``feature_selection_cfg`` /
     ``feature_selection_active``) — keyword-only: в ветке «config dict»
@@ -1435,7 +1639,8 @@ def train_model(
         logger.info(
             f"Training finished: Algorithm={algo_key}, "
             f"Metric={metric.upper()} ({metric_type}), "
-            f"Value={val_score:.4f}"
+            f"Value={val_score:.4f} "
+            f"(validation={trainer.validation_strategy})"
         )
 
     return float(val_score)

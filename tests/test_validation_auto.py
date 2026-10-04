@@ -352,6 +352,25 @@ def test_get_effective_train_size_auto_n_lt_2():
     assert result == 0
 
 
+def test_get_effective_train_size_integer_test_size():
+    """Целочисленный test_size (резолюция 'auto' → split, issue #24):
+    трактуется как число строк, а не доля (иначе Neff схлопывался бы до 1).
+    """
+    # Явная train_test_split с целым test_size
+    result = get_effective_train_size(
+        120, ValidationStrategy.train_test_split, test_size=15
+    )
+    assert result == 105
+    # auto → train_test_split: choose_validation_method возвращает целое
+    # число строк; get_effective_train_size обязан дать тот же train_size.
+    decision = choose_validation_method(1000, 5)
+    assert decision["method"] == "train_test_split"
+    result_auto = get_effective_train_size(
+        1000, ValidationStrategy.auto, n_folds=5, n_features=5
+    )
+    assert result_auto == int(decision["train_size"])
+
+
 # ══════════════════════ tuner integration ══════════════════════
 
 

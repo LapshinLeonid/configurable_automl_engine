@@ -14,6 +14,7 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.exceptions import NotFittedError
+from sklearn.linear_model import LinearRegression
 
 
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
@@ -113,9 +114,11 @@ def test_invalid_param_key(base_params):
 
 
 def test_negative_alpha(base_params):
-    # Негативный alpha приводит к ValueError из sklearn
+    # Негативный alpha приводит к ValueError из sklearn внутри валидационного
+    # скоринга (issue #24). Все фолды падают → fail-fast TrainingError до
+    # финального обучения, с сохранением текста ошибки sklearn.
     neg_params = {"alpha": -1.0, "l1_ratio": 0.5}
-    with pytest.raises(ValueError):
+    with pytest.raises(TrainingError, match="alpha"):
         train_model("ElasticNet", "r2", neg_params, X, y)
 
 
@@ -249,8 +252,10 @@ def test_train_model_legacy_api(tmp_path):
         train_model("elasticnet", "r2", {}, X, y)
 
     # 4. Тест проброса исключений
-    with pytest.raises(ValueError):
-        # Некорректный параметр l1_ratio (> 1.0) вызовет ValueError в sklearn
+    with pytest.raises(TrainingError, match="l1_ratio"):
+        # Некорректный параметр l1_ratio (> 1.0) вызывает ValueError в sklearn
+        # внутри валидационного скоринга (issue #24); все фолды падают →
+        # fail-fast TrainingError с сохранением текста ошибки.
         train_model("elasticnet", "r2", {"l1_ratio": 5.0}, X, y)
 
 
@@ -1022,14 +1027,18 @@ def test_fit_sets_feature_names_from_numerical_when_none():
 
     trainer = ModelTrainer(algorithm="elasticnet", random_state=42)
 
-    # Мокаем внешние зависимости, чтобы тест не упал на этапе обучения модели
+    # Мокаем внешние зависимости, чтобы тест не упал на этапе обучения модели.
+    # create_model возвращает реальный лёгкий оценщик: валидационный скоринг
+    # (issue #24) клонирует модель на каждый фолд, а клонирование MagicMock
+    # приводит к RecursionError (sklearn clone).
     with (
-        patch("configurable_automl_engine.trainer.create_model") as mock_create,
+        patch(
+            "configurable_automl_engine.trainer.create_model",
+            return_value=LinearRegression(),
+        ) as mock_create,
         patch("configurable_automl_engine.trainer.get_scorer_object") as mock_scorer,
     ):
         # Настройка моков для минимально успешного прохода
-        mock_model = MagicMock()
-        mock_create.return_value = mock_model
         mock_scorer.return_value = lambda m, x, y: 0.9
 
         trainer.fit(X, y)
@@ -1054,7 +1063,13 @@ def test_fit_extracts_metadata_as_fallback():
     with (
         patch.object(ModelTrainer, "_detect_feature_types"),
         patch.object(ModelTrainer, "_extract_metadata") as mock_extract,
-        patch("configurable_automl_engine.trainer.create_model") as mock_create,
+        # Реальный лёгкий оценщик вместо MagicMock: валидационный скоринг
+        # (issue #24) клонирует модель на каждый фолд, а clone(MagicMock)
+        # даёт RecursionError.
+        patch(
+            "configurable_automl_engine.trainer.create_model",
+            return_value=LinearRegression(),
+        ) as mock_create,
         patch(
             "configurable_automl_engine.trainer.get_scorer_object"
         ) as mock_scorer_factory,
@@ -1071,9 +1086,6 @@ def test_fit_extracts_metadata_as_fallback():
         mock_scorer_func = MagicMock(return_value=0.85)
         mock_scorer_factory.return_value = mock_scorer_func
 
-        # 4. Мокаем саму модель, чтобы fit_internal прошел успешно
-        mock_model = MagicMock()
-        mock_create.return_value = mock_model
         # Нам нужно, чтобы к моменту "Этапа 3" в методе fit() self.feature_names был None.
         # Используем side_effect для _prepare_data, чтобы сбросить поле после его заполнения.
         original_prepare = trainer._prepare_data
@@ -1110,7 +1122,12 @@ def test_coverage_feature_names_from_numerical_fallback():
     # Путь к модулю (замените на ваш фактический путь)
     module_path = "configurable_automl_engine.trainer"
     with (
-        patch(f"{module_path}.create_model"),
+        # Реальный лёгкий оценщик вместо MagicMock: валидационный скоринг
+        # (issue #24) клонирует модель на каждый фолд, а clone(MagicMock)
+        # даёт RecursionError.
+        patch(
+            f"{module_path}.create_model", return_value=LinearRegression()
+        ),
         patch(f"{module_path}.get_scorer_object") as mock_scorer_factory,
         patch(f"{module_path}.is_greater_better", return_value=True),
     ):
@@ -1150,9 +1167,17 @@ def test_metric_calculation_debug_log_formats_val_score(caplog):
     Debug-сообщение "Metric calculation" должно содержать фактическое значение
     val_score (например, final val_score=0.9421), а не литеральный текст
     {self.val_score:.4f} из не-f-строки.
+
+    Достаточно большая выборка, чтобы hold-out R² (issue #24) был конечным
+    (на 1-строчном hold-out r2_score возвращает NaN).
     """
-    X = pd.DataFrame({"feature1": [1, 2, 3, 4], "feature2": [5, 6, 7, 8]})
-    y = pd.Series([10, 20, 30, 40])
+    X = pd.DataFrame(
+        {
+            "feature1": np.arange(40, dtype=float),
+            "feature2": np.arange(40, dtype=float) * 2,
+        }
+    )
+    y = pd.Series(np.arange(40, dtype=float) * 3 + 1.0)
 
     model_trainer = ModelTrainer(algorithm="ridge")
 
@@ -1214,9 +1239,16 @@ def test_trainer_glm_uses_robust_scaler_and_median():
 
 
 def test_trainer_univariate_no_scaling():
-    """Одномерный алгоритм (isotonic): без масштабирования."""
-    X1 = X.iloc[:, [0]]
-    trainer = ModelTrainer(algorithm="isotonic").fit(X1, y)
+    """Одномерный алгоритм (isotonic): без масштабирования.
+
+    Перемешанные данные: при hold-out валидации (issue #24) тренировочная
+    часть фолда покрывает весь диапазон значений, иначе IsotonicRegression
+    (out_of_bounds='nan') даёт NaN-предсказания на hold-out.
+    """
+    rng = np.random.RandomState(0)
+    X1 = pd.DataFrame({"a": rng.permutation(np.linspace(0, 1, 50))})
+    y1 = pd.Series(X1["a"] * 2.0 + rng.randn(50) * 0.05)
+    trainer = ModelTrainer(algorithm="isotonic").fit(X1, y1)
     assert trainer.preprocessing_preset.scaling == "none"
     num = _num_transformer_of(trainer)
     assert "scaler" not in [s[0] for s in num.steps]
@@ -1597,9 +1629,17 @@ def test_feature_selection_auto_logs_info_message(caplog):
 
 
 def test_feature_selection_isotonic_forced_disabled(caplog):
-    """IsotonicRegression: отбор принудительно отключается, обучение проходит."""
-    X = pd.DataFrame({"f": np.linspace(0, 10, 60)})
-    y = pd.Series(np.linspace(0, 10, 60) ** 2)
+    """IsotonicRegression: отбор принудительно отключается, обучение проходит.
+
+    Данные перемешаны (не монотонный linspace): при hold-out валидации
+    (issue #24) тренировочная часть фолда покрывает весь диапазон значений,
+    иначе IsotonicRegression (out_of_bounds='nan') даёт NaN-предсказания на
+    hold-out и валидационный скоринг падает.
+    """
+    rng = np.random.RandomState(0)
+    f = rng.permutation(np.linspace(0, 10, 60))
+    X = pd.DataFrame({"f": f})
+    y = pd.Series(f**2)
 
     with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
         trainer = ModelTrainer(

@@ -45,16 +45,21 @@ def resolve_auto_no_features_fallback(n_samples: int, n_folds: int) -> tuple[str
 def _effective_size_train_test(n_total: int, test_size: float) -> int:
     """Compute the effective train size for a train/test split.
 
-    The ratio ``test_size`` is clamped to the range [0.01, 0.99] to avoid
-    producing 0 or ``n_total`` (which would crash most training algorithms).
+    ``test_size`` follows sklearn semantics: a fraction in [0.01, 0.99] is
+    clamped to that range (to avoid producing 0 or ``n_total``, which would
+    crash most training algorithms); an integer value is interpreted as the
+    absolute number of test rows (issue #24: the 'auto' resolution via
+    ``choose_validation_method`` returns an integer test size).
 
     Args:
         n_total: Total number of rows.
-        test_size: Desired test fraction (clamped internally).
+        test_size: Desired test fraction (or absolute row count).
 
     Returns:
         The number of rows the model effectively trains on.
     """
+    if isinstance(test_size, int) and not isinstance(test_size, bool):
+        return max(1 if n_total >= 2 else 0, n_total - test_size)
     safe_test_size = max(0.01, min(0.99, test_size))
     effective_size = math.floor(n_total * (1 - safe_test_size))
     # Гарантируем, что если есть хотя бы 2 строки, то Neff будет минимум 1

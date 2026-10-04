@@ -551,6 +551,77 @@ def test_run_hpo_success_return():
         assert params == {"param": 1}
 
 
+def test_run_hpo_forwards_resolved_test_size_to_tuner():
+    """Разрешённый test_size (issue #24, D3) прокидывается тюнеру с поддержкой.
+
+    При 'auto' → 'train_test_split' choose_validation_method возвращает целое
+    число строк; HPO обязан оценивать модели на том же сплите, что и финальный
+    fit, иначе оценки разойдутся.
+    """
+    received: dict[str, object] = {}
+
+    class SplitAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            train_test_split_test_size=0.2,
+        ):
+            received["test_size"] = train_test_split_test_size
+            received["strategy"] = validation_strategy
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=SplitAwareTuner()):
+        score, params = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="r2",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            train_test_split_test_size=15,
+        )
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    assert received["test_size"] == 15
+    assert received["strategy"] == ValidationStrategy.train_test_split
+
+
+def test_run_hpo_skips_test_size_for_legacy_tuner():
+    """Кастомный тюнер без параметра не получает train_test_split_test_size."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["test_size_passed"] = "train_test_split_test_size" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            train_test_split_test_size=0.25,
+        )
+
+    assert result == (0.5, {})
+    assert calls["test_size_passed"] is False
+
+
 # Ранняя остановка (pruning): прокидывание настроек в тюнер
 def test_run_hpo_passes_pruning_when_tuner_supports_it():
     """Настройки ранней остановки передаются тюнеру, поддерживающему `pruning`."""

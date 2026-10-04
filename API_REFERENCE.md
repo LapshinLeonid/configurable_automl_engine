@@ -106,7 +106,7 @@ Rules and behavior:
 * **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
 * **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
 * **Post-validation list.** Both rules above are applied at config validation time, so the resulting `general.additional_metrics` (as exposed on the validated config object and forwarded to the final `ModelTrainer`) may differ from the list the user provided: duplicates are removed and the comparison metric (with its aliases) is dropped. Only the metrics present in the final list are computed and returned.
-* **Computation.** Each additional metric is evaluated for the final model on the same dataset and with the same scorer mechanism as the main metric of the final model (i.e., on the full training dataset after the final fit). Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
+* **Computation.** Each additional metric is evaluated for the final model with the **same validation method as the comparison metric** (issue #24): on a hold-out split (`train_test_split`) or as the mean over CV folds (`k_fold`/`loo`) — never on the full training set. Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
 * **Failure tolerance.** If a single additional metric cannot be computed (scorer error), it is skipped with a warning and does not abort training, model selection, or artifact saving.
 
 Example:
@@ -321,7 +321,10 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
 | `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy: `"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. |
-| `additional_metrics` | `Iterable[str]` or `None` | `None` | Additional (informational) metrics computed for the trained model on the same dataset as the main metric. Any iterable of strings is accepted (list, tuple, set, generator); names are normalized to lowercase. Stored in `additional_scores` after `fit()`. |
+| `additional_metrics` | `Iterable[str]` or `None` | `None` | Additional (informational) metrics computed for the trained model with the same validation method as the main metric (hold-out split or CV-fold mean, never a train score). Any iterable of strings is accepted (list, tuple, set, generator); names are normalized to lowercase. Stored in `additional_scores` after `fit()`. |
+| `validation_strategy` | `str` or `ValidationStrategy` | `"train_test_split"` | Validation strategy for the final model quality estimate: `"train_test_split"` (one hold-out split), `"k_fold"` (CV fold mean), `"loo"` or `"auto"`. The engine path always passes the already-resolved strategy (D3, issue #24). |
+| `n_folds` | `int` | `5` | Number of folds for `"k_fold"` (`>= 2`). |
+| `test_size` | `float` or `int` | `0.2` | Hold-out size: a fraction in `(0, 1)` or an integer number of rows (like sklearn `train_test_split`). |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset (FR-5). Partial or full overrides are supported; takes priority over the automatic class-based selection. |
 | `high_cardinality_threshold` | `int` or `None` | `None` | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding`; the rest use `encoding_strategy`. Must be set together with `high_cardinality_encoding`. `None` disables the mode. |
 | `high_cardinality_encoding` | `str` or `None` | `None` | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
@@ -342,8 +345,8 @@ Orchestrator class for training, validation, and serialization of regression mod
 
 **Attributes after `fit()`:**
 
-* `val_score` — value of the main metric for the trained model.
-* `additional_scores` — `dict[str, float]` with values of the configured additional metrics (empty if none were set).
+* `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the mean over CV folds (`k_fold`/`loo`) — the same validation method used by HPO to compare models (issue #24). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected).
+* `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set).
 
 **Categorical encoding**
 
@@ -415,7 +418,7 @@ Legacy facade function for training a single model. Accepts either a config dict
 | `feature_selection_cfg` (keyword-only) | `FeatureSelectionCfg`, `dict`, or `None` | Feature selection config (method, percentile, `min_features`, etc.). In the config-dict branch the `feature_selection_cfg` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; `None` means `FeatureSelectionCfg()` (`mode='disabled'`). |
 | `feature_selection_active` (keyword-only) | `bool` or `None` | Explicit feature selection activity flag (takes precedence over the config mode). In the config-dict branch the `feature_selection_active` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; non-bool values are rejected by `ModelTrainer`; `None` defers the decision to the config. |
 
-**Returns:** `float` — validation metric value.
+**Returns:** `float` — validation metric value computed on hold-out data (or CV-fold mean) with the `ModelTrainer` validation strategy — an honest out-of-sample estimate, not a train score (issue #24).
 
 ---
 

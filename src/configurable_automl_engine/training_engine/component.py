@@ -44,6 +44,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
     read_config,
 )
+from configurable_automl_engine.validation import RANDOM_STATE, make_cv
 
 # ───────────────────────── canonical IAE ─────────────────────── #
 from ..tuner import HPO_WORST_SCORE
@@ -123,6 +124,7 @@ def _run_hpo(
     n_trials: int,
     validation_strategy: ValidationStrategy,
     n_folds: int | None = None,
+    train_test_split_test_size: float = 0.2,
     search_space_override: dict[str, Any] | None = None,
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
@@ -156,6 +158,10 @@ def _run_hpo(
         validation_strategy (ValidationStrategy): Стратегия валидации
             (k_fold, loo и т.д.).
         n_folds (int | None): Количество фолдов для кросс-валидации.
+        train_test_split_test_size (float): Размер hold-out части для стратегии
+            'train_test_split' (доля в (0, 1) либо целое число строк после
+            резолюции 'auto'). Прокидывается тюнеру, поддерживающему параметр,
+            чтобы оценка HPO не расходилась с финальным val_score (D3 issue #24).
         search_space_override (Dict[str, Any] | None):
             Переопределенное пространство поиска.
         data_oversampling (bool): Флаг включения оверсэмплинга.
@@ -214,6 +220,12 @@ def _run_hpo(
         and "n_folds" in sig.parameters
     ):
         kwargs["n_folds"] = n_folds
+
+    # прокидываем разрешённый размер hold-out (issue #24, D3): при 'auto' →
+    # 'train_test_split' choose_validation_method возвращает целое число строк,
+    # которое обязано совпадать и в HPO, и в финальном fit.
+    if "train_test_split_test_size" in sig.parameters:
+        kwargs["train_test_split_test_size"] = train_test_split_test_size
 
     # прокидываем oversampling параметры, если tuner их поддерживает
     if "data_oversampling" in sig.parameters:
@@ -340,6 +352,10 @@ def _fit_and_save(
     model_path: Path,
     cfg: Config,
     metric_name_sklearn: str = "r2",
+    *,
+    validation_strategy: ValidationStrategy | str | None = None,
+    n_folds: int | None = None,
+    test_size: float | None = None,
 ) -> Any:
     """Выполнить финальное обучение модели и сохранить результат на диск.
     Args:
@@ -351,6 +367,12 @@ def _fit_and_save(
         model_path (Path): Путь для сохранения файла модели.
         cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
         metric_name_sklearn (str): Имя основной метрики в формате sklearn.
+        validation_strategy (ValidationStrategy | str | None): Разрешённая
+            стратегия валидации финальной модели (issue #24, D3). ``None`` —
+            дефолт ``ModelTrainer`` ('train_test_split').
+        n_folds (int | None): Число фолдов (для 'k_fold').
+        test_size (float | int | None): Размер hold-out части (доля либо число
+            строк после резолюции 'auto').
     Returns:
         Any: Экземпляр ``ModelTrainer`` после обучения и сохранения
             (используется для доступа к значениям дополнительных метрик).
@@ -445,6 +467,34 @@ def _fit_and_save(
             fs_active,
         )
 
+    # Параметры валидации (issue #24, D3): в финальный fit передаются
+    # разрешённые значения (метод + число фолдов/размер hold-out), а не строка
+    # 'auto', чтобы финальный val_score считался тем же методом, что и оценка
+    # сравнения моделей в HPO. Кастомным тренерам без поддержки аргументов
+    # новые ключи не передаются (сигнатура проверяется, как для отбора
+    # признаков); поведение по умолчанию ModelTrainer при этом совпадает.
+    if validation_strategy is not None:
+        if (
+            "validation_strategy" in trainer_sig.parameters
+            or trainer_accepts_var_kwargs
+        ):
+            trainer_kwargs["validation_strategy"] = validation_strategy
+        else:
+            _LOG.warning(
+                "ModelTrainer %s does not accept `validation_strategy`; "
+                "the resolved strategy %r will NOT be applied in the final fit.",
+                algo_cfg.trainer_module,
+                validation_strategy,
+            )
+    if n_folds is not None and (
+        "n_folds" in trainer_sig.parameters or trainer_accepts_var_kwargs
+    ):
+        trainer_kwargs["n_folds"] = n_folds
+    if test_size is not None and (
+        "test_size" in trainer_sig.parameters or trainer_accepts_var_kwargs
+    ):
+        trainer_kwargs["test_size"] = test_size
+
     trainer = trainer_module.ModelTrainer(**trainer_kwargs)
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,6 +585,35 @@ def train_best_model(
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    # Единая резолюция стратегии валидации (issue #24, D3): 'auto' разрешается
+    # ровно один раз по сырым X/y — до фаз HPO. Разрешённые значения (метод +
+    # число фолдов / размер hold-out) передаются и в HPO, и в финальный fit,
+    # чтобы оценка сравнения моделей и финальный val_score не расходились
+    # (например, auto → train_test_split с целочисленным test_size из
+    # choose_validation_method, а не фиксированным 0.2).
+    val_method_eff, cv_obj, auto_decision = make_cv(
+        n_samples=len(X),
+        val_method=cfg.general.validation_strategy,
+        n_folds=cfg.general.n_folds,
+        random_state=RANDOM_STATE,
+        test_size=0.2,
+        n_features=X.shape[1],
+    )
+    resolved_validation = ValidationStrategy(val_method_eff)
+    if val_method_eff == "k_fold":
+        # Число фолдов берём из готового cv_obj: для 'auto'→kfold он содержит
+        # k из решения choose_validation_method, отличное от cfg.general.n_folds.
+        assert cv_obj is not None
+        resolved_n_folds = int(cv_obj.get_n_splits())
+    else:
+        resolved_n_folds = cfg.general.n_folds
+    # Для auto → train_test_split choose_validation_method возвращает целое
+    # число строк; для явной стратегии — фиксированная доля 0.2.
+    if val_method_eff == "train_test_split" and auto_decision is not None:
+        resolved_test_size: float | int = int(auto_decision["test_size"])
+    else:
+        resolved_test_size = 0.2
+
     # Определяем типы колонок ровно один раз на входном DataFrame и прокидываем
     # в фазу HPO. Это гарантирует одинаковую предобработку (one-hot) между HPO
     # и финальным обучением ModelTrainer.
@@ -608,8 +687,9 @@ def train_best_model(
                 y=y,
                 metric_name_sklearn=metric_sklearn,
                 n_trials=n_trials,
-                validation_strategy=cfg.general.validation_strategy,
-                n_folds=cfg.general.n_folds,
+                validation_strategy=resolved_validation,
+                n_folds=resolved_n_folds,
+                train_test_split_test_size=resolved_test_size,
                 search_space_override=search_space,
                 data_oversampling=ovr.enable,
                 data_oversampling_multiplier=ovr.multiplier,
@@ -866,6 +946,9 @@ def train_best_model(
             model_path,
             cfg,
             metric_name_sklearn=metric_sklearn,
+            validation_strategy=resolved_validation,
+            n_folds=resolved_n_folds,
+            test_size=resolved_test_size,
         )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
