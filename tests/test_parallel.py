@@ -158,9 +158,15 @@ def raise_invalid():
     raise InvalidAlgorithmError("bad algo")
 
 
-def test_run_parallel_invalid_algorithm_error_propagates():
-    with pytest.raises(InvalidAlgorithmError):
-        run_parallel(raise_invalid, args_seq=[()])
+def test_run_parallel_invalid_algorithm_error_is_not_fatal(caplog):
+    """InvalidAlgorithmError — обычный отказ задачи: результат None,
+    а не прерывание всего батча (issue #12)."""
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(raise_invalid, args_seq=[()])
+
+    assert results == [None]
+    assert "Task 0 failed" in caplog.text
+    assert "bad algo" in caplog.text
 
 
 def raise_keyboard_interrupt():
@@ -1056,10 +1062,17 @@ def raise_invalid_no_timeout():
     raise InvalidAlgorithmError("bad algo no timeout")
 
 
-def test_run_parallel_invalid_algorithm_error_propagates_no_timeout():
-    """Покрытие строки 625: re-raise InvalidAlgorithmError в else-ветке (timeout_for_ac is None)."""
-    with pytest.raises(InvalidAlgorithmError, match="bad algo no timeout"):
-        run_parallel(raise_invalid_no_timeout, args_seq=[()], timeout=None)
+def test_run_parallel_invalid_algorithm_error_is_not_fatal_no_timeout(caplog):
+    """Покрытие else-ветки (timeout_for_ac is None): InvalidAlgorithmError
+    обрабатывается как обычный отказ задачи (issue #12)."""
+    with caplog.at_level(logging.ERROR):
+        results = run_parallel(
+            raise_invalid_no_timeout, args_seq=[()], timeout=None
+        )
+
+    assert results == [None]
+    assert "Task 0 failed" in caplog.text
+    assert "bad algo no timeout" in caplog.text
 
 
 def raise_keyboard_interrupt_no_timeout():
