@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
+import importlib
 import inspect
 
 import numpy as np
@@ -186,11 +187,12 @@ def _make_iae(message: str):
 
 def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     """
-    Проверка вызова InvalidAlgorithmError при попытке использовать
-    неподдерживаемый алгоритм.
-    Покрывает ветку в _run_hpo:
-        if err.__class__.__name__ == "InvalidAlgorithmError":
-            raise _CanonicalIAE(str(err)) from err
+    Проверка, что алгоритм, чей тюнер бросает InvalidAlgorithmError,
+    дисквалифицируется, а не прерывает запуск (issue #12).
+    Если дисквалифицированы ВСЕ алгоритмы — поднимается штатный
+    RuntimeError со списком упавших алгоритмов.
+    Покрывает ветку в _worker:
+        except _CanonicalIAE: логируем причину и возвращаем None
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
@@ -203,10 +205,135 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
         "configurable_automl_engine.training_engine.component._load_module",
         return_value=mock_tuner,
     ):
-        with pytest.raises(InvalidAlgorithmError):
+        with pytest.raises(RuntimeError) as excinfo:
             train_best_model(
                 cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
             )
+
+    assert "No algorithms produced valid scores" in str(excinfo.value)
+    assert "random_forest" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+#  CIRCUIT BREAKER (issue #12): дисквалификация не прерывает запуск
+# --------------------------------------------------------------------------- #
+_CIRCUIT_BREAKER_CFG = """
+general:
+  comparison_metric: rmse
+  path_to_model: '{model_path}'
+  phases:
+    - name: "Coarse Search"
+      n_trials: 2
+      action: "all_algorithms"
+algorithms:
+  ridge:
+    enable: true
+    tuner: "mock.tuner_ridge"
+    trainer_module: "configurable_automl_engine.trainer"
+    hyperparameters:
+      alpha: [0.1, 1.0]
+  random_forest:
+    enable: true
+    tuner: "mock.tuner_rf"
+    trainer_module: "configurable_automl_engine.trainer"
+    hyperparameters:
+      n_estimators: [10, 20]
+"""
+
+
+def _make_broken_tuner(message: str) -> MagicMock:
+    """Тюнер, который всегда бросает InvalidAlgorithmError."""
+    tuner = MagicMock()
+    tuner.optimize.side_effect = _make_iae(message)
+    return tuner
+
+
+def _make_good_tuner(
+    best_params: dict, best_score: float = 0.9
+) -> MagicMock:
+    """Тюнер, который успешно возвращает (model, best_params, best_score)."""
+    tuner = MagicMock()
+    tuner.optimize.return_value = (None, best_params, best_score)
+    return tuner
+
+
+def _patch_load_modules(broken_tuner, good_tuner):
+    """Подменяет _load_module так, чтобы разные тюнеры возвращались
+    по разным путям модулей, указанным в конфиге."""
+
+    def fake_load(path: str):
+        if path == "mock.tuner_ridge":
+            return broken_tuner
+        if path == "mock.tuner_rf":
+            return good_tuner
+        # Все остальные пути (например, trainer_module) грузим по-настоящему
+        return importlib.import_module(path)
+
+    return patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        side_effect=fake_load,
+    )
+
+
+def test_circuit_breaker_disqualifies_only_broken_algorithm(
+    tmp_path: Path, small_dataset
+):
+    """
+    e2e-тест issue #12: один алгоритм дисквалифицируется (тюнер бросает
+    InvalidAlgorithmError), второй успешно завершает HPO — запуск обязан
+    завершиться успешно, победителем становится рабочий алгоритм, а
+    дисквалифицированный фиксируется в result["disqualified_algorithms"].
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        _CIRCUIT_BREAKER_CFG.format(model_path="dummy_path"), "utf-8"
+    )
+
+    broken_tuner = _make_broken_tuner(
+        "Algorithm 'ridge' disqualified after 5 consecutive fatal failures"
+    )
+    good_tuner = _make_good_tuner({"n_estimators": 20})
+
+    with _patch_load_modules(broken_tuner, good_tuner):
+        res = train_best_model(
+            cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
+        )
+
+    # Запуск завершился успешно, победил рабочий алгоритм
+    assert res["algorithm"] == "random_forest"
+    assert Path(res["model_path"]).exists()
+    # Дисквалифицированный алгоритм зафиксирован с причиной
+    assert res["disqualified_algorithms"] == {
+        "ridge": (
+            "Algorithm 'ridge' disqualified after 5 consecutive fatal failures"
+        )
+    }
+
+
+def test_circuit_breaker_all_algorithms_disqualified_raises(
+    tmp_path: Path, small_dataset
+):
+    """
+    Негативный e2e-тест issue #12: если дисквалифицированы ВСЕ алгоритмы,
+    поднимается штатный RuntimeError со списком упавших алгоритмов.
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        _CIRCUIT_BREAKER_CFG.format(model_path="dummy_path"), "utf-8"
+    )
+
+    broken_tuner = _make_broken_tuner("disqualified after 5 fatal failures")
+
+    with _patch_load_modules(broken_tuner, broken_tuner):
+        with pytest.raises(RuntimeError) as excinfo:
+            train_best_model(
+                cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
+            )
+
+    msg = str(excinfo.value)
+    assert "No algorithms produced valid scores" in msg
+    assert "ridge" in msg
+    assert "random_forest" in msg
 
 
 from unittest.mock import patch

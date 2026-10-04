@@ -34,8 +34,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from configurable_automl_engine.tuner import InvalidAlgorithmError
-
 logger = logging.getLogger(__name__)
 
 
@@ -455,9 +453,9 @@ def run_parallel(
 
     Returns:
         list[Any]: Список результатов. Задачи, не успевшие выполниться
-            или вызвавшие стандартные исключения, заменяются на None.
-            Критические ошибки (InvalidAlgorithmError) и прерывания пользователя
-            (KeyboardInterrupt) пробрасываются вызывающему коду.
+            или вызвавшие исключения (включая InvalidAlgorithmError),
+            заменяются на None. Прерывания пользователя (KeyboardInterrupt)
+            пробрасываются вызывающему коду.
     """
     pool = None
 
@@ -611,7 +609,7 @@ def run_parallel(
                         idx = future_to_idx.pop(fut)
                         try:
                             results[idx] = fut.result(timeout=0)
-                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                        except KeyboardInterrupt:
                             raise
                         except Exception as e:  # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
@@ -621,7 +619,7 @@ def run_parallel(
                         idx = future_to_idx.pop(fut)
                         try:
                             results[idx] = fut.result(timeout=0)
-                        except (InvalidAlgorithmError, KeyboardInterrupt):
+                        except KeyboardInterrupt:
                             raise
                         except Exception as e:  # noqa: BLE001
                             logger.error(f"Task {idx} failed: {e}")
@@ -632,9 +630,8 @@ def run_parallel(
                 # Просто продолжаем ожидание — это не C-level падение, а медленные задачи
                 continue
 
-            except (InvalidAlgorithmError, KeyboardInterrupt) as e:
-                if isinstance(e, KeyboardInterrupt):
-                    logger.error("Interrupted by user")
+            except KeyboardInterrupt:
+                logger.error("Interrupted by user")
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Error while waiting for tasks: {e}")
