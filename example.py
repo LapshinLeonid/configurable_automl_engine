@@ -8,12 +8,6 @@ df = data.frame
 config = {
     "general": {
         "comparison_metric": "r2",
-        # Стратегия кодирования категориальных признаков:
-        # 'one_hot' (по умолчанию), 'ordinal', 'target', 'frequency' или 'hashing'.
-        # "categorical_encoding": "target",
-        # Автоматический режим для колонок высокой кардинальности:
-        # "high_cardinality_threshold": 100,
-        # "high_cardinality_encoding": "hashing",
         "phases": [
             {"n_trials": 100, "action": "all_algorithms"},
             {"n_trials": 200, "action": "refine_winner"},
