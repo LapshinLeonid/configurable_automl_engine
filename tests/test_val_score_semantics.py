@@ -34,10 +34,12 @@ from configurable_automl_engine.models import create_model
 from configurable_automl_engine.trainer import (
     ModelTrainer,
     TrainingError,
-    _sign_corrected_value,
 )
 from configurable_automl_engine.training_engine.component import train_best_model
-from configurable_automl_engine.training_engine.metrics import get_scorer_object
+from configurable_automl_engine.training_engine.metrics import (
+    get_scorer_object,
+    to_user_value,
+)
 from configurable_automl_engine.validation import iter_splits
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ def _manual_fold_score(
         )
         fold_pipe.fit(X_tr, y_tr)
         raw.append(float(scorer(fold_pipe, X_te, y_te)))
-    return _sign_corrected_value(trainer.metric, float(np.mean(raw)))
+    return to_user_value(trainer.metric, float(np.mean(raw)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

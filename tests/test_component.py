@@ -1322,7 +1322,9 @@ class TestWorstScoreResultsExcluded:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return HPO_WORST_SCORE, {"n_estimators": 10}
-            return 0.42, {"n_estimators": 10}
+            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
+            # пользователю возвращается положительный RMSE (issue #26)
+            return -0.42, {"n_estimators": 10}
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1507,12 +1509,13 @@ class TestMultiPhaseFailureExclusion:
             calls[algo] = calls.get(algo, 0) + 1
             if algo == "random_forest":
                 if calls[algo] == 1:
-                    return 0.9, {"n_estimators": 50}
+                    # MAE = 0.9 (raw = -0.9)
+                    return -0.9, {"n_estimators": 50}
                 return None  # полный провал во 2-й фазе
-            # elasticnet — валиден в обеих фазах
+            # elasticnet — валиден в обеих фазах: MAE 0.7 → 0.8 (raw: -0.7 → -0.8)
             if calls[algo] == 1:
-                return 0.7, {"alpha": 0.5}
-            return 0.8, {"alpha": 0.7}
+                return -0.7, {"alpha": 0.5}
+            return -0.8, {"alpha": 0.7}
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1629,11 +1632,13 @@ class TestMultiPhaseFailureExclusion:
     ):
         """Пин семантики «победитель = последняя фаза» (issue #13).
 
-        Фаза 1: rf 0.9 (победитель), et 0.5 (проигравший). Фаза 2
-        (refine_winner): rf рефайнится до 0.4 — хуже результата проигравшего
-        из фазы 1. Так как phase_results пересобирается по фазам, финальным
-        победителем остаётся отрефайненный rf (0.4): запись et из фазы 1
-        не участвует в выборе по последней фазе.
+        Метрика — mae, поэтому моки возвращают «сырые» значения скорера
+        (-MAE). Фаза 1: rf MAE=0.5 (raw -0.5, победитель), et MAE=0.9
+        (raw -0.9, проигравший). Фаза 2 (refine_winner): rf рефайнится до
+        MAE=0.95 (raw -0.95) — хуже результата проигравшего из фазы 1.
+        Так как phase_results пересобирается по фазам, финальным победителем
+        остаётся отрефайненный rf: запись et из фазы 1 не участвует в выборе
+        по последней фазе.
         """
         config_dict = {
             "general": {
@@ -1667,11 +1672,13 @@ class TestMultiPhaseFailureExclusion:
             calls[algo] = calls.get(algo, 0) + 1
             if algo == "random_forest":
                 if calls[algo] == 1:
-                    return 0.9, {"n_estimators": 50}
-                # Рефайн дал худший скор, чем у проигравшего фазы 1 (et: 0.5),
+                    # MAE = 0.5 (raw = -0.5): победитель фазы 1
+                    return -0.5, {"n_estimators": 50}
+                # Рефайн дал худший скор, чем у проигравшего фазы 1 (et: MAE 0.9),
                 # но запись et в выборе по последней фазе не участвует.
-                return 0.4, {"n_estimators": 30}
-            return 0.5, {"alpha": 0.5}
+                return -0.95, {"n_estimators": 30}
+            # MAE = 0.9 (raw = -0.9): проигравший фазы 1
+            return -0.9, {"alpha": 0.5}
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1679,7 +1686,8 @@ class TestMultiPhaseFailureExclusion:
         result = train_best_model(config=config_dict, df=df, target="target")
 
         assert result["algorithm"] == "random_forest"
-        assert result["score"] == 0.4
+        # Пользовательская семантика: положительный MAE (0.95)
+        assert result["score"] == 0.95
         mock_save.assert_called_once()
 
 
