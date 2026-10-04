@@ -159,6 +159,40 @@ def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
     assert is_greater_better("some_custom_metric") is True
 
 
+def test_is_greater_better_reflects_registry_mutation():
+    """Мутация реестра _SCORER_OBJECTS видна сразу, без устаревшего кэша.
+
+    Регрессия ревью PR #18: направление из собственного реестра читается
+    без кэширования, поэтому изменение реестра в рантайме (регистрация
+    кастомной метрики, смена направления) подхватывается немедленно.
+    """
+    from sklearn.metrics import make_scorer, mean_squared_error
+
+    import configurable_automl_engine.training_engine.metrics as metrics_mod
+
+    custom_name = "dyn_registry_metric"
+    assert custom_name not in metrics_mod._SCORER_OBJECTS
+
+    # До регистрации метрика неизвестна → ValueError.
+    with pytest.raises(ValueError):
+        is_greater_better(custom_name)
+
+    # Регистрируем «ошибку» (меньше — лучше) и проверяем направление.
+    metrics_mod._SCORER_OBJECTS[custom_name] = (
+        make_scorer(mean_squared_error, greater_is_better=False),
+        False,
+    )
+    try:
+        assert is_greater_better(custom_name) is False
+        # Меняем направление в реестре — результат обязан обновиться,
+        # несмотря на предшествующие вызовы (кэш реестра отсутствует).
+        scorer, _ = metrics_mod._SCORER_OBJECTS[custom_name]
+        metrics_mod._SCORER_OBJECTS[custom_name] = (scorer, True)
+        assert is_greater_better(custom_name) is True
+    finally:
+        del metrics_mod._SCORER_OBJECTS[custom_name]
+
+
 def test_get_scorer_object():
     # Проверка кастомных объектов (включая лямбды в _SCORER_OBJECTS)
     scorer = get_scorer_object("rmse")

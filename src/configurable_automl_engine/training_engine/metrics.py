@@ -223,6 +223,35 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
 
 
 @lru_cache(maxsize=256)
+def _sklearn_direction(name: str) -> bool:
+    """Определить направление оптимизации по объекту-скореру sklearn.
+
+    Кэшируется только «стабильная» часть: реестр скореров sklearn не
+    изменяется в рантайме, поэтому результат для конкретного имени
+    детерминирован и безопасен для кэширования. В отличие от неё,
+    собственный реестр ``_SCORER_OBJECTS`` может быть расширен/изменён
+    пользователем, поэтому он читается без кэша (см. ``is_greater_better``).
+
+    У объекта-скорера доступен флаг направления (``_sign``): +1 — «больше —
+    лучше», -1 — инвертированная ошибка (neg_-префикс), которую оптимизатор
+    по-прежнему максимизирует.
+
+    Args:
+        name (str): Название метрики в нижнем регистре.
+
+    Returns:
+        bool: True, если значение метрики максимизируется.
+
+    Raises:
+        ValueError: Если метрика неизвестна sklearn.
+    """
+    scorer = sklearn_get_scorer(name)
+    sign = getattr(scorer, "_sign", None)
+    if sign is not None:
+        return bool(sign > 0) or name.startswith("neg_")
+    return True
+
+
 def is_greater_better(name: str) -> bool:
     """Определить направление оптимизации метрики: «больше — лучше»?
 
@@ -230,14 +259,14 @@ def is_greater_better(name: str) -> bool:
     подстрокам имени:
     1. Для метрик собственного реестра ``_SCORER_OBJECTS`` направление
        хранится явно рядом со скорером (rmse/mae/mse/nrmse — False,
-       r2 и neg_root_mean_squared_error — True).
+       r2 и neg_root_mean_squared_error — True). Реестр читается каждый раз
+       без кэша: он изменяем, и результат обязан отражать актуальное
+       состояние (ревью PR #18).
     2. Для остальных имён используется объект ``sklearn.metrics.get_scorer``:
        все скореры sklearn устроены так, что большее значение лучше —
        метрики-ошибки уже инвертированы в neg_-скореры (``_sign == -1``),
-       score-метрики возвращаются как есть (``_sign == +1``).
-
-    Результат кэшируется (``lru_cache``), так как функция вызывается
-    многократно в циклах обучения.
+       score-метрики возвращаются как есть (``_sign == +1``). Этот путь
+       стабилен и кэшируется (``_sklearn_direction``).
 
     Args:
         name (str): Название метрики.
@@ -250,17 +279,11 @@ def is_greater_better(name: str) -> bool:
         ValueError: Если метрика неизвестна ни реестру, ни sklearn.
     """
     lname = name.lower()
-    # 1. Явное направление из собственного реестра.
+    # 1. Явное направление из собственного реестра — без кэша.
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][1]
-    # 2. Объект-скорер sklearn. У объекта доступен флаг направления
-    #    (``_sign``): +1 — «больше — лучше», -1 — инвертированная ошибка
-    #    (neg_-префикс), которую оптимизатор по-прежнему максимизирует.
-    scorer = sklearn_get_scorer(lname)
-    sign = getattr(scorer, "_sign", None)
-    if sign is not None:
-        return bool(sign > 0) or lname.startswith("neg_")
-    return True
+    # 2. Стабильные sklearn-скореры — с кэшированием результата.
+    return _sklearn_direction(lname)
 
 
 def to_user_value(name: str, raw_value: float) -> float:
