@@ -2,8 +2,14 @@
 Обеспечивает автоматизированный процесс от валидации входных данных до
 сохранения финальной модели. Поддерживает многофазовый поиск гиперпараметров
 (HPO), динамическую загрузку алгоритмов и параллельное выполнение вычислений.
+Публичный цикл обучения декомпозирован на шаги (issue #31):
+    - load_config: Загрузка и валидация конфигурации и входных данных.
+    - prepare_dataset: Подготовка X/y, резолюция валидации и типов колонок.
+    - execute_phases: Многофазовый поиск гиперпараметров (HPO).
+    - select_winner: Детерминированный выбор алгоритма-победителя.
+    - persist_artifact: Финальное обучение, сохранение модели и сборка отчёта.
 Основные компоненты:
-    - train_best_model: Публичный интерфейс для запуска полного цикла обучения.
+    - train_best_model: Публичный интерфейс — оркестрация перечисленных шагов.
     - _run_hpo: Обертка для поиска гиперпараметров через внешние тюнеры.
     - _fit_and_save: Финальное обучение модели на полном наборе данных.
     - _load_module: Помощник для динамического импорта модулей по пути.
@@ -22,6 +28,7 @@ import importlib
 import inspect
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -562,61 +569,79 @@ def _fit_and_save(
 
 
 # --------------------------------------------------------------------------- #
-#  Public API                                                                 #
+#  Orchestration helpers (issue #31)                                          #
+#  Шаги пайплайна, вынесенные из монолитного ``train_best_model``:           #
+#  load_config → prepare_dataset → execute_phases → select_winner →          #
+#  persist_artifact.                                                          #
 # --------------------------------------------------------------------------- #
 
 
-def train_best_model(
+@dataclass(frozen=True)
+class PreparedData:
+    """Подготовленные данные и разрешённые настройки для фаз HPO.
+
+    Единый контейнер, который ``prepare_dataset`` создаёт ровно один раз,
+    а ``execute_phases`` / ``persist_artifact`` потребляют. Гарантирует, что
+    все этапы пайплайна используют одинаковое представление признаков,
+    метрик и стратегии валидации (issue #24, D3) без дублирования
+    вычислений.
+
+    Attributes:
+        X (pd.DataFrame): Матрица признаков без целевой колонки.
+        y (pd.Series): Вектор целевой переменной.
+        metric_user (str): Пользовательское имя метрики сравнения
+            (``general.comparison_metric``).
+        metric_sklearn (str): Имя метрики в sklearn-семантике
+            (например, ``neg_root_mean_squared_error``).
+        resolved_validation (ValidationStrategy): Разрешённая стратегия
+            валидации: 'auto' уже раскрыта в конкретный метод
+            ('k_fold'/'train_test_split'/'loo').
+        resolved_n_folds (int): Число фолдов (актуально для 'k_fold').
+        resolved_test_size (float | int): Размер hold-out части — доля либо
+            целое число строк после резолюции 'auto'.
+        categorical_features (list[str]): Детектированные категориальные
+            колонки.
+        numerical_features (list[str]): Детектированные числовые колонки.
+    """
+
+    X: pd.DataFrame
+    y: pd.Series
+    metric_user: str
+    metric_sklearn: str
+    resolved_validation: ValidationStrategy
+    resolved_n_folds: int
+    resolved_test_size: float | int
+    categorical_features: list[str]
+    numerical_features: list[str]
+
+
+def load_config(
     config: str | Path | Config | dict[str, Any],
     df: pd.DataFrame,
     target: str | None = None,
-    model_path_override: str | Path | None = None,
-) -> dict[str, Any]:
-    """Основной интерфейс обучения лучшей модели.
-    Выполняет полный цикл: валидация данных -> многофазовый поиск гиперпараметров (HPO)
-    -> выбор победителя -> финальное обучение -> сохранение.
+) -> tuple[Config, str]:
+    """Загрузить и провалидировать конфигурацию запуска.
 
-    Multi-phase semantics (issue #13): phase results are not accumulated — each
-    phase rebuilds its results from scratch, so an algorithm that fails in the
-    current phase (total HPO failure: returned ``None`` or an invalid score) is
-    fully excluded and does not keep a stale record from a previous phase.
-    The final winner is chosen by the results of the LAST phase: for the typical
-    ``all_algorithms → refine_winner`` pipeline this is the refined winner;
-    a winner failure during ``refine_winner`` raises ``RuntimeError`` instead of
-    silently rolling back to the previous phase results.
+    Шаг 1 пайплайна (issue #31). Проверяет входные данные и целевую колонку,
+    приводит конфигурацию к объекту ``Config`` (из файла, словаря или уже
+    готового объекта) и при необходимости настраивает файловое логирование.
+
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения.
-            Может быть путем к файлу, словарем или объектом Config.
+        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация
+            обучения.
         df (pd.DataFrame): Исходные данные.
         target (str | None): Имя целевого столбца. По умолчанию 'target'.
-        model_path_override (str | Path | None): Альтернативный путь сохранения модели.
+
     Returns:
-        Dict[str, Any]: Словарь с результатами: название алгоритма,
-            ``score`` — значение метрики в пользовательской семантике
-            (положительный RMSE/MAE, обычный R²; для neg_-скореров значение
-            инвертировано обратно), ``metric`` — пользовательское имя метрики
-            сравнения, параметры и путь к файлу. Если в конфигурации заданы
-            дополнительные метрики (``general.additional_metrics``),
-            в результат добавляется ключ ``additional_metrics`` — словарь
-            {метрика: значение}, рассчитанных для финальной модели на том же
-            наборе данных, что и основная метрика. Если в ходе запуска
-            какие-либо алгоритмы были дисквалифицированы circuit breaker'ом
-            (5 подряд фатальных ошибок), в результат добавляется ключ
-            ``disqualified_algorithms`` — словарь {имя алгоритма: причина
-            дисквалификации}.
+        Tuple[Config, str]: Кортеж (объект ``Config``, имя целевой колонки).
+
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
-        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
-            Дисквалификация отдельного алгоритма (``InvalidAlgorithmError``)
-            запуск НЕ прерывает: алгоритм исключается из кандидатов, остальные
-            продолжают обучение (issue #12).
+        ValueError: Если DataFrame пуст или целевая колонка отсутствует.
     """
-    # Centralized validation
+    # Centralized validation входных данных до инициализации тяжёлых ресурсов
     validate_df_not_empty(df)
-    # Определяем имя таргета (приоритет: аргумент функции -> дефолт 'target')
     target_col = target or "target"
-
-    # Проверка наличия таргета до инициализации тяжелых ресурсов
     check_target_exists(df, target_col)
 
     # Если передана строка или Path, читаем файл.
@@ -641,7 +666,25 @@ def train_best_model(
     # Если в конфиге указан путь к лог-файлу, настраиваем логирование
     if cfg.general.log_to_file:
         setup_logging(cfg.general.log_to_file)
+    return cfg, target_col
 
+
+def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedData:
+    """Подготовить данные и разрешить настройки для фаз HPO.
+
+    Шаг 2 пайплайна (issue #31). Разделяет DataFrame на X/y, резолвит
+    стратегию валидации ('auto' → конкретный метод/фолды/test_size, issue
+    #24, D3) и детектирует типы колонок ровно один раз — гарантия
+    согласованной предобработки между HPO и финальным обучением.
+
+    Args:
+        cfg (Config): Объект конфигурации.
+        df (pd.DataFrame): Исходные данные.
+        target_col (str): Имя целевой колонки.
+
+    Returns:
+        PreparedData: Подготовленный контейнер данных и настроек.
+    """
     metric_user = cfg.general.comparison_metric
     metric_sklearn = to_sklearn_name(metric_user)
 
@@ -681,6 +724,66 @@ def train_best_model(
     # в фазу HPO. Это гарантирует одинаковую предобработку (one-hot) между HPO
     # и финальным обучением ModelTrainer.
     categorical_features, numerical_features = detect_feature_types(X)
+
+    return PreparedData(
+        X=X,
+        y=y,
+        metric_user=metric_user,
+        metric_sklearn=metric_sklearn,
+        resolved_validation=resolved_validation,
+        resolved_n_folds=resolved_n_folds,
+        resolved_test_size=resolved_test_size,
+        categorical_features=categorical_features,
+        numerical_features=numerical_features,
+    )
+
+
+def execute_phases(
+    cfg: Config,
+    prepared: PreparedData,
+) -> tuple[dict[str, tuple[float, dict[str, Any]]], dict[str, str]]:
+    """Выполнить все фазы HPO и вернуть результаты последней фазы.
+
+    Шаг 3 пайплайна (issue #31). Содержит вложенные помощники
+    ``prepare_search_space`` и ``_execute_hpo_phase`` (ранее объявленные
+    внутри ``train_best_model``), цикл по фазам, параллельное выполнение,
+    circuit breaker дисквалификации и фильтрацию невалидных результатов.
+
+    Multi-phase semantics (issue #13): phase results are not accumulated —
+    each phase rebuilds its results from scratch, so an algorithm that fails
+    in the current phase (total HPO failure: returned ``None`` or an invalid
+    score) is fully excluded and does not keep a stale record from a previous
+    phase. The final winner is chosen by the results of the LAST phase: for
+    the typical ``all_algorithms → refine_winner`` pipeline this is the
+    refined winner; a winner failure during ``refine_winner`` raises
+    ``RuntimeError`` instead of silently rolling back to the previous phase
+    results.
+
+    Args:
+        cfg (Config): Объект конфигурации.
+        prepared (PreparedData): Подготовленные данные и разрешённые настройки.
+
+    Returns:
+        Tuple[Dict[str, Tuple[float, Dict[str, Any]]], Dict[str, str]]:
+            Кортеж (результаты последней фазы «алгоритм → (скор, параметры)»,
+            дисквалифицированные алгоритмы «имя → причина»). Результаты пусты,
+            если фазы не выполнялись (``general.phases`` пуст) или ни один
+            алгоритм не дал валидного результата — тогда ``select_winner``
+            не вызывается (защита в ``train_best_model``).
+
+    Raises:
+        RuntimeError: Если фаза 'refine_winner' не имеет предыдущих
+            результатов, либо ни один алгоритм не дал валидного скора
+            в фазе.
+    """
+    X = prepared.X
+    y = prepared.y
+    metric_sklearn = prepared.metric_sklearn
+    resolved_validation = prepared.resolved_validation
+    resolved_n_folds = prepared.resolved_n_folds
+    resolved_test_size = prepared.resolved_test_size
+    categorical_features = prepared.categorical_features
+    numerical_features = prepared.numerical_features
 
     def prepare_search_space(
         algo_name: str, user_overrides: dict[str, Any] | None
@@ -987,51 +1090,69 @@ def train_best_model(
                 f"No algorithms produced valid scores in phase '{phase.name}'. "
                 f"Failed algorithms: {failed_algos}"
             )
-    # After all phases, pick the final winner. Since phase_results is rebuilt per
-    # phase, the winner is chosen by the LAST phase's results (for the typical
-    # all_algorithms → refine_winner pipeline this is the refined winner).
-    # Детерминированный tie-break при равных скорах: побеждает первый
-    # алгоритм в порядке конфигурации (select_winner, issue #32).
-    if not phase_results:
-        # Защита от пустого списка фаз (конфиг допускает phases: []): цикл
-        # выше не выполнялся, и select_winner({}) бросил бы ValueError —
-        # поднимаем понятную RuntimeError (ревью PR #22).
-        raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
-    winner_algo = select_winner(phase_results)
-    final_score, final_params = phase_results[winner_algo]
-    # Финальный инвариант (issue #32): score победителя обязан быть конечным и
-    # строго выше класса worst-score сентинела, прежде чем попасть в
-    # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-метрик
-    # to_user_value инвертировал бы его в абсурдные +3.4e38.
-    if not is_valid_winner_score(final_score):
-        raise RuntimeError(
-            f"Winner '{winner_algo}' produced an invalid final score "
-            f"{final_score!r} (non-finite or worst-score sentinel); "
-            f"refusing to report it."
-        )
-    winner_cfg = all_algorithms[winner_algo]
+    return phase_results, disqualified_algorithms
 
-    # ------------------ FINAL FIT & SAVE -------------------------- #
+
+def persist_artifact(
+    *,
+    cfg: Config,
+    prepared: PreparedData,
+    winner_algo: str,
+    final_score: float,
+    final_params: dict[str, Any],
+    model_path_override: str | Path | None,
+    disqualified_algorithms: dict[str, str],
+) -> dict[str, Any]:
+    """Финальное обучение победителя, сохранение артефакта и сборка отчёта.
+
+    Шаг 5 пайплайна (issue #31). Обучает модель алгоритма-победителя на
+    полном наборе данных через ``_fit_and_save``, сохраняет артефакт на диск
+    и формирует словарь результата: ``algorithm``, ``score`` (в
+    пользовательской семантике, issue #26), ``metric``, ``params``,
+    ``model_path``; при наличии добавляются ``disqualified_algorithms``
+    (issue #12) и ``additional_metrics``.
+
+    Args:
+        cfg (Config): Объект конфигурации.
+        prepared (PreparedData): Подготовленные данные и настройки.
+        winner_algo (str): Имя алгоритма-победителя.
+        final_score (float): «Сырой» скор победителя (уже прошёл инвариант
+            ``is_valid_winner_score``).
+        final_params (Dict[str, Any]): Лучшие гиперпараметры победителя.
+        model_path_override (str | Path | None): Альтернативный путь
+            сохранения модели.
+        disqualified_algorithms (Dict[str, str]): Дисквалифицированные
+            алгоритмы (имя → причина); добавляются в результат при наличии.
+
+    Returns:
+        Dict[str, Any]: Словарь с результатами обучения.
+
+    Raises:
+        Exception: Пробрасывается ошибка финального обучения/сохранения
+            (логируется перед повторным поднятием).
+    """
     model_path = Path(model_path_override or cfg.general.path_to_model)
+    winner_cfg = _algorithms_as_dict(cfg.algorithms)[winner_algo]
 
     try:
         trainer = _fit_and_save(
             winner_algo,
             winner_cfg,
-            X,
-            y,
+            prepared.X,
+            prepared.y,
             final_params,
             model_path,
             cfg,
-            metric_name_sklearn=metric_sklearn,
-            validation_strategy=resolved_validation,
-            n_folds=resolved_n_folds,
-            test_size=resolved_test_size,
+            metric_name_sklearn=prepared.metric_sklearn,
+            validation_strategy=prepared.resolved_validation,
+            n_folds=prepared.resolved_n_folds,
+            test_size=prepared.resolved_test_size,
         )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
         _LOG.error(f"Failed to save final model: {e}")
         raise
+
     result: dict[str, Any] = {
         "algorithm": winner_algo,
         # Единая пользовательская семантика (issue #26): score всегда отражает
@@ -1039,8 +1160,8 @@ def train_best_model(
         # metric — пользовательское имя метрики сравнения из конфигурации.
         # «Сырое» (инвертированное для neg_*-скореров) значение остаётся
         # внутренней деталью оптимизатора и до пользователя не доходит.
-        "score": to_user_value(metric_user, final_score),
-        "metric": metric_user,
+        "score": to_user_value(prepared.metric_user, final_score),
+        "metric": prepared.metric_user,
         "params": final_params,
         "model_path": str(model_path),
     }
@@ -1055,3 +1176,94 @@ def train_best_model(
     if cfg.general.additional_metrics:
         result["additional_metrics"] = dict(trainer.additional_scores)
     return result
+
+
+# --------------------------------------------------------------------------- #
+#  Public API                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def train_best_model(
+    config: str | Path | Config | dict[str, Any],
+    df: pd.DataFrame,
+    target: str | None = None,
+    model_path_override: str | Path | None = None,
+) -> dict[str, Any]:
+    """Основной интерфейс обучения лучшей модели.
+
+    Оркестрирует декомпозированный пайплайн (issue #31):
+    ``load_config → prepare_dataset → execute_phases → select_winner →
+    persist_artifact``. Логика каждого шага вынесена в отдельные функции
+    модуля; здесь остаются только выбор победителя и инвариант winner-скора.
+
+    Multi-phase semantics (issue #13): phase results are not accumulated — each
+    phase rebuilds its results from scratch, so an algorithm that fails in the
+    current phase (total HPO failure: returned ``None`` or an invalid score) is
+    fully excluded and does not keep a stale record from a previous phase.
+    The final winner is chosen by the results of the LAST phase: for the typical
+    ``all_algorithms → refine_winner`` pipeline this is the refined winner;
+    a winner failure during ``refine_winner`` raises ``RuntimeError`` instead of
+    silently rolling back to the previous phase results.
+    Args:
+        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения.
+            Может быть путем к файлу, словарем или объектом Config.
+        df (pd.DataFrame): Исходные данные.
+        target (str | None): Имя целевого столбца. По умолчанию 'target'.
+        model_path_override (str | Path | None): Альтернативный путь сохранения модели.
+    Returns:
+        Dict[str, Any]: Словарь с результатами: название алгоритма,
+            ``score`` — значение метрики в пользовательской семантике
+            (положительный RMSE/MAE, обычный R²; для neg_-скореров значение
+            инвертировано обратно), ``metric`` — пользовательское имя метрики
+            сравнения, параметры и путь к файлу. Если в конфигурации заданы
+            дополнительные метрики (``general.additional_metrics``),
+            в результат добавляется ключ ``additional_metrics`` — словарь
+            {метрика: значение}, рассчитанных для финальной модели на том же
+            наборе данных, что и основная метрика. Если в ходе запуска
+            какие-либо алгоритмы были дисквалифицированы circuit breaker'ом
+            (5 подряд фатальных ошибок), в результат добавляется ключ
+            ``disqualified_algorithms`` — словарь {имя алгоритма: причина
+            дисквалификации}.
+    Raises:
+        TypeError: При передаче конфига неподдерживаемого типа.
+        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
+            Дисквалификация отдельного алгоритма (``InvalidAlgorithmError``)
+            запуск НЕ прерывает: алгоритм исключается из кандидатов, остальные
+            продолжают обучение (issue #12).
+    """
+    cfg, target_col = load_config(config, df, target)
+    prepared = prepare_dataset(cfg, df, target_col)
+    phase_results, disqualified_algorithms = execute_phases(cfg, prepared)
+
+    # After all phases, pick the final winner. Since phase_results is rebuilt per
+    # phase, the winner is chosen by the LAST phase's results (for the typical
+    # all_algorithms → refine_winner pipeline this is the refined winner).
+    # Детерминированный tie-break при равных скорах: побеждает первый
+    # алгоритм в порядке конфигурации (select_winner, issue #32).
+    if not phase_results:
+        # Защита от пустого списка фаз (конфиг допускает phases: []): цикл
+        # в execute_phases не выполнялся, и select_winner({}) бросил бы
+        # ValueError — поднимаем понятную RuntimeError (ревью PR #22).
+        raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
+    winner_algo = select_winner(phase_results)
+    final_score, final_params = phase_results[winner_algo]
+    # Финальный инвариант (issue #32): score победителя обязан быть конечным и
+    # строго выше класса worst-score сентинела, прежде чем попасть в
+    # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-метрик
+    # to_user_value инвертировал бы его в абсурдные +3.4e38.
+    if not is_valid_winner_score(final_score):
+        raise RuntimeError(
+            f"Winner '{winner_algo}' produced an invalid final score "
+            f"{final_score!r} (non-finite or worst-score sentinel); "
+            f"refusing to report it."
+        )
+
+    return persist_artifact(
+        cfg=cfg,
+        prepared=prepared,
+        winner_algo=winner_algo,
+        final_score=final_score,
+        final_params=final_params,
+        model_path_override=model_path_override,
+        disqualified_algorithms=disqualified_algorithms,
+    )
