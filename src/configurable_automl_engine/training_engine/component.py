@@ -26,6 +26,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
@@ -47,7 +48,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 from configurable_automl_engine.validation import RANDOM_STATE, make_cv
 
 # ───────────────────────── canonical IAE ─────────────────────── #
-from ..tuner import HPO_WORST_SCORE
+from ..tuner import WORST_SCORE_THRESHOLD
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
@@ -57,6 +58,63 @@ from .metrics import (
 from .thread_pool import run_parallel
 
 _LOG = logging.getLogger("training_engine")
+
+
+def is_valid_winner_score(score: Any) -> bool:
+    """Проверить, что «сырое» значение скора может быть скором победителя.
+
+    Валидный скор победителя обязан быть:
+    - числом (int/float/np.floating): None, строки (в т.ч. числовые, например
+      ``"0.5"``) и прочие «мусорные» типы от кастомных тюнеров не проходят
+      (issue #32);
+    - конечным (NaN и ±inf — сигналы отсутствия валидной метрики);
+    - строго выше класса worst-score сентинела: любой скор <= точного
+      float32-минимума (``WORST_SCORE_THRESHOLD``) трактуется как сентинел.
+      Порог покрывает и константу ``HPO_WORST_SCORE`` (возвращается тюнером
+      для нефинитных метрик), и «сырое» значение ``float(np.finfo(np.float32).min)``
+      (возможно от numpy-cast метрик или кастомных тюнеров), которое старый
+      фильтр через ``math.isclose(rel_tol=1e-9)`` пропускал (относительная
+      разница ≈ 9.88e-9 > 1e-9). Реальные метрики такой величины практически
+      невозможны, поэтому ложный отсев исключён.
+
+    Args:
+        score (Any): «Сырое» значение скора из фазы HPO.
+
+    Returns:
+        bool: True, если скор может попасть в ``result["score"]``.
+    """
+    if not isinstance(score, (int, float, np.floating)):
+        return False
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and value > WORST_SCORE_THRESHOLD
+
+
+def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
+    """Детерминированно выбрать алгоритм-победителя по «сырому» скору.
+
+    Побеждает алгоритм с максимальным значением скора (семантика
+    оптимизатора — «больше лучше»). Ничьи разрешаются порядком итерации по
+    ``results``: ``max`` стабилен, а словарь сохраняет порядок вставки —
+    для последовательного пути это порядок конфигурации, поэтому при равных
+    скорах побеждает первый настроенный алгоритм (задокументированный
+    tie-break, issue #32).
+
+    Args:
+        results (dict[str, tuple[float, dict[str, Any]]]): Словарь
+            «алгоритм → (скор, параметры)» текущей фазы. Не должен быть пустым.
+
+    Returns:
+        str: Имя алгоритма-победителя.
+
+    Raises:
+        ValueError: Если ``results`` пуст — победитель не существует.
+    """
+    if not results:
+        raise ValueError("Cannot select a winner from empty results")
+    return max(results.items(), key=lambda kv: kv[1][0])[0]
 
 
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
@@ -757,8 +815,9 @@ def train_best_model(
                     f" but no previous results exist."
                 )
 
-            select = max
-            winner_algo = select(prev_results.items(), key=lambda kv: kv[1][0])[0]
+            # Детерминированный выбор победителя (issue #32): максимальный
+            # «сырой» скор; ничья разрешается порядком конфигурации.
+            winner_algo = select_winner(prev_results)
             _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
             current_candidates = {winner_algo: all_algorithms[winner_algo]}
             # Only the previous phase's winner takes part in refine_winner:
@@ -884,37 +943,32 @@ def train_best_model(
             phase_results.pop(name, None)
             current_candidates.pop(name, None)
 
-        # Filter out invalid phase results: None, NaN, ±inf and the worst-score
-        # sentinel (HPO_WORST_SCORE from the tuner — used when a trial metric is
-        # non-finite). The sentinel is matched with math.isclose (relative
-        # tolerance 1e-9): HPO_WORST_SCORE equals the float32 minimum and cannot
-        # be a real metric value, while valid but very small custom metric
-        # scores (e.g., < -3.4e38) are NOT dropped. params=None is the tuner
-        # failure signal (issue #13).
+        # Filter out invalid phase results: None/NaN/±inf and the worst-score
+        # sentinel class. The sentinel class is defined as any score at or below
+        # the exact float32 minimum (WORST_SCORE_THRESHOLD): it covers both the
+        # HPO_WORST_SCORE constant (returned by the tuner when a trial metric is
+        # non-finite) and the raw float(np.finfo(np.float32).min) value (possible
+        # from numpy-cast metrics or custom tuners), which the old
+        # math.isclose(rel_tol=1e-9) check missed (relative difference ≈ 9.88e-9,
+        # issue #32). Real metrics of such magnitude are practically impossible,
+        # so the threshold cannot drop a legitimate winner. params must be a
+        # dict (the tuner failure signal is params=None, issue #13); garbage
+        # score types from custom tuners (None, strings, etc.) are rejected by
+        # is_valid_winner_score.
         valid_results: dict[str, tuple[float, dict[str, Any]]] = {}
         for name, (score, params) in phase_results.items():
-            if score is None or params is None:
+            if not isinstance(params, dict):
                 _LOG.warning(
-                    "Algorithm %s produced no valid result (score=%r, "
-                    "params=%r); excluding from phase candidates",
+                    "Algorithm %s produced invalid params %r (expected dict); "
+                    "excluding from phase candidates",
                     name,
-                    score,
                     params,
                 )
                 continue
-            if math.isnan(score) or score in (float("-inf"), float("inf")):
+            if not is_valid_winner_score(score):
                 _LOG.warning(
-                    "Algorithm %s produced non-finite score %r; excluding "
-                    "from phase candidates",
-                    name,
-                    score,
-                )
-                continue
-            if math.isclose(score, HPO_WORST_SCORE, rel_tol=1e-9, abs_tol=0.0):
-                _LOG.warning(
-                    "Algorithm %s produced the worst-score sentinel %r "
-                    "(no trial yielded a finite metric); excluding from "
-                    "phase candidates",
+                    "Algorithm %s produced invalid score %r (non-finite or "
+                    "worst-score sentinel); excluding from phase candidates",
                     name,
                     score,
                 )
@@ -936,9 +990,25 @@ def train_best_model(
     # After all phases, pick the final winner. Since phase_results is rebuilt per
     # phase, the winner is chosen by the LAST phase's results (for the typical
     # all_algorithms → refine_winner pipeline this is the refined winner).
-    select = max
-    winner_algo = select(phase_results.items(), key=lambda kv: kv[1][0])[0]
+    # Детерминированный tie-break при равных скорах: побеждает первый
+    # алгоритм в порядке конфигурации (select_winner, issue #32).
+    if not phase_results:
+        # Защита от пустого списка фаз (конфиг допускает phases: []): цикл
+        # выше не выполнялся, и select_winner({}) бросил бы ValueError —
+        # поднимаем понятную RuntimeError (ревью PR #22).
+        raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
+    winner_algo = select_winner(phase_results)
     final_score, final_params = phase_results[winner_algo]
+    # Финальный инвариант (issue #32): score победителя обязан быть конечным и
+    # строго выше класса worst-score сентинела, прежде чем попасть в
+    # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-метрик
+    # to_user_value инвертировал бы его в абсурдные +3.4e38.
+    if not is_valid_winner_score(final_score):
+        raise RuntimeError(
+            f"Winner '{winner_algo}' produced an invalid final score "
+            f"{final_score!r} (non-finite or worst-score sentinel); "
+            f"refusing to report it."
+        )
     winner_cfg = all_algorithms[winner_algo]
 
     # ------------------ FINAL FIT & SAVE -------------------------- #

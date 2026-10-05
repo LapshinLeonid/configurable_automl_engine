@@ -291,13 +291,17 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
 
 
 def test_optimize_pruning_all_trials_pruned_returns_no_results(
-    toy_data, quality_patches, mocker
+    toy_data, quality_patches, mocker, caplog
 ):
     """Все триалы отсечены → сценарий «нет результатов» (AC-6, issue #13).
 
     Раньше optimize() возвращал «магическую» константу -3.4028235e38,
     которая выглядела как валидный результат для оркестратора. Теперь
     полный провал сигнализируется сплошным None.
+
+    Дополнительно (issue #32): решение принимается явным подсчётом состояний
+    триалов (n_completed == 0), а не перехватом ValueError от study.best_params;
+    счётчики состояний логируются для наблюдаемости.
     """
     X, y = toy_data
 
@@ -305,6 +309,144 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
     mocker.patch.object(
         tuner.optuna.trial.Trial, "should_prune", return_value=True
     )
+
+    with caplog.at_level(logging.INFO):
+        model, params, score = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=4,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+
+    assert model is None
+    assert params is None
+    assert score is None
+    # Лог со счётчиками состояний: 4 отсечено, 0 завершено, 0 упало.
+    assert "Trial states for algorithm 'ridge'" in caplog.text
+    assert "completed=0, pruned=4, failed=0" in caplog.text
+    assert "no completed trials" in caplog.text
+
+
+def test_optimize_pruning_single_trial_pruned_returns_no_results(
+    toy_data, quality_patches, mocker
+):
+    """B1 (issue #32): n_trials=1 и единственный триал отсечён → (None, None, None).
+
+    Граничный случай «все pruned» при минимально возможном числе триалов.
+    """
+    X, y = toy_data
+
+    mocker.patch.object(
+        tuner.optuna.trial.Trial, "should_prune", return_value=True
+    )
+
+    model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=1,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert model is None
+    assert params is None
+    assert score is None
+
+
+def _make_study_with_states(
+    states: list[optuna.trial.TrialState],
+) -> optuna.Study:
+    """Собрать реальный study Optuna с триалами в заданных состояниях.
+
+    Опция ``catch`` в ``study.optimize`` не используется тюнером, поэтому
+    «живые» FAIL-триалы (исключение из objective) пробрасываются наружу и
+    прерывают запуск. Чтобы проверить явный подсчёт состояний (issue #32),
+    наполняем настоящий study заранее созданными триалами и подменяем
+    ``study.optimize`` на no-op — get_trials() вернёт именно эти состояния.
+    """
+    study = optuna.create_study(direction="maximize")
+    for state in states:
+        study.add_trial(
+            optuna.trial.create_trial(state=state, params={}, distributions={})
+        )
+    return study
+
+
+def test_optimize_all_trials_failed_returns_no_results(
+    toy_data, quality_patches, mocker
+):
+    """N2 (issue #32): все триалы FAILED → (None, None, None).
+
+    Триалы в состоянии FAILED появляются у Optuna при падении objective с
+    исключением, не превращённым в optuna.TrialPruned. Явный подсчёт
+    состояний (n_completed == 0) обязан исключить алгоритм и в этом случае,
+    не полагаясь на ValueError от study.best_params.
+    """
+    X, y = toy_data
+    study = _make_study_with_states([optuna.trial.TrialState.FAIL] * 3)
+    mocker.patch.object(tuner.optuna, "create_study", return_value=study)
+    mocker.patch.object(study, "optimize")
+
+    model, params, score = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=3,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+
+    assert model is None
+    assert params is None
+    assert score is None
+
+
+def test_optimize_pruned_and_failed_mix_returns_no_results(
+    toy_data, quality_patches, mocker
+):
+    """N3 (issue #32): mix PRUNED + FAILED без COMPLETED → (None, None, None).
+
+    Завершённых триалов нет ни одного — алгоритм исключается, даже если
+    часть триалов отсечена прайнером, а часть упала.
+    """
+    X, y = toy_data
+    study = _make_study_with_states(
+        [
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.FAIL,
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.FAIL,
+        ]
+    )
+    mocker.patch.object(tuner.optuna, "create_study", return_value=study)
+    mocker.patch.object(study, "optimize")
 
     model, params, score = optimize(
         "ridge",

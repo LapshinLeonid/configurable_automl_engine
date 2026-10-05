@@ -1,5 +1,6 @@
 import pytest
 import pandas as pd
+import math
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
@@ -704,6 +705,35 @@ def test_train_best_model_missing_target_column():
         train_best_model(config=config, df=df, target="missing_col")
 
 
+def test_train_best_model_empty_phases_raises_runtime_error():
+    """Пустой список фаз (phases: []) → RuntimeError, а не ValueError.
+
+    Конфиг допускает phases: [] — цикл фаз не выполняется, phase_results
+    остаётся пустым, и финальный select_winner({}) бросил бы ValueError.
+    Явная защита поднимает понятную RuntimeError (ревью PR #22).
+    """
+    config_dict = {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "train_test_split",
+            "phases": [],
+            "path_to_model": "model.pkl",
+        },
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            }
+        },
+        "oversampling": {"enable": False},
+    }
+    df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+    with pytest.raises(RuntimeError, match="cannot select a winner"):
+        train_best_model(config=config_dict, df=df, target="target")
+
+
 def test_train_best_model_config_from_dict_and_refine_flow():
     valid_config_dict = {
         "general": {
@@ -1339,6 +1369,37 @@ class TestWorstScoreResultsExcluded:
 
     @patch(f"{_MODULE}._fit_and_save")
     @patch(f"{_MODULE}._run_hpo")
+    def test_raw_float32_min_excluded_when_mixed(
+        self, mock_hpo, mock_save, minimal_df, config_two_algos
+    ):
+        """P3/B4 (issue #32): «сырой» float32 min отбрасывается фильтром.
+
+        Ключевой пробел старого фильтра: ``math.isclose(f32min,
+        HPO_WORST_SCORE, rel_tol=1e-9)`` возвращает False (относительная
+        разница ≈ 9.88e-9 > 1e-9), поэтому raw ``float(np.finfo(np.float32).min)``
+        проходил и мог «победить» со скором ~-3.4e38. Усиленный фильтр
+        (``score <= WORST_SCORE_THRESHOLD``) обязан его отбросить.
+        """
+        raw_f32_min = float(np.finfo(np.float32).min)
+
+        def hpo_side_effect(**kwargs):
+            if kwargs["algo_name"] == "random_forest":
+                return raw_f32_min, {"n_estimators": 10}
+            return -0.42, {"n_estimators": 10}
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(
+            config=config_two_algos, df=minimal_df, target="target"
+        )
+
+        assert result["algorithm"] == "extra_trees"
+        assert result["score"] == 0.42
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
     def test_defensive_filter_drops_none_nan_inf(
         self, mock_hpo, mock_save, minimal_df, config_single_algo
     ):
@@ -1346,6 +1407,8 @@ class TestWorstScoreResultsExcluded:
 
         Эти сигналы не должны возникать после фикса в _run_hpo (issue #13),
         но фильтр страхует оркестратор от кастомных тюнеров и регрессий.
+        Дополнительно (issue #32): numpy-типы (np.float32 nan/inf) и «сырой»
+        float32 minimum отбрасываются — старый isclose-фильтр их пропускал.
         """
         bad_results = [
             (None, {"n_estimators": 10}),  # score is None
@@ -1353,6 +1416,15 @@ class TestWorstScoreResultsExcluded:
             (float("nan"), {"n_estimators": 10}),  # NaN
             (float("-inf"), {"n_estimators": 10}),  # -inf
             (float("inf"), {"n_estimators": 10}),  # +inf
+            # numpy-cast нефинитные значения (issue #32)
+            (np.float32("nan"), {"n_estimators": 10}),
+            (np.float32("inf"), {"n_estimators": 10}),
+            (np.float32("-inf"), {"n_estimators": 10}),
+            # класс worst-score сентинела (issue #32): точная константа и
+            # «сырой» float32 minimum (и его numpy-представление)
+            (HPO_WORST_SCORE, {"n_estimators": 10}),
+            (float(np.finfo(np.float32).min), {"n_estimators": 10}),
+            (np.float32(np.finfo(np.float32).min), {"n_estimators": 10}),
         ]
         for bad_result in bad_results:
             mock_hpo.side_effect = lambda br=bad_result, **kwargs: br
@@ -1364,6 +1436,141 @@ class TestWorstScoreResultsExcluded:
                 )
         # Ни одна итерация не должна дойти до финального обучения.
         mock_save.assert_not_called()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_garbage_custom_tuner_results_excluded_without_crash(
+        self, mock_hpo, mock_save, minimal_df, config_single_algo
+    ):
+        """N7 (issue #32): мусор от кастомного тюнера не роняет весь запуск.
+
+        Неконвертируемая строка падает ещё в to_user_value (фаза логирования)
+        и исключается воркером; числовая строка и прочие «мусорные» типы
+        отсекаются фильтром valid_results (is_valid_winner_score). Итог в
+        обоих случаях — каноническая RuntimeError об отсутствии валидных
+        скоров, а не исключение уровня запуска.
+        """
+        garbage_results = [
+            "not-a-number",  # строка: ValueError в to_user_value → исключён
+            ("0.5", {"n_estimators": 10}),  # числовая строка → исключена фильтром
+            (0.5, "params-garbage"),  # params не dict/None — исключён фильтром
+        ]
+        for garbage in garbage_results:
+            mock_hpo.side_effect = lambda g=garbage, **kwargs: g
+            with pytest.raises(
+                RuntimeError, match="No algorithms produced valid scores"
+            ):
+                train_best_model(
+                    config=config_single_algo, df=minimal_df, target="target"
+                )
+        mock_save.assert_not_called()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_parallel_worker_failure_does_not_corrupt_others(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """Параллельный режим: провал одного воркера не коррумпирует результаты.
+
+        Один алгоритм возвращает None (все триалы pruned), второй — валидный
+        скор. run_parallel подменяет исключения воркеров на None, а фильтр
+        valid_results отбрасывает None-результаты: победителем остаётся
+        валидный алгоритм, запуск не падает (issue #32).
+        """
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "parallel_strategy": "algorithms",
+                "parallel_mode": "threads",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        def hpo_side_effect(**kwargs):
+            if kwargs["algo_name"] == "random_forest":
+                return None  # полный провал HPO (все триалы отсечены)
+            return -0.8, {"alpha": 0.5}  # MAE 0.8
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "elasticnet"
+        assert result["score"] == 0.8
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_duplicate_scores_first_config_order_wins(
+        self, mock_hpo, mock_save, minimal_df, config_two_algos
+    ):
+        """B6 (issue #32): равные скоры → детерминированный победитель.
+
+        Ничья разрешается порядком конфигурации: random_forest идёт раньше
+        extra_trees в реестре AVAILABLE_ALGORITHMS, поэтому при равных скорах
+        победителем объявляется random_forest (max стабилен).
+        """
+        mock_hpo.side_effect = lambda **kwargs: (-0.5, {"n_estimators": 10})
+        mock_save.return_value = None
+
+        result = train_best_model(
+            config=config_two_algos, df=minimal_df, target="target"
+        )
+
+        assert result["algorithm"] == "random_forest"
+        assert result["score"] == 0.5
+        mock_save.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "raw_score",
+        [
+            -0.9,  # обычный валидный скор
+            -3.4e38,  # очень маленький, но валидный скор (выше float32 min)
+            0.0,  # нулевой скор
+            1.0,  # положительный
+        ],
+    )
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_reported_winner_score_is_finite_and_above_sentinel(
+        self, mock_hpo, mock_save, raw_score, minimal_df, config_single_algo
+    ):
+        """B7 (issue #32): инвариант отчёта — result["score"] конечен и > сентинела.
+
+        Для любой комбинации валидных скоров (включая граничные) значение,
+        попавшее в result["score"], обязано быть конечным и строго выше
+        HPO_WORST_SCORE; сентинел/NaN/±inf физически не может протечь.
+        """
+        mock_hpo.side_effect = lambda **kwargs: (raw_score, {"n_estimators": 10})
+        mock_save.return_value = None
+
+        result = train_best_model(
+            config=config_single_algo, df=minimal_df, target="target"
+        )
+
+        reported = result["score"]
+        assert math.isfinite(reported)
+        assert reported > HPO_WORST_SCORE
+        mock_save.assert_called_once()
 
 
 class TestWorstScoreIntegrationThroughTuner:

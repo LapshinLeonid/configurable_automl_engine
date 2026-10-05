@@ -94,19 +94,27 @@ log = logging.getLogger(__name__)
 # ═══════════════════════════════════ constants ═══════════════════════════════
 # The worst possible trial score — an analog of the float32 minimum or
 # float('-inf'). Returned as the objective value when the real metric is not
-# finite (NaN/+inf, e.g. an nrmse error). The value equals the float32 minimum:
-# practically unreachable for real metrics, hence used as a sentinel.
+# finite (NaN/+inf, e.g. an nrmse error). The value is practically unreachable
+# for real metrics, hence used as a sentinel.
 #
 # Used in two places:
 # 1. Inside `_objective`: a non-finite trial avg_score is replaced with this
 #    constant (the trial completes, but with a deliberately worst score).
 # 2. On the orchestrator side: the `valid_results` filter in
-#    `training_engine/component.py` drops results whose score matches
-#    HPO_WORST_SCORE via math.isclose (rel_tol=1e-9), treating the algorithm
-#    as failed (issue #13). The relative tolerance keeps valid but very small
-#    custom metric scores (e.g., < -3.4e38) from being dropped; only scores
-#    practically equal to the float32 minimum are excluded.
+#    `training_engine/component.py` drops results whose score belongs to the
+#    worst-score sentinel class — any score at or below WORST_SCORE_THRESHOLD —
+#    treating the algorithm as failed (issues #13, #32).
 HPO_WORST_SCORE = -3.4028235e38
+
+# The lower bound of the "worst-score sentinel" class: the exact float32
+# minimum. Any score <= this bound is treated as a sentinel — real metrics of
+# such magnitude are practically impossible (documented threshold decision,
+# issue #32). Comparing against this bound (instead of the exact
+# HPO_WORST_SCORE via math.isclose) also catches the raw
+# float(np.finfo(np.float32).min) value that numpy-cast metrics or custom
+# tuners may return: its relative difference from HPO_WORST_SCORE is
+# ≈ 9.88e-9, which the old isclose(rel_tol=1e-9) check silently missed.
+WORST_SCORE_THRESHOLD = float(np.finfo(np.float32).min)
 
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
@@ -575,12 +583,15 @@ def optimize(
               ``use_feature_selection`` с решением по отбору).
             - best_score: Лучшее значение метрики на валидации.
             If no trial finished with a valid result (e.g., every trial was
-            turned into ``optuna.TrialPruned`` by a non-fatal error),
+            turned into ``optuna.TrialPruned`` by a non-fatal error, every
+            trial failed, or ``n_trials`` is 0 — an empty trial list),
             ``(None, None, None)`` is returned — the failure signal for the
             caller (the algorithm is excluded from candidates).
 
     Raises:
-        ValueError: Если ``n_trials`` не является положительным целым числом.
+        ValueError: Если ``n_trials`` является отрицательным целым числом
+            (не целым числом). Значение ``n_trials=0`` допустимо и приводит
+            к пустому списку триалов → ``(None, None, None)`` (issue #32).
         HyperoptError: Если для выбранного алгоритма не определено пространство
             поиска или передан невалидный ``feature_selection_cfg``.
     """
@@ -593,8 +604,18 @@ def optimize(
         },
     }
 
-    if not isinstance(n_trials, int) or n_trials <= 0:
-        raise ValueError(f"n_trials must be a positive integer, got {n_trials}")
+    if not isinstance(n_trials, int) or n_trials < 0:
+        raise ValueError(f"n_trials must be a non-negative integer, got {n_trials}")
+    if n_trials == 0:
+        # Пустой список триалов — контракт «нет валидного результата»
+        # (issue #32): возвращаем сплошной None без запуска Optuna и без
+        # исключений (в т.ч. для алгоритмов без search-space).
+        log.warning(
+            "Algorithm '%s' requested with n_trials=0; no trials to run — "
+            "returning no result",
+            algo_name,
+        )
+        return None, None, None
 
     # -------------------- 0. ранняя остановка (pruning) ------------- #
     pruning_cfg = _normalize_pruning_config(pruning)
@@ -987,27 +1008,48 @@ def optimize(
         )
         raise
 
+    # Явный подсчёт состояний триалов (issue #32): наличие валидного результата
+    # определяется по числу завершённых (COMPLETED) триалов, а не по внутреннему
+    # поведению study.best_params (ValueError при отсутствии завершённых
+    # триалов — деталь реализации Optuna, на которую нельзя опираться).
+    # Счётчики логируются для наблюдаемости («нет валидного результата» должно
+    # быть объяснимо по логам).
+    trials = study.get_trials(deepcopy=False)
+    n_completed = sum(1 for t in trials if t.state == optuna.trial.TrialState.COMPLETE)
+    n_pruned = sum(1 for t in trials if t.state == optuna.trial.TrialState.PRUNED)
+    n_failed = sum(1 for t in trials if t.state == optuna.trial.TrialState.FAIL)
     if pruning_active:
-        trials = study.get_trials(deepcopy=False)
-        n_pruned = sum(1 for t in trials if t.state == optuna.trial.TrialState.PRUNED)
         log.info(
             "Early stopping: pruned %d of %d trials (algo=%s)",
             n_pruned,
             len(trials),
             algo,
         )
-
-    try:
-        best_params = study.best_params
-        best_score = study.best_value
-    except ValueError:
-        # All trials of the algorithm finished without a valid result (e.g.,
-        # each was interrupted by a non-fatal ValueError and turned into
-        # optuna.TrialPruned). Return all-None instead of the "magic"
-        # HPO_WORST_SCORE constant so the caller (component._run_hpo) can
-        # distinguish a failure from a valid result and exclude the algorithm
-        # from candidates (issue #13).
+    log.info(
+        "Trial states for algorithm '%s': completed=%d, pruned=%d, failed=%d",
+        algo,
+        n_completed,
+        n_pruned,
+        n_failed,
+    )
+    if n_completed == 0:
+        # Контракт «нет валидного результата» (issues #13, #32): все триалы
+        # отсечены (PRUNED), упали (FAILED) или список триалов пуст
+        # (n_trials=0). Возвращаем сплошной None вместо «магической» константы
+        # HPO_WORST_SCORE, чтобы вызывающий код (_run_hpo) мог отличить провал
+        # от валидного результата и исключить алгоритм из кандидатов.
+        log.warning(
+            "Algorithm '%s' produced no completed trials "
+            "(completed=%d, pruned=%d, failed=%d); returning no result",
+            algo,
+            n_completed,
+            n_pruned,
+            n_failed,
+        )
         return None, None, None
+
+    best_params = study.best_params
+    best_score = study.best_value
 
     # --- ФИНАЛЬНЫЙ ЭТАП: Обучение лучшей модели ---
     # Важно: если оверсэмплинг был включен, финальная модель тоже должна его пройти!

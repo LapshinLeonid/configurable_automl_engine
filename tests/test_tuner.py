@@ -133,11 +133,26 @@ def test_bad_data():
         hyperopt.optimize("ridge", "not-an-array", [1, 2, 3], n_trials=2)
 
 
-@pytest.mark.parametrize("bad_trials", [0, -3])
+@pytest.mark.parametrize("bad_trials", [-1, -3])
 def test_non_positive_trials(bad_trials, toy_data):
     X, y = toy_data
     with pytest.raises(ValueError):
         hyperopt.optimize("ridge", X, y, n_trials=bad_trials)
+
+
+def test_zero_trials_returns_no_result(toy_data):
+    """B2 (issue #32): n_trials=0 → пустой список триалов → (None, None, None).
+
+    Раньше n_trials=0 считался невалидным и вызывал ValueError. Теперь это
+    легальный «пустой поиск»: ни одного триала — значит, нет и валидного
+    результата, и optimize() сигнализирует об этом сплошным None.
+    """
+    X, y = toy_data
+    model, params, score = hyperopt.optimize("ridge", X, y, n_trials=0)
+
+    assert model is None
+    assert params is None
+    assert score is None
 
 
 def test_apply_dynamic_space_types(toy_data):
@@ -1174,6 +1189,11 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
             "use_feature_selection": False,
         }
         mock_study.best_value = 0.9
+        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
+        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        mock_study.get_trials.return_value = [
+            MagicMock(state=optuna.trial.TrialState.COMPLETE)
+        ]
         mock_create.return_value = mock_study
 
         model, params, _ = optimize(
@@ -1352,6 +1372,11 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
         mock_study = MagicMock()
         mock_study.best_params = {"alpha": 0.6}
         mock_study.best_value = 0.9
+        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
+        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        mock_study.get_trials.return_value = [
+            MagicMock(state=optuna.trial.TrialState.COMPLETE)
+        ]
         mock_create.return_value = mock_study
 
         optimize(
@@ -1416,6 +1441,11 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
             "use_feature_selection": True,
         }
         mock_study.best_value = 0.9
+        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
+        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        mock_study.get_trials.return_value = [
+            MagicMock(state=optuna.trial.TrialState.COMPLETE)
+        ]
         mock_create.return_value = mock_study
 
         _, params, _ = optimize(
