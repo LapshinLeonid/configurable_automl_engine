@@ -569,7 +569,10 @@ class _OptimizeRunner:
         self.auto_decision: dict[str, Any] | None = None
         self.resolved_via_auto = False
         self.effective_n_folds = self.n_folds
-        self.space_fn: Callable[[Trial], dict[str, Any]]
+        # Заглушка до разрешения пространства поиска (шаг 2): заменяется в
+        # resolve_search_space(). run() всегда вызывает resolve_search_space
+        # до цикла Optuna, поэтому реальный вызов заглушки невозможен.
+        self.space_fn: Callable[[Trial], dict[str, Any]] = lambda trial: {}
         self.scorer: Any = None
         self.pruner: optuna.pruners.BasePruner | None = None
         self.pruning_active = False
@@ -1007,9 +1010,10 @@ class _OptimizeRunner:
         except (ValueError, MemoryError, RuntimeError, InvalidDataError) as err:
             fatal_failure = not isinstance(err, ValueError)
             self.handle_failure(trial, err)
-            raise AssertionError(
-                "unreachable"
-            )  # pragma: no cover — handle_failure всегда бросает
+            # Недостижимо: handle_failure всегда бросает (NoReturn). Заглушка
+            # нужна только статическому анализу, чтобы except-ветка имела
+            # возвращаемое значение.
+            return 0.0  # pragma: no cover
         finally:
             # Любой нефатальный исход триала прерывает последовательность
             # фатальных сбоев: успешный возврат _score, отсечение прунером
@@ -1121,11 +1125,12 @@ class _OptimizeRunner:
         self.best_params = best_params
         # Параметры для конструктора базовой модели очищаются от служебного
         # ключа тюнера ("use_feature_selection" не является гиперпараметром
-        # модели). Явное копирование: исходный study.best_params не мутируется,
-        # а ключ гарантированно не попадает в конструктор модели (issue #11).
-        clean_model_params = dict(self.study.best_params)
-        clean_model_params.pop("use_feature_selection", None)
-        self.clean_model_params = clean_model_params
+        # модели). Строим их из уже отфильтрованного self.best_params (для
+        # isotonic_regression ключ исключён выше), чтобы источник был единым;
+        # исходный study.best_params не мутируется, а ключ гарантированно не
+        # попадает в конструктор модели (issue #11).
+        self.clean_model_params = dict(self.best_params)
+        self.clean_model_params.pop("use_feature_selection", None)
         self.best_apply_fs = best_apply_fs
         return True
 
