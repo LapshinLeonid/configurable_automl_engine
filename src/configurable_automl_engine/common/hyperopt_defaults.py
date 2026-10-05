@@ -6,6 +6,7 @@ from typing import (
     TypeVar,
 )
 
+import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
 T = TypeVar("T", str, int, float, bool)
@@ -290,6 +291,106 @@ DATA_DEPENDENT_CONSTRAINTS: dict[str, str] = {
     "min_samples_leaf": "n_samples",
     "min_samples_split": "n_samples",
 }
+
+# ───────────────── адаптивный epsilon для SVR ───────────────── #
+# Физический смысл epsilon в SVR — абсолютная погрешность в единицах
+# целевой переменной y, внутри которой ошибка предсказания игнорируется.
+# Слепой диапазон [1e-3, 1.0] деградирует на данных с малым/большим
+# разбросом y: при σ(y)=0.244 epsilon=0.1 — это ~40% всей шкалы, а для
+# цен в миллионах epsilon=0.1 заставляет модель подгонять каждый рубль.
+# Поэтому границы поиска масштабируются разбросом y_train (issue #55).
+SVR_EPSILON_REL_MIN = 0.005
+"""Нижняя граница epsilon как доля разброса y: 0.005·spread (~0.5% «шума»)."""
+
+SVR_EPSILON_REL_MAX = 0.10
+"""Верхняя граница epsilon как доля разброса y: 0.10·spread (~10% «шума»)."""
+
+SVR_EPSILON_FALLBACK = (1e-4, 1e-2)
+"""Fallback-границы при константном/NaN-таргете или нулевом разбросе."""
+
+SVR_EPSILON_MIN_LOW = 1e-8
+"""Положительный минимум нижней границы (инвариант ``FloatSpace.validate_log_low``)."""
+
+
+def compute_svr_epsilon_bounds(
+    y: Any,
+    *,
+    rel_min: float = SVR_EPSILON_REL_MIN,
+    rel_max: float = SVR_EPSILON_REL_MAX,
+    fallback: tuple[float, float] = SVR_EPSILON_FALLBACK,
+    strategy: Literal["std", "iqr"] = "std",
+    min_low: float = SVR_EPSILON_MIN_LOW,
+) -> tuple[float, float]:
+    """Вычислить адаптивные границы поиска ``epsilon`` для SVR по разбросу ``y``.
+
+    ``epsilon`` в SVR — абсолютная погрешность в единицах целевой
+    переменной, поэтому универсальный слепой диапазон неприменим: границы
+    масштабируются разбросом обучающей выборки (по умолчанию σ(y)).
+
+    Особенности:
+    1. Вычисление выполняется один раз на запуск ``optimize()`` (вне
+       ``space_fn``), иначе у каждого триала были бы свои границы и
+       TPE-сэмплер Optuna ломался бы.
+    2. Константный ``y`` (σ = 0), NaN/нефинитные значения или пустой
+       вектор приводят к fallback-границам без исключений.
+    3. Нижняя граница клампится к положительному минимуму ``min_low`` —
+       инвариант логарифмической шкалы (``FloatSpace.validate_log_low``).
+       При субнормально малом разбросе верхняя граница дополнительно
+       поднимается, чтобы сохранить ``low < high``.
+
+    Args:
+        y (Any): Вектор целевой переменной (np.ndarray, pd.Series,
+            pd.DataFrame или итерируемый).
+        rel_min (float): Множитель нижней границы. По умолчанию 0.005.
+        rel_max (float): Множитель верхней границы. По умолчанию 0.10.
+        fallback (tuple[float, float]): Границы, возвращаемые при нулевом
+            или неопределённом разбросе. По умолчанию (1e-4, 1e-2).
+        strategy (Literal["std", "iqr"]): Стратегия оценки разброса.
+            ``'std'`` — стандартное отклонение (по умолчанию);
+            ``'iqr'`` — робастный вариант через межквартильный размах
+            (IQR / 1.349, эквивалент σ для нормального распределения),
+            устойчивый к выбросам.
+        min_low (float): Положительный минимум нижней границы для
+            логарифмической шкалы. Должен быть строго больше нуля.
+
+    Returns:
+        tuple[float, float]: Пара ``(low, high)`` границ поиска epsilon
+            с инвариантами ``low > 0`` и ``low < high``.
+
+    Raises:
+        ValueError: Если ``strategy`` не из ``{"std", "iqr"}`` или
+            ``min_low <= 0``.
+    """
+    if strategy not in {"std", "iqr"}:
+        raise ValueError(f"Unknown epsilon spread strategy: '{strategy}'")
+    if min_low <= 0:
+        raise ValueError(f"min_low must be > 0 for log-scale bounds. Got {min_low}")
+
+    arr = np.asarray(y, dtype=float).reshape(-1)
+    # Fallback-поведение: константный y, NaN/±inf или пустой вектор —
+    # никаких исключений (контракт issue #55).
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return fallback
+
+    if strategy == "std":
+        spread = float(np.std(arr))
+    else:  # 'iqr'
+        q1, q3 = np.percentile(arr, [25.0, 75.0])
+        spread = float(q3 - q1) / 1.349
+
+    if not np.isfinite(spread) or spread <= 0:
+        return fallback
+
+    low = rel_min * spread
+    high = rel_max * spread
+    # Клампинг к положительному минимуму для float_log (low > 0).
+    low = max(low, min_low)
+    # При субнормально малом разбросе после клампинга low может превысить
+    # high — поднимаем high, сохраняя low < high (валидный диапазон для
+    # suggest_float(log=True)).
+    if low >= high:
+        high = max(high, low * 2.0)
+    return float(low), float(high)
 
 
 def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
