@@ -805,6 +805,15 @@ def execute_phases(
             # Перезаписываем или добавляем параметры из конфига пользователя
             space.update(user_overrides)
 
+        # Адаптивный epsilon для SVR (issue #55): границы поиска epsilon
+        # масштабируются разбросом y_train в рантайме (tuner.resolve_search_space),
+        # поэтому дефолтный слепой диапазон [1e-3, 1.0] из DEFAULT_SPACES
+        # опускается. Если пользователь задал epsilon явно — он уже в space
+        # (space.update(user_overrides) выше), и приоритет пользователя
+        # сохраняется: адаптивная логика не вмешивается.
+        if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
+            space.pop("epsilon", None)
+
         return space
 
     def _execute_hpo_phase(

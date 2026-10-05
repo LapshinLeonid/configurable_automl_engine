@@ -44,8 +44,11 @@ from sklearn.model_selection import (
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import (
+    DEFAULT_SPACES,
     FloatSpace,
+    SearchSpaceEntry,
     clip_search_space,
+    compute_svr_epsilon_bounds,
 )
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.feature_selection import FeatureSelector
@@ -136,6 +139,44 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
         }
 
     return _space
+
+
+# ══════════ SVR-space: epsilon зависит от разброса y ══════════
+def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
+    """Построить SearchSpaceEntry для epsilon SVR с границами, масштабированными y.
+
+    Границы считаются от разброса ``y`` (по умолчанию σ(y)) ОДИН раз — до
+    цикла Optuna (вызывается из ``resolve_search_space``, а не из
+    ``space_fn``): иначе у каждого триала были бы свои границы и
+    TPE-сэмплер терял бы детерминизм (issue #55).
+
+    Args:
+        y (Any): Вектор целевой переменной.
+    Returns:
+        SearchSpaceEntry: float_log-распределение epsilon в адаптивных границах.
+    """
+    low, high = compute_svr_epsilon_bounds(y)
+    log.info("SVR adaptive epsilon bounds: [%.6g, %.6g] (from y spread)", low, high)
+    return SearchSpaceEntry.model_validate([low, high, "float_log"])
+
+
+def _make_svr_space(y: Any) -> Callable[[Trial], dict[str, Any]]:
+    """Создать генератор пространства поиска SVR с адаптивным epsilon.
+
+    Используется, когда пользователь не переопределил пространство поиска
+    (в т.ч. прямой вызов ``optimize("svr", X, y)`` без ``space_overrides``):
+    дефолтное пространство берётся из ``DEFAULT_SPACES["svr"]``, а epsilon
+    заменяется на float_log-распределение в границах, производных от
+    разброса ``y_train``.
+
+    Args:
+        y (Any): Вектор целевой переменной.
+    Returns:
+        Callable[[Trial], dict[str, Any]]: Функция-генератор параметров триала.
+    """
+    space = DEFAULT_SPACES["svr"].copy()
+    space["epsilon"] = _svr_adaptive_epsilon_entry(y)
+    return partial(_apply_dynamic_space, space_dict=space)
 
 
 # ═════════════════════════════ helper-utilities ═════════════════════════════
@@ -714,9 +755,10 @@ class _OptimizeRunner:
         """Разрешить пространство поиска гиперпараметров и скорер (шаг 2).
 
         Поддерживает динамическое пространство KNN (зависит от эффективного
-        размера выборки), прямые переопределения-функции и словарные
-        конфигурации YAML (SearchSpaceEntry). Сохраняет ``space_fn`` и
-        ``scorer`` в атрибутах экземпляра.
+        размера выборки), адаптивный epsilon для SVR (границы масштабируются
+        разбросом ``y_train``, issue #55), прямые переопределения-функции и
+        словарные конфигурации YAML (SearchSpaceEntry). Сохраняет
+        ``space_fn`` и ``scorer`` в атрибутах экземпляра.
 
         Raises:
             HyperoptError: Если для выбранного алгоритма не определено
@@ -735,9 +777,25 @@ class _OptimizeRunner:
             space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
         # Если пришел словарь (новый механизм из YAML) — создаем обертку
         elif isinstance(external_config, dict):
-            clipped_config = clip_search_space(external_config, self.n_samples_eff)
+            space_dict = external_config
+            # SVR: адаптивные границы epsilon по разбросу y_train, если
+            # пользователь не задал epsilon явно (prepare_search_space
+            # опускает дефолтный epsilon из DEFAULT_SPACES, поэтому его
+            # отсутствие в словаре означает «не переопределён»). Границы
+            # вычисляются один раз ДО цикла Optuna (issue #55).
+            if self.algo == "svr" and "epsilon" not in space_dict:
+                space_dict = {
+                    **space_dict,
+                    "epsilon": _svr_adaptive_epsilon_entry(self.y),
+                }
+            clipped_config = clip_search_space(space_dict, self.n_samples_eff)
             space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
         else:
+            # SVR без внешнего конфига (в т.ч. прямой optimize("svr", X, y)):
+            # дефолтное пространство с адаптивным epsilon вместо слепого
+            # диапазона [1e-3, 1.0] из DEFAULT_SPACES.
+            if self.algo == "svr":
+                base_space_fn = _make_svr_space(self.y)
             space_fn = base_space_fn
         if space_fn is None:
             raise HyperoptError(f"Для «{self.algo}» нет search-space")
