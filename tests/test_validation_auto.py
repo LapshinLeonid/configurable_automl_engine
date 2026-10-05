@@ -35,17 +35,114 @@ def test_choose_invalid_n_lt_2():
 
 
 def test_choose_loo_small_sample():
-    """Branch 1: N <= 30 and N >= 2*P selects LOO."""
+    """Branch 1: N <= 15 and N >= 2*P selects LOO."""
     result = choose_validation_method(10, 3)
     assert result["method"] == "LOO"
     # Boundary: N == 2*P still LOO.
-    assert choose_validation_method(30, 15)["method"] == "LOO"
+    assert choose_validation_method(15, 2)["method"] == "LOO"
+    # N == 30/P == 15 is now beyond the LOO range: fixed k-fold takes over.
+    assert choose_validation_method(30, 15)["method"] == "kfold"
 
 
-def test_choose_loo_small_sample_good_ratio():
-    """Branch 2: 31 <= N <= 50 and N >= 10*P selects LOO."""
-    assert choose_validation_method(40, 3)["method"] == "LOO"
-    assert choose_validation_method(50, 5)["method"] == "LOO"
+def test_choose_fixed_kfold_small_dataset():
+    """Branch 2: 16 <= N <= 50 uses a fixed k-fold (3-4 folds) instead of LOO."""
+    assert choose_validation_method(40, 3)["method"] == "kfold"
+    assert choose_validation_method(50, 5)["method"] == "kfold"
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_features, expected_k, expected_avg_test_size",
+    [
+        (16, 2, 3, 5),
+        (19, 2, 3, 6),
+        (20, 2, 4, 5),
+        (30, 3, 4, 7),
+        (40, 3, 4, 10),
+        (50, 5, 4, 12),
+    ],
+)
+def test_choose_fixed_kfold_boundaries(
+    n_samples, n_features, expected_k, expected_avg_test_size
+):
+    """Branch 2 fold-count boundaries: k=3 for N <= 19, k=4 for N >= 20."""
+    result = choose_validation_method(n_samples, n_features)
+    assert result["method"] == "kfold"
+    assert result["k"] == expected_k
+    assert result["average_test_size"] == expected_avg_test_size
+    # average_test_size is an integer floor of N/k.
+    assert result["average_test_size"] == n_samples // expected_k
+    # Each fold tests the model on a slice of several distinct points.
+    assert result["average_test_size"] >= 5
+
+
+def test_choose_fixed_kfold_motivating_case():
+    """N=24/P=2 -> k=4: the model is tested on slices of 6 points, not one."""
+    result = choose_validation_method(24, 2)
+    assert result["method"] == "kfold"
+    assert result["k"] == 4
+    assert result["average_test_size"] == 6
+    assert "Small dataset: fixed k-fold CV (3-4 folds)" in result["warning"]
+
+
+def test_choose_fixed_kfold_k_never_exceeds_n():
+    """Defensive guard: k is clamped to [1, N] across the whole range."""
+    for n_samples in range(16, 51):
+        result = choose_validation_method(n_samples, 1)
+        assert result["method"] == "kfold"
+        assert 1 <= result["k"] <= n_samples
+
+
+def test_choose_fixed_kfold_low_confidence_warning():
+    """Fixed k-fold with N < 2*P attaches the uniform low-confidence warning."""
+    result = choose_validation_method(16, 9)
+    assert result["method"] == "kfold"
+    assert result["k"] == 3
+    assert "Low confidence" in result["warning"]
+
+
+def test_choose_fixed_kfold_transition_15_to_16():
+    """Transition 15 -> 16: LOO stops, fixed k-fold starts."""
+    assert choose_validation_method(15, 2)["method"] == "LOO"
+    result = choose_validation_method(16, 2)
+    assert result["method"] == "kfold"
+    assert result["k"] == 3
+
+
+def test_choose_fixed_kfold_transition_19_to_20():
+    """Transition 19 -> 20: k grows from 3 to 4."""
+    assert choose_validation_method(19, 2)["k"] == 3
+    assert choose_validation_method(20, 2)["k"] == 4
+
+
+def test_choose_fixed_kfold_transition_50_to_51():
+    """Transition 50 -> 51: fixed k-fold ends, continuous heuristic resumes."""
+    result_50 = choose_validation_method(50, 5)
+    assert result_50["method"] == "kfold"
+    assert result_50["k"] == 4
+    # Continuous branch must not crash and must not reuse the fixed k=4.
+    result_51 = choose_validation_method(51, 5)
+    assert result_51["method"] == "kfold"
+    assert result_51["k"] != 4
+
+
+@pytest.mark.parametrize(
+    "n_samples, n_features, method, expected_k",
+    [
+        (10, 3, "LOO", None),  # Branch 1: LOO
+        (15, 2, "LOO", None),  # Branch 1 boundary preserved
+        (5, 3, "LOO", None),  # Branch 5: micro-sample relabel LOO
+        (100, 5, "kfold", 5),  # Branch 5: continuous k-fold
+        (150, 5, "kfold", 7),  # Branch 5: continuous k-fold (unchanged)
+        (1000, 5, "train_test_split", None),  # Branch 3: standard split
+        (60000, 10000, "train_test_split", None),  # Branch 4: high-dimensional
+    ],
+)
+def test_choose_unchanged_branches(n_samples, n_features, method, expected_k):
+    """Branches 1 (N <= 15), 3-5 keep their behaviour for these inputs."""
+    result = choose_validation_method(n_samples, n_features)
+    assert result["method"] == method
+    if expected_k is not None:
+        assert result["k"] == expected_k
 
 
 def test_choose_train_test_split_standard():
@@ -88,10 +185,10 @@ def test_choose_kfold_micro_relabel_loo():
 
 
 def test_choose_kfold_low_confidence_warning():
-    """k == 2 produces the low-confidence warning."""
+    """N < 2*P in the fixed-kfold range produces the low-confidence warning."""
     result = choose_validation_method(31, 16)
     assert result["method"] == "kfold"
-    assert result["k"] == 2
+    assert result["k"] == 4
     assert "Low confidence" in result["warning"]
 
 
@@ -173,7 +270,7 @@ def test_make_cv_auto_train_test_split():
 
 def test_make_cv_auto_kfold_with_warning():
     """auto resolving to k-fold with the low-confidence warning."""
-    method, cv, _ = make_cv(
+    method, cv, decision = make_cv(
         31,
         val_method="auto",
         n_folds=5,
@@ -183,7 +280,33 @@ def test_make_cv_auto_kfold_with_warning():
     )
     assert method == "k_fold"
     assert isinstance(cv, KFold)
-    assert cv.get_n_splits() == 2
+    assert cv.get_n_splits() == 4
+    assert decision["k"] == 4
+    assert "Low confidence" in decision["warning"]
+
+
+def test_make_cv_auto_fixed_kfold_motivating_case():
+    """auto on 24x2 resolves to a 4-fold KFold (fixed k-fold branch)."""
+    method, cv, decision = make_cv(
+        24,
+        val_method="auto",
+        n_folds=5,
+        random_state=42,
+        test_size=0.2,
+        n_features=2,
+    )
+    assert method == "k_fold"
+    assert isinstance(cv, KFold)
+    assert cv.get_n_splits() == 4
+    assert decision == {
+        "method": "kfold",
+        "k": 4,
+        "average_test_size": 6,
+        "warning": (
+            "Small dataset: fixed k-fold CV (3-4 folds) to prevent "
+            "LOO overfitting."
+        ),
+    }
 
 
 def test_make_cv_auto_high_dimensional_warning():
@@ -277,6 +400,16 @@ def test_iter_splits_auto_loo():
     assert len(splits) == 10
 
 
+def test_iter_splits_auto_fixed_kfold():
+    """auto on 24x2 resolves to a fixed 4-fold k-fold split."""
+    X, y = _dummy_data(n=24, p=2)
+    splits = list(iter_splits(X, y, method="auto"))
+    assert len(splits) == 4
+    # Each fold tests the model on exactly 6 distinct points (24 // 4).
+    test_sizes = {len(x_te) for _, x_te, _, _ in splits}
+    assert test_sizes == {6}
+
+
 def test_iter_splits_auto_train_test_split_dynamic_test_size():
     """auto -> train_test_split uses the computed (integer) test size, not 0.2."""
     X, y = _dummy_data(n=1000, p=5)
@@ -305,6 +438,7 @@ def test_iter_splits_auto_pandas():
         (10, 3, 9),  # LOO -> N - 1
         (5, 3, 4),  # relabel LOO -> N - 1
         (1000, 5, 970),  # train_test_split -> train_size
+        (24, 2, 18),  # fixed kfold k=4 -> floor(24 * (1 - 1/4))
     ],
 )
 def test_get_effective_train_size_auto(n_total, n_features, expected):

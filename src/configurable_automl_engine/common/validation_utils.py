@@ -75,6 +75,22 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     number of folds. The heuristic is fully deterministic given ``(N, P)`` so
     every caller that resolves 'auto' arrives at the same decision.
 
+    Decision branches (applied in order):
+
+    1. **LOO** for critically small samples (N <= 15) with a good N/P ratio
+       (N >= 2*P): leave-one-out is the only affordable way to get per-point
+       estimates when there are too few rows for k-fold.
+    2. **Fixed k-fold** for small samples (16 <= N <= 50): each fold tests the
+       model on a slice of several distinct points (6-8 rows), which is more
+       reliable than LOO — LOO would measure the ability to repeat the global
+       trend instead of generalizing to new point slices. Uses k=4 for N >= 20
+       and k=3 otherwise. A low-confidence warning is attached when N < 2*P.
+    3. **Standard train-test split** for N >= 200 with a good N/P ratio.
+    4. **High-dimensional train-test split** for N >= 50000 when P is very
+       large relative to N (5P <= N < 10P).
+    5. **Continuous k-fold heuristic** for everything else; k == N is relabeled
+       to LOO. Micro-samples (N <= 5) are protected from k > N.
+
     Args:
         n_samples: Number of observations (rows) in the dataset.
         n_features: Number of features (columns) in the dataset.
@@ -82,6 +98,9 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     Returns:
         A dict describing the chosen method. Possible shapes:
             ``{"method": "LOO"}``
+            ``{"method": "kfold", "k", "average_test_size", "warning"}``
+            (fixed k-fold for 16 <= N <= 50; ``average_test_size`` is an
+            integer floor of N/k)
             ``{"method": "train_test_split", "regime", "test_percent",
             "test_size", "train_size", ["warning"]}``
             ``{"method": "kfold", "k", "average_test_size", ["warning"]}``
@@ -96,13 +115,34 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     if n_samples < 2:
         return {"method": "invalid", "reason": "N < 2: insufficient data"}
 
-    # 1. LOO for very small datasets
-    if n_samples <= 30 and n_samples >= 2 * n_features:
+    # 1. LOO for critically small samples (up to 15 rows) with a good N/P ratio.
+    if n_samples <= 15 and n_samples >= 2 * n_features:
         return {"method": "LOO"}
 
-    # 2. LOO for small datasets with a good N/P ratio
-    if 31 <= n_samples <= 50 and n_samples >= 10 * n_features:
-        return {"method": "LOO"}
+    # 2. Small samples 16 <= N <= 50: a fixed k-fold (3-4 folds) is more
+    # reliable than LOO. Each fold tests the model on a slice of several
+    # distinct points instead of a single one.
+    if 16 <= n_samples <= 50:
+        k = 4 if n_samples >= 20 else 3
+        # Defensive guard: keep k within [1, N]. k > N is impossible for
+        # 16..50 today (k <= 4 < 16 <= N), but the clamp protects against
+        # future range edits, invalid callers and division by zero.
+        k = max(1, min(k, n_samples))
+        fixed_kfold_warning = (
+            "Small dataset: fixed k-fold CV (3-4 folds) to prevent LOO overfitting."
+        )
+        # Uniform low-confidence flag with the other branches: N barely
+        # sufficient for P (N < 2*P) takes precedence over the generic note.
+        if n_samples < 2 * n_features:
+            fixed_kfold_warning = (
+                "Low confidence: High variance expected (N is barely sufficient for P)."
+            )
+        return {
+            "method": "kfold",
+            "k": k,
+            "average_test_size": n_samples // k,
+            "warning": fixed_kfold_warning,
+        }
 
     # 3. Standard train-test split.
     # The minimum test set size is the larger of 30 rows or 2*P features (enough
