@@ -18,6 +18,7 @@ from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     PreprocessingPreset,
     normalize_algorithm,
+    requires_missing_indicator,
     resolve_preprocessing_preset,
 )
 
@@ -74,6 +75,30 @@ def test_univariate_algorithms_get_no_scaling():
     assert preset.algorithm_class == AlgorithmClass.UNIVARIATE
     assert preset.scaling == "none"
     assert preset.imputation_strategy == "median"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Индикаторы пропусков (issue #56)
+# ──────────────────────────────────────────────────────────────────────────
+def test_missing_indicators_disabled_for_univariate_algorithms():
+    """Строго одномерные алгоритмы (isotonic) несовместимы с колонками-
+    индикаторами пропусков (входной контракт — ровно один признак)."""
+    assert requires_missing_indicator("isotonic_regression") is False
+    assert requires_missing_indicator("isotonic") is False
+
+
+def test_missing_indicators_enabled_for_all_other_algorithms():
+    """Для остальных алгоритмов индикаторы пропусков включены."""
+    for algo in AVAILABLE_ALGORITHMS:
+        if ALGORITHM_CLASS_MAPPING[normalize_algorithm(algo)] is AlgorithmClass.UNIVARIATE:
+            continue
+        assert requires_missing_indicator(algo) is True, algo
+
+
+def test_missing_indicators_unknown_algorithm_rejected():
+    """Неизвестный алгоритм отклоняется той же явной ошибкой, что и пресет."""
+    with pytest.raises(ValueError, match="Unknown algorithm"):
+        requires_missing_indicator("custom_model_2026")
 
 
 def test_every_supported_algorithm_resolves_to_a_preset():

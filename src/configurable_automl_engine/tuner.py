@@ -65,6 +65,7 @@ from configurable_automl_engine.preprocessing import (
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
+    requires_missing_indicator,
     resolve_preprocessing_preset,
 )
 from configurable_automl_engine.training_engine.config_parser import (
@@ -272,6 +273,34 @@ def _get_estimator(algo: str) -> Any:
         # Если в models.py алгоритм не найден или не установлен пакет
         #  (например, XGBoost)
         raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
+
+
+def _missing_indicator_enabled(algorithm: str | None) -> bool:
+    """Безопасно определить необходимость индикаторов пропусков (issue #56).
+
+    Строго одномерные алгоритмы (``isotonic_regression``) несовместимы с
+    колонками-индикаторами пропусков (входной контракт — ровно один признак),
+    поэтому для них возвращается ``False``. Пустое имя алгоритма либо
+    некорректное имя (неизвестный алгоритм) не должны ронять фазу HPO —
+    в этом случае возвращается безопасное значение по умолчанию ``True``.
+
+    Args:
+        algorithm: Имя регрессионного алгоритма (или алиас), может быть
+            ``None``/пустой строкой до валидации имени.
+
+    Returns:
+        ``True`` — индикаторы пропусков включаются; ``False`` — алгоритм
+        строго одномерный.
+    """
+    if not algorithm:
+        return True
+    try:
+        return requires_missing_indicator(algorithm)
+    except ValueError:
+        # Неизвестное имя алгоритма: не маскируем ошибку конфигурации, но
+        # не даём ей упасть в необработанное исключение на этапе сборки
+        # препроцессора — валидация имени выполняется отдельным шагом.
+        return True
 
 
 def _build_scorer(name: str) -> Any:
@@ -846,6 +875,7 @@ class _OptimizeRunner:
                         target_encoding_fallback=self.target_encoding_fallback,
                         random_state=self.random_state,
                         force_dense_output=requires_dense_input(self.algo),
+                        add_indicator=_missing_indicator_enabled(self.algo),
                     )
                 else:
                     log.warning(
@@ -874,6 +904,7 @@ class _OptimizeRunner:
                         target_encoding_fallback=self.target_encoding_fallback,
                         random_state=self.random_state,
                         force_dense_output=requires_dense_input(self.algo),
+                        add_indicator=_missing_indicator_enabled(self.algo),
                     )
             else:
                 log.warning(

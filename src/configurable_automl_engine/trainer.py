@@ -68,6 +68,7 @@ from configurable_automl_engine.preprocessing import (
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     PreprocessingPreset,
+    requires_missing_indicator,
     resolve_preprocessing_preset,
 )
 from configurable_automl_engine.training_engine.config_parser import (
@@ -716,6 +717,12 @@ class ModelTrainer:
         # hashing-кодировании (sparse-выход) препроцессор обязан вернуть
         # плотную матрицу (issue: OOM fix, force_dense_output).
         force_dense = requires_dense_input(self.algorithm)
+        # Строго одномерные алгоритмы (isotonic) несовместимы с
+        # колонками-индикаторами пропусков (issue #56). Если имя алгоритма
+        # пустое/не задано — безопасное значение по умолчанию (True).
+        use_missing_indicator = (
+            requires_missing_indicator(self.algorithm) if self.algorithm else True
+        )
         return build_preprocessor(
             feature_names,
             self.categorical_features or [],
@@ -730,6 +737,7 @@ class ModelTrainer:
             target_encoding_fallback=target_fallback,
             random_state=self.random_state,
             force_dense_output=force_dense,
+            add_indicator=use_missing_indicator,
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:

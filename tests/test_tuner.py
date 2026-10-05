@@ -38,6 +38,7 @@ from configurable_automl_engine.tuner import (
     _apply_dynamic_space,
     _build_scorer,
     _can_stratify,
+    _missing_indicator_enabled,
     optimize,
 )
 
@@ -1610,3 +1611,26 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
         assert best_algo is None
         assert best_model is None
         assert best_score is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Индикаторы пропусков: безопасный fallback в tuner (issue #56)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_missing_indicator_enabled_guards_invalid_algorithms():
+    """Пустое/None/неизвестное имя алгоритма не роняет сборку препроцессора:
+    возвращается безопасное значение True (индикаторы включены)."""
+    assert _missing_indicator_enabled(None) is True
+    assert _missing_indicator_enabled("") is True
+    assert _missing_indicator_enabled("unknown_algo_2026") is True
+
+
+def test_missing_indicator_enabled_univariate_disabled():
+    """Строго одномерные алгоритмы (isotonic) — индикаторы выключены."""
+    assert _missing_indicator_enabled("isotonic_regression") is False
+    assert _missing_indicator_enabled("isotonic") is False
+
+
+def test_missing_indicator_enabled_regular_algorithms():
+    """Обычные алгоритмы — индикаторы включены."""
+    assert _missing_indicator_enabled("ridge") is True
+    assert _missing_indicator_enabled("rf") is True

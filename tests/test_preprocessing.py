@@ -350,17 +350,20 @@ def _num_pipeline(preprocessor: ColumnTransformer):
 
 
 def test_build_preprocessor_default_imputation_is_mean():
-    """По умолчанию (пресет scale_sensitive) — импутация mean."""
+    """По умолчанию (пресет scale_sensitive) — импутация mean с add_indicator."""
     preprocessor = build_preprocessor(
         ["a", "b"], categorical_features=[], numerical_features=["a", "b"]
     )
     num = _num_pipeline(preprocessor)
     assert isinstance(num.named_steps["imputer"], SimpleImputer)
     assert num.named_steps["imputer"].strategy == "mean"
+    # Индикаторы пропусков включены для числового пайплайна (issue #56)
+    assert num.named_steps["imputer"].add_indicator is True
 
 
 def test_build_preprocessor_median_imputation():
-    """imputation_strategy='median' → SimpleImputer(strategy='median')."""
+    """imputation_strategy='median' → SimpleImputer(strategy='median',
+    add_indicator=True)."""
     preprocessor = build_preprocessor(
         ["a", "b"],
         categorical_features=[],
@@ -369,6 +372,7 @@ def test_build_preprocessor_median_imputation():
     )
     num = _num_pipeline(preprocessor)
     assert num.named_steps["imputer"].strategy == "median"
+    assert num.named_steps["imputer"].add_indicator is True
 
 
 def test_build_preprocessor_scaling_none_omits_scaler():
@@ -431,7 +435,7 @@ def test_build_preprocessor_invalid_scaling_raises():
 
 def test_tree_preset_end_to_end_no_scaling():
     """Пресет деревьев (median + none): пропуски заполняются медианой, данные
-    передаются в модель без масштабирования."""
+    передаются в модель без масштабирования; индикаторы пропусков добавляются."""
     df = pd.DataFrame(
         {"num_a": [1.0, 2.0, np.nan, 4.0], "num_b": [10.0, 20.0, 30.0, np.nan]}
     )
@@ -443,11 +447,15 @@ def test_tree_preset_end_to_end_no_scaling():
         scaling="none",
     )
     out = preprocessor.fit_transform(df)
-    assert out.shape == (4, 2)
+    # 2 импутированные колонки + 2 индикатора пропусков (по одному на признак)
+    assert out.shape == (4, 4)
     assert np.isfinite(out).all()
     # Без масштабирования значения остаются в исходном диапазоне
     assert set(np.round(out[:, 0]).astype(int)) <= {1, 2, 4}
     assert set(np.round(out[:, 1]).astype(int)) <= {10, 20, 30}
+    # Индикаторы: 1 там, где был NaN, 0 иначе
+    np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0])
+    np.testing.assert_array_equal(out[:, 3], [0, 0, 0, 1])
 
 
 def test_glm_preset_end_to_end_robust():
@@ -466,8 +474,207 @@ def test_glm_preset_end_to_end_robust():
         scaling="robust",
     )
     out = preprocessor.fit_transform(df)
-    assert out.shape == (5, 2)
+    # 2 скалированные колонки + 1 индикатор пропуска (NaN только в num_a)
+    assert out.shape == (5, 3)
     assert np.isfinite(out).all()
+    np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0, 0])
+
+
+# ─────────────────── Индикаторы пропусков (issue #56) ───────────────────
+
+
+def test_build_preprocessor_indicator_columns_on_fit_transform():
+    """fit_transform с NaN в числовых признаках: индикаторы = 1 на пропусках,
+    импутированные значения корректны."""
+    df = pd.DataFrame(
+        {"num_a": [1.0, 2.0, np.nan, 4.0], "num_b": [10.0, 20.0, 30.0, np.nan]}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        imputation_strategy="mean",
+        scaling="none",
+    )
+    out = preprocessor.fit_transform(df)
+
+    # 2 импутированные колонки + 2 индикатора (по одному на признак с NaN)
+    assert out.shape == (4, 4)
+    # Импутация средним: mean([1,2,4]) = 7/3, mean([10,20,30]) = 20
+    np.testing.assert_allclose(out[:, 0], [1.0, 2.0, 7 / 3, 4.0])
+    np.testing.assert_allclose(out[:, 1], [10.0, 20.0, 30.0, 20.0])
+    # Индикаторы: 1 там, где был NaN, 0 иначе (порядок = порядок признаков)
+    np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0])
+    np.testing.assert_array_equal(out[:, 3], [0, 0, 0, 1])
+
+
+def test_build_preprocessor_indicator_only_for_missing_features():
+    """Полностью заполненный признак не получает индикатор (missing-only)."""
+    df = pd.DataFrame(
+        {"num_a": [1.0, 2.0, np.nan], "num_b": [10.0, 20.0, 30.0]}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="none",
+    )
+    out = preprocessor.fit_transform(df)
+
+    # num_b заполнен полностью → индикатор только для num_a
+    assert out.shape == (3, 3)
+    np.testing.assert_array_equal(out[:, 2], [0, 0, 1])
+
+
+def test_build_preprocessor_no_indicators_when_all_features_filled():
+    """Все числовые признаки заполнены → выход без индикаторов
+    (обратная совместимость с текущим поведением)."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0], "num_b": [10.0, 20.0, 30.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="none",
+    )
+    out = preprocessor.fit_transform(df)
+
+    assert out.shape == (3, 2)
+    np.testing.assert_allclose(out, df.to_numpy())
+
+
+def test_build_preprocessor_all_nan_on_transform_indicator_ones():
+    """Колонка со всеми NaN на transform: импутация константой из train +
+    индикатор со всеми 1."""
+    df_train = pd.DataFrame({"num_a": [1.0, np.nan, 3.0]})
+    df_test = pd.DataFrame({"num_a": [np.nan, np.nan]})
+    preprocessor = build_preprocessor(
+        list(df_train.columns),
+        categorical_features=[],
+        numerical_features=list(df_train.columns),
+        imputation_strategy="mean",
+        scaling="none",
+    )
+    preprocessor.fit(df_train)
+    out = preprocessor.transform(df_test)
+
+    assert out.shape == (2, 2)
+    np.testing.assert_allclose(out[:, 0], [2.0, 2.0])  # mean([1,3]) = 2
+    np.testing.assert_array_equal(out[:, 1], [1, 1])
+
+
+def test_build_preprocessor_missing_on_inference_without_indicator():
+    """Пропуск на инференсе в признаке без пропусков на train: значение
+    импутируется, индикатор не создаётся (features='missing-only')."""
+    df_train = pd.DataFrame({"num_a": [1.0, 2.0, 3.0]})
+    df_test = pd.DataFrame({"num_a": [1.0, np.nan, 3.0]})
+    preprocessor = build_preprocessor(
+        list(df_train.columns),
+        categorical_features=[],
+        numerical_features=list(df_train.columns),
+        imputation_strategy="mean",
+        scaling="none",
+    )
+    preprocessor.fit(df_train)
+    out = preprocessor.transform(df_test)
+
+    assert out.shape == (3, 1)
+    np.testing.assert_allclose(out[:, 0], [1.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize("scaling", ["standard", "robust", "none"])
+def test_build_preprocessor_indicator_with_all_scaling_types(scaling):
+    """Индикаторы корректно работают при scaling='standard'/'robust'/'none'."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling=scaling,
+    )
+    out = preprocessor.fit_transform(df)
+
+    assert out.shape == (4, 2)
+    assert np.isfinite(out).all()
+    # Индикатор отделяет строку с пропуском при любом scaling:
+    # значение в строке с NaN строго больше значений без пропуска
+    indicator = out[:, 1]
+    assert indicator[2] > indicator[0]
+    assert indicator[2] > indicator[1]
+    assert indicator[2] > indicator[3]
+
+
+def test_build_preprocessor_indicator_end_to_end_with_model():
+    """Сквозной сценарий: препроцессор + модель на данных с пропусками —
+    обучение и предсказание работают; число колонок = базовое + число
+    признаков с пропусками."""
+    from sklearn.linear_model import LinearRegression
+    from sklearn.pipeline import make_pipeline
+
+    rng = np.random.default_rng(0)
+    n = 50
+    df = pd.DataFrame(
+        {
+            "num_a": rng.normal(size=n),
+            "num_b": rng.normal(size=n),
+            "num_c": rng.normal(size=n),
+        }
+    )
+    df.iloc[0:10, 0] = np.nan
+    df.iloc[5:15, 2] = np.nan
+    y = df["num_a"].fillna(0.0).to_numpy() + df["num_b"].to_numpy()
+
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="none",
+    )
+    pipeline = make_pipeline(preprocessor, LinearRegression())
+    pipeline.fit(df, y)
+    preds = pipeline.predict(df)
+
+    assert preds.shape == (n,)
+    assert np.isfinite(preds).all()
+    # 3 базовые колонки + 2 индикатора (пропуски были в num_a и num_c)
+    assert preprocessor.transform(df).shape == (n, 5)
+
+
+def test_build_preprocessor_categorical_imputer_without_indicator():
+    """Категориальный пайплайн не меняется: SimpleImputer(strategy=
+    'most_frequent') без add_indicator (индикаторы только для числовых)."""
+    preprocessor = build_preprocessor(
+        ["cat", "num"],
+        categorical_features=["cat"],
+        numerical_features=["num"],
+    )
+    cat_transformers = dict(
+        (name, transformer)
+        for name, transformer, _ in preprocessor.transformers
+    )
+    cat_imputer = cat_transformers["cat"].named_steps["imputer"]
+    assert isinstance(cat_imputer, SimpleImputer)
+    assert cat_imputer.strategy == "most_frequent"
+    assert cat_imputer.add_indicator is False
+
+
+def test_build_preprocessor_add_indicator_false_omits_indicators():
+    """add_indicator=False отключает индикаторы пропусков (совместимость со
+    строго одномерными алгоритмами вроде isotonic_regression)."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="none",
+        add_indicator=False,
+    )
+    out = preprocessor.fit_transform(df)
+
+    # NaN импутирован, но индикаторная колонка не добавлена
+    assert out.shape == (4, 1)
+    np.testing.assert_allclose(out[:, 0], [1.0, 2.0, 7 / 3, 4.0])
+    imputer = _num_pipeline(preprocessor).named_steps["imputer"]
+    assert imputer.add_indicator is False
 
 
 # ─────────────────── Выбор колонок по имени (issue #2) ───────────────────────
