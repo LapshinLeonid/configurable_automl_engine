@@ -63,6 +63,7 @@ from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
+    _clean_uninformative_features,
     build_preprocessor,
 )
 from configurable_automl_engine.preprocessing_presets import (
@@ -244,6 +245,12 @@ class ModelTrainer:
             число строк (как в sklearn ``train_test_split``). По умолчанию 0.2.
         feature_names (list[str] | None): Список имен признаков,
             определенных при обучении.
+        dropped_features_ (list[str]): Имена колонок, удалённых очисткой
+            неинформативных признаков (пустых и строго константных) в
+            последнем вызове ``fit()`` (issue #57). Пустой список, если
+            очистка не применялась (вход без имён колонок) или ничего не
+            удалено. Заполняется только для ``pd.DataFrame``-входов: для
+            ``np.ndarray`` имён колонок нет, очистка не выполняется.
         preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
             предобработки (заполняется в процессе fit()).
         feature_selection_cfg (FeatureSelectionCfg): Валидированная
@@ -494,6 +501,10 @@ class ModelTrainer:
         self.base_model: Any = None
         self.val_score: float | None = None
         self.feature_names: list[str] | None = None
+        # Имена колонок, удалённых очисткой неинформативных признаков
+        # (issue #57). Заполняется в fit() для pd.DataFrame-входов; пустой
+        # список по умолчанию (pickle-совместимый атрибут).
+        self.dropped_features_: list[str] = []
         self._last_train_y: pd.Series | None = None
         self._last_val_y: pd.Series | None = None
 
@@ -1124,6 +1135,7 @@ class ModelTrainer:
             self.additional_scores = {}
             self.feature_selection_active_ = False
             self.selected_features_mask_ = None
+            self.dropped_features_ = []
 
             # Этап 1: Валидация и подготовка данных
             X_prepared, y_s = self._prepare_data(X, y)
@@ -1135,6 +1147,46 @@ class ModelTrainer:
                 raise TrainingError("Insufficient records for training")
 
             if isinstance(X_prepared, pd.DataFrame):
+                # Очистка неинформативных признаков (issue #57): полностью
+                # пустые и строго константные колонки удаляются ДО определения
+                # типов признаков и сборки препроцессора, чтобы HPO и финальное
+                # обучение работали с согласованным набором признаков (единая
+                # точка с tuner.optimize). Решение принимается только по
+                # обучающим данным (no leakage); для np.ndarray без имён колонок
+                # очистка не выполняется (задокументированное ограничение,
+                # как у detect_feature_types).
+                cleaned = _clean_uninformative_features(X_prepared)
+                self.dropped_features_ = [
+                    col for col in X_prepared.columns if col not in cleaned.columns
+                ]
+                if self.dropped_features_:
+                    X_prepared = cleaned
+                    # Обновляем feature_names на очищенный список: predict()
+                    # выравнивает колонки по self.feature_names (issue #2),
+                    # поэтому удалённые колонки на инференсе отбрасываются
+                    # автоматически, отсутствующие дают явную ошибку.
+                    if self.feature_names is not None:
+                        self.feature_names = [
+                            name
+                            for name in self.feature_names
+                            if name not in self.dropped_features_
+                        ]
+                    # Явно заданные пользователем списки колонок тоже обязаны
+                    # быть согласованы с очищенным набором признаков: иначе
+                    # _detect_feature_types/build_preprocessor упадут на
+                    # отсутствующих колонках.
+                    for attr in ("categorical_features", "numerical_features"):
+                        features = getattr(self, attr)
+                        if features is not None:
+                            setattr(
+                                self,
+                                attr,
+                                [
+                                    feature
+                                    for feature in features
+                                    if feature not in self.dropped_features_
+                                ],
+                            )
                 self._detect_feature_types(X_prepared, target_column="")
             else:
                 if self.categorical_features is None:

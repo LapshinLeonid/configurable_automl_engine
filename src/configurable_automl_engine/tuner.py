@@ -60,6 +60,7 @@ from configurable_automl_engine.models import (
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
+    _clean_uninformative_features,
     build_preprocessor,
     detect_feature_types,
 )
@@ -619,6 +620,11 @@ class _OptimizeRunner:
         self.target_encoding_fallback = target_encoding_fallback
         self.feature_selection_cfg = feature_selection_cfg
 
+        # Имена колонок, удалённых очисткой неинформативных признаков
+        # (issue #57). Заполняется в build_trial_pipeline для диагностики;
+        # пустой список по умолчанию.
+        self.dropped_features_: list[str] = []
+
         # Конфиг оверсэмплинга для сборки пайплайна (единая точка).
         self.oversampling_config: dict[str, Any] = {
             "active": data_oversampling,
@@ -840,7 +846,38 @@ class _OptimizeRunner:
         автоматически по алгоритму (FR-1). Используется та же логика, что и в
         финальном обучении (trainer.ModelTrainer), поэтому HPO и финальный fit
         согласованы (AC-6). Готовая фабрика пайплайна — ``assemble_estimator``.
+
+        Очистка неинформативных признаков (issue #57) применяется здесь же —
+        в той точке, где выполняется ``detect_feature_types``, до HPO-фолдов
+        и до финального обучения, чтобы обе фазы использовали согласованный
+        набор признаков. Очистка выполняется только в автономной ветке
+        (``self.preprocessor is None``): если пользователь передал готовый
+        препроцессор, он уже зафиксировал свой набор признаков, и молча
+        менять ``self.X`` нельзя. Для ``np.ndarray`` без имён колонок очистка
+        не выполняется (ограничение, как у ``detect_feature_types``); список
+        удалённых колонок сохраняется в ``self.dropped_features_``.
         """
+        self.dropped_features_ = []
+        if self.preprocessor is None and isinstance(self.X, pd.DataFrame):
+            cleaned = _clean_uninformative_features(self.X)
+            self.dropped_features_ = [
+                col for col in self.X.columns if col not in cleaned.columns
+            ]
+            if self.dropped_features_:
+                self.X = cleaned
+                # Явно переданные списки колонок согласуются с очищенным
+                # набором признаков: иначе build_preprocessor упадёт на
+                # отсутствующих колонках (Unknown feature name).
+                if self.categorical_features is not None:
+                    self.categorical_features = [
+                        col
+                        for col in self.categorical_features
+                        if col in self.X.columns
+                    ]
+                if self.numerical_features is not None:
+                    self.numerical_features = [
+                        col for col in self.numerical_features if col in self.X.columns
+                    ]
         if self.preprocessor is None:
             encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
             # Автоматический выбор пресета + применение явного override (FR-5).

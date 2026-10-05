@@ -19,6 +19,7 @@ from sklearn.preprocessing import (
 
 from configurable_automl_engine.preprocessing import (
     ColumnNameSelector,
+    _clean_uninformative_features,
     build_preprocessor,
     detect_feature_types,
 )
@@ -913,3 +914,213 @@ def test_build_preprocessor_force_dense_passthrough():
     assert isinstance(out, np.ndarray)
     assert out.shape == (3, 1)
 
+
+
+# ─────────────── Очистка неинформативных признаков (issue #57) ───────────────
+
+
+def test_clean_drops_all_nan_column():
+    """Колонка со 100% NaN удаляется; остальные колонки сохраняются."""
+    df = pd.DataFrame(
+        {
+            "good_num": [1.0, 2.0, 3.0],
+            "empty": [np.nan, np.nan, np.nan],
+            "good_cat": ["a", "b", "a"],
+        }
+    )
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["good_num", "good_cat"]
+    assert out.equals(df[["good_num", "good_cat"]])
+
+
+def test_clean_drops_constant_numeric_column():
+    """Строго константная числовая колонка удаляется."""
+    df = pd.DataFrame({"informative": [1.0, 2.0, 3.0], "const": [5.0, 5.0, 5.0]})
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["informative"]
+
+
+def test_clean_drops_constant_categorical_column():
+    """Константная категориальная колонка удаляется (бесполезна после one-hot)."""
+    df = pd.DataFrame(
+        {
+            "num": [1.0, 2.0, 3.0],
+            "const_cat": ["only", "only", "only"],
+            "multi_cat": ["x", "y", "x"],
+        }
+    )
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["num", "multi_cat"]
+
+
+def test_clean_nan_ratio_threshold_boundary():
+    """nan_ratio ровно на пороге (0.95) — колонка удаляется; чуть ниже — нет."""
+    # Колонка с долей пропусков ровно 0.95: 19 NaN из 20.
+    df_border = pd.DataFrame({"good": np.arange(20.0)})
+    df_border["border"] = [np.nan] * 19 + [1.0]
+    out_at = _clean_uninformative_features(df_border, max_nan_ratio=0.95)
+    assert "border" not in out_at.columns
+
+    # Чуть ниже порога: 18/20 = 0.9 < 0.95 — колонка сохраняется.
+    df_below = df_border.copy()
+    df_below["border"] = [np.nan] * 18 + [1.0, 2.0]
+    out_below = _clean_uninformative_features(df_below, max_nan_ratio=0.95)
+    assert "border" in out_below.columns
+
+
+def test_clean_combination_single_unique_with_nans_dropped():
+    """Колонка с одним уникальным значением после dropna и 10% NaN удаляется."""
+    df = pd.DataFrame(
+        {
+            "good": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            "almost_const": [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, np.nan, 7.0],
+        }
+    )
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["good"]
+
+
+def test_clean_min_unique_two_keeps_two_unique_values():
+    """min_unique=2: колонка с ровно 2 уникальными значениями сохраняется."""
+    df = pd.DataFrame({"a": [1.0, 2.0, 1.0, 2.0], "b": [0.0, 0.0, 0.0, 0.0]})
+    out = _clean_uninformative_features(df, min_unique=2)
+
+    assert list(out.columns) == ["a"]
+
+
+def test_clean_informative_two_unique_column_not_dropped():
+    """Информативная колонка с двумя уникальными значениями не удаляется."""
+    df = pd.DataFrame({"flag": [0, 1, 0, 1], "num": [1.0, 2.0, 3.0, 4.0]})
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["flag", "num"]
+
+
+def test_clean_all_columns_dropped_raises():
+    """Все колонки неинформативны -> ValueError (guard от пустой матрицы)."""
+    df = pd.DataFrame({"c1": [1.0, 1.0, 1.0], "c2": [np.nan, np.nan, np.nan]})
+    with pytest.raises(ValueError, match="uninformative"):
+        _clean_uninformative_features(df)
+
+
+def test_clean_single_column_preserved_even_if_constant():
+    """Единственная колонка сохраняется, даже если константна или пуста."""
+    const_df = pd.DataFrame({"only": [1.0, 1.0, 1.0]})
+    out_const = _clean_uninformative_features(const_df)
+    assert list(out_const.columns) == ["only"]
+
+    empty_df = pd.DataFrame({"only": [np.nan, np.nan, np.nan]})
+    out_empty = _clean_uninformative_features(empty_df)
+    assert list(out_empty.columns) == ["only"]
+
+
+def test_clean_is_idempotent():
+    """Повторный вызов на уже очищенных данных не меняет результат."""
+    df = pd.DataFrame(
+        {
+            "good": [1.0, 2.0, 3.0, 4.0],
+            "const": [0.5, 0.5, 0.5, 0.5],
+            "all_nan": [np.nan] * 4,
+        }
+    )
+    once = _clean_uninformative_features(df)
+    twice = _clean_uninformative_features(once)
+
+    assert list(twice.columns) == list(once.columns)
+    assert twice.equals(once)
+
+
+def test_clean_clean_data_unchanged():
+    """Колонки без пропусков и с дисперсией сохраняются (регрессия)."""
+    df = pd.DataFrame(
+        {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+    )
+    out = _clean_uninformative_features(df)
+
+    assert list(out.columns) == ["a", "b"]
+    assert out.equals(df)
+
+
+def test_clean_empty_dataframe_no_crash():
+    """Пустой DataFrame (0 строк / 0 колонок) обрабатывается без падений."""
+    empty_cols = pd.DataFrame()
+    out_cols = _clean_uninformative_features(empty_cols)
+    assert out_cols.shape == (0, 0)
+
+    empty_rows = pd.DataFrame({"a": [], "b": []})
+    out_rows = _clean_uninformative_features(empty_rows)
+    assert list(out_rows.columns) == ["a", "b"]
+    assert out_rows.shape == (0, 2)
+
+
+def test_clean_numpy_input_raises_type_error():
+    """np.ndarray без имён колонок отклоняется явной ошибкой (документальное
+    ограничение, как у detect_feature_types)."""
+    with pytest.raises(TypeError, match="pandas.DataFrame"):
+        _clean_uninformative_features(np.zeros((5, 3)))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"max_nan_ratio": 0.0}, "max_nan_ratio"),
+        ({"max_nan_ratio": 1.5}, "max_nan_ratio"),
+        ({"min_unique": 0}, "min_unique"),
+    ],
+)
+def test_clean_invalid_thresholds_raise(kwargs, match):
+    """Некорректные пороги отклоняются явной ошибкой."""
+    df = pd.DataFrame({"a": [1.0, 2.0]})
+    with pytest.raises(ValueError, match=match):
+        _clean_uninformative_features(df, **kwargs)
+
+
+def test_clean_does_not_mutate_input():
+    """Функция не мутирует исходный DataFrame."""
+    df = pd.DataFrame({"good": [1.0, 2.0], "const": [0.0, 0.0]})
+    _clean_uninformative_features(df)
+
+    assert list(df.columns) == ["good", "const"]
+
+
+def test_clean_removes_zero_variance_constant_column_via_preprocessor():
+    """Мотивация issue #57: константная колонка даёт нулевую дисперсию через
+    препроцессор (q75 == q25 у RobustScaler; в старых версиях sklearn —
+    NaN/±inf из-за деления на нулевой IQR), очистка убирает мусор до сборки."""
+    df = pd.DataFrame(
+        {"informative": [1.0, 2.0, 3.0, 4.0, 5.0], "const": [7.0] * 5}
+    )
+
+    # Без очистки константная колонка проходит через скалер нулевой
+    # дисперсией — «мусорное» измерение в матрице расстояний метрических
+    # моделей (SVR/KNN/Ridge).
+    dirty_preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        imputation_strategy="median",
+        scaling="robust",
+    )
+    dirty_out = dirty_preprocessor.fit_transform(df)
+    assert np.isfinite(dirty_out).all()
+    assert dirty_out[:, 1].std() == 0.0  # константная колонка -> нулевая дисперсия
+
+    # С очисткой константная колонка удаляется, остаётся один информативный
+    # признак с ненулевой дисперсией.
+    cleaned = _clean_uninformative_features(df)
+    assert list(cleaned.columns) == ["informative"]
+    clean_preprocessor = build_preprocessor(
+        list(cleaned.columns),
+        categorical_features=[],
+        numerical_features=list(cleaned.columns),
+        imputation_strategy="median",
+        scaling="robust",
+    )
+    clean_out = clean_preprocessor.fit_transform(cleaned)
+    assert np.isfinite(clean_out).all()
+    assert clean_out.shape == (5, 1)
+    assert clean_out[:, 0].std() > 0.0

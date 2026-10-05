@@ -2573,3 +2573,132 @@ def test_train_model_feature_selection_dict_config_real_training():
     score = train_model(config, "r2", {}, X, y)
     assert isinstance(score, float)
     assert 0.0 < score <= 1.0
+
+
+# ─────────── Очистка неинформативных признаков (issue #57) ───────────────────
+
+
+def _garbage_df(n: int = 120, seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Чистый и «грязный» DataFrame с одинаковыми информативными колонками.
+
+    Грязная версия добавляет мусорные колонки: константную числовую,
+    полностью пустую, почти пустую (>= 95% NaN) и константную категориальную.
+    """
+    rng = np.random.default_rng(seed)
+    X_clean = pd.DataFrame({"x1": rng.normal(size=n), "x2": rng.normal(size=n)})
+    y = 2.0 * X_clean["x1"] - 1.5 * X_clean["x2"] + rng.normal(0, 0.1, n)
+
+    X_dirty = X_clean.copy()
+    X_dirty["const_num"] = 5.0
+    X_dirty["all_nan"] = np.nan
+    X_dirty["almost_empty"] = [np.nan] * (n - 1) + [1.0]
+    X_dirty["const_cat"] = "only"
+    return X_clean, X_dirty, y
+
+
+def test_fit_drops_uninformative_features():
+    """fit() удаляет пустые и константные колонки ДО определения типов:
+    feature_names обрезается, dropped_features_ фиксирует удалённое."""
+    X_clean, X_dirty, y = _garbage_df()
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
+        X_dirty, y
+    )
+
+    assert set(trainer.dropped_features_) == {
+        "const_num",
+        "all_nan",
+        "almost_empty",
+        "const_cat",
+    }
+    assert trainer.feature_names == ["x1", "x2"]
+    assert trainer.val_score is not None and np.isfinite(trainer.val_score)
+    # Паттерн единой точки: препроцессор обучен только на очищенных колонках.
+    preprocessor = trainer.pipeline.named_steps["preprocessor"]
+    assert set(preprocessor.feature_names_in_) == {"x1", "x2"}
+
+
+@pytest.mark.parametrize("algo", ["ridge", "svr", "knn"])
+def test_metric_models_with_garbage_columns_train_and_score(algo):
+    """Мотивационный сценарий: SVR/KNN/Ridge на данных с мусорными колонками
+    обучаются без NaN/мусора, метрики не хуже, чем на данных без мусора."""
+    X_clean, X_dirty, y = _garbage_df()
+    trainer_clean = ModelTrainer(algorithm=algo, random_state=0).fit(X_clean, y)
+    trainer_dirty = ModelTrainer(algorithm=algo, random_state=0).fit(X_dirty, y)
+
+    assert trainer_dirty.val_score is not None
+    assert np.isfinite(trainer_dirty.val_score)
+    assert trainer_clean.val_score is not None
+    assert np.isfinite(trainer_clean.val_score)
+    # После очистки набор признаков идентичен чистым данным -> качество не хуже.
+    assert trainer_dirty.val_score >= trainer_clean.val_score - 1e-12
+
+
+def test_predict_after_cleaning_drops_extra_columns():
+    """predict() после обучения с очисткой отбрасывает лишние колонки
+    (в т.ч. мусорные) — поведение issue #2 сохраняется."""
+    X_clean, X_dirty, y = _garbage_df()
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
+        X_dirty, y
+    )
+
+    baseline = trainer.predict(X_clean)
+    assert np.isfinite(baseline).all()
+    # Вход с лишними (мусорными) колонками даёт тот же результат.
+    with_extra = trainer.predict(X_dirty)
+    assert np.allclose(baseline, with_extra)
+
+
+def test_predict_after_cleaning_missing_column_raises():
+    """predict() после обучения с очисткой: отсутствующая информативная
+    колонка даёт явную ошибку."""
+    X_clean, X_dirty, y = _garbage_df()
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
+        X_dirty, y
+    )
+
+    missing = X_clean.drop(columns=["x2"])
+    with pytest.raises(TrainingError, match="Missing columns in prediction data"):
+        trainer.predict(missing)
+
+
+def test_trainer_cleaning_survives_save_load(tmp_path):
+    """trainer.save()/load(): feature_names уже обрезаны, удалённые колонки
+    восстановимы из dropped_features_."""
+    X_clean, X_dirty, y = _garbage_df()
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
+        X_dirty, y
+    )
+    pkl = tmp_path / "cleaned.pkl"
+    trainer.save(pkl)
+    restored = ModelTrainer.load(pkl)
+
+    assert restored.feature_names == ["x1", "x2"]
+    assert set(restored.dropped_features_) == set(trainer.dropped_features_)
+    assert np.allclose(restored.predict(X_clean), trainer.predict(X_clean))
+
+
+def test_fit_numpy_input_skips_cleaning():
+    """np.ndarray без имён колонок: очистка не выполняется (ограничение),
+    обучение проходит без падений."""
+    rng = np.random.default_rng(0)
+    X_arr = rng.normal(size=(80, 3))
+    y_arr = X_arr[:, 0] * 2.0 + rng.normal(0, 0.1, 80)
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
+        X_arr, y_arr
+    )
+
+    assert trainer.dropped_features_ == []
+    assert trainer.feature_names == ["col_0", "col_1", "col_2"]
+    assert trainer.val_score is not None and np.isfinite(trainer.val_score)
+
+
+def test_fit_clean_data_feature_count_unchanged():
+    """Регрессия: на данных без мусорных колонок очистка не меняет число
+    признаков и dropped_features_ пуст."""
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame({"a": rng.normal(size=60), "b": rng.normal(size=60)})
+    y = X["a"] + 0.5 * X["b"] + rng.normal(0, 0.05, 60)
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+
+    assert trainer.dropped_features_ == []
+    assert trainer.feature_names == ["a", "b"]

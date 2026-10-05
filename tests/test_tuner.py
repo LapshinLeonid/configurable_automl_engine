@@ -1613,6 +1613,182 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
         assert best_score is None
 
 
+# ─────────── Очистка неинформативных признаков (issue #57) ───────────────────
+
+
+def _tuner_garbage_data(n: int = 120, seed: int = 7) -> tuple[pd.DataFrame, pd.Series]:
+    """DataFrame с информативными колонками и мусором (константные/пустые)."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "const_num": 5.0,
+            "all_nan": np.nan,
+            "almost_empty": [np.nan] * (n - 1) + [1.0],
+            "const_cat": "only",
+        }
+    )
+    y = pd.Series(2.0 * X["x1"] - 1.5 * X["x2"] + rng.normal(0, 0.1, n))
+    return X, y
+
+
+def test_optimize_cleans_uninformative_features():
+    """optimize() очищает мусорные колонки до построения препроцессора:
+    финальная модель работает с информативными признаками, предсказания
+    конечны, лишние колонки на входе не влияют на результат."""
+    X, y = _tuner_garbage_data()
+
+    model, params, score = hyperopt.optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+        space_overrides={
+            "ridge": lambda t: {"alpha": t.suggest_float("alpha", 0.05, 0.5)}
+        },
+    )
+
+    assert isinstance(score, float) and np.isfinite(score)
+    assert isinstance(params, dict) and params
+    assert hasattr(model, "predict")
+    # Модель обучалась на очищенных данных: предсказания конечны и устойчивы
+    # к лишним (мусорным) колонкам на входе.
+    preds = model.predict(X)
+    assert np.isfinite(preds).all()
+    preds_clean = model.predict(X[["x1", "x2"]])
+    assert np.allclose(preds, preds_clean)
+
+    # Препроцессор собран только по 2 информативным колонкам (не 6).
+    preprocessor = model.named_steps["preprocessor"]
+    out = preprocessor.transform(X[["x1", "x2"]])
+    assert out.shape[1] == 2
+
+
+def test_optimize_numpy_input_skips_cleaning():
+    """np.ndarray без имён колонок: очистка пропускается (ограничение),
+    оптимизация проходит без падений."""
+    rng = np.random.default_rng(3)
+    X_arr = rng.normal(size=(100, 3))
+    y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
+
+    model, params, score = hyperopt.optimize(
+        "ridge",
+        X_arr,
+        y_arr,
+        n_trials=2,
+        random_state=0,
+        space_overrides={
+            "ridge": lambda t: {"alpha": t.suggest_float("alpha", 0.05, 0.5)}
+        },
+    )
+
+    assert isinstance(score, float) and np.isfinite(score)
+    assert hasattr(model, "predict")
+    assert np.isfinite(model.predict(X_arr)).all()
+
+
+def test_runner_dropped_features_recorded():
+    """_OptimizeRunner фиксирует список удалённых колонок для диагностики."""
+    X, y = _tuner_garbage_data()
+    runner = hyperopt._OptimizeRunner(
+        algo_name="ridge",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding=None,
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    assert set(runner.dropped_features_) == {
+        "const_num",
+        "all_nan",
+        "almost_empty",
+        "const_cat",
+    }
+    assert set(runner.X.columns) == {"x1", "x2"}
+    assert runner.preprocessor is not None
+
+
+def test_optimize_external_preprocessor_skips_cleaning():
+    """Если передан готовый preprocessor, очистка self.X не выполняется:
+    пользователь сам зафиксировал набор признаков."""
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = _tuner_garbage_data()
+    external = ColumnTransformer(
+        transformers=[("num", StandardScaler(), ["x1", "x2"])]
+    )
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="ridge",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=external,
+        categorical_features=None,
+        numerical_features=None,
+        encoding=None,
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    assert runner.dropped_features_ == []
+    assert set(runner.X.columns) == {
+        "x1",
+        "x2",
+        "const_num",
+        "all_nan",
+        "almost_empty",
+        "const_cat",
+    }
+    assert runner.preprocessor is external
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Индикаторы пропусков: безопасный fallback в tuner (issue #56)
 # ──────────────────────────────────────────────────────────────────────────────

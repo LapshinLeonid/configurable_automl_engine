@@ -1,10 +1,16 @@
 """Preprocessing: единая точка построения препроцессора признаков.
 
-Модуль инкапсулирует два низкоуровневых кирпича подготовки данных:
+Модуль инкапсулирует низкоуровневые кирпичи подготовки данных:
 
-    1. :func:`detect_feature_types` — автоопределение категориальных и
+    1. :func:`_clean_uninformative_features` — удаление неинформативных
+       колонок (полностью пустых и строго константных) до определения типов
+       признаков и сборки препроцессора (issue #57). Применяется одинаково
+       в фазе HPO (``tuner.optimize``) и финальном обучении
+       (``trainer.ModelTrainer``), чтобы обе фазы работали с согласованным
+       набором признаков.
+    2. :func:`detect_feature_types` — автоопределение категориальных и
        числовых колонок по ``pd.DataFrame``.
-    2. :func:`build_preprocessor` — сборка ``sklearn.ColumnTransformer``
+    3. :func:`build_preprocessor` — сборка ``sklearn.ColumnTransformer``
        с предобработкой категорий (импутация ``most_frequent`` + выбранная
        стратегия кодирования) и скалированием для числовых признаков.
        Стратегия обработки числовых признаков (стратегия импутации и тип
@@ -761,6 +767,126 @@ def detect_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
     ).columns.tolist()
     numerical = X.select_dtypes(include=["number"]).columns.tolist()
     return categorical, numerical
+
+
+def _clean_uninformative_features(
+    X: pd.DataFrame,
+    max_nan_ratio: float = 0.95,
+    min_unique: int = 2,
+) -> pd.DataFrame:
+    """Удалить неинформативные колонки: пустые и строго константные.
+
+    Колонка считается неинформативной, если выполняется хотя бы одно из
+    условий:
+
+    1. Доля пропусков ``>= max_nan_ratio`` (по умолчанию 0.95): импутация
+       средним/медианой заменяет почти все значения одной константой, после
+       скалирования колонка либо не несёт информации (нулевой вклад в
+       расстояния), либо вносит смещение в матрицу расстояний метрических
+       моделей (SVR/KNN/Ridge).
+    2. Число уникальных значений без учёта NaN ``< min_unique`` (по
+       умолчанию 2): строго константная колонка после импутации и
+       масштабирования имеет нулевую дисперсию; для ``RobustScaler`` деление
+       на нулевой IQR (``q75 == q25``) даёт NaN/±inf, что ломает обучение.
+       Константная категориальная колонка бесполезна и после one-hot
+       кодирования (константный бинарный столбец), поэтому тоже удаляется.
+
+    Решение принимается **только по обучающим данным** (no leakage) и
+    фиксируется на этапе обучения: колонка, пустая на train, но
+    информативная на инференсе, будет отброшена и на проде
+    (задокументированное поведение). Это консистентно с ``detect_feature_types``,
+    который также вычисляется по полным данным. Функция идемпотентна: повторный
+    вызов на уже очищенных данных не меняет результат.
+
+    Защитные правила (guard):
+
+    * DataFrame без колонок (``X.shape[1] == 0``) или без строк
+      (``X.shape[0] == 0``) возвращается без изменений — очистка не падает.
+    * Единственная колонка никогда не удаляется, даже если константна или
+      пуста: иначе получилась бы пустая матрица признаков.
+    * Если под удаление попадают **все** колонки (при ``P >= 2``) — бросается
+      :class:`ValueError`: пустой набор признаков недопустим. Это аналог
+      ``FeatureSelector.min_features_guard`` (``feature_selection.py``), но на
+      этапе подготовки данных ошибка явная, а не молчаливый passthrough.
+
+    Args:
+        X: DataFrame признаков (без целевой переменной).
+        max_nan_ratio: Порог доли пропусков в ``(0, 1]``: колонки с долей NaN
+            ``>=`` порога удаляются. ``1.0`` — удаляются только полностью
+            пустые колонки.
+        min_unique: Минимальное число уникальных значений без учёта NaN
+            (``>= 1``), при котором колонка считается информативной. Значение
+            ``2`` (по умолчанию) удаляет строго константные колонки;
+            значение ``1`` оставляет их (полезно только вместе с правилом
+            пропусков).
+
+    Returns:
+        Копия ``X`` без неинформативных колонок (исходный объект не
+        мутируется). Если удалять нечего — возвращается исходный ``X``.
+
+    Raises:
+        TypeError: Если ``X`` не является ``pd.DataFrame``. Для ``np.ndarray``
+            без имён колонок очистка невозможна (задокументированное
+            ограничение, как у :func:`detect_feature_types`).
+        ValueError: Если пороги некорректны либо под удаление попадают все
+            колонки (пустой набор признаков).
+    """
+    if not isinstance(X, pd.DataFrame):
+        raise TypeError(
+            "_clean_uninformative_features expects a pandas.DataFrame, got "
+            f"{type(X).__name__}. Column names are required to identify "
+            "uninformative features (same limitation as detect_feature_types)."
+        )
+    if not 0.0 < max_nan_ratio <= 1.0:
+        raise ValueError(f"max_nan_ratio must be in (0, 1], got {max_nan_ratio!r}.")
+    if min_unique < 1:
+        raise ValueError(f"min_unique must be >= 1, got {min_unique!r}.")
+
+    n_cols = X.shape[1]
+    # Пустой DataFrame (0 строк / 0 колонок) — корректная обработка без
+    # падений: очищать нечего.
+    if n_cols == 0 or X.shape[0] == 0:
+        return X
+    # Единственная колонка сохраняется всегда, даже если константна или
+    # пуста: иначе останется пустая матрица признаков.
+    if n_cols == 1:
+        return X
+
+    # 1. Колонки с долей пропусков >= max_nan_ratio (в т.ч. полностью пустые).
+    nan_ratios = X.isna().mean()
+    drop_cols = list(nan_ratios[nan_ratios >= max_nan_ratio].index)
+
+    # 2. Строго константные колонки: ровно одно уникальное значение без учёта
+    # NaN (для полностью пустой колонки nunique() == 0, но такие колонки уже
+    # покрыты правилом пропусков при max_nan_ratio <= 1.0).
+    for col in X.columns:
+        if col not in drop_cols and X[col].dropna().nunique() < min_unique:
+            drop_cols.append(col)
+
+    if not drop_cols:
+        logger.debug(
+            "No uninformative columns to drop (max_nan_ratio=%s, min_unique=%d, "
+            "n_columns=%d)",
+            max_nan_ratio,
+            min_unique,
+            n_cols,
+        )
+        return X
+    if len(drop_cols) >= n_cols:
+        raise ValueError(
+            "All columns are uninformative and would be dropped: "
+            f"{drop_cols}. Refusing to produce an empty feature matrix."
+        )
+
+    logger.warning("Dropping uninformative/empty columns: %s", drop_cols)
+    logger.debug(
+        "Cleanup thresholds: max_nan_ratio=%s, min_unique=%d; dropped %d of %d columns",
+        max_nan_ratio,
+        min_unique,
+        len(drop_cols),
+        n_cols,
+    )
+    return X.drop(columns=drop_cols)
 
 
 def build_preprocessor(
