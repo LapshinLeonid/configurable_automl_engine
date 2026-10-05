@@ -1495,3 +1495,118 @@ def test_fs_pipeline_from_optimize_serializes(tmp_path: Path, noisy_fs_data):
 
     assert "feature_selector" in restored.named_steps
     assert np.array_equal(model.predict(X), restored.predict(X))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. Регрессия рефакторинга optimize() на шаги (issue #30, блокер B1)
+# ══════════════════════════════════════════════════════════════════════════════
+# Генерация гиперпараметров (space_fn) и конструктора модели (create_model)
+# выполняется в _objective ВНЕ try/except: их ошибки обязаны пробрасываться
+# наружу (триал FAIL + исключение из study.optimize), а не превращаться в
+# тихие pruned-триалы → (None, None, None) или учитываться circuit breaker'ом.
+def test_space_fn_error_marks_trial_failed_and_propagates(toy_data):
+    """B1: ValueError из пользовательской space-функции → FAIL, а не PRUNED.
+
+    Исходный контракт: ошибка в space-функции отмечает триал как FAIL и
+    прерывает study.optimize (исключение наружу), что делает провал видимым
+    для вызывающего кода, а не маскирует его под отсечённый триал.
+    """
+    X, y = toy_data
+    real_study = optuna.create_study(direction="maximize")
+
+    def space_raises(trial):
+        trial.suggest_float("alpha", 0.0, 1.0)
+        raise ValueError("user space fn boom")
+
+    with patch(
+        "configurable_automl_engine.tuner.optuna.create_study", return_value=real_study
+    ):
+        with pytest.raises(ValueError, match="user space fn boom"):
+            optimize(
+                "ridge",
+                X,
+                y,
+                n_trials=2,
+                space_overrides={"ridge": space_raises},
+            )
+
+    assert real_study.trials[0].state == optuna.trial.TrialState.FAIL
+    # Отсечения не происходит: это не ранняя остановка и не нефатальный сбой.
+    assert all(t.state != optuna.trial.TrialState.PRUNED for t in real_study.trials)
+
+
+def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
+    """B1: сбой конструктора модели (MemoryError) → FAIL, а не дисквалификация.
+
+    Ошибка конструктора не является фатальным сбоем ОЦЕНКИ: она не должна
+    инкрементировать consecutive_fatal_failures и приводить к
+    InvalidAlgorithmError после N попыток — контракт исходного кода.
+    """
+    X, y = toy_data
+    real_study = optuna.create_study(direction="maximize")
+
+    def exploding_model(algo, **kwargs):
+        raise MemoryError("model constructor boom")
+
+    with (
+        patch(
+            "configurable_automl_engine.tuner.optuna.create_study",
+            return_value=real_study,
+        ),
+        patch(
+            "configurable_automl_engine.tuner.create_model",
+            side_effect=exploding_model,
+        ),
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.tuner._build_scorer"),
+    ):
+        with pytest.raises(MemoryError, match="model constructor boom"):
+            optimize(
+                "ridge",
+                X,
+                y,
+                n_trials=5,
+                space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+            )
+
+    # Первый же триал FAIL — без накопления счётчика фатальных сбоев
+    # (иначе после 5 попыток был бы InvalidAlgorithmError, а не MemoryError).
+    assert real_study.trials[0].state == optuna.trial.TrialState.FAIL
+    assert len(real_study.trials) == 1
+
+
+def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
+    """B1: ValueError на этапе ОЦЕНКИ (fit/scoring) по-прежнему → PRUNED.
+
+    Разделение сохранено: за пределами try/except остались только генерация
+    параметров/модели; ошибки самой оценки обрабатываются handle_failure
+    как раньше (нефатальный ValueError → TrialPruned, без дисквалификации).
+    """
+    X, y = toy_data
+    with (
+        patch(
+            "configurable_automl_engine.tuner.model_selection.cross_val_score"
+        ) as mock_cv,
+        patch("configurable_automl_engine.tuner.create_model"),
+        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+    ):
+        mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+        # Все 10 вызовов cross_val_score (этап оценки) кидают ValueError
+        mock_cv.side_effect = ValueError("non-fatal scoring error")
+
+        best_algo, best_model, best_score = optimize(
+            algo_name="rf",
+            X=X,
+            y=y,
+            n_trials=10,
+            space_overrides={"rf": lambda trial: {"n_estimators": 10}},
+        )
+        # Ни один триал не завершён → контракт «нет валидного результата»
+        # (issue #13/#32): сплошной None, без InvalidAlgorithmError.
+        assert best_algo is None
+        assert best_model is None
+        assert best_score is None

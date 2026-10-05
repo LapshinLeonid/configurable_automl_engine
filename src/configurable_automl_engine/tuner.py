@@ -853,37 +853,22 @@ class _OptimizeRunner:
             return model_impl
         return ImbPipeline(steps)
 
-    def evaluate_trial(self, trial: Trial) -> float:
-        """Оценить один триал Optuna и вернуть целевую метрику (шаг 4).
+    def _resolve_apply_fs(self, trial: Trial) -> bool:
+        """Определить необходимость отбора признаков для текущего испытания.
 
-        Генерирует гиперпараметры через ``space_fn``, собирает пайплайн
-        (``assemble_estimator``) и оценивает его по выбранной стратегии
-        валидации. Нефинитный результат (+inf при ошибке nrmse или NaN)
-        заменяется на ``HPO_WORST_SCORE`` — сентинел «худшего» исхода.
+        В режиме 'auto' Optuna сама исследует пространство решений (выгодно
+        ли сокращать признаки), в 'always'/'disabled' решение жёстко следует
+        конфигурации. Для isotonic_regression категория use_feature_selection
+        не предлагается даже в режиме 'auto': отбор принудительно выключен
+        (одномерный алгоритм со своим IsotonicDataTransformer), поэтому
+        предложение было бы бессмысленным, а служебный ключ не должен попадать
+        в best_params.
 
         Args:
             trial (Trial): Объект текущего испытания Optuna.
         Returns:
-            float: Значение целевой метрики на текущем наборе параметров.
-        Raises:
-            ValueError: Нефатальная ошибка оценки (триал отсекается).
-            MemoryError, RuntimeError, InvalidDataError: Фатальные сбои —
-                учитываются в счётчике ``handle_failure``.
-            optuna.TrialPruned: Отсечение прунером ранней остановки.
+            bool: Нужно ли включать шаг ``feature_selector`` в пайплайн.
         """
-        # 1. гиперпараметры и модель
-        params = self.space_fn(trial)
-        model = create_model(self.algo, **params)
-
-        # --- ШАГ 2: ПОДГОТОВКА ОБЕРТКИ (WRAPPER) ---
-        # Определение необходимости отбора признаков для текущего испытания:
-        # в режиме 'auto' Optuna сама исследует пространство решений
-        # (выгодно ли сокращать признаки), в 'always'/'disabled' решение
-        # жёстко следует конфигурации. Для isotonic_regression категория
-        # use_feature_selection не предлагается даже в режиме 'auto': отбор
-        # принудительно выключен (одномерный алгоритм со своим
-        # IsotonicDataTransformer), поэтому предложение было бы бессмысленным,
-        # а служебный ключ не должен попадать в best_params.
         if self.fs_mode == FeatureSelectionMode.auto and not self.is_isotonic:
             apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
         elif self.fs_mode == FeatureSelectionMode.always:
@@ -895,10 +880,31 @@ class _OptimizeRunner:
         # (в т.ч. если 'always' или enqueued initial_params пронесли флаг).
         if self.is_isotonic:
             apply_fs = False
+        return apply_fs
 
-        current_estimator = self.assemble_estimator(model, apply_fs=apply_fs)
+    def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
+        """Оценить собранный пайплайн триала и вернуть целевую метрику (шаг 4).
 
-        # 3. оценка по стратегии валидации
+        Оценивает ``current_estimator`` по выбранной стратегии валидации.
+        Нефинитный результат (+inf при ошибке nrmse или NaN) заменяется на
+        ``HPO_WORST_SCORE`` — сентинел «худшего» исхода. Генерация
+        гиперпараметров и сборка пайплайна выполняются в ``_objective`` ДО
+        вызова этого метода и вне try/except: ошибки пользовательской
+        space-функции или конструктора модели обязаны пробрасываться наружу
+        (триал FAIL), а не превращаться в pruned/дисквалификацию.
+
+        Args:
+            trial (Trial): Объект текущего испытания Optuna.
+            current_estimator (Any): Пайплайн/модель текущего испытания.
+        Returns:
+            float: Значение целевой метрики на текущем наборе параметров.
+        Raises:
+            ValueError: Нефатальная ошибка оценки (триал отсекается).
+            MemoryError, RuntimeError, InvalidDataError: Фатальные сбои —
+                учитываются в счётчике ``handle_failure``.
+            optuna.TrialPruned: Отсечение прунером ранней остановки.
+        """
+        # 1. оценка по стратегии валидации
         if self.val_method_eff == "train_test_split":
             # Если 'auto' было разрешено в make_cv — используем уже вычисленный
             # (dataset-зависимый) целочисленный test_size, чтобы iter_splits
@@ -991,9 +997,13 @@ class _OptimizeRunner:
         """Целевая функция Optuna: evaluate_trial + handle_failure (issue #30).
 
         Разделяет оценку триала (``evaluate_trial``) и обработку его сбоя
-        (``handle_failure``) на отдельные шаги. Счётчик подряд идущих
-        фатальных сбоев сбрасывается при любом нефатальном исходе: успехе,
-        отсечении прунером (optuna.TrialPruned из
+        (``handle_failure``) на отдельные шаги. Генерация гиперпараметров и
+        сборка пайплайна выполняются ВНЕ try/except — как в исходной
+        реализации: ошибки пользовательской space-функции или конструктора
+        модели должны пробрасываться наружу (триал FAIL и исключение из
+        ``study.optimize``), а не превращаться в тихий pruned/дисквалификацию.
+        Счётчик подряд идущих фатальных сбоев сбрасывается при любом
+        нефатальном исходе: успехе, отсечении прунером (optuna.TrialPruned из
         ``_evaluate_with_intermediate_reports``) или нефатальном ValueError.
 
         Args:
@@ -1004,9 +1014,18 @@ class _OptimizeRunner:
             optuna.TrialPruned: Если триал отсечён (ошибкой или прайнером).
             InvalidAlgorithmError: При превышении лимита фатальных ошибок.
         """
+        # 1. гиперпараметры, модель и сборка пайплайна — вне try/except
+        #    (контракт исходного кода: их ошибки не относятся к фатальным
+        #    сбоям оценки и не учитываются circuit breaker'ом).
+        params = self.space_fn(trial)
+        model = create_model(self.algo, **params)
+        current_estimator = self.assemble_estimator(
+            model, apply_fs=self._resolve_apply_fs(trial)
+        )
+
         fatal_failure = False
         try:
-            return self.evaluate_trial(trial)
+            return self.evaluate_trial(trial, current_estimator)
         except (ValueError, MemoryError, RuntimeError, InvalidDataError) as err:
             fatal_failure = not isinstance(err, ValueError)
             self.handle_failure(trial, err)
