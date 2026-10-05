@@ -287,6 +287,63 @@ def test_tuner_svr_callable_override_unchanged(monkeypatch):
     assert 0.2 <= params["epsilon"] <= 0.3
 
 
+def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
+    """enqueue_trial: epsilon из предыдущей фазы (refine_winner) валиден в адаптивном диапазоне.
+
+    Границы считаются от того же y_train в обеих фазах, поэтому значение
+    победителя первой фазы гарантированно лежит внутри диапазона второй.
+    """
+    X = pd.DataFrame(np.random.randn(80, 5))
+    y = pd.Series(np.random.randn(80))
+    low, high = compute_svr_epsilon_bounds(y)
+    prev_epsilon = (low + high) / 2.0  # «победитель» предыдущей фазы
+
+    seen: list[float] = []
+    _mock_optimize_infra(monkeypatch, seen)
+
+    _, params, _ = optimize(
+        "svr",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        initial_params={
+            "C": 1.0,
+            "epsilon": prev_epsilon,
+            "kernel": "rbf",
+            "gamma": "scale",
+        },
+    )
+
+    assert low <= prev_epsilon <= high
+    assert seen[0] == prev_epsilon  # первый триал — enqueued значение
+    assert low <= params["epsilon"] <= high
+
+
+def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
+    """σ = 0 + пользовательский epsilon → работает пользовательское значение, не fallback."""
+    X = pd.DataFrame(np.random.randn(60, 5))
+    y = pd.Series([1.0] * 60)  # константный y → σ = 0
+
+    seen: list[float] = []
+    _mock_optimize_infra(monkeypatch, seen)
+
+    user_eps = SearchSpaceEntry.model_validate([0.5, 1.0, "float_log"])
+    _, params, _ = optimize(
+        "svr",
+        X,
+        y,
+        n_trials=4,
+        random_state=42,
+        space_overrides={"svr": {"epsilon": user_eps}},
+    )
+
+    assert seen
+    for eps in seen:
+        assert 0.5 <= eps <= 1.0  # пользовательский диапазон, а не fallback (1e-4, 1e-2)
+    assert 0.5 <= params["epsilon"] <= 1.0
+
+
 def test_tuner_svr_constant_y_falls_back(monkeypatch):
     """Константный y → fallback (1e-4, 1e-2), запуск без исключений."""
     X = pd.DataFrame(np.random.randn(60, 5))
