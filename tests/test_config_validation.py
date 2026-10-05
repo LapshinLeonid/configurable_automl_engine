@@ -507,6 +507,37 @@ def test_search_space_bounds_property():
     assert entry_cat.bounds == [["a", "b"], "categorical"]
 
 
+# 5a. Тест состава DEFAULT_SPACES['svr'] (issue #58): только надёжные ядра
+def test_default_svr_kernel_space_only_reliable_kernels():
+    """В пространстве поиска SVR остаются только ядра rbf и linear.
+
+    Позитивный сценарий: options == ["rbf", "linear"].
+    Негативный сценарий: 'sigmoid' и 'poly' исключены из перебора.
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+
+    kernel_entry = DEFAULT_SPACES["svr"]["kernel"]
+    assert kernel_entry.dist_type == "categorical"
+    assert kernel_entry.config.options == ["rbf", "linear"]
+    assert "sigmoid" not in kernel_entry.config.options
+    assert "poly" not in kernel_entry.config.options
+
+
+def test_default_svr_gamma_stays_in_space():
+    """Параметр gamma остаётся в пространстве поиска SVR.
+
+    Для rbf он используется, для linear игнорируется sklearn —
+    удалять его не требуется (issue #58).
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+
+    svr_space = DEFAULT_SPACES["svr"]
+    assert "gamma" in svr_space
+    gamma_entry = svr_space["gamma"]
+    assert gamma_entry.dist_type == "categorical"
+    assert gamma_entry.config.options == ["scale", "auto"]
+
+
 # 6. Тест для: _check_algorithm_dependencies (проверка установленных пакетов)
 def test_algorithm_dependency_check():
     # Мокаем маппинг и функцию проверки установки

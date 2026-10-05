@@ -144,6 +144,22 @@ def test_create_model_svr_user_max_iter():
     assert model.max_iter == 5000
 
 
+def test_create_model_svr_explicit_sigmoid_kernel_allowed():
+    """Явно заданный пользователем kernel='sigmoid' продолжает работать.
+
+    Регрессионный тест на issue #58: правка DEFAULT_SPACES['svr'] исключает
+    sigmoid/poly только из автоматического перебора HPO. Валидация построена
+    на get_allowed_hyperparameters (сигнатура конструктора SVR), поэтому явный
+    выбор 'sigmoid' через hyperparameters / space_overrides не запрещается.
+    """
+    allowed = get_allowed_hyperparameters("svr")
+    assert "kernel" in allowed
+
+    model = create_model("svr", C=1.0, kernel="sigmoid")
+    assert isinstance(model, SVR)
+    assert model.kernel == "sigmoid"
+
+
 def test_clean_hyperparameters_logs_remapped(caplog):
     """clean_hyperparameters logs at DEBUG level when remapping."""
     with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.models"):

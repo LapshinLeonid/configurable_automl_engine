@@ -210,9 +210,10 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "svr": {
         "C": SearchSpaceEntry.model_validate([1e-2, 100.0, "float_log"]),
         "epsilon": SearchSpaceEntry.model_validate([1e-3, 1.0, "float_log"]),
-        "kernel": SearchSpaceEntry.model_validate(
-            [["rbf", "poly", "sigmoid"], "categorical"]
-        ),
+        # Исключены 'sigmoid' (не является строго положительно определённым,
+        # насыщается на больших аргументах) и 'poly' (склонен к вырождению на
+        # малых выборках) — в HPO оставляем только надёжные ядра rbf/linear.
+        "kernel": SearchSpaceEntry.model_validate([["rbf", "linear"], "categorical"]),
         "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
     },
     "xgboosting": {
