@@ -11,6 +11,7 @@ from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     to_sklearn_name,
     to_user_value,
+    user_direction,
     NRMSEZeroRangeError,
     _global_nrmse,
     get_global_nrmse_scorer,
@@ -174,6 +175,48 @@ def test_to_user_value_natural_semantics():
 def test_to_user_value_global_nrmse():
     """global_nrmse — динамическая ошибка: значение инвертируется."""
     assert to_user_value("global_nrmse", -0.25) == pytest.approx(0.25)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# user_direction: направление метрики в пользовательской семантике (issue #54)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_user_direction_minimize_for_errors():
+    """Метрики-ошибки в пользовательской семантике — «меньше лучше»."""
+    assert user_direction("rmse") == "minimize"
+    assert user_direction("mae") == "minimize"
+    assert user_direction("mse") == "minimize"
+    assert user_direction("nrmse") == "minimize"
+    assert user_direction("global_nrmse") == "minimize"
+    assert user_direction("neg_root_mean_squared_error") == "minimize"
+    assert user_direction("neg_log_loss") == "minimize"
+    assert user_direction("neg_mean_squared_error") == "minimize"
+    assert user_direction("neg_mean_absolute_error") == "minimize"
+
+
+def test_user_direction_maximize_for_score_metrics():
+    """Score-метрики (R², accuracy и т.п.) — «больше лучше»."""
+    assert user_direction("r2") == "maximize"
+    assert user_direction("R2") == "maximize"
+    assert user_direction("accuracy") == "maximize"
+    assert user_direction("explained_variance") == "maximize"
+
+
+def test_user_direction_contrast_with_greater_is_better():
+    """Контраст с семантикой оптимизатора (issue #54, зависимость T3).
+
+    neg_-метрики оптимизатор максимизирует (is_greater_better=True), но в
+    пользовательской семантике это ошибки — «меньше лучше». Формула коридора
+    пула финалистов обязана использовать user_direction, а не
+    greater_is_better.
+    """
+    assert is_greater_better("neg_root_mean_squared_error") is True
+    assert user_direction("neg_root_mean_squared_error") == "minimize"
+
+
+def test_user_direction_unknown_metric_raises():
+    """Неизвестная метрика не имеет направления — понятный ValueError."""
+    with pytest.raises(ValueError, match="not implemented"):
+        user_direction("unknown_custom_metric")
 
 
 def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):

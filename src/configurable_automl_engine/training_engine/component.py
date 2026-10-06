@@ -28,10 +28,11 @@ import importlib
 import inspect
 import logging
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -59,8 +60,10 @@ from ..tuner import WORST_SCORE_THRESHOLD
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
+    is_error_metric,
     to_sklearn_name,
     to_user_value,
+    user_direction,
 )
 from .thread_pool import run_parallel
 
@@ -122,6 +125,296 @@ def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
     if not results:
         raise ValueError("Cannot select a winner from empty results")
     return max(results.items(), key=lambda kv: kv[1][0])[0]
+
+
+# --------------------------------------------------------------------------- #
+#  Finalists pool Top-K (epic #61, task T3)                                    #
+#  Формирование пула финалистов: коридор δ от лидера в пользовательской       #
+#  семантике + жёсткий кап top_k_candidates.                                  #
+# --------------------------------------------------------------------------- #
+CorridorMode = Literal["multiplicative", "additive", "auto"]
+
+FAMILY_DIVERSITY_MULTIPLIER_DEFAULT = 1.5
+
+# Малый относительный допуск для сравнений на границе коридора: артефакты
+# плавающей арифметики (например, 0.55 - 0.5 = 0.050000000000000044) не должны
+# исключать кандидата, математически находящегося ровно на границе (правило
+# «равенство границе — включение», задокументированный tie-break). Допуск
+# масштабируется величиной операндов (относительная точность float64), поэтому
+# для скоров порядка 1e-300 он не «расширяет» коридор до 1e-12.
+_CORRIDOR_EPS = 1e-12
+
+
+def _tol_scale(value: float, limit: float) -> float:
+    """Шкала допуска: максимальная величина операндов (0 при обоих нулях)."""
+    scale = max(abs(value), abs(limit))
+    return _CORRIDOR_EPS * scale if scale > 0.0 else 0.0
+
+
+def _le_tol(value: float, limit: float) -> bool:
+    """``value <= limit`` с малым относительным допуском (граница включается)."""
+    return value <= limit + _tol_scale(value, limit)
+
+
+def _ge_tol(value: float, limit: float) -> bool:
+    """``value >= limit`` с малым относительным допуском (граница включается)."""
+    return value >= limit - _tol_scale(value, limit)
+
+
+def _family_of(algo_name: str, algorithm_families: Mapping[str, str] | None) -> str:
+    """Resolve the algorithm family (unmapped algorithms are their own family).
+
+    Args:
+        algo_name (str): Algorithm name.
+        algorithm_families (Mapping[str, str] | None): Algorithm → family map,
+            or None when no family classification is provided.
+
+    Returns:
+        str: The family name (the algorithm name itself when unmapped).
+    """
+    if algorithm_families is None:
+        return algo_name
+    return algorithm_families.get(algo_name, algo_name)
+
+
+def select_finalists(
+    results: dict[str, tuple[float, dict[str, Any]]],
+    *,
+    metric_user: str,
+    top_k_candidates: int = 3,
+    corridor_delta: float = 0.15,
+    corridor_mode: CorridorMode = "auto",
+    enforce_family_diversity: bool = False,
+    algorithm_families: Mapping[str, str] | None = None,
+    allowed_families: set[str] | None = None,
+    family_diversity_multiplier: float = FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
+    disqualified: Iterable[str] = (),
+) -> list[str]:
+    """Build the deterministic finalists pool (epic #61, task T3, issue #65).
+
+    Replaces the "blind" CV-first-place selection with a pool of candidates for
+    the second phase: candidates whose CV score falls inside the δ corridor from
+    the leader, intersected with the hard ``top_k_candidates`` cap. The corridor
+    is expressed in **user** metric semantics (see ``metrics.user_direction``
+    and ``metrics.to_user_value``): raw optimizer scores from ``results`` are
+    converted back to natural values first (issue #54 — the direction comes from
+    ``user_direction``, not from the optimizer's ``greater_is_better``).
+
+    Corridor forms (``corridor_mode``):
+    - ``multiplicative`` — min-better metrics (errors):
+      ``Score_CV(m) <= Score_CV_best * (1 + δ)``; max-better metrics (R² etc.):
+      ``Score_CV(m) >= Score_CV_best * (1 - δ)``.
+    - ``additive`` — for metrics where the multiplicative form is incorrect
+      (zero/negative values: R² < 0, MAE ≈ 0):
+      ``|Score_CV(m) - Score_CV_best| <= δ * (max_score - min_score)``, where
+      the range is computed over all valid candidates.
+    - ``auto`` (default) — chosen by the metric type: error → multiplicative,
+      score metric with a possible sign → additive.
+    When the multiplicative corridor would exclude the leader itself (e.g. a
+    max-better metric with a negative best score such as R² < 0), the additive
+    form is used instead (documented edge case).
+
+    Combination of filters (explicit): pool = (candidates inside the corridor)
+    ∩ (first ``top_k_candidates`` by CV score). The corridor is the main
+    filter; if it yields fewer candidates than ``top_k_candidates`` the pool
+    contains exactly those — no topping up beyond the corridor, except the
+    optional family-diversity rule below.
+
+    Optional soft family top-up (``enforce_family_diversity``, default False):
+    when the pool represents exactly one algorithm family (linear / ensembles /
+    kernel-GPR) and that family is permitted by ``allowed_families``, the best
+    representative of each missing family is added from the *extended* corridor
+    (``family_diversity_multiplier * δ``), never exceeding
+    ``top_k_candidates``.
+
+    Algorithms disqualified by the circuit breaker (issue #12) never enter the
+    pool.
+
+    Determinism: the pool is ordered by the raw score descending (optimizer
+    semantics — the same ordering as ``select_winner``); ties keep the
+    insertion order of ``results`` (the configuration order), which is the
+    documented tie-break.
+
+    Args:
+        results (dict[str, tuple[float, dict[str, Any]]]): HPO phase results
+            "algorithm → (raw score, params)". Must not be empty after removing
+            the disqualified algorithms.
+        metric_user (str): User-facing metric name (``general.comparison_metric``);
+            used to convert raw scores to user semantics and to pick the
+            corridor direction/form.
+        top_k_candidates (int): Hard cap on the pool size (>= 1, default 3).
+        corridor_delta (float): Relative corridor width δ (>= 0, default 0.15).
+        corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'
+            (default 'auto').
+        enforce_family_diversity (bool): Enable the optional soft family
+            top-up (default False).
+        algorithm_families (Mapping[str, str] | None): Algorithm → family map
+            (e.g. 'linear', 'ensemble', 'kernel'). Algorithms absent from the
+            map are treated as their own family.
+        allowed_families (set[str] | None): Families permitted to join through
+            the top-up rule; None — all families are permitted.
+        family_diversity_multiplier (float): Width multiplier of the extended
+            corridor for the top-up (default 1.5, must be > 0).
+        disqualified (Iterable[str]): Algorithms disqualified by the circuit
+            breaker (issue #12); they are excluded from the pool.
+
+    Returns:
+        list[str]: Ordered finalist names (best first), length in
+            [1, top_k_candidates].
+
+    Raises:
+        RuntimeError: If ``results`` is empty (after removing disqualified
+            algorithms) — no finalists exist.
+        ValueError: If parameters are out of bounds (``top_k_candidates`` < 1,
+            ``corridor_delta`` < 0, ``family_diversity_multiplier`` <= 0,
+            unknown ``corridor_mode``) or the metric name cannot be resolved.
+    """
+    if not results:
+        raise RuntimeError("Cannot build a finalists pool from empty results")
+    if top_k_candidates < 1:
+        raise ValueError("top_k_candidates must be >= 1")
+    if corridor_delta < 0:
+        raise ValueError("corridor_delta must be >= 0")
+    if corridor_mode not in ("multiplicative", "additive", "auto"):
+        raise ValueError(
+            f"corridor_mode must be 'multiplicative', 'additive' or 'auto'; "
+            f"got {corridor_mode!r}"
+        )
+    if family_diversity_multiplier <= 0:
+        raise ValueError("family_diversity_multiplier must be > 0")
+
+    # Circuit breaker (issue #12): disqualified algorithms never enter the pool.
+    candidates = {
+        name: value for name, value in results.items() if name not in set(disqualified)
+    }
+    if not candidates:
+        raise RuntimeError(
+            "Cannot build a finalists pool: no valid results after removing "
+            "disqualified algorithms"
+        )
+
+    # Пользовательская семантика (issue #54): «сырые» скоры переводятся в
+    # естественные значения, направление берётся из user_direction (для ошибок
+    # это "minimize", хотя оптимизатор максимизирует их инверсии).
+    user_scores = {
+        name: to_user_value(metric_user, score)
+        for name, (score, _) in candidates.items()
+    }
+    direction = user_direction(metric_user)
+
+    if corridor_mode == "auto":
+        effective_mode: CorridorMode = (
+            "multiplicative" if is_error_metric(metric_user) else "additive"
+        )
+    else:
+        effective_mode = corridor_mode
+
+    # Лидер по пользовательской семантике; ничья — первый в порядке вставки
+    # (тот же tie-break, что и в select_winner).
+    if direction == "minimize":
+        best_name = min(user_scores, key=lambda n: user_scores[n])
+    else:
+        best_name = max(user_scores, key=lambda n: user_scores[n])
+    best_score = user_scores[best_name]
+
+    def _in_corridor(name: str, mode: CorridorMode, delta: float) -> bool:
+        """Проверить попадание кандидата в коридор заданной формы и ширины.
+
+        Равенство границе включается (документированный tie-break); малый
+        относительный допуск ``_CORRIDOR_EPS`` нейтрализует артефакты
+        плавающей арифметики.
+        """
+        score = user_scores[name]
+        if mode == "additive":
+            spread = max(user_scores.values()) - min(user_scores.values())
+            limit = delta * spread
+            return _le_tol(score, best_score + limit) and _ge_tol(
+                score, best_score - limit
+            )
+        if direction == "minimize":
+            return _le_tol(score, best_score * (1.0 + delta))
+        return _ge_tol(score, best_score * (1.0 - delta))
+
+    base_members = [
+        name
+        for name in candidates
+        if _in_corridor(name, effective_mode, corridor_delta)
+    ]
+    if best_name not in base_members:
+        # Коридор пуст при max-better метрике с отрицательным лучшим скором
+        # (например, R² < 0): мультипликативная форма исключает самого лидера
+        # (best*(1-δ) > best при best < 0). Выбираем аддитивную форму
+        # (документированный edge case из постановки).
+        _LOG.warning(
+            "Finalists corridor (mode=%s, direction=%s) excludes the leader "
+            "%s (best %s); falling back to the additive corridor form",
+            effective_mode,
+            direction,
+            best_name,
+            best_score,
+        )
+        effective_mode = "additive"
+        base_members = [
+            name
+            for name in candidates
+            if _in_corridor(name, effective_mode, corridor_delta)
+        ]
+
+    # Детерминированный порядок: «сырой» скор по убыванию (семантика
+    # оптимизатора, как в select_winner); ничьи — порядок вставки (порядок
+    # конфигурации). Сортировка стабильна.
+    ordered = sorted(candidates, key=lambda n: candidates[n][0], reverse=True)
+
+    # Явная комбинация (пересечение): (кандидаты внутри коридора) ∩
+    # (первые top_k по CV-скору). Добор за пределы коридора не производится.
+    base_set = set(base_members)
+    pool = [name for name in ordered if name in base_set][:top_k_candidates]
+
+    # Опциональный мягкий добор семейств (п. 4 постановки): если в пуле
+    # представлено ровно одно семейство, добавляем лучшего представителя
+    # недостающих семейств из расширенного коридора (family_diversity_multiplier
+    # × δ), не превышая top_k_candidates.
+    if enforce_family_diversity and len(pool) < top_k_candidates:
+        pool_families = {_family_of(name, algorithm_families) for name in pool}
+        if len(pool_families) == 1:
+            extended_delta = corridor_delta * family_diversity_multiplier
+            extended_members = [
+                name
+                for name in candidates
+                if _in_corridor(name, effective_mode, extended_delta)
+            ]
+            extended_set = set(extended_members)
+            missing_families = {
+                _family_of(name, algorithm_families)
+                for name in candidates
+                if _family_of(name, algorithm_families) not in pool_families
+            }
+            if allowed_families is not None:
+                missing_families &= allowed_families
+
+            pool_names = set(pool)
+            remaining = set(missing_families)
+            while len(pool) < top_k_candidates and remaining:
+                picked: str | None = None
+                for name in ordered:
+                    family = _family_of(name, algorithm_families)
+                    if (
+                        name not in pool_names
+                        and name in extended_set
+                        and family in remaining
+                    ):
+                        picked = name
+                        break
+                if picked is None:
+                    break
+                pool.append(picked)
+                pool_names.add(picked)
+                remaining.remove(_family_of(picked, algorithm_families))
+
+    # Финальный стабильный порядок: добавленные семейства слабее участников
+    # базового пула, но пересортировка делает инвариант явным.
+    pool.sort(key=lambda n: candidates[n][0], reverse=True)
+    return pool
 
 
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from sklearn.metrics import get_scorer as sklearn_get_scorer
@@ -352,6 +352,43 @@ def is_error_metric(name: str) -> bool:
     scorer = _resolve_scorer(lname)
     sign = getattr(scorer, "_sign", None)
     return sign is not None and sign < 0
+
+
+def user_direction(name: str) -> Literal["minimize", "maximize"]:
+    """Определить направление метрики в пользовательской семантике (issue #54).
+
+    В отличие от ``is_greater_better`` (семантика оптимизатора — «больше —
+    лучше» для всех скореров), возвращает направление для значений в
+    пользовательском представлении (``to_user_value``):
+
+    - метрики-ошибки (RMSE, MAE, MSE, NRMSE, global_nrmse и все neg_-метрики)
+      → ``"minimize"``: в пользовательской семантике меньшее значение лучше;
+    - score-метрики (R², accuracy и т.п.) → ``"maximize"``: большее лучше.
+
+    Направление требуется формуле коридора пула финалистов (T3, issue #65):
+    мультипликативная форма коридора зависит от того, какое значение лучше —
+    меньшее или большее (для R² с отрицательным лидером мультипликативная
+    форма некорректна, см. ``select_finalists``).
+
+    Args:
+        name (str): Название метрики.
+
+    Returns:
+        Literal["minimize", "maximize"]: Направление в пользовательской
+            семантике: "minimize" для ошибок, "maximize" для score-метрик.
+
+    Raises:
+        ValueError: Если метрика неизвестна ни реестру, ни sklearn.
+    """
+    lname = name.lower()
+    # Ошибки инвертированы скорером, но пользователю возвращаются
+    # естественными («меньше — лучше»): приоритет над greater_is_better,
+    # который для neg_-метрик истинен (семантика оптимизатора).
+    if is_error_metric(lname):
+        return "minimize"
+    if is_greater_better(lname):
+        return "maximize"
+    return "minimize"
 
 
 def to_user_value(name: str, raw_value: float) -> float:

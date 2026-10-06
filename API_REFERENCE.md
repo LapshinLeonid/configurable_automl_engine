@@ -94,6 +94,55 @@ Behavior by validation strategy:
 * `"mse"`
 * `"r2"`
 
+### Finalists pool Top-K (`select_finalists`, epic #61 / task T3)
+
+The engine replaces the "blind" first-place CV pick with a deterministic
+**finalists pool** used by the two-stage winner selection: candidates whose CV
+score falls inside the δ corridor from the leader, intersected with the hard
+`top_k_candidates` cap. The pool is built by `select_finalists` in
+`training_engine/component.py` from the HPO phase results (raw optimizer
+scores); the corridor is expressed in **user** metric semantics (see
+`metrics.user_direction` / `metrics.to_user_value`).
+
+Corridor form (`corridor_mode`):
+
+* `"multiplicative"` — min-better metrics (errors): `Score_CV(m) <=
+  Score_CV_best * (1 + δ)`; max-better metrics (R² etc.): `Score_CV(m) >=
+  Score_CV_best * (1 - δ)`.
+* `"additive"` — for metrics where the multiplicative form is incorrect
+  (zero/negative values: R² < 0, MAE ≈ 0): `|Score_CV(m) - Score_CV_best| <=
+  δ * (max_score - min_score)`, the range computed over all valid candidates.
+* `"auto"` (default) — chosen by the metric type: error → multiplicative,
+  score metric with a possible sign → additive.
+* If the multiplicative corridor excludes the leader itself (e.g. a max-better
+  metric with a negative best score such as R² < 0), the additive form is used
+  instead.
+
+Combination of filters (explicit): pool = (candidates inside the corridor) ∩
+(first `top_k_candidates` by CV score). If the corridor yields fewer candidates
+than `top_k_candidates`, the pool contains exactly those — no topping up beyond
+the corridor, except the optional family-diversity rule:
+
+* `enforce_family_diversity` (default `false`) — when the pool represents
+  exactly one algorithm family (linear / ensembles / kernel-GPR) and the family
+  is permitted by `allowed_families`, the best representative of each missing
+  family is added from the *extended* corridor
+  (`family_diversity_multiplier * δ`, default 1.5), never exceeding
+  `top_k_candidates`.
+
+Algorithms disqualified by the circuit breaker never enter the pool.
+Determinism: the pool is ordered by the raw score descending (optimizer
+semantics, same ordering as `select_winner`); ties keep the configuration
+order, which is the documented tie-break. Scores exactly on the corridor
+boundary are included (equality never fails).
+
+Edge cases: an empty result set raises `RuntimeError`; fewer than `top_k` valid
+algorithms produce a pool of what is available; `top_k_candidates = 1` yields
+the single CV leader (equivalent to the current behavior). The pool function is
+standalone: the existing `train_best_model` pipeline is unchanged until the
+two-stage winner selection (task T4) is wired in, so with the sanity gate off
+the behavior remains identical to the current single-winner selection.
+
 ### Additional metrics (`additional_metrics`)
 
 The optional `general.additional_metrics` parameter is a list of extra quality metrics whose values are computed for the **final trained model** (after the winner is selected) and returned together with the training results.
