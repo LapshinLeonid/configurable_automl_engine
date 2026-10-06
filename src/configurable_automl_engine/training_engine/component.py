@@ -2193,6 +2193,7 @@ def train_best_model(
         dead_features_require_low_diversity=sg_cfg.dead_features_require_low_diversity,
         zero_coef_tolerance=sg_cfg.zero_coef_tolerance,
         max_generalization_gap=sg_cfg.max_generalization_gap,
+        check_permutation_sensitivity=sg_cfg.check_permutation_sensitivity,
         permutation_max_rows=sg_cfg.permutation_max_rows,
         permutation_max_features=sg_cfg.permutation_max_features,
         permutation_repeats=sg_cfg.permutation_repeats,

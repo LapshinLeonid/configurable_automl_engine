@@ -43,7 +43,9 @@ C. Dead Feature Check (``check_dead_features``)
      ``permutation_tolerance``. A high share of dead features produces a soft
      warning, not a disqualification: on correlated features permutation
      reports "false-dead" features because the model borrows the information
-     from a neighbour column.
+     from a neighbour column. The whole permutation path can be turned off
+     with ``check_permutation_sensitivity=False`` (cost control, task T5);
+     the linear ``coef_`` path is unaffected.
 
 D. Generalization Gap (``check_generalization_gap``)
    ``RMSE_oof / RMSE_full`` (the formula written as ``RMSE_full / RMSE_oof``
@@ -334,6 +336,7 @@ class ModelSanityGate:
         dead_features_require_low_diversity: bool = True,
         zero_coef_tolerance: float = 1e-12,
         max_generalization_gap: float = 1.5,
+        check_permutation_sensitivity: bool = True,
         permutation_max_rows: int | None = 5000,
         permutation_max_features: int | None = 100,
         permutation_repeats: int = 3,
@@ -362,6 +365,10 @@ class ModelSanityGate:
             zero_coef_tolerance: coefficients with ``abs(coef) <=`` this value
                 count as zero (linear path of circuit C).
             max_generalization_gap: circuit D threshold (≥ 1, default 1.5).
+            check_permutation_sensitivity: enable the permutation sensitivity
+                audit of circuit C for nonlinear models (default True — the
+                cost-controlled permutation path runs; False — the path is
+                skipped and only the linear ``coef_`` path of circuit C works).
             permutation_max_rows: row subsampling for permutations (None — all
                 rows).
             permutation_max_features: cap on checked columns (None — all).
@@ -408,6 +415,7 @@ class ModelSanityGate:
         self.dead_features_require_low_diversity = dead_features_require_low_diversity
         self.zero_coef_tolerance = zero_coef_tolerance
         self.max_generalization_gap = max_generalization_gap
+        self.check_permutation_sensitivity = check_permutation_sensitivity
         self.permutation_max_rows = permutation_max_rows
         self.permutation_max_features = permutation_max_features
         self.permutation_repeats = permutation_repeats
@@ -683,6 +691,10 @@ class ModelSanityGate:
         coef = getattr(estimator, "coef_", None)
         if coef is not None:
             return self._check_dead_features_linear(coef, diversity_failed)
+        if not self.check_permutation_sensitivity:
+            # Пермутационный путь отключён пользователем (T5): для нелинейных
+            # моделей контур В бездействует — это осознанный выбор стоимости.
+            return 0, [], []
         if X is None:
             return (
                 0,

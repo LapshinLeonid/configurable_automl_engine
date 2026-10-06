@@ -319,26 +319,33 @@ class SanityGateCfg(BaseModel):
     Attributes:
         mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').
         top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).
-        corridor_delta (float): Относительная ширина коридора δ (>= 0).
+        corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).
         corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.
         enforce_family_diversity (bool): Включить мягкий добор семейств.
         algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».
         allowed_families (list[str] | None): Семейства, участвующие в доборе.
         family_diversity_multiplier (float): Множитель расширенного коридора.
-        min_prediction_diversity (float): Порог контура А (>= 0).
+        min_prediction_diversity (float): Порог контура А (в (0, 1]);
+            считается на OOF-предсказаниях.
         adaptive_diversity (bool): Адаптивный режим контура А.
         min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).
-        min_unique_ratio (float): Нижняя граница доли уникальных (в [0, 1]).
-        max_dead_feature_ratio (float): Порог контура В (в [0, 1]).
+        min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).
+        max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал
+            для линейных моделей; самостоятельная дисквалификация только при
+            ``dead_features_require_low_diversity=true`` и низком diversity.
         dead_features_require_low_diversity (bool): Комбинированное правило
             «много мёртвых признаков И низкий diversity».
         zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).
         max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).
-        permutation_max_rows (int | None): Подвыборка строк для пермутаций.
-        permutation_max_features (int | None): Кап проверяемых колонок.
+        check_permutation_sensitivity (bool): Включить пермутационный аудит
+            чувствительности признаков (контур В, нелинейные модели).
+        permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).
+        permutation_max_features (int): Кап проверяемых колонок (>= 1).
         permutation_repeats (int): Повторы пермутаций (>= 1).
         permutation_seed (int): Фиксированное зерно пермутаций.
         permutation_tolerance (float): Порог «мёртвости» признака (>= 0).
+        audit_time_budget_seconds (float): Бюджет времени на фазу аудита
+            (>= 0; 0 — без ограничения).
         check_diversity (bool): Включить контур А.
         check_unique (bool): Включить контур Б.
         check_dead_features (bool): Включить контур В.
@@ -364,8 +371,11 @@ class SanityGateCfg(BaseModel):
     )
     corridor_delta: float = Field(
         default=0.15,
-        ge=0.0,
-        description="Относительная ширина коридора δ от лидера (>= 0, дефолт 0.15).",
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Относительная ширина коридора δ от лидера (строго в (0, 1), дефолт 0.15)."
+        ),
     )
     corridor_mode: CorridorMode = Field(
         default="auto",
@@ -399,8 +409,12 @@ class SanityGateCfg(BaseModel):
     )
     min_prediction_diversity: float = Field(
         default=0.15,
-        ge=0.0,
-        description="Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога.",
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога; "
+            "считается на OOF-предсказаниях (строго в (0, 1], дефолт 0.15)."
+        ),
     )
     adaptive_diversity: bool = Field(
         default=False,
@@ -416,15 +430,20 @@ class SanityGateCfg(BaseModel):
     )
     min_unique_ratio: float = Field(
         default=0.05,
-        ge=0.0,
+        gt=0.0,
         le=1.0,
-        description="Нижняя граница доли уникальных предсказаний контура Б.",
+        description="Нижняя граница доли уникальных предсказаний контура Б (в (0, 1]).",
     )
     max_dead_feature_ratio: float = Field(
         default=0.4,
         ge=0.0,
         le=1.0,
-        description="Порог доли «мёртвых» признаков контура В.",
+        description=(
+            "Порог доли «мёртвых» признаков контура В (в [0, 1]) — для "
+            "линейных моделей это сигнал; самостоятельная дисквалификация "
+            "только при dead_features_require_low_diversity=true и низком "
+            "diversity."
+        ),
     )
     dead_features_require_low_diversity: bool = Field(
         default=True,
@@ -443,15 +462,24 @@ class SanityGateCfg(BaseModel):
         ge=1.0,
         description="Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
     )
-    permutation_max_rows: int | None = Field(
+    check_permutation_sensitivity: bool = Field(
+        default=True,
+        description=(
+            "Включить пермутационный аудит чувствительности признаков "
+            "(контур В для нелинейных моделей; контроль стоимости аудита). "
+            "По умолчанию True; False — пермутационный путь пропускается, "
+            "линейный путь по коэффициентам остаётся."
+        ),
+    )
+    permutation_max_rows: int = Field(
         default=5000,
         ge=1,
-        description="Подвыборка строк для пермутационного пути контура В (None — все).",
+        description="Подвыборка строк для пермутационного пути контура В (>= 1, дефолт 5000).",
     )
-    permutation_max_features: int | None = Field(
+    permutation_max_features: int = Field(
         default=100,
         ge=1,
-        description="Кап проверяемых колонок в пермутационном пути (None — все).",
+        description="Кап проверяемых колонок в пермутационном пути (>= 1, дефолт 100).",
     )
     permutation_repeats: int = Field(
         default=3,
@@ -467,12 +495,73 @@ class SanityGateCfg(BaseModel):
         ge=0.0,
         description="Относительный порог «мёртвости» признака в пермутациях.",
     )
+    audit_time_budget_seconds: float = Field(
+        default=0,
+        ge=0.0,
+        description=(
+            "Бюджет времени на фазу аудита Sanity Gate (в секундах). "
+            "0 — без ограничения (дефолт)."
+        ),
+    )
     check_diversity: bool = Field(default=True, description="Включить контур А.")
     check_unique: bool = Field(default=True, description="Включить контур Б.")
     check_dead_features: bool = Field(default=True, description="Включить контур В.")
     check_generalization_gap: bool = Field(
         default=True, description="Включить контур Г."
     )
+
+    @model_validator(mode="after")
+    def _validate_thresholds(self) -> SanityGateCfg:
+        """Проверить диапазоны всех порогов Sanity Gate (эпик #61, T5).
+
+        Единая точка валидации диапазонов из постановки T5: ограничения полей
+        (``Field``) задают те же границы и транслируются в ``config.schema.json``,
+        а здесь они собраны явно для читаемости ошибок и как страховка от
+        неконсистентной эволюции отдельных полей. Поля ``mode``/``corridor_mode``
+        валидируются типом ``Literal``, неизвестные ключи отклоняются
+        ``extra="forbid"``.
+
+        Returns:
+            SanityGateCfg: Валидированный объект настроек.
+
+        Raises:
+            ValueError: Если хотя бы один порог вне допустимого диапазона.
+        """
+        rules: dict[str, tuple[bool, str]] = {
+            "top_k_candidates": (self.top_k_candidates >= 1, ">= 1"),
+            "corridor_delta": (0 < self.corridor_delta < 1, "в (0, 1)"),
+            "min_prediction_diversity": (
+                0 < self.min_prediction_diversity <= 1,
+                "в (0, 1]",
+            ),
+            "max_dead_feature_ratio": (
+                0 <= self.max_dead_feature_ratio <= 1,
+                "в [0, 1]",
+            ),
+            "min_unique_ratio": (0 < self.min_unique_ratio <= 1, "в (0, 1]"),
+            "min_unique_count": (self.min_unique_count >= 1, ">= 1"),
+            "max_generalization_gap": (self.max_generalization_gap >= 1, ">= 1"),
+            "permutation_max_rows": (self.permutation_max_rows >= 1, ">= 1"),
+            "permutation_max_features": (self.permutation_max_features >= 1, ">= 1"),
+            "permutation_repeats": (self.permutation_repeats >= 1, ">= 1"),
+            "audit_time_budget_seconds": (
+                self.audit_time_budget_seconds >= 0,
+                ">= 0 (0 — без ограничения)",
+            ),
+            "zero_coef_tolerance": (self.zero_coef_tolerance >= 0, ">= 0"),
+            "permutation_tolerance": (self.permutation_tolerance >= 0, ">= 0"),
+            "family_diversity_multiplier": (
+                self.family_diversity_multiplier > 0,
+                "> 0",
+            ),
+        }
+        for name, (ok, expected) in rules.items():
+            if not ok:
+                raise ValueError(
+                    f"general.sanity_gate.{name} должен быть {expected}; "
+                    f"получено {getattr(self, name)!r}"
+                )
+        return self
 
 
 # ─────────────────── general ─────────────────── #
