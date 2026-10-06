@@ -113,7 +113,9 @@ Corridor form (`corridor_mode`):
   (zero/negative values: R² < 0, MAE ≈ 0): `|Score_CV(m) - Score_CV_best| <=
   δ * (max_score - min_score)`, the range computed over all valid candidates.
 * `"auto"` (default) — chosen by the metric type: error → multiplicative,
-  score metric with a possible sign → additive.
+  score metric with a possible sign → additive. For error metrics with a
+  practically zero best score (MAE ≈ 0) the multiplicative form would collapse
+  the pool to the leader, so the additive form is used instead.
 * If the multiplicative corridor excludes the leader itself (e.g. a max-better
   metric with a negative best score such as R² < 0), the additive form is used
   instead.
@@ -124,11 +126,13 @@ than `top_k_candidates`, the pool contains exactly those — no topping up beyon
 the corridor, except the optional family-diversity rule:
 
 * `enforce_family_diversity` (default `false`) — when the pool represents
-  exactly one algorithm family (linear / ensembles / kernel-GPR) and the family
-  is permitted by `allowed_families`, the best representative of each missing
-  family is added from the *extended* corridor
+  exactly one algorithm family (linear / ensembles / kernel-GPR) **and that
+  family is permitted by `allowed_families`**, the best representative of each
+  missing family is added from the *extended* corridor
   (`family_diversity_multiplier * δ`, default 1.5), never exceeding
-  `top_k_candidates`.
+  `top_k_candidates`. The added families are also restricted to
+  `allowed_families`; when the pool's single family is not permitted, no
+  top-up happens at all.
 
 Algorithms disqualified by the circuit breaker never enter the pool.
 Determinism: the pool is ordered by the raw score descending (optimizer

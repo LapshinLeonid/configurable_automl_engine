@@ -383,12 +383,11 @@ def user_direction(name: str) -> Literal["minimize", "maximize"]:
     lname = name.lower()
     # Ошибки инвертированы скорером, но пользователю возвращаются
     # естественными («меньше — лучше»): приоритет над greater_is_better,
-    # который для neg_-метрик истинен (семантика оптимизатора).
+    # который для neg_-метрик истинен (семантика оптимизатора). Для всех
+    # остальных метрик пользовательская семантика — «больше лучше».
     if is_error_metric(lname):
         return "minimize"
-    if is_greater_better(lname):
-        return "maximize"
-    return "minimize"
+    return "maximize"
 
 
 def to_user_value(name: str, raw_value: float) -> float:

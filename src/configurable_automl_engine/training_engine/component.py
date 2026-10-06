@@ -209,7 +209,9 @@ def select_finalists(
       ``|Score_CV(m) - Score_CV_best| <= δ * (max_score - min_score)``, where
       the range is computed over all valid candidates.
     - ``auto`` (default) — chosen by the metric type: error → multiplicative,
-      score metric with a possible sign → additive.
+      score metric with a possible sign → additive. For error metrics with a
+      practically zero best score (MAE ≈ 0) the multiplicative form would
+      collapse the pool to the leader, so the additive form is used instead.
     When the multiplicative corridor would exclude the leader itself (e.g. a
     max-better metric with a negative best score such as R² < 0), the additive
     form is used instead (documented edge case).
@@ -222,10 +224,12 @@ def select_finalists(
 
     Optional soft family top-up (``enforce_family_diversity``, default False):
     when the pool represents exactly one algorithm family (linear / ensembles /
-    kernel-GPR) and that family is permitted by ``allowed_families``, the best
-    representative of each missing family is added from the *extended* corridor
-    (``family_diversity_multiplier * δ``), never exceeding
-    ``top_k_candidates``.
+    kernel-GPR) **and that family is permitted by ``allowed_families``**, the
+    best representative of each missing family is added from the *extended*
+    corridor (``family_diversity_multiplier * δ``), never exceeding
+    ``top_k_candidates``. The added families are also restricted to
+    ``allowed_families``; when the pool's single family is not permitted, no
+    top-up happens at all.
 
     Algorithms disqualified by the circuit breaker (issue #12) never enter the
     pool.
@@ -251,8 +255,9 @@ def select_finalists(
         algorithm_families (Mapping[str, str] | None): Algorithm → family map
             (e.g. 'linear', 'ensemble', 'kernel'). Algorithms absent from the
             map are treated as their own family.
-        allowed_families (set[str] | None): Families permitted to join through
-            the top-up rule; None — all families are permitted.
+        allowed_families (set[str] | None): Families participating in the
+            top-up rule: the pool's single family must be permitted AND only
+            these families may be added; None — all families are permitted.
         family_diversity_multiplier (float): Width multiplier of the extended
             corridor for the top-up (default 1.5, must be > 0).
         disqualified (Iterable[str]): Algorithms disqualified by the circuit
@@ -284,8 +289,12 @@ def select_finalists(
         raise ValueError("family_diversity_multiplier must be > 0")
 
     # Circuit breaker (issue #12): disqualified algorithms never enter the pool.
+    # Iterable материализуется ДО dict-comprehension: генератор, переданный
+    # как ``disqualified``, был бы потреблён ``set(...)`` на первой итерации
+    # comprehension, и дисквалифицированные «протекли» бы в пул (ревью PR #33).
+    disqualified_set = set(disqualified)
     candidates = {
-        name: value for name, value in results.items() if name not in set(disqualified)
+        name: value for name, value in results.items() if name not in disqualified_set
     }
     if not candidates:
         raise RuntimeError(
@@ -302,13 +311,6 @@ def select_finalists(
     }
     direction = user_direction(metric_user)
 
-    if corridor_mode == "auto":
-        effective_mode: CorridorMode = (
-            "multiplicative" if is_error_metric(metric_user) else "additive"
-        )
-    else:
-        effective_mode = corridor_mode
-
     # Лидер по пользовательской семантике; ничья — первый в порядке вставки
     # (тот же tie-break, что и в select_winner).
     if direction == "minimize":
@@ -316,6 +318,24 @@ def select_finalists(
     else:
         best_name = max(user_scores, key=lambda n: user_scores[n])
     best_score = user_scores[best_name]
+
+    # Размах скоров по валидным кандидатам — вычисляется один раз (аддитивная
+    # форма коридора), а не внутри _in_corridor на каждого кандидата (O(n²),
+    # ревью PR #33).
+    score_spread = max(user_scores.values()) - min(user_scores.values())
+
+    if corridor_mode == "auto":
+        if is_error_metric(metric_user):
+            # Ошибка → multiplicative, кроме вырожденного случая best≈0
+            # (MAE≈0): мультипликативная форма даёт порог ≈0 и схлопывает пул
+            # до лидера — переходим на аддитивную форму (ревью PR #33).
+            effective_mode: CorridorMode = (
+                "additive" if abs(best_score) <= _CORRIDOR_EPS else "multiplicative"
+            )
+        else:
+            effective_mode = "additive"
+    else:
+        effective_mode = corridor_mode
 
     def _in_corridor(name: str, mode: CorridorMode, delta: float) -> bool:
         """Проверить попадание кандидата в коридор заданной формы и ширины.
@@ -326,8 +346,7 @@ def select_finalists(
         """
         score = user_scores[name]
         if mode == "additive":
-            spread = max(user_scores.values()) - min(user_scores.values())
-            limit = delta * spread
+            limit = delta * score_spread
             return _le_tol(score, best_score + limit) and _ge_tol(
                 score, best_score - limit
             )
@@ -371,12 +390,19 @@ def select_finalists(
     pool = [name for name in ordered if name in base_set][:top_k_candidates]
 
     # Опциональный мягкий добор семейств (п. 4 постановки): если в пуле
-    # представлено ровно одно семейство, добавляем лучшего представителя
-    # недостающих семейств из расширенного коридора (family_diversity_multiplier
-    # × δ), не превышая top_k_candidates.
+    # представлено ровно одно семейство И это семейство разрешено конфигом
+    # (allowed_families), добавляем лучшего представителя недостающих семейств
+    # из расширенного коридора (family_diversity_multiplier × δ), не превышая
+    # top_k_candidates. Добавляемые семейства также ограничиваются
+    # allowed_families. Поведение приведено к документации (ревью PR #33).
     if enforce_family_diversity and len(pool) < top_k_candidates:
         pool_families = {_family_of(name, algorithm_families) for name in pool}
-        if len(pool_families) == 1:
+        single_pool_family = (
+            next(iter(pool_families)) if len(pool_families) == 1 else None
+        )
+        if single_pool_family is not None and (
+            allowed_families is None or single_pool_family in allowed_families
+        ):
             extended_delta = corridor_delta * family_diversity_multiplier
             extended_members = [
                 name
@@ -387,7 +413,7 @@ def select_finalists(
             missing_families = {
                 _family_of(name, algorithm_families)
                 for name in candidates
-                if _family_of(name, algorithm_families) not in pool_families
+                if _family_of(name, algorithm_families) != single_pool_family
             }
             if allowed_families is not None:
                 missing_families &= allowed_families

@@ -472,7 +472,11 @@ def test_family_diversity_default_multiplier_constant():
 # Edge cases и failure modes
 # ──────────────────────────────────────────────────────────────────────────────
 def test_edge_empty_results_raises_runtime_error():
-    """Пустой phase_results → RuntimeError (как в select_winner)."""
+    """Пустой phase_results → RuntimeError (по постановке T3).
+
+    Примечание: ``select_winner`` для пустого словаря бросает ``ValueError``,
+    но для пула финалистов постановка требует ``RuntimeError`` (ревью PR #33).
+    """
     with pytest.raises(RuntimeError, match="empty results"):
         select_finalists({}, metric_user="r2")
 
@@ -575,3 +579,96 @@ def test_edge_min_better_and_max_better_metrics_parametrized():
         corridor_mode="multiplicative",
         top_k_candidates=3,
     ) == ["good", "bad"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Регрессии ревью PR #33
+# ──────────────────────────────────────────────────────────────────────────────
+def test_regression_disqualified_generator_not_consumed():
+    """Генератор в ``disqualified`` не «съедается» dict-comprehension.
+
+    Блокирующее замечание ревью: раньше ``set(disqualified)`` вычислялся
+    внутри comprehension, генератор потреблялся на первой итерации, и
+    дисквалифицированные имена «протекали» в пул (воспроизведение: ['c']
+    вместо ['a', 'b']). Теперь iterable материализуется до comprehension.
+    """
+    results: R = {
+        "a": (0.90, {}),
+        "b": (0.85, {}),
+        "c": (0.95, {}),  # лучший по CV, но дисквалифицирован
+    }
+    pool = select_finalists(
+        results,
+        metric_user="r2",
+        corridor_mode="multiplicative",
+        top_k_candidates=3,
+        disqualified=(name for name in ("c",)),
+    )
+    assert pool == ["a", "b"]
+
+
+def test_regression_pool_family_not_allowed_no_topup():
+    """Единственное семейство пула не разрешено → добор не выполняется.
+
+    Блокирующее замечание ревью: поведение приведено к документации — если
+    единственное семейство пула отсутствует в ``allowed_families``, мягкий
+    добор не применяется (раньше было ['elasticnet', 'svr'] вместо
+    ['elasticnet']).
+    """
+    results: R = {
+        "elasticnet": (-0.081, {}),  # linear
+        "svr": (-0.095, {}),  # kernel, в расширенном коридоре
+    }
+    pool = select_finalists(
+        results,
+        metric_user="rmse",
+        corridor_delta=0.15,
+        top_k_candidates=3,
+        enforce_family_diversity=True,
+        algorithm_families=FAMILIES,
+        allowed_families={"ensemble"},  # линейное семейство пула запрещено
+    )
+    assert pool == ["elasticnet"]
+
+
+def test_regression_pool_family_allowed_and_missing_allowed():
+    """Семейство пула и добавляемое семейство разрешены → добор выполняется.
+
+    Позитивный контроль к ``test_regression_pool_family_not_allowed_no_topup``:
+    добор происходит, когда единственное семейство пула разрешено
+    ``allowed_families`` и недостающее семейство тоже разрешено.
+    """
+    results: R = {
+        "elasticnet": (-0.081, {}),  # linear
+        "ridge": (-0.082, {}),  # linear
+        "svr": (-0.095, {}),  # kernel, в расширенном коридоре
+        "random_forest": (-0.11, {}),  # ensemble, вне расширенного коридора
+    }
+    pool = select_finalists(
+        results,
+        metric_user="rmse",
+        corridor_delta=0.15,
+        top_k_candidates=3,
+        enforce_family_diversity=True,
+        algorithm_families=FAMILIES,
+        allowed_families={"linear", "kernel"},
+    )
+    assert pool == ["elasticnet", "ridge", "svr"]
+
+
+def test_regression_auto_mode_best_near_zero_switches_to_additive():
+    """auto при best≈0 (MAE≈0) переключается на additive (ревью PR #33).
+
+    Мультипликативная форма при best=0 даёт порог 0 и схлопывает пул до
+    лидера; аддитивная включает кандидатов в пределах δ×размах.
+    """
+    results: R = {
+        "a": (0.0, {}),  # MAE ≈ 0 (raw -0.0 после инверсии)
+        "b": (-1e-4, {}),
+        "c": (-2e-4, {}),
+    }
+    # additive: range = 2e-4, порог = 0.5×2e-4 = 1e-4 → b на границе включается.
+    pool = select_finalists(
+        results, metric_user="mae", corridor_delta=0.5, top_k_candidates=3
+    )
+    assert pool == ["a", "b"]
