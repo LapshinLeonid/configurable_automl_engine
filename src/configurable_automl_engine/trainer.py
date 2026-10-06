@@ -80,10 +80,16 @@ from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_error_metric,
     is_greater_better,
+    oof_rmse,
     to_user_value,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
-from configurable_automl_engine.validation import iter_splits, norm_val_method
+from configurable_automl_engine.validation import (
+    SUPPORTED_VALIDATION_METHODS,
+    iter_splits,
+    make_cv,
+    norm_val_method,
+)
 
 from .models import (
     _ALIASES,
@@ -233,6 +239,22 @@ class ModelTrainer:
             оценка всегда считается на данных, не участвовавших в обучении
             пайплайна этого фолда. Для метрик-ошибок значение положительное
             (sign-corrected).
+        oof_score_ (float | None): ``RMSE_oof`` — честная оценка качества на
+            всех строках без утечки (issue #62): предсказания валидационных
+            фолдов конкатенируются в один вектор и метрика считается по всему
+            вектору сразу (а не усреднением по мелким фолдам). ``None``, если
+            OOF-оценка невозможна (нет ни одной валидной пары). Отдельный
+            канал: ``val_score`` фаз HPO не изменяется.
+        oof_predictions_ (pd.Series | np.ndarray | None): Вектор
+            ``y_pred_oof``, выровненный по исходному порядку строк
+            (``pd.Series`` с сохранённым pandas-индексом для данных с
+            уникальным индексом, включая MultiIndex; ``np.ndarray`` по позиции
+            для numpy-входов и данных с дублирующимся индексом). Непокрытые
+            строки (например, train-часть ``train_test_split``) и нефинитные
+            предсказания — NaN. ``None`` до первого ``fit()``.
+        oof_coverage_ (float | None): Доля строк исходных данных, покрытых
+            OOF-предсказаниями (1.0 для ``k_fold``/``loo``; < 1.0 для
+            ``train_test_split`` — ограничение задокументировано в логе).
         additional_scores (dict[str, float]): Значения дополнительных метрик,
             рассчитанных тем же методом валидации, что и основная метрика
             (пустой словарь, если метрики не заданы).
@@ -240,6 +262,11 @@ class ModelTrainer:
             ``'train_test_split'`` (дефолт), ``'k_fold'``, ``'loo'`` или
             ``'auto'``. ``'auto'`` разрешается внутри fit() через
             ``validation.make_cv``; engine-путь передаёт уже разрешённый метод.
+            Список допустимых методов — в
+            ``validation.SUPPORTED_VALIDATION_METHODS`` (единая точка
+            расширения: новые стратегии, например order-aware
+            ``TimeSeriesSplit`` из T10, регистрируются там и в ``make_cv``,
+            после чего OOF-канал работает с ними без переписывания).
         n_folds (int): Число фолдов для стратегии ``'k_fold'`` (по умолчанию 5).
         test_size (float | int): Размер hold-out части: доля в (0, 1) либо целое
             число строк (как в sklearn ``train_test_split``). По умолчанию 0.2.
@@ -457,11 +484,15 @@ class ModelTrainer:
         # validation.norm_val_method — единый источник маппинга с HPO
         # (validation.make_cv / iter_splits). Валидируется сразу, чтобы
         # неизвестная стратегия отклонялась на этапе инициализации.
+        # Список допустимых методов берётся из validation.SUPPORTED_VALIDATION_METHODS
+        # — единой точки расширения интерфейса стратегий (issue #62, T10):
+        # добавление новой стратегии (например, TimeSeriesSplit) не требует
+        # правок здесь.
         normalized_strategy = norm_val_method(validation_strategy)
-        if normalized_strategy not in ("train_test_split", "k_fold", "loo", "auto"):
+        if normalized_strategy not in SUPPORTED_VALIDATION_METHODS:
             raise TrainingError(
                 f"Unknown validation_strategy: {validation_strategy!r}. "
-                "Expected one of ('train_test_split', 'k_fold', 'loo', 'auto')."
+                f"Expected one of {SUPPORTED_VALIDATION_METHODS}."
             )
         self.validation_strategy: str = normalized_strategy
         if not isinstance(n_folds, int) or isinstance(n_folds, bool) or n_folds < 1:
@@ -500,6 +531,14 @@ class ModelTrainer:
         self.pipeline: Pipeline | None = None
         self.base_model: Any = None
         self.val_score: float | None = None
+        # OOF-канал оценки кандидата (issue #62): честная метрика на всех
+        # строках без утечки. Каждая строка предсказывается моделью, не
+        # видевшей её при обучении; предсказания валидационных фолдов
+        # собираются в один вектор y_pred_oof, выровненный по исходному
+        # порядку строк, и RMSE_oof считается по всему вектору сразу.
+        self.oof_score_: float | None = None
+        self.oof_predictions_: pd.Series | np.ndarray | None = None
+        self.oof_coverage_: float | None = None
         self.feature_names: list[str] | None = None
         # Имена колонок, удалённых очисткой неинформативных признаков
         # (issue #57). Заполняется в fit() для pd.DataFrame-входов; пустой
@@ -1118,7 +1157,11 @@ class ModelTrainer:
         отложенных данных тем же методом валидации, которым HPO сравнивает
         модели (``validation.iter_splits``): ``train_test_split`` — одно
         hold-out разбиение со скорингом на отложенной части; ``k_fold``/``loo``
-        — среднее по фолдам. После валидационного скоринга финальный пайплайн
+        — среднее по фолдам. Дополнительно собирается OOF-канал (issue #62):
+        предсказания валидационных фолдов конкатенируются в ``y_pred_oof`` и
+        по всему вектору сразу вычисляется ``RMSE_oof`` (``oof_score_``) —
+        честная оценка на всех строках без утечки, отдельная от ``val_score``.
+        После валидационного скоринга финальный пайплайн
         обучается на полных данных: артефакт хранит обучение на 100% выборки,
         а ``val_score`` остаётся честной оценкой качества (не train-скором).
         """
@@ -1133,6 +1176,12 @@ class ModelTrainer:
             self.pipeline = None
             self.val_score = None
             self.additional_scores = {}
+            # OOF-канал (issue #62): сбрасываем вместе с остальным состоянием,
+            # чтобы после неудачного fit() не оставались значения от
+            # предыдущего обучения.
+            self.oof_score_ = None
+            self.oof_predictions_ = None
+            self.oof_coverage_ = None
             self.feature_selection_active_ = False
             self.selected_features_mask_ = None
             self.dropped_features_ = []
@@ -1275,12 +1324,24 @@ class ModelTrainer:
            всех дополнительных метрик.
         3. ``val_score = to_user_value(metric, mean(raw))``;
            ``additional_scores[m] = to_user_value(m, mean(raw_m))``.
+        4. Параллельно собирается OOF-канал (issue #62): предсказания
+           валидационных частей фолдов складываются в один вектор
+           ``y_pred_oof``, выровненный по исходному порядку строк, и по всему
+           вектору сразу считается ``RMSE_oof`` (см. ``_finalize_oof``).
 
         Сбой отдельной дополнительной метрики (ошибка скорера/None на фолде) →
         WARNING + пропуск метрики; падение всех фолдов основной метрики →
         ``TrainingError`` (fail-fast, до финального обучения). Не-конечные скоры
         фолдов (например, inf для NRMSE на константном таргете) возвращаются
-        как есть.
+        как есть. Сбой сбора OOF на отдельном фолде не роняет валидационный
+        скоринг: он только уменьшает покрытие OOF-вектора (WARNING).
+
+        Примечание (интерфейс стратегий, issue #62/T10): сборка OOF не привязана
+        к конкретной стратегии — используется только позиционный ``test_idx``,
+        который ``iter_splits`` отдаёт для любой стратегии. Order-aware
+        стратегии (``TimeSeriesSplit`` и т.п.), регистрируемые в T10 через
+        ``validation.SUPPORTED_VALIDATION_METHODS``/``make_cv``, заработают
+        без переписывания этого метода.
 
         Args:
             X: Матрица признаков (полные данные).
@@ -1330,6 +1391,9 @@ class ModelTrainer:
         # Материализуем разбиения до цикла по фолдам: ошибки инициализации
         # валидации (недостаточно данных, неизвестный метод и т.п.) должны
         # прерывать обучение сразу, а не маскироваться под «упавший фолд».
+        # include_indices=True (issue #62): разбиения дополнительно отдают
+        # позиционные индексы валидационных строк для сборки OOF-вектора,
+        # выровненного по исходному порядку.
         try:
             splits = list(
                 iter_splits(
@@ -1339,15 +1403,42 @@ class ModelTrainer:
                     n_folds=n_folds,
                     test_size=test_size,
                     random_state=splits_seed,
+                    include_indices=True,
                 )
             )
         except Exception as err:  # noqa: BLE001
             raise TrainingError(f"Error calculating metrics on validation: {err}")
 
+        # Фактически применённый метод после возможного fallback
+        # (k_fold → train_test_split при малом N): предупреждения OOF-канала
+        # обязаны опираться на реально использованные разбиения, а не на
+        # запрошенную стратегию (ревью PR #31). Разрешаем тем же make_cv, что
+        # вызывается внутри iter_splits, — значения гарантированно совпадают.
+        n_samples = X.shape[0] if hasattr(X, "shape") else len(X)
+        n_features = X.shape[1] if method == "auto" else None
+        try:
+            effective_method, _, _ = make_cv(
+                n_samples,
+                val_method=method,
+                n_folds=n_folds,
+                random_state=splits_seed,
+                test_size=test_size,
+                n_features=n_features,
+            )
+        except Exception:  # noqa: BLE001
+            # Сплиты уже материализованы выше — сюда попадаем только в
+            # невозможном/дегенеративном случае; fallback на запрошенный метод.
+            effective_method = method
+
         fold_raw: list[float] = []
         add_raw: dict[str, list[float]] = {m: [] for m in add_scorers}
         fold_errors: list[str] = []
-        for X_tr, X_te, y_tr, y_te in splits:
+        # Буферы OOF-канала (issue #62): заполняются по позициям валидационных
+        # строк в исходных данных; непокрытые строки остаются NaN и
+        # отбрасываются при расчёте RMSE_oof.
+        oof_pred_buffer = np.full(n_samples, np.nan, dtype=float)
+        oof_y_buffer = np.full(n_samples, np.nan, dtype=float)
+        for X_tr, X_te, y_tr, y_te, test_idx in splits:
             try:
                 # Свежий пайплайн на каждый фолд: клоны preprocessor/base_model
                 # (sklearn Pipeline не клонирует переданные шаги, поэтому общие
@@ -1382,6 +1473,29 @@ class ModelTrainer:
                             mname,
                             err,
                         )
+
+                # OOF-канал (issue #62): предсказание на валидационной части
+                # фолда — модель обучалась только на train-части, поэтому
+                # строка гарантированно не участвовала в обучении (отсутствие
+                # утечки). Отдельный try: сбой сбора OOF не роняет скоринг
+                # фолда, а только уменьшает покрытие OOF-вектора (WARNING).
+                try:
+                    preds = np.asarray(fold_pipe.predict(X_te)).reshape(-1)
+                    idx = np.asarray(test_idx)
+                    if preds.shape[0] != idx.shape[0]:
+                        raise TrainingError(
+                            "OOF prediction length mismatch: got "
+                            f"{preds.shape[0]} predictions for {idx.shape[0]} rows"
+                        )
+                    if y_te is not None:
+                        oof_pred_buffer[idx] = preds
+                        oof_y_buffer[idx] = np.asarray(y_te, dtype=float).reshape(-1)
+                except Exception as err:  # noqa: BLE001
+                    self.logger.warning(
+                        "OOF predictions could not be collected on a "
+                        "validation fold: %s. RMSE_oof coverage reduced.",
+                        err,
+                    )
             except Exception as err:  # noqa: BLE001
                 fold_errors.append(str(err))
 
@@ -1405,6 +1519,148 @@ class ModelTrainer:
             self.additional_scores[mname] = to_user_value(
                 mname, float(np.mean(raw_values))
             )
+
+        # OOF-канал (issue #62): RMSE_oof по всему вектору, предупреждения о
+        # покрытии/малом N, выравнивание y_pred_oof по исходному порядку строк.
+        self._finalize_oof(
+            oof_pred_buffer,
+            oof_y_buffer,
+            X,
+            n_samples,
+            method=effective_method,
+        )
+
+    def _finalize_oof(
+        self,
+        oof_pred: np.ndarray,
+        oof_y: np.ndarray,
+        X: Any,
+        n_samples: int,
+        *,
+        method: str,
+    ) -> None:
+        """Финализировать OOF-канал оценки (issue #62).
+
+        По буферам предсказаний/таргета, собранным на валидационных фолдах
+        (``_score_on_validation_splits``), вычисляет ``RMSE_oof`` по всему
+        вектору сразу через :func:`metrics.oof_rmse`, заполняет атрибуты
+        ``oof_score_``/``oof_predictions_``/``oof_coverage_`` и логирует
+        предупреждения:
+        - ``train_test_split`` покрывает OOF-ом только валидационную часть
+          (задокументированное ограничение);
+        - очень малый N (2–5): короткий OOF-вектор, высокая дисперсия;
+        - нефинитные предсказания/таргеты исключаются из RMSE_oof.
+
+        Args:
+            oof_pred: Буфер OOF-предсказаний (NaN для непокрытых строк).
+            oof_y: Буфер истинных значений (NaN для непокрытых строк).
+            X: Исходная матрица признаков (для восстановления pandas-индекса).
+            n_samples: Общее число строк в исходных данных.
+            method: Фактически применённый метод валидации (после возможного
+                fallback ``k_fold`` → ``train_test_split``), от которого зависят
+                предупреждения о покрытии.
+        """
+        oof_vector = self._align_oof_vector(oof_pred, X)
+        valid = np.isfinite(oof_pred) & np.isfinite(oof_y)
+        n_valid = int(valid.sum())
+        coverage = float(n_valid / n_samples) if n_samples > 0 else 0.0
+        self.oof_coverage_ = coverage
+
+        # Ограничение train_test_split: OOF покрывает только валидационную
+        # часть (issue #62, требование 4). Явно задокументировано в логе.
+        if method == "train_test_split":
+            self.logger.warning(
+                "OOF evaluation with 'train_test_split' covers only the "
+                "validation part (%d/%d rows, %.0f%%): rows from the training "
+                "part have no honest out-of-fold prediction, so RMSE_oof is "
+                "estimated on the covered subset only.",
+                n_valid,
+                n_samples,
+                coverage * 100.0,
+            )
+
+        # Очень малый N: OOF-вектор короткий, дисперсия оценки высокая
+        # (issue #62, edge cases).
+        if n_samples <= 5:
+            self.logger.warning(
+                "OOF evaluation on very small data (N=%d): the OOF vector is "
+                "short and RMSE_oof has high variance.",
+                n_samples,
+            )
+
+        if n_valid == 0:
+            self.oof_score_ = None
+            self.oof_predictions_ = oof_vector
+            self.logger.warning(
+                "RMSE_oof could not be computed: no valid out-of-fold "
+                "prediction/target pairs."
+            )
+            return
+
+        dropped = n_samples - n_valid
+        # Для train_test_split непокрытые строки — это train-часть, ограничение
+        # уже задокументировано отдельным WARNING выше; общее предупреждение об
+        # исключении строк логируем только для нефинитных предсказаний/таргетов.
+        if dropped and method != "train_test_split":
+            self.logger.warning(
+                "%d row(s) excluded from RMSE_oof (non-finite prediction or "
+                "target); coverage=%.3f.",
+                dropped,
+                coverage,
+            )
+
+        try:
+            self.oof_score_ = oof_rmse(oof_y, oof_pred)
+        except ValueError as err:
+            self.oof_score_ = None
+            self.logger.warning("RMSE_oof could not be computed: %s", err)
+        self.oof_predictions_ = oof_vector
+        self.logger.info(
+            "OOF evaluation: RMSE_oof=%.4f on %d/%d rows (coverage=%.3f).",
+            self.oof_score_ if self.oof_score_ is not None else float("nan"),
+            n_valid,
+            n_samples,
+            coverage,
+        )
+
+    def _align_oof_vector(
+        self,
+        oof_pred: np.ndarray,
+        X: Any,
+    ) -> pd.Series | np.ndarray:
+        """Выровнять OOF-вектор ``y_pred_oof`` по исходному порядку строк.
+
+        Для pandas-входов (``DataFrame``/``Series``) с уникальным индексом
+        возвращается ``pd.Series`` с сохранёнными метками строк (issue #62,
+        требование 2), включая MultiIndex. Для numpy-входов и данных с
+        невосстановимым индексом (дубликаты меток) возвращается
+        ``np.ndarray``, выровненный по позиции: сортировка по значению индекса
+        не выполняется.
+
+        Примечание (фикс ревью PR #31): свойство ``Index.hasnans`` не
+        определено для ``MultiIndex`` (``NotImplementedError``), поэтому
+        проверка обёрнута в try/except — иначе ``fit()`` падал на данных с
+        MultiIndex-индексом, хотя на main такой вход работал.
+
+        Args:
+            oof_pred: Буфер OOF-предсказаний (NaN для непокрытых строк),
+                выровненный по позиции исходных данных.
+            X: Исходная матрица признаков.
+
+        Returns:
+            Вектор ``y_pred_oof`` в исходном порядке строк.
+        """
+        if isinstance(X, (pd.DataFrame, pd.Series)) and X.index.is_unique:
+            try:
+                has_nan_labels = bool(X.index.hasnans)
+            except (NotImplementedError, TypeError):
+                # MultiIndex и другие индексы без поддержки hasnans: проверить
+                # NaN-метки нельзя, но уникальность гарантирует однозначное
+                # позиционное выравнивание — сохраняем метки строк.
+                has_nan_labels = False
+            if not has_nan_labels:
+                return pd.Series(oof_pred, index=X.index, name="y_pred_oof")
+        return oof_pred
 
     def _align_predict_columns(self, X: pd.DataFrame) -> pd.DataFrame:
         """Выровнять колонки DataFrame к обучающему порядку (issue #2).

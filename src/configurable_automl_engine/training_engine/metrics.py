@@ -58,6 +58,35 @@ def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
+def oof_rmse(y_true: Any, y_pred: Any) -> float:
+    """Рассчитать RMSE по выровненному OOF-вектору целиком (issue #62).
+
+    В отличие от усреднения по фолдам, метрика считается по всему вектору
+    out-of-fold предсказаний сразу: каждая строка входит в расчёт ровно один
+    раз. Пары, где ``y_true`` или ``y_pred`` не являются конечными числами
+    (NaN/None/inf — непокрытые строки ``train_test_split`` либо сбойные
+    предсказания отдельных фолдов), отбрасываются, чтобы конкатенация фолдов
+    разной длины «не разъезжалась» по индексам.
+
+    Args:
+        y_true (Any): Истинные значения, выровненные с ``y_pred`` по позиции.
+        y_pred (Any): OOF-предсказания, выровненные с ``y_true`` по позиции.
+
+    Returns:
+        float: RMSE по всем валидным парам (меньше — лучше).
+
+    Raises:
+        ValueError: Если после отбрасывания нефинитных пар не осталось ни
+            одной валидной пары (OOF-оценка невозможна).
+    """
+    yt = np.asarray(y_true, dtype=float)
+    yp = np.asarray(y_pred, dtype=float)
+    mask = np.isfinite(yt) & np.isfinite(yp)
+    if not np.any(mask):
+        raise ValueError("No valid (y_true, y_pred) pairs for OOF RMSE.")
+    return _rmse(yt[mask], yp[mask])
+
+
 class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 

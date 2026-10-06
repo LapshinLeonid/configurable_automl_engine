@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator
-from typing import Any
+from typing import Any, Literal, overload
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,19 @@ from configurable_automl_engine.common.validation_utils import (
 log = logging.getLogger(__name__)
 
 RANDOM_STATE = 42  # фиксируем сид в одном месте
+
+#: Методы валидации, поддерживаемые ``make_cv``/``iter_splits`` в текущей
+#: версии. Единая точка расширения интерфейса стратегий валидации (issue #62,
+#: edge case «временные ряды»): для новой стратегии (например,
+#: order-aware ``TimeSeriesSplit`` из T10) достаточно добавить метод в этот
+#: кортеж и ветку в ``make_cv`` — ``ModelTrainer`` и OOF-канал подхватят его
+#: автоматически, без переписывания.
+SUPPORTED_VALIDATION_METHODS: tuple[str, ...] = (
+    "train_test_split",
+    "k_fold",
+    "loo",
+    "auto",
+)
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
 
@@ -140,7 +153,8 @@ def make_cv(
         return "loo", LeaveOneOut(), None
 
     raise ValueError(
-        "Unknown validation method. Must be 'train_test_split', 'k_fold', 'loo' or 'auto'"
+        "Unknown validation method. Must be one of "
+        f"{', '.join(SUPPORTED_VALIDATION_METHODS)}"
     )
 
 
@@ -200,6 +214,20 @@ def _resolve_auto_cv(
     raise InvalidDataError(decision.get("reason", "Insufficient data for validation."))
 
 
+# Результат ``iter_splits``: кортеж из четырёх подмножеств (X_train, X_val,
+# y_train, y_val) либо из пяти при ``include_indices=True`` — пятым элементом
+# добавляется ``np.ndarray`` позиционных индексов валидационных строк в
+# исходных данных (issue #62, сборка OOF-предсказаний в ``ModelTrainer``).
+# Точная типизация через ``@overload`` с ``Literal`` (ревью PR #31): вызовы с
+# ``include_indices=False`` (по умолчанию) получают 4-элементный кортеж,
+# с ``include_indices=True`` — 5-элементный.
+Split = tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
+SplitWithIndices = tuple[
+    np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray
+]
+
+
+@overload
 def iter_splits(
     X: np.ndarray | pd.DataFrame,
     y: np.ndarray | pd.Series | None = None,
@@ -208,7 +236,33 @@ def iter_splits(
     n_folds: int = 5,
     test_size: float = 0.2,
     random_state: int | None = 42,
-) -> Generator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], None, None]:
+    include_indices: Literal[False] = False,
+) -> Generator[Split, None, None]: ...
+
+
+@overload
+def iter_splits(
+    X: np.ndarray | pd.DataFrame,
+    y: np.ndarray | pd.Series | None = None,
+    *,
+    method: ValidationStrategy | str = "k_fold",
+    n_folds: int = 5,
+    test_size: float = 0.2,
+    random_state: int | None = 42,
+    include_indices: Literal[True],
+) -> Generator[SplitWithIndices, None, None]: ...
+
+
+def iter_splits(
+    X: np.ndarray | pd.DataFrame,
+    y: np.ndarray | pd.Series | None = None,
+    *,
+    method: ValidationStrategy | str = "k_fold",
+    n_folds: int = 5,
+    test_size: float = 0.2,
+    random_state: int | None = 42,
+    include_indices: bool = False,
+) -> Generator[Split | SplitWithIndices, None, None]:
     """
     Генерирует итеративные разбиения данных на обучающую и валидационную выборки.
     Функция инкапсулирует логику кросс-валидации и простого разделения, возвращая
@@ -222,12 +276,21 @@ def iter_splits(
         test_size: Доля валидационной выборки
         (используется только при методе 'train_test_split').
         random_state: Зерно для фиксации случайности при перемешивании.
+        include_indices: Если True, каждый кортеж дополняется пятым элементом —
+            ``np.ndarray`` позиционных индексов валидационных строк в исходном
+            ``X`` (порядок соответствует порядку ``X_val``). Используется для
+            сборки OOF-предсказаний, выровненных по исходному порядку строк
+            (issue #62). По умолчанию False — поведение полностью совместимо
+            со старым 4-элементным контрактом.
     Yields:
-        Tuple: Кортеж из четырех элементов:
+        Tuple: Кортеж из четырех (или пяти при ``include_indices=True``)
+            элементов:
             - X_train: Данные для обучения.
             - X_val: Данные для проверки.
             - y_train: Метки для обучения (или None).
             - y_val: Метки для проверки (или None).
+            - test_idx (только при ``include_indices=True``): Позиционные
+              индексы строк ``X_val`` в исходном ``X``.
     Raises:
         InvalidDataError: Если входные данные пусты или размеры X и y не совпадают.
         ValidationError: При критической ошибке инициализации объекта валидации.
@@ -258,15 +321,33 @@ def iter_splits(
         effective_test_size: float | int = test_size
         if method_str == "auto" and decision is not None:
             effective_test_size = int(decision["test_size"])
-        # y может быть None, sklearn.train_test_split это корректно обрабатывает
-        X_tr, X_te, y_tr, y_te = train_test_split(
-            X,
-            y,
+        # Разбиваем ПОЗИЦИОННЫЕ индексы один раз, чтобы при include_indices=True
+        # отдавать настоящие позиции валидационных строк в исходном X, а сами
+        # подмножества получать индексацией по этим же позициям. Это гарантирует
+        # согласованность X_val/y_val/test_idx и корректную работу при
+        # random_state=None (два независимых вызова train_test_split дали бы
+        # разные перестановки).
+        all_idx = np.arange(len(X))
+        train_idx, test_idx = train_test_split(
+            all_idx,
             test_size=effective_test_size,
             shuffle=True,
             random_state=random_state,
         )
-        yield X_tr, X_te, y_tr, y_te
+        if hasattr(X, "iloc"):
+            X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+        else:
+            X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = None, None
+        if y is not None:
+            if hasattr(y, "iloc"):
+                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+            else:
+                y_tr, y_te = y[train_idx], y[test_idx]
+        if include_indices:
+            yield X_tr, X_te, y_tr, y_te, test_idx
+        else:
+            yield X_tr, X_te, y_tr, y_te
     elif final_method in ("k_fold", "loo"):
         if cv is None:
             raise ValidationError(
@@ -289,4 +370,7 @@ def iter_splits(
                 else:
                     y_tr, y_te = y[train_idx], y[test_idx]
 
-            yield x_tr, x_te, y_tr, y_te
+            if include_indices:
+                yield x_tr, x_te, y_tr, y_te, np.asarray(test_idx)
+            else:
+                yield x_tr, x_te, y_tr, y_te
