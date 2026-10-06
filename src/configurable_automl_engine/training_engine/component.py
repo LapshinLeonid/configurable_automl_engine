@@ -8,6 +8,11 @@
     - execute_phases: Многофазовый поиск гиперпараметров (HPO).
     - select_winner: Детерминированный выбор алгоритма-победителя.
     - persist_artifact: Финальное обучение, сохранение модели и сборка отчёта.
+Двухстадийный выбор победителя (эпик #61, задача T4, issue #64):
+    - select_finalists (T3): пул финалистов — коридор δ + top_k_candidates.
+    - select_robust_winner (T4): аудит каждого финалиста через
+      ModelSanityGate (T2) и ранжирование прошедших аудит по RMSE_oof;
+      режимы off / warn_only / active из конфига general.sanity_gate.
 Основные компоненты:
     - train_best_model: Публичный интерфейс — оркестрация перечисленных шагов.
     - _run_hpo: Обертка для поиска гиперпараметров через внешние тюнеры.
@@ -28,11 +33,12 @@ import importlib
 import inspect
 import logging
 import math
+import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -47,9 +53,11 @@ from configurable_automl_engine.preprocessing import detect_feature_types
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
+    CorridorMode,
     FeatureSelectionCfg,
     FeatureSelectionMode,
     HPOPhaseCfg,
+    SanityGateMode,
     ValidationStrategy,
     read_config,
 )
@@ -61,10 +69,12 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
     is_error_metric,
+    oof_rmse,
     to_sklearn_name,
     to_user_value,
     user_direction,
 )
+from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .thread_pool import run_parallel
 
 _LOG = logging.getLogger("training_engine")
@@ -130,10 +140,9 @@ def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
 # --------------------------------------------------------------------------- #
 #  Finalists pool Top-K (epic #61, task T3)                                    #
 #  Формирование пула финалистов: коридор δ от лидера в пользовательской       #
-#  семантике + жёсткий кап top_k_candidates.                                  #
+#  семантике + жёсткий кап top_k_candidates. Тип ``CorridorMode`` определён   #
+#  в ``config_parser`` (используется также конфигом ``SanityGateCfg``).       #
 # --------------------------------------------------------------------------- #
-CorridorMode = Literal["multiplicative", "additive", "auto"]
-
 FAMILY_DIVERSITY_MULTIPLIER_DEFAULT = 1.5
 
 # Малый относительный допуск для сравнений на границе коридора: артефакты
@@ -443,6 +452,468 @@ def select_finalists(
     return pool
 
 
+# --------------------------------------------------------------------------- #
+#  Robust winner selection (epic #61, task T4, issue #64)                      #
+#  Двухстадийный выбор победителя: пул финалистов (T3) → обучение каждого     #
+#  финалиста на 100% данных ОДИН раз → аудит ModelSanityGate (T2) →           #
+#  ранжирование прошедших аудит по RMSE_oof.                                  #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FinalistCandidate:
+    """Финалист двухстадийного выбора: модель, обученная на 100% данных.
+
+    Собирается до ``select_robust_winner`` (обучение финалистов на полных
+    данных выполняется ровно один раз, результат переиспользуется для
+    ``RMSE_full``, аудита и отчёта — без дублирования обучения, требование 4
+    постановки T4).
+
+    Attributes:
+        algo_name (str): Имя алгоритма.
+        model (Any): Обученный на 100% данных пайплайн (``trainer.pipeline``);
+            используется аудитом (контур В) и для предсказаний ``y_pred_full``.
+        params (dict[str, Any]): Лучшие гиперпараметры из HPO
+            (``phase_results[algo_name][1]``).
+        cv_score (float): «Сырой» скор из HPO-фазы (семантика оптимизатора);
+            используется в режимах ``off``/``warn_only`` для выбора победителя
+            как при старом ``select_winner``.
+        rmse_oof (float | None): ``RMSE_oof`` финалиста (``trainer.oof_score_``);
+            ``None``, если OOF-оценка невозможна.
+        y_pred_oof (Any): OOF-вектор предсказаний (``trainer.oof_predictions_``),
+            выровненный по строкам X.
+        y_pred_full (Any): Предсказания full-fit модели на тех же строках
+            (``trainer.predict(X)``); используется контуром Г (RMSE_full) и
+            отчётом.
+        rmse_full (float | None): ``RMSE_full = RMSE(y, y_pred_full)``;
+            ``None``, если вычислить нельзя.
+        trainer (Any | None): Сам ``ModelTrainer`` финалиста; передаётся в
+            ``persist_artifact``, чтобы артефакт сохранялся БЕЗ повторного
+            обучения победителя.
+    """
+
+    algo_name: str
+    model: Any
+    params: dict[str, Any]
+    cv_score: float
+    rmse_oof: float | None
+    y_pred_oof: Any
+    y_pred_full: Any
+    rmse_full: float | None = None
+    trainer: Any | None = None
+
+
+@dataclass(frozen=True)
+class RobustWinnerResult:
+    """Результат robust-выбора победителя (T4).
+
+    Attributes:
+        winner_algo (str): Имя алгоритма-победителя.
+        mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').
+        pool (list[str]): Порядок пула финалистов (из T3, детерминированный
+            tie-break при равных RMSE_oof).
+        audit (dict[str, SanityCheckResult]): Аудит каждого финалиста
+            (имя → результат). Заполнен при mode != 'off'.
+        disqualified (dict[str, list[str]]): Дисквалифицированные финалисты
+            (имя → причины). В режиме ``active`` причины применяются;
+            в ``warn_only`` — гипотетические (победитель не меняется).
+        fallback_used (bool): True, если все кандидаты забракованы и победитель
+            выбран fallback-критерием («наименее проблемная» модель).
+        winner_rmse_oof (float | None): ``RMSE_oof`` победителя.
+    """
+
+    winner_algo: str
+    mode: SanityGateMode
+    pool: list[str]
+    audit: dict[str, SanityCheckResult] = field(default_factory=dict)
+    disqualified: dict[str, list[str]] = field(default_factory=dict)
+    fallback_used: bool = False
+    winner_rmse_oof: float | None = None
+
+
+def _fit_finalist(
+    algo_name: str,
+    algo_cfg: AlgoCfg,
+    X: pd.DataFrame,
+    y: pd.Series,
+    best_params: dict[str, Any],
+    cfg: Config,
+    metric_name_sklearn: str,
+    *,
+    validation_strategy: ValidationStrategy | str | None,
+    n_folds: int | None,
+    test_size: float | None,
+) -> Any:
+    """Обучить финалиста на 100% данных и вернуть его ``ModelTrainer``.
+
+    Выполняет ровно одно обучение (``ModelTrainer.fit``): валидационный
+    скоринг с OOF-каналом (issue #62) + финальный fit на полном наборе.
+    Результат переиспользуется далее для ``RMSE_full``, аудита и отчёта —
+    дублирование обучения отсутствует (требование 4 постановки T4).
+
+    Args:
+        algo_name (str): Имя алгоритма.
+        algo_cfg (AlgoCfg): Конфигурация алгоритма.
+        X (pd.DataFrame): Полная матрица признаков.
+        y (pd.Series): Полный вектор целевой переменной.
+        best_params (dict[str, Any]): Лучшие гиперпараметры из HPO.
+        cfg (Config): Корневой конфиг.
+        metric_name_sklearn (str): Имя метрики в sklearn-семантике.
+        validation_strategy (ValidationStrategy | str | None): Разрешённая
+            стратегия валидации.
+        n_folds (int | None): Число фолдов (для 'k_fold').
+        test_size (float | int | None): Размер hold-out части.
+
+    Returns:
+        Any: Обученный ``ModelTrainer`` (pipeline на 100% данных, OOF-атрибуты).
+
+    Raises:
+        Exception: Любая ошибка обучения пробрасывается наверх — вызывающий
+            код (``_train_finalists``) ловит её и исключает финалиста
+            (требование 5 постановки T4).
+    """
+    trainer = _build_trainer(
+        algo_name,
+        algo_cfg,
+        best_params,
+        cfg,
+        metric_name_sklearn=metric_name_sklearn,
+        validation_strategy=validation_strategy,
+        n_folds=n_folds,
+        test_size=test_size,
+    )
+    trainer.fit(X, y)
+    return trainer
+
+
+def _to_candidate(
+    algo_name: str,
+    trainer: Any,
+    params: dict[str, Any],
+    cv_score: float,
+    X: pd.DataFrame,
+    y: pd.Series,
+) -> FinalistCandidate:
+    """Собрать ``FinalistCandidate`` из обученного ``ModelTrainer``.
+
+    Вычисляет производные величины (``y_pred_full``, ``rmse_full``) ровно
+    один раз из уже обученного тренера; OOF-вектор и ``RMSE_oof`` берутся из
+    атрибутов тренера (issue #62).
+
+    Args:
+        algo_name (str): Имя алгоритма.
+        trainer (Any): Обученный ``ModelTrainer``.
+        params (dict[str, Any]): Лучшие гиперпараметры.
+        cv_score (float): «Сырой» CV-скор из HPO.
+        X (pd.DataFrame): Полная матрица признаков.
+        y (pd.Series): Полный вектор целевой переменной.
+
+    Returns:
+        FinalistCandidate: Кандидат с переиспользуемыми full-fit векторами.
+    """
+    y_pred_full = np.asarray(trainer.predict(X), dtype=float).reshape(-1)
+    rmse_full: float | None = None
+    try:
+        rmse_full = oof_rmse(y, y_pred_full)
+    except ValueError:
+        rmse_full = None
+    return FinalistCandidate(
+        algo_name=algo_name,
+        model=trainer.pipeline,
+        params=params,
+        cv_score=cv_score,
+        rmse_oof=trainer.oof_score_,
+        y_pred_oof=trainer.oof_predictions_,
+        y_pred_full=y_pred_full,
+        rmse_full=rmse_full,
+        trainer=trainer,
+    )
+
+
+def _train_finalists(
+    pool: list[str],
+    phase_results: dict[str, tuple[float, dict[str, Any]]],
+    cfg: Config,
+    prepared: PreparedData,
+) -> dict[str, FinalistCandidate]:
+    """Обучить каждый финалист пула на 100% данных ровно один раз.
+
+    Провал обучения отдельного финалиста не прерывает запуск: исключение
+    ловится, причина логируется (WARNING), кандидат пропускается (переход к
+    следующему, требование 5 постановки T4).
+
+    Args:
+        pool (list[str]): Упорядоченный пул финалистов (из ``select_finalists``).
+        phase_results (dict[str, tuple[float, dict[str, Any]]]): Результаты HPO
+            «алгоритм → (скор, параметры)».
+        cfg (Config): Корневой конфиг.
+        prepared (PreparedData): Подготовленные данные и настройки.
+
+    Returns:
+        dict[str, FinalistCandidate]: Обученные кандидаты (ключ — имя
+            алгоритма), в порядке пула (dict сохраняет порядок вставки).
+    """
+    algos = _algorithms_as_dict(cfg.algorithms)
+    candidates: dict[str, FinalistCandidate] = {}
+    for name in pool:
+        if name not in phase_results:
+            continue
+        score, params = phase_results[name]
+        try:
+            trainer = _fit_finalist(
+                name,
+                algos[name],
+                prepared.X,
+                prepared.y,
+                params,
+                cfg,
+                prepared.metric_sklearn,
+                validation_strategy=prepared.resolved_validation,
+                n_folds=prepared.resolved_n_folds,
+                test_size=prepared.resolved_test_size,
+            )
+        except Exception as err:  # noqa: BLE001 — финалист исключается
+            _LOG.warning(
+                "Finalist %s failed to train on the full dataset: %s. "
+                "The candidate is skipped (T4 requirement 5).",
+                name,
+                err,
+                exc_info=True,
+            )
+            continue
+        candidates[name] = _to_candidate(
+            name, trainer, params, score, prepared.X, prepared.y
+        )
+    return candidates
+
+
+# Значимость контуров для fallback-критерия (T4, п. 3): Г > А > Б > В.
+# Чем больше ранг, тем «тяжелее» нарушение. Ранги фиксированы в коде.
+_CIRCUIT_RANK_BY_LETTER = {
+    "A": 2,  # А — diversity
+    "B": 1,  # Б — unique
+    "C": 0,  # В — dead features
+    "D": 3,  # Г — generalization gap (самое тяжёлое)
+}
+
+
+def _circuit_rank(reason: str) -> int:
+    """Ранг значимости контура по строке reason (Г > А > Б > В).
+
+    Разбирает префикс ``Circuit <letter>`` в reason (формат
+    ``ModelSanityGate``). Неизвестный формат трактуется как наименее значимый
+    контур (ранг 0) — defensive fallback, чтобы fallback-ранжирование никогда
+    не падало на кастомных причинах.
+
+    Args:
+        reason (str): Текст причины дисквалификации.
+
+    Returns:
+        int: Ранг значимости (0..3); 3 — контур Г, 2 — А, 1 — Б, 0 — В/unknown.
+    """
+    match = re.search(r"Circuit\s+([A-D])", reason)
+    if match is None:
+        return 0
+    return _CIRCUIT_RANK_BY_LETTER.get(match.group(1), 0)
+
+
+def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
+    """Подпись тяжести нарушений для fallback-критерия (T4, п. 3).
+
+    Кортеж рангов значимости контуров, отсортированный по убыванию (самое
+    тяжёлое нарушение первым). Лексикографически меньшая подпись = менее
+    проблемная модель при равном числе нарушенных контуров.
+
+    Args:
+        reasons (list[str]): Причины дисквалификации кандидата.
+
+    Returns:
+        tuple[int, ...]: Отсортированная по убыванию подпись тяжести.
+    """
+    return tuple(sorted((_circuit_rank(r) for r in reasons), reverse=True))
+
+
+def _best_by_rmse_oof(
+    names: list[str], candidates: Mapping[str, FinalistCandidate]
+) -> str:
+    """Выбрать кандидата с лучшим (минимальным) ``RMSE_oof``.
+
+    Tie-break: при равных ``RMSE_oof`` побеждает первый в порядке списка
+    (порядок пула из T3 — детерминированный, требование постановки).
+    Кандидат с недоступным ``RMSE_oof`` (None) ранжируется последним.
+
+    Args:
+        names (list[str]): Кандидаты в детерминированном порядке.
+        candidates (Mapping[str, FinalistCandidate]): Кандидаты.
+
+    Returns:
+        str: Имя победителя.
+    """
+
+    def _key(name: str) -> tuple[int, float]:
+        rmse = candidates[name].rmse_oof
+        return (rmse is None, rmse if rmse is not None else float("inf"))
+
+    return min(names, key=_key)
+
+
+def select_robust_winner(
+    candidate_models: Mapping[str, FinalistCandidate],
+    X: pd.DataFrame,
+    y: pd.Series,
+    sanity_gate: ModelSanityGate,
+    *,
+    mode: SanityGateMode = "off",
+) -> RobustWinnerResult:
+    """Двухстадийный выбор победителя с аудитом Sanity Gate (эпик #61, T4).
+
+    Перебирает пул кандидатов (уже обученных на 100% данных), прогоняет
+    каждого через ``ModelSanityGate.check`` (diversity/unique считаются на
+    OOF-векторе; контур Г использует full-fit предсказания) и ранжирует
+    прошедших аудит по ``RMSE_oof`` (CV и ``RMSE_full`` в ранжировании НЕ
+    участвуют — композитный скор удалён по итогам ревью v2).
+
+    Режимы (``mode``, из T5):
+    - ``off``: старое поведение ``select_winner`` — победитель = лучший
+      ``cv_score`` (без аудита; ``audit`` остаётся пустым);
+    - ``warn_only``: аудит выполняется, дисквалификации гипотетические
+      (фиксируются в ``disqualified``/``audit`` для отчёта T6), но победитель
+      выбирается как при ``off`` (сбор статистики на реальных данных);
+    - ``active``: дисквалификации применяются; победитель = лучший
+      ``RMSE_oof`` среди прошедших все проверки.
+
+    Fallback (формализован, п. 3 постановки): если все кандидаты забракованы,
+    выбирается «наименее проблемная» модель — минимум числа нарушенных
+    контуров, при равенстве — минимум тяжести нарушений (значимость контуров
+    зафиксирована в коде: Г > А > Б > В, см. ``_circuit_rank``), при равенстве
+    — лучший ``RMSE_oof``. Запуск не падает, в лог пишется WARNING с причинами.
+
+    Args:
+        candidate_models (Mapping[str, FinalistCandidate]): Пул кандидатов
+            (обучены на 100% данных, OOF-векторы доступны). Порядок вставки
+            — детерминированный порядок пула из T3.
+        X (pd.DataFrame): Полная матрица признаков.
+        y (pd.Series): Полный вектор целевой переменной.
+        sanity_gate (ModelSanityGate): Настроенный экземпляр гейта (T2).
+        mode (SanityGateMode): Режим работы ('off'/'warn_only'/'active').
+
+    Returns:
+        RobustWinnerResult: Победитель, аудит по каждому кандидату,
+            применённые/гипотетические дисквалификации и флаг fallback.
+
+    Raises:
+        RuntimeError: Если пул кандидатов пуст — победитель не существует.
+        ValueError: Если ``mode`` неизвестен.
+    """
+    if not candidate_models:
+        raise RuntimeError("Cannot select a robust winner from an empty candidate pool")
+
+    pool_order = list(candidate_models)
+
+    def _cv_winner() -> str:
+        """Старое поведение select_winner: лучший «сырой» скор, tie — порядок."""
+        return max(pool_order, key=lambda n: candidate_models[n].cv_score)
+
+    if mode == "off":
+        winner = _cv_winner()
+        return RobustWinnerResult(
+            winner_algo=winner,
+            mode=mode,
+            pool=pool_order,
+            winner_rmse_oof=candidate_models[winner].rmse_oof,
+        )
+
+    if mode not in ("warn_only", "active"):
+        raise ValueError(f"mode must be 'off', 'warn_only' or 'active'; got {mode!r}")
+
+    # Аудит каждого финалиста: diversity/unique — на OOF-векторе, контур Г —
+    # на full-fit предсказаниях (требование 1 постановки T4).
+    audits: dict[str, SanityCheckResult] = {}
+    for name in pool_order:
+        cand = candidate_models[name]
+        try:
+            audits[name] = sanity_gate.check(
+                y=y,
+                y_pred_oof=cand.y_pred_oof,
+                y_pred_full=cand.y_pred_full,
+                X=X,
+                model=cand.model,
+            )
+        except Exception as err:  # noqa: BLE001 — сбой аудита = дисквалификация
+            _LOG.warning("Sanity audit failed for candidate %s: %s", name, err)
+            audits[name] = SanityCheckResult(
+                is_valid=False,
+                reasons=[f"Sanity audit failed: {err}"],
+                severity=4,
+            )
+
+    disqualified = {
+        name: list(audits[name].reasons) for name in pool_order if audits[name].reasons
+    }
+
+    if mode == "warn_only":
+        # Победитель — как при off (CV-лидер); дисквалификации гипотетические
+        # и попадают в отчёт (T6), фактический выбор не меняют.
+        winner = _cv_winner()
+        for name, reasons in disqualified.items():
+            _LOG.info(
+                "[sanity_gate warn_only] Hypothetical disqualification of "
+                "candidate %s: %s",
+                name,
+                reasons,
+            )
+        return RobustWinnerResult(
+            winner_algo=winner,
+            mode=mode,
+            pool=pool_order,
+            audit=audits,
+            disqualified=disqualified,
+            winner_rmse_oof=candidate_models[winner].rmse_oof,
+        )
+
+    # mode == "active": применяем дисквалификации, ранжируем по RMSE_oof.
+    valid = [n for n in pool_order if audits[n].is_valid]
+    if valid:
+        winner = _best_by_rmse_oof(valid, candidate_models)
+        return RobustWinnerResult(
+            winner_algo=winner,
+            mode=mode,
+            pool=pool_order,
+            audit=audits,
+            disqualified=disqualified,
+            winner_rmse_oof=candidate_models[winner].rmse_oof,
+        )
+
+    # Fallback (п. 3 постановки): все кандидаты забракованы — «наименее
+    # проблемная» модель: минимум числа нарушенных контуров → минимум тяжести
+    # (Г > А > Б > В) → лучший RMSE_oof. Запуск не падает.
+    def _fallback_key(name: str) -> tuple[int, tuple[int, ...], bool, float]:
+        reasons = audits[name].reasons
+        rmse = candidate_models[name].rmse_oof
+        return (
+            len(reasons),
+            _severity_signature(reasons),
+            rmse is None,
+            rmse if rmse is not None else float("inf"),
+        )
+
+    winner = min(pool_order, key=_fallback_key)
+    _LOG.warning(
+        "[sanity_gate active] All %d candidate(s) failed the sanity audit; "
+        "falling back to the least problematic model %s. Reasons: %s",
+        len(pool_order),
+        winner,
+        {n: audits[n].reasons for n in pool_order},
+    )
+    return RobustWinnerResult(
+        winner_algo=winner,
+        mode=mode,
+        pool=pool_order,
+        audit=audits,
+        disqualified=disqualified,
+        fallback_used=True,
+        winner_rmse_oof=candidate_models[winner].rmse_oof,
+    )
+
+
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
     """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
     # model_fields через экземпляр тоже работает, но deprecated
@@ -728,13 +1199,10 @@ def _run_hpo(
 # --------------------------------------------------------------------------- #
 #  Final fit & save                                                           #
 # --------------------------------------------------------------------------- #
-def _fit_and_save(
+def _build_trainer(
     algo_name: str,
     algo_cfg: AlgoCfg,
-    X: pd.DataFrame,
-    y: pd.Series,
     best_params: dict[str, Any],
-    model_path: Path,
     cfg: Config,
     metric_name_sklearn: str = "r2",
     *,
@@ -742,30 +1210,35 @@ def _fit_and_save(
     n_folds: int | None = None,
     test_size: float | None = None,
 ) -> Any:
-    """Выполнить финальное обучение модели и сохранить результат на диск.
+    """Сконструировать ``ModelTrainer`` для алгоритма по конфигурации.
+
+    Единая точка сборки тренера, используемая и финальным обучением
+    победителя (``_fit_and_save``), и обучением финалистов на 100% данных
+    (T4, ``_fit_finalist``): гарантирует, что оба пути передают тренеру
+    одинаковые настройки предобработки, оверсэмплинга, кодирования,
+    отбора признаков и валидации (issue #24, D3).
+
     Args:
         algo_name (str): Название выбранного алгоритма.
         algo_cfg (AlgoCfg): Конфигурация алгоритма с путем к тренеру.
-        X (pd.DataFrame): Полная матрица признаков для обучения.
-        y (pd.Series): Полный вектор целевой переменной.
         best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
-        model_path (Path): Путь для сохранения файла модели.
-        cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
+        cfg (Config): Общий объект конфигурации.
         metric_name_sklearn (str): Имя основной метрики в формате sklearn.
         validation_strategy (ValidationStrategy | str | None): Разрешённая
-            стратегия валидации финальной модели (issue #24, D3). ``None`` —
-            дефолт ``ModelTrainer`` ('train_test_split').
+            стратегия валидации (issue #24, D3). ``None`` — дефолт
+            ``ModelTrainer`` ('train_test_split').
         n_folds (int | None): Число фолдов (для 'k_fold').
-        test_size (float | int | None): Размер hold-out части (доля либо число
-            строк после резолюции 'auto').
+        test_size (float | int | None): Размер hold-out части.
+
     Returns:
-        Any: Экземпляр ``ModelTrainer`` после обучения и сохранения
-            (используется для доступа к значениям дополнительных метрик).
+        Any: Сконструированный (но ещё не обученный) ``ModelTrainer``.
+
     Raises:
-        AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
-        ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
-            no valid hyperparameters (protection against the TypeError
-            'NoneType' object is not iterable, issue #13).
+        ValueError: Если ``algo_cfg.trainer_module`` не задан либо
+            ``best_params`` равен ``None`` (сигнал полного отказа HPO,
+            issue #13).
+        AttributeError: Если в модуле тренера отсутствует класс
+            ``ModelTrainer``.
     """
     if algo_cfg.trainer_module is None:
         raise ValueError("Trainer module path is not configured")
@@ -880,7 +1353,58 @@ def _fit_and_save(
     ):
         trainer_kwargs["test_size"] = test_size
 
-    trainer = trainer_module.ModelTrainer(**trainer_kwargs)
+    return trainer_module.ModelTrainer(**trainer_kwargs)
+
+
+def _fit_and_save(
+    algo_name: str,
+    algo_cfg: AlgoCfg,
+    X: pd.DataFrame,
+    y: pd.Series,
+    best_params: dict[str, Any],
+    model_path: Path,
+    cfg: Config,
+    metric_name_sklearn: str = "r2",
+    *,
+    validation_strategy: ValidationStrategy | str | None = None,
+    n_folds: int | None = None,
+    test_size: float | None = None,
+) -> Any:
+    """Выполнить финальное обучение модели и сохранить результат на диск.
+    Args:
+        algo_name (str): Название выбранного алгоритма.
+        algo_cfg (AlgoCfg): Конфигурация алгоритма с путем к тренеру.
+        X (pd.DataFrame): Полная матрица признаков для обучения.
+        y (pd.Series): Полный вектор целевой переменной.
+        best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
+        model_path (Path): Путь для сохранения файла модели.
+        cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
+        metric_name_sklearn (str): Имя основной метрики в формате sklearn.
+        validation_strategy (ValidationStrategy | str | None): Разрешённая
+            стратегия валидации финальной модели (issue #24, D3). ``None`` —
+            дефолт ``ModelTrainer`` ('train_test_split').
+        n_folds (int | None): Число фолдов (для 'k_fold').
+        test_size (float | int | None): Размер hold-out части (доля либо число
+            строк после резолюции 'auto').
+    Returns:
+        Any: Экземпляр ``ModelTrainer`` после обучения и сохранения
+            (используется для доступа к значениям дополнительных метрик).
+    Raises:
+        AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
+        ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
+            no valid hyperparameters (protection against the TypeError
+            'NoneType' object is not iterable, issue #13).
+    """
+    trainer = _build_trainer(
+        algo_name,
+        algo_cfg,
+        best_params,
+        cfg,
+        metric_name_sklearn=metric_name_sklearn,
+        validation_strategy=validation_strategy,
+        n_folds=n_folds,
+        test_size=test_size,
+    )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
@@ -1430,12 +1954,14 @@ def persist_artifact(
     final_params: dict[str, Any],
     model_path_override: str | Path | None,
     disqualified_algorithms: dict[str, str],
+    pre_trained_trainer: Any | None = None,
 ) -> dict[str, Any]:
     """Финальное обучение победителя, сохранение артефакта и сборка отчёта.
 
     Шаг 5 пайплайна (issue #31). Обучает модель алгоритма-победителя на
-    полном наборе данных через ``_fit_and_save``, сохраняет артефакт на диск
-    и формирует словарь результата: ``algorithm``, ``score`` (в
+    полном наборе данных через ``_fit_and_save`` (либо переиспользует уже
+    обученного финалиста при двухстадийном выборе T4), сохраняет артефакт на
+    диск и формирует словарь результата: ``algorithm``, ``score`` (в
     пользовательской семантике, issue #26), ``metric``, ``params``,
     ``model_path``; при наличии добавляются ``disqualified_algorithms``
     (issue #12) и ``additional_metrics``.
@@ -1451,6 +1977,10 @@ def persist_artifact(
             сохранения модели.
         disqualified_algorithms (Dict[str, str]): Дисквалифицированные
             алгоритмы (имя → причина); добавляются в результат при наличии.
+        pre_trained_trainer (Any | None): Уже обученный на 100% данных
+            ``ModelTrainer`` победителя (двухстадийный выбор T4). Если задан,
+            повторное обучение НЕ выполняется — артефакт сохраняется из него
+            (требование 4 постановки T4: финалисты обучаются один раз).
 
     Returns:
         Dict[str, Any]: Словарь с результатами обучения.
@@ -1463,19 +1993,24 @@ def persist_artifact(
     winner_cfg = _algorithms_as_dict(cfg.algorithms)[winner_algo]
 
     try:
-        trainer = _fit_and_save(
-            winner_algo,
-            winner_cfg,
-            prepared.X,
-            prepared.y,
-            final_params,
-            model_path,
-            cfg,
-            metric_name_sklearn=prepared.metric_sklearn,
-            validation_strategy=prepared.resolved_validation,
-            n_folds=prepared.resolved_n_folds,
-            test_size=prepared.resolved_test_size,
-        )
+        if pre_trained_trainer is not None:
+            trainer = pre_trained_trainer
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            trainer.save(model_path)
+        else:
+            trainer = _fit_and_save(
+                winner_algo,
+                winner_cfg,
+                prepared.X,
+                prepared.y,
+                final_params,
+                model_path,
+                cfg,
+                metric_name_sklearn=prepared.metric_sklearn,
+                validation_strategy=prepared.resolved_validation,
+                n_folds=prepared.resolved_n_folds,
+                test_size=prepared.resolved_test_size,
+            )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
         _LOG.error(f"Failed to save final model: {e}")
@@ -1524,6 +2059,15 @@ def train_best_model(
     persist_artifact``. Логика каждого шага вынесена в отдельные функции
     модуля; здесь остаются только выбор победителя и инвариант winner-скора.
 
+    Двухстадийный выбор победителя (эпик #61, T4): при
+    ``general.sanity_gate.mode != 'off'`` после фаз HPO строится пул
+    финалистов (``select_finalists``, T3), каждый финалист обучается на 100%
+    данных ровно один раз, прогоняется через ``ModelSanityGate`` (T2) и
+    победитель ранжируется по ``RMSE_oof`` (``select_robust_winner``).
+    Режим ``warn_only`` собирает статистику аудита без применения
+    дисквалификаций; режим ``active`` применяет их. При ``mode='off'``
+    поведение полностью идентично старому одностадийному выбору.
+
     Multi-phase semantics (issue #13): phase results are not accumulated — each
     phase rebuilds its results from scratch, so an algorithm that fails in the
     current phase (total HPO failure: returned ``None`` or an invalid score) is
@@ -1551,10 +2095,13 @@ def train_best_model(
             какие-либо алгоритмы были дисквалифицированы circuit breaker'ом
             (5 подряд фатальных ошибок), в результат добавляется ключ
             ``disqualified_algorithms`` — словарь {имя алгоритма: причина
-            дисквалификации}.
+            дисквалификации}. При ``general.sanity_gate.mode != 'off'``
+            добавляется ключ ``sanity_gate`` со статистикой аудита для отчёта
+            (T6): режим, пул, дисквалификации, fallback-флаг и RMSE победителя.
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
-        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO.
+        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO
+            либо ни один финалист не обучился на полном наборе данных.
             Дисквалификация отдельного алгоритма (``InvalidAlgorithmError``)
             запуск НЕ прерывает: алгоритм исключается из кандидатов, остальные
             продолжают обучение (issue #12).
@@ -1573,12 +2120,98 @@ def train_best_model(
         # в execute_phases не выполнялся, и select_winner({}) бросил бы
         # ValueError — поднимаем понятную RuntimeError (ревью PR #22).
         raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
-    winner_algo = select_winner(phase_results)
+
+    sg_cfg = cfg.general.sanity_gate
+
+    # ── Двухстадийный выбор победителя (эпик #61, T4) ────────────────────── #
+    # Режим 'off' — старое поведение select_winner: пул и аудит НЕ выполняются,
+    # поведение пайплайна идентично прежнему (первый финалист обучается один
+    # раз внутри persist_artifact).
+    if sg_cfg.mode == "off":
+        winner_algo = select_winner(phase_results)
+        final_score, final_params = phase_results[winner_algo]
+        # Финальный инвариант (issue #32): score победителя обязан быть конечным
+        # и строго выше класса worst-score сентинела, прежде чем попасть в
+        # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-
+        # метрик to_user_value инвертировал бы его в абсурдные +3.4e38.
+        if not is_valid_winner_score(final_score):
+            raise RuntimeError(
+                f"Winner '{winner_algo}' produced an invalid final score "
+                f"{final_score!r} (non-finite or worst-score sentinel); "
+                f"refusing to report it."
+            )
+        return persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo=winner_algo,
+            final_score=final_score,
+            final_params=final_params,
+            model_path_override=model_path_override,
+            disqualified_algorithms=disqualified_algorithms,
+        )
+
+    # Режимы warn_only / active: пул финалистов (T3) → обучение на 100%
+    # данных один раз → аудит ModelSanityGate (T2) → ранжирование по RMSE_oof.
+    pool = select_finalists(
+        phase_results,
+        metric_user=prepared.metric_user,
+        top_k_candidates=sg_cfg.top_k_candidates,
+        corridor_delta=sg_cfg.corridor_delta,
+        corridor_mode=sg_cfg.corridor_mode,
+        enforce_family_diversity=sg_cfg.enforce_family_diversity,
+        algorithm_families=sg_cfg.algorithm_families,
+        allowed_families=(
+            set(sg_cfg.allowed_families)
+            if sg_cfg.allowed_families is not None
+            else None
+        ),
+        family_diversity_multiplier=sg_cfg.family_diversity_multiplier,
+        disqualified=disqualified_algorithms,
+    )
+    _LOG.info(
+        "[sanity_gate] mode=%s: finalists pool (top_k=%d, delta=%s): %s",
+        sg_cfg.mode,
+        sg_cfg.top_k_candidates,
+        sg_cfg.corridor_delta,
+        pool,
+    )
+
+    candidates = _train_finalists(pool, phase_results, cfg, prepared)
+    if not candidates:
+        raise RuntimeError(
+            "No finalist could be trained on the full dataset; "
+            "cannot select a robust winner."
+        )
+    failed_training = [name for name in pool if name not in candidates]
+
+    gate = ModelSanityGate(
+        min_prediction_diversity=sg_cfg.min_prediction_diversity,
+        adaptive_diversity=sg_cfg.adaptive_diversity,
+        min_unique_count=sg_cfg.min_unique_count,
+        min_unique_ratio=sg_cfg.min_unique_ratio,
+        max_dead_feature_ratio=sg_cfg.max_dead_feature_ratio,
+        dead_features_require_low_diversity=sg_cfg.dead_features_require_low_diversity,
+        zero_coef_tolerance=sg_cfg.zero_coef_tolerance,
+        max_generalization_gap=sg_cfg.max_generalization_gap,
+        permutation_max_rows=sg_cfg.permutation_max_rows,
+        permutation_max_features=sg_cfg.permutation_max_features,
+        permutation_repeats=sg_cfg.permutation_repeats,
+        permutation_seed=sg_cfg.permutation_seed,
+        permutation_tolerance=sg_cfg.permutation_tolerance,
+        check_diversity=sg_cfg.check_diversity,
+        check_unique=sg_cfg.check_unique,
+        check_dead_features=sg_cfg.check_dead_features,
+        check_generalization_gap=sg_cfg.check_generalization_gap,
+    )
+    robust_result = select_robust_winner(
+        candidates,
+        prepared.X,
+        prepared.y,
+        gate,
+        mode=sg_cfg.mode,
+    )
+    winner_algo = robust_result.winner_algo
     final_score, final_params = phase_results[winner_algo]
-    # Финальный инвариант (issue #32): score победителя обязан быть конечным и
-    # строго выше класса worst-score сентинела, прежде чем попасть в
-    # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-метрик
-    # to_user_value инвертировал бы его в абсурдные +3.4e38.
     if not is_valid_winner_score(final_score):
         raise RuntimeError(
             f"Winner '{winner_algo}' produced an invalid final score "
@@ -1586,7 +2219,7 @@ def train_best_model(
             f"refusing to report it."
         )
 
-    return persist_artifact(
+    result = persist_artifact(
         cfg=cfg,
         prepared=prepared,
         winner_algo=winner_algo,
@@ -1594,4 +2227,34 @@ def train_best_model(
         final_params=final_params,
         model_path_override=model_path_override,
         disqualified_algorithms=disqualified_algorithms,
+        pre_trained_trainer=candidates[winner_algo].trainer,
     )
+
+    # Статистика Sanity Gate для отчёта (T6): причины дисквалификаций,
+    # результаты аудита и режим. Добавляется только в режимах с пулом/аудитом,
+    # в 'off' результат идентичен прежнему поведению.
+    result["sanity_gate"] = {
+        "mode": robust_result.mode,
+        "pool": list(robust_result.pool),
+        "fallback_used": robust_result.fallback_used,
+        "winner_rmse_oof": robust_result.winner_rmse_oof,
+        "winner_rmse_full": candidates[winner_algo].rmse_full,
+        "failed_training": list(failed_training),
+        "disqualified": {
+            name: list(reasons) for name, reasons in robust_result.disqualified.items()
+        },
+        "audit": {
+            name: {
+                "is_valid": audit.is_valid,
+                "reasons": list(audit.reasons),
+                "soft_warnings": list(audit.soft_warnings),
+                "diversity_ratio": audit.diversity_ratio,
+                "unique_ratio": audit.unique_ratio,
+                "dead_features_count": audit.dead_features_count,
+                "generalization_gap": audit.generalization_gap,
+                "severity": audit.severity,
+            }
+            for name, audit in robust_result.audit.items()
+        },
+    }
+    return result

@@ -290,8 +290,7 @@
       "title": "AlgorithmsConfig",
       "type": "object"
     },
-    "CategoricalSpace": {
-      "description": "Распределение для категориальных признаков: [options, 'categorical'].",
+    "CategoricalSpace_Any_": {
       "properties": {
         "type": {
           "const": "categorical",
@@ -299,22 +298,7 @@
           "type": "string"
         },
         "options": {
-          "items": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "integer"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "boolean"
-              }
-            ]
-          },
+          "items": {},
           "title": "Options",
           "type": "array"
         }
@@ -323,7 +307,7 @@
         "type",
         "options"
       ],
-      "title": "CategoricalSpace",
+      "title": "CategoricalSpace[Any]",
       "type": "object"
     },
     "FeatureSelectionCfg": {
@@ -650,6 +634,10 @@
         "feature_selection": {
           "$ref": "#/$defs/FeatureSelectionCfg",
           "description": "Настройки сокращения пространства признаков. По умолчанию mode='disabled' — отбор признаков не применяется."
+        },
+        "sanity_gate": {
+          "$ref": "#/$defs/SanityGateCfg",
+          "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61, T4/T5). По умолчанию mode='off' — поведение train_best_model не меняется (старый select_winner)."
         }
       },
       "required": [
@@ -862,13 +850,230 @@
       "title": "PruningStrategy",
       "type": "string"
     },
+    "SanityGateCfg": {
+      "additionalProperties": false,
+      "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).\n\nУправляет интеграцией аудита вырождения моделей\n(:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,\nзадача T2) в финальный выбор победителя (задача T4) и режимами работы\n(задача T5):\n\n- ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —\n  пул финалистов и аудит не выполняются, поведение пайплайна не меняется;\n- ``mode=warn_only``: пул и аудит выполняются, результаты и\n  «гипотетические дисквалификации» логируются и попадают в отчёт,\n  но фактический победитель выбирается как при ``off`` (сбор статистики\n  на реальных данных до включения гейта);\n- ``mode=active``: дисквалификации применяются, победитель = кандидат\n  с лучшим ``RMSE_oof`` среди прошедших все проверки.\n\nПул финалистов строится из результатов HPO через\n``component.select_finalists`` (T3, issue #65): коридор δ от лидера в\nпользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,\nопциональный мягкий добор семейств (``enforce_family_diversity``).\n\nПороги контуров гейта повторяют параметры ``ModelSanityGate`` и\nпередаются в конструктор гейта без изменений.\n\nAttributes:\n    mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (>= 0).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (>= 0).\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в [0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]).\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    permutation_max_rows (int | None): Подвыборка строк для пермутаций.\n    permutation_max_features (int | None): Кап проверяемых колонок.\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
+      "properties": {
+        "mode": {
+          "default": "off",
+          "description": "Режим работы Sanity Gate при выборе победителя: 'off' — старое поведение select_winner (без пула и аудита); 'warn_only' — пул и аудит выполняются, дисквалификации гипотетические (победитель как при off, статистика собирается); 'active' — дисквалификации применяются, победитель = лучший RMSE_oof среди прошедших аудит.",
+          "enum": [
+            "off",
+            "warn_only",
+            "active"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "top_k_candidates": {
+          "default": 3,
+          "description": "Жёсткий кап размера пула финалистов (>= 1, дефолт 3).",
+          "minimum": 1,
+          "title": "Top K Candidates",
+          "type": "integer"
+        },
+        "corridor_delta": {
+          "default": 0.15,
+          "description": "Относительная ширина коридора δ от лидера (>= 0, дефолт 0.15).",
+          "minimum": 0.0,
+          "title": "Corridor Delta",
+          "type": "number"
+        },
+        "corridor_mode": {
+          "default": "auto",
+          "description": "Форма коридора пула финалистов: 'multiplicative', 'additive' или 'auto' (выбор по типу метрики, дефолт 'auto').",
+          "enum": [
+            "multiplicative",
+            "additive",
+            "auto"
+          ],
+          "title": "Corridor Mode",
+          "type": "string"
+        },
+        "enforce_family_diversity": {
+          "default": false,
+          "description": "Опциональный мягкий добор недостающих семейств в пул финалистов (дефолт False — выключен).",
+          "title": "Enforce Family Diversity",
+          "type": "boolean"
+        },
+        "algorithm_families": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Карта «алгоритм → семейство» для правила добора семейств. None — алгоритмы без классификации считаются собственным семейством.",
+          "title": "Algorithm Families"
+        },
+        "allowed_families": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Семейства, участвующие в правиле добора (None — все разрешены).",
+          "title": "Allowed Families"
+        },
+        "family_diversity_multiplier": {
+          "default": 1.5,
+          "description": "Множитель расширенного коридора для добора семейств (> 0).",
+          "exclusiveMinimum": 0.0,
+          "title": "Family Diversity Multiplier",
+          "type": "number"
+        },
+        "min_prediction_diversity": {
+          "default": 0.15,
+          "description": "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога.",
+          "minimum": 0.0,
+          "title": "Min Prediction Diversity",
+          "type": "number"
+        },
+        "adaptive_diversity": {
+          "default": false,
+          "description": "Адаптивный режим контура А: сравнение с константной моделью (нулевой разброс предсказаний — провал).",
+          "title": "Adaptive Diversity",
+          "type": "boolean"
+        },
+        "min_unique_count": {
+          "default": 5,
+          "description": "Абсолютный нижний предел nunique контура Б (>= 1).",
+          "minimum": 1,
+          "title": "Min Unique Count",
+          "type": "integer"
+        },
+        "min_unique_ratio": {
+          "default": 0.05,
+          "description": "Нижняя граница доли уникальных предсказаний контура Б.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Unique Ratio",
+          "type": "number"
+        },
+        "max_dead_feature_ratio": {
+          "default": 0.4,
+          "description": "Порог доли «мёртвых» признаков контура В.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Max Dead Feature Ratio",
+          "type": "number"
+        },
+        "dead_features_require_low_diversity": {
+          "default": true,
+          "description": "Комбинированное правило контура В: дисквалификация только при сочетании «много мёртвых признаков И низкий diversity».",
+          "title": "Dead Features Require Low Diversity",
+          "type": "boolean"
+        },
+        "zero_coef_tolerance": {
+          "default": 1e-12,
+          "description": "Коэффициенты с |coef| <= порога считаются нулевыми (контур В).",
+          "minimum": 0.0,
+          "title": "Zero Coef Tolerance",
+          "type": "number"
+        },
+        "max_generalization_gap": {
+          "default": 1.5,
+          "description": "Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
+          "minimum": 1.0,
+          "title": "Max Generalization Gap",
+          "type": "number"
+        },
+        "permutation_max_rows": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 5000,
+          "description": "Подвыборка строк для пермутационного пути контура В (None — все).",
+          "title": "Permutation Max Rows"
+        },
+        "permutation_max_features": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 100,
+          "description": "Кап проверяемых колонок в пермутационном пути (None — все).",
+          "title": "Permutation Max Features"
+        },
+        "permutation_repeats": {
+          "default": 3,
+          "description": "Число повторов пермутаций на колонку (>= 1).",
+          "minimum": 1,
+          "title": "Permutation Repeats",
+          "type": "integer"
+        },
+        "permutation_seed": {
+          "default": 42,
+          "description": "Фиксированное зерно пермутаций (детерминизм).",
+          "title": "Permutation Seed",
+          "type": "integer"
+        },
+        "permutation_tolerance": {
+          "default": 0.001,
+          "description": "Относительный порог «мёртвости» признака в пермутациях.",
+          "minimum": 0.0,
+          "title": "Permutation Tolerance",
+          "type": "number"
+        },
+        "check_diversity": {
+          "default": true,
+          "description": "Включить контур А.",
+          "title": "Check Diversity",
+          "type": "boolean"
+        },
+        "check_unique": {
+          "default": true,
+          "description": "Включить контур Б.",
+          "title": "Check Unique",
+          "type": "boolean"
+        },
+        "check_dead_features": {
+          "default": true,
+          "description": "Включить контур В.",
+          "title": "Check Dead Features",
+          "type": "boolean"
+        },
+        "check_generalization_gap": {
+          "default": true,
+          "description": "Включить контур Г.",
+          "title": "Check Generalization Gap",
+          "type": "boolean"
+        }
+      },
+      "title": "SanityGateCfg",
+      "type": "object"
+    },
     "SearchSpaceEntry": {
       "description": "Описание пространства поиска для отдельного гиперпараметра.\n\nУниверсальный контейнер, поддерживающий как категориальные списки,\nтак и числовые диапазоны. Реализует логику прозрачной конвертации\nиз сокращенной YAML-записи в типизированные объекты распределений.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный\n        объект конкретного типа распределения.",
       "properties": {
         "config": {
           "discriminator": {
             "mapping": {
-              "categorical": "#/$defs/CategoricalSpace",
+              "categorical": "#/$defs/CategoricalSpace_Any_",
               "float": "#/$defs/FloatSpace",
               "float_log": "#/$defs/FloatSpace",
               "int": "#/$defs/IntSpace"
@@ -877,7 +1082,7 @@
           },
           "oneOf": [
             {
-              "$ref": "#/$defs/CategoricalSpace"
+              "$ref": "#/$defs/CategoricalSpace_Any_"
             },
             {
               "$ref": "#/$defs/FloatSpace"

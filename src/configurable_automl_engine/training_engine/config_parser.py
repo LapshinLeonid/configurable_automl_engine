@@ -68,12 +68,26 @@ _DOTTED_PATH_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
 __all__ = [
     "AlgoCfg",
     "Config",
+    "CorridorMode",
     "FeatureSelectionCfg",
     "FeatureSelectionMethod",
     "FeatureSelectionMode",
+    "SanityGateCfg",
+    "SanityGateMode",
     "ValidationStrategy",
     "read_config",
 ]
+
+#: Режим работы Sanity Gate при выборе победителя (эпик #61, T4/T5):
+#: 'off' — старое поведение ``select_winner`` (без пула и аудита);
+#: 'warn_only' — пул и аудит выполняются, дисквалификации гипотетические;
+#: 'active' — дисквалификации применяются, победитель = лучший RMSE_oof.
+SanityGateMode = Literal["off", "warn_only", "active"]
+
+#: Форма коридора пула финалистов (T3, issue #65): multiplicative / additive /
+#: auto (выбор по типу метрики). Определяется здесь, чтобы ``SanityGateCfg``
+#: и ``select_finalists`` использовали один тип без циклического импорта.
+CorridorMode = Literal["multiplicative", "additive", "auto"]
 
 
 # ─────────────────── pruning (early stopping) ──────────────────── #
@@ -273,6 +287,191 @@ class FeatureSelectionCfg(BaseModel):
             "Number of trees used to estimate feature importance in the "
             "'importance' method."
         ),
+    )
+
+
+# ─────────────────── sanity gate / two-stage winner (T4, T5) ─────────── #
+class SanityGateCfg(BaseModel):
+    """Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).
+
+    Управляет интеграцией аудита вырождения моделей
+    (:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,
+    задача T2) в финальный выбор победителя (задача T4) и режимами работы
+    (задача T5):
+
+    - ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —
+      пул финалистов и аудит не выполняются, поведение пайплайна не меняется;
+    - ``mode=warn_only``: пул и аудит выполняются, результаты и
+      «гипотетические дисквалификации» логируются и попадают в отчёт,
+      но фактический победитель выбирается как при ``off`` (сбор статистики
+      на реальных данных до включения гейта);
+    - ``mode=active``: дисквалификации применяются, победитель = кандидат
+      с лучшим ``RMSE_oof`` среди прошедших все проверки.
+
+    Пул финалистов строится из результатов HPO через
+    ``component.select_finalists`` (T3, issue #65): коридор δ от лидера в
+    пользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,
+    опциональный мягкий добор семейств (``enforce_family_diversity``).
+
+    Пороги контуров гейта повторяют параметры ``ModelSanityGate`` и
+    передаются в конструктор гейта без изменений.
+
+    Attributes:
+        mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').
+        top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).
+        corridor_delta (float): Относительная ширина коридора δ (>= 0).
+        corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.
+        enforce_family_diversity (bool): Включить мягкий добор семейств.
+        algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».
+        allowed_families (list[str] | None): Семейства, участвующие в доборе.
+        family_diversity_multiplier (float): Множитель расширенного коридора.
+        min_prediction_diversity (float): Порог контура А (>= 0).
+        adaptive_diversity (bool): Адаптивный режим контура А.
+        min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).
+        min_unique_ratio (float): Нижняя граница доли уникальных (в [0, 1]).
+        max_dead_feature_ratio (float): Порог контура В (в [0, 1]).
+        dead_features_require_low_diversity (bool): Комбинированное правило
+            «много мёртвых признаков И низкий diversity».
+        zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).
+        max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).
+        permutation_max_rows (int | None): Подвыборка строк для пермутаций.
+        permutation_max_features (int | None): Кап проверяемых колонок.
+        permutation_repeats (int): Повторы пермутаций (>= 1).
+        permutation_seed (int): Фиксированное зерно пермутаций.
+        permutation_tolerance (float): Порог «мёртвости» признака (>= 0).
+        check_diversity (bool): Включить контур А.
+        check_unique (bool): Включить контур Б.
+        check_dead_features (bool): Включить контур В.
+        check_generalization_gap (bool): Включить контур Г.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: SanityGateMode = Field(
+        default="off",
+        description=(
+            "Режим работы Sanity Gate при выборе победителя: 'off' — старое "
+            "поведение select_winner (без пула и аудита); 'warn_only' — пул и "
+            "аудит выполняются, дисквалификации гипотетические (победитель "
+            "как при off, статистика собирается); 'active' — дисквалификации "
+            "применяются, победитель = лучший RMSE_oof среди прошедших аудит."
+        ),
+    )
+    top_k_candidates: int = Field(
+        default=3,
+        ge=1,
+        description="Жёсткий кап размера пула финалистов (>= 1, дефолт 3).",
+    )
+    corridor_delta: float = Field(
+        default=0.15,
+        ge=0.0,
+        description="Относительная ширина коридора δ от лидера (>= 0, дефолт 0.15).",
+    )
+    corridor_mode: CorridorMode = Field(
+        default="auto",
+        description=(
+            "Форма коридора пула финалистов: 'multiplicative', 'additive' "
+            "или 'auto' (выбор по типу метрики, дефолт 'auto')."
+        ),
+    )
+    enforce_family_diversity: bool = Field(
+        default=False,
+        description=(
+            "Опциональный мягкий добор недостающих семейств в пул финалистов "
+            "(дефолт False — выключен)."
+        ),
+    )
+    algorithm_families: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Карта «алгоритм → семейство» для правила добора семейств. "
+            "None — алгоритмы без классификации считаются собственным семейством."
+        ),
+    )
+    allowed_families: list[str] | None = Field(
+        default=None,
+        description=("Семейства, участвующие в правиле добора (None — все разрешены)."),
+    )
+    family_diversity_multiplier: float = Field(
+        default=1.5,
+        gt=0.0,
+        description="Множитель расширенного коридора для добора семейств (> 0).",
+    )
+    min_prediction_diversity: float = Field(
+        default=0.15,
+        ge=0.0,
+        description="Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога.",
+    )
+    adaptive_diversity: bool = Field(
+        default=False,
+        description=(
+            "Адаптивный режим контура А: сравнение с константной моделью "
+            "(нулевой разброс предсказаний — провал)."
+        ),
+    )
+    min_unique_count: int = Field(
+        default=5,
+        ge=1,
+        description="Абсолютный нижний предел nunique контура Б (>= 1).",
+    )
+    min_unique_ratio: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Нижняя граница доли уникальных предсказаний контура Б.",
+    )
+    max_dead_feature_ratio: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Порог доли «мёртвых» признаков контура В.",
+    )
+    dead_features_require_low_diversity: bool = Field(
+        default=True,
+        description=(
+            "Комбинированное правило контура В: дисквалификация только при "
+            "сочетании «много мёртвых признаков И низкий diversity»."
+        ),
+    )
+    zero_coef_tolerance: float = Field(
+        default=1e-12,
+        ge=0.0,
+        description="Коэффициенты с |coef| <= порога считаются нулевыми (контур В).",
+    )
+    max_generalization_gap: float = Field(
+        default=1.5,
+        ge=1.0,
+        description="Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
+    )
+    permutation_max_rows: int | None = Field(
+        default=5000,
+        ge=1,
+        description="Подвыборка строк для пермутационного пути контура В (None — все).",
+    )
+    permutation_max_features: int | None = Field(
+        default=100,
+        ge=1,
+        description="Кап проверяемых колонок в пермутационном пути (None — все).",
+    )
+    permutation_repeats: int = Field(
+        default=3,
+        ge=1,
+        description="Число повторов пермутаций на колонку (>= 1).",
+    )
+    permutation_seed: int = Field(
+        default=42,
+        description="Фиксированное зерно пермутаций (детерминизм).",
+    )
+    permutation_tolerance: float = Field(
+        default=1e-3,
+        ge=0.0,
+        description="Относительный порог «мёртвости» признака в пермутациях.",
+    )
+    check_diversity: bool = Field(default=True, description="Включить контур А.")
+    check_unique: bool = Field(default=True, description="Включить контур Б.")
+    check_dead_features: bool = Field(default=True, description="Включить контур В.")
+    check_generalization_gap: bool = Field(
+        default=True, description="Включить контур Г."
     )
 
 
@@ -478,6 +677,14 @@ class GeneralCfg(BaseModel):
         description=(
             "Настройки сокращения пространства признаков. По умолчанию "
             "mode='disabled' — отбор признаков не применяется."
+        ),
+    )
+    sanity_gate: SanityGateCfg = Field(
+        default_factory=SanityGateCfg,
+        description=(
+            "Настройки двухстадийного выбора победителя с Sanity Gate "
+            "(эпик #61, T4/T5). По умолчанию mode='off' — поведение "
+            "train_best_model не меняется (старый select_winner)."
         ),
     )
 

@@ -41,6 +41,7 @@ from configurable_automl_engine.training_engine.component import (
 )
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
+    SanityGateCfg,
     ValidationStrategy,
 )
 from configurable_automl_engine.tuner import HPO_WORST_SCORE, InvalidAlgorithmError
@@ -550,6 +551,9 @@ def test_persist_artifact_propagates_fit_failure():
 def test_train_best_model_orchestrates_steps_in_order():
     order: list[str] = []
     cfg = MagicMock()
+    # Двухстадийный выбор (T4) по умолчанию выключен (mode='off'):
+    # оркестрация остаётся старой (select_winner → persist_artifact).
+    cfg.general.sanity_gate = SanityGateCfg()
     prepared = MagicMock()
     expected_result = {"algorithm": "rf"}
 
@@ -615,8 +619,10 @@ def test_train_best_model_no_phase_results_skips_winner_and_persist():
 
 def test_train_best_model_invalid_winner_score_raises():
     sentinel = float(np.finfo(np.float32).min)
+    cfg_mock = MagicMock()
+    cfg_mock.general.sanity_gate = SanityGateCfg()  # mode='off' — старый путь
     with (
-        patch.object(component, "load_config", return_value=(MagicMock(), "target")),
+        patch.object(component, "load_config", return_value=(cfg_mock, "target")),
         patch.object(component, "prepare_dataset", return_value=MagicMock()),
         patch.object(
             component,

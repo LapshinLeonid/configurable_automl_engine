@@ -143,9 +143,55 @@ boundary are included (equality never fails).
 Edge cases: an empty result set raises `RuntimeError`; fewer than `top_k` valid
 algorithms produce a pool of what is available; `top_k_candidates = 1` yields
 the single CV leader (equivalent to the current behavior). The pool function is
-standalone: the existing `train_best_model` pipeline is unchanged until the
-two-stage winner selection (task T4) is wired in, so with the sanity gate off
-the behavior remains identical to the current single-winner selection.
+standalone: `train_best_model` uses it only when the two-stage winner selection
+(task T4) is enabled (`general.sanity_gate.mode != "off"`); with the sanity
+gate off the behavior remains identical to the current single-winner selection.
+
+### Two-stage winner selection with Sanity Gate (`select_robust_winner`, epic #61 / task T4)
+
+When `general.sanity_gate.mode != "off"`, `train_best_model` replaces the
+"blind" CV-first-place pick with a two-stage selection:
+
+1. **Pool** — built by `select_finalists` (T3) from the HPO phase results.
+2. **Finalist training** — every pool candidate is trained on **100% of the
+   data exactly once** (`ModelTrainer.fit`, which also produces the OOF vector
+   `oof_predictions_` and `RMSE_oof`); the same training result is reused for
+   `RMSE_full`, the sanity audit and the final report (no duplicated training).
+3. **Audit** — each finalist is checked by `ModelSanityGate` (T2): circuits A/B
+   (diversity / unique) are computed on the **OOF vector**, circuit D
+   (generalization gap) uses the full-fit predictions, circuit C (dead
+   features) inspects the model.
+4. **Ranking** — among the candidates that passed every check the winner is
+   the one with the **best (minimum) `RMSE_oof`**. CV score and `RMSE_full`
+   do NOT participate in the ranking (the v2 composite score
+   `α·Score_CV + (1−α)·Score_full` was removed).
+
+Modes (`general.sanity_gate.mode`, task T5):
+
+* `"off"` (default) — old `select_winner` behavior: no pool, no audit, the
+  pipeline is byte-for-byte identical to the pre-T4 flow.
+* `"warn_only"` — pool and audit run, the (hypothetical) disqualifications are
+  logged and reported (task T6), but the actual winner is still the CV leader
+  (statistics collection before enabling the gate).
+* `"active"` — disqualifications are applied; the winner is the best `RMSE_oof`
+  among the candidates that passed the audit.
+
+Fallback (formalized): if every candidate is rejected, the "least problematic"
+model wins — minimum number of violated circuits, then minimum severity of the
+violations (circuit significance order fixed in code: Г > А > Б > В, i.e.
+D > A > B > C), then the best `RMSE_oof`. The run never fails; a `WARNING`
+with all reasons is logged.
+
+Failure of a finalist's full-data training is handled: the candidate is
+skipped, the reason is logged, and selection continues with the next candidate.
+If no finalist can be trained at all, a `RuntimeError` is raised.
+
+Result reporting: when the gate is enabled (`mode != "off"`) the returned dict
+gains a `sanity_gate` key with the mode, pool order, per-candidate audit
+results (reasons / soft warnings / circuit statistics), applied or hypothetical
+disqualifications, the fallback flag and the winner's `RMSE_oof` / `RMSE_full`
+(data for task T6). With `mode = "off"` the result is identical to the old
+single-stage selection.
 
 ### Additional metrics (`additional_metrics`)
 
