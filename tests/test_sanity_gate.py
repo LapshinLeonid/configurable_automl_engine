@@ -1273,3 +1273,41 @@ def test_gap_y_pred_full_length_mismatch_rejected():
 def test_constructor_zero_coef_tolerance_validation():
     with pytest.raises(ValueError):
         ModelSanityGate(zero_coef_tolerance=-1e-6)
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  T6 (issue #66): уровни логирования soft_warnings
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_soft_warnings_logged_at_debug_not_warning(caplog):
+    """soft_warnings — DEBUG/INFO, никогда WARNING (T6).
+
+    Dead-признаки у линейных моделей («сигнал») логируются на уровне
+    DEBUG/INFO: они не дисквалифицируют сами по себе и не должны
+    подниматься до WARNING.
+    """
+    import logging
+
+    rng = np.random.RandomState(11)
+    X = rng.randn(200, 30)
+    y = 2.0 * X[:, 0] + 1.0 * X[:, 1] + rng.randn(200)
+    lasso = Lasso(alpha=0.06, random_state=0).fit(X, y)
+    gate = ModelSanityGate()
+
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.training_engine.sanity_gate"
+    ):
+        result = gate.check(
+            y=y,
+            y_pred_oof=lasso.predict(X),
+            y_pred_full=lasso.predict(X),
+            X=X,
+            model=lasso,
+        )
+
+    assert result.is_valid
+    assert any("soft warning" in r.message for r in caplog.records)
+    # Детали каждого soft_warning — на DEBUG.
+    assert any("Sanity gate soft warning" in r.message for r in caplog.records)
+    # Ни одного WARNING и выше (требование T6).
+    assert all(r.levelno < logging.WARNING for r in caplog.records)

@@ -537,10 +537,18 @@ class ModelSanityGate:
                 len(reasons),
                 reasons,
             )
-        elif soft_warnings:
+        if soft_warnings:
+            # Требование T6: soft_warnings (dead-признаки у линейных моделей,
+            # «ложно мёртвые» признаки на корреляции) логируются на уровне
+            # DEBUG/INFO — они не дисквалифицируют сами по себе и никогда
+            # не должны подниматься до WARNING.
             logger.info(
-                "Sanity gate: valid with %d soft warning(s)", len(soft_warnings)
+                "Sanity gate: valid with %d soft warning(s) "
+                "(non-disqualifying signals)",
+                len(soft_warnings),
             )
+            for warning in soft_warnings:
+                logger.debug("Sanity gate soft warning: %s", warning)
 
         return SanityCheckResult(
             is_valid=is_valid,

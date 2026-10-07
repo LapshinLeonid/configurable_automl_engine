@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from configurable_automl_engine.training_engine.metrics import (
     _rmse,
     _nrmse,
+    direction_label,
     get_metric,
     is_error_metric,
     is_greater_better,
@@ -211,6 +212,22 @@ def test_user_direction_contrast_with_greater_is_better():
     """
     assert is_greater_better("neg_root_mean_squared_error") is True
     assert user_direction("neg_root_mean_squared_error") == "minimize"
+
+
+def test_direction_label_for_logs():
+    """Направление метрик для логов (T6, issue #54): «min/max better».
+
+    Пользовательские значения в логах сопровождаются направлением из
+    user_direction; для neg_-метрик это «min better», хотя оптимизатор их
+    максимизирует (greater_is_better не применяется).
+    """
+    assert direction_label("rmse") == "min better"
+    assert direction_label("mae") == "min better"
+    assert direction_label("neg_root_mean_squared_error") == "min better"
+    assert direction_label("nrmse") == "min better"
+    assert direction_label("r2") == "max better"
+    assert direction_label("R2") == "max better"
+    assert direction_label("accuracy") == "max better"
 
 
 def test_user_direction_unknown_metric_raises():

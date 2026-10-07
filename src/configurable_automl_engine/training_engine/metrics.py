@@ -354,6 +354,28 @@ def is_error_metric(name: str) -> bool:
     return sign is not None and sign < 0
 
 
+def direction_label(name: str) -> str:
+    """Вернуть человекочитаемое направление метрики для логов (issue #54, T6).
+
+    Пользовательские значения метрик (``to_user_value``) в логах обязаны
+    сопровождаться направлением: для ошибок — ``"min better"``, для score-
+    метрик — ``"max better"``. Направление берётся из ``user_direction``
+    (пользовательская семантика), а не из флага оптимизатора
+    ``greater_is_better`` — для neg_-метрик эти семантики расходятся
+    (оптимизатор максимизирует -RMSE, а пользователю меньшее значение лучше).
+
+    Args:
+        name (str): Название метрики.
+
+    Returns:
+        str: ``"min better"`` для ошибок, ``"max better"`` для score-метрик.
+
+    Raises:
+        ValueError: Если метрика неизвестна ни реестру, ни sklearn.
+    """
+    return "min better" if user_direction(name) == "minimize" else "max better"
+
+
 def user_direction(name: str) -> Literal["minimize", "maximize"]:
     """Определить направление метрики в пользовательской семантике (issue #54).
 

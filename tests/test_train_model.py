@@ -1101,7 +1101,8 @@ def test_fit_extracts_metadata_as_fallback():
             "configurable_automl_engine.trainer.get_scorer_object"
         ) as mock_scorer_factory,
         patch(
-            "configurable_automl_engine.trainer.is_greater_better", return_value=True
+            "configurable_automl_engine.trainer.direction_label",
+            return_value="min better",
         ),
     ):
         # 1. Настраиваем возврат имен при повторном извлечении
@@ -1156,7 +1157,9 @@ def test_coverage_feature_names_from_numerical_fallback():
             f"{module_path}.create_model", return_value=LinearRegression()
         ),
         patch(f"{module_path}.get_scorer_object") as mock_scorer_factory,
-        patch(f"{module_path}.is_greater_better", return_value=True),
+        patch(
+            f"{module_path}.direction_label", return_value="min better"
+        ),
     ):
         # Настраиваем окружение обучения
         mock_scorer_factory.return_value = lambda p, x, y: 0.5
@@ -1650,7 +1653,7 @@ def test_feature_selection_auto_logs_info_message(caplog):
 
     assert re.search(
         r"Standalone feature selection auto-check: score_full=\d+\.\d{4}, "
-        r"score_reduced=\d+\.\d{4} -> active=(True|False)",
+        r"score_reduced=\d+\.\d{4} \((min|max) better\) -> active=(True|False)",
         caplog.text,
     )
 
