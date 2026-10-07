@@ -24,7 +24,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Lasso
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
@@ -1311,3 +1311,164 @@ def test_soft_warnings_logged_at_debug_not_warning(caplog):
     assert any("Sanity gate soft warning" in r.message for r in caplog.records)
     # Ни одного WARNING и выше (требование T6).
     assert all(r.levelno < logging.WARNING for r in caplog.records)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  T7 (issue #69): «золотые» сценарии на синтетических данных N=10–30
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _small_dataset(n: int = 25, seed: int = 7, noise: float = 0.5, p: int = 4):
+    """Синтетический датасет малого размера: X0/X1 информативны, остальное — шум."""
+    rng = np.random.RandomState(seed)
+    X = rng.randn(n, p)
+    y = 2.0 * X[:, 0] + 0.5 * X[:, 1] + rng.randn(n) * noise
+    return X, y
+
+
+def test_golden_small_n_honest_gbr_passes_all_circuits():
+    """Positive (T7, п. 5e): честная модель (градиентный бустинг) на N=30.
+
+    Маленькие датасеты (N=10–30) не должны ложно дисквалифицировать честные
+    модели: diversity > 0.15, unique достаточен, gap ≤ 1.5.
+    """
+    X, y = _small_dataset(n=30, seed=7)
+    oof, full, model = _honest_oof_full(
+        lambda: GradientBoostingRegressor(
+            max_depth=1, n_estimators=20, learning_rate=0.05, random_state=0
+        ),
+        X,
+        y,
+        folds=5,
+    )
+    result = ModelSanityGate().check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
+    assert result.is_valid
+    assert result.reasons == []
+    assert result.diversity_ratio > 0.15
+    assert result.unique_ratio >= 0.05
+    assert result.generalization_gap <= 1.5
+
+
+@pytest.mark.parametrize(
+    "name, factory, expected_circuit",
+    [
+        (
+            "elasticnet_zero",
+            lambda: ElasticNet(alpha=500.0, random_state=0),
+            "Circuit A",
+        ),
+        (
+            "svr_sigmoid",
+            lambda: SVR(kernel="sigmoid", gamma=0.001, coef0=0.0),
+            "Circuit A",
+        ),
+        (
+            "deep_tree",
+            lambda: DecisionTreeRegressor(max_depth=20, random_state=0),
+            "Circuit D",
+        ),
+        (
+            "knn_1",
+            lambda: KNeighborsRegressor(n_neighbors=1),
+            "Circuit D",
+        ),
+    ],
+)
+def test_golden_small_n_degenerate_models_fail(
+    name: str, factory: Callable[[], Any], expected_circuit: str
+):
+    """Negative (T7, п. 5a–d): вырожденные модели на N=25 дисквалифицируются.
+
+    (a) ElasticNet с занулёнными коэффициентами («полка»);
+    (b) SVR-sigmoid, упёршийся в плато tanh;
+    (c) дерево глубины 20 (RMSE_train≈0);
+    (d) 1-NN.
+    """
+    X, y = _small_dataset(n=25, seed=7)
+    oof, full, model = _honest_oof_full(factory, X, y, folds=5)
+    result = ModelSanityGate().check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
+    assert not result.is_valid
+    assert any(expected_circuit in r for r in result.reasons)
+    # У вырожденных моделей обязана быть хотя бы одна причина.
+    assert result.reasons
+
+
+def test_v2_wide_data_lasso_high_zero_ratio_soft_warning_only():
+    """v2 (T7, п. 7): широкие данные, Lasso с 60–90% нулевых коэффициентов.
+
+    Высокая доля нулевых коэффициентов — soft_warning, но НЕ дисквалификация:
+    на широких зашумлённых данных Lasso легитимно зануляет признаки, а
+    diversity при нормальном сигнале высокий (комбинация C+A не срабатывает).
+    """
+    rng = np.random.RandomState(21)
+    n, p = 100, 80
+    X = rng.randn(n, p)
+    y = 2.0 * X[:, 0] + 1.0 * X[:, 1] + rng.randn(n)
+    lasso = Lasso(alpha=0.1, random_state=0).fit(X, y)
+    gate = ModelSanityGate()
+    tol = gate.zero_coef_tolerance
+    zero_ratio = float((np.abs(lasso.coef_) <= tol).mean())
+    assert 0.6 <= zero_ratio <= 0.95  # предпосылка: 60–90% нулей
+
+    result = gate.check(
+        y=y, y_pred_oof=lasso.predict(X), y_pred_full=lasso.predict(X), X=X, model=lasso
+    )
+    assert result.is_valid  # не дисквалификация
+    assert result.reasons == []
+    assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
+    assert result.diversity_ratio > 0.15  # нормальный diversity
+
+
+def test_v2_noisy_honest_model_not_disqualified_small_n():
+    """v2 (T7, п. 7): зашумлённые данные, честная модель — гейт НЕ дисквалифицирует.
+
+    R²≈0.3 (Var(signal)=3 при 3 информативных признаках, шум подобран так,
+    чтобы R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3) — мягкий порог
+    diversity (0.15) пропускает честную модель даже на малой выборке N=30.
+    """
+    rng = np.random.RandomState(3)
+    n = 30
+    X = rng.randn(n, 3)
+    signal = X.sum(axis=1)
+    noise_var = 3.0 * (1.0 / 0.3 - 1.0)
+    y = signal + rng.randn(n) * np.sqrt(noise_var)
+
+    class _LinearHonest:
+        """Линейная честная модель: восстанавливает сигнал с шумом."""
+
+        def __init__(self, X: np.ndarray, y: np.ndarray) -> None:
+            self._X = X
+            self._y = y
+
+        def fit(self, X: np.ndarray, y: np.ndarray) -> "_LinearHonest":
+            # OLS по методу наименьших квадратов — без sklearn-зависимости.
+            Xd = np.column_stack([np.ones(len(X)), X])
+            coef, *_ = np.linalg.lstsq(Xd, y, rcond=None)
+            self._coef = coef
+            return self
+
+        def predict(self, X: np.ndarray) -> np.ndarray:
+            Xd = np.column_stack([np.ones(len(X)), X])
+            return Xd @ self._coef
+
+    model = _LinearHonest(X, y).fit(X, y)
+    pred = model.predict(X)
+    # На OOF-семантике теста считаем честный OOF через KFold.
+    kf = KFold(n_splits=5, shuffle=True, random_state=0)
+    oof = np.full(len(y), np.nan)
+    for tr, te in kf.split(X):
+        m = _LinearHonest(X, y).fit(X[tr], y[tr])
+        oof[te] = m.predict(X[te])
+    result = ModelSanityGate(check_generalization_gap=False).check(
+        y=y, y_pred_oof=oof, y_pred_full=pred, X=X, model=model
+    )
+    assert result.is_valid  # НЕ дисквалифицируется (мягкий diversity-порог)
+    assert result.reasons == []
+    # Diversity ≈ R² зашумлённой честной модели: много выше жёсткого порога
+    # 0.15, но заметно ниже «идеального» (шум не даёт R² ≈ 1).
+    assert result.diversity_ratio > 0.15
+    assert result.diversity_ratio < 0.9

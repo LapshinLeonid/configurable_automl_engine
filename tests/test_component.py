@@ -2722,3 +2722,126 @@ def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
         assert "feature_selector" in loaded.pipeline.named_steps
     else:
         assert "feature_selector" not in loaded.pipeline.named_steps
+
+
+# --------------------------------------------------------------------------- #
+#  Sanity Gate e2e (эпик #61, задача T7, issue #69)
+# --------------------------------------------------------------------------- #
+
+_SANITY_E2E_CFG = """
+general:
+  comparison_metric: rmse
+  path_to_model: '{model_path}'
+  validation_strategy: train_test_split
+  phases:
+    - name: "Search"
+      n_trials: 2
+      action: "all_algorithms"
+  sanity_gate:
+    mode: "{mode}"
+    top_k_candidates: 2
+algorithms:
+  ridge:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      alpha: [0.1, 1.0]
+  elasticnet:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      alpha: [0.1, 1.0]
+      l1_ratio: [0.2, 0.8]
+"""
+
+
+def _sanity_e2e_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
+    """Синтетический датасет с чётким сигналом (честные линейные модели)."""
+    rng = np.random.RandomState(seed)
+    df = pd.DataFrame(rng.randn(n, 4))
+    df["target"] = 2.0 * df[0] + rng.randn(n) * 0.3
+    return df
+
+
+def test_e2e_sanity_gate_active_winner_without_degeneracy(tmp_path: Path):
+    """E2E (T7): mode=active — победитель проходит аудит (без вырождения).
+
+    Конфиг с ``sanity_gate.mode=active``: пул финалистов строится,
+    победитель ранжируется по RMSE_oof среди прошедших аудит, и его
+    ``is_valid`` обязан быть True (гейт не пропускает вырожденные модели).
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="active"), encoding="utf-8"
+    )
+    res = train_best_model(
+        cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
+    )
+    assert Path(res["model_path"]).exists()
+    sg = res["sanity_gate"]
+    assert sg["mode"] == "active"
+    assert sg["pool"]
+    # Победитель — из пула финалистов.
+    assert res["algorithm"] in sg["pool"]
+    # Победитель прошёл аудит: is_valid=True (победитель без вырождения).
+    winner_audit = sg["audit"][res["algorithm"]]
+    assert winner_audit["is_valid"] is True
+    assert winner_audit["reasons"] == []
+    # Fallback не потребовался: хотя бы один кандидат валиден.
+    assert sg["fallback_used"] is False
+
+
+def test_e2e_sanity_gate_off_old_behavior(tmp_path: Path):
+    """E2E (T7): mode=off — старое поведение select_winner.
+
+    Никаких новых ключей отчёта (sanity_gate, disqualified_by_sanity_gate,
+    sanity_gate_warn_only, sanity_gate_overhead_seconds) — обратная
+    совместимость пайплайна.
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="off"), encoding="utf-8"
+    )
+    res = train_best_model(
+        cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
+    )
+    assert Path(res["model_path"]).exists()
+    assert res["algorithm"] in {"ridge", "elasticnet"}
+    for key in (
+        "sanity_gate",
+        "disqualified_by_sanity_gate",
+        "sanity_gate_warn_only",
+        "sanity_gate_overhead_seconds",
+    ):
+        assert key not in res
+
+
+def test_e2e_sanity_gate_warn_only_winner_matches_off(tmp_path: Path):
+    """E2E (T7): mode=warn_only — фактический победитель как при mode=off.
+
+    Аудит выполняется и попадает в отчёт, но выбор победителя не меняется;
+    гипотетические дисквалификации — в отдельном ключе отчёта.
+    """
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="off"), encoding="utf-8"
+    )
+    res_off = train_best_model(
+        cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
+    )
+
+    cfg_file_wo = tmp_path / "cfg_warn.yaml"
+    cfg_file_wo.write_text(
+        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="warn_only"), encoding="utf-8"
+    )
+    res_wo = train_best_model(
+        cfg_file_wo, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
+    )
+    # Фактический победитель не меняется относительно mode=off.
+    assert res_wo["algorithm"] == res_off["algorithm"]
+    sgo = res_wo["sanity_gate_warn_only"]
+    assert set(sgo) == {"disqualified", "winner_if_active"}
+    assert isinstance(sgo["winner_if_active"], str)
+    assert "disqualified_by_sanity_gate" not in res_wo
+    assert "sanity_gate" in res_wo
+    assert res_wo["sanity_gate"]["mode"] == "warn_only"

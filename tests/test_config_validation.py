@@ -1319,3 +1319,222 @@ def test_read_config_feature_selection_absent_defaults(tmp_path):
     assert fs.min_features == 2
     assert fs.variance_threshold == 0.0
     assert fs.n_estimators == 50
+
+
+# ─────────────────────── Sanity Gate v2 (эпик #61, T7, issue #69) ────────────
+
+
+def _sg_cfg(sanity_gate_block: dict) -> dict:
+    """Конфиг с блоком ``general.sanity_gate`` поверх базового."""
+    return {
+        "general": {**BASE["general"], "sanity_gate": sanity_gate_block},
+        "algorithms": BASE["algorithms"],
+    }
+
+
+def test_sanity_gate_v2_defaults():
+    """Дефолты блока sanity_gate v2: mode=off, мягкие пороги из постановки."""
+    cfg = Config.model_validate(BASE)
+    sg = cfg.general.sanity_gate
+    assert sg.mode == "off"
+    assert sg.top_k_candidates == 3
+    assert sg.corridor_delta == 0.15
+    assert sg.corridor_mode == "auto"
+    assert sg.min_prediction_diversity == 0.15
+    assert sg.min_unique_count == 5
+    assert sg.min_unique_ratio == 0.05
+    assert sg.max_dead_feature_ratio == 0.4
+    assert sg.dead_features_require_low_diversity is True
+    assert sg.max_generalization_gap == 1.5
+    assert sg.check_permutation_sensitivity is True
+    assert sg.permutation_max_rows == 5000
+    assert sg.permutation_max_features == 100
+    assert sg.permutation_repeats == 3
+    assert sg.permutation_seed == 42
+    assert sg.audit_time_budget_seconds == 0
+    assert sg.check_diversity is True
+    assert sg.check_unique is True
+    assert sg.check_dead_features is True
+    assert sg.check_generalization_gap is True
+
+
+def test_sanity_gate_v2_full_block_parses():
+    """Полный блок sanity_gate v2 (постановка эпика #61 / T5) парсится."""
+    block = {
+        "mode": "active",
+        "top_k_candidates": 5,
+        "corridor_delta": 0.2,
+        "corridor_mode": "multiplicative",
+        "enforce_family_diversity": True,
+        "algorithm_families": {"ridge": "linear", "svr": "kernel"},
+        "allowed_families": ["linear", "kernel"],
+        "family_diversity_multiplier": 1.3,
+        "min_prediction_diversity": 0.25,
+        "adaptive_diversity": True,
+        "min_unique_count": 10,
+        "min_unique_ratio": 0.1,
+        "max_dead_feature_ratio": 0.5,
+        "dead_features_require_low_diversity": False,
+        "zero_coef_tolerance": 1e-10,
+        "max_generalization_gap": 2.0,
+        "check_permutation_sensitivity": False,
+        "permutation_max_rows": 2000,
+        "permutation_max_features": 50,
+        "permutation_repeats": 5,
+        "permutation_seed": 7,
+        "permutation_tolerance": 1e-2,
+        "audit_time_budget_seconds": 120.5,
+        "check_diversity": True,
+        "check_unique": True,
+        "check_dead_features": True,
+        "check_generalization_gap": True,
+    }
+    cfg = Config.model_validate(_sg_cfg(block))
+    sg = cfg.general.sanity_gate
+    assert sg.mode == "active"
+    assert sg.top_k_candidates == 5
+    assert sg.corridor_delta == 0.2
+    assert sg.corridor_mode == "multiplicative"
+    assert sg.enforce_family_diversity is True
+    assert sg.algorithm_families == {"ridge": "linear", "svr": "kernel"}
+    assert sg.allowed_families == ["linear", "kernel"]
+    assert sg.family_diversity_multiplier == 1.3
+    assert sg.min_prediction_diversity == 0.25
+    assert sg.adaptive_diversity is True
+    assert sg.min_unique_count == 10
+    assert sg.min_unique_ratio == 0.1
+    assert sg.max_dead_feature_ratio == 0.5
+    assert sg.dead_features_require_low_diversity is False
+    assert sg.zero_coef_tolerance == 1e-10
+    assert sg.max_generalization_gap == 2.0
+    assert sg.check_permutation_sensitivity is False
+    assert sg.permutation_max_rows == 2000
+    assert sg.permutation_max_features == 50
+    assert sg.permutation_repeats == 5
+    assert sg.permutation_seed == 7
+    assert sg.permutation_tolerance == 1e-2
+    assert sg.audit_time_budget_seconds == 120.5
+    assert sg.check_diversity is True
+    assert sg.check_unique is True
+    assert sg.check_dead_features is True
+    assert sg.check_generalization_gap is True
+
+
+@pytest.mark.parametrize("bad_mode", ["weird", "aggressive", "ACTIVE", 123])
+def test_sanity_gate_v2_invalid_mode_rejected(bad_mode):
+    """Невалидный mode отклоняется: только off / warn_only / active."""
+    with pytest.raises(ValidationError, match="sanity_gate.mode"):
+        Config.model_validate(_sg_cfg({"mode": bad_mode}))
+
+
+@pytest.mark.parametrize("corridor_mode", ["multiplicative", "additive", "auto"])
+def test_sanity_gate_v2_corridor_mode_valid(corridor_mode):
+    """Все три формы коридора принимаются схемой."""
+    cfg = Config.model_validate(_sg_cfg({"corridor_mode": corridor_mode}))
+    assert cfg.general.sanity_gate.corridor_mode == corridor_mode
+
+
+def test_sanity_gate_v2_corridor_mode_invalid_rejected():
+    """Неизвестная форма коридора отклоняется на этапе валидации."""
+    with pytest.raises(ValidationError, match="corridor_mode"):
+        Config.model_validate(_sg_cfg({"corridor_mode": "geometric"}))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # Граничные значения (равенство порогу — валидно).
+        ("min_prediction_diversity", 1.0),
+        ("min_unique_ratio", 1.0),
+        ("max_dead_feature_ratio", 0.0),
+        ("max_dead_feature_ratio", 1.0),
+        ("max_generalization_gap", 1.0),
+        ("top_k_candidates", 1),
+        ("min_unique_count", 1),
+        # corridor_delta → 0 (строго больше нуля, но сколь угодно мал).
+        ("corridor_delta", 1e-9),
+        # Множители и допуски: неотрицательные/положительные границы.
+        ("family_diversity_multiplier", 1e-9),
+        ("zero_coef_tolerance", 0.0),
+        ("permutation_tolerance", 0.0),
+        ("audit_time_budget_seconds", 0.0),
+    ],
+)
+def test_sanity_gate_v2_threshold_boundaries_valid(field, value):
+    """Граничные значения порогов блока v2 проходят валидацию."""
+    cfg = Config.model_validate(_sg_cfg({field: value}))
+    assert getattr(cfg.general.sanity_gate, field) == value
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("min_prediction_diversity", 0),
+        ("min_prediction_diversity", -0.1),
+        ("min_prediction_diversity", 1.5),
+        ("min_unique_ratio", 0),
+        ("min_unique_ratio", 1.5),
+        ("max_dead_feature_ratio", -0.1),
+        ("max_dead_feature_ratio", 1.1),
+        ("max_generalization_gap", 0.5),
+        ("max_generalization_gap", 0.99),
+        ("top_k_candidates", 0),
+        ("top_k_candidates", -1),
+        ("min_unique_count", 0),
+        ("corridor_delta", 0),
+        ("corridor_delta", 1.0),
+        ("corridor_delta", -0.1),
+        ("family_diversity_multiplier", 0),
+        ("family_diversity_multiplier", -1),
+        ("zero_coef_tolerance", -1e-6),
+        ("permutation_tolerance", -1e-6),
+        ("permutation_repeats", 0),
+        ("permutation_max_rows", 0),
+        ("permutation_max_features", 0),
+        ("audit_time_budget_seconds", -0.1),
+    ],
+)
+def test_sanity_gate_v2_threshold_out_of_bounds_rejected(field, value):
+    """Значения порогов вне допустимых границ отклоняются с именем поля."""
+    with pytest.raises(ValidationError, match=re.escape(field)):
+        Config.model_validate(_sg_cfg({field: value}))
+
+
+def test_sanity_gate_v2_extra_forbid():
+    """Лишние ключи внутри блока sanity_gate отклоняются (extra='forbid')."""
+    with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
+        Config.model_validate(_sg_cfg({"unknown_sanity_key": True}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["check_diversity", "check_unique", "check_dead_features",
+     "check_generalization_gap", "adaptive_diversity",
+     "dead_features_require_low_diversity", "enforce_family_diversity",
+     "check_permutation_sensitivity"],
+)
+def test_sanity_gate_v2_check_flags_accept_bools_only(field):
+    """Флаги-контуры принимают bool; несовместимые типы отклоняются.
+
+    Pydantic в lax-режиме коэрсит ``1``/``"yes"`` в True, но списки,
+    словари и None — несовместимые типы — отклоняются.
+    """
+    for flag_value in (True, False):
+        cfg = Config.model_validate(_sg_cfg({field: flag_value}))
+        assert getattr(cfg.general.sanity_gate, field) == flag_value
+    with pytest.raises(ValidationError, match=re.escape(field)):
+        Config.model_validate(_sg_cfg({field: [1]}))
+    with pytest.raises(ValidationError, match=re.escape(field)):
+        Config.model_validate(_sg_cfg({field: {"value": True}}))
+    with pytest.raises(ValidationError, match=re.escape(field)):
+        Config.model_validate(_sg_cfg({field: None}))
+
+
+def test_sanity_gate_v2_empty_block_is_valid_mode_off():
+    """Пустой блок sanity_gate: {} валиден и равен mode='off' (T5)."""
+    cfg = Config.model_validate(_sg_cfg({}))
+    sg = cfg.general.sanity_gate
+    assert sg.mode == "off"
+    assert sg.corridor_delta == 0.15
+    assert sg.min_prediction_diversity == 0.15
+    assert sg.max_generalization_gap == 1.5
