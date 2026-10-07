@@ -852,7 +852,7 @@
     },
     "SanityGateCfg": {
       "additionalProperties": false,
-      "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).\n\nУправляет интеграцией аудита вырождения моделей\n(:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,\nзадача T2) в финальный выбор победителя (задача T4) и режимами работы\n(задача T5):\n\n- ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —\n  пул финалистов и аудит не выполняются, поведение пайплайна не меняется;\n- ``mode=warn_only``: пул и аудит выполняются, результаты и\n  «гипотетические дисквалификации» логируются и попадают в отчёт,\n  но фактический победитель выбирается как при ``off`` (сбор статистики\n  на реальных данных до включения гейта);\n- ``mode=active``: дисквалификации применяются, победитель = кандидат\n  с лучшим ``RMSE_oof`` среди прошедших все проверки.\n\nПул финалистов строится из результатов HPO через\n``component.select_finalists`` (T3, issue #65): коридор δ от лидера в\nпользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,\nопциональный мягкий добор семейств (``enforce_family_diversity``).\n\nПороги контуров гейта повторяют параметры ``ModelSanityGate`` и\nпередаются в конструктор гейта без изменений.\n\nAttributes:\n    mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (>= 0).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (>= 0).\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в [0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]).\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    permutation_max_rows (int | None): Подвыборка строк для пермутаций.\n    permutation_max_features (int | None): Кап проверяемых колонок.\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
+      "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).\n\nУправляет интеграцией аудита вырождения моделей\n(:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,\nзадача T2) в финальный выбор победителя (задача T4) и режимами работы\n(задача T5):\n\n- ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —\n  пул финалистов и аудит не выполняются, поведение пайплайна не меняется;\n- ``mode=warn_only``: пул и аудит выполняются, результаты и\n  «гипотетические дисквалификации» логируются и попадают в отчёт,\n  но фактический победитель выбирается как при ``off`` (сбор статистики\n  на реальных данных до включения гейта);\n- ``mode=active``: дисквалификации применяются, победитель = кандидат\n  с лучшим ``RMSE_oof`` среди прошедших все проверки.\n\nПул финалистов строится из результатов HPO через\n``component.select_finalists`` (T3, issue #65): коридор δ от лидера в\nпользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,\nопциональный мягкий добор семейств (``enforce_family_diversity``).\n\nПороги контуров гейта повторяют параметры ``ModelSanityGate`` и\nпередаются в конструктор гейта без изменений.\n\nAttributes:\n    mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (в (0, 1]);\n        считается на OOF-предсказаниях.\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал\n        для линейных моделей; самостоятельная дисквалификация только при\n        ``dead_features_require_low_diversity=true`` и низком diversity.\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    check_permutation_sensitivity (bool): Включить пермутационный аудит\n        чувствительности признаков (контур В, нелинейные модели).\n    permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).\n    permutation_max_features (int): Кап проверяемых колонок (>= 1).\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    audit_time_budget_seconds (float): Бюджет времени на фазу аудита\n        (>= 0; 0 — без ограничения).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
       "properties": {
         "mode": {
           "default": "off",
@@ -874,8 +874,9 @@
         },
         "corridor_delta": {
           "default": 0.15,
-          "description": "Относительная ширина коридора δ от лидера (>= 0, дефолт 0.15).",
-          "minimum": 0.0,
+          "description": "Относительная ширина коридора δ от лидера (строго в (0, 1), дефолт 0.15).",
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.0,
           "title": "Corridor Delta",
           "type": "number"
         },
@@ -937,8 +938,9 @@
         },
         "min_prediction_diversity": {
           "default": 0.15,
-          "description": "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога.",
-          "minimum": 0.0,
+          "description": "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога; считается на OOF-предсказаниях (строго в (0, 1], дефолт 0.15).",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
           "title": "Min Prediction Diversity",
           "type": "number"
         },
@@ -957,15 +959,15 @@
         },
         "min_unique_ratio": {
           "default": 0.05,
-          "description": "Нижняя граница доли уникальных предсказаний контура Б.",
+          "description": "Нижняя граница доли уникальных предсказаний контура Б (в (0, 1]).",
+          "exclusiveMinimum": 0.0,
           "maximum": 1.0,
-          "minimum": 0.0,
           "title": "Min Unique Ratio",
           "type": "number"
         },
         "max_dead_feature_ratio": {
           "default": 0.4,
-          "description": "Порог доли «мёртвых» признаков контура В.",
+          "description": "Порог доли «мёртвых» признаков контура В (в [0, 1]) — для линейных моделей это сигнал; самостоятельная дисквалификация только при dead_features_require_low_diversity=true и низком diversity.",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Max Dead Feature Ratio",
@@ -991,33 +993,25 @@
           "title": "Max Generalization Gap",
           "type": "number"
         },
+        "check_permutation_sensitivity": {
+          "default": true,
+          "description": "Включить пермутационный аудит чувствительности признаков (контур В для нелинейных моделей; контроль стоимости аудита). По умолчанию True; False — пермутационный путь пропускается, линейный путь по коэффициентам остаётся.",
+          "title": "Check Permutation Sensitivity",
+          "type": "boolean"
+        },
         "permutation_max_rows": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": 5000,
-          "description": "Подвыборка строк для пермутационного пути контура В (None — все).",
-          "title": "Permutation Max Rows"
+          "description": "Подвыборка строк для пермутационного пути контура В (>= 1, дефолт 5000).",
+          "minimum": 1,
+          "title": "Permutation Max Rows",
+          "type": "integer"
         },
         "permutation_max_features": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": 100,
-          "description": "Кап проверяемых колонок в пермутационном пути (None — все).",
-          "title": "Permutation Max Features"
+          "description": "Кап проверяемых колонок в пермутационном пути (>= 1, дефолт 100).",
+          "minimum": 1,
+          "title": "Permutation Max Features",
+          "type": "integer"
         },
         "permutation_repeats": {
           "default": 3,
@@ -1037,6 +1031,13 @@
           "description": "Относительный порог «мёртвости» признака в пермутациях.",
           "minimum": 0.0,
           "title": "Permutation Tolerance",
+          "type": "number"
+        },
+        "audit_time_budget_seconds": {
+          "default": 0,
+          "description": "Бюджет времени на фазу аудита Sanity Gate (в секундах). 0 — без ограничения (дефолт).",
+          "minimum": 0.0,
+          "title": "Audit Time Budget Seconds",
           "type": "number"
         },
         "check_diversity": {

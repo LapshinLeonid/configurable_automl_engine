@@ -432,6 +432,70 @@ def test_dead_features_nonlinear_correlated_noise_soft_warning_only():
     assert any("dead-feature ratio" in w for w in result.soft_warnings)
 
 
+def test_dead_features_permutation_disabled_when_sensitivity_off():
+    # T5: check_permutation_sensitivity=False отключает пермутационный путь
+    # контура В для нелинейных моделей; линейный путь по coef_ остаётся.
+    rng = np.random.RandomState(3)
+    n, p = 120, 10
+    x0 = rng.randn(n)
+    X = np.column_stack([x0] + [x0 + rng.randn(n) * 0.05 for _ in range(p - 1)])
+    y = 3.0 * x0 + rng.randn(n)
+
+    class _FirstColumnModel:
+        def predict(self, X: Any) -> np.ndarray:
+            return np.asarray(X)[:, 0] * 3.0
+
+    model = _FirstColumnModel()
+    # С выключенной чувствительностью пермутационный аудит не выполняется:
+    # «мёртвые» признаки не считаются, мягких предупреждений нет.
+    gate = ModelSanityGate(
+        check_permutation_sensitivity=False,
+        check_generalization_gap=False,
+    )
+    result = gate.check(
+        y=y, y_pred_oof=model.predict(X), y_pred_full=model.predict(X), X=X, model=model
+    )
+    assert result.is_valid
+    assert result.dead_features_count == 0
+    assert result.soft_warnings == []
+
+    # Контроль: тот же инпут с включённой чувствительностью даёт «мёртвые»
+    # признаки (пермутационный путь реально работает).
+    gate_on = ModelSanityGate(check_generalization_gap=False)
+    result_on = gate_on.check(
+        y=y, y_pred_oof=model.predict(X), y_pred_full=model.predict(X), X=X, model=model
+    )
+    assert result_on.dead_features_count == p - 1
+
+
+def test_dead_features_permutation_disabled_keeps_linear_path():
+    # T5: выключение пермутационной чувствительности НЕ влияет на линейный
+    # путь контура В (модель с coef_): сигнал и комбинация работают как раньше.
+    rng = np.random.RandomState(5)
+    n, p = 200, 12
+    X = rng.randn(n, p)
+    y = X[:, 0] + rng.randn(n) * 0.01
+    lasso = Lasso(alpha=1e3).fit(X, y)
+    assert np.mean(np.abs(lasso.coef_) <= 1e-12) > 0.8  # много нулей
+    gate = ModelSanityGate(
+        check_permutation_sensitivity=False,
+        max_dead_feature_ratio=0.4,
+        check_diversity=False,
+        check_unique=False,
+        check_generalization_gap=False,
+    )
+    result = gate.check(
+        y=y,
+        y_pred_oof=lasso.predict(X),
+        y_pred_full=lasso.predict(X),
+        X=X,
+        model=lasso,
+    )
+    assert result.is_valid  # сигнал, не дисквалификация
+    assert result.dead_features_count > 0
+    assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
+
+
 def test_dead_features_permutation_cost_controls_rows_and_features():
     rng = np.random.RandomState(9)
     n, p = 120, 40
@@ -886,7 +950,13 @@ def test_constructor_validation():
     with pytest.raises(ValueError):
         ModelSanityGate(min_prediction_diversity=-0.1)
     with pytest.raises(ValueError):
+        ModelSanityGate(min_prediction_diversity=0)
+    with pytest.raises(ValueError):
+        ModelSanityGate(min_prediction_diversity=1.5)
+    with pytest.raises(ValueError):
         ModelSanityGate(min_unique_count=0)
+    with pytest.raises(ValueError):
+        ModelSanityGate(min_unique_ratio=0)
     with pytest.raises(ValueError):
         ModelSanityGate(min_unique_ratio=1.5)
     with pytest.raises(ValueError):

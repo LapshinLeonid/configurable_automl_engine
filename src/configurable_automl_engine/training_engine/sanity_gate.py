@@ -35,7 +35,7 @@ C. Dead Feature Check (``check_dead_features``)
      diversity threshold (rule controlled by
      ``dead_features_require_low_diversity``, default True).
    * Nonlinear models (SVR, trees, ...): permutation sensitivity with cost
-     controls — ``permutation_max_rows`` (row subsampling),
+     controls — ``permutation_max_rows`` (row subsampling cap),
      ``permutation_max_features`` (cap on checked columns),
      ``permutation_repeats`` (repeat count) and a fixed ``permutation_seed``
      for full determinism. Base predictions are cached; a feature is "dead"
@@ -43,7 +43,9 @@ C. Dead Feature Check (``check_dead_features``)
      ``permutation_tolerance``. A high share of dead features produces a soft
      warning, not a disqualification: on correlated features permutation
      reports "false-dead" features because the model borrows the information
-     from a neighbour column.
+     from a neighbour column. The whole permutation path can be turned off
+     with ``check_permutation_sensitivity=False`` (cost control, task T5);
+     the linear ``coef_`` path is unaffected.
 
 D. Generalization Gap (``check_generalization_gap``)
    ``RMSE_oof / RMSE_full`` (the formula written as ``RMSE_full / RMSE_oof``
@@ -334,8 +336,9 @@ class ModelSanityGate:
         dead_features_require_low_diversity: bool = True,
         zero_coef_tolerance: float = 1e-12,
         max_generalization_gap: float = 1.5,
-        permutation_max_rows: int | None = 5000,
-        permutation_max_features: int | None = 100,
+        check_permutation_sensitivity: bool = True,
+        permutation_max_rows: int = 5000,
+        permutation_max_features: int = 100,
         permutation_repeats: int = 3,
         permutation_seed: int = 42,
         permutation_tolerance: float = 1e-3,
@@ -348,12 +351,14 @@ class ModelSanityGate:
         """Initialize the gate with thresholds and circuit flags.
 
         Args:
-            min_prediction_diversity: circuit A threshold (default 0.15 — soft).
+            min_prediction_diversity: circuit A threshold, in (0, 1]
+                (default 0.15 — soft).
             adaptive_diversity: adaptive mode A relative to the constant model:
                 fails only for a zero prediction spread (the absolute threshold
                 is not applied).
             min_unique_count: absolute lower bound for nunique (circuit B).
-            min_unique_ratio: lower bound for the share of unique predictions.
+            min_unique_ratio: lower bound for the share of unique predictions,
+                in (0, 1].
             max_dead_feature_ratio: dead-feature share threshold (circuit C):
                 above it — a soft signal, and combined with a circuit A failure
                 (when ``dead_features_require_low_diversity``) — disqualification.
@@ -362,9 +367,14 @@ class ModelSanityGate:
             zero_coef_tolerance: coefficients with ``abs(coef) <=`` this value
                 count as zero (linear path of circuit C).
             max_generalization_gap: circuit D threshold (≥ 1, default 1.5).
-            permutation_max_rows: row subsampling for permutations (None — all
-                rows).
-            permutation_max_features: cap on checked columns (None — all).
+            check_permutation_sensitivity: enable the permutation sensitivity
+                audit of circuit C for nonlinear models (default True — the
+                cost-controlled permutation path runs; False — the path is
+                skipped and only the linear ``coef_`` path of circuit C works).
+            permutation_max_rows: row subsampling for permutations (>= 1,
+                default 5000).
+            permutation_max_features: cap on checked columns (>= 1,
+                default 100).
             permutation_repeats: shuffle repeats per column.
             permutation_seed: fixed seed for permutation determinism.
             permutation_tolerance: relative "deadness" threshold of a feature:
@@ -379,12 +389,12 @@ class ModelSanityGate:
         Raises:
             ValueError: for invalid thresholds or parameter combinations.
         """
-        if min_prediction_diversity < 0:
-            raise ValueError("min_prediction_diversity must be >= 0")
+        if not 0 < min_prediction_diversity <= 1:
+            raise ValueError("min_prediction_diversity must be in (0, 1]")
         if min_unique_count < 1:
             raise ValueError("min_unique_count must be >= 1")
-        if not 0 <= min_unique_ratio <= 1:
-            raise ValueError("min_unique_ratio must be in [0, 1]")
+        if not 0 < min_unique_ratio <= 1:
+            raise ValueError("min_unique_ratio must be in (0, 1]")
         if not 0 <= max_dead_feature_ratio <= 1:
             raise ValueError("max_dead_feature_ratio must be in [0, 1]")
         if max_generalization_gap < 1:
@@ -393,10 +403,10 @@ class ModelSanityGate:
             raise ValueError("zero_coef_tolerance must be >= 0")
         if permutation_repeats < 1:
             raise ValueError("permutation_repeats must be >= 1")
-        if permutation_max_rows is not None and permutation_max_rows < 1:
-            raise ValueError("permutation_max_rows must be >= 1 or None")
-        if permutation_max_features is not None and permutation_max_features < 1:
-            raise ValueError("permutation_max_features must be >= 1 or None")
+        if permutation_max_rows < 1:
+            raise ValueError("permutation_max_rows must be >= 1")
+        if permutation_max_features < 1:
+            raise ValueError("permutation_max_features must be >= 1")
         if permutation_tolerance < 0:
             raise ValueError("permutation_tolerance must be >= 0")
 
@@ -408,6 +418,7 @@ class ModelSanityGate:
         self.dead_features_require_low_diversity = dead_features_require_low_diversity
         self.zero_coef_tolerance = zero_coef_tolerance
         self.max_generalization_gap = max_generalization_gap
+        self.check_permutation_sensitivity = check_permutation_sensitivity
         self.permutation_max_rows = permutation_max_rows
         self.permutation_max_features = permutation_max_features
         self.permutation_repeats = permutation_repeats
@@ -683,6 +694,10 @@ class ModelSanityGate:
         coef = getattr(estimator, "coef_", None)
         if coef is not None:
             return self._check_dead_features_linear(coef, diversity_failed)
+        if not self.check_permutation_sensitivity:
+            # Пермутационный путь отключён пользователем (T5): для нелинейных
+            # моделей контур В бездействует — это осознанный выбор стоимости.
+            return 0, [], []
         if X is None:
             return (
                 0,
@@ -799,7 +814,7 @@ class ModelSanityGate:
         n_rows = y.shape[0]
 
         row_idx = np.arange(n_rows)
-        if self.permutation_max_rows is not None and n_rows > self.permutation_max_rows:
+        if n_rows > self.permutation_max_rows:
             row_idx = rng.choice(n_rows, size=self.permutation_max_rows, replace=False)
         try:
             X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
@@ -824,10 +839,7 @@ class ModelSanityGate:
             )
         n_cols = X_sub.shape[1]
         col_idx = np.arange(n_cols)
-        if (
-            self.permutation_max_features is not None
-            and n_cols > self.permutation_max_features
-        ):
+        if n_cols > self.permutation_max_features:
             col_idx = rng.choice(
                 n_cols, size=self.permutation_max_features, replace=False
             )

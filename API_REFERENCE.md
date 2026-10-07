@@ -32,6 +32,7 @@ The `general` section may include the following attributes:
 * `hashing_n_components` — (optional, `>= 1`, default `16`) number of binary columns per categorical column when `"hashing"` encoding is used.
 * `target_encoding_smoothing` — (optional, `>= 0`, default `20.0`) smoothing parameter `m` of target encoding.
 * `target_encoding_fallback` — (optional, default `null`) fallback value of target encoding for categories unseen in training; `null` means the global target mean.
+* `sanity_gate` — (optional) settings of the two-stage winner selection with Sanity Gate (epic #61). Defaults to `mode: "off"` — the old single-stage `select_winner` behavior. See [Sanity Gate configuration](#sanity-gate-configuration-sanity_gate).
 
 ### Early stopping (`pruning`)
 
@@ -160,7 +161,10 @@ When `general.sanity_gate.mode != "off"`, `train_best_model` replaces the
 3. **Audit** — each finalist is checked by `ModelSanityGate` (T2): circuits A/B
    (diversity / unique) are computed on the **OOF vector**, circuit D
    (generalization gap) uses the full-fit predictions, circuit C (dead
-   features) inspects the model.
+   features) inspects the model. The total audit phase can be capped by
+   `general.sanity_gate.audit_time_budget_seconds` (0 = no limit): when the
+   budget is exhausted, the remaining candidates are skipped with an explicit
+   reason.
 4. **Ranking** — among the candidates that passed every check the winner is
    the one with the **best (minimum) `RMSE_oof`**. CV score and `RMSE_full`
    do NOT participate in the ranking (the v2 composite score
@@ -192,6 +196,76 @@ results (reasons / soft warnings / circuit statistics), applied or hypothetical
 disqualifications, the fallback flag and the winner's `RMSE_oof` / `RMSE_full`
 (data for task T6). With `mode = "off"` the result is identical to the old
 single-stage selection.
+
+### Sanity Gate configuration (`sanity_gate`, epic #61 / task T5)
+
+The optional `general.sanity_gate` block exposes the whole Sanity Gate feature
+(epic #61, v2) through configuration — no code changes are needed to enable,
+tune or disable it. **Backward compatibility:** an absent block (or an empty
+`{}`) is equivalent to `mode: "off"` — the old single-stage `select_winner`
+behavior, byte-for-byte identical to the pre-T4 flow. The v1 `composite_alpha`
+field is **removed** — the composite score was abolished in v2.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `string` | `"off"` | Gate mode: `"off"` (old behavior — no pool, no audit), `"warn_only"` (pool and audit run, disqualifications are hypothetical — statistics collection), `"active"` (disqualifications applied, winner = best `RMSE_oof` among the candidates that passed the audit). Default `"off"` for the first release; switching to `"active"` is planned only after warn-only statistics and the T9 benchmark. |
+| `top_k_candidates` | `int` | `3` | Hard cap of the finalists pool size (≥ 1). Larger than the number of algorithms — allowed (pool of what is available). |
+| `corridor_delta` | `float` | `0.15` | Relative corridor width δ from the leader, strictly in `(0, 1)`. |
+| `corridor_mode` | `string` | `"auto"` | Corridor form: `"multiplicative"`, `"additive"` or `"auto"` (chosen by metric type; unknown metric — conservative additive form + warning). |
+| `enforce_family_diversity` | `bool` | `false` | Optional soft top-up of missing algorithm families into the pool (task T3). |
+| `algorithm_families` | `dict[str, str] \| null` | `null` | «algorithm → family» map for the family-diversity rule. |
+| `allowed_families` | `list[str] \| null` | `null` | Families participating in the top-up (`null` — all allowed). |
+| `family_diversity_multiplier` | `float` | `1.5` | Extended-corridor multiplier for the family top-up (> 0). |
+| `min_prediction_diversity` | `float` | `0.15` | Circuit A threshold: `Var(y_pred_oof) / Var(y) >=` threshold, computed on **OOF predictions**, strictly in `(0, 1]`. Too strict values (e.g. `1.0` on noisy data) are not rejected by validation but cause false positives — documented consequence. |
+| `adaptive_diversity` | `bool` | `false` | Adaptive mode of circuit A (comparison against the constant model). |
+| `min_unique_count` | `int` | `5` | Absolute lower bound of `nunique` for circuit B (≥ 1). |
+| `min_unique_ratio` | `float` | `0.05` | Lower bound of the unique-prediction share for circuit B, in `(0, 1]`. |
+| `max_dead_feature_ratio` | `float` | `0.4` | Dead-feature share threshold of circuit C, in `[0, 1]` — a **signal** for linear models; standalone disqualification only when `dead_features_require_low_diversity=true` and diversity is low. |
+| `dead_features_require_low_diversity` | `bool` | `true` | Combination rule of circuit C: disqualify only when "many dead features AND low diversity". |
+| `zero_coef_tolerance` | `float` | `1e-12` | Coefficients with `abs(coef) <=` threshold count as zero (circuit C, linear path; ≥ 0). |
+| `max_generalization_gap` | `float` | `1.5` | Circuit D threshold (≥ 1): `RMSE_oof / RMSE_full >` threshold means overfitting. |
+| `check_permutation_sensitivity` | `bool` | `true` | Enable the permutation sensitivity audit of circuit C for nonlinear models (cost control of the permutation audit). `false` — the permutation path is skipped, the linear `coef_` path remains. |
+| `permutation_max_rows` | `int` | `5000` | Row subsampling for the permutation path (≥ 1). |
+| `permutation_max_features` | `int` | `100` | Cap of checked columns in the permutation path (≥ 1). |
+| `permutation_repeats` | `int` | `3` | Permutation repeats per column (≥ 1). |
+| `permutation_seed` | `int` | `42` | Fixed permutation seed (determinism). |
+| `permutation_tolerance` | `float` | `1e-3` | Relative "deadness" threshold of a feature in the permutation path (≥ 0). |
+| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). When the budget is exhausted, the remaining finalists are not audited and receive an explicit "audit skipped: budget exceeded" reason (they cannot win in `"active"` mode; in `"warn_only"` they appear in the report as hypothetical). |
+| `check_diversity` | `bool` | `true` | Enable circuit A. |
+| `check_unique` | `bool` | `true` | Enable circuit B. |
+| `check_dead_features` | `bool` | `true` | Enable circuit C. |
+| `check_generalization_gap` | `bool` | `true` | Enable circuit D. |
+
+Validation rules (rejected at config load with a clear message):
+
+* Unknown keys — the block has `extra="forbid"` (a typo is a hard error).
+* Unknown `mode` (anything other than `"off"` / `"warn_only"` / `"active"`)
+  or unknown `corridor_mode`.
+* Out-of-range thresholds: `top_k_candidates < 1`; `corridor_delta` outside
+  `(0, 1)`; `min_prediction_diversity` outside `(0, 1]`;
+  `max_dead_feature_ratio` outside `[0, 1]`; `min_unique_ratio` outside
+  `(0, 1]`; `min_unique_count < 1`; `max_generalization_gap < 1`;
+  `permutation_max_rows < 1`; `permutation_max_features < 1`;
+  `permutation_repeats < 1`; `audit_time_budget_seconds < 0`.
+
+Edge cases:
+
+* `mode: "active"` with no other fields — the defaults are used (valid).
+* `top_k_candidates` greater than the number of algorithms — allowed (pool of
+  what is available).
+* `corridor_mode: "auto"` with an unknown metric — conservative additive form
+  plus a warning.
+* Absent `sanity_gate` block — old behavior; the v1 `enable` key is not
+  introduced.
+
+Migration note: the v2 statement (epic #61) tightened `corridor_delta` to the
+open interval `(0, 1)` — the previously allowed value `0` (degenerate corridor
+= leader only) is now rejected. Use a small positive value (e.g. `1e-9`) for
+the same behavior. `permutation_max_rows` / `permutation_max_features` are
+plain `int` (≥ 1) since v2; the old `null` ("no cap") form is replaced by
+`check_permutation_sensitivity: false` when the permutation audit should be
+skipped entirely. These changes apply to the pre-release T4/T5 schema only —
+no released configuration is affected.
 
 ### Additional metrics (`additional_metrics`)
 

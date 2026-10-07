@@ -269,6 +269,97 @@ def test_active_audit_failure_is_disqualification():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def test_audit_time_budget_zero_audits_all_candidates():
+    """Бюджет = 0 (дефолт): лимита нет, аудируются все кандидаты."""
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "a": _candidate("a", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full),
+        "b": _candidate("b", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full),
+    }
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="active",
+        audit_time_budget_seconds=0,
+    )
+    assert set(res.audit) == {"a", "b"}
+    assert res.disqualified == {}
+
+
+def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
+    """Исчерпание бюджета: оставшиеся кандидаты не аудируются (reason в отчёте).
+
+    ``time.monotonic`` замокан: старт в 0.0, первый кандидат проверяется на
+    1.0 (< бюджета 5.0), остальные — на 10.0 (>= бюджета) → пропуск.
+    """
+    import configurable_automl_engine.training_engine.component as comp
+
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "a": _candidate("a", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full),
+        "b": _candidate("b", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full),
+        "c": _candidate("c", cv_score=-0.10, rmse_oof=0.25, y_oof=y_oof, y_full=y_full),
+    }
+    mocker.patch.object(
+        comp.time,
+        "monotonic",
+        side_effect=[0.0, 1.0, 10.0, 10.0],
+    )
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="active",
+        audit_time_budget_seconds=5.0,
+    )
+    # Аудит выполнен только для первого кандидата; остальные пропущены.
+    assert set(res.audit) == {"a", "b", "c"}
+    assert res.audit["a"].is_valid is True
+    assert res.audit["b"].is_valid is False
+    assert res.audit["c"].is_valid is False
+    assert all(
+        "audit time budget" in r
+        for name in ("b", "c")
+        for r in res.disqualified[name]
+    )
+    # Пропущенный кандидат не может победить в active.
+    assert res.winner_algo == "a"
+    assert "a" not in res.disqualified
+
+
+def test_audit_time_budget_warn_only_winner_still_cv_leader(mocker):
+    """warn_only + исчерпанный бюджет: победитель остаётся CV-лидером."""
+    import configurable_automl_engine.training_engine.component as comp
+
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "cv_leader": _candidate(
+            "cv_leader", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full
+        ),
+        "second": _candidate(
+            "second", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full
+        ),
+    }
+    mocker.patch.object(
+        comp.time,
+        "monotonic",
+        side_effect=[0.0, 1.0, 10.0],
+    )
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="warn_only",
+        audit_time_budget_seconds=5.0,
+    )
+    assert res.winner_algo == "cv_leader"
+    assert "audit time budget" in res.disqualified["second"][0]
+
+
 def test_warn_only_winner_like_off_with_hypothetical_disqualifications():
     """warn_only: победитель = CV-лидер (как при off), статистика в отчёте."""
     y, _, _ = _honest_vectors()
@@ -669,6 +760,8 @@ def test_sanity_gate_config_defaults():
     assert sg.corridor_mode == "auto"
     assert sg.enforce_family_diversity is False
     assert sg.max_generalization_gap == 1.5
+    assert sg.check_permutation_sensitivity is True
+    assert sg.audit_time_budget_seconds == 0
 
 
 def test_sanity_gate_config_parses_mode_and_thresholds():
@@ -696,17 +789,27 @@ def test_sanity_gate_config_parses_mode_and_thresholds():
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "bad, expected",
     [
-        {"mode": "weird"},
-        {"top_k_candidates": 0},
-        {"corridor_delta": -0.1},
-        {"max_generalization_gap": 0.5},
-        {"min_unique_ratio": 1.5},
-        {"permutation_repeats": 0},
+        ({"mode": "weird"}, "sanity_gate.mode"),
+        ({"mode": "aggressive"}, "sanity_gate.mode"),
+        ({"top_k_candidates": 0}, "top_k_candidates"),
+        ({"corridor_delta": -0.1}, "corridor_delta"),
+        ({"corridor_delta": 0}, "corridor_delta"),
+        ({"corridor_delta": 1.0}, "corridor_delta"),
+        ({"min_prediction_diversity": 0}, "min_prediction_diversity"),
+        ({"min_prediction_diversity": 1.5}, "min_prediction_diversity"),
+        ({"min_unique_ratio": 0}, "min_unique_ratio"),
+        ({"min_unique_ratio": 1.5}, "min_unique_ratio"),
+        ({"max_generalization_gap": 0.5}, "max_generalization_gap"),
+        ({"permutation_repeats": 0}, "permutation_repeats"),
+        ({"permutation_max_rows": 0}, "permutation_max_rows"),
+        ({"permutation_max_features": -1}, "permutation_max_features"),
+        ({"audit_time_budget_seconds": -1}, "audit_time_budget_seconds"),
+        ({"unknown_key": True}, "unknown_key"),
     ],
 )
-def test_sanity_gate_config_invalid_values_rejected(bad):
+def test_sanity_gate_config_invalid_values_rejected(bad, expected):
     from pydantic import ValidationError
 
     data = {
@@ -717,5 +820,133 @@ def test_sanity_gate_config_invalid_values_rejected(bad):
         },
         "algorithms": {"ridge": {"enable": True}},
     }
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=expected):
         Config.model_validate(data)
+
+
+def test_sanity_gate_config_empty_block_is_valid_mode_off():
+    """Пустой блок sanity_gate: {} валиден и равен mode='off' (T5)."""
+    data = {
+        "general": {
+            "comparison_metric": "rmse",
+            "phases": [{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+            "sanity_gate": {},
+        },
+        "algorithms": {"ridge": {"enable": True}},
+    }
+    cfg = Config.model_validate(data)
+    sg = cfg.general.sanity_gate
+    assert sg.mode == "off"
+    assert sg.corridor_delta == 0.15
+    assert sg.min_prediction_diversity == 0.15
+    assert sg.max_dead_feature_ratio == 0.4
+    assert sg.max_generalization_gap == 1.5
+
+
+def test_sanity_gate_config_full_v2_block_parses():
+    """Полный блок sanity_gate (v2, постановка эпика #61 / T5) парсится."""
+    data = {
+        "general": {
+            "comparison_metric": "rmse",
+            "phases": [{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+            "sanity_gate": {
+                "mode": "warn_only",
+                "top_k_candidates": 5,
+                "corridor_delta": 0.2,
+                "corridor_mode": "multiplicative",
+                "min_prediction_diversity": 0.25,
+                "max_dead_feature_ratio": 0.5,
+                "dead_features_require_low_diversity": True,
+                "max_generalization_gap": 2.0,
+                "min_unique_ratio": 0.1,
+                "min_unique_count": 10,
+                "enforce_family_diversity": True,
+                "algorithm_families": {"ridge": "linear", "svr": "kernel"},
+                "allowed_families": ["linear", "kernel"],
+                "family_diversity_multiplier": 1.3,
+                "check_permutation_sensitivity": False,
+                "permutation_max_rows": 2000,
+                "permutation_max_features": 50,
+                "permutation_repeats": 5,
+                "permutation_seed": 7,
+                "permutation_tolerance": 1e-2,
+                "audit_time_budget_seconds": 120.5,
+                "adaptive_diversity": True,
+                "zero_coef_tolerance": 1e-10,
+                "check_diversity": True,
+                "check_unique": True,
+                "check_dead_features": True,
+                "check_generalization_gap": True,
+            },
+        },
+        "algorithms": {"ridge": {"enable": True}},
+    }
+    cfg = Config.model_validate(data)
+    sg = cfg.general.sanity_gate
+    assert sg.mode == "warn_only"
+    assert sg.top_k_candidates == 5
+    assert sg.corridor_delta == 0.2
+    assert sg.corridor_mode == "multiplicative"
+    assert sg.min_prediction_diversity == 0.25
+    assert sg.max_dead_feature_ratio == 0.5
+    assert sg.max_generalization_gap == 2.0
+    assert sg.min_unique_ratio == 0.1
+    assert sg.min_unique_count == 10
+    assert sg.enforce_family_diversity is True
+    assert sg.check_permutation_sensitivity is False
+    assert sg.permutation_max_rows == 2000
+    assert sg.permutation_max_features == 50
+    assert sg.permutation_repeats == 5
+    assert sg.permutation_seed == 7
+    assert sg.permutation_tolerance == 1e-2
+    assert sg.audit_time_budget_seconds == 120.5
+    assert sg.dead_features_require_low_diversity is True
+
+
+def test_sanity_gate_config_cost_control_defaults():
+    """Дефолты новых полей T5: пермутации включены, бюджет без ограничения."""
+    cfg = Config(
+        general=GeneralCfg(
+            comparison_metric="rmse",
+            phases=[{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+        ),
+        algorithms={"ridge": {"enable": True}},
+    )
+    sg = cfg.general.sanity_gate
+    assert sg.check_permutation_sensitivity is True
+    assert sg.permutation_max_rows == 5000
+    assert sg.permutation_max_features == 100
+    assert sg.permutation_repeats == 3
+    assert sg.permutation_seed == 42
+    assert sg.audit_time_budget_seconds == 0
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        # Граничные значения (равенство порогу — валидно).
+        {"min_prediction_diversity": 1.0},
+        {"max_generalization_gap": 1.0},
+        {"min_unique_ratio": 1.0},
+        {"max_dead_feature_ratio": 1.0},
+        {"max_dead_feature_ratio": 0.0},
+        # corridor_delta → 0 (строго больше нуля, но сколь угодно мал).
+        {"corridor_delta": 1e-9},
+        # top_k_candidates=1 — допустимо (пул из лидера).
+        {"top_k_candidates": 1},
+        # audit_time_budget_seconds=0 — без ограничения.
+        {"audit_time_budget_seconds": 0},
+    ],
+)
+def test_sanity_gate_config_boundary_values_valid(values):
+    data = {
+        "general": {
+            "comparison_metric": "rmse",
+            "phases": [{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+            "sanity_gate": values,
+        },
+        "algorithms": {"ridge": {"enable": True}},
+    }
+    cfg = Config.model_validate(data)
+    for name, expected in values.items():
+        assert getattr(cfg.general.sanity_gate, name) == expected
