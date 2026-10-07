@@ -36,6 +36,16 @@ jobs:
           PYTHONPATH: .
         run: pytest --cov=src --cov-report=xml
 
+      # T9 (issue #70): регрессионный бенчмарк «до/после» Sanity Gate —
+      # обязательный критерий приёмки эпика #61. Печатает таблицу
+      # «датасет × режим × победитель × метрики × гейт» и блокирует приёмку
+      # при нарушении порогов: 0 изменений победителя на эталонных датасетах,
+      # 100% изменений на вырожденных.
+      - name: Run Sanity Gate before/after benchmark
+        env:
+          PYTHONPATH: .
+        run: python benchmarks/run_sanity_gate_benchmark.py
+
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         with:
