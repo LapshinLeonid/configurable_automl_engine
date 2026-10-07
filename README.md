@@ -117,6 +117,26 @@ The example can be run from [example.py](example.py).
 
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
+# Result Dictionary Keys
+
+`train_best_model` returns a dictionary describing the run. The stable core keys are:
+
+* **`algorithm`** — winner algorithm name.
+* **`score`** — winner metric value in **user semantics** (positive RMSE/MAE, plain R²; `metric` names the comparison metric).
+* **`params`** — best hyperparameters of the winner.
+* **`model_path`** — path of the saved artifact.
+* **`additional_metrics`** — extra metrics of the final model (only when configured via `general.additional_metrics`).
+* **`disqualified_algorithms`** — algorithms excluded by the circuit breaker (`{algo: reason}`, only when any were disqualified).
+
+Sanity Gate reporting keys (epic #61, task T6) appear only when `general.sanity_gate.mode != 'off'`; with `mode=off` the result is identical to the legacy behavior (no new keys):
+
+* **`sanity_gate`** — full audit statistics: `mode`, `pool`, `fallback_used`, `winner_rmse_oof`, `winner_rmse_full`, `failed_training`, `disqualified` and per-candidate `audit` (reasons, soft warnings, diversity/unique ratios, dead features count, generalization gap, severity).
+* **`sanity_gate_overhead_seconds`** — gate overhead: finalist retraining on 100% of data + audit phase.
+* **`disqualified_by_sanity_gate`** — applied disqualifications in `active` mode (`{algo: [reasons]}`, only when any were disqualified). Kept in a separate key from `disqualified_algorithms` — circuit-breaker and Sanity Gate sources are never mixed.
+* **`sanity_gate_warn_only`** — statistics of `warn_only` mode: `disqualified` — models that *would be* disqualified (`{algo: [reasons]}`), and `winner_if_active` — the winner that *would be* selected under `mode=active`. This is the key mechanism for collecting statistics before enabling the gate.
+
+Logging notes (T6): each disqualified candidate produces a `WARNING` with its reasons, the winner produces an `INFO` audit summary (diversity ratio, unique ratio, dead features count, generalization gap), a total pool failure produces a fallback `WARNING` naming the formal criterion (T4), and soft warnings are logged at `DEBUG`/`INFO` — never `WARNING`. User metric values in logs are always accompanied by their direction (`min better` for errors, `max better` for score metrics); the optimizer's `greater_is_better` flag is not applied to user-facing values (issue #54).
+
 # Contributing
 
 Small improvements, fixes, reporting issues, requesting features are always appreciated. Use [GitHub issue tracker](https://github.com/LapshinLeonid/configurable_automl_engine/issues).

@@ -69,6 +69,7 @@ from ..tuner import WORST_SCORE_THRESHOLD
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
+    direction_label,
     is_error_metric,
     oof_rmse,
     to_sklearn_name,
@@ -519,6 +520,11 @@ class RobustWinnerResult:
         fallback_used (bool): True, если все кандидаты забракованы и победитель
             выбран fallback-критерием («наименее проблемная» модель).
         winner_rmse_oof (float | None): ``RMSE_oof`` победителя.
+        winner_if_active (str | None): Гипотетический победитель в режиме
+            ``active`` (лучший ``RMSE_oof`` среди прошедших аудит; при полном
+            провале — fallback-критерий). Заполняется только в ``warn_only``
+            (T6): ключевая статистика перед включением гейта. В остальных
+            режимах — None.
     """
 
     winner_algo: str
@@ -528,6 +534,7 @@ class RobustWinnerResult:
     disqualified: dict[str, list[str]] = field(default_factory=dict)
     fallback_used: bool = False
     winner_rmse_oof: float | None = None
+    winner_if_active: str | None = None
 
 
 def _fit_finalist(
@@ -756,6 +763,64 @@ def _best_by_rmse_oof(
     return min(names, key=_key)
 
 
+def _select_active_winner(
+    pool_order: list[str],
+    audits: Mapping[str, SanityCheckResult],
+    candidate_models: Mapping[str, FinalistCandidate],
+) -> str:
+    """Выбрать победителя в режиме ``active`` (T4; переиспользуется в T6).
+
+    Сначала — лучший ``RMSE_oof`` среди прошедших аудит (CV и ``RMSE_full``
+    в ранжировании не участвуют). Если валидных кандидатов нет (тотальный
+    провал пула) — формальный fallback-критерий «наименее проблемной» модели:
+    минимум числа нарушенных контуров → минимум тяжести (значимость контуров
+    зафиксирована в коде: Г > А > Б > В, см. ``_circuit_rank``) → лучший
+    ``RMSE_oof``. Запуск не падает.
+
+    В режиме ``warn_only`` функция даёт гипотетического победителя
+    (``winner_if_active``) — ключевую статистику перед включением гейта (T6).
+
+    Args:
+        pool_order (list[str]): Упорядоченный пул финалистов.
+        audits (Mapping[str, SanityCheckResult]): Аудит каждого финалиста.
+        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
+
+    Returns:
+        str: Имя победителя (актуального в ``active`` либо гипотетического
+            в ``warn_only``).
+    """
+    valid = [n for n in pool_order if audits[n].is_valid]
+    if valid:
+        return _best_by_rmse_oof(valid, candidate_models)
+
+    def _fallback_key(name: str) -> tuple[int, tuple[int, ...], bool, float]:
+        reasons = audits[name].reasons
+        rmse = candidate_models[name].rmse_oof
+        return (
+            len(reasons),
+            _severity_signature(reasons),
+            rmse is None,
+            rmse if rmse is not None else float("inf"),
+        )
+
+    return min(pool_order, key=_fallback_key)
+
+
+def _fmt_audit_value(value: float) -> str:
+    """Отформатировать числовую метрику аудита для логов (T6).
+
+    NaN/±inf (контур отключён либо не вычислим) выводятся как ``"n/a"``,
+    чтобы лог итогов аудита победителя оставался компактным и читаемым.
+
+    Args:
+        value (float): Значение метрики аудита (diversity/unique/gap).
+
+    Returns:
+        str: ``"%.4f"`` для конечных значений, ``"n/a"`` иначе.
+    """
+    return f"{value:.4f}" if np.isfinite(value) else "n/a"
+
+
 def select_robust_winner(
     candidate_models: Mapping[str, FinalistCandidate],
     X: pd.DataFrame,
@@ -886,17 +951,28 @@ def select_robust_winner(
         name: list(audits[name].reasons) for name in pool_order if audits[name].reasons
     }
 
+    # Требование T6: для каждого забракованного кандидата — WARNING с перечнем
+    # причин. В warn_only — «был бы дисквалифицирован» (гипотетически, выбор
+    # не меняется); в active — дисквалификация применена.
+    for name, reasons in disqualified.items():
+        if mode == "warn_only":
+            _LOG.warning(
+                "[sanity_gate warn_only] Candidate %s WOULD BE disqualified "
+                "(hypothetical, not applied): %s",
+                name,
+                reasons,
+            )
+        else:
+            _LOG.warning(
+                "[sanity_gate active] Candidate %s disqualified by the sanity gate: %s",
+                name,
+                reasons,
+            )
+
     if mode == "warn_only":
         # Победитель — как при off (CV-лидер); дисквалификации гипотетические
         # и попадают в отчёт (T6), фактический выбор не меняют.
         winner = _cv_winner()
-        for name, reasons in disqualified.items():
-            _LOG.info(
-                "[sanity_gate warn_only] Hypothetical disqualification of "
-                "candidate %s: %s",
-                name,
-                reasons,
-            )
         return RobustWinnerResult(
             winner_algo=winner,
             mode=mode,
@@ -904,49 +980,33 @@ def select_robust_winner(
             audit=audits,
             disqualified=disqualified,
             winner_rmse_oof=candidate_models[winner].rmse_oof,
+            winner_if_active=_select_active_winner(
+                pool_order, audits, candidate_models
+            ),
         )
 
     # mode == "active": применяем дисквалификации, ранжируем по RMSE_oof.
-    valid = [n for n in pool_order if audits[n].is_valid]
-    if valid:
-        winner = _best_by_rmse_oof(valid, candidate_models)
-        return RobustWinnerResult(
-            winner_algo=winner,
-            mode=mode,
-            pool=pool_order,
-            audit=audits,
-            disqualified=disqualified,
-            winner_rmse_oof=candidate_models[winner].rmse_oof,
+    winner = _select_active_winner(pool_order, audits, candidate_models)
+    all_failed = not any(audits[n].is_valid for n in pool_order)
+    if all_failed:
+        # Fallback (п. 3 постановки): все кандидаты забракованы — «наименее
+        # проблемная» модель. Формальный критерий указывается в логе явно (T6).
+        _LOG.warning(
+            "[sanity_gate active] All %d candidate(s) failed the sanity audit; "
+            "falling back to the least problematic model %s. Formal criterion "
+            "(T4): min violated circuits -> min severity (D > A > B > C) -> "
+            "best RMSE_oof. Reasons: %s",
+            len(pool_order),
+            winner,
+            {n: audits[n].reasons for n in pool_order},
         )
-
-    # Fallback (п. 3 постановки): все кандидаты забракованы — «наименее
-    # проблемная» модель: минимум числа нарушенных контуров → минимум тяжести
-    # (Г > А > Б > В) → лучший RMSE_oof. Запуск не падает.
-    def _fallback_key(name: str) -> tuple[int, tuple[int, ...], bool, float]:
-        reasons = audits[name].reasons
-        rmse = candidate_models[name].rmse_oof
-        return (
-            len(reasons),
-            _severity_signature(reasons),
-            rmse is None,
-            rmse if rmse is not None else float("inf"),
-        )
-
-    winner = min(pool_order, key=_fallback_key)
-    _LOG.warning(
-        "[sanity_gate active] All %d candidate(s) failed the sanity audit; "
-        "falling back to the least problematic model %s. Reasons: %s",
-        len(pool_order),
-        winner,
-        {n: audits[n].reasons for n in pool_order},
-    )
     return RobustWinnerResult(
         winner_algo=winner,
         mode=mode,
         pool=pool_order,
         audit=audits,
         disqualified=disqualified,
-        fallback_used=True,
+        fallback_used=all_failed,
         winner_rmse_oof=candidate_models[winner].rmse_oof,
     )
 
@@ -1770,8 +1830,13 @@ def execute_phases(
             # Логируем значение в пользовательской семантике: для neg_*-метрик
             # (например, neg_root_mean_squared_error) «сырое» значение скорера
             # инвертировано, пользователю показываем естественное (положительное).
+            # Направление сопровождает значение явно («min better» для ошибок,
+            # issue #54): флаг оптимизатора greater_is_better не применяется.
             disp = to_user_value(metric_sklearn, score)
-            _LOG.info(f"{phase_name} {algo:15} | score {disp:.5f} | params {params}")
+            _LOG.info(
+                f"{phase_name} {algo:15} | score {disp:.5f} "
+                f"({direction_label(metric_sklearn)}) | params {params}"
+            )
             return score, params
         except Exception as err:
             _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
@@ -1992,6 +2057,9 @@ def persist_artifact(
     model_path_override: str | Path | None,
     disqualified_algorithms: dict[str, str],
     pre_trained_trainer: Any | None = None,
+    disqualified_by_sanity_gate: dict[str, list[str]] | None = None,
+    sanity_gate_warn_only: dict[str, Any] | None = None,
+    sanity_gate_overhead_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Финальное обучение победителя, сохранение артефакта и сборка отчёта.
 
@@ -2001,7 +2069,11 @@ def persist_artifact(
     диск и формирует словарь результата: ``algorithm``, ``score`` (в
     пользовательской семантике, issue #26), ``metric``, ``params``,
     ``model_path``; при наличии добавляются ``disqualified_algorithms``
-    (issue #12) и ``additional_metrics``.
+    (issue #12), ``additional_metrics`` и ключи Sanity Gate (T6):
+    ``disqualified_by_sanity_gate``, ``sanity_gate_warn_only``,
+    ``sanity_gate_overhead_seconds``. Источники дисквалификаций не смешиваются:
+    circuit breaker (``disqualified_algorithms``) и Sanity Gate
+    (``disqualified_by_sanity_gate``) — отдельные ключи.
 
     Args:
         cfg (Config): Объект конфигурации.
@@ -2018,6 +2090,17 @@ def persist_artifact(
             ``ModelTrainer`` победителя (двухстадийный выбор T4). Если задан,
             повторное обучение НЕ выполняется — артефакт сохраняется из него
             (требование 4 постановки T4: финалисты обучаются один раз).
+        disqualified_by_sanity_gate (Dict[str, list[str]] | None): Применённые
+            дисквалификации Sanity Gate «алгоритм → причины» (режим ``active``,
+            T6). Ключ ``disqualified_by_sanity_gate`` добавляется в результат
+            только при наличии дисквалификаций.
+        sanity_gate_warn_only (Dict[str, Any] | None): Секция статистики
+            режима ``warn_only`` (T6): гипотетические дисквалификации
+            (``disqualified``) и гипотетический победитель при ``active``
+            (``winner_if_active``). Передаётся только в режиме ``warn_only``.
+        sanity_gate_overhead_seconds (float | None): Накладные расходы гейта
+            (время обучения финалистов на 100% данных + аудит, T6).
+            Добавляется в результат только в режимах с пулом/аудитом.
 
     Returns:
         Dict[str, Any]: Словарь с результатами обучения.
@@ -2070,6 +2153,22 @@ def persist_artifact(
     # иначе результаты идентичны прежнему поведению.
     if disqualified_algorithms:
         result["disqualified_algorithms"] = dict(disqualified_algorithms)
+    # Дисквалификации Sanity Gate (T6, режим active): причины отдельным ключом
+    # от circuit breaker — источники не смешиваются. Ключ добавляется только
+    # при наличии дисквалификаций.
+    if disqualified_by_sanity_gate:
+        result["disqualified_by_sanity_gate"] = {
+            name: list(reasons) for name, reasons in disqualified_by_sanity_gate.items()
+        }
+    # Статистика warn_only (T6): гипотетические дисквалификации и
+    # гипотетический победитель при mode=active. Ключ присутствует только в
+    # режиме warn_only (None в остальных).
+    if sanity_gate_warn_only is not None:
+        result["sanity_gate_warn_only"] = dict(sanity_gate_warn_only)
+    # Накладные расходы гейта (T6): обучение финалистов на 100% данных + аудит.
+    # Добавляется только в режимах с пулом/аудитом (mode != 'off').
+    if sanity_gate_overhead_seconds is not None:
+        result["sanity_gate_overhead_seconds"] = float(sanity_gate_overhead_seconds)
     # Дополнительные информационные метрики финальной модели. Ключ добавляется
     # только при наличии метрик (после дедупликации и исключения основной
     # метрики сравнения), иначе результаты идентичны прежнему поведению.
@@ -2135,6 +2234,15 @@ def train_best_model(
             дисквалификации}. При ``general.sanity_gate.mode != 'off'``
             добавляется ключ ``sanity_gate`` со статистикой аудита для отчёта
             (T6): режим, пул, дисквалификации, fallback-флаг и RMSE победителя.
+            Дополнительно (T6): ``sanity_gate_overhead_seconds`` — накладные
+            расходы гейта (переобучение финалистов на 100% данных + аудит);
+            в режиме ``active`` при наличии дисквалификаций —
+            ``disqualified_by_sanity_gate`` {алгоритм: [причины]} (отдельный
+            ключ от circuit breaker, источники не смешиваются); в режиме
+            ``warn_only`` — ``sanity_gate_warn_only`` с гипотетическими
+            дисквалификациями (``disqualified``) и гипотетическим победителем
+            при ``mode=active`` (``winner_if_active``). При ``mode='off'`` все
+            новые ключи отсутствуют (результат обратно совместим).
     Raises:
         TypeError: При передаче конфига неподдерживаемого типа.
         RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO
@@ -2213,6 +2321,10 @@ def train_best_model(
         pool,
     )
 
+    # Накладные расходы гейта (T6): время переобучения финалистов на 100%
+    # данных + фазы аудита. Замеряется от старта обучения финалистов до
+    # завершения выбора robust-победителя; попадает в отчёт отдельным ключом.
+    gate_overhead_started = time.monotonic()
     candidates = _train_finalists(pool, phase_results, cfg, prepared)
     if not candidates:
         raise RuntimeError(
@@ -2249,6 +2361,7 @@ def train_best_model(
         mode=sg_cfg.mode,
         audit_time_budget_seconds=sg_cfg.audit_time_budget_seconds,
     )
+    sanity_gate_overhead_seconds = time.monotonic() - gate_overhead_started
     winner_algo = robust_result.winner_algo
     final_score, final_params = phase_results[winner_algo]
     if not is_valid_winner_score(final_score):
@@ -2257,6 +2370,41 @@ def train_best_model(
             f"{final_score!r} (non-finite or worst-score sentinel); "
             f"refusing to report it."
         )
+
+    # Лог итогов аудита победителя (T6): по логам запуска можно восстановить,
+    # почему модель стала победителем (diversity/unique/gap/dead features).
+    winner_audit = robust_result.audit.get(winner_algo)
+    if winner_audit is not None:
+        _LOG.info(
+            "[sanity_gate] Winner %s audit summary: diversity_ratio=%s, "
+            "unique_ratio=%s, dead_features_count=%d, generalization_gap=%s",
+            winner_algo,
+            _fmt_audit_value(winner_audit.diversity_ratio),
+            _fmt_audit_value(winner_audit.unique_ratio),
+            winner_audit.dead_features_count,
+            _fmt_audit_value(winner_audit.generalization_gap),
+        )
+
+    # Секции отчёта T6. Источники дисквалификаций не смешиваются: в active —
+    # disqualified_by_sanity_gate (применённые), в warn_only —
+    # sanity_gate_warn_only (гипотетические + победитель при mode=active).
+    disqualified_by_sanity_gate: dict[str, list[str]] | None = None
+    sanity_gate_warn_only: dict[str, Any] | None = None
+    if sg_cfg.mode == "warn_only":
+        sanity_gate_warn_only = {
+            "disqualified": {
+                name: list(reasons)
+                for name, reasons in robust_result.disqualified.items()
+            },
+            "winner_if_active": robust_result.winner_if_active,
+        }
+    else:
+        # mode == "active": применяются фактически.
+        if robust_result.disqualified:
+            disqualified_by_sanity_gate = {
+                name: list(reasons)
+                for name, reasons in robust_result.disqualified.items()
+            }
 
     result = persist_artifact(
         cfg=cfg,
@@ -2267,6 +2415,9 @@ def train_best_model(
         model_path_override=model_path_override,
         disqualified_algorithms=disqualified_algorithms,
         pre_trained_trainer=candidates[winner_algo].trainer,
+        disqualified_by_sanity_gate=disqualified_by_sanity_gate,
+        sanity_gate_warn_only=sanity_gate_warn_only,
+        sanity_gate_overhead_seconds=sanity_gate_overhead_seconds,
     )
 
     # Статистика Sanity Gate для отчёта (T6): причины дисквалификаций,

@@ -546,6 +546,107 @@ def test_persist_artifact_propagates_fit_failure():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# persist_artifact: ключи Sanity Gate (T6, issue #66)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_persist_artifact_adds_sanity_gate_keys():
+    """T6: новые ключи отчёта добавляются при передаче соответствующих данных."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    prepared = _prepared()
+    trainer_mock = MagicMock()
+    trainer_mock.additional_scores = {}
+    with patch.object(component, "_fit_and_save", return_value=trainer_mock):
+        result = persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo="random_forest",
+            final_score=0.9,
+            final_params={},
+            model_path_override=None,
+            disqualified_algorithms={},
+            disqualified_by_sanity_gate={
+                "elasticnet": ["Circuit D (generalization gap): gap=2.0 > 1.5"]
+            },
+            sanity_gate_warn_only={
+                "disqualified": {"elasticnet": ["Circuit D (generalization gap): ..."]},
+                "winner_if_active": "ridge",
+            },
+            sanity_gate_overhead_seconds=1.25,
+        )
+    assert result["disqualified_by_sanity_gate"] == {
+        "elasticnet": ["Circuit D (generalization gap): gap=2.0 > 1.5"]
+    }
+    assert result["sanity_gate_warn_only"] == {
+        "disqualified": {"elasticnet": ["Circuit D (generalization gap): ..."]},
+        "winner_if_active": "ridge",
+    }
+    assert result["sanity_gate_overhead_seconds"] == 1.25
+
+
+def test_persist_artifact_sanity_keys_absent_by_default():
+    """T6: без данных Sanity Gate новые ключи отсутствуют (обратная совместимость)."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    prepared = _prepared()
+    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+        result = persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo="random_forest",
+            final_score=0.9,
+            final_params={},
+            model_path_override=None,
+            disqualified_algorithms={},
+        )
+    for key in (
+        "disqualified_by_sanity_gate",
+        "sanity_gate_warn_only",
+        "sanity_gate_overhead_seconds",
+    ):
+        assert key not in result
+
+
+def test_persist_artifact_empty_disqualified_by_sanity_gate_absent():
+    """T6: пустой disqualified_by_sanity_gate не добавляет ключ; overhead — да."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    prepared = _prepared()
+    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+        result = persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo="random_forest",
+            final_score=0.9,
+            final_params={},
+            model_path_override=None,
+            disqualified_algorithms={},
+            disqualified_by_sanity_gate={},
+            sanity_gate_overhead_seconds=0.0,
+        )
+    assert "disqualified_by_sanity_gate" not in result
+    assert result["sanity_gate_overhead_seconds"] == 0.0
+
+
+def test_persist_artifact_disqualified_by_sanity_gate_copy_is_independent():
+    """T6: значение ключа копируется (мутация исходного словаря не видна)."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    prepared = _prepared()
+    dq = {"elasticnet": ["Circuit D (generalization gap): gap=2.0 > 1.5"]}
+    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+        result = persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo="random_forest",
+            final_score=0.9,
+            final_params={},
+            model_path_override=None,
+            disqualified_algorithms={},
+            disqualified_by_sanity_gate=dq,
+        )
+    dq["elasticnet"].append("mutated")
+    assert result["disqualified_by_sanity_gate"] == {
+        "elasticnet": ["Circuit D (generalization gap): gap=2.0 > 1.5"]
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # train_best_model: оркестрация шагов
 # ──────────────────────────────────────────────────────────────────────────────
 def test_train_best_model_orchestrates_steps_in_order():

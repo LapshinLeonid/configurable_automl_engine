@@ -970,8 +970,11 @@ def test_result_score_matches_logged_user_value(caplog):
     # Пользовательская семантика: положительный RMSE + имя метрики
     assert result["score"] == pytest.approx(0.12345)
     assert result["metric"] == "rmse"
-    # Фазовый лог выводит то же значение (пользовательская семантика)
-    assert re.search(r"score 0\.12345 \| params", caplog.text)
+    # Фазовый лог выводит то же значение (пользовательская семантика) с явным
+    # направлением «min better» для ошибок (issue #54, T6).
+    assert re.search(
+        r"score 0\.12345 \(min better\) \| params", caplog.text
+    )
     # «Сырое» инвертированное значение наружу не утекает
     assert "score -0.12345" not in caplog.text
 

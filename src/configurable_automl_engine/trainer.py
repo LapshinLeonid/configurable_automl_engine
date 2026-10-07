@@ -77,9 +77,9 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionMode,
 )
 from configurable_automl_engine.training_engine.metrics import (
+    direction_label,
     get_scorer_object,
     is_error_metric,
-    is_greater_better,
     oof_rmse,
     to_user_value,
 )
@@ -1016,13 +1016,16 @@ class ModelTrainer:
             active = raw_reduced > raw_full
             # В лог выводим значения в пользовательской семантике
             # (для ошибок — положительные), а решение принимаем по «сырым».
+            # Направление сопровождает значения явно («min better» для ошибок,
+            # issue #54) — флаг оптимизатора greater_is_better не используется.
             score_full = to_user_value(self.metric, raw_full)
             score_reduced = to_user_value(self.metric, raw_reduced)
             self.logger.info(
                 "Standalone feature selection auto-check: score_full=%.4f, "
-                "score_reduced=%.4f -> active=%s",
+                "score_reduced=%.4f (%s) -> active=%s",
                 score_full,
                 score_reduced,
+                direction_label(self.metric),
                 active,
             )
             return active
@@ -1505,10 +1508,15 @@ class ModelTrainer:
 
         raw_mean = float(np.mean(fold_raw))
         self.val_score = to_user_value(self.metric, raw_mean)
+        # Пользовательская семантика (issue #54): val_score — значение в
+        # пользовательском представлении, поэтому направление в логе —
+        # user_direction («min better» для ошибок), а не флаг оптимизатора
+        # greater_is_better (для neg_-метрик он истинен, хотя пользователю
+        # меньшее значение лучше).
         self.logger.debug(
             f"Metric calculation: raw={raw_mean:.4f},"
             f" final val_score={self.val_score:.4f} "
-            f"(greater_is_better={is_greater_better(self.metric)})"
+            f"({direction_label(self.metric)})"
         )
 
         self.additional_scores = {}
@@ -1615,8 +1623,10 @@ class ModelTrainer:
             self.oof_score_ = None
             self.logger.warning("RMSE_oof could not be computed: %s", err)
         self.oof_predictions_ = oof_vector
+        # RMSE_oof — пользовательское значение ошибки («min better», issue #54):
+        # направление указывается явно, флаг оптимизатора не применяется.
         self.logger.info(
-            "OOF evaluation: RMSE_oof=%.4f on %d/%d rows (coverage=%.3f).",
+            "OOF evaluation: RMSE_oof=%.4f (min better) on %d/%d rows (coverage=%.3f).",
             self.oof_score_ if self.oof_score_ is not None else float("nan"),
             n_valid,
             n_samples,
