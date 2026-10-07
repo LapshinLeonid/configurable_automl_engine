@@ -510,59 +510,6 @@ class SanityGateCfg(BaseModel):
         default=True, description="Включить контур Г."
     )
 
-    @model_validator(mode="after")
-    def _validate_thresholds(self) -> SanityGateCfg:
-        """Проверить диапазоны всех порогов Sanity Gate (эпик #61, T5).
-
-        Единая точка валидации диапазонов из постановки T5: ограничения полей
-        (``Field``) задают те же границы и транслируются в ``config.schema.json``,
-        а здесь они собраны явно для читаемости ошибок и как страховка от
-        неконсистентной эволюции отдельных полей. Поля ``mode``/``corridor_mode``
-        валидируются типом ``Literal``, неизвестные ключи отклоняются
-        ``extra="forbid"``.
-
-        Returns:
-            SanityGateCfg: Валидированный объект настроек.
-
-        Raises:
-            ValueError: Если хотя бы один порог вне допустимого диапазона.
-        """
-        rules: dict[str, tuple[bool, str]] = {
-            "top_k_candidates": (self.top_k_candidates >= 1, ">= 1"),
-            "corridor_delta": (0 < self.corridor_delta < 1, "в (0, 1)"),
-            "min_prediction_diversity": (
-                0 < self.min_prediction_diversity <= 1,
-                "в (0, 1]",
-            ),
-            "max_dead_feature_ratio": (
-                0 <= self.max_dead_feature_ratio <= 1,
-                "в [0, 1]",
-            ),
-            "min_unique_ratio": (0 < self.min_unique_ratio <= 1, "в (0, 1]"),
-            "min_unique_count": (self.min_unique_count >= 1, ">= 1"),
-            "max_generalization_gap": (self.max_generalization_gap >= 1, ">= 1"),
-            "permutation_max_rows": (self.permutation_max_rows >= 1, ">= 1"),
-            "permutation_max_features": (self.permutation_max_features >= 1, ">= 1"),
-            "permutation_repeats": (self.permutation_repeats >= 1, ">= 1"),
-            "audit_time_budget_seconds": (
-                self.audit_time_budget_seconds >= 0,
-                ">= 0 (0 — без ограничения)",
-            ),
-            "zero_coef_tolerance": (self.zero_coef_tolerance >= 0, ">= 0"),
-            "permutation_tolerance": (self.permutation_tolerance >= 0, ">= 0"),
-            "family_diversity_multiplier": (
-                self.family_diversity_multiplier > 0,
-                "> 0",
-            ),
-        }
-        for name, (ok, expected) in rules.items():
-            if not ok:
-                raise ValueError(
-                    f"general.sanity_gate.{name} должен быть {expected}; "
-                    f"получено {getattr(self, name)!r}"
-                )
-        return self
-
 
 # ─────────────────── general ─────────────────── #
 class GeneralCfg(BaseModel):

@@ -35,7 +35,7 @@ C. Dead Feature Check (``check_dead_features``)
      diversity threshold (rule controlled by
      ``dead_features_require_low_diversity``, default True).
    * Nonlinear models (SVR, trees, ...): permutation sensitivity with cost
-     controls — ``permutation_max_rows`` (row subsampling),
+     controls — ``permutation_max_rows`` (row subsampling cap),
      ``permutation_max_features`` (cap on checked columns),
      ``permutation_repeats`` (repeat count) and a fixed ``permutation_seed``
      for full determinism. Base predictions are cached; a feature is "dead"
@@ -337,8 +337,8 @@ class ModelSanityGate:
         zero_coef_tolerance: float = 1e-12,
         max_generalization_gap: float = 1.5,
         check_permutation_sensitivity: bool = True,
-        permutation_max_rows: int | None = 5000,
-        permutation_max_features: int | None = 100,
+        permutation_max_rows: int = 5000,
+        permutation_max_features: int = 100,
         permutation_repeats: int = 3,
         permutation_seed: int = 42,
         permutation_tolerance: float = 1e-3,
@@ -369,9 +369,10 @@ class ModelSanityGate:
                 audit of circuit C for nonlinear models (default True — the
                 cost-controlled permutation path runs; False — the path is
                 skipped and only the linear ``coef_`` path of circuit C works).
-            permutation_max_rows: row subsampling for permutations (None — all
-                rows).
-            permutation_max_features: cap on checked columns (None — all).
+            permutation_max_rows: row subsampling for permutations (>= 1,
+                default 5000).
+            permutation_max_features: cap on checked columns (>= 1,
+                default 100).
             permutation_repeats: shuffle repeats per column.
             permutation_seed: fixed seed for permutation determinism.
             permutation_tolerance: relative "deadness" threshold of a feature:
@@ -400,10 +401,10 @@ class ModelSanityGate:
             raise ValueError("zero_coef_tolerance must be >= 0")
         if permutation_repeats < 1:
             raise ValueError("permutation_repeats must be >= 1")
-        if permutation_max_rows is not None and permutation_max_rows < 1:
-            raise ValueError("permutation_max_rows must be >= 1 or None")
-        if permutation_max_features is not None and permutation_max_features < 1:
-            raise ValueError("permutation_max_features must be >= 1 or None")
+        if permutation_max_rows < 1:
+            raise ValueError("permutation_max_rows must be >= 1")
+        if permutation_max_features < 1:
+            raise ValueError("permutation_max_features must be >= 1")
         if permutation_tolerance < 0:
             raise ValueError("permutation_tolerance must be >= 0")
 
@@ -811,7 +812,7 @@ class ModelSanityGate:
         n_rows = y.shape[0]
 
         row_idx = np.arange(n_rows)
-        if self.permutation_max_rows is not None and n_rows > self.permutation_max_rows:
+        if n_rows > self.permutation_max_rows:
             row_idx = rng.choice(n_rows, size=self.permutation_max_rows, replace=False)
         try:
             X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
@@ -836,10 +837,7 @@ class ModelSanityGate:
             )
         n_cols = X_sub.shape[1]
         col_idx = np.arange(n_cols)
-        if (
-            self.permutation_max_features is not None
-            and n_cols > self.permutation_max_features
-        ):
+        if n_cols > self.permutation_max_features:
             col_idx = rng.choice(
                 n_cols, size=self.permutation_max_features, replace=False
             )

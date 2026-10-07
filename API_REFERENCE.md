@@ -161,7 +161,10 @@ When `general.sanity_gate.mode != "off"`, `train_best_model` replaces the
 3. **Audit** — each finalist is checked by `ModelSanityGate` (T2): circuits A/B
    (diversity / unique) are computed on the **OOF vector**, circuit D
    (generalization gap) uses the full-fit predictions, circuit C (dead
-   features) inspects the model.
+   features) inspects the model. The total audit phase can be capped by
+   `general.sanity_gate.audit_time_budget_seconds` (0 = no limit): when the
+   budget is exhausted, the remaining candidates are skipped with an explicit
+   reason.
 4. **Ranking** — among the candidates that passed every check the winner is
    the one with the **best (minimum) `RMSE_oof`**. CV score and `RMSE_full`
    do NOT participate in the ranking (the v2 composite score
@@ -227,7 +230,7 @@ field is **removed** — the composite score was abolished in v2.
 | `permutation_repeats` | `int` | `3` | Permutation repeats per column (≥ 1). |
 | `permutation_seed` | `int` | `42` | Fixed permutation seed (determinism). |
 | `permutation_tolerance` | `float` | `1e-3` | Relative "deadness" threshold of a feature in the permutation path (≥ 0). |
-| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). |
+| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). When the budget is exhausted, the remaining finalists are not audited and receive an explicit "audit skipped: budget exceeded" reason (they cannot win in `"active"` mode; in `"warn_only"` they appear in the report as hypothetical). |
 | `check_diversity` | `bool` | `true` | Enable circuit A. |
 | `check_unique` | `bool` | `true` | Enable circuit B. |
 | `check_dead_features` | `bool` | `true` | Enable circuit C. |
@@ -254,6 +257,15 @@ Edge cases:
   plus a warning.
 * Absent `sanity_gate` block — old behavior; the v1 `enable` key is not
   introduced.
+
+Migration note: the v2 statement (epic #61) tightened `corridor_delta` to the
+open interval `(0, 1)` — the previously allowed value `0` (degenerate corridor
+= leader only) is now rejected. Use a small positive value (e.g. `1e-9`) for
+the same behavior. `permutation_max_rows` / `permutation_max_features` are
+plain `int` (≥ 1) since v2; the old `null` ("no cap") form is replaced by
+`check_permutation_sensitivity: false` when the permutation audit should be
+skipped entirely. These changes apply to the pre-release T4/T5 schema only —
+no released configuration is affected.
 
 ### Additional metrics (`additional_metrics`)
 

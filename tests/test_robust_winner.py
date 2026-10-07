@@ -269,6 +269,97 @@ def test_active_audit_failure_is_disqualification():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def test_audit_time_budget_zero_audits_all_candidates():
+    """Бюджет = 0 (дефолт): лимита нет, аудируются все кандидаты."""
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "a": _candidate("a", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full),
+        "b": _candidate("b", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full),
+    }
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="active",
+        audit_time_budget_seconds=0,
+    )
+    assert set(res.audit) == {"a", "b"}
+    assert res.disqualified == {}
+
+
+def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
+    """Исчерпание бюджета: оставшиеся кандидаты не аудируются (reason в отчёте).
+
+    ``time.monotonic`` замокан: старт в 0.0, первый кандидат проверяется на
+    1.0 (< бюджета 5.0), остальные — на 10.0 (>= бюджета) → пропуск.
+    """
+    import configurable_automl_engine.training_engine.component as comp
+
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "a": _candidate("a", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full),
+        "b": _candidate("b", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full),
+        "c": _candidate("c", cv_score=-0.10, rmse_oof=0.25, y_oof=y_oof, y_full=y_full),
+    }
+    mocker.patch.object(
+        comp.time,
+        "monotonic",
+        side_effect=[0.0, 1.0, 10.0, 10.0],
+    )
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="active",
+        audit_time_budget_seconds=5.0,
+    )
+    # Аудит выполнен только для первого кандидата; остальные пропущены.
+    assert set(res.audit) == {"a", "b", "c"}
+    assert res.audit["a"].is_valid is True
+    assert res.audit["b"].is_valid is False
+    assert res.audit["c"].is_valid is False
+    assert all(
+        "audit time budget" in r
+        for name in ("b", "c")
+        for r in res.disqualified[name]
+    )
+    # Пропущенный кандидат не может победить в active.
+    assert res.winner_algo == "a"
+    assert "a" not in res.disqualified
+
+
+def test_audit_time_budget_warn_only_winner_still_cv_leader(mocker):
+    """warn_only + исчерпанный бюджет: победитель остаётся CV-лидером."""
+    import configurable_automl_engine.training_engine.component as comp
+
+    y, y_oof, y_full = _honest_vectors()
+    cands = {
+        "cv_leader": _candidate(
+            "cv_leader", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full
+        ),
+        "second": _candidate(
+            "second", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full
+        ),
+    }
+    mocker.patch.object(
+        comp.time,
+        "monotonic",
+        side_effect=[0.0, 1.0, 10.0],
+    )
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        _gate(),
+        mode="warn_only",
+        audit_time_budget_seconds=5.0,
+    )
+    assert res.winner_algo == "cv_leader"
+    assert "audit time budget" in res.disqualified["second"][0]
+
+
 def test_warn_only_winner_like_off_with_hypothetical_disqualifications():
     """warn_only: победитель = CV-лидер (как при off), статистика в отчёте."""
     y, _, _ = _honest_vectors()

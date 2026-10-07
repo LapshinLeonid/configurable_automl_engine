@@ -34,6 +34,7 @@ import inspect
 import logging
 import math
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -762,6 +763,7 @@ def select_robust_winner(
     sanity_gate: ModelSanityGate,
     *,
     mode: SanityGateMode = "off",
+    audit_time_budget_seconds: float = 0,
 ) -> RobustWinnerResult:
     """Двухстадийный выбор победителя с аудитом Sanity Gate (эпик #61, T4).
 
@@ -780,6 +782,12 @@ def select_robust_winner(
     - ``active``: дисквалификации применяются; победитель = лучший
       ``RMSE_oof`` среди прошедших все проверки.
 
+    Бюджет времени аудита (``audit_time_budget_seconds``, T5): суммарное
+    время фазы аудита ограничено; при исчерпании бюджета оставшиеся
+    кандидаты не аудируются и получают явный reason «audit skipped: budget
+    exceeded» (в ``active`` они не могут выиграть, в ``warn_only`` попадают
+    в отчёт как гипотетические). ``0`` — без ограничения.
+
     Fallback (формализован, п. 3 постановки): если все кандидаты забракованы,
     выбирается «наименее проблемная» модель — минимум числа нарушенных
     контуров, при равенстве — минимум тяжести нарушений (значимость контуров
@@ -794,6 +802,8 @@ def select_robust_winner(
         y (pd.Series): Полный вектор целевой переменной.
         sanity_gate (ModelSanityGate): Настроенный экземпляр гейта (T2).
         mode (SanityGateMode): Режим работы ('off'/'warn_only'/'active').
+        audit_time_budget_seconds (float): Суммарный бюджет времени фазы
+            аудита в секундах; 0 — без ограничения.
 
     Returns:
         RobustWinnerResult: Победитель, аудит по каждому кандидату,
@@ -825,9 +835,36 @@ def select_robust_winner(
         raise ValueError(f"mode must be 'off', 'warn_only' or 'active'; got {mode!r}")
 
     # Аудит каждого финалиста: diversity/unique — на OOF-векторе, контур Г —
-    # на full-fit предсказаниях (требование 1 постановки T4).
+    # на full-fit предсказаниях (требование 1 постановки T4). Суммарное время
+    # фазы ограничено бюджетом audit_time_budget_seconds (0 — без лимита).
     audits: dict[str, SanityCheckResult] = {}
+    audit_started = time.monotonic()
+
+    def _audit_budget_exhausted() -> bool:
+        return (
+            audit_time_budget_seconds > 0
+            and time.monotonic() - audit_started >= audit_time_budget_seconds
+        )
+
     for name in pool_order:
+        if _audit_budget_exhausted():
+            _LOG.warning(
+                "[sanity_gate] audit time budget (%.3fs) exceeded; "
+                "skipping audit of candidate %s",
+                audit_time_budget_seconds,
+                name,
+            )
+            audits[name] = SanityCheckResult(
+                is_valid=False,
+                reasons=[
+                    (
+                        "Sanity audit skipped: audit time budget "
+                        f"({audit_time_budget_seconds:g}s) exceeded"
+                    )
+                ],
+                severity=0,
+            )
+            continue
         cand = candidate_models[name]
         try:
             audits[name] = sanity_gate.check(
@@ -2210,6 +2247,7 @@ def train_best_model(
         prepared.y,
         gate,
         mode=sg_cfg.mode,
+        audit_time_budget_seconds=sg_cfg.audit_time_budget_seconds,
     )
     winner_algo = robust_result.winner_algo
     final_score, final_params = phase_results[winner_algo]
