@@ -950,7 +950,13 @@ def test_constructor_validation():
     with pytest.raises(ValueError):
         ModelSanityGate(min_prediction_diversity=-0.1)
     with pytest.raises(ValueError):
+        ModelSanityGate(min_prediction_diversity=0)
+    with pytest.raises(ValueError):
+        ModelSanityGate(min_prediction_diversity=1.5)
+    with pytest.raises(ValueError):
         ModelSanityGate(min_unique_count=0)
+    with pytest.raises(ValueError):
+        ModelSanityGate(min_unique_ratio=0)
     with pytest.raises(ValueError):
         ModelSanityGate(min_unique_ratio=1.5)
     with pytest.raises(ValueError):

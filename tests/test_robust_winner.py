@@ -789,27 +789,27 @@ def test_sanity_gate_config_parses_mode_and_thresholds():
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "bad, expected",
     [
-        {"mode": "weird"},
-        {"mode": "aggressive"},
-        {"top_k_candidates": 0},
-        {"corridor_delta": -0.1},
-        {"corridor_delta": 0},
-        {"corridor_delta": 1.0},
-        {"min_prediction_diversity": 0},
-        {"min_prediction_diversity": 1.5},
-        {"min_unique_ratio": 0},
-        {"min_unique_ratio": 1.5},
-        {"max_generalization_gap": 0.5},
-        {"permutation_repeats": 0},
-        {"permutation_max_rows": 0},
-        {"permutation_max_features": -1},
-        {"audit_time_budget_seconds": -1},
-        {"unknown_key": True},
+        ({"mode": "weird"}, "sanity_gate.mode"),
+        ({"mode": "aggressive"}, "sanity_gate.mode"),
+        ({"top_k_candidates": 0}, "top_k_candidates"),
+        ({"corridor_delta": -0.1}, "corridor_delta"),
+        ({"corridor_delta": 0}, "corridor_delta"),
+        ({"corridor_delta": 1.0}, "corridor_delta"),
+        ({"min_prediction_diversity": 0}, "min_prediction_diversity"),
+        ({"min_prediction_diversity": 1.5}, "min_prediction_diversity"),
+        ({"min_unique_ratio": 0}, "min_unique_ratio"),
+        ({"min_unique_ratio": 1.5}, "min_unique_ratio"),
+        ({"max_generalization_gap": 0.5}, "max_generalization_gap"),
+        ({"permutation_repeats": 0}, "permutation_repeats"),
+        ({"permutation_max_rows": 0}, "permutation_max_rows"),
+        ({"permutation_max_features": -1}, "permutation_max_features"),
+        ({"audit_time_budget_seconds": -1}, "audit_time_budget_seconds"),
+        ({"unknown_key": True}, "unknown_key"),
     ],
 )
-def test_sanity_gate_config_invalid_values_rejected(bad):
+def test_sanity_gate_config_invalid_values_rejected(bad, expected):
     from pydantic import ValidationError
 
     data = {
@@ -820,7 +820,7 @@ def test_sanity_gate_config_invalid_values_rejected(bad):
         },
         "algorithms": {"ridge": {"enable": True}},
     }
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match=expected):
         Config.model_validate(data)
 
 

@@ -351,12 +351,14 @@ class ModelSanityGate:
         """Initialize the gate with thresholds and circuit flags.
 
         Args:
-            min_prediction_diversity: circuit A threshold (default 0.15 — soft).
+            min_prediction_diversity: circuit A threshold, in (0, 1]
+                (default 0.15 — soft).
             adaptive_diversity: adaptive mode A relative to the constant model:
                 fails only for a zero prediction spread (the absolute threshold
                 is not applied).
             min_unique_count: absolute lower bound for nunique (circuit B).
-            min_unique_ratio: lower bound for the share of unique predictions.
+            min_unique_ratio: lower bound for the share of unique predictions,
+                in (0, 1].
             max_dead_feature_ratio: dead-feature share threshold (circuit C):
                 above it — a soft signal, and combined with a circuit A failure
                 (when ``dead_features_require_low_diversity``) — disqualification.
@@ -387,12 +389,12 @@ class ModelSanityGate:
         Raises:
             ValueError: for invalid thresholds or parameter combinations.
         """
-        if min_prediction_diversity < 0:
-            raise ValueError("min_prediction_diversity must be >= 0")
+        if not 0 < min_prediction_diversity <= 1:
+            raise ValueError("min_prediction_diversity must be in (0, 1]")
         if min_unique_count < 1:
             raise ValueError("min_unique_count must be >= 1")
-        if not 0 <= min_unique_ratio <= 1:
-            raise ValueError("min_unique_ratio must be in [0, 1]")
+        if not 0 < min_unique_ratio <= 1:
+            raise ValueError("min_unique_ratio must be in (0, 1]")
         if not 0 <= max_dead_feature_ratio <= 1:
             raise ValueError("max_dead_feature_ratio must be in [0, 1]")
         if max_generalization_gap < 1:
