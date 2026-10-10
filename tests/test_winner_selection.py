@@ -13,8 +13,9 @@
 Интеграция двухстадийного выбора победителя (эпик #61, задача T7, issue #69):
 
 • пул финалистов (``select_finalists``, T3) + ``select_robust_winner`` (T4):
-  три режима ``off`` / ``warn_only`` / ``active`` и fallback при тотальном
-  провале пула;
+  режимы ``off`` / ``active`` и fallback при тотальном провале пула;
+  режим ``warn_only`` удалён вместе с ключами отчёта
+  ``sanity_gate_warn_only``/``winner_if_active`` (эпик #74, задача R2);
 • кейс из постановки: ElasticNet CV=0.081, SVR=0.085, RF=0.089, δ=0.15 →
   пул из трёх; победитель по RMSE_oof — SVR или RF, но не ElasticNet;
 • «золотые» сценарии на синтетических данных N=10–30: победитель —
@@ -277,16 +278,16 @@ def _golden_candidates(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Три режима off / warn_only / active (интеграция пула T3 + robust T4)
+#  Режимы off / active (интеграция пула T3 + robust T4)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_integration_three_modes_pool_to_robust_winner():
-    """Пул финалистов (T3) → select_robust_winner (T4): семантика трёх режимов.
+def test_integration_off_and_active_pool_to_robust_winner():
+    """Пул финалистов (T3) → select_robust_winner (T4): семантика режимов.
 
-    CV-лидер — вырожденная модель (плоский ElasticNet): в ``off``/``warn_only``
-    он побеждает как раньше, в ``active`` — дисквалифицируется, и побеждает
-    честная модель с лучшим RMSE_oof.
+    CV-лидер — вырожденная модель (плоский ElasticNet): в ``off`` он побеждает
+    как раньше, в ``active`` — дисквалифицируется, и побеждает честная модель
+    с лучшим RMSE_oof. Режим ``warn_only`` удалён (эпик #74).
     """
     X, y = _golden_dataset(n=80, seed=11)
     results: R = {
@@ -325,15 +326,6 @@ def test_integration_three_modes_pool_to_robust_winner():
     assert off.audit == {}
     assert off.disqualified == {}
 
-    warn = select_robust_winner(cands, X_df, y_s, gate, mode="warn_only")
-    # Победитель как при off, дисквалификации гипотетические (T6).
-    assert warn.winner_algo == "elasticnet_zero"
-    assert "elasticnet_zero" in warn.disqualified
-    assert set(warn.audit) == set(pool)
-    # Гипотетический победитель активного режима — честная модель (SVR/RF).
-    assert warn.winner_if_active in {"svr", "random_forest"}
-    assert warn.winner_if_active != "elasticnet_zero"
-
     active = select_robust_winner(cands, X_df, y_s, gate, mode="active")
     assert active.winner_algo in {"svr", "random_forest"}
     assert active.winner_algo != "elasticnet_zero"
@@ -342,22 +334,48 @@ def test_integration_three_modes_pool_to_robust_winner():
     assert active.fallback_used is False
 
 
-def test_boundary_warn_only_winner_matches_off_and_reports_disqualifications():
-    """Boundary: mode=warn_only — победитель ровно как при mode=off.
+def test_warn_only_mode_removed():
+    """Boundary (эпик #74, R2): режим ``warn_only`` удалён — ValueError."""
+    rng = np.random.RandomState(0)
+    n = 40
+    y = 5.0 * np.linspace(0.0, 1.0, n) + rng.randn(n) * 0.1
+    cand = FinalistCandidate(
+        algo_name="a",
+        model=object(),
+        params={},
+        cv_score=-0.08,
+        rmse_oof=0.3,
+        y_pred_oof=y + rng.randn(n) * 0.2,
+        y_pred_full=y,
+    )
+    with pytest.raises(ValueError, match="mode must be 'off' or 'active'"):
+        select_robust_winner(
+            {"a": cand},
+            pd.DataFrame(np.zeros((n, 2))),
+            pd.Series(y),
+            ModelSanityGate(),
+            mode="warn_only",  # type: ignore[arg-type]
+        )
 
-    Дисквалификации фиксируются для отчёта (T6), но выбор не меняются.
-    """
+
+def test_boundary_active_reports_disqualifications_without_changing_pool():
+    """Boundary: ``active`` применяет дисквалификации, но не меняет пул T3."""
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
     gate = ModelSanityGate()
     X_df, y_s = pd.DataFrame(X), pd.Series(y)
 
     off = select_robust_winner(cands, X_df, y_s, gate, mode="off")
-    warn = select_robust_winner(cands, X_df, y_s, gate, mode="warn_only")
-    assert warn.winner_algo == off.winner_algo
-    # Гипотетические дисквалификации собраны для отчёта.
-    assert set(warn.disqualified) == {"elasticnet_zero", "svr_sigmoid", "deep_tree", "knn_1"}
-    assert warn.winner_if_active == "honest_gbr"
+    active = select_robust_winner(cands, X_df, y_s, gate, mode="active")
+    # Пул T3 в обоих режимах одинаков; отличаются только дисквалификации.
+    assert active.pool == off.pool
+    assert set(active.disqualified) == {
+        "elasticnet_zero",
+        "svr_sigmoid",
+        "deep_tree",
+        "knn_1",
+    }
+    assert active.winner_algo == "honest_gbr"
 
 
 def test_boundary_pool_exactly_top_k_candidates():

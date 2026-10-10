@@ -1925,33 +1925,13 @@ def test_select_without_strategy_and_output_rejected():
 # ─────────── Runtime: select/refine execution (эпик #74) ───────────
 
 
-def test_select_phase_raises_not_implemented():
-    """Исполнение select-фаз ещё не реализовано (эпик #74, R2): валидный
-    конфиг с select-фазой падает в рантайме с явным ``NotImplementedError``
-    (со ссылкой на эпик) вместо молчаливого неверного исполнения
-    select-фазы как фазы all_algorithms. После реализации R2 тест
-    заменяется проверкой реального поведения.
-    """
-    import numpy as np
-    import pandas as pd
-    from configurable_automl_engine.training_engine.component import train_best_model
-
-    rng = np.random.RandomState(0)
-    df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
-    df["target"] = 2.0 * df["a"] + rng.randn(30) * 0.1
-
-    cfg_select = _cfg_with_phases(_phase(), TERMINAL_SELECT)
-    with pytest.raises(NotImplementedError, match="not implemented yet.*epic #74"):
-        train_best_model(cfg_select, df, target="target")
-
-
-def test_refine_phase_executes_before_not_implemented_select():
+def test_refine_phase_executes_with_warm_start():
     """refine исполним (эпик #74, R3): warm-start HPO для всего множества.
 
     Конфиг [all_algorithms → refine → terminal select] выполняет обе HPO-фазы
     (по одному запуску HPO на каждый алгоритм в каждой фазе; в refine
-    передаются initial_params) и падает с ``NotImplementedError`` только на
-    терминальном select-шаге (R2) — refine больше не отвергается рантаймом.
+    передаются initial_params) и завершается артефактом терминального
+    select-шага (R2).
     """
     import numpy as np
     import pandas as pd
@@ -1968,9 +1948,10 @@ def test_refine_phase_executes_before_not_implemented_select():
         "configurable_automl_engine.training_engine.component._run_hpo",
         side_effect=lambda **kw: (0.9, {"p": 1}),
     ) as mock_hpo:
-        with pytest.raises(NotImplementedError, match="action 'select'.*epic #74"):
-            train_best_model(cfg_refine, df, target="target")
+        res = train_best_model(cfg_refine, df, target="target")
 
+    assert res["algorithm"] in BASE["algorithms"]
+    assert "sanity_gate" not in res
     # elasticnet — единственный алгоритм BASE: 1 вызов в all_algorithms-фазе
     # (без initial_params) + 1 вызов в refine-фазе (с warm-start).
     assert mock_hpo.call_count == 2
@@ -1978,6 +1959,24 @@ def test_refine_phase_executes_before_not_implemented_select():
     refine_call = mock_hpo.call_args_list[1].kwargs
     assert first_call.get("initial_params") is None
     assert refine_call.get("initial_params") == {"p": 1}
+
+
+def test_select_phase_executes_in_pipeline():
+    """Исполнение select-фаз реализовано (эпик #74, задача R2): терминальный
+    select(cv_best, winner) отрабатывает и возвращает артефакт."""
+    import numpy as np
+    import pandas as pd
+    from configurable_automl_engine.training_engine.component import train_best_model
+
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
+    df["target"] = 2.0 * df["a"] + rng.randn(30) * 0.1
+
+    res = train_best_model(
+        _cfg_with_phases(_phase(), TERMINAL_SELECT), df, target="target"
+    )
+    assert res["algorithm"] in BASE["algorithms"]
+    assert "sanity_gate" not in res
 
 
 # ─────────── M1/M2 (ревью PR !43): граничные комбинации фаз ───────────

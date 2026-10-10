@@ -5,10 +5,12 @@ import configurable_automl_engine as caml
 data = load_diabetes(as_frame=True)
 df = data.frame
 
-# NOTE (epic #74, WIP): the config below uses the target pipeline schema.
-# The `select` / `refine` actions are declared in the config schema, but
-# their pipeline execution is not implemented yet (tasks R2/R3): running
-# this example raises NotImplementedError until then.
+# NOTE (epic #74): the config below uses the target pipeline schema.
+# The `select` steps are fully implemented (task R2); the `refine` action is
+# declared in the config schema but its execution is not implemented yet
+# (task R3): running this example raises NotImplementedError until then.
+# Remove the "refine" phase (or replace it with another "all_algorithms"
+# phase) to run the example today.
 
 config = {
     "general": {

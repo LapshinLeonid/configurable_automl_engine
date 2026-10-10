@@ -72,10 +72,9 @@ Testing:
 
 # Quick Start
 
-> **Note (epic #74, WIP):** pipeline execution for the `select` phase is
-> not implemented yet (task R2) — until then running the example fails with
-> `NotImplementedError`. The `refine` phase is executed (task R3). See the
-> pipeline section below.
+> **Note (epic #74):** both explicit pipeline steps are implemented:
+> `select` (task R2) and `refine` (task R3). The example below demonstrates
+> the full target pipeline. See the pipeline section below.
 
 The example can be run from [example.py](example.py). It demonstrates the
 full target pipeline with a Sanity Gate select step; the shorter config
@@ -134,27 +133,29 @@ terminal select) — the two examples are intentionally different.
 
 # Pipeline phases: `refine` / `select` (epic #74)
 
-> **Note (epic #74, WIP):** the `refine` action is executed in the pipeline
-> (task R3, see the contract below). The `select` action is declared in the
-> config schema, but pipeline execution for it is not implemented yet
-> (task R2). Until then configs containing select phases are rejected at
-> runtime with `NotImplementedError`.
+> **Note (epic #74):** both explicit pipeline actions are executed:
+> `refine` (task R3, see the contract below) and `select` (task R2 — both
+> strategies `cv_best` / `sanity_gate` and all output forms `winner` /
+> `top_k` / `pool`).
 
 The HPO pipeline is assembled from explicit phases (`general.phases`):
 
 * `action: "all_algorithms"` — `n_trials` HPO attempts for every enabled algorithm;
-* `action: "refine"` — `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (epic #74, task R3). The incoming working set is the result of the last HPO phase (or the output of the previous select step once R2 lands); only `params` are used for warm-start — they are passed to the tuner as `initial_params` (`enqueue_trial`), incoming scores are ignored. The output keeps the same set of names with updated `(score', params')` records and replaces the working set. Thanks to `enqueue_trial` the score of every surviving candidate after refine is not worse than before it (monotonicity). There is no narrowing in refine — no winners, no top-K, no corridors; narrowing is the job of explicit select steps. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set, the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (deliberate epic #74 decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase);
-* `action: "select"` — an explicit selection step with `strategy: "cv_best" | "sanity_gate"` and `output: "winner" | "top_k" | "pool"` (parameter `k >= 1` is required for, and only allowed with, `output: "top_k"`). With `strategy: "cv_best"`, `output: "pool"` builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
+* `action: "refine"` — `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (epic #74, task R3). The incoming working set is the result of the last HPO phase or the output of the previous select step; only `params` are used for warm-start — they are passed to the tuner as `initial_params` (`enqueue_trial`), incoming scores are ignored. The output keeps the same set of names with updated `(score', params')` records and replaces the working set. Thanks to `enqueue_trial` the score of every surviving candidate after refine is not worse than before it (monotonicity). There is no narrowing in refine — no winners, no top-K, no corridors; narrowing is the job of explicit select steps. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set, the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (deliberate epic #74 decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
+* `action: "select"` — an explicit selection step with `strategy: "cv_best" | "sanity_gate"` and `output: "winner" | "top_k" | "pool"` (parameter `k >= 1` is required for, and only allowed with, `output: "top_k"`). The step runs synchronously (never inside `run_parallel`) and its output **replaces** the pipeline working set — subsequent `refine` / `select` steps operate on it:
+  * `strategy: "cv_best"` — ranking by raw CV score (no audit, no gate section in the report). `output: "winner"` — the CV leader; `output: "top_k"` — the first `k` candidates of the ranking; `output: "pool"` — the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
+  * `strategy: "sanity_gate"` — the two-stage selection (T3+T4): finalists pool (corridor δ ∩ `top_k_candidates` from `general.sanity_gate`) → every finalist trained on **100% of the data exactly once** → `ModelSanityGate` audit → ranking of the candidates that passed the audit by `RMSE_oof` (formal fallback criterion when the whole pool is disqualified). `output: "winner"` — the robust winner (terminal step); `output: "top_k"` — the first `k` candidates of the `RMSE_oof` ranking; `output: "pool"` — every candidate that passed the audit (or the full fallback ranking when all are disqualified). Gate disqualifications are fed into the circuit breaker (`disqualified_algorithms`) on a par with HPO failures. A terminal select with `output: "winner"` reuses the already trained full-fit trainer of the winner — the winner is **not** retrained for the artifact. A repeated sanity select (e.g. after `refine`) trains its finalists from scratch — stale full-fit trainers are never reused.
+  * Every `sanity_gate` select adds its own section to `result["sanity_gate"]` keyed by the phase name (pool, per-candidate audit, applied disqualifications, `fallback_used`, `winner_rmse_oof`, `overhead_seconds`); `cv_best` selects add none. The legacy report keys `disqualified_by_sanity_gate`, `sanity_gate_warn_only` and `sanity_gate_overhead_seconds` were removed together with the `warn_only` mode (task R2).
 
-Validation rules: `select` cannot be the first phase; no phases are allowed after a terminal select (`output: "winner"`); the **last phase must be a `select` with `output: "winner"`**. The parameter `k` is deliberately not cross-checked against `sanity_gate.top_k_candidates` at the config level: the pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay is defined at execution time by task R2. The `sanity_gate` section remains a pure source of thresholds (corridor, `top_k_candidates`, audit limits) for select steps with `strategy: "sanity_gate"` — the global switch `general.sanity_gate.mode` was removed together with the deprecated action `refine_winner`.
+Validation rules: `select` cannot be the first phase; no phases are allowed after a terminal select (`output: "winner"`); the **last phase must be a `select` with `output: "winner"`**. The parameter `k` is deliberately not cross-checked against `sanity_gate.top_k_candidates` at the config level: the pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay is defined at execution time. The `sanity_gate` section remains a pure source of thresholds (corridor, `top_k_candidates`, audit limits) for select steps with `strategy: "sanity_gate"` — the global switch `general.sanity_gate.mode` was removed together with the deprecated action `refine_winner`.
 
 Migration table for typical legacy configs:
 
-| Legacy config | New config (refine execution — task R3 — is available; select execution lands with task R2) |
+| Legacy config | New config (after epic #74: R2 + R3) |
 |---------------|------------|
 | `all_algorithms` → `refine_winner` | `all_algorithms` → `select(strategy: cv_best, output: top_k, k: N)` → `refine` → `select(strategy: cv_best, output: winner)` — or simply an extended `all_algorithms` + `select(strategy: cv_best, output: winner)` |
 | Implicit gate at the end (`sanity_gate.mode: active`) | Explicit last phase `select(strategy: sanity_gate, output: winner)` |
-| `sanity_gate.mode: warn_only` | `select(strategy: sanity_gate, ...)` step + read the gate section of the select-step report |
+| `sanity_gate.mode: warn_only` | `select(strategy: sanity_gate, ...)` step + read the gate section of the select-step report (`result["sanity_gate"][<phase name>]`) |
 
 Configs with `refine_winner` or `sanity_gate.mode` are rejected at load with a migration hint (no silent translation).
 

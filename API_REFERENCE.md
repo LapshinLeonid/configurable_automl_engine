@@ -91,15 +91,20 @@ Behavior by validation strategy:
 
 ### Allowed actions for a pipeline phase (epic #74)
 
-> **Note (epic #74, WIP):** the `refine` action is executed in the pipeline
-> (task R3, see the contract below). The `select` action is declared in the
-> config schema, but pipeline execution for it is not implemented yet
-> (task R2). Until then configs containing select phases are rejected at
-> runtime with `NotImplementedError`.
+> **Note (epic #74):** both explicit pipeline actions are executed:
+> `refine` (task R3, see the contract below) and `select` (task R2 — both
+> strategies `cv_best` / `sanity_gate` and all output forms `winner` /
+> `top_k` / `pool`).
 
 * `"all_algorithms"` — for each algorithm, performs `n_trials` hyperparameter optimization attempts.
-* `"refine"` — performs `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (epic #74, task R3). Input: the current working set of the pipeline — the result of the last HPO phase (or the output of the previous select step once R2 lands). Only `params` are used for warm-start: each candidate's current parameters are passed to the tuner as `initial_params` (`enqueue_trial` guarantees score monotonicity); incoming scores are ignored. The service key `use_feature_selection` keeps being carried inside `params`. Output: the same set of names with updated `(score', params')` records; the output replaces the working set. There is no narrowing in refine — no winners, no top-K, no corridors. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set (all candidates failed), the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (deliberate epic #74 decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
-* `"select"` — an explicit selection step. Required fields: `strategy` (`"cv_best"` — ranking by CV score, or `"sanity_gate"` — finalists pool + `ModelSanityGate` audit + ranking by `RMSE_oof`) and `output` (`"winner"` — a single winner, terminal step; `"top_k"` — top-K candidates, requires integer `k >= 1`; `"pool"` — the whole corridor finalists pool). The combination `strategy: "cv_best"` + `output: "pool"` is valid: it builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
+* `"refine"` — performs `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (epic #74, task R3). Input: the current working set of the pipeline — the result of the last HPO phase or the output of the previous select step. Only `params` are used for warm-start: each candidate's current parameters are passed to the tuner as `initial_params` (`enqueue_trial` guarantees score monotonicity); incoming scores are ignored. The service key `use_feature_selection` keeps being carried inside `params`. Output: the same set of names with updated `(score', params')` records; the output replaces the working set. There is no narrowing in refine — no winners, no top-K, no corridors. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set (all candidates failed), the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (deliberate epic #74 decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
+* `"select"` — an explicit selection step. Required fields: `strategy` (`"cv_best"` — ranking by CV score, or `"sanity_gate"` — finalists pool + `ModelSanityGate` audit + ranking by `RMSE_oof`) and `output` (`"winner"` — a single winner, terminal step; `"top_k"` — top-K candidates, requires integer `k >= 1`; `"pool"` — the whole corridor finalists pool). The step runs synchronously (never inside `run_parallel`) and its output **replaces** the pipeline working set — subsequent `refine` / `select` steps operate on it. The combination `strategy: "cv_best"` + `output: "pool"` is valid: it builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
+
+Execution semantics (task R2):
+
+* `strategy: "cv_best"` — ranking by raw CV score (no audit, no gate section in the report): `output: "winner"` — the CV leader (documented tie-break: configuration order); `output: "top_k"` — the first `k` candidates of the ranking; `output: "pool"` — the corridor finalists pool.
+* `strategy: "sanity_gate"` — the two-stage selection: finalists pool (T3) → every finalist trained on **100% of the data exactly once** → `ModelSanityGate` audit → `select_robust_winner` ranking of the passed candidates by `RMSE_oof` (formal fallback criterion when the whole pool is disqualified). Ranking metric of the strategy — `RMSE_oof`. `output: "winner"` — the robust winner (terminal step; its full-fit trainer is reused for the artifact — the winner is **not** retrained); `output: "top_k"` — the first `k` candidates of the `RMSE_oof` ranking; `output: "pool"` — every candidate that passed the audit (or the full fallback ranking when all are disqualified). Gate disqualifications are fed into the circuit breaker (`disqualified_algorithms`) on a par with HPO failures. A repeated sanity select (e.g. after `refine`) trains its finalists from scratch — stale full-fit trainers are never reused.
+* An empty incoming working set (nothing to rank/audit) raises a `RuntimeError`.
 
 Validation rules (rejected at config load with a clear message):
 
@@ -108,7 +113,7 @@ Validation rules (rejected at config load with a clear message):
 * No phases are allowed after a terminal select (`output: "winner"`).
 * The **last phase must be a `select` with `output: "winner"`** — the final artifact is built from the result of the terminal select step.
 * `output: "top_k"` without `k >= 1` — error; `k` set for `output: "winner" | "pool"` — error; `strategy` / `output` / `k` set for non-select phases — error.
-* The parameter `k` is deliberately **not** cross-checked against `sanity_gate.top_k_candidates` at the config level: the finalists pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay (trim / cap) is defined at execution time by task R2 (epic #74).
+* The parameter `k` is deliberately **not** cross-checked against `sanity_gate.top_k_candidates` at the config level: the finalists pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay (trim / cap) is defined at execution time (epic #74).
 
 Typical pipeline (see the migration table in README.md):
 
@@ -197,12 +202,7 @@ steps with `strategy: "sanity_gate"` (epic #74); thresholds come from the
 
 ### Two-stage winner selection with Sanity Gate (`select_robust_winner`)
 
-> **Note (epic #74, WIP):** this section describes the target behavior of
-> select phases with `strategy: "sanity_gate"`; their pipeline execution is
-> not implemented yet (task R2) — see the note under
-> [Allowed actions](#allowed-actions-for-a-pipeline-phase-epic-74).
-
-Select phases with `strategy: "sanity_gate"` (epic #74) replace the
+Select phases with `strategy: "sanity_gate"` (epic #74, task R2) replace the
 "blind" CV-first-place pick with a two-stage selection:
 
 1. **Pool** — built by `select_finalists` (T3) from the HPO phase results.
@@ -224,22 +224,24 @@ Select phases with `strategy: "sanity_gate"` (epic #74) replace the
 
 Selection step modes (`select_robust_winner` mode, epic #74):
 
-Select steps run the audit in one of the modes of `select_robust_winner`;
-the mode is a property of the select step handling, **not** a config field
-(`general.sanity_gate.mode` was removed in epic #74) and **there is currently
-no way to set it from the config**: the mode is fixed inside the select-step
-implementation (in particular, select steps with `strategy: "sanity_gate"`
-run the `"active"` mode). The exact mode-to-step mapping is fixed and
-documented together with the select-step implementation (task R2); the list
-below describes the underlying `select_robust_winner` machinery only:
+The mode is a property of the select step handling, **not** a config field
+(`general.sanity_gate.mode` was removed in epic #74) and there is no way to
+set it from the config: the mode is fixed inside the select-step
+implementation — select steps with `strategy: "sanity_gate"` always run the
+**`"active"`** mode. The underlying `select_robust_winner` machinery exposes
+two modes:
 
-* `"off"` — old `select_winner` behavior: no pool, no audit (used by
-  `strategy: "cv_best"` select steps).
-* `"warn_only"` — pool and audit run, the (hypothetical) disqualifications are
-  logged and reported, but the actual winner is still the CV leader
-  (statistics collection before enabling the gate).
+* `"off"` — old `select_winner` behavior: no pool, no audit (legacy direct
+  calls only; `strategy: "cv_best"` select steps do not use
+  `select_robust_winner` at all).
 * `"active"` — disqualifications are applied; the winner is the best `RMSE_oof`
   among the candidates that passed the audit.
+
+The `"warn_only"` mode was removed in epic #74 (task R2) together with the
+report keys `sanity_gate_warn_only` and `winner_if_active`: diagnostics are
+always available in the gate section of each select-step report, and the
+decision to narrow the working set is made explicitly by the select step
+itself.
 
 Fallback (formalized): if every candidate is rejected, the "least problematic"
 model wins — minimum number of violated circuits, then minimum severity of the
@@ -251,28 +253,31 @@ Failure of a finalist's full-data training is handled: the candidate is
 skipped, the reason is logged, and selection continues with the next candidate.
 If no finalist can be trained at all, a `RuntimeError` is raised.
 
-Result reporting: every select step with a pool/audit appends its own
-section to the returned dict (keyed by the phase name in `sanity_gate`,
-epic #74) with the mode, pool order, per-candidate audit results (reasons /
-soft warnings / circuit statistics), applied or hypothetical disqualifications,
-the fallback flag and the winner's `RMSE_oof` / `RMSE_full`. Select steps with
+Result reporting: every select step with `strategy: "sanity_gate"` adds its
+own section to `result["sanity_gate"]` keyed by the **phase name** (epic #74,
+task R2) — see [Result keys](#result-keys) below. Select steps with
 `strategy: "cv_best"` add no gate section.
 
 #### Result keys
 
-> **Note (epic #74, WIP):** these keys will be produced by select steps once
-> their pipeline execution lands (task R2).
+The `sanity_gate` key of the `train_best_model` return value is a dict keyed
+by the names of select phases with `strategy: "sanity_gate"` (epic #74,
+task R2); select steps with `strategy: "cv_best"` add no sections, and with
+no sanity-gate select steps the key is absent entirely:
 
-The following keys are added to the `train_best_model` return value by
-select steps with a pool/audit (`strategy: "sanity_gate"`, epic #74); select
-steps with `strategy: "cv_best"` add none of them:
+| Key of `result["sanity_gate"][<phase name>]` | Type | Description |
+|-----|------|-------------|
+| `strategy` | `str` | Always `"sanity_gate"`. |
+| `pool` | `list[str]` | Ordered finalist names (T3 pool, best first). |
+| `audit` | `dict[str, dict]` | Per-candidate audit results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (disabled/not-computable statistics are `null`), `severity`. |
+| `disqualified` | `dict[str, list[str]]` | Applied disqualifications `{algo: [reasons]}`; the same entries are also fed into the top-level `disqualified_algorithms` (circuit breaker). |
+| `fallback_used` | `bool` | `true` when the whole pool was disqualified and the winner was chosen by the formal fallback criterion. |
+| `winner_rmse_oof` | `float \| null` | `RMSE_oof` of the winner (`null` when not computable). |
+| `overhead_seconds` | `float` | Wall-clock overhead of the select step: finalist training on 100% of the data + the audit phase. |
 
-| Key | Mode | Structure |
-|-----|------|-----------|
-| `sanity_gate` | `warn_only`, `active` | Full audit report: `mode`, `pool` (ordered finalist names), `fallback_used`, `winner_rmse_oof`, `winner_rmse_full`, `failed_training` (finalists that could not be trained on the full dataset), `disqualified` (`{algo: [reasons]}`), and `audit` — per-candidate results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap`, `severity`. |
-| `disqualified_by_sanity_gate` | `active` only | Applied disqualifications `{algo: [reasons]}`. Present only when any candidate was disqualified. Kept in a separate key from `disqualified_algorithms` (circuit breaker) — the two sources are never mixed. |
-| `sanity_gate_warn_only` | `warn_only` only | Statistics for the pre-activation stage: `disqualified` — candidates that *would be* disqualified (`{algo: [reasons]}`), and `winner_if_active` — the winner that *would be* selected under `mode = "active"` (best `RMSE_oof` among the hypothetical survivors, or the fallback pick). |
-| `sanity_gate_overhead_seconds` | `warn_only`, `active` | Wall-clock overhead of the gate: finalist retraining on 100% of the data + the audit phase. |
+The legacy keys `disqualified_by_sanity_gate`, `sanity_gate_warn_only` and
+`sanity_gate_overhead_seconds` (and the `mode` / `winner_if_active` fields)
+were removed in epic #74 (task R2) together with the `warn_only` mode.
 
 ### Sanity Gate configuration (`sanity_gate`)
 
@@ -309,7 +314,7 @@ migration hint.
 | `permutation_repeats` | `int` | `3` | Permutation repeats per column (≥ 1). |
 | `permutation_seed` | `int` | `42` | Fixed permutation seed (determinism). |
 | `permutation_tolerance` | `float` | `1e-3` | Relative "deadness" threshold of a feature in the permutation path (≥ 0). |
-| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). When the budget is exhausted, the remaining finalists are not audited and receive an explicit "audit skipped: budget exceeded" reason (they cannot win in `"active"` mode; in `"warn_only"` they appear in the report as hypothetical). |
+| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). When the budget is exhausted, the remaining finalists are not audited and receive an explicit "audit skipped: budget exceeded" reason (they cannot win in `"active"` mode). |
 | `check_diversity` | `bool` | `true` | Enable circuit A. |
 | `check_unique` | `bool` | `true` | Enable circuit B. |
 | `check_dead_features` | `bool` | `true` | Enable circuit C. |
@@ -556,7 +561,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). Select steps with a pool/audit add the Sanity Gate result keys (`sanity_gate` keyed by the select phase name, plus `sanity_gate_overhead_seconds`, `disqualified_by_sanity_gate` or `sanity_gate_warn_only` depending on the step mode) — see [Result keys](#result-keys).
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name (epic #74, task R2) — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons.
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
