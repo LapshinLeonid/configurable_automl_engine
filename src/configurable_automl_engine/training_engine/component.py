@@ -1205,7 +1205,7 @@ def _run_hpo(
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
 
-    # прокидываем initial_params, если есть (для refine_winner phase)
+    # прокидываем initial_params, если есть (для refine phase, эпик #74)
     if initial_params is not None and "initial_params" in sig.parameters:
         kwargs["initial_params"] = initial_params
 
@@ -1701,11 +1701,22 @@ def execute_phases(
     each phase rebuilds its results from scratch, so an algorithm that fails
     in the current phase (total HPO failure: returned ``None`` or an invalid
     score) is fully excluded and does not keep a stale record from a previous
-    phase. The final winner is chosen by the results of the LAST phase: for
-    the typical ``all_algorithms → refine_winner`` pipeline this is the
-    refined winner; a winner failure during ``refine_winner`` raises
-    ``RuntimeError`` instead of silently rolling back to the previous phase
-    results.
+    phase. The final winner is chosen by the results of the LAST phase (in
+    the epic #74 pipeline — the terminal select step).
+
+    Refine step (epic #74, task R3): ``action='refine'`` performs ``n_trials``
+    warm-started HPO attempts for **every** candidate of the incoming working
+    set (the results of the last HPO phase, or — after R2 — the output of the
+    previous select step). Only ``params`` of the incoming records are used
+    (they become ``initial_params`` for ``enqueue_trial`` in the tuner);
+    incoming scores are ignored. The output keeps the same set of names with
+    updated ``(score', params')`` records and replaces the working set. There
+    is no narrowing in refine — narrowing is the job of explicit select steps.
+    As the first phase, refine runs over the full set of enabled algorithms
+    without warm-start. A per-algorithm failure excludes only that algorithm
+    (circuit breaker / invalid-result filters); if refine wipes out the whole
+    working set, ``RuntimeError`` is raised — a silent fallback to pre-refine
+    parameters would hide the regression (deliberate epic #74 decision).
 
     Args:
         cfg (Config): Объект конфигурации.
@@ -1720,9 +1731,11 @@ def execute_phases(
             не вызывается (защита в ``train_best_model``).
 
     Raises:
-        RuntimeError: Если фаза 'refine_winner' не имеет предыдущих
-            результатов, либо ни один алгоритм не дал валидного скора
-            в фазе.
+        RuntimeError: Если рабочее множество фазы пусто либо ни один алгоритм
+            не дал валидного скора в фазе (в том числе после refine, вычистившего
+            всё входное множество).
+        NotImplementedError: Если конфиг содержит select-фазу — исполнение
+            select-шагов появится в задаче R2 (эпик #74).
     """
     X = prepared.X
     y = prepared.y
@@ -1858,16 +1871,15 @@ def execute_phases(
     # кандидатов и результатов, остальные продолжают обучение (issue #12).
     disqualified_algorithms: dict[str, str] = {}
     for phase in cfg.general.phases:
-        # Эпик #74: действия 'select' и 'refine' объявлены в конфиг-схеме,
-        # но их исполнение в пайплайне ещё не реализовано (задачи R2/R3).
-        # Молчаливое исполнение select-фазы как фазы all_algorithms скрыло бы
-        # отсутствие отбора — поднимаем явную ошибку.
-        if phase.action in ("select", "refine"):
+        # Эпик #74: исполнение select-шагов появится в задаче R2. Молчаливое
+        # исполнение select-фазы как фазы all_algorithms скрыло бы отсутствие
+        # отбора — поднимаем явную ошибку.
+        if phase.action == "select":
             raise NotImplementedError(
-                f"Phase '{phase.name}': action '{phase.action}' is declared "
+                f"Phase '{phase.name}': action 'select' is declared "
                 "in the config schema (epic #74), but pipeline execution for "
-                "it is not implemented yet (tasks R2/R3). Until then every "
-                "valid config containing these phases fails at runtime; "
+                "it is not implemented yet (task R2). Until then every "
+                "valid config containing select phases fails at runtime; "
                 "track progress in epic #74."
             )
 
@@ -1876,8 +1888,8 @@ def execute_phases(
             f" trials, action: {phase.action}) ---"
         )
 
-        # Snapshot of the previous phases' results. Used ONLY to select the
-        # refine_winner and to pass initial_params to the worker. Records from
+        # Snapshot of the previous phases' results. Used ONLY to pass
+        # initial_params to the worker of a refine phase. Records from
         # previous phases are NOT carried into the current one: phase_results
         # is rebuilt from the current phase only, so an algorithm that failed
         # in it (returned None or an invalid score) does not keep a stale
@@ -1886,23 +1898,30 @@ def execute_phases(
         # of the LAST phase.
         prev_results = phase_results
 
-        if phase.action == "refine_winner":
-            if not prev_results:
-                raise RuntimeError(
-                    f"Phase '{phase.name}' requires a winner,"
-                    f" but no previous results exist."
-                )
-
-            # Детерминированный выбор победителя (issue #32): максимальный
-            # «сырой» скор; ничья разрешается порядком конфигурации.
-            winner_algo = select_winner(prev_results)
-            _LOG.info(f"Phase '{phase.name}' filtering for winner: {winner_algo}")
-            current_candidates = {winner_algo: all_algorithms[winner_algo]}
-            # Only the previous phase's winner takes part in refine_winner:
-            # the losers' records must not "resurrect" if the winner fails
-            # during refinement. The refine result replaces the winner's
-            # record; if the winner fails (None/invalid score) the phase ends
-            # with RuntimeError — no silent rollback to phase 1.
+        if phase.action == "refine":
+            # Refine (эпик #74, R3): warm-start HPO для ВСЕГО входного
+            # рабочего множества. Вход — результаты последней фазы HPO
+            # (после R2 — выход предыдущего select-шага); используются только
+            # params (initial_params для enqueue_trial), входные score
+            # игнорируются. Сужения нет: никаких победителей, top-K и
+            # коридоров — сужение множества выполняют явные select-шаги.
+            # Выход замещает рабочее множество: те же имена, обновлённые
+            # (score', params').
+            if prev_results:
+                current_candidates = {
+                    n: all_algorithms[n]
+                    for n in prev_results
+                    if n in all_algorithms and n not in disqualified_algorithms
+                }
+            else:
+                # refine первой фазой: входное рабочее множество — полный
+                # набор включённых алгоритмов, warm-start не передаётся
+                # (предыдущих результатов нет).
+                current_candidates = {
+                    n: a
+                    for n, a in all_algorithms.items()
+                    if a.enable and n not in disqualified_algorithms
+                }
         else:
             # all_algorithms phase: every enabled algorithm, results from
             # previous phases are not accumulated. Algorithms disqualified by
@@ -1936,16 +1955,18 @@ def execute_phases(
                 Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
                     или None в случае ошибки.
             """
-            # Determine initial_params for refine_winner: keep the best parameters of
-            # the previous phase for enqueue_trial. The prev_results snapshot is
-            # fixed via a default argument (like `p`), so the worker uses the
-            # state at definition time (B023). Workers only READ this dict;
-            # writes to phase_results happen after all phase workers finish, and
-            # at the end of the phase phase_results is re-bound to the filtered
-            # valid_results (objects are never mutated) — therefore the snapshot
-            # is stable in both parallel and sequential modes.
+            # Determine initial_params for refine (epic #74, R3): each
+            # candidate warm-starts from its OWN previous-phase parameters
+            # (enqueue_trial in the tuner guarantees score monotonicity).
+            # The prev_results snapshot is fixed via a default argument
+            # (like `p`), so the worker uses the state at definition time
+            # (B023). Workers only READ this dict; writes to phase_results
+            # happen after all phase workers finish, and at the end of the
+            # phase phase_results is re-bound to the filtered valid_results
+            # (objects are never mutated) — therefore the snapshot is stable
+            # in both parallel and sequential modes.
             init_params = None
-            if p.action == "refine_winner" and algo_name in pr:
+            if p.action == "refine" and algo_name in pr:
                 _, prev_params = pr[algo_name]
                 init_params = prev_params
 

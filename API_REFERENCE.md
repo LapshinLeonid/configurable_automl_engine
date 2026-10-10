@@ -91,13 +91,14 @@ Behavior by validation strategy:
 
 ### Allowed actions for a pipeline phase (epic #74)
 
-> **Note (epic #74, WIP):** the `select` / `refine` actions are declared in the
-> config schema, but pipeline execution is not implemented yet (tasks R2/R3).
-> Until then configs containing these phases are rejected at runtime with
-> `NotImplementedError`.
+> **Note (epic #74, WIP):** the `refine` action is executed in the pipeline
+> (task R3, see the contract below). The `select` action is declared in the
+> config schema, but pipeline execution for it is not implemented yet
+> (task R2). Until then configs containing select phases are rejected at
+> runtime with `NotImplementedError`.
 
 * `"all_algorithms"` — for each algorithm, performs `n_trials` hyperparameter optimization attempts.
-* `"refine"` — performs `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (the result of the last HPO phase or the output of the previous select step). No narrowing happens here — narrowing is the job of select steps. As the first phase `refine` is accepted by the schema: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase); the execution semantics are finalized by task R3.
+* `"refine"` — performs `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set (epic #74, task R3). Input: the current working set of the pipeline — the result of the last HPO phase (or the output of the previous select step once R2 lands). Only `params` are used for warm-start: each candidate's current parameters are passed to the tuner as `initial_params` (`enqueue_trial` guarantees score monotonicity); incoming scores are ignored. The service key `use_feature_selection` keeps being carried inside `params`. Output: the same set of names with updated `(score', params')` records; the output replaces the working set. There is no narrowing in refine — no winners, no top-K, no corridors. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set (all candidates failed), the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (deliberate epic #74 decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
 * `"select"` — an explicit selection step. Required fields: `strategy` (`"cv_best"` — ranking by CV score, or `"sanity_gate"` — finalists pool + `ModelSanityGate` audit + ranking by `RMSE_oof`) and `output` (`"winner"` — a single winner, terminal step; `"top_k"` — top-K candidates, requires integer `k >= 1`; `"pool"` — the whole corridor finalists pool). The combination `strategy: "cv_best"` + `output: "pool"` is valid: it builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
 
 Validation rules (rejected at config load with a clear message):
