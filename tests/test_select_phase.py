@@ -254,6 +254,18 @@ def test_select_cv_best_pool_corridor_and_cap():
     assert list(ctx2.working_set) == ["extra_trees", "ridge"]
     assert ctx2.sanity_gate_sections == {}  # gate-секция не создаётся
 
+    # Boundary капа: пул широк (оба в коридоре δ=0.9), но top_k_candidates=1
+    # отсекает его до лидера.
+    cfg3 = _hpo_cfg(sanity_gate={"top_k_candidates": 1, "corridor_delta": 0.9})
+    ctx3 = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    component._execute_select_phase(
+        phase=_select_phase(name="sel3", output="pool"),
+        cfg=cfg3,
+        prepared=_prepared(),
+        ctx=ctx3,
+    )
+    assert list(ctx3.working_set) == ["extra_trees"]
+
 
 def test_select_cv_best_pool_excludes_disqualified():
     """select(cv_best, pool): дисквалифицированные circuit breaker'ом не в пуле."""
@@ -617,22 +629,48 @@ def test_repeat_sanity_select_retrains_finalists():
     df = _df(n_rows=40)
     prepared = prepare_dataset(cfg, df, "target")
 
-    trainers: list[_FakeTrainer] = []
+    # Тренеры накапливаются по имени sanity-фазы. Имя фазы определяется
+    # динамически: пул финалистов строится в НАЧАЛЕ sanity-select, поэтому
+    # секции предыдущих sanity-фаз уже в отчёте, а текущей — ещё нет.
+    trainers_by_phase: dict[str, list[_FakeTrainer]] = {}
+    current_phase: list[str] = []
+
+    real_build_pool = component._build_finalists_pool
+
+    def _build_pool(cfg_arg: Any, prepared_arg: Any, ctx_arg: Any) -> list[str]:
+        pending = [
+            p.name
+            for p in cfg_arg.general.phases
+            if p.action == "select"
+            and p.strategy == "sanity_gate"
+            and p.name not in ctx_arg.sanity_gate_sections
+        ]
+        current_phase.append(pending[0])
+        return real_build_pool(cfg_arg, prepared_arg, ctx_arg)
 
     def _fit(*a: Any, **kw: Any) -> _FakeTrainer:
         trainer = _FakeTrainer(prepared.y.to_numpy(), 0.30, 0.25)
-        trainers.append(trainer)
+        trainers_by_phase.setdefault(current_phase[-1], []).append(trainer)
         return trainer
 
-    with _patch_hpo(), patch.object(component, "_fit_finalist", side_effect=_fit):
+    with (
+        _patch_hpo(),
+        patch.object(component, "_build_finalists_pool", side_effect=_build_pool),
+        patch.object(component, "_fit_finalist", side_effect=_fit),
+    ):
         ctx = execute_phases(cfg, prepared)
 
-    # Финалисты обучались в обеих sanity-фазах (новые экземпляры тренеров).
-    assert len(trainers) >= 4  # ≥ 2 финалиста × 2 sanity-select
+    # Финалисты обучались в обеих sanity-фазах новыми экземплярами тренеров;
+    # разбиение по фазам не зависит от размеров пулов и набора алгоритмов.
+    first_phase = trainers_by_phase["gate"]
+    final_phase = trainers_by_phase["gate_final"]
+    assert first_phase and final_phase
     # Терминальный sanity-select отдаёт тренера победителя, обученного в
     # НЕЙ фазе (не переиспользуя тренеры первой sanity-фазы).
-    assert ctx.pre_trained_trainer in trainers[2:]
-    assert ctx.pre_trained_trainer not in trainers[:2]
+    assert ctx.pre_trained_trainer in final_phase
+    assert ctx.pre_trained_trainer not in first_phase
+    # Полная дискретность: пересечение множеств тренеров пусто.
+    assert not set(map(id, first_phase)) & set(map(id, final_phase))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -685,8 +723,9 @@ def test_report_audit_section_serialized():
     )
     cfg = Config.model_validate(cfg_dict)
     df = _df(n_rows=40)
+    prepared = prepare_dataset(cfg, df, "target")
     with _patch_hpo(), _patch_honest_finalists(df["target"]):
-        ctx = execute_phases(cfg, prepared := prepare_dataset(cfg, df, "target"))
+        ctx = execute_phases(cfg, prepared)
     section = ctx.sanity_gate_sections["gate"]
     for audit in section["audit"].values():
         assert isinstance(audit, dict)

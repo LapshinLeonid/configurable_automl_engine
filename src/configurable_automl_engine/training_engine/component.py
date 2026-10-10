@@ -763,6 +763,35 @@ def _best_by_rmse_oof(
     return min(names, key=_key)
 
 
+def _fallback_sort_key(
+    name: str,
+    audits: Mapping[str, SanityCheckResult],
+    candidate_models: Mapping[str, FinalistCandidate],
+) -> tuple[int, tuple[int, ...], bool, float]:
+    """Ключ fallback-ранжирования T4 (см. ``_select_active_winner``).
+
+    Минимум числа нарушенных контуров → минимум тяжести (Г > А > Б > В) →
+    лучший ``RMSE_oof``. Вынесен на уровень модуля, чтобы ранжирование
+    select-шага (``output: top_k``/``pool``) совпадало с выбором победителя.
+
+    Args:
+        name (str): Имя кандидата.
+        audits (Mapping[str, SanityCheckResult]): Аудит каждого финалиста.
+        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
+
+    Returns:
+        tuple[int, tuple[int, ...], bool, float]: Ключ сортировки.
+    """
+    reasons = audits[name].reasons
+    rmse = candidate_models[name].rmse_oof
+    return (
+        len(reasons),
+        _severity_signature(reasons),
+        rmse is None,
+        rmse if rmse is not None else float("inf"),
+    )
+
+
 def _select_active_winner(
     pool_order: list[str],
     audits: Mapping[str, SanityCheckResult],
@@ -788,18 +817,10 @@ def _select_active_winner(
     valid = [n for n in pool_order if audits[n].is_valid]
     if valid:
         return _best_by_rmse_oof(valid, candidate_models)
-
-    def _fallback_key(name: str) -> tuple[int, tuple[int, ...], bool, float]:
-        reasons = audits[name].reasons
-        rmse = candidate_models[name].rmse_oof
-        return (
-            len(reasons),
-            _severity_signature(reasons),
-            rmse is None,
-            rmse if rmse is not None else float("inf"),
-        )
-
-    return min(pool_order, key=_fallback_key)
+    return min(
+        pool_order,
+        key=lambda n: _fallback_sort_key(n, audits, candidate_models),
+    )
 
 
 def _fmt_audit_value(value: float) -> str:
@@ -872,7 +893,7 @@ def select_robust_winner(
 
     Returns:
         RobustWinnerResult: Победитель, аудит по каждому кандидату,
-            применённые/гипотетические дисквалификации и флаг fallback.
+            применённые дисквалификации и флаг fallback.
 
     Raises:
         RuntimeError: Если пул кандидатов пуст — победитель не существует.
@@ -2005,14 +2026,13 @@ def execute_phases(
                 # MAX_FATAL_FAILURES подряд фатальных ошибок. Это НЕ аварийный
                 # стоп всего запуска — алгоритм исключается из кандидатов,
                 # остальные продолжают обучение (аналогично None-результату).
-                disqualified_algorithms_msg = str(err)
                 _LOG.warning(
                     "Algorithm %s disqualified in phase %s: %s",
                     algo_name,
                     p.name,
-                    disqualified_algorithms_msg,
+                    err,
                 )
-                ctx.disqualified_algorithms[algo_name] = disqualified_algorithms_msg
+                ctx.disqualified_algorithms[algo_name] = str(err)
                 return None
             except Exception as e:  # noqa: BLE001
                 _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
@@ -2123,35 +2143,6 @@ def _rank_cv_best(
         list[str]: Имена алгоритмов, лучшие по CV-скору первыми.
     """
     return sorted(working_set, key=lambda n: working_set[n][0], reverse=True)
-
-
-def _fallback_sort_key(
-    name: str,
-    audits: Mapping[str, SanityCheckResult],
-    candidate_models: Mapping[str, FinalistCandidate],
-) -> tuple[int, tuple[int, ...], bool, float]:
-    """Ключ fallback-ранжирования T4 (см. ``_select_active_winner``).
-
-    Минимум числа нарушенных контуров → минимум тяжести (Г > А > Б > В) →
-    лучший ``RMSE_oof``. Вынесен на уровень модуля, чтобы ранжирование
-    select-шага (``output: top_k``/``pool``) совпадало с выбором победителя.
-
-    Args:
-        name (str): Имя кандидата.
-        audits (Mapping[str, SanityCheckResult]): Аудит каждого финалиста.
-        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
-
-    Returns:
-        tuple[int, tuple[int, ...], bool, float]: Ключ сортировки.
-    """
-    reasons = audits[name].reasons
-    rmse = candidate_models[name].rmse_oof
-    return (
-        len(reasons),
-        _severity_signature(reasons),
-        rmse is None,
-        rmse if rmse is not None else float("inf"),
-    )
 
 
 def _rank_sanity_candidates(
@@ -2309,13 +2300,7 @@ def _execute_select_cv_best(
         cfg (Config): Объект конфигурации.
         prepared (PreparedData): Подготовленные данные и настройки.
         ctx (PhaseContext): Контекст фаз пайплайна (изменяется).
-
-    Raises:
-        ValueError: Если ``output: top_k`` без параметра ``k`` (защита:
-            схема конфига уже требует ``k``, проверка дублируется явно).
     """
-    ranked = _rank_cv_best(ctx.working_set)
-
     if phase.output == "winner":
         winner_algo = select_winner(ctx.working_set)
         ctx.working_set = {winner_algo: ctx.working_set[winner_algo]}
@@ -2330,12 +2315,9 @@ def _execute_select_cv_best(
         return
 
     if phase.output == "top_k":
-        if phase.k is None:  # pragma: no cover — защищено схемой конфига
-            raise ValueError(
-                f"Select phase '{phase.name}': output 'top_k' requires "
-                "the integer parameter k (>= 1)"
-            )
-        kept = ranked[: phase.k]
+        # Ранжир строится лениво: для winner он не нужен (источник истины —
+        # select_winner), для pool пул строится отдельно.
+        kept = _rank_cv_best(ctx.working_set)[: phase.k]
         ctx.working_set = {name: ctx.working_set[name] for name in kept}
         _LOG.info(
             "Select phase '%s' (strategy: cv_best): top_k=%d kept %s",
@@ -2390,17 +2372,8 @@ def _execute_select_sanity_gate(
         ctx (PhaseContext): Контекст фаз пайплайна (изменяется).
 
     Raises:
-        ValueError: Если ``output: top_k`` без параметра ``k`` (защита:
-            схема конфига уже требует ``k``, проверка дублируется явно).
         RuntimeError: Если ни один финалист пула не обучился на 100% данных.
     """
-    if phase.output == "top_k" and phase.k is None:
-        # pragma: no cover — защищено схемой конфига
-        raise ValueError(
-            f"Select phase '{phase.name}': output 'top_k' requires "
-            "the integer parameter k (>= 1)"
-        )
-
     # 1. Пул финалистов (T3).
     pool = _build_finalists_pool(cfg, prepared, ctx)
     _LOG.info(
@@ -2472,14 +2445,14 @@ def _execute_select_sanity_gate(
         ctx.working_set = {winner_algo: ctx.working_set[winner_algo]}
         ctx.winner_algo = winner_algo
         ctx.pre_trained_trainer = candidates[winner_algo].trainer
+        # Для артефакта нужен только тренер победителя: тренеры остальных
+        # финалистов не удерживаются в памяти до конца train_best_model.
+        ctx.full_fit_trainers = {
+            winner_algo: candidates[winner_algo].trainer,
+        }
         return
 
     if phase.output == "top_k":
-        if phase.k is None:  # pragma: no cover — защищено схемой конфига
-            raise ValueError(
-                f"Select phase '{phase.name}': output 'top_k' requires "
-                "the integer parameter k (>= 1)"
-            )
         kept = ranked[: phase.k]
         ctx.working_set = {name: ctx.working_set[name] for name in kept}
         ctx.full_fit_trainers = {
@@ -2544,6 +2517,13 @@ def _execute_select_phase(
             f"Select phase '{phase.name}' received an empty working set: "
             "nothing to select from. Check that a preceding HPO phase "
             "produced valid results."
+        )
+    # Единая защита для всех стратегий: top_k без k не имеет смысла
+    # (схема конфига уже требует k >= 1, проверка дублируется явно).
+    if phase.output == "top_k" and phase.k is None:
+        raise ValueError(
+            f"Select phase '{phase.name}': output 'top_k' requires "
+            "the integer parameter k (>= 1)"
         )
     _LOG.info(
         f"--- Select Phase: {phase.name} (strategy: {phase.strategy}, "
