@@ -512,8 +512,9 @@ def test_select_top_k_without_k_raises():
 # ──────────────────────────────────────────────────────────────────────────────
 def test_terminal_sanity_select_persists_without_retraining(tmp_path):
     """Терминальный sanity-select: артефакт без переобучения победителя."""
-    cfg_dict = _cfg_dict([_select_phase(name="gate", strategy="sanity_gate")],
-                         **_GATE_THRESHOLDS)
+    cfg_dict = _cfg_dict(
+        [_select_phase(name="gate", strategy="sanity_gate")], **_GATE_THRESHOLDS
+    )
     cfg = Config.model_validate(cfg_dict)
     cfg.general.path_to_model = tmp_path / "m.pkl"
     df = _df(n_rows=40)
@@ -553,8 +554,11 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
     """
     cfg_dict = _cfg_dict(
         [_select_phase(name="gate", strategy="sanity_gate")],
-        sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9,
-                     "max_generalization_gap": 1.0},
+        sanity_gate={
+            "top_k_candidates": 2,
+            "corridor_delta": 0.9,
+            "max_generalization_gap": 1.0,
+        },
     )
     cfg = Config.model_validate(cfg_dict)
     cfg.general.path_to_model = tmp_path / "m.pkl"
@@ -564,8 +568,9 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
         # RMSE_oof=0.5 против RMSE_full=0.05: gap=10 > 1.0 → контур Г.
         return _FakeTrainer(df["target"].to_numpy(), 0.5, 0.05)
 
-    with _patch_hpo(), patch.object(
-        component, "_fit_finalist", side_effect=_overfit_finalist
+    with (
+        _patch_hpo(),
+        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -587,8 +592,9 @@ def test_select_sanity_gate_all_finalists_fail_to_train():
     cfg = Config.model_validate(cfg_dict)
     prepared = prepare_dataset(cfg, _df(), "target")
 
-    with _patch_hpo(), patch.object(
-        component, "_fit_finalist", side_effect=RuntimeError("boom")
+    with (
+        _patch_hpo(),
+        patch.object(component, "_fit_finalist", side_effect=RuntimeError("boom")),
     ):
         with pytest.raises(RuntimeError, match="No finalist could be trained"):
             execute_phases(cfg, prepared)

@@ -1172,7 +1172,7 @@ def _run_hpo(
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
 
-    # прокидываем initial_params, если есть (для refine phase, задача R3)
+    # прокидываем initial_params, если есть (для refine phase, эпик #74/R3)
     if initial_params is not None and "initial_params" in sig.parameters:
         kwargs["initial_params"] = initial_params
 
@@ -1708,7 +1708,22 @@ def execute_phases(
     каждая фаза HPO пересобирает его с нуля, поэтому алгоритм, провалившийся
     в текущей фазе (полный отказ HPO: ``None`` или невалидный скор), полностью
     исключается и не держит устаревшую запись предыдущей фазы. Выход
-    select-шага замещает рабочее множество пайплайна (эпик #74).
+    select-шага замещает рабочее множество пайплайна (эпик #74); финальный
+    победитель определяется терминальным select-шагом.
+
+    Refine step (epic #74, task R3): ``action='refine'`` performs ``n_trials``
+    warm-started HPO attempts for **every** candidate of the incoming working
+    set (the results of the last HPO phase, or the output of the previous
+    select step). Only ``params`` of the incoming records are used
+    (they become ``initial_params`` for ``enqueue_trial`` in the tuner);
+    incoming scores are ignored. The output keeps the same set of names with
+    updated ``(score', params')`` records and replaces the working set. There
+    is no narrowing in refine — narrowing is the job of explicit select steps.
+    As the first phase, refine runs over the full set of enabled algorithms
+    without warm-start. A per-algorithm failure excludes only that algorithm
+    (circuit breaker / invalid-result filters); if refine wipes out the whole
+    working set, ``RuntimeError`` is raised — a silent fallback to pre-refine
+    parameters would hide the regression (deliberate epic #74 decision).
 
     Args:
         cfg (Config): Объект конфигурации.
@@ -1864,18 +1879,6 @@ def execute_phases(
     # кандидатов и результатов, остальные продолжают обучение (issue #12).
     # living in ctx: наполняется HPO-провалами и select-шагами (эпик #74).
     for phase in cfg.general.phases:
-        # Эпик #74, задача R3: дообучение входного множества (warm-start)
-        # ещё не реализовано. Молчаливое исполнение refine-фазы скрыло бы
-        # отсутствие семантики — поднимаем явную ошибку.
-        if phase.action == "refine":
-            raise NotImplementedError(
-                f"Phase '{phase.name}': action 'refine' is declared in the "
-                "config schema (epic #74), but pipeline execution for it is "
-                "not implemented yet (task R3). Until then every valid "
-                "config containing refine phases fails at runtime; track "
-                "progress in epic #74."
-            )
-
         if phase.action == "select":
             # Select-шаг выполняется синхронно (вне run_parallel): отбор
             # оперирует уже готовыми результатами HPO (эпик #74, задача R2).
@@ -1887,6 +1890,16 @@ def execute_phases(
             f" trials, action: {phase.action}) ---"
         )
 
+        # Snapshot of the incoming working set. Used ONLY to pass
+        # initial_params to the worker of a refine phase. Records from
+        # previous phases are NOT carried into the current one: the working
+        # set is rebuilt from the current phase only, so an algorithm that
+        # failed in it (returned None or an invalid score) does not keep a
+        # stale record from a previous phase and does not compete with real
+        # results (issue #13). Consequence: the final winner is chosen by the
+        # terminal select step (epic #74).
+        prev_results = ctx.working_set
+
         # Фаза HPO пересобирает рабочее множество с нуля (issue #13), поэтому
         # full-fit тренеры и результат терминального select предыдущих фаз
         # больше не соответствуют параметрам рабочего множества.
@@ -1894,14 +1907,39 @@ def execute_phases(
         ctx.winner_algo = None
         ctx.pre_trained_trainer = None
 
-        # all_algorithms phase: every enabled algorithm, results from
-        # previous phases are not accumulated. Algorithms disqualified by
-        # the circuit breaker do not return to the phase (issue #12).
-        current_candidates = {
-            n: a
-            for n, a in all_algorithms.items()
-            if a.enable and n not in ctx.disqualified_algorithms
-        }
+        if phase.action == "refine":
+            # Refine (эпик #74, R3): warm-start HPO для ВСЕГО входного
+            # рабочего множества. Вход — результаты последней фазы HPO
+            # или выход предыдущего select-шага; используются только
+            # params (initial_params для enqueue_trial), входные score
+            # игнорируются. Сужения нет: никаких победителей, top-K и
+            # коридоров — сужение множества выполняют явные select-шаги.
+            # Выход замещает рабочее множество: те же имена, обновлённые
+            # (score', params').
+            if prev_results:
+                current_candidates = {
+                    n: all_algorithms[n]
+                    for n in prev_results
+                    if n in all_algorithms and n not in ctx.disqualified_algorithms
+                }
+            else:
+                # refine первой фазой: входное рабочее множество — полный
+                # набор включённых алгоритмов, warm-start не передаётся
+                # (предыдущих результатов нет).
+                current_candidates = {
+                    n: a
+                    for n, a in all_algorithms.items()
+                    if a.enable and n not in ctx.disqualified_algorithms
+                }
+        else:
+            # all_algorithms phase: every enabled algorithm, results from
+            # previous phases are not accumulated. Algorithms disqualified by
+            # the circuit breaker do not return to the phase (issue #12).
+            current_candidates = {
+                n: a
+                for n, a in all_algorithms.items()
+                if a.enable and n not in ctx.disqualified_algorithms
+            }
 
         # Each phase starts with an empty working set: it is rebuilt from the
         # current phase only, so an algorithm that fails in this phase does not
@@ -1916,6 +1954,7 @@ def execute_phases(
             algo_name: str,
             algo_cfg: AlgoCfg,
             p: HPOPhaseCfg = phase,
+            pr: dict[str, tuple[float, dict[str, Any]]] = prev_results,
         ) -> tuple[str, float, dict[str, Any]] | None:
             """Воркер для параллельного или последовательного запуска задачи HPO.
             Args:
@@ -1925,6 +1964,21 @@ def execute_phases(
                 Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
                     или None в случае ошибки.
             """
+            # Determine initial_params for refine (epic #74, R3): each
+            # candidate warm-starts from its OWN previous-phase parameters
+            # (enqueue_trial in the tuner guarantees score monotonicity).
+            # The prev_results snapshot is fixed via a default argument
+            # (like `p`), so the worker uses the state at definition time
+            # (B023). Workers only READ this dict; writes to phase_results
+            # happen after all phase workers finish, and at the end of the
+            # phase phase_results is re-bound to the filtered valid_results
+            # (objects are never mutated) — therefore the snapshot is stable
+            # in both parallel and sequential modes.
+            init_params = None
+            if p.action == "refine" and algo_name in pr:
+                _, prev_params = pr[algo_name]
+                init_params = prev_params
+
             # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
             full_search_space = prepare_search_space(
                 algo_name,
@@ -1937,6 +1991,7 @@ def execute_phases(
                     algo_cfg,
                     p.n_trials,
                     full_search_space,
+                    initial_params=init_params,
                 )
 
                 if result is None:

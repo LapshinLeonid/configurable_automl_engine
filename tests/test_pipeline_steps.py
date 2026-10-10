@@ -14,9 +14,10 @@ select-шаги — эпик #74, задача R2).
       k_fold/train_test_split, детекция типов колонок;
     • execute_phases — одна фаза HPO + терминальный select, ``PhaseContext``
       (рабочее множество, circuit breaker, победитель терминального select),
-      refine → NotImplementedError (задача R3), дисквалификация (circuit
-      breaker, issue #12), фильтрация невалидных скоров (issue #13/#32),
-      пустые фазы, отсутствие валидных результатов;
+      refine с warm-start initial_params для всего входного множества
+      (эпик #74, R3), дисквалификация (circuit breaker, issue #12),
+      фильтрация невалидных скоров (issue #13/#32), пустые фазы,
+      отсутствие валидных результатов;
     • persist_artifact — сборка результата, семантика score (issue #26),
       model_path_override, additional_metrics, секции ``sanity_gate``
       select-шагов (T6, эпик #74), проброс ошибки fit;
@@ -63,6 +64,34 @@ TERMINAL_SELECT: dict[str, Any] = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Общие помощники
 # ──────────────────────────────────────────────────────────────────────────────
+# Терминальный select-шаг (эпик #74): последняя фаза любого валидного конфига.
+TERMINAL_SELECT: dict[str, Any] = {
+    "name": "final_select",
+    "n_trials": 1,
+    "action": "select",
+    "strategy": "cv_best",
+    "output": "winner",
+}
+
+
+def _hpo_only_cfg_dict(phases: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+    """Словарь валидного конфига, усечённого до HPO-фаз.
+
+    Схема конфига (эпик #74) требует терминальный select последней фазой.
+    Юнит-тесты ``execute_phases`` добавляют терминальный select только для
+    прохождения валидации и затем усекают его (мутация после валидации
+    безопасна: ``execute_phases`` читает только ``general.phases``).
+    """
+    return _cfg_dict(phases=list(phases) + [TERMINAL_SELECT], **kwargs)
+
+
+def _hpo_only_cfg(phases: list[dict[str, Any]], **kwargs: Any) -> Config:
+    """Валидный ``Config``, усечённый до HPO-фаз (см. ``_hpo_only_cfg_dict``)."""
+    cfg = Config.model_validate(_hpo_only_cfg_dict(phases, **kwargs))
+    cfg.general.phases = cfg.general.phases[:-1]
+    return cfg
+
+
 def _cfg_dict(
     *,
     phases: list[dict[str, Any]],
@@ -113,9 +142,7 @@ def _cfg_dict(
 
 def _df(n_rows: int = 10, n_features: int = 2) -> pd.DataFrame:
     """Небольшой числовой DataFrame с колонкой 'target'."""
-    data: dict[str, Any] = {
-        f"f{i}": list(range(n_rows)) for i in range(n_features)
-    }
+    data: dict[str, Any] = {f"f{i}": list(range(n_rows)) for i in range(n_features)}
     data["target"] = [float(i % 3) for i in range(n_rows)]
     return pd.DataFrame(data)
 
@@ -150,7 +177,7 @@ def test_load_config_from_dict():
 
 def test_load_config_default_target_column():
     _, target_col = load_config(
-        _cfg_dict(phases=[{"name": "p", "n_trials": 1}]), _df()
+        _cfg_dict(phases=[{"name": "p", "n_trials": 1}, TERMINAL_SELECT]), _df()
     )
     assert target_col == "target"
 
@@ -159,7 +186,9 @@ def test_load_config_explicit_target_column():
     df = _df()
     df["my_target"] = df["target"]
     cfg, target_col = load_config(
-        _cfg_dict(phases=[{"name": "p", "n_trials": 1}]), df, target="my_target"
+        _cfg_dict(phases=[{"name": "p", "n_trials": 1}, TERMINAL_SELECT]),
+        df,
+        target="my_target",
     )
     assert isinstance(cfg, Config)
     assert target_col == "my_target"
@@ -167,7 +196,7 @@ def test_load_config_explicit_target_column():
 
 def test_load_config_accepts_config_object():
     cfg_obj = Config.model_validate(
-        _cfg_dict(phases=[{"name": "p", "n_trials": 1}])
+        _cfg_dict(phases=[{"name": "p", "n_trials": 1}, TERMINAL_SELECT])
     )
     cfg, target_col = load_config(cfg_obj, _df(), target="target")
     assert cfg is cfg_obj  # объект Config не пересоздаётся
@@ -238,9 +267,7 @@ def test_prepare_dataset_splits_x_y_and_metric_names():
 
 
 def test_prepare_dataset_resolves_metric_alias_rmse():
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[], comparison_metric="rmse")
-    )
+    cfg = Config.model_validate(_cfg_dict(phases=[], comparison_metric="rmse"))
     prepared = prepare_dataset(cfg, _df(), "target")
     assert prepared.metric_user == "rmse"
     assert prepared.metric_sklearn == "neg_root_mean_squared_error"
@@ -249,9 +276,7 @@ def test_prepare_dataset_resolves_metric_alias_rmse():
 def test_prepare_dataset_resolves_kfold_fold_count():
     # 100 строк, 3 признака, явная k_fold c n_folds=3
     cfg = Config.model_validate(
-        _cfg_dict(
-            phases=[], validation_strategy="k_fold", n_folds=3
-        )
+        _cfg_dict(phases=[], validation_strategy="k_fold", n_folds=3)
     )
     prepared = prepare_dataset(cfg, _df(n_rows=100, n_features=3), "target")
     assert prepared.resolved_validation == ValidationStrategy.k_fold
@@ -360,28 +385,115 @@ def test_execute_phases_select_cv_best_top_k_replaces_working_set():
     assert ctx.winner_algo == "random_forest"
 
 
-def test_execute_phases_refine_raises_not_implemented():
-    """refine-фаза в рантайме → NotImplementedError до реализации задачи R3."""
-    cfg = Config.model_validate(
-        _cfg_dict(
-            phases=[
-                {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
-                {"name": "fine", "n_trials": 1, "action": "refine"},
-            ],
-            algorithms=["random_forest"],
-        )
+def test_execute_phases_refine_uses_initial_params_for_all_candidates():
+    """refine после all_algorithms — «второй раунд для всех» (эпик #74, R3).
+
+    Каждый кандидат входного множества получает initial_params из СВОЕЙ
+    записи предыдущей фазы (warm-start, enqueue_trial), сужения нет: в
+    refine участвуют оба алгоритма, выход замещает рабочее множество.
+    """
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "fine", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest", "extra_trees"],
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
+    calls: list[tuple[str, Any]] = []
+
+    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+        algo = kw["algo_name"]
+        calls.append((algo, kw.get("initial_params")))
+        scores = {"random_forest": 0.9, "extra_trees": 0.8}
+        return scores[algo], {"p": 1}
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        ctx = execute_phases(cfg, prepared)
+
+    # Фаза 1: оба алгоритма без initial_params; фаза 2: оба алгоритма
+    # с параметрами фазы 1 (warm-start для всего входного множества).
+    assert calls == [
+        ("random_forest", None),
+        ("extra_trees", None),
+        ("random_forest", {"p": 1}),
+        ("extra_trees", {"p": 1}),
+    ]
+    # Те же имена, обновлённые записи: выход замещает рабочее множество.
+    assert set(ctx.working_set) == {"random_forest", "extra_trees"}
+    assert ctx.working_set["random_forest"] == (0.9, {"p": 1})
+    assert ctx.working_set["extra_trees"] == (0.8, {"p": 1})
+    assert ctx.disqualified_algorithms == {}
+
+
+def test_execute_phases_refine_after_select_warm_starts_from_select_output():
+    """refine после select-шага: warm-start от выхода select (эпик #74, R2+R3).
+
+    Вход refine — выход предыдущего select (top_k): initial_params берутся
+    из записей рабочего множества, сужения нет.
+    """
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {
+                "name": "top1",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "top_k",
+                "k": 1,
+            },
+            {"name": "fine", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest", "extra_trees"],
+    )
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+
+    calls: list[tuple[str, Any]] = []
+
+    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+        algo = kw["algo_name"]
+        calls.append((algo, kw.get("initial_params")))
+        scores = {"random_forest": 0.9, "extra_trees": 0.8}
+        return scores[algo], {"p": 1}
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        ctx = execute_phases(cfg, prepared)
+
+    # select(cv_best, top_k, k=1) оставил только CV-лидера; refine
+    # дообучает его с warm-start от параметров выхода select.
+    assert calls == [
+        ("random_forest", None),
+        ("extra_trees", None),
+        ("random_forest", {"p": 1}),
+    ]
+    assert set(ctx.working_set) == {"random_forest"}
+
+
+def test_execute_phases_refine_empty_working_set_raises():
+    """refine с пустым входным рабочим множеством → RuntimeError.
+
+    Как первая фаза refine получает полный набор включённых алгоритмов;
+    если включённых алгоритмов нет — рабочее множество пусто и фаза
+    завершается канонической RuntimeError (защита от молчаливого
+    «успешного» пустого результата, эпик #74).
+    """
+    cfg = _hpo_only_cfg(
+        [{"name": "fine", "n_trials": 1, "action": "refine"}],
+        algorithms=["random_forest"],
+    )
+    # Все алгоритмы выключены → входное множество refine пусто.
+    cfg.algorithms.random_forest.enable = False
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+
     with patch.object(component, "_run_hpo", return_value=(0.9, {})):
-        with pytest.raises(NotImplementedError, match="action 'refine'.*epic #74"):
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
 
 def test_execute_phases_empty_phases_returns_empty_context():
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[], terminal_select=False)
-    )
+    cfg = Config.model_validate(_cfg_dict(phases=[], terminal_select=False))
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
     ctx = execute_phases(cfg, prepared)
     assert ctx.working_set == {}
@@ -390,9 +502,7 @@ def test_execute_phases_empty_phases_returns_empty_context():
 
 
 def test_execute_phases_no_valid_scores_raises_runtime_error():
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}])
-    )
+    cfg = _hpo_only_cfg([{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}])
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
     # Все триалы неуспешны (best_score=None → _run_hpo возвращает None)
@@ -402,11 +512,9 @@ def test_execute_phases_no_valid_scores_raises_runtime_error():
 
 
 def test_execute_phases_filters_worst_score_sentinel():
-    cfg = Config.model_validate(
-        _cfg_dict(
-            phases=[{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
-            algorithms=["random_forest", "extra_trees"],
-        )
+    cfg = _hpo_only_cfg(
+        [{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
+        algorithms=["random_forest", "extra_trees"],
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
@@ -423,11 +531,9 @@ def test_execute_phases_filters_worst_score_sentinel():
 
 
 def test_execute_phases_disqualifies_invalid_algorithm():
-    cfg = Config.model_validate(
-        _cfg_dict(
-            phases=[{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
-            algorithms=["random_forest", "extra_trees"],
-        )
+    cfg = _hpo_only_cfg(
+        [{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
+        algorithms=["random_forest", "extra_trees"],
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
@@ -445,17 +551,13 @@ def test_execute_phases_disqualifies_invalid_algorithm():
 
 
 def test_execute_phases_all_invalid_algorithms_raise():
-    cfg = Config.model_validate(
-        _cfg_dict(
-            phases=[{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
-            algorithms=["random_forest", "extra_trees"],
-        )
+    cfg = _hpo_only_cfg(
+        [{"name": "coarse", "n_trials": 1, "action": "all_algorithms"}],
+        algorithms=["random_forest", "extra_trees"],
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(
-        component, "_run_hpo", side_effect=InvalidAlgorithmError("bad")
-    ):
+    with patch.object(component, "_run_hpo", side_effect=InvalidAlgorithmError("bad")):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -464,9 +566,7 @@ def test_execute_phases_all_invalid_algorithms_raise():
 # persist_artifact
 # ──────────────────────────────────────────────────────────────────────────────
 def test_persist_artifact_basic_result():
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[], algorithms=["random_forest"])
-    )
+    cfg = Config.model_validate(_cfg_dict(phases=[], algorithms=["random_forest"]))
     prepared = _prepared(metric_user="mae", metric_sklearn="mae")
     trainer_mock = MagicMock()
     trainer_mock.additional_scores = {"r2": 0.7}
@@ -536,9 +636,7 @@ def test_persist_artifact_model_path_override(tmp_path: Path):
 
 
 def test_persist_artifact_adds_disqualified_and_additional_metrics():
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[], additional_metrics=["r2"])
-    )
+    cfg = Config.model_validate(_cfg_dict(phases=[], additional_metrics=["r2"]))
     prepared = _prepared()
     trainer_mock = MagicMock()
     trainer_mock.additional_scores = {"r2": 0.75}
