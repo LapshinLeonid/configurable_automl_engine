@@ -318,11 +318,47 @@ def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> An
 class ModelSanityGate:
     """Audit a model for degeneracy through four optional circuits (epic #61).
 
-    Each circuit is optional and disabled with a ``check_*`` flag. Errors and
-    NaN are treated as a failure of the corresponding circuit with a clear
-    reason (except partial NaN in predictions — such pairs are masked, as in
-    ``metrics.oof_rmse``). Default thresholds are deliberately soft (v2
-    statement), so honest models on noisy/wide data are not disqualified.
+    Standalone auditor: it depends only on numpy, pandas and scikit-learn and
+    knows nothing about the rest of the engine. Each circuit is optional and
+    disabled with a ``check_*`` flag. Errors and NaN are treated as a failure
+    of the corresponding circuit with a clear reason (except partial NaN in
+    predictions — such pairs are masked, as in ``metrics.oof_rmse``). Default
+    thresholds are deliberately soft (v2 statement), so honest models on
+    noisy/wide data are not disqualified.
+
+    Attributes:
+        min_prediction_diversity: Circuit A threshold — ``Var(y_pred_oof) /
+            Var(y)`` (default 0.15, soft).
+        adaptive_diversity: Adaptive mode of circuit A relative to the
+            constant model: fails only for a zero prediction spread (the
+            absolute threshold is not applied).
+        min_unique_count: Absolute lower bound for nunique (circuit B).
+        min_unique_ratio: Lower bound for the share of unique predictions,
+            in (0, 1].
+        max_dead_feature_ratio: Dead-feature share threshold (circuit C);
+            above it — a soft signal, and combined with a circuit A failure
+            (when ``dead_features_require_low_diversity``) — a disqualification.
+        dead_features_require_low_diversity: Allow the combined
+            disqualification "many dead features AND low diversity".
+        zero_coef_tolerance: Coefficients with ``abs(coef) <=`` this value
+            count as zero (linear path of circuit C).
+        max_generalization_gap: Circuit D threshold — ``RMSE_oof / RMSE_full``
+            (default 1.5).
+        check_permutation_sensitivity: Enable the permutation sensitivity
+            audit of circuit C for nonlinear models (cost control).
+        permutation_max_rows: Row subsampling cap for the permutation path.
+        permutation_max_features: Cap on checked columns in the permutation
+            path.
+        permutation_repeats: Shuffle repeats per column.
+        permutation_seed: Fixed seed for permutation determinism.
+        permutation_tolerance: Relative "deadness" threshold of a feature in
+            the permutation path.
+        check_diversity: Enable circuit A.
+        check_unique: Enable circuit B.
+        check_dead_features: Enable circuit C.
+        check_generalization_gap: Enable circuit D.
+        warn_only: Mode without the right to disqualify (statistics are
+            computed, ``is_valid`` is always True).
     """
 
     def __init__(

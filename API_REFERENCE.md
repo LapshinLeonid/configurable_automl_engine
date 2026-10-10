@@ -95,7 +95,7 @@ Behavior by validation strategy:
 * `"mse"`
 * `"r2"`
 
-### Finalists pool Top-K (`select_finalists`, epic #61 / task T3)
+### Finalists pool Top-K (`select_finalists`)
 
 The engine replaces the "blind" first-place CV pick with a deterministic
 **finalists pool** used by the two-stage winner selection: candidates whose CV
@@ -145,10 +145,10 @@ Edge cases: an empty result set raises `RuntimeError`; fewer than `top_k` valid
 algorithms produce a pool of what is available; `top_k_candidates = 1` yields
 the single CV leader (equivalent to the current behavior). The pool function is
 standalone: `train_best_model` uses it only when the two-stage winner selection
-(task T4) is enabled (`general.sanity_gate.mode != "off"`); with the sanity
+is enabled (`general.sanity_gate.mode != "off"`); with the sanity
 gate off the behavior remains identical to the current single-winner selection.
 
-### Two-stage winner selection with Sanity Gate (`select_robust_winner`, epic #61 / task T4)
+### Two-stage winner selection with Sanity Gate (`select_robust_winner`)
 
 When `general.sanity_gate.mode != "off"`, `train_best_model` replaces the
 "blind" CV-first-place pick with a two-stage selection:
@@ -170,12 +170,11 @@ When `general.sanity_gate.mode != "off"`, `train_best_model` replaces the
    do NOT participate in the ranking (the v2 composite score
    `α·Score_CV + (1−α)·Score_full` was removed).
 
-Modes (`general.sanity_gate.mode`, task T5):
+Modes (`general.sanity_gate.mode`):
 
-* `"off"` (default) — old `select_winner` behavior: no pool, no audit, the
-  pipeline is byte-for-byte identical to the pre-T4 flow.
+* `"off"` (default) — old `select_winner` behavior: no pool, no audit.
 * `"warn_only"` — pool and audit run, the (hypothetical) disqualifications are
-  logged and reported (task T6), but the actual winner is still the CV leader
+  logged and reported, but the actual winner is still the CV leader
   (statistics collection before enabling the gate).
 * `"active"` — disqualifications are applied; the winner is the best `RMSE_oof`
   among the candidates that passed the audit.
@@ -193,18 +192,30 @@ If no finalist can be trained at all, a `RuntimeError` is raised.
 Result reporting: when the gate is enabled (`mode != "off"`) the returned dict
 gains a `sanity_gate` key with the mode, pool order, per-candidate audit
 results (reasons / soft warnings / circuit statistics), applied or hypothetical
-disqualifications, the fallback flag and the winner's `RMSE_oof` / `RMSE_full`
-(data for task T6). With `mode = "off"` the result is identical to the old
+disqualifications, the fallback flag and the winner's `RMSE_oof` / `RMSE_full`. 
+With `mode = "off"` the result is identical to the old
 single-stage selection.
 
-### Sanity Gate configuration (`sanity_gate`, epic #61 / task T5)
+#### Result keys
+
+The following keys are added to the `train_best_model` return value only when
+`general.sanity_gate.mode != "off"`; with `mode = "off"` the result is
+byte-for-byte identical to the legacy behavior:
+
+| Key | Mode | Structure |
+|-----|------|-----------|
+| `sanity_gate` | `warn_only`, `active` | Full audit report: `mode`, `pool` (ordered finalist names), `fallback_used`, `winner_rmse_oof`, `winner_rmse_full`, `failed_training` (finalists that could not be trained on the full dataset), `disqualified` (`{algo: [reasons]}`), and `audit` — per-candidate results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap`, `severity`. |
+| `disqualified_by_sanity_gate` | `active` only | Applied disqualifications `{algo: [reasons]}`. Present only when any candidate was disqualified. Kept in a separate key from `disqualified_algorithms` (circuit breaker) — the two sources are never mixed. |
+| `sanity_gate_warn_only` | `warn_only` only | Statistics for the pre-activation stage: `disqualified` — candidates that *would be* disqualified (`{algo: [reasons]}`), and `winner_if_active` — the winner that *would be* selected under `mode = "active"` (best `RMSE_oof` among the hypothetical survivors, or the fallback pick). |
+| `sanity_gate_overhead_seconds` | `warn_only`, `active` | Wall-clock overhead of the gate: finalist retraining on 100% of the data + the audit phase. |
+
+### Sanity Gate configuration (`sanity_gate`)
 
 The optional `general.sanity_gate` block exposes the whole Sanity Gate feature
-(epic #61, v2) through configuration — no code changes are needed to enable,
+through configuration — no code changes are needed to enable,
 tune or disable it. **Backward compatibility:** an absent block (or an empty
 `{}`) is equivalent to `mode: "off"` — the old single-stage `select_winner`
-behavior, byte-for-byte identical to the pre-T4 flow. The v1 `composite_alpha`
-field is **removed** — the composite score was abolished in v2.
+behavior. 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -212,7 +223,7 @@ field is **removed** — the composite score was abolished in v2.
 | `top_k_candidates` | `int` | `3` | Hard cap of the finalists pool size (≥ 1). Larger than the number of algorithms — allowed (pool of what is available). |
 | `corridor_delta` | `float` | `0.15` | Relative corridor width δ from the leader, strictly in `(0, 1)`. |
 | `corridor_mode` | `string` | `"auto"` | Corridor form: `"multiplicative"`, `"additive"` or `"auto"` (chosen by metric type; unknown metric — conservative additive form + warning). |
-| `enforce_family_diversity` | `bool` | `false` | Optional soft top-up of missing algorithm families into the pool (task T3). |
+| `enforce_family_diversity` | `bool` | `false` | Optional soft top-up of missing algorithm families into the pool. |
 | `algorithm_families` | `dict[str, str] \| null` | `null` | «algorithm → family» map for the family-diversity rule. |
 | `allowed_families` | `list[str] \| null` | `null` | Families participating in the top-up (`null` — all allowed). |
 | `family_diversity_multiplier` | `float` | `1.5` | Extended-corridor multiplier for the family top-up (> 0). |
@@ -257,6 +268,52 @@ Edge cases:
   plus a warning.
 * Absent `sanity_gate` block — old behavior; the v1 `enable` key is not
   introduced.
+
+Example:
+
+```yaml
+general:
+  comparison_metric: "r2"
+  validation_strategy: "k_fold"
+  n_folds: 5
+  phases:
+    - name: "search"
+      n_trials: 50
+      action: "all_algorithms"
+  sanity_gate:
+    mode: "warn_only"          # start here: collect statistics before going active
+    top_k_candidates: 3        # pool size cap
+    corridor_delta: 0.15       # relative corridor from the CV leader
+    min_prediction_diversity: 0.15
+    min_unique_count: 5
+    min_unique_ratio: 0.05
+    max_dead_feature_ratio: 0.4
+    max_generalization_gap: 1.5
+algorithms:
+  ridge:
+    enable: true
+    limit_hyperparameters: true
+  random_forest:
+    enable: true
+    limit_hyperparameters: true
+```
+
+Boundary behavior:
+
+* **OOF coverage with `train_test_split`** — the OOF vector covers only the
+  hold-out part (`oof_coverage_` < 1.0); train rows are `NaN` and masked, so
+  circuits A/B and the `RMSE_oof` ranking are computed on the hold-out subset
+  only. Prefer `k_fold` / `loo` for the most complete audit.
+* **Small N** — the unique-ratio circuit is governed by the absolute
+  `min_unique_count` bound; a constant target (`Var(y) == 0`) skips circuit A
+  with a soft warning and circuit B takes over.
+* **Correlated features** — the permutation path may report "false-dead"
+  features on correlated columns (the model borrows the information from a
+  neighbour column): a high dead-feature share produces a soft warning, never
+  a standalone disqualification.
+* **Permutation cost controls** — `permutation_max_rows` / `permutation_max_features`
+  bound the audit cost; `check_permutation_sensitivity: false` disables the
+  whole permutation path (the linear `coef_` path of circuit C remains).
 
 Migration note: the v2 statement (epic #61) tightened `corridor_delta` to the
 open interval `(0, 1)` — the previously allowed value `0` (degenerate corridor
@@ -424,7 +481,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics).
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). When `general.sanity_gate.mode != "off"`, the Sanity Gate result keys are added (`sanity_gate`, and `sanity_gate_overhead_seconds`; plus `disqualified_by_sanity_gate` in `"active"` mode or `sanity_gate_warn_only` in `"warn_only"` mode) — see [Result keys](#result-keys).
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
