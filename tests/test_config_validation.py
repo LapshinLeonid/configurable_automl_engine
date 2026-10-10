@@ -1922,15 +1922,15 @@ def test_select_without_strategy_and_output_rejected():
         HPOPhaseCfg(n_trials=1, action="select")
 
 
-# ─────────── Runtime: select/refine execution (эпик #74, WIP) ───────────
+# ─────────── Runtime: select/refine execution (эпик #74) ───────────
 
 
-def test_select_and_refine_phases_raise_not_implemented():
-    """Исполнение select/refine-фаз ещё не реализовано (эпик #74, R2/R3):
-    валидный конфиг с такими фазами падает в рантайме с явным
+def test_refine_phase_raises_not_implemented():
+    """Исполнение refine-фаз ещё не реализовано (эпик #74, задача R3):
+    валидный конфиг с такой фазой падает в рантайме с явным
     ``NotImplementedError`` (со ссылкой на эпик) вместо молчаливого
-    неверного исполнения select-фазы как фазы all_algorithms. После
-    реализации R2/R3 тест заменяется проверкой реального поведения.
+    неверного исполнения. После реализации R3 тест заменяется проверкой
+    реального поведения.
     """
     import numpy as np
     import pandas as pd
@@ -1940,15 +1940,27 @@ def test_select_and_refine_phases_raise_not_implemented():
     df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
     df["target"] = 2.0 * df["a"] + rng.randn(30) * 0.1
 
-    cfg_select = _cfg_with_phases(_phase(), TERMINAL_SELECT)
-    with pytest.raises(NotImplementedError, match="not implemented yet.*epic #74"):
-        train_best_model(cfg_select, df, target="target")
-
     cfg_refine = _cfg_with_phases(
         _phase(), _phase(action="refine", n_trials=1), TERMINAL_SELECT
     )
     with pytest.raises(NotImplementedError, match="action 'refine'.*epic #74"):
         train_best_model(cfg_refine, df, target="target")
+
+
+def test_select_phase_executes_in_pipeline():
+    """Исполнение select-фаз реализовано (эпик #74, задача R2): терминальный
+    select(cv_best, winner) отрабатывает и возвращает артефакт."""
+    import numpy as np
+    import pandas as pd
+    from configurable_automl_engine.training_engine.component import train_best_model
+
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
+    df["target"] = 2.0 * df["a"] + rng.randn(30) * 0.1
+
+    res = train_best_model(_cfg_with_phases(_phase(), TERMINAL_SELECT), df, target="target")
+    assert res["algorithm"] in BASE["algorithms"]
+    assert "sanity_gate" not in res
 
 
 # ─────────── M1/M2 (ревью PR !43): граничные комбинации фаз ───────────

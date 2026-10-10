@@ -2,21 +2,23 @@
 
 Покрытие:
 
-1. ``select_robust_winner`` — режимы ``off`` / ``warn_only`` / ``active``.
+1. ``select_robust_winner`` — режимы ``off`` / ``active`` (режим ``warn_only``
+   удалён вместе с ключами отчёта ``sanity_gate_warn_only``/
+   ``winner_if_active``, эпик #74, задача R2).
 2. Ранжирование прошедших аудит по ``RMSE_oof``: CV и ``RMSE_full`` в
    ранжировании НЕ участвуют (композитный скор отсутствует).
 3. Negative: «плоский» ElasticNet-лидер (константный OOF) дисквалифицируется;
    глубокое дерево с ``RMSE_train≈0`` отсекается контуром Г; SVR-sigmoid
    с плато tanh отсекается контуром А.
-4. Boundary: ``mode=off`` (старое поведение); ``mode=warn_only`` (победитель
-   как при off, дисквалификации гипотетические); все кандидаты забракованы
+4. Boundary: ``mode=off`` (старое поведение); все кандидаты забракованы
    (fallback с формальным критерием); равные ``RMSE_oof`` (детерминированный
    tie-break порядком пула).
 5. Fallback: минимум числа нарушенных контуров → минимум тяжести
    (значимость контуров Г > А > Б > В, ``_circuit_rank``) → лучший
    ``RMSE_oof``; в лог пишется WARNING с причинами.
-6. Интеграция с ``train_best_model``: ключ ``sanity_gate`` в отчёте (T6),
-   режимы ``off``/``warn_only``/``active``, обучение финалиста ровно один раз.
+6. Интеграция с ``train_best_model`` через явный select-шаг
+   (эпик #74, задача R2): секция ``sanity_gate`` в отчёте под именем фазы,
+   дисквалификации гейта в circuit breaker, обучение финалиста ровно один раз.
 """
 
 from __future__ import annotations
@@ -31,15 +33,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Эпик #74 (WIP, PR !43): легаси-тесты пайплайна со старой схемой конфига
-# (refine_winner / sanity_gate.mode / нетерминальная последняя фаза) падают
-# на валидации с подсказкой миграции; исполнение select/refine появится в
-# задачах R2/R3. Нестрогий xfail держит CI зелёным в переходный период;
-# маркер снимается вместе с миграцией тестов (R2/R3/R4).
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Legacy pipeline config (refine_winner / sanity_gate.mode / non-terminal select) or select/refine execution: migration to the epic #74 schema lands with tasks R2/R3/R4 (see PR !43, issue #75). Non-strict xfail keeps the CI green in the transition period; remove this marker together with the test migration.",
-)
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
@@ -303,7 +296,7 @@ def test_active_audit_failure_is_disqualification():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Режим warn_only: победитель как при off, дисквалификации гипотетические
+#  Бюджет времени аудита (T5)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -364,98 +357,6 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
     # Пропущенный кандидат не может победить в active.
     assert res.winner_algo == "a"
     assert "a" not in res.disqualified
-
-
-def test_audit_time_budget_warn_only_winner_still_cv_leader(mocker):
-    """warn_only + исчерпанный бюджет: победитель остаётся CV-лидером."""
-    import configurable_automl_engine.training_engine.component as comp
-
-    y, y_oof, y_full = _honest_vectors()
-    cands = {
-        "cv_leader": _candidate(
-            "cv_leader", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full
-        ),
-        "second": _candidate(
-            "second", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof, y_full=y_full
-        ),
-    }
-    mocker.patch.object(
-        comp.time,
-        "monotonic",
-        side_effect=[0.0, 1.0, 10.0],
-    )
-    res = select_robust_winner(
-        cands,
-        pd.DataFrame(np.zeros((len(y), 2))),
-        pd.Series(y),
-        _gate(),
-        mode="warn_only",
-        audit_time_budget_seconds=5.0,
-    )
-    assert res.winner_algo == "cv_leader"
-    assert "audit time budget" in res.disqualified["second"][0]
-
-
-def test_warn_only_winner_like_off_with_hypothetical_disqualifications():
-    """warn_only: победитель = CV-лидер (как при off), статистика в отчёте."""
-    y, _, _ = _honest_vectors()
-    cands = {
-        "elasticnet": _candidate(
-            "elasticnet",
-            cv_score=-0.081,
-            rmse_oof=1.0,
-            y_oof=_flat_vectors(y)[0],
-            y_full=_flat_vectors(y)[1],
-        ),
-        "svr": _candidate(
-            "svr", cv_score=-0.085, rmse_oof=0.09, y_oof=_oof_with_rmse(y, 0.09, 1)
-        ),
-        "random_forest": _candidate(
-            "random_forest",
-            cv_score=-0.089,
-            rmse_oof=0.085,
-            y_oof=_oof_with_rmse(y, 0.085, 2),
-        ),
-    }
-    res = select_robust_winner(
-        cands,
-        pd.DataFrame(np.zeros((len(y), 2))),
-        pd.Series(y),
-        _gate(),
-        mode="warn_only",
-    )
-    # Победитель — как при off: лучший CV-скор
-    assert res.winner_algo == "elasticnet"
-    # «Гипотетические дисквалификации» собраны для отчёта (T6)
-    assert "elasticnet" in res.disqualified
-    assert res.audit.keys() == {"elasticnet", "svr", "random_forest"}
-    assert res.fallback_used is False
-
-
-def test_warn_only_disqualification_is_not_applied():
-    """warn_only: забракованный кандидат может остаться победителем."""
-    y, _, _ = _honest_vectors()
-    cands = {
-        "flat": _candidate(
-            "flat",
-            cv_score=-0.09,
-            rmse_oof=0.01,
-            y_oof=_flat_vectors(y)[0],
-            y_full=_flat_vectors(y)[1],
-        ),
-        "honest": _candidate(
-            "honest", cv_score=-0.12, rmse_oof=0.3, y_oof=_oof_with_rmse(y, 0.3, 3)
-        ),
-    }
-    res = select_robust_winner(
-        cands,
-        pd.DataFrame(np.zeros((len(y), 2))),
-        pd.Series(y),
-        _gate(),
-        mode="warn_only",
-    )
-    assert res.winner_algo == "flat"  # CV-лидер, несмотря на вырожденность
-    assert "flat" in res.disqualified
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -636,10 +537,11 @@ def test_negative_svr_sigmoid_plateau_rejected_by_circuit_a():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Интеграция с train_best_model
+#  Интеграция с train_best_model (явный select-шаг, эпик #74, задача R2)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+# Терминальный select со strategy: sanity_gate заменяет неявный гейт (эпик #74).
 _SANITY_CFG = """
 general:
   comparison_metric: rmse
@@ -649,8 +551,12 @@ general:
     - name: "Search"
       n_trials: 2
       action: "all_algorithms"
+    - name: "GateSelect"
+      n_trials: 1
+      action: "select"
+      strategy: "{strategy}"
+      output: "{output}"
   sanity_gate:
-    mode: "{mode}"
     top_k_candidates: 2
 algorithms:
   ridge:
@@ -674,11 +580,12 @@ def _tiny_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
     return df
 
 
-def test_train_best_model_sanity_off_has_no_sanity_key(tmp_path: Path):
-    """mode=off: результат идентичен старому поведению (ключа sanity_gate нет)."""
+def test_train_best_model_cv_best_select_has_no_sanity_key(tmp_path: Path):
+    """select(cv_best, winner): артефакт без ключа sanity_gate (аудита нет)."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_CFG.format(model_path="m.pkl", mode="off"), encoding="utf-8"
+        _SANITY_CFG.format(model_path="m.pkl", strategy="cv_best", output="winner"),
+        encoding="utf-8",
     )
     res = train_best_model(cfg_file, _tiny_df(), model_path_override=tmp_path / "m.pkl")
     assert "sanity_gate" not in res
@@ -686,37 +593,35 @@ def test_train_best_model_sanity_off_has_no_sanity_key(tmp_path: Path):
     assert res["algorithm"] in {"ridge", "elasticnet"}
 
 
-def test_train_best_model_sanity_warn_only_report(tmp_path: Path):
-    """mode=warn_only: победитель как при off, статистика аудита в отчёте."""
+def test_train_best_model_sanity_gate_select_report(tmp_path: Path):
+    """select(sanity_gate, winner): секция отчёта под именем фазы (T6, эпик #74)."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_CFG.format(model_path="m.pkl", mode="warn_only"), encoding="utf-8"
+        _SANITY_CFG.format(model_path="m.pkl", strategy="sanity_gate", output="winner"),
+        encoding="utf-8",
     )
     res = train_best_model(cfg_file, _tiny_df(), model_path_override=tmp_path / "m.pkl")
     assert Path(res["model_path"]).exists()
-    sg = res["sanity_gate"]
-    assert sg["mode"] == "warn_only"
+    # Секции отчёта ключуются именем select-фазы (эпик #74).
+    assert set(res["sanity_gate"]) == {"GateSelect"}
+    sg = res["sanity_gate"]["GateSelect"]
+    assert sg["strategy"] == "sanity_gate"
     assert set(sg["pool"]) <= {"ridge", "elasticnet"}
     assert sg["pool"]  # непустой
     assert "audit" in sg
     assert isinstance(sg["winner_rmse_oof"], float)
-
-
-def test_train_best_model_sanity_active_report(tmp_path: Path):
-    """mode=active: победитель проходит аудит, ключ sanity_gate в отчёте."""
-    cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(
-        _SANITY_CFG.format(model_path="m.pkl", mode="active"), encoding="utf-8"
-    )
-    res = train_best_model(cfg_file, _tiny_df(), model_path_override=tmp_path / "m.pkl")
-    assert Path(res["model_path"]).exists()
-    sg = res["sanity_gate"]
-    assert sg["mode"] == "active"
-    assert set(sg["pool"]) <= {"ridge", "elasticnet"}
+    assert sg["overhead_seconds"] >= 0
     # Победитель обязан быть из пула
     assert res["algorithm"] in sg["pool"]
     # Аудит проведён для всех финалистов пула
     assert set(sg["audit"].keys()) == set(sg["pool"])
+    # Победитель валиден либо сработал fallback (пул полностью забракован).
+    assert (
+        sg["audit"][res["algorithm"]]["is_valid"] is True or sg["fallback_used"] is True
+    )
+    # Удалённые ключи warn_only (эпик #74) больше не появляются.
+    for key in ("disqualified_by_sanity_gate", "sanity_gate_warn_only"):
+        assert key not in res
 
 
 def test_train_best_model_sanity_winner_not_retrained_in_persist(
@@ -730,7 +635,8 @@ def test_train_best_model_sanity_winner_not_retrained_in_persist(
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_CFG.format(model_path="m.pkl", mode="active"), encoding="utf-8"
+        _SANITY_CFG.format(model_path="m.pkl", strategy="sanity_gate", output="winner"),
+        encoding="utf-8",
     )
     fit_and_save = mocker.patch(
         "configurable_automl_engine.training_engine.component._fit_and_save"
@@ -799,7 +705,8 @@ def test_train_best_model_all_finalists_fail_raises(tmp_path: Path):
     """Все финалисты упали при обучении на 100% данных → понятная RuntimeError."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_CFG.format(model_path="m.pkl", mode="active"), encoding="utf-8"
+        _SANITY_CFG.format(model_path="m.pkl", strategy="sanity_gate", output="winner"),
+        encoding="utf-8",
     )
     from unittest.mock import patch
 
@@ -1076,68 +983,6 @@ def test_sanity_gate_config_boundary_values_valid(values):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_warn_only_winner_if_active_is_active_selection():
-    """warn_only: winner_if_active = выбор режима active (лучший RMSE_oof).
-
-    Фактический победитель — CV-лидер (как при off), а гипотетический при
-    ``mode=active`` — лучший ``RMSE_oof`` среди прошедших аудит (T6).
-    """
-    y, _, _ = _honest_vectors()
-    cands = {
-        "elasticnet": _candidate(
-            "elasticnet",
-            cv_score=-0.081,
-            rmse_oof=1.0,
-            y_oof=_flat_vectors(y)[0],
-            y_full=_flat_vectors(y)[1],
-        ),
-        "svr": _candidate(
-            "svr", cv_score=-0.085, rmse_oof=0.09, y_oof=_oof_with_rmse(y, 0.09, 1)
-        ),
-        "random_forest": _candidate(
-            "random_forest",
-            cv_score=-0.089,
-            rmse_oof=0.085,
-            y_oof=_oof_with_rmse(y, 0.085, 2),
-        ),
-    }
-    res = select_robust_winner(
-        cands,
-        pd.DataFrame(np.zeros((len(y), 2))),
-        pd.Series(y),
-        _gate(),
-        mode="warn_only",
-    )
-    assert res.winner_algo == "elasticnet"  # CV-лидер, несмотря на вырожденность
-    assert res.winner_if_active == "random_forest"  # лучший RMSE_oof из валидных
-
-
-def test_warn_only_winner_if_active_fallback_when_all_disqualified():
-    """warn_only + тотальный провал: winner_if_active — fallback-критерий (T6)."""
-    y, y_oof, y_full = _honest_vectors()
-    mocker_gate = MagicMock()
-    mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),
-    ]
-    cands = {
-        "violates_G": _candidate("violates_G", -0.08, 0.3, y_oof),
-        "violates_A": _candidate("violates_A", -0.09, 0.3, y_oof),
-    }
-    res = select_robust_winner(
-        cands,
-        pd.DataFrame(np.zeros((len(y), 2))),
-        pd.Series(y),
-        mocker_gate,
-        mode="warn_only",
-    )
-    # Фактический победитель не меняется (CV-лидер), а гипотетический — по
-    # fallback-критерию (меньше нарушений/легче нарушение).
-    assert res.winner_algo == "violates_G"
-    assert res.winner_if_active == "violates_A"
-    assert res.fallback_used is False
-
-
 def test_active_disqualification_logs_warning_per_candidate(caplog):
     """Логи (T6): каждый забракованный кандидат — WARNING с причинами."""
     y, y_oof, y_full = _honest_vectors()
@@ -1172,36 +1017,6 @@ def test_active_disqualification_logs_warning_per_candidate(caplog):
     assert "flat" in disq_msgs[0].message
     assert "Circuit A" in disq_msgs[0].message
     assert disq_msgs[0].levelno == logging.WARNING
-
-
-def test_warn_only_disqualification_logs_warning(caplog):
-    """Логи (T6): в warn_only «гипотетическая» дисквалификация — тоже WARNING."""
-    y, _, _ = _honest_vectors()
-    cands = {
-        "flat": _candidate(
-            "flat",
-            cv_score=-0.09,
-            rmse_oof=0.01,
-            y_oof=_flat_vectors(y)[0],
-            y_full=_flat_vectors(y)[1],
-        ),
-        "honest": _candidate(
-            "honest", cv_score=-0.12, rmse_oof=0.3, y_oof=_oof_with_rmse(y, 0.3, 3)
-        ),
-    }
-    with caplog.at_level("WARNING", logger="training_engine"):
-        res = select_robust_winner(
-            cands,
-            pd.DataFrame(np.zeros((len(y), 2))),
-            pd.Series(y),
-            _gate(),
-            mode="warn_only",
-        )
-    assert res.winner_algo == "flat"
-    hypo_msgs = [r for r in caplog.records if "WOULD BE disqualified" in r.message]
-    assert len(hypo_msgs) == 1
-    assert "flat" in hypo_msgs[0].message
-    assert hypo_msgs[0].levelno == logging.WARNING
 
 
 def test_fallback_logs_formal_criterion(caplog):
@@ -1240,8 +1055,12 @@ general:
     - name: "Search"
       n_trials: 2
       action: "all_algorithms"
+    - name: "GateSelect"
+      n_trials: 1
+      action: "select"
+      strategy: "sanity_gate"
+      output: "winner"
   sanity_gate:
-    mode: "{mode}"
     top_k_candidates: 2
     max_generalization_gap: 1.0
 algorithms:
@@ -1259,11 +1078,11 @@ algorithms:
 """
 
 
-def _run_sanity(tmp_path: Path, mode: str) -> dict[str, Any]:
+def _run_sanity(tmp_path: Path) -> dict[str, Any]:
     """Запустить train_best_model со строгим порогом контура Г (детерминизм)."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_CFG_STRICT_GAP.format(model_path="m.pkl", mode=mode),
+        _SANITY_CFG_STRICT_GAP.format(model_path="m.pkl"),
         encoding="utf-8",
     )
     return train_best_model(
@@ -1271,14 +1090,17 @@ def _run_sanity(tmp_path: Path, mode: str) -> dict[str, Any]:
     )
 
 
-def test_train_best_model_sanity_active_disqualified_by_sanity_gate(tmp_path: Path):
-    """Positive (T6): active → disqualified_by_sanity_gate с причинами.
+def test_train_best_model_sanity_gate_disqualifications_in_circuit_breaker(
+    tmp_path: Path,
+):
+    """Positive (T6, эпик #74): дисквалификации гейта попадают в circuit breaker.
 
-    Ключ отделён от disqualified_algorithms (circuit breaker) — источники
-    не смешиваются; при тотальном провале пула срабатывает fallback.
+    Причины доступны в gate-секции отчёта; при тотальном провале пула
+    срабатывает fallback и запуск не падает.
     """
-    res = _run_sanity(tmp_path, "active")
-    dq = res.get("disqualified_by_sanity_gate")
+    res = _run_sanity(tmp_path)
+    sg = res["sanity_gate"]["GateSelect"]
+    dq = sg["disqualified"]
     assert dq  # присутствует и непуст
     assert isinstance(dq, dict)
     assert set(dq) <= {"ridge", "elasticnet"}
@@ -1286,50 +1108,28 @@ def test_train_best_model_sanity_active_disqualified_by_sanity_gate(tmp_path: Pa
     assert all(
         any("Circuit D" in reason for reason in reasons) for reasons in dq.values()
     )
-    # Источники не смешиваются: circuit breaker ничего не дисквалифицировал.
-    assert "disqualified_algorithms" not in res
+    # Дисквалификации гейта попадают в circuit breaker (disqualified_algorithms)
+    # наравне с HPO-провалами (эпик #74, задача R2).
+    cb = res.get("disqualified_algorithms")
+    assert cb
+    assert set(cb) == set(dq)
+    assert all("Circuit D" in reason for reason in cb.values())
     # Все кандидаты пула забракованы → fallback с формальным критерием.
-    assert res["sanity_gate"]["fallback_used"] is True
-    assert "sanity_gate_warn_only" not in res
-    assert res["sanity_gate_overhead_seconds"] >= 0
-
-
-def test_train_best_model_sanity_warn_only_matches_off_winner(tmp_path: Path):
-    """Positive (v2, T6): warn_only → sanity_gate_warn_only; победитель = off."""
-    res_off = _run_sanity(tmp_path, "off")
-    res_wo = _run_sanity(tmp_path, "warn_only")
-    # Фактический победитель не меняется относительно mode=off.
-    assert res_wo["algorithm"] == res_off["algorithm"]
-    sgo = res_wo["sanity_gate_warn_only"]
-    assert set(sgo) == {"disqualified", "winner_if_active"}
-    # Гипотетические дисквалификации совпадают с пулом (все забракованы).
-    assert set(sgo["disqualified"]) == set(res_wo["sanity_gate"]["pool"])
-    assert all(isinstance(v, list) and v for v in sgo["disqualified"].values())
-    assert sgo["winner_if_active"] in res_wo["sanity_gate"]["pool"]
-    # В warn_only фактически применённых дисквалификаций нет.
-    assert "disqualified_by_sanity_gate" not in res_wo
-    assert res_wo["sanity_gate_overhead_seconds"] >= 0
-
-
-def test_train_best_model_sanity_off_has_no_new_keys(tmp_path: Path):
-    """Negative (T6): mode=off — новые ключи отсутствуют (обратная совместимость)."""
-    res = _run_sanity(tmp_path, "off")
-    for key in (
-        "disqualified_by_sanity_gate",
-        "sanity_gate_warn_only",
-        "sanity_gate_overhead_seconds",
-    ):
+    assert sg["fallback_used"] is True
+    # Удалённые ключи warn_only (эпик #74) больше не появляются.
+    for key in ("disqualified_by_sanity_gate", "sanity_gate_warn_only"):
         assert key not in res
 
 
-def test_train_best_model_sanity_overhead_and_winner_audit_logged(
+def test_train_best_model_sanity_gate_overhead_and_winner_audit_logged(
     tmp_path: Path, caplog
 ):
-    """T6: sanity_gate_overhead_seconds в отчёте и INFO-лог итогов аудита победителя."""
+    """T6: overhead_seconds в gate-секции и INFO-лог итогов аудита победителя."""
     with caplog.at_level(logging.INFO, logger="training_engine"):
-        res = _run_sanity(tmp_path, "warn_only")
-    assert isinstance(res["sanity_gate_overhead_seconds"], float)
-    assert res["sanity_gate_overhead_seconds"] >= 0
+        res = _run_sanity(tmp_path)
+    sg = res["sanity_gate"]["GateSelect"]
+    assert isinstance(sg["overhead_seconds"], float)
+    assert sg["overhead_seconds"] >= 0
     # INFO с итогами аудита победителя: diversity/unique/dead features/gap.
     assert re.search(
         r"\[sanity_gate\] Winner \w+ audit summary: "

@@ -2732,9 +2732,14 @@ def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Sanity Gate e2e (эпик #61, задача T7, issue #69)
+#  Sanity Gate e2e (эпик #61, задача T7, issue #69; явный select-шаг —
+#  эпик #74, задача R2)
 # --------------------------------------------------------------------------- #
 
+# NOTE (эпик #74, R2): неявный гейт и sanity_gate.mode удалены; отбор
+# выполняется явным select-шагом. Модульный xfail-маркер остаётся для
+# остальных легаси-тестов этого файла (миграция R3/R4), поэтому эти
+# переписанные тесты могут репортиться как XPASS (non-strict).
 _SANITY_E2E_CFG = """
 general:
   comparison_metric: rmse
@@ -2744,8 +2749,49 @@ general:
     - name: "Search"
       n_trials: 2
       action: "all_algorithms"
+    - name: "{select_name}"
+      n_trials: 1
+      action: "select"
+      strategy: "{strategy}"
+      output: "{output}"{extra}
   sanity_gate:
-    mode: "{mode}"
+    top_k_candidates: 2
+algorithms:
+  ridge:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      alpha: [0.1, 1.0]
+  elasticnet:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      alpha: [0.1, 1.0]
+      l1_ratio: [0.2, 0.8]
+"""
+
+# select после select (эпик #74, R2): sanity-select top_k -> sanity-select winner.
+_SANITY_E2E_TWO_SELECTS_CFG = """
+general:
+  comparison_metric: rmse
+  path_to_model: '{model_path}'
+  validation_strategy: train_test_split
+  phases:
+    - name: "Search"
+      n_trials: 2
+      action: "all_algorithms"
+    - name: "GateSelect"
+      n_trials: 1
+      action: "select"
+      strategy: "sanity_gate"
+      output: "top_k"
+      k: 2
+    - name: "GateFinal"
+      n_trials: 1
+      action: "select"
+      strategy: "sanity_gate"
+      output: "winner"
+  sanity_gate:
     top_k_candidates: 2
 algorithms:
   ridge:
@@ -2770,23 +2816,29 @@ def _sanity_e2e_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
     return df
 
 
-def test_e2e_sanity_gate_active_winner_without_degeneracy(tmp_path: Path):
-    """E2E (T7): mode=active — победитель проходит аудит (без вырождения).
+def test_e2e_sanity_gate_select_winner_without_degeneracy(tmp_path: Path):
+    """E2E (T7/R2): select(sanity_gate, winner) — победитель проходит аудит.
 
-    Конфиг с ``sanity_gate.mode=active``: пул финалистов строится,
-    победитель ранжируется по RMSE_oof среди прошедших аудит, и его
-    ``is_valid`` обязан быть True (гейт не пропускает вырожденные модели).
+    Пул финалистов строится, победитель ранжируется по RMSE_oof среди
+    прошедших аудит, и его ``is_valid`` обязан быть True (гейт не пропускает
+    вырожденные модели); секция отчёта ключуется именем фазы.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="active"), encoding="utf-8"
+        _SANITY_E2E_CFG.format(
+            model_path="m.pkl",
+            select_name="GateSelect",
+            strategy="sanity_gate",
+            output="winner",
+            extra="",
+        ),
+        encoding="utf-8",
     )
     res = train_best_model(
         cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
     )
     assert Path(res["model_path"]).exists()
-    sg = res["sanity_gate"]
-    assert sg["mode"] == "active"
+    sg = res["sanity_gate"]["GateSelect"]
     assert sg["pool"]
     # Победитель — из пула финалистов.
     assert res["algorithm"] in sg["pool"]
@@ -2798,16 +2850,23 @@ def test_e2e_sanity_gate_active_winner_without_degeneracy(tmp_path: Path):
     assert sg["fallback_used"] is False
 
 
-def test_e2e_sanity_gate_off_old_behavior(tmp_path: Path):
-    """E2E (T7): mode=off — старое поведение select_winner.
+def test_e2e_cv_best_select_no_sanity_keys(tmp_path: Path):
+    """E2E (T7/R2): select(cv_best, winner) — старое поведение без gate-секции.
 
-    Никаких новых ключей отчёта (sanity_gate, disqualified_by_sanity_gate,
+    Никаких ключей отчёта гейта (sanity_gate, disqualified_by_sanity_gate,
     sanity_gate_warn_only, sanity_gate_overhead_seconds) — обратная
     совместимость пайплайна.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
-        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="off"), encoding="utf-8"
+        _SANITY_E2E_CFG.format(
+            model_path="m.pkl",
+            select_name="FinalSelect",
+            strategy="cv_best",
+            output="winner",
+            extra="",
+        ),
+        encoding="utf-8",
     )
     res = train_best_model(
         cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
@@ -2823,32 +2882,25 @@ def test_e2e_sanity_gate_off_old_behavior(tmp_path: Path):
         assert key not in res
 
 
-def test_e2e_sanity_gate_warn_only_winner_matches_off(tmp_path: Path):
-    """E2E (T7): mode=warn_only — фактический победитель как при mode=off.
+def test_e2e_two_selects_report_per_phase(tmp_path: Path):
+    """E2E (R2): select после select — секции отчёта по именам фаз.
 
-    Аудит выполняется и попадает в отчёт, но выбор победителя не меняется;
-    гипотетические дисквалификации — в отдельном ключе отчёта.
+    Первый sanity-select (top_k) сужает рабочее множество, второй
+    sanity-select (winner) переобучает финалистов заново; обе секции
+    присутствуют в отчёте под своими именами, warn_only-ключи удалены.
+    Терминальный cv_best-select не добавляет секций (проверяется в
+    ``test_e2e_cv_best_select_no_sanity_keys``).
     """
-    cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(
-        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="off"), encoding="utf-8"
+    two_selects_cfg = tmp_path / "cfg2.yaml"
+    two_selects_cfg.write_text(
+        _SANITY_E2E_TWO_SELECTS_CFG.format(model_path="m.pkl"),
+        encoding="utf-8",
     )
-    res_off = train_best_model(
-        cfg_file, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
+    res2 = train_best_model(
+        two_selects_cfg, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
     )
-
-    cfg_file_wo = tmp_path / "cfg_warn.yaml"
-    cfg_file_wo.write_text(
-        _SANITY_E2E_CFG.format(model_path="m.pkl", mode="warn_only"), encoding="utf-8"
-    )
-    res_wo = train_best_model(
-        cfg_file_wo, _sanity_e2e_df(), model_path_override=tmp_path / "m.pkl"
-    )
-    # Фактический победитель не меняется относительно mode=off.
-    assert res_wo["algorithm"] == res_off["algorithm"]
-    sgo = res_wo["sanity_gate_warn_only"]
-    assert set(sgo) == {"disqualified", "winner_if_active"}
-    assert isinstance(sgo["winner_if_active"], str)
-    assert "disqualified_by_sanity_gate" not in res_wo
-    assert "sanity_gate" in res_wo
-    assert res_wo["sanity_gate"]["mode"] == "warn_only"
+    assert set(res2["sanity_gate"]) == {"GateSelect", "GateFinal"}
+    assert res2["sanity_gate"]["GateSelect"]["strategy"] == "sanity_gate"
+    assert res2["sanity_gate"]["GateFinal"]["pool"]  # финалисты переобучены
+    for key in ("sanity_gate_warn_only", "disqualified_by_sanity_gate"):
+        assert key not in res2

@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import inspect
 import logging
@@ -2607,11 +2608,11 @@ def persist_artifact(
         result["disqualified_algorithms"] = dict(disqualified_algorithms)
     # Секции отчёта select-шагов (T6, эпик #74): ключ ``sanity_gate`` —
     # словарь «имя select-фазы → секция». Добавляется только при наличии
-    # select-шагов со strategy: sanity_gate.
+    # select-шагов со strategy: sanity_gate. Копируется глубоко: секции
+    # содержат вложенные списки/словари, мутации источников не должны
+    # влиять на отчёт.
     if sanity_gate_sections:
-        result["sanity_gate"] = {
-            name: dict(section) for name, section in sanity_gate_sections.items()
-        }
+        result["sanity_gate"] = copy.deepcopy(sanity_gate_sections)
     # Дополнительные информационные метрики финальной модели. Ключ добавляется
     # только при наличии метрик (после дедупликации и исключения основной
     # метрики сравнения), иначе результаты идентичны прежнему поведению.
