@@ -5,9 +5,10 @@ AutoML Config Engine: Валидация и парсинг иерархичес�
 эксперимента, стратегий валидации и пространств поиска гиперпараметров
 перед запуском пайплайна AutoML.
 Ключевые возможности:
-    1. Multi-Stage HPO Pipeline: Конфигурирование последовательных фаз
-       оптимизации (Hyperparameter Optimization) с поддержкой различных
-       действий: от глобального поиска до уточнения параметров победителя.
+    1. Multi-Stage Pipeline: Конфигурирование последовательности шагов
+       (фазы HPO 'all_algorithms' / 'refine' и явные шаги отбора 'select'
+       со стратегиями cv_best / sanity_gate) с кросс-валидацией фаз
+       (эпик #74).
     2. Intelligent Validation Logic: Автоматическая проверка согласованности
        настроек, включая контроль количества фолдов для k-fold стратегии
        и валидацию границ числовых диапазонов.
@@ -39,6 +40,13 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
+
+# Стабильные коды ошибок миграции (эпик #74): тесты могут завязываться на
+# ``error['type']`` из ValidationError вместо текста подсказки, который
+# может меняться.
+ERR_REMOVED_REFINE_WINNER = "removed_refine_winner_action"
+ERR_REMOVED_SANITY_GATE_MODE = "removed_sanity_gate_mode"
 
 from configurable_automl_engine.common.definitions import (
     ALGO_PACKAGE_MAPPING,
@@ -72,22 +80,44 @@ __all__ = [
     "FeatureSelectionCfg",
     "FeatureSelectionMethod",
     "FeatureSelectionMode",
+    "HPOPhaseAction",
+    "HPOPhaseCfg",
     "SanityGateCfg",
-    "SanityGateMode",
+    "SelectOutput",
+    "SelectStrategy",
     "ValidationStrategy",
     "read_config",
 ]
 
-#: Режим работы Sanity Gate при выборе победителя (эпик #61, T4/T5):
-#: 'off' — старое поведение ``select_winner`` (без пула и аудита);
-#: 'warn_only' — пул и аудит выполняются, дисквалификации гипотетические;
-#: 'active' — дисквалификации применяются, победитель = лучший RMSE_oof.
+#: Режим robust-выбора победителя ``select_robust_winner`` (эпик #61, T4/T5),
+#: переиспользуемый select-шагами пайплайна (эпик #74): 'off' — ранжирование
+#: только по CV-скору (без аудита); 'warn_only' — аудит выполняется,
+#: дисквалификации гипотетические; 'active' — дисквалификации применяются,
+#: победитель = лучший RMSE_oof. Это внутренний режим шага отбора, а НЕ
+#: поле конфигурации: поле ``general.sanity_gate.mode`` удалено (эпик #74),
+#: стратегия задается явно в action='select' фазах. Определение остаётся здесь
+#: (без экспорта в ``__all__``), так как механизм robust-выбора в
+#: ``training_engine/component.py`` импортирует этот тип напрямую; в
+#: конфиг-схеме он не используется.
 SanityGateMode = Literal["off", "warn_only", "active"]
 
 #: Форма коридора пула финалистов (T3, issue #65): multiplicative / additive /
 #: auto (выбор по типу метрики). Определяется здесь, чтобы ``SanityGateCfg``
 #: и ``select_finalists`` использовали один тип без циклического импорта.
 CorridorMode = Literal["multiplicative", "additive", "auto"]
+
+#: Действия фазы пайплайна (эпик #74): поиск по всем алгоритмам, дообучение
+#: всего входного множества (warm-start) и явный шаг отбора. Устаревшее
+#: значение 'refine_winner' удалено — конфиги с ним отвергаются валидацией
+#: с подсказкой миграции.
+HPOPhaseAction = Literal["all_algorithms", "refine", "select"]
+
+#: Стратегия select-шага: ранжирование по CV-скору или аудит Sanity Gate.
+SelectStrategy = Literal["cv_best", "sanity_gate"]
+
+#: Что отдаёт select-шаг на выходе: единственный победитель, топ-K кандидатов
+#: или весь коридорный пул финалистов.
+SelectOutput = Literal["winner", "top_k", "pool"]
 
 
 # ─────────────────── pruning (early stopping) ──────────────────── #
@@ -171,16 +201,34 @@ class PruningCfg(BaseModel):
 
 # ─────────────────── phases ──────────────────── #
 class HPOPhaseCfg(BaseModel):
-    """Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).
+    """Конфигурация отдельного шага пайплайна (эпик #74).
 
-    Класс описывает параметры конкретного этапа оптимизации, позволяя
-    выстраивать многоступенчатые стратегии поиска (например, сначала
-    грубый поиск по всем моделям, затем тонкая настройка лучшей).
+    Класс описывает параметры конкретного шага: фазы HPO
+    (``all_algorithms`` / ``refine``) или явного шага отбора (``select``),
+    позволяя выстраивать многоступенчатые стратегии поиска и отбора
+    (например: поиск по всем моделям → select с аудитом → дообучение
+    финалистов → финальный select победителя).
+
     Attributes:
         name (str): Уникальный идентификатор фазы.
-        n_trials (int): Лимит итераций (испытаний) для данной фазы.
-        action (str): Тип действия ('all_algorithms' или 'refine_winner'),
-            определяющий область поиска.
+        n_trials (int): Лимит итераций (испытаний) для фаз HPO
+            (``all_algorithms`` / ``refine``). Для ``select`` игнорируется,
+            но поле остаётся обязательным для единообразия схемы.
+        action (str): Тип действия: 'all_algorithms' (поиск по всем
+            алгоритмам), 'refine' (дообучение всего входного множества
+            с warm-start) или 'select' (шаг отбора). Устаревшее значение
+            'refine_winner' удалено (эпик #74): конфиги с ним отвергаются
+            валидацией с подсказкой миграции.
+        strategy (Literal['cv_best', 'sanity_gate'] | None): Стратегия
+            select-шага (только для action='select'): ранжирование по
+            CV-скору ('cv_best') или аудит Sanity Gate ('sanity_gate').
+        output (Literal['winner', 'top_k', 'pool'] | None): Что отдаёт
+            select-шаг на выходе (только для action='select'): 'winner' —
+            единственный победитель (терминальный шаг), 'top_k' — топ-K
+            кандидатов, 'pool' — весь коридорный пул финалистов.
+        k (int | None): Количество кандидатов (>= 1) для output='top_k'.
+            Обязателен только при output='top_k'; при output='winner'/'pool'
+            запрещён.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -193,15 +241,142 @@ class HPOPhaseCfg(BaseModel):
         ),
     )
     n_trials: int = Field(
-        ge=1, description="Количество итераций (испытаний) в рамках данной фазы"
-    )
-    action: Literal["all_algorithms", "refine_winner"] = Field(
-        default="all_algorithms",
+        ge=1,
         description=(
-            "Действие фазы: поиск по всем алгоритмам или уточнение "
-            "гиперпараметров для победителя предыдущих этапов"
+            "Количество итераций (испытаний) для фаз HPO (all_algorithms / "
+            "refine). Для action='select' игнорируется"
         ),
     )
+    action: HPOPhaseAction = Field(
+        default="all_algorithms",
+        description=(
+            "Действие фазы: 'all_algorithms' — поиск по всем алгоритмам, "
+            "'refine' — дообучение всего входного множества с warm-start, "
+            "'select' — явный шаг отбора (стратегия strategy, форма выхода "
+            "output). Устаревшее 'refine_winner' удалено: используйте пару "
+            "'select' (cv_best) + 'refine'"
+        ),
+    )
+    strategy: SelectStrategy | None = Field(
+        default=None,
+        description=(
+            "Стратегия select-шага (только для action='select'): 'cv_best' — "
+            "ранжирование по CV-скору, 'sanity_gate' — пул финалистов + "
+            "аудит ModelSanityGate + ранжирование по RMSE_oof. Для фаз "
+            "all_algorithms/refine запрещено"
+        ),
+    )
+    output: SelectOutput | None = Field(
+        default=None,
+        description=(
+            "Форма выхода select-шага (только для action='select'): "
+            "'winner' — единственный победитель (терминальный шаг), "
+            "'top_k' — топ-K кандидатов (требует параметр k), 'pool' — "
+            "весь коридорный пул финалистов. Для фаз all_algorithms/refine "
+            "запрещено"
+        ),
+    )
+    k: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Количество кандидатов (>= 1) для output='top_k'; обязателен "
+            "только при output='top_k', при output='winner'/'pool' запрещён. "
+            "Для фаз all_algorithms/refine запрещено"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_refine_winner(cls, data: Any) -> Any:
+        """Отвергнуть устаревший action 'refine_winner' с подсказкой миграции.
+
+        Значение удалено осознанно (эпик #74) без обратной совместимости:
+        молчаливое игнорирование или автоматическая трансляция скрыли бы
+        смену семантики (refine_winner сужал множество до одного кандидата,
+        новая пара select + refine этого не делает). Ошибка сопровождается
+        подсказкой миграции.
+
+        Args:
+            data: Сырые входные данные фазы (dict при YAML/JSON-парсинге).
+
+        Returns:
+            Any: Данные без изменений, если legacy-значения нет.
+
+        Raises:
+            ValueError: Если action равен 'refine_winner'.
+        """
+        if isinstance(data, dict) and data.get("action") == "refine_winner":
+            # Стабильный код ошибки (ERR_REMOVED_REFINE_WINNER) позволяет
+            # тестам завязываться на error['type'], а не на текст подсказки.
+            raise PydanticCustomError(
+                ERR_REMOVED_REFINE_WINNER,
+                "action 'refine_winner' has been removed (epic #74). "
+                "Migration: replace the 'refine_winner' phase with explicit "
+                "'select' and 'refine' phases, e.g. "
+                "all_algorithms -> select(strategy: cv_best, output: top_k, "
+                "k: N) -> refine -> select(strategy: cv_best, output: winner); "
+                "for a single-winner pipeline use "
+                "all_algorithms -> select(strategy: cv_best, output: winner). "
+                "See the migration table in README.md.",
+            )
+        return data
+
+    @model_validator(mode="after")
+    def _validate_select_fields(self) -> HPOPhaseCfg:
+        """Проверить согласованность strategy/output/k с действием фазы.
+
+        Логика проверки:
+        1. Для action='select' поля strategy и output обязательны.
+        2. При output='top_k' параметр k обязателен (k >= 1 накладывается
+           ограничением поля); при output='winner'/'pool' параметр k
+           запрещён.
+        3. Для action='all_algorithms'/'refine' поля strategy/output/k
+           запрещены (сужение множества — работа select-шага).
+
+        Returns:
+            HPOPhaseCfg: Валидированный объект фазы.
+
+        Raises:
+            ValueError: Если набор полей не согласован с действием фазы.
+        """
+        if self.action == "select":
+            missing = [
+                field
+                for field in ("strategy", "output")
+                if getattr(self, field) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"action 'select' requires fields {missing} to be set "
+                    "(strategy: 'cv_best' | 'sanity_gate', "
+                    "output: 'winner' | 'top_k' | 'pool')"
+                )
+            if self.output == "top_k" and self.k is None:
+                raise ValueError(
+                    "output 'top_k' requires the integer parameter k (>= 1); "
+                    "set k on the select phase or use output 'winner'/'pool'"
+                )
+            if self.output in ("winner", "pool") and self.k is not None:
+                raise ValueError(
+                    f"parameter k is not allowed for output '{self.output}' "
+                    "(k is only valid for output 'top_k'); remove k or use "
+                    "output 'top_k'"
+                )
+            return self
+
+        forbidden = [
+            field
+            for field in ("strategy", "output", "k")
+            if getattr(self, field) is not None
+        ]
+        if forbidden:
+            raise ValueError(
+                f"fields {forbidden} are only allowed for action 'select' "
+                f"(got action '{self.action}'): candidate narrowing is the "
+                "job of explicit select phases (epic #74)"
+            )
+        return self
 
 
 # ─────────────────── feature selection ──────────────────── #
@@ -290,34 +465,23 @@ class FeatureSelectionCfg(BaseModel):
     )
 
 
-# ─────────────────── sanity gate / two-stage winner (T4, T5) ─────────── #
+# ─────────────────── sanity gate / select-step thresholds ─────────── #
 class SanityGateCfg(BaseModel):
-    """Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).
+    """Пороги и настройки аудита Sanity Gate (эпик #61, #74).
 
-    Управляет интеграцией аудита вырождения моделей
-    (:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,
-    задача T2) в финальный выбор победителя (задача T4) и режимами работы
-    (задача T5):
+    С версии эпика #74 секция является исключительно **источником порогов**
+    для select-шагов со ``strategy: sanity_gate`` (пул финалистов: коридор δ
+    от лидера ∩ жёсткий кап ``top_k_candidates``, опциональный мягкий добор
+    семейств; пороги контуров аудита ``ModelSanityGate`` передаются в
+    конструктор гейта без изменений). Глобального переключателя больше нет:
+    поле ``mode`` удалено вместе с семантикой ``warn_only`` — отбор
+    происходит ТОЛЬКО явным шагом ``select`` в ``general.phases``, а
+    диагностика доступна в gate-секции отчёта каждого select-шага.
 
-    - ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —
-      пул финалистов и аудит не выполняются, поведение пайплайна не меняется;
-    - ``mode=warn_only``: пул и аудит выполняются, результаты и
-      «гипотетические дисквалификации» логируются и попадают в отчёт,
-      но фактический победитель выбирается как при ``off`` (сбор статистики
-      на реальных данных до включения гейта);
-    - ``mode=active``: дисквалификации применяются, победитель = кандидат
-      с лучшим ``RMSE_oof`` среди прошедших все проверки.
-
-    Пул финалистов строится из результатов HPO через
-    ``component.select_finalists`` (T3, issue #65): коридор δ от лидера в
-    пользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,
-    опциональный мягкий добор семейств (``enforce_family_diversity``).
-
-    Пороги контуров гейта повторяют параметры ``ModelSanityGate`` и
-    передаются в конструктор гейта без изменений.
+    Наличие секции без select-шагов со ``strategy: sanity_gate`` валидно:
+    секция — опциональный источник порогов, а не поведенческий флаг.
 
     Attributes:
-        mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').
         top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).
         corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).
         corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.
@@ -354,16 +518,41 @@ class SanityGateCfg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: SanityGateMode = Field(
-        default="off",
-        description=(
-            "Режим работы Sanity Gate при выборе победителя: 'off' — старое "
-            "поведение select_winner (без пула и аудита); 'warn_only' — пул и "
-            "аудит выполняются, дисквалификации гипотетические (победитель "
-            "как при off, статистика собирается); 'active' — дисквалификации "
-            "применяются, победитель = лучший RMSE_oof среди прошедших аудит."
-        ),
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_mode(cls, data: Any) -> Any:
+        """Отвергнуть удалённое поле ``mode`` с подсказкой миграции.
+
+        Поле удалено целиком вместе с семантикой ``warn_only`` (осознанное
+        решение эпика #74): отбор происходит только явным select-шагом.
+        Молчаливое игнорирование скрыло бы смену семантики, поэтому конфиг
+        с ``sanity_gate.mode`` отвергается с подсказкой миграции.
+
+        Args:
+            data: Сырые входные данные секции (dict при YAML/JSON-парсинге).
+
+        Returns:
+            Any: Данные без изменений, если ключа ``mode`` нет.
+
+        Raises:
+            ValueError: Если в данных присутствует ключ ``mode``.
+        """
+        if isinstance(data, dict) and "mode" in data:
+            # Стабильный код ошибки (ERR_REMOVED_SANITY_GATE_MODE) позволяет
+            # тестам завязываться на error['type'], а не на текст подсказки.
+            raise PydanticCustomError(
+                ERR_REMOVED_SANITY_GATE_MODE,
+                "general.sanity_gate.mode has been removed (epic #74). "
+                "Migration: remove sanity_gate.mode and add an explicit "
+                "select phase, e.g. {action: 'select', strategy: "
+                "'sanity_gate', output: 'winner'} as the last phase; "
+                "gate diagnostics are available in the gate section of the "
+                "select step report. The sanity_gate section remains the "
+                "source of thresholds (corridor, top_k_candidates, audit "
+                "limits, ...). See the migration table in README.md.",
+            )
+        return data
+
     top_k_candidates: int = Field(
         default=3,
         ge=1,
@@ -526,7 +715,9 @@ class GeneralCfg(BaseModel):
         path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.
         serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
         log_to_file (Path | None): Файл для записи логов работы движка.
-        phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.
+        phases (List[HPOPhaseCfg]): Последовательность шагов пайплайна:
+            фазы HPO ('all_algorithms' / 'refine') и явные шаги отбора
+            ('select'); последняя фаза обязана быть select с output: winner.
         validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).
         n_folds (int): Количество разбиений для кросс-валидации.
         categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования
@@ -718,9 +909,12 @@ class GeneralCfg(BaseModel):
     sanity_gate: SanityGateCfg = Field(
         default_factory=SanityGateCfg,
         description=(
-            "Настройки двухстадийного выбора победителя с Sanity Gate "
-            "(эпик #61, T4/T5). По умолчанию mode='off' — поведение "
-            "train_best_model не меняется (старый select_winner)."
+            "Пороги и настройки аудита Sanity Gate для select-шагов со "
+            "strategy: sanity_gate (эпик #61, #74). Секция — опциональный "
+            "источник порогов (коридор, top_k_candidates, лимиты аудита), "
+            "а не поведенческий флаг: отбор выполняется только явными "
+            "select-фазами в general.phases. Наличие секции без "
+            "sanity-select-шагов валидно"
         ),
     )
 
@@ -840,6 +1034,66 @@ class GeneralCfg(BaseModel):
                 "pruning.enable=true with validation_strategy='train_test_split': "
                 "early stopping will NOT be applied because hold-out evaluation "
                 "has no intermediate steps."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_phase_pipeline(self) -> GeneralCfg:
+        """Кросс-валидация последовательности фаз пайплайна (эпик #74).
+
+        Порядок after-валидаторов в Pydantic v2 детерминирован порядком
+        определения, поэтому этот валидатор осознанно объявлен РАНЬШЕ
+        ``_check_high_cardinality_encoding``: ошибки структуры пайплайна
+        (первопричина конфига) гарантированно сообщаются раньше ошибок
+        кодирования категориальных колонок.
+
+        Логика проверки (пустой список фаз не проверяется — защита от
+        отсутствия фаз остаётся в рантайме ``train_best_model``):
+        1. ``select`` не может быть первой фазой: до какого-либо поиска
+           аудировать/ранжировать нечего.
+        2. Фазы после терминального select (``output: winner``) запрещены:
+           такой шаг отдаёт единственного победителя, и последующее
+           дообучение скрыло бы результат отбора.
+        3. Последняя фаза обязана быть ``select`` с ``output: winner``:
+           финальный артефакт строится только из результата терминального
+           шага отбора.
+
+        Returns:
+            GeneralCfg: Валидированный объект настроек.
+
+        Raises:
+            ValueError: Если последовательность фаз нарушает правила пайплайна.
+        """
+        phases = self.phases
+        if not phases:
+            return self
+
+        if phases[0].action == "select":
+            raise ValueError(
+                f"phase '{phases[0].name}' (index 0): action 'select' cannot "
+                "be the first phase — there is nothing to rank/audit yet. "
+                "Start the pipeline with an 'all_algorithms' (or 'refine') "
+                "phase."
+            )
+
+        for index, phase in enumerate(phases[:-1]):
+            if phase.action == "select" and phase.output == "winner":
+                raise ValueError(
+                    f"phase '{phase.name}' (index {index}): select with "
+                    "output 'winner' is terminal — no phases are allowed "
+                    "after it. Move it to the last position or use "
+                    "output 'top_k'/'pool' to keep the pipeline going."
+                )
+
+        last = phases[-1]
+        if not (last.action == "select" and last.output == "winner"):
+            raise ValueError(
+                f"the last phase '{last.name}' (action '{last.action}') must "
+                "be a 'select' phase with output 'winner': the final artifact "
+                "is built from the result of the terminal select step "
+                "(epic #74). Migration: append "
+                "{action: 'select', strategy: 'cv_best', output: 'winner'} "
+                "as the last phase. See the migration table in README.md."
             )
         return self
 

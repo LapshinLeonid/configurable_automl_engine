@@ -420,7 +420,7 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    additional_metrics (List[ComparisonMetric]): Дополнительные информационные\n        метрики, рассчитываемые для финальной модели тем же методом валидации,\n        что и сравнение моделей (hold-out/CV, а не train-скор).\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность этапов оптимизации.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').\n    feature_selection (FeatureSelectionCfg): Настройки сокращения пространства\n        признаков. По умолчанию mode='disabled' — отбор признаков не применяется.",
+      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    additional_metrics (List[ComparisonMetric]): Дополнительные информационные\n        метрики, рассчитываемые для финальной модели тем же методом валидации,\n        что и сравнение моделей (hold-out/CV, а не train-скор).\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность шагов пайплайна:\n        фазы HPO ('all_algorithms' / 'refine') и явные шаги отбора\n        ('select'); последняя фаза обязана быть select с output: winner.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').\n    feature_selection (FeatureSelectionCfg): Настройки сокращения пространства\n        признаков. По умолчанию mode='disabled' — отбор признаков не применяется.",
       "properties": {
         "comparison_metric": {
           "default": "r2",
@@ -637,7 +637,7 @@
         },
         "sanity_gate": {
           "$ref": "#/$defs/SanityGateCfg",
-          "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61, T4/T5). По умолчанию mode='off' — поведение train_best_model не меняется (старый select_winner)."
+          "description": "Пороги и настройки аудита Sanity Gate для select-шагов со strategy: sanity_gate (эпик #61, #74). Секция — опциональный источник порогов (коридор, top_k_candidates, лимиты аудита), а не поведенческий флаг: отбор выполняется только явными select-фазами в general.phases. Наличие секции без sanity-select-шагов валидно"
         }
       },
       "required": [
@@ -648,7 +648,7 @@
     },
     "HPOPhaseCfg": {
       "additionalProperties": false,
-      "description": "Конфигурация отдельной фазы поиска гиперпараметров (Hyperparameter Optimization).\n\nКласс описывает параметры конкретного этапа оптимизации, позволяя\nвыстраивать многоступенчатые стратегии поиска (например, сначала\nгрубый поиск по всем моделям, затем тонкая настройка лучшей).\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для данной фазы.\n    action (str): Тип действия ('all_algorithms' или 'refine_winner'),\n        определяющий область поиска.",
+      "description": "Конфигурация отдельного шага пайплайна (эпик #74).\n\nКласс описывает параметры конкретного шага: фазы HPO\n(``all_algorithms`` / ``refine``) или явного шага отбора (``select``),\nпозволяя выстраивать многоступенчатые стратегии поиска и отбора\n(например: поиск по всем моделям → select с аудитом → дообучение\nфиналистов → финальный select победителя).\n\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для фаз HPO\n        (``all_algorithms`` / ``refine``). Для ``select`` игнорируется,\n        но поле остаётся обязательным для единообразия схемы.\n    action (str): Тип действия: 'all_algorithms' (поиск по всем\n        алгоритмам), 'refine' (дообучение всего входного множества\n        с warm-start) или 'select' (шаг отбора). Устаревшее значение\n        'refine_winner' удалено (эпик #74): конфиги с ним отвергаются\n        валидацией с подсказкой миграции.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Стратегия\n        select-шага (только для action='select'): ранжирование по\n        CV-скору ('cv_best') или аудит Sanity Gate ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): Что отдаёт\n        select-шаг на выходе (только для action='select'): 'winner' —\n        единственный победитель (терминальный шаг), 'top_k' — топ-K\n        кандидатов, 'pool' — весь коридорный пул финалистов.\n    k (int | None): Количество кандидатов (>= 1) для output='top_k'.\n        Обязателен только при output='top_k'; при output='winner'/'pool'\n        запрещён.",
       "properties": {
         "name": {
           "default": "phase",
@@ -657,20 +657,70 @@
           "type": "string"
         },
         "n_trials": {
-          "description": "Количество итераций (испытаний) в рамках данной фазы",
+          "description": "Количество итераций (испытаний) для фаз HPO (all_algorithms / refine). Для action='select' игнорируется",
           "minimum": 1,
           "title": "N Trials",
           "type": "integer"
         },
         "action": {
           "default": "all_algorithms",
-          "description": "Действие фазы: поиск по всем алгоритмам или уточнение гиперпараметров для победителя предыдущих этапов",
+          "description": "Действие фазы: 'all_algorithms' — поиск по всем алгоритмам, 'refine' — дообучение всего входного множества с warm-start, 'select' — явный шаг отбора (стратегия strategy, форма выхода output). Устаревшее 'refine_winner' удалено: используйте пару 'select' (cv_best) + 'refine'",
           "enum": [
             "all_algorithms",
-            "refine_winner"
+            "refine",
+            "select"
           ],
           "title": "Action",
           "type": "string"
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "enum": [
+                "cv_best",
+                "sanity_gate"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Стратегия select-шага (только для action='select'): 'cv_best' — ранжирование по CV-скору, 'sanity_gate' — пул финалистов + аудит ModelSanityGate + ранжирование по RMSE_oof. Для фаз all_algorithms/refine запрещено",
+          "title": "Strategy"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "enum": [
+                "winner",
+                "top_k",
+                "pool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Форма выхода select-шага (только для action='select'): 'winner' — единственный победитель (терминальный шаг), 'top_k' — топ-K кандидатов (требует параметр k), 'pool' — весь коридорный пул финалистов. Для фаз all_algorithms/refine запрещено",
+          "title": "Output"
+        },
+        "k": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Количество кандидатов (>= 1) для output='top_k'; обязателен только при output='top_k', при output='winner'/'pool' запрещён. Для фаз all_algorithms/refine запрещено",
+          "title": "K"
         }
       },
       "required": [
@@ -852,19 +902,8 @@
     },
     "SanityGateCfg": {
       "additionalProperties": false,
-      "description": "Настройки двухстадийного выбора победителя с Sanity Gate (эпик #61).\n\nУправляет интеграцией аудита вырождения моделей\n(:class:`~configurable_automl_engine.training_engine.sanity_gate.ModelSanityGate`,\nзадача T2) в финальный выбор победителя (задача T4) и режимами работы\n(задача T5):\n\n- ``mode=off`` (по умолчанию): старое поведение ``select_winner`` —\n  пул финалистов и аудит не выполняются, поведение пайплайна не меняется;\n- ``mode=warn_only``: пул и аудит выполняются, результаты и\n  «гипотетические дисквалификации» логируются и попадают в отчёт,\n  но фактический победитель выбирается как при ``off`` (сбор статистики\n  на реальных данных до включения гейта);\n- ``mode=active``: дисквалификации применяются, победитель = кандидат\n  с лучшим ``RMSE_oof`` среди прошедших все проверки.\n\nПул финалистов строится из результатов HPO через\n``component.select_finalists`` (T3, issue #65): коридор δ от лидера в\nпользовательской семантике метрики ∩ жёсткий кап ``top_k_candidates``,\nопциональный мягкий добор семейств (``enforce_family_diversity``).\n\nПороги контуров гейта повторяют параметры ``ModelSanityGate`` и\nпередаются в конструктор гейта без изменений.\n\nAttributes:\n    mode (SanityGateMode): Режим работы гейта ('off'/'warn_only'/'active').\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (в (0, 1]);\n        считается на OOF-предсказаниях.\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал\n        для линейных моделей; самостоятельная дисквалификация только при\n        ``dead_features_require_low_diversity=true`` и низком diversity.\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    check_permutation_sensitivity (bool): Включить пермутационный аудит\n        чувствительности признаков (контур В, нелинейные модели).\n    permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).\n    permutation_max_features (int): Кап проверяемых колонок (>= 1).\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    audit_time_budget_seconds (float): Бюджет времени на фазу аудита\n        (>= 0; 0 — без ограничения).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
+      "description": "Пороги и настройки аудита Sanity Gate (эпик #61, #74).\n\nС версии эпика #74 секция является исключительно **источником порогов**\nдля select-шагов со ``strategy: sanity_gate`` (пул финалистов: коридор δ\nот лидера ∩ жёсткий кап ``top_k_candidates``, опциональный мягкий добор\nсемейств; пороги контуров аудита ``ModelSanityGate`` передаются в\nконструктор гейта без изменений). Глобального переключателя больше нет:\nполе ``mode`` удалено вместе с семантикой ``warn_only`` — отбор\nпроисходит ТОЛЬКО явным шагом ``select`` в ``general.phases``, а\nдиагностика доступна в gate-секции отчёта каждого select-шага.\n\nНаличие секции без select-шагов со ``strategy: sanity_gate`` валидно:\nсекция — опциональный источник порогов, а не поведенческий флаг.\n\nAttributes:\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (в (0, 1]);\n        считается на OOF-предсказаниях.\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал\n        для линейных моделей; самостоятельная дисквалификация только при\n        ``dead_features_require_low_diversity=true`` и низком diversity.\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    check_permutation_sensitivity (bool): Включить пермутационный аудит\n        чувствительности признаков (контур В, нелинейные модели).\n    permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).\n    permutation_max_features (int): Кап проверяемых колонок (>= 1).\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    audit_time_budget_seconds (float): Бюджет времени на фазу аудита\n        (>= 0; 0 — без ограничения).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
       "properties": {
-        "mode": {
-          "default": "off",
-          "description": "Режим работы Sanity Gate при выборе победителя: 'off' — старое поведение select_winner (без пула и аудита); 'warn_only' — пул и аудит выполняются, дисквалификации гипотетические (победитель как при off, статистика собирается); 'active' — дисквалификации применяются, победитель = лучший RMSE_oof среди прошедших аудит.",
-          "enum": [
-            "off",
-            "warn_only",
-            "active"
-          ],
-          "title": "Mode",
-          "type": "string"
-        },
         "top_k_candidates": {
           "default": 3,
           "description": "Жёсткий кап размера пула финалистов (>= 1, дефолт 3).",

@@ -72,7 +72,14 @@ Testing:
 
 # Quick Start
 
-The example can be run from [example.py](example.py).
+> **Note (epic #74, WIP):** pipeline execution for the `select` / `refine`
+> phases is not implemented yet (tasks R2/R3) — until then running the
+> example fails with `NotImplementedError`. See the pipeline section below.
+
+The example can be run from [example.py](example.py). It demonstrates the
+full target pipeline with a Sanity Gate select step; the shorter config
+below is a minimal illustration of the same schema (`all_algorithms` →
+terminal select) — the two examples are intentionally different.
 
     from sklearn.datasets import load_diabetes
 
@@ -86,7 +93,13 @@ The example can be run from [example.py](example.py).
             "comparison_metric": "r2",
             "phases": [
                 {"n_trials": 100, "action": "all_algorithms"},
-                {"n_trials": 200, "action": "refine_winner"}
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner"
+                }
             ],
             "path_to_model": "diabetes_model.pkl"
         },
@@ -118,7 +131,30 @@ The example can be run from [example.py](example.py).
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
-📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
+# Pipeline phases: `refine` / `select` (epic #74)
+
+> **Note (epic #74, WIP):** the `select` / `refine` actions are declared in the
+> config schema, but pipeline execution is not implemented yet (tasks R2/R3).
+> Until then configs containing these phases are rejected at runtime with
+> `NotImplementedError`.
+
+The HPO pipeline is assembled from explicit phases (`general.phases`):
+
+* `action: "all_algorithms"` — `n_trials` HPO attempts for every enabled algorithm;
+* `action: "refine"` — `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set. As the first phase `refine` is accepted by the schema: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase); the execution semantics are finalized by task R3.
+* `action: "select"` — an explicit selection step with `strategy: "cv_best" | "sanity_gate"` and `output: "winner" | "top_k" | "pool"` (parameter `k >= 1` is required for, and only allowed with, `output: "top_k"`). With `strategy: "cv_best"`, `output: "pool"` builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
+
+Validation rules: `select` cannot be the first phase; no phases are allowed after a terminal select (`output: "winner"`); the **last phase must be a `select` with `output: "winner"`**. The parameter `k` is deliberately not cross-checked against `sanity_gate.top_k_candidates` at the config level: the pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay is defined at execution time by task R2. The `sanity_gate` section remains a pure source of thresholds (corridor, `top_k_candidates`, audit limits) for select steps with `strategy: "sanity_gate"` — the global switch `general.sanity_gate.mode` was removed together with the deprecated action `refine_winner`.
+
+Migration table for typical legacy configs:
+
+| Legacy config | New config (after epic #74 execution support — R2/R3) |
+|---------------|------------|
+| `all_algorithms` → `refine_winner` | `all_algorithms` → `select(strategy: cv_best, output: top_k, k: N)` → `refine` → `select(strategy: cv_best, output: winner)` — or simply an extended `all_algorithms` + `select(strategy: cv_best, output: winner)` |
+| Implicit gate at the end (`sanity_gate.mode: active`) | Explicit last phase `select(strategy: sanity_gate, output: winner)` |
+| `sanity_gate.mode: warn_only` | `select(strategy: sanity_gate, ...)` step + read the gate section of the select-step report |
+
+Configs with `refine_winner` or `sanity_gate.mode` are rejected at load with a migration hint (no silent translation).
 
 # Contributing
 

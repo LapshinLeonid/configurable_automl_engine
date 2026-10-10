@@ -13,6 +13,9 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
     FeatureSelectionMethod,
+    SanityGateCfg,
+    ERR_REMOVED_REFINE_WINNER,
+    ERR_REMOVED_SANITY_GATE_MODE,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
     NumericSpace,
@@ -26,6 +29,15 @@ from configurable_automl_engine.common.definitions import (
 
 from unittest.mock import patch
 
+# Терминальный select-шаг (эпик #74): последняя фаза любого валидного конфига.
+TERMINAL_SELECT = {
+    "name": "final_select",
+    "n_trials": 1,
+    "action": "select",
+    "strategy": "cv_best",
+    "output": "winner",
+}
+
 BASE = {
     "general": {
         "comparison_metric": "nrmse",
@@ -33,7 +45,7 @@ BASE = {
         "n_folds": 5,
         "phases": [
             {"name": "search", "n_trials": 1, "action": "all_algorithms"},
-            {"name": "refine", "n_trials": 1, "action": "refine_winner"},
+            TERMINAL_SELECT,
         ],
     },
     "algorithms": {"elasticnet": {"enable": True}},
@@ -254,6 +266,11 @@ def test_read_config_integration(tmp_path):
         - name: "search"
           n_trials: 10
           action: "all_algorithms"
+        - name: "final_select"
+          n_trials: 1
+          action: "select"
+          strategy: "cv_best"
+          output: "winner"
       validation_strategy: "k_fold"
       n_folds: 3
     algorithms:
@@ -275,7 +292,16 @@ def test_read_config_integration(tmp_path):
 def test_general_cfg_valid_n_folds():
     """Успешное завершение валидатора _check_n_folds."""
     cfg = GeneralCfg(
-        phases=[HPOPhaseCfg(name="test", n_trials=1)],
+        phases=[
+            HPOPhaseCfg(name="test", n_trials=1),
+            HPOPhaseCfg(
+                name="final_select",
+                n_trials=1,
+                action="select",
+                strategy="cv_best",
+                output="winner",
+            ),
+        ],
         validation_strategy=ValidationStrategy.k_fold,
         n_folds=3,
     )
@@ -301,7 +327,16 @@ def test_general_cfg_invalid_n_folds_kfold():
     """Покрывает ошибку валидации при n_folds < 2 для k_fold."""
     with pytest.raises(ValidationError, match="(?s).*n_folds must be ≥ 2.*"):
         GeneralCfg(
-            phases=[HPOPhaseCfg(name="test", n_trials=1)],
+            phases=[
+                HPOPhaseCfg(name="test", n_trials=1),
+                HPOPhaseCfg(
+                    name="final_select",
+                    n_trials=1,
+                    action="select",
+                    strategy="cv_best",
+                    output="winner",
+                ),
+            ],
             validation_strategy=ValidationStrategy.k_fold,
             n_folds=1,
         )
@@ -318,7 +353,16 @@ def test_general_cfg_coverage_line_83():
 
     with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
         GeneralCfg(
-            phases=[HPOPhaseCfg(name="test", n_trials=1)],
+            phases=[
+                HPOPhaseCfg(name="test", n_trials=1),
+                HPOPhaseCfg(
+                    name="final_select",
+                    n_trials=1,
+                    action="select",
+                    strategy="cv_best",
+                    output="winner",
+                ),
+            ],
             validation_strategy=strategy,
             n_folds=0,  # Это активирует raise на строке 83
         )
@@ -342,7 +386,10 @@ def test_joblib_not_installed_raises_error(mock_is_installed):
 
     data = {
         "general": {
-            "phases": [{"name": "search", "n_trials": 10}],
+            "phases": [
+                {"name": "search", "n_trials": 10},
+                TERMINAL_SELECT,
+            ],
             "serialization_format": "joblib",
             "validation_strategy": "k_fold",
             "n_folds": 5,
@@ -361,7 +408,10 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
 
     data = {
         "general": {
-            "phases": [{"name": "search", "n_trials": 10}],
+            "phases": [
+                {"name": "search", "n_trials": 10},
+                TERMINAL_SELECT,
+            ],
             "validation_strategy": "train_test_split",
         },
         "algorithms": {"xgboosting": {"enable": True}},
@@ -385,7 +435,7 @@ def test_config_skips_disabled_algorithms_dependency_check():
     # 2. 'xgboost' выключен. Даже если библиотеки xgboost нет в системе,
     #    ошибка не должна возникнуть благодаря 'continue'.
     config_data = {
-        "general": {"phases": [{"name": "test", "n_trials": 1}]},
+        "general": {"phases": [{"name": "test", "n_trials": 1}, TERMINAL_SELECT]},
         "algorithms": {"elasticnet": {"enable": True}, "xgboosting": {"enable": False}},
     }
     # Имитируем отсутствие библиотеки xgboost в системе
@@ -555,7 +605,7 @@ def test_algorithm_dependency_check():
 
         config_data = {
             "general": {
-                "phases": [{"name": "p1", "n_trials": 1}],
+                "phases": [{"name": "p1", "n_trials": 1}, TERMINAL_SELECT],
                 "validation_strategy": "k_fold",
                 "n_folds": 2,
             },
@@ -573,7 +623,7 @@ def test_algorithm_dependency_check():
 
 # 7. Дополнительный тест на n_folds (общая логика GeneralCfg)
 def test_general_cfg_n_folds():
-    base_phases = [{"name": "test", "n_trials": 1}]
+    base_phases = [{"name": "test", "n_trials": 1}, TERMINAL_SELECT]
 
     # Ошибка: n_folds < 1
     with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
@@ -695,7 +745,7 @@ def test_hyperparameter_compatibility_error():
     algo_name = AVAILABLE_ALGORITHMS[0]  # elasticnet
 
     cfg_data = {
-        "general": {"phases": [{"name": "p1", "n_trials": 1}]},
+        "general": {"phases": [{"name": "p1", "n_trials": 1}, TERMINAL_SELECT]},
         "algorithms": {
             algo_name: {"enable": True, "hyperparameters": {"bad": [1, 10]}}
         },
@@ -770,7 +820,11 @@ def test_hyperparameter_compatibility_nondefault_valid_params():
     cfg = Config.model_validate(cfg_data)
     rf_cfg = getattr(cfg.algorithms, "random_forest")
     assert rf_cfg.enable is True
-    assert set(rf_cfg.hyperparameters) == {"min_samples_split", "max_features", "warm_start"}
+    assert set(rf_cfg.hyperparameters) == {
+        "min_samples_split",
+        "max_features",
+        "warm_start",
+    }
 
 
 def test_hyperparameter_compatibility_gpr_alpha():
@@ -808,9 +862,12 @@ def test_hyperparameter_compatibility_constant_value():
     }
 
     cfg = Config.model_validate(cfg_data)
-    assert getattr(cfg.algorithms, "random_forest").hyperparameters[
-        "min_samples_split"
-    ].dist_type == "categorical"
+    assert (
+        getattr(cfg.algorithms, "random_forest")
+        .hyperparameters["min_samples_split"]
+        .dist_type
+        == "categorical"
+    )
 
 
 def test_hyperparameter_compatibility_legacy_name():
@@ -1207,7 +1264,10 @@ def test_feature_selection_invalid_percentile_rejected(percentile):
 def test_feature_selection_invalid_min_features_rejected(min_features):
     """min_features < 1 отклоняется (защита от опустошения матрицы)."""
     cfg_data = BASE | {
-        "general": {**BASE["general"], "feature_selection": {"min_features": min_features}}
+        "general": {
+            **BASE["general"],
+            "feature_selection": {"min_features": min_features},
+        }
     }
     with pytest.raises(ValidationError, match="min_features"):
         Config.model_validate(cfg_data)
@@ -1267,6 +1327,11 @@ def test_read_config_feature_selection_yaml(tmp_path):
         - name: "search"
           n_trials: 5
           action: "all_algorithms"
+        - name: "final_select"
+          n_trials: 1
+          action: "select"
+          strategy: "cv_best"
+          output: "winner"
       validation_strategy: "k_fold"
       n_folds: 3
       feature_selection:
@@ -1302,6 +1367,11 @@ def test_read_config_feature_selection_absent_defaults(tmp_path):
         - name: "search"
           n_trials: 5
           action: "all_algorithms"
+        - name: "final_select"
+          n_trials: 1
+          action: "select"
+          strategy: "cv_best"
+          output: "winner"
       validation_strategy: "k_fold"
       n_folds: 3
     algorithms:
@@ -1333,10 +1403,13 @@ def _sg_cfg(sanity_gate_block: dict) -> dict:
 
 
 def test_sanity_gate_v2_defaults():
-    """Дефолты блока sanity_gate v2: mode=off, мягкие пороги из постановки."""
+    """Дефолты блока sanity_gate v2: мягкие пороги из постановки.
+
+    Эпик #74: поле mode удалено — секция является только источником порогов.
+    """
     cfg = Config.model_validate(BASE)
     sg = cfg.general.sanity_gate
-    assert sg.mode == "off"
+    assert "mode" not in SanityGateCfg.model_fields
     assert sg.top_k_candidates == 3
     assert sg.corridor_delta == 0.15
     assert sg.corridor_mode == "auto"
@@ -1361,7 +1434,6 @@ def test_sanity_gate_v2_defaults():
 def test_sanity_gate_v2_full_block_parses():
     """Полный блок sanity_gate v2 (постановка эпика #61 / T5) парсится."""
     block = {
-        "mode": "active",
         "top_k_candidates": 5,
         "corridor_delta": 0.2,
         "corridor_mode": "multiplicative",
@@ -1391,7 +1463,6 @@ def test_sanity_gate_v2_full_block_parses():
     }
     cfg = Config.model_validate(_sg_cfg(block))
     sg = cfg.general.sanity_gate
-    assert sg.mode == "active"
     assert sg.top_k_candidates == 5
     assert sg.corridor_delta == 0.2
     assert sg.corridor_mode == "multiplicative"
@@ -1420,11 +1491,22 @@ def test_sanity_gate_v2_full_block_parses():
     assert sg.check_generalization_gap is True
 
 
-@pytest.mark.parametrize("bad_mode", ["weird", "aggressive", "ACTIVE", 123])
-def test_sanity_gate_v2_invalid_mode_rejected(bad_mode):
-    """Невалидный mode отклоняется: только off / warn_only / active."""
-    with pytest.raises(ValidationError, match="sanity_gate.mode"):
-        Config.model_validate(_sg_cfg({"mode": bad_mode}))
+@pytest.mark.parametrize("legacy_mode", ["off", "warn_only", "active", "weird"])
+def test_sanity_gate_v2_mode_removed_with_migration_hint(legacy_mode):
+    """Поле sanity_gate.mode удалено (эпик #74): конфиг с ним отвергается
+    с понятной ошибкой и подсказкой миграции на явный select-шаг.
+
+    Идентификация ошибки — по стабильному коду
+    (``ERR_REMOVED_SANITY_GATE_MODE`` из error['type']); содержательные
+    части подсказки (упоминание поля и select-шага) проверяются отдельно.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(_sg_cfg({"mode": legacy_mode}))
+    error_types = {e["type"] for e in exc_info.value.errors()}
+    assert ERR_REMOVED_SANITY_GATE_MODE in error_types
+    msg = str(exc_info.value)
+    assert "sanity_gate.mode" in msg
+    assert "select" in msg
 
 
 @pytest.mark.parametrize("corridor_mode", ["multiplicative", "additive", "auto"])
@@ -1508,10 +1590,16 @@ def test_sanity_gate_v2_extra_forbid():
 
 @pytest.mark.parametrize(
     "field",
-    ["check_diversity", "check_unique", "check_dead_features",
-     "check_generalization_gap", "adaptive_diversity",
-     "dead_features_require_low_diversity", "enforce_family_diversity",
-     "check_permutation_sensitivity"],
+    [
+        "check_diversity",
+        "check_unique",
+        "check_dead_features",
+        "check_generalization_gap",
+        "adaptive_diversity",
+        "dead_features_require_low_diversity",
+        "enforce_family_diversity",
+        "check_permutation_sensitivity",
+    ],
 )
 def test_sanity_gate_v2_check_flags_accept_bools_only(field):
     """Флаги-контуры принимают bool; несовместимые типы отклоняются.
@@ -1530,11 +1618,377 @@ def test_sanity_gate_v2_check_flags_accept_bools_only(field):
         Config.model_validate(_sg_cfg({field: None}))
 
 
-def test_sanity_gate_v2_empty_block_is_valid_mode_off():
-    """Пустой блок sanity_gate: {} валиден и равен mode='off' (T5)."""
+def test_sanity_gate_v2_empty_block_is_valid_thresholds_only():
+    """Пустой блок sanity_gate: {} валиден — секция является источником
+    порогов, а не поведенческим флагом (эпик #74)."""
     cfg = Config.model_validate(_sg_cfg({}))
     sg = cfg.general.sanity_gate
-    assert sg.mode == "off"
+    assert "mode" not in SanityGateCfg.model_fields
     assert sg.corridor_delta == 0.15
     assert sg.min_prediction_diversity == 0.15
     assert sg.max_generalization_gap == 1.5
+
+
+# ─────────────── Pipeline phases: refine / select (эпик #74) ───────────────
+
+
+def _phase(**overrides: object) -> dict:
+    """Словарь одной фазы пайплайна поверх дефолтов."""
+    base: dict = {"name": "phase", "n_trials": 1, "action": "all_algorithms"}
+    base.update(overrides)
+    return base
+
+
+def _cfg_with_phases(*phases: dict) -> dict:
+    """Конфиг с заданной последовательностью фаз поверх BASE."""
+    return {
+        "general": {**BASE["general"], "phases": list(phases)},
+        "algorithms": BASE["algorithms"],
+    }
+
+
+# ── Позитивные сценарии ──
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        {"name": "refine_all", "n_trials": 5, "action": "refine"},
+        {
+            "name": "sel_winner",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "cv_best",
+            "output": "winner",
+        },
+        {
+            "name": "sel_topk",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "cv_best",
+            "output": "top_k",
+            "k": 1,
+        },
+        {
+            "name": "sel_pool",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "cv_best",
+            "output": "pool",
+        },
+        {
+            "name": "gate_winner",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "sanity_gate",
+            "output": "winner",
+        },
+        {
+            "name": "gate_topk",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "sanity_gate",
+            "output": "top_k",
+            "k": 3,
+        },
+        {
+            "name": "gate_pool",
+            "n_trials": 1,
+            "action": "select",
+            "strategy": "sanity_gate",
+            "output": "pool",
+        },
+    ],
+)
+def test_phase_actions_valid_combinations(phase):
+    """Все допустимые комбинации action/strategy/output/k парсятся схемой.
+
+    Фазы с output='winner' ставятся последними (терминальный шаг), остальные
+    — в середину пайплайна перед терминальным select.
+    """
+    is_terminal = phase.get("output") == "winner"
+    phases = [_phase(), phase] if is_terminal else [_phase(), phase, TERMINAL_SELECT]
+    cfg = Config.model_validate(_cfg_with_phases(*phases))
+    parsed = cfg.general.phases[1]
+    assert parsed.action == phase["action"]
+    assert parsed.strategy == phase.get("strategy")
+    assert parsed.output == phase.get("output")
+    assert parsed.k == phase.get("k")
+
+
+def test_refine_default_fields_are_none():
+    """У фаз all_algorithms/refine поля strategy/output/k равны None."""
+    cfg = Config.model_validate(
+        _cfg_with_phases(
+            _phase(action="all_algorithms"), _phase(action="refine"), TERMINAL_SELECT
+        )
+    )
+    for phase in cfg.general.phases[:2]:
+        assert phase.strategy is None
+        assert phase.output is None
+        assert phase.k is None
+
+
+def test_select_immediately_after_select_is_valid():
+    """select сразу после select валиден (эпик #74, edge case 5): top_k → winner."""
+    cfg = Config.model_validate(
+        _cfg_with_phases(
+            _phase(),
+            _phase(action="select", strategy="sanity_gate", output="top_k", k=2),
+            TERMINAL_SELECT,
+        )
+    )
+    assert [p.action for p in cfg.general.phases] == [
+        "all_algorithms",
+        "select",
+        "select",
+    ]
+
+
+def test_refine_right_after_all_algorithms_is_valid():
+    """refine сразу после all_algorithms валиден (эпик #74, edge case 4)."""
+    cfg = Config.model_validate(
+        _cfg_with_phases(_phase(), _phase(action="refine"), TERMINAL_SELECT)
+    )
+    assert [p.action for p in cfg.general.phases] == [
+        "all_algorithms",
+        "refine",
+        "select",
+    ]
+
+
+def test_sanity_gate_section_without_sanity_select_is_valid():
+    """Секция sanity_gate без select-шагов со strategy: sanity_gate валидна:
+    секция — источник порогов, а не поведенческий флаг (эпик #74)."""
+    data = _cfg_with_phases(_phase(), TERMINAL_SELECT)
+    data["general"]["sanity_gate"] = {
+        "top_k_candidates": 2,
+        "corridor_delta": 0.3,
+        "audit_time_budget_seconds": 60,
+    }
+    cfg = Config.model_validate(data)
+    assert cfg.general.sanity_gate.top_k_candidates == 2
+    assert cfg.general.sanity_gate.corridor_delta == 0.3
+
+
+def test_empty_phases_list_is_still_accepted():
+    """Пустой список фаз не проверяется кросс-валидацией (защита от пустого
+    пайплайна остаётся рантайм-проверкой train_best_model)."""
+    cfg = Config(
+        general=GeneralCfg(phases=[]), algorithms={"elasticnet": {"enable": True}}
+    )
+    assert cfg.general.phases == []
+
+
+# ── Негативные сценарии ──
+
+
+def test_refine_winner_rejected_with_migration_hint():
+    """action 'refine_winner' удалён: конфиг отвергается с подсказкой
+    миграции (не молчаливое игнорирование).
+
+    Тест завязывается на стабильный код ошибки
+    (``ERR_REMOVED_REFINE_WINNER`` из error['type']) и отдельно — на
+    содержательные части текста подсказки; точная формулировка подсказки
+    может меняться без поломки теста.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(
+            _cfg_with_phases(_phase(action="refine_winner"), TERMINAL_SELECT)
+        )
+    error_types = {e["type"] for e in exc_info.value.errors()}
+    assert ERR_REMOVED_REFINE_WINNER in error_types
+    msg = str(exc_info.value)
+    assert "refine_winner" in msg
+    assert "has been removed" in msg
+    assert "select" in msg and "refine" in msg
+    assert "README.md" in msg
+
+
+def test_select_first_phase_rejected():
+    """select не может быть первой фазой: нечего ранжировать/аудировать."""
+    with pytest.raises(ValidationError, match="cannot be the first phase"):
+        Config.model_validate(
+            _cfg_with_phases(
+                _phase(action="select", strategy="cv_best", output="winner")
+            )
+        )
+
+
+def test_phases_after_terminal_select_rejected():
+    """Фазы после терминального select (output: winner) запрещены."""
+    with pytest.raises(ValidationError, match="terminal"):
+        Config.model_validate(
+            _cfg_with_phases(
+                _phase(),
+                TERMINAL_SELECT,
+                _phase(action="refine"),
+            )
+        )
+
+
+def test_select_winner_in_middle_rejected():
+    """select(output: winner) в середине пайплайна отклоняется."""
+    with pytest.raises(ValidationError, match="terminal"):
+        Config.model_validate(
+            _cfg_with_phases(
+                _phase(),
+                _phase(action="select", strategy="cv_best", output="winner"),
+                TERMINAL_SELECT,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "last_phase",
+    [
+        _phase(),  # all_algorithms последней
+        _phase(action="refine"),  # refine последней
+        _phase(action="select", strategy="cv_best", output="top_k", k=1),
+        _phase(action="select", strategy="cv_best", output="pool"),
+    ],
+)
+def test_last_phase_must_be_terminal_select(last_phase):
+    """Последняя фаза обязана быть select с output: winner."""
+    with pytest.raises(ValidationError, match="must be a 'select' phase"):
+        Config.model_validate(_cfg_with_phases(_phase(), last_phase))
+
+
+def test_last_phase_select_without_winner_output_rejected():
+    """Последняя фаза select, но с output != winner — ошибка."""
+    with pytest.raises(ValidationError, match="must be a 'select' phase"):
+        Config.model_validate(
+            _cfg_with_phases(
+                _phase(),
+                _phase(action="select", strategy="cv_best", output="pool"),
+            )
+        )
+
+
+def test_top_k_without_k_rejected():
+    """output: top_k без k >= 1 отклоняется."""
+    with pytest.raises(ValidationError, match="top_k.*requires.*k"):
+        Config.model_validate(
+            HPOPhaseCfg(n_trials=1, action="select", strategy="cv_best", output="top_k")
+        )
+
+
+def test_k_zero_or_negative_rejected():
+    """k < 1 отклоняется ограничением поля (ge=1)."""
+    with pytest.raises(ValidationError, match="k"):
+        Config.model_validate(
+            HPOPhaseCfg(
+                n_trials=1, action="select", strategy="cv_best", output="top_k", k=0
+            )
+        )
+
+
+@pytest.mark.parametrize("output", ["winner", "pool"])
+def test_k_with_winner_or_pool_rejected(output):
+    """k при output: winner|pool запрещён."""
+    with pytest.raises(ValidationError, match="k is not allowed"):
+        Config.model_validate(
+            HPOPhaseCfg(
+                n_trials=1, action="select", strategy="cv_best", output=output, k=2
+            )
+        )
+
+
+@pytest.mark.parametrize("field", ["strategy", "output", "k"])
+def test_select_fields_forbidden_on_non_select_phases(field):
+    """Поля strategy/output/k запрещены у фаз all_algorithms/refine."""
+    value: object = (
+        "cv_best" if field == "strategy" else "winner" if field == "output" else 2
+    )
+    with pytest.raises(ValidationError, match="only allowed for action 'select'"):
+        HPOPhaseCfg(action="refine", n_trials=3, **{field: value})  # type: ignore[arg-type]
+
+
+def test_select_without_strategy_rejected():
+    """select без strategy отклоняется с подсказкой допустимых значений."""
+    with pytest.raises(ValidationError, match="requires fields \\['strategy'\\]"):
+        HPOPhaseCfg(n_trials=1, action="select", output="winner")
+
+
+def test_select_without_output_rejected():
+    """select без output отклоняется с подсказкой допустимых значений."""
+    with pytest.raises(ValidationError, match="requires fields \\['output'\\]"):
+        HPOPhaseCfg(n_trials=1, action="select", strategy="cv_best")
+
+
+def test_select_without_strategy_and_output_rejected():
+    """select без обоих полей перечисляет оба в сообщении об ошибке."""
+    with pytest.raises(ValidationError, match="\\['strategy', 'output'\\]"):
+        HPOPhaseCfg(n_trials=1, action="select")
+
+
+# ─────────── Runtime: select/refine execution (эпик #74, WIP) ───────────
+
+
+def test_select_and_refine_phases_raise_not_implemented():
+    """Исполнение select/refine-фаз ещё не реализовано (эпик #74, R2/R3):
+    валидный конфиг с такими фазами падает в рантайме с явным
+    ``NotImplementedError`` (со ссылкой на эпик) вместо молчаливого
+    неверного исполнения select-фазы как фазы all_algorithms. После
+    реализации R2/R3 тест заменяется проверкой реального поведения.
+    """
+    import numpy as np
+    import pandas as pd
+    from configurable_automl_engine.training_engine.component import train_best_model
+
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
+    df["target"] = 2.0 * df["a"] + rng.randn(30) * 0.1
+
+    cfg_select = _cfg_with_phases(_phase(), TERMINAL_SELECT)
+    with pytest.raises(NotImplementedError, match="not implemented yet.*epic #74"):
+        train_best_model(cfg_select, df, target="target")
+
+    cfg_refine = _cfg_with_phases(
+        _phase(), _phase(action="refine", n_trials=1), TERMINAL_SELECT
+    )
+    with pytest.raises(NotImplementedError, match="action 'refine'.*epic #74"):
+        train_best_model(cfg_refine, df, target="target")
+
+
+# ─────────── M1/M2 (ревью PR !43): граничные комбинации фаз ───────────
+
+
+def test_refine_first_phase_is_valid():
+    """refine первой фазой валиден (M1): входное рабочее множество —
+    полный набор включённых алгоритмов (warm-start от предыдущей фазы
+    отсутствует); семантика исполнения финализируется задачей R3."""
+    cfg = Config.model_validate(
+        _cfg_with_phases(_phase(action="refine"), TERMINAL_SELECT)
+    )
+    assert [p.action for p in cfg.general.phases] == ["refine", "select"]
+
+
+def test_select_cv_best_pool_is_valid():
+    """select(strategy: cv_best, output: pool) валиден (M2): коридорный пул
+    финалистов (коридор δ ∩ top_k_candidates, пороги из секции sanity_gate),
+    ранжирование по CV-скору БЕЗ аудита ModelSanityGate."""
+    phase = _phase(action="select", strategy="cv_best", output="pool")
+    cfg = Config.model_validate(_cfg_with_phases(_phase(), phase, TERMINAL_SELECT))
+    parsed = cfg.general.phases[1]
+    assert parsed.strategy == "cv_best"
+    assert parsed.output == "pool"
+    assert parsed.k is None
+
+
+def test_k_exceeding_top_k_candidates_is_accepted():
+    """k > sanity_gate.top_k_candidates не проверяется на уровне конфига
+    (M3): пул финалистов сначала ограничивается top_k_candidates, точное
+    взаимодействие k с пулом определяется при исполнении (задача R2)."""
+    data = _cfg_with_phases(_phase(), TERMINAL_SELECT)
+    data["general"]["sanity_gate"] = {"top_k_candidates": 3}
+    cfg = Config.model_validate(
+        _cfg_with_phases(
+            _phase(),
+            _phase(action="select", strategy="sanity_gate", output="top_k", k=10),
+            TERMINAL_SELECT,
+        )
+    )
+    assert cfg.general.phases[1].k == 10
+    assert cfg.general.sanity_gate.top_k_candidates == 3
+    _ = data  # sanity_gate-секция валидна сама по себе
