@@ -69,8 +69,35 @@ def _select_phase(**overrides: Any) -> HPOPhaseCfg:
     return HPOPhaseCfg(**base)
 
 
-def _cfg_dict(phases: list[dict[str, Any]], **general_extra: Any) -> dict[str, Any]:
-    """Валидный конфиг: HPO-фаза + заданные фазы (терминальный — с конца)."""
+def _cfg_dict(
+    phases: list[dict[str, Any]],
+    *,
+    extra_algorithms: dict[str, dict[str, Any]] | None = None,
+    **general_extra: Any,
+) -> dict[str, Any]:
+    """Валидный конфиг: HPO-фаза + заданные фазы (терминальный — с конца).
+
+    Args:
+        phases: Фазы пайплайна (добавляются после обязательной HPO-фазы).
+        extra_algorithms: Дополнительные секции алгоритмов (сливаются с
+            базовыми ridge/extra_trees).
+        **general_extra: Дополнительные поля ``general`` (например,
+            ``sanity_gate``).
+    """
+    algorithms: dict[str, dict[str, Any]] = {
+        "ridge": {
+            "enable": True,
+            "tuner": "mock.mock_tuner",
+            "trainer_module": "mock.mock_trainer",
+        },
+        "extra_trees": {
+            "enable": True,
+            "tuner": "mock.mock_tuner",
+            "trainer_module": "mock.mock_trainer",
+        },
+    }
+    if extra_algorithms:
+        algorithms.update(extra_algorithms)
     return {
         "general": {
             "comparison_metric": "mae",
@@ -82,18 +109,7 @@ def _cfg_dict(phases: list[dict[str, Any]], **general_extra: Any) -> dict[str, A
             "path_to_model": "model.pkl",
             **general_extra,
         },
-        "algorithms": {
-            "ridge": {
-                "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
-            },
-            "extra_trees": {
-                "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
-            },
-        },
+        "algorithms": algorithms,
         "oversampling": {"data_oversampling": False},
     }
 
@@ -424,6 +440,9 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
     """select(sanity_gate, pool): полная дисквалификация → fallback-ранжир.
 
     Пайплайн не остаётся с пустым множеством (документированный fallback).
+    Инвариант выхода (issue #102): вернувшиеся в рабочее множество
+    fallback-кандидаты снимаются с circuit breaker — иначе следующая фаза
+    отфильтровала бы их и упала. Аудит сохраняется в gate-секции.
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
     ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
@@ -465,11 +484,364 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
 
     # Меньше нарушений (extra_trees) — выше в fallback-ранжире.
     assert list(ctx.working_set) == ["extra_trees", "ridge"]
-    # Дисквалификации гейта попали в circuit breaker (эпик #74).
-    assert set(ctx.disqualified_algorithms) == {"extra_trees", "ridge"}
+    # Инвариант (issue #102): рабочее множество не пересекается с circuit
+    # breaker — fallback-кандидаты не дисквалифицированы навсегда, иначе
+    # следующий refine/select отфильтровал бы их и упал с RuntimeError.
+    assert ctx.disqualified_algorithms == {}
     section = ctx.sanity_gate_sections["gate"]
     assert section["fallback_used"] is True
+    # Детальный аудит сохраняется в gate-секции отчёта.
     assert set(section["disqualified"]) == {"extra_trees", "ridge"}
+
+
+def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
+    """select(sanity_gate, top_k): fallback-кандидат в выходе не дисквалифицирован.
+
+    Ранжир стратегии ставит валидных первыми; если ``k`` покрывает и
+    забракованных (fallback-семантика top_k, issue #102), вернувшиеся в
+    рабочее множество кандидаты снимаются с circuit breaker — иначе
+    следующий refine/select отфильтровал бы их и упал с RuntimeError.
+    """
+    cfg = _hpo_cfg(**_GATE_THRESHOLDS)
+    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+
+    with (
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(
+                        is_valid=False, reasons=["Circuit A"], severity=2
+                    ),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(
+                name="gate", strategy="sanity_gate", output="top_k", k=2
+            ),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    assert set(ctx.working_set) == {"extra_trees", "ridge"}
+    # Инвариант (issue #102): ridge вернулся в выход top_k → не в circuit breaker.
+    assert ctx.disqualified_algorithms == {}
+
+
+def test_select_sanity_gate_top_k_drops_failed_outside_k():
+    """select(sanity_gate, top_k): забракованный вне slice остаётся дисквалифицированным."""
+    cfg = _hpo_cfg(**_GATE_THRESHOLDS)
+    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+
+    with (
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(
+                        is_valid=False, reasons=["Circuit A"], severity=2
+                    ),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(
+                name="gate", strategy="sanity_gate", output="top_k", k=1
+            ),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    assert set(ctx.working_set) == {"extra_trees"}
+    # ridge вне top_k: исключён из рабочего множества и остаётся в circuit breaker.
+    assert set(ctx.disqualified_algorithms) == {"ridge"}
+    assert ctx.disqualified_algorithms["ridge"] == "Circuit A"
+
+
+def test_select_sanity_gate_pool_partial_failure_keeps_only_passed():
+    """select(sanity_gate, pool): частичный провал аудита.
+
+    Прошедшие остаются в рабочем множестве; реально забракованные — вне
+    выхода и в circuit breaker (не вернутся в следующие фазы, эпик #74).
+    """
+    cfg = _hpo_cfg(**_GATE_THRESHOLDS)
+    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+
+    with (
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(
+                        is_valid=False, reasons=["Circuit A"], severity=2
+                    ),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    assert list(ctx.working_set) == ["extra_trees"]
+    assert ctx.disqualified_algorithms == {"ridge": "Circuit A"}
+    assert ctx.sanity_gate_sections["gate"]["fallback_used"] is False
+
+
+def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
+    """select(sanity_gate, pool): кандидаты, не проверенные из-за
+    ``audit_time_budget``, не дисквалифицируются навсегда (issue #102).
+
+    Пропуск аудита — ресурсное ограничение фазы, а не качество модели:
+    такой кандидат не может победить в текущем select (нет аудита), но не
+    попадает в circuit breaker и может вернуться в последующие фазы.
+    Причины остаются в gate-секции отчёта.
+    """
+    cfg = _hpo_cfg(**_GATE_THRESHOLDS)
+    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    # Формат причины берётся из кода (единый источник, ревью PR #49).
+    budget_reason = component._audit_budget_skip_reason(5.0)
+
+    with (
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(
+                        is_valid=False, reasons=[budget_reason], severity=0
+                    ),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    # Прошедший остаётся; пропущенный не дисквалифицирован навсегда.
+    assert list(ctx.working_set) == ["extra_trees"]
+    assert ctx.disqualified_algorithms == {}
+    # Отчёт сохраняет причину пропуска.
+    section = ctx.sanity_gate_sections["gate"]
+    assert section["audit"]["ridge"]["is_valid"] is False
+    assert section["disqualified"]["ridge"] == [budget_reason]
+
+
+def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
+    """Budget-only причины кандидата ВНЕ рабочего множества (issue #102).
+
+    Пропущенный по бюджету кандидат не прошёл в выход ``pool`` (прошли
+    только валидные), но НЕ дисквалифицируется навсегда — в отличие от
+    реального провала, который остаётся в circuit breaker. Контраст обеих
+    категорий в одном select-шаге.
+    """
+    cfg = Config.model_validate(
+        _cfg_dict(
+            [
+                _select_phase(name="gate", strategy="sanity_gate", output="pool"),
+                _select_phase(name="final"),  # терминальный select (валидность схемы)
+            ],
+            sanity_gate={"top_k_candidates": 3, "corridor_delta": 0.9},
+            extra_algorithms={
+                "svr": {
+                    "enable": True,
+                    "tuner": "mock.mock_tuner",
+                    "trainer_module": "mock.mock_trainer",
+                }
+            },
+        )
+    )
+    ctx = _make_ctx(
+        {
+            "extra_trees": (-0.08, {"p": 1}),
+            "ridge": (-0.10, {"p": 1}),
+            "svr": (-0.12, {"p": 1}),
+        }
+    )
+    budget_reason = component._audit_budget_skip_reason(5.0)
+
+    with (
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge", "svr"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(
+                        is_valid=False, reasons=["Circuit A"], severity=2
+                    ),
+                    "svr": SanityCheckResult(
+                        is_valid=False, reasons=[budget_reason], severity=0
+                    ),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    # Валидный — в выходе; реальный провал — в circuit breaker; пропущенный
+    # по бюджету — ни в выходе, ни в circuit breaker (issue #102).
+    assert list(ctx.working_set) == ["extra_trees"]
+    assert ctx.disqualified_algorithms == {"ridge": "Circuit A"}
+    assert "svr" not in ctx.disqualified_algorithms
+    # Отчёт сохраняет причины обеих невалидных категорий.
+    section = ctx.sanity_gate_sections["gate"]
+    assert section["disqualified"]["ridge"] == ["Circuit A"]
+    assert section["disqualified"]["svr"] == [budget_reason]
+
+
+def test_select_sanity_gate_pool_keeps_pre_existing_disqualification():
+    """select(sanity_gate, pool): предсуществующая дисквалификация не снимается.
+
+    (ревью PR #49) Снимаются только провалы, дисквалифицированные этим
+    шагом и возвращённые fallback'ом в выход. Кандидат, дисквалифицированный
+    ранее (например, HPO circuit breaker), остаётся в circuit breaker, даже
+    если оказался в выходе шага.
+    """
+    cfg = _hpo_cfg(**_GATE_THRESHOLDS)
+    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx.disqualified_algorithms = {"ridge": "HPO failure"}
+
+    with (
+        patch.object(
+            component,
+            "_build_finalists_pool",
+            return_value=["extra_trees", "ridge"],
+        ),
+        patch.object(
+            component,
+            "_fit_finalist",
+            side_effect=lambda *a, **kw: _FakeTrainer(
+                _prepared().y.to_numpy(), 0.2, 0.25
+            ),
+        ),
+        patch.object(
+            component,
+            "select_robust_winner",
+            return_value=_result(
+                ["extra_trees", "ridge"],
+                {
+                    "extra_trees": SanityCheckResult(is_valid=True),
+                    "ridge": SanityCheckResult(is_valid=True),
+                },
+                winner="extra_trees",
+            ),
+        ),
+    ):
+        component._execute_select_phase(
+            phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
+            cfg=cfg,
+            prepared=_prepared(),
+            ctx=ctx,
+        )
+
+    # Оба валидны → оба в выходе pool; ridge НЕ провалил аудит в этом шаге,
+    # поэтому его предсуществующая дисквалификация сохраняется.
+    assert list(ctx.working_set) == ["extra_trees", "ridge"]
+    assert ctx.disqualified_algorithms == {"ridge": "HPO failure"}
+
+
+def test_is_audit_budget_skip_rejects_partial_prefix_match():
+    """Fullmatch-детекция (ревью PR #49): частичное совпадение префикса не
+    считается бюджетным пропуском.
+
+    Раньше ``startswith`` давал ложное срабатывание на произвольной причине,
+    лишь начинающейся с префикса; теперь причина обязана полностью
+    соответствовать формату «{prefix} (Ns) exceeded».
+    """
+    assert (
+        component._is_audit_budget_skip(
+            ["Sanity audit skipped: audit time budget is not a reason"]
+        )
+        is False
+    )
+    assert component._is_audit_budget_skip(["Sanity audit skipped by user"]) is False
+    # Кандидат с реальной причиной + «похожей» — тоже не «только пропуск».
+    assert (
+        component._is_audit_budget_skip(
+            [component._audit_budget_skip_reason(5.0), "Sanity audit skipped by user"]
+        )
+        is False
+    )
+
+
+def test_is_audit_budget_skip_detects_only_budget_reasons():
+    """``_is_audit_budget_skip`` отличает пропуск по бюджету от реального провала."""
+    reason = component._audit_budget_skip_reason(5.0)
+    assert component._is_audit_budget_skip([reason]) is True
+    # Смешанные причины (бюджет + контур) — не «только пропуск».
+    assert component._is_audit_budget_skip([reason, "Circuit A"]) is False
+    assert component._is_audit_budget_skip(["Circuit A"]) is False
+    assert component._is_audit_budget_skip([]) is False
 
 
 def test_select_after_select():
@@ -595,6 +967,58 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
     assert all("Circuit D" in r for rs in sg["disqualified"].values() for r in rs)
     # Победитель (fallback) — из пула финалистов.
     assert res["algorithm"] in sg["pool"]
+
+
+def test_pipeline_pool_fallback_survives_following_refine_and_select(tmp_path):
+    """Issue #102: fallback select(pool) не ломает последующие refine/select.
+
+    Полная дисквалификация первого sanity-select возвращает весь ранжир в
+    рабочее множество. Без снятия вернувшихся кандидатов с circuit breaker
+    следующий refine отфильтровал бы всех и упал с RuntimeError («no valid
+    results»), а select(sanity_gate) — в ``select_finalists``. С фиксом DAG
+    …select(pool) → refine → select(winner)… доходит до терминального
+    победителя.
+    """
+    cfg_dict = _cfg_dict(
+        [
+            _select_phase(name="gate_pool", strategy="sanity_gate", output="pool"),
+            {"name": "refine", "n_trials": 2, "action": "refine"},
+            _select_phase(name="gate_final", strategy="sanity_gate"),
+        ],
+        sanity_gate={
+            "top_k_candidates": 2,
+            "corridor_delta": 0.9,
+            "max_generalization_gap": 1.0,
+            "generalization_gap_mode": "reject",
+        },
+    )
+    cfg = Config.model_validate(cfg_dict)
+    cfg.general.path_to_model = tmp_path / "m.pkl"
+    df = _df(n_rows=40)
+
+    def _overfit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
+        # RMSE_oof=0.5 против RMSE_full=0.05: gap=10 > 1.0 → контур Г.
+        return _FakeTrainer(df["target"].to_numpy(), 0.5, 0.05)
+
+    with (
+        _patch_hpo(),
+        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+    ):
+        res = train_best_model(cfg, df, target="target")
+
+    assert res["algorithm"] in {"ridge", "extra_trees"}
+    pool_section = res["sanity_gate"]["gate_pool"]
+    final_section = res["sanity_gate"]["gate_final"]
+    # Первый select: все финалисты провалили аудит → fallback-ранжир.
+    assert pool_section["fallback_used"] is True
+    assert set(pool_section["disqualified"]) == {"ridge", "extra_trees"}
+    # Второй select тоже с fallback (финалисты по-прежнему вырожденные) —
+    # финальный победитель выбирается формальным критерием T4.
+    assert final_section["fallback_used"] is True
+    assert res["algorithm"] in final_section["pool"]
+    # Терминальный select (winner) сохраняет дисквалификации в circuit breaker
+    # (эпик #74): победитель fallback'а по-прежнему числится в отчёте.
+    assert res["algorithm"] in res["disqualified_algorithms"]
 
 
 def test_select_sanity_gate_warn_mode_keeps_gap_winner(tmp_path):

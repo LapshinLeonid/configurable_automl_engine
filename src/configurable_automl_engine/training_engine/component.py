@@ -42,6 +42,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -848,6 +849,64 @@ def _fmt_audit_value(value: float) -> str:
     return f"{value:.4f}" if np.isfinite(value) else "n/a"
 
 
+class _AuditSkipReason(str, Enum):
+    """Причины пропуска аудита Sanity Gate (issue #102, T5).
+
+    Пропуск аудита отличается от провала: проверка не выполнилась из-за
+    ресурсного ограничения фазы (``audit_time_budget_seconds``), а не из-за
+    качества модели. Кандидат с такой причиной не может победить в текущем
+    select-шаге (аудита нет), но НЕ должен дисквалифицироваться навсегда:
+    ограничение одной фазы не выбрасывает алгоритм из всех последующих.
+    """
+
+    BUDGET_EXCEEDED = "Sanity audit skipped: audit time budget"
+
+
+def _audit_budget_skip_reason(budget_seconds: float) -> str:
+    """Сформировать текст причины пропуска аудита по бюджету времени (T5).
+
+    Единый источник формата: используется ``select_robust_winner`` при
+    формировании ``SanityCheckResult`` и тестами — строка нигде не
+    дублируется (ревью PR #49).
+
+    Args:
+        budget_seconds (float): Значение ``audit_time_budget_seconds`` фазы.
+
+    Returns:
+        str: Причина вида «Sanity audit skipped: audit time budget (Ns) exceeded».
+    """
+    return f"{_AuditSkipReason.BUDGET_EXCEEDED.value} ({budget_seconds:g}s) exceeded"
+
+
+# Полное соответствие причины пропуска аудита формату «{prefix} (Ns) exceeded»,
+# где N — число в формате %g (целое/десятичное/экспонента). Fullmatch-проверка
+# исключает ложные срабатывания на причинах, лишь начинающихся с префикса
+# (ревью PR #49).
+_AUDIT_BUDGET_SKIP_RE = re.compile(
+    rf"{re.escape(_AuditSkipReason.BUDGET_EXCEEDED.value)} "
+    r"\([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?s\) exceeded"
+)
+
+
+def _is_audit_budget_skip(reasons: list[str]) -> bool:
+    """True, если ВСЕ причины кандидата — пропуск аудита по бюджету времени.
+
+    Используется в ``_execute_select_sanity_gate``, чтобы такие кандидаты не
+    попадали в circuit breaker (``disqualified_algorithms``) — бюджет фазы не
+    должен выбрасывать алгоритм из всех последующих фаз (issue #102).
+
+    Args:
+        reasons (list[str]): Причины невалидности кандидата из аудита.
+
+    Returns:
+        bool: True, если причины сводятся к пропуску из-за исчерпания
+            ``audit_time_budget_seconds`` (хотя бы одна причина есть).
+    """
+    return bool(reasons) and all(
+        _AUDIT_BUDGET_SKIP_RE.fullmatch(reason) is not None for reason in reasons
+    )
+
+
 def select_robust_winner(
     candidate_models: Mapping[str, FinalistCandidate],
     X: pd.DataFrame,
@@ -947,12 +1006,7 @@ def select_robust_winner(
             )
             audits[name] = SanityCheckResult(
                 is_valid=False,
-                reasons=[
-                    (
-                        "Sanity audit skipped: audit time budget "
-                        f"({audit_time_budget_seconds:g}s) exceeded"
-                    )
-                ],
+                reasons=[_audit_budget_skip_reason(audit_time_budget_seconds)],
                 severity=0,
             )
             continue
@@ -2524,6 +2578,34 @@ def _execute_select_cv_best(
     )
 
 
+def _drop_kept_from_circuit_breaker(
+    ctx: PhaseContext, returned_by_fallback: Iterable[str]
+) -> None:
+    """Снять с circuit breaker кандидатов, возвращённых выходом select-шага.
+
+    Select-шаг со ``strategy: sanity_gate`` (``output: top_k``/``pool``)
+    сознательно возвращает в рабочее множество кандидатов, не прошедших
+    аудит (fallback T4) — иначе пайплайн остался бы с пустым множеством.
+    Оставлять их в ``disqualified_algorithms`` нельзя: следующая фаза
+    отфильтровала бы их и упала (refine — RuntimeError «no valid results»,
+    следующий sanity-select — ``select_finalists``).
+
+    Снимаются ТОЛЬКО имена, переданные ``returned_by_fallback``: провалы,
+    дисквалифицированные именно этим шагом и вернувшиеся в его выход.
+    Предсуществующие дисквалификации (HPO circuit breaker и др.) не
+    трогаются — за них ответственны другие фазы (ревью PR #49).
+
+    Args:
+        ctx (PhaseContext): Контекст фаз (изменяется).
+        returned_by_fallback (Iterable[str]): Имена, вернувшиеся в выход шага
+            и дисквалифицированные этим же шагом.
+    """
+    kept = set(returned_by_fallback)
+    for name in list(ctx.disqualified_algorithms):
+        if name in kept:
+            del ctx.disqualified_algorithms[name]
+
+
 def _execute_select_sanity_gate(
     phase: HPOPhaseCfg,
     cfg: Config,
@@ -2544,7 +2626,10 @@ def _execute_select_sanity_gate(
        аудит по ``RMSE_oof``, fallback-критерий при полной дисквалификации.
 
     Дисквалификации гейта попадают в circuit breaker
-    (``disqualified_algorithms``) наравне с HPO-провалами. Секция отчёта (T6)
+    (``disqualified_algorithms``) наравне с HPO-провалами (эпик #74);
+    исключение — кандидаты, пропущенные из-за исчерпания
+    ``audit_time_budget_seconds`` (issue #102): они не аудированы, а не
+    забракованы, и не дисквалифицируются навсегда. Секция отчёта (T6)
     добавляется в ``ctx.sanity_gate_sections`` под именем фазы. Формы выхода:
 
     - ``winner`` — единственный победитель (терминальный шаг); его full-fit
@@ -2553,6 +2638,13 @@ def _execute_select_sanity_gate(
     - ``pool`` — все прошедшие отбор (аудит); при полной дисквалификации —
       весь ранжир по fallback-критерию T4 (пайплайн не остаётся с пустым
       множеством).
+
+    Инвариант выхода (issue #102): рабочее множество не пересекается с
+    ``disqualified_algorithms`` — провалы, дисквалифицированные этим шагом и
+    возвращённые fallback'ом в выход ``top_k``/``pool``, снимаются с circuit
+    breaker (иначе следующая фаза отфильтровала бы их и упала).
+    Предсуществующие дисквалификации (HPO circuit breaker и др.) не
+    снимаются (ревью PR #49).
 
     Args:
         phase (HPOPhaseCfg): Конфигурация select-фазы.
@@ -2599,8 +2691,28 @@ def _execute_select_sanity_gate(
 
     # Дисквалификации гейта → circuit breaker (наравне с HPO-провалами,
     # эпик #74): алгоритм не вернётся в пулы следующих select-шагов.
+    # Исключение — кандидаты, пропущенные из-за исчерпания audit_time_budget
+    # (issue #102): они НЕ аудированы, а не забракованы, поэтому не должны
+    # дисквалифицироваться навсегда из всех последующих фаз.
     for name, reasons in result.disqualified.items():
+        if _is_audit_budget_skip(reasons):
+            _LOG.info(
+                "[sanity_gate] Candidate %s was not audited (audit time "
+                "budget exceeded); not permanently disqualified",
+                name,
+            )
+            continue
         ctx.disqualified_algorithms[name] = "; ".join(reasons)
+
+    # Провалы, дисквалифицированные ИМЕННО этим шагом (без бюджетных
+    # пропусков). Только их выход может вернуть в рабочее множество, снимая
+    # с circuit breaker; предсуществующие дисквалификации не трогаются
+    # (ревью PR #49).
+    disqualified_this_step = {
+        name
+        for name, reasons in result.disqualified.items()
+        if not _is_audit_budget_skip(reasons)
+    }
 
     ranked = _rank_sanity_candidates(result, candidates)
     _LOG.info(
@@ -2652,6 +2764,10 @@ def _execute_select_sanity_gate(
         ctx.full_fit_trainers = {
             name: tr for name, tr in ctx.full_fit_trainers.items() if name in kept
         }
+        # Инвариант выхода (issue #102): вернувшиеся fallback-кандидаты
+        # снимаются с circuit breaker, иначе следующая фаза отфильтровала бы
+        # их и упала с RuntimeError. Снимаются только провалы этого шага.
+        _drop_kept_from_circuit_breaker(ctx, set(kept) & disqualified_this_step)
         _LOG.info(
             "Select phase '%s' (strategy: sanity_gate): top_k=%d kept %s",
             phase.name,
@@ -2677,6 +2793,8 @@ def _execute_select_sanity_gate(
     ctx.full_fit_trainers = {
         name: tr for name, tr in ctx.full_fit_trainers.items() if name in passed
     }
+    # Инвариант выхода (issue #102): см. комментарий к ветке top_k.
+    _drop_kept_from_circuit_breaker(ctx, set(passed) & disqualified_this_step)
     _LOG.info(
         "Select phase '%s' (strategy: sanity_gate): pool of passed candidates %s",
         phase.name,
