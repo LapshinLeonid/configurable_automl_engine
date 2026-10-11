@@ -106,9 +106,11 @@ general:
     - name: "Coarse Search"
       n_trials: 3
       action: "all_algorithms"
-    - name: "Fine Tuning"
-      n_trials: 5
-      action: "refine_winner"
+    - name: "Final Select"
+      n_trials: 1
+      action: "select"
+      strategy: "cv_best"
+      output: "winner"
 algorithms:
   random_forest:
     enable: true
@@ -175,7 +177,6 @@ algorithms:
 # --------------------------------------------------------------------------- #
 #  HAPPY PATH
 # --------------------------------------------------------------------------- #
-@_LEGACY_XFAIL
 def test_happy_path(tmp_path: Path, small_dataset):
     """
     Проверка успешного цикла обучения на синтетических данных из фикстуры.
@@ -256,7 +257,6 @@ def _make_iae(message: str):
     return InvalidAlgorithmError(message)
 
 
-@_LEGACY_XFAIL
 def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     """
     Проверка, что алгоритм, чей тюнер бросает InvalidAlgorithmError,
@@ -297,6 +297,11 @@ general:
     - name: "Coarse Search"
       n_trials: 2
       action: "all_algorithms"
+    - name: "Final Select"
+      n_trials: 1
+      action: "select"
+      strategy: "cv_best"
+      output: "winner"
 algorithms:
   ridge:
     enable: true
@@ -347,7 +352,6 @@ def _patch_load_modules(broken_tuner, good_tuner):
     )
 
 
-@_LEGACY_XFAIL
 def test_circuit_breaker_disqualifies_only_broken_algorithm(
     tmp_path: Path, small_dataset
 ):
@@ -383,7 +387,6 @@ def test_circuit_breaker_disqualifies_only_broken_algorithm(
     }
 
 
-@_LEGACY_XFAIL
 def test_circuit_breaker_all_algorithms_disqualified_raises(
     tmp_path: Path, small_dataset
 ):
@@ -466,7 +469,14 @@ def base_config_dict():
                     "name": "fast",
                     "n_trials": 2,
                     "action": "all_algorithms",
-                }  # Исправлено 'all' -> 'all_algorithms'
+                },  # Исправлено 'all' -> 'all_algorithms'
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
             "path_to_model": "model.pkl",
             "log_to_file": None,
@@ -510,7 +520,6 @@ class TestTrainingEngineCoverage:
 
     # Исправленный тест на отсутствие ModelTrainer
     @patch("configurable_automl_engine.training_engine.component._load_module")
-    @_LEGACY_XFAIL
     def test_fit_and_save_missing_trainer_class(
         self, mock_load, mock_algo_cfg, sample_df, base_config_dict
     ):
@@ -532,7 +541,6 @@ class TestTrainingEngineCoverage:
     # Исправленный тест логирования
     @patch("configurable_automl_engine.training_engine.component.setup_logging")
     @patch("configurable_automl_engine.training_engine.component.read_config")
-    @_LEGACY_XFAIL
     def test_logging_setup(self, mock_read, mock_setup, sample_df, base_config_dict):
         base_config_dict["general"]["log_to_file"] = "test.log"
         mock_read.return_value = Config.model_validate(base_config_dict)
@@ -551,7 +559,6 @@ class TestTrainingEngineCoverage:
 
     # Исправленный тест на ошибку в воркере
     @patch("configurable_automl_engine.training_engine.component._run_hpo")
-    @_LEGACY_XFAIL
     def test_worker_exception_handling(self, mock_hpo, sample_df, base_config_dict):
         # Настраиваем HPO на выброс исключения, которое НЕ является InvalidAlgorithmError
         mock_hpo.side_effect = ValueError("Something went wrong")
@@ -567,7 +574,6 @@ class TestTrainingEngineCoverage:
         return_value=(0.9, {"p": 1}),
     )
     @patch("configurable_automl_engine.training_engine.component._fit_and_save")
-    @_LEGACY_XFAIL
     def test_fit_and_save_failure(
         self, mock_fit, mock_hpo, sample_df, base_config_dict
     ):
@@ -812,9 +818,10 @@ def test_train_best_model_empty_phases_raises_runtime_error():
 def test_train_best_model_config_from_dict_and_refine_flow():
     """refine из dict-конфига (R3): второй раунд HPO для всех кандидатов.
 
-    Легаси-версия теста шла через train_best_model с action='refine_winner';
-    терминальный select ещё не исполним (R2), поэтому поток проверяется
-    напрямую через execute_phases на конфиге, усечённом до HPO-фаз.
+    Схема (эпик #74) требует терминальный select последней фазой; для
+    unit-проверки HPO-потока конфиг валидируется с ним, а фазы усекаются до
+    [all_algorithms, refine] (модификация после валидации безопасна:
+    execute_phases читает только general.phases).
     """
     valid_config_dict = {
         "general": {
@@ -879,7 +886,6 @@ def test_train_best_model_config_from_dict_and_refine_flow():
 # --------------------------------------------------------------------------- #
 #  Debug-логи в ветке dict-конфига (issue #23)
 # --------------------------------------------------------------------------- #
-@_LEGACY_XFAIL
 def test_train_best_model_debug_logs_formatted_no_logging_error(
     caplog, capsys, sample_df, base_config_dict
 ):
@@ -1026,7 +1032,6 @@ def test_refine_uses_initial_params_from_phase1():
     assert mock_hpo.call_count == 2
 
 
-@_LEGACY_XFAIL
 def test_result_score_matches_logged_user_value(caplog):
     """Логи фаз HPO и result["score"] используют единую семантику (issue #26).
 
@@ -1037,7 +1042,16 @@ def test_result_score_matches_logged_user_value(caplog):
         "general": {
             "comparison_metric": "rmse",
             "validation_strategy": "train_test_split",
-            "phases": [{"name": "p1", "n_trials": 1, "action": "all_algorithms"}],
+            "phases": [
+                {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
             "path_to_model": "model.pkl",
         },
         "algorithms": {
@@ -1234,7 +1248,6 @@ def test_run_hpo_returns_none_when_tuner_reports_failure():
         assert result is None
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_dict):
     """best_params=None → понятный ValueError, а не TypeError iterable.
 
@@ -1280,6 +1293,11 @@ def config_single_algo(tmp_path):
             - name: "Coarse Search"
               n_trials: 3
               action: "all_algorithms"
+            - name: "Final Select"
+              n_trials: 1
+              action: "select"
+              strategy: "cv_best"
+              output: "winner"
         algorithms:
           random_forest:
             enable: true
@@ -1320,6 +1338,11 @@ def config_two_algos(tmp_path):
             - name: "Coarse Search"
               n_trials: 3
               action: "all_algorithms"
+            - name: "Final Select"
+              n_trials: 1
+              action: "select"
+              strategy: "cv_best"
+              output: "winner"
         algorithms:
           random_forest:
             enable: true
@@ -1354,7 +1377,6 @@ def config_two_algos(tmp_path):
 # ── Тест 1: _run_hpo → None, цепочка None-веток → RuntimeError ──────────────
 
 
-@_LEGACY_XFAIL
 class TestExecuteHpoPhaseReturnsNone:
     """
     Цепочка: _run_hpo() → None
@@ -1395,7 +1417,6 @@ class TestExecuteHpoPhaseReturnsNone:
 # ── Тест 2: Два алгоритма — один None, второй валидный ──────────────────────
 
 
-@_LEGACY_XFAIL
 class TestPartialNoneResults:
     """
     random_forest → None  (триггерит обе None-ветки),
@@ -1448,7 +1469,6 @@ class TestPartialNoneResults:
 # ── Тест 3: «Худший скор» HPO_WORST_SCORE исключается (issue #13) ────────────
 
 
-@_LEGACY_XFAIL
 class TestWorstScoreResultsExcluded:
     """
     Алгоритмы, вернувшие «худший скор» HPO_WORST_SCORE (-3.4028235e38),
@@ -1612,6 +1632,13 @@ class TestWorstScoreResultsExcluded:
                 "parallel_mode": "threads",
                 "phases": [
                     {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {
+                        "name": "final",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
                 ],
                 "path_to_model": "model.pkl",
             },
@@ -1700,7 +1727,6 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
 
-@_LEGACY_XFAIL
 class TestWorstScoreIntegrationThroughTuner:
     """Полный путь: реальный _run_hpo + тюнер, вернувший HPO_WORST_SCORE."""
 
@@ -1977,7 +2003,6 @@ class TestMultiPhaseFailureExclusion:
 # ── Тест 6: комбинированная регрессия circuit breaker (issue #12) +           #
 #           пересборка фаз (issue #13)                                         #
 # --------------------------------------------------------------------------- #
-@_LEGACY_XFAIL
 def test_disqualified_algorithm_not_rerun_in_later_all_algorithms_phase(
     tmp_path: Path, small_dataset
 ):
@@ -1999,6 +2024,11 @@ general:
     - name: "Fine Search"
       n_trials: 2
       action: "all_algorithms"
+    - name: "Final Select"
+      n_trials: 1
+      action: "select"
+      strategy: "cv_best"
+      output: "winner"
 algorithms:
   ridge:
     enable: true
@@ -2110,7 +2140,6 @@ def test_run_hpo_no_override_when_absent():
     assert kwargs.get("preprocessing_override") is None
 
 
-@_LEGACY_XFAIL
 def test_train_best_model_applies_preprocessing_override(tmp_path, regression_dataset):
     """AC-7 end-to-end: переопределение пресета из конфига применяется в финальной модели.
 
@@ -2127,7 +2156,16 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
             "comparison_metric": "r2",
             "path_to_model": str(model_path),
             "validation_strategy": "train_test_split",
-            "phases": [{"name": "search", "n_trials": 2, "action": "all_algorithms"}],
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
         },
         "algorithms": {
             "random_forest": {
@@ -2360,7 +2398,6 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
     assert received["feature_selection_cfg"].mode == FeatureSelectionMode.disabled
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
     """_fit_and_save передаёт feature_selection_cfg и feature_selection_active."""
     mock_trainer_cls = Mock()
@@ -2384,7 +2421,14 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
                         "name": "fast",
                         "n_trials": 2,
                         "action": "all_algorithms",
-                    }
+                    },
+                    {
+                        "name": "final",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
                 ],
                 "path_to_model": "model.pkl",
             },
@@ -2429,7 +2473,6 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
     mock_trainer_instance.save.assert_called_once()
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_fs_active_none_when_key_absent():
     """Без ключа use_feature_selection тренеру передаётся None (решение по конфигу)."""
     mock_trainer_cls = Mock()
@@ -2453,7 +2496,14 @@ def test_fit_and_save_fs_active_none_when_key_absent():
                         "name": "fast",
                         "n_trials": 2,
                         "action": "all_algorithms",
-                    }
+                    },
+                    {
+                        "name": "final",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
                 ],
                 "path_to_model": "model.pkl",
             },
@@ -2486,7 +2536,6 @@ def test_fit_and_save_fs_active_none_when_key_absent():
     assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
     """B5: путь «auto → победитель выбрал False» в финальной сборке модели.
 
@@ -2580,7 +2629,14 @@ def _fs_cfg_dict(mode: str) -> dict:
             "validation_strategy": "k_fold",
             "n_folds": 2,
             "phases": [
-                {"name": "fast", "n_trials": 2, "action": "all_algorithms"}
+                {"name": "fast", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
             "path_to_model": "model.pkl",
             "feature_selection": {"mode": mode},
@@ -2610,7 +2666,6 @@ def test_feature_selection_mode_helper():
     assert _feature_selection_mode("not-a-cfg") is None
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
     """A2: legacy ModelTrainer без fs-аргументов не получает их (warning).
 
@@ -2649,7 +2704,6 @@ def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
     assert "does not accept `feature_selection_active`" in caplog.text
 
 
-@_LEGACY_XFAIL
 def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
     caplog, tmp_path
 ):
@@ -2737,7 +2791,6 @@ def test_refine_preserves_feature_selection_status_between_phases():
     assert mock_hpo.call_count == 2
 
 
-@_LEGACY_XFAIL
 def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
     """E2E «тюнер→компонент→тренер» в auto-режиме отбора признаков.
 
@@ -2767,7 +2820,14 @@ def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
             "validation_strategy": "train_test_split",
             "n_folds": 2,
             "phases": [
-                {"name": "auto_fs", "n_trials": 3, "action": "all_algorithms"}
+                {"name": "auto_fs", "n_trials": 3, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
             "path_to_model": str(model_path),
             "feature_selection": {"mode": "auto", "method": "importance"},

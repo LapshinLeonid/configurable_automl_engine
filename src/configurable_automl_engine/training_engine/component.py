@@ -2306,11 +2306,15 @@ def _execute_select_cv_best(
         ctx.working_set = {winner_algo: ctx.working_set[winner_algo]}
         ctx.winner_algo = winner_algo
         ctx.pre_trained_trainer = None
+        # Единая пользовательская семантика (issue #26, T6): как и лог фазы
+        # HPO, select-шаг печатает естественное значение метрики (для ошибок
+        # — положительное RMSE/MAE), а не «сырое» инвертированное значение
+        # скорера оптимизатора.
         _LOG.info(
             "Select phase '%s' (strategy: cv_best): winner %s (score %.5f)",
             phase.name,
             winner_algo,
-            ctx.working_set[winner_algo][0],
+            to_user_value(prepared.metric_user, ctx.working_set[winner_algo][0]),
         )
         return
 

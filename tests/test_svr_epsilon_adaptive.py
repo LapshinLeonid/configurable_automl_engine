@@ -18,12 +18,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Эпик #74 (WIP, PR !43): легаси-тесты пайплайна со старой схемой конфига
-# (refine_winner / sanity_gate.mode / нетерминальная последняя фаза) падают
-# на валидации с подсказкой миграции; исполнение select/refine появится в
-# задачах R2/R3. Нестрогий xfail держит CI зелёным в переходный период;
-# маркер снимается вместе с миграцией тестов (R2/R3/R4).
-pytestmark = pytest.mark.xfail(strict=False, reason='Legacy pipeline config (refine_winner / sanity_gate.mode / non-terminal select) or select/refine execution: migration to the epic #74 schema lands with tasks R2/R3/R4 (see PR !43, issue #75). Non-strict xfail keeps the CI green in the transition period; remove this marker together with the test migration.')
 from sklearn.linear_model import Ridge
 
 import configurable_automl_engine.tuner as tuner_module
@@ -295,7 +289,7 @@ def test_tuner_svr_callable_override_unchanged(monkeypatch):
 
 
 def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
-    """enqueue_trial: epsilon из предыдущей фазы (refine_winner) валиден в адаптивном диапазоне.
+    """enqueue_trial: epsilon из предыдущей фазы (refine) валиден в адаптивном диапазоне.
 
     Границы считаются от того же y_train в обеих фазах, поэтому значение
     победителя первой фазы гарантированно лежит внутри диапазона второй.
@@ -425,6 +419,11 @@ general:
     - name: "Coarse Search"
       n_trials: {n_trials}
       action: "all_algorithms"
+    - name: "Final Select"
+      n_trials: 1
+      action: "select"
+      strategy: "cv_best"
+      output: "winner"
 algorithms:
   svr:
     enable: true
@@ -489,6 +488,11 @@ general:
     - name: "Coarse Search"
       n_trials: 3
       action: "all_algorithms"
+    - name: "Final Select"
+      n_trials: 1
+      action: "select"
+      strategy: "cv_best"
+      output: "winner"
 algorithms:
   svr:
     enable: true
@@ -530,7 +534,16 @@ def _svr_config(tmp_path: Path, hyperparameters: dict | None = None) -> Config:
         general=GeneralCfg(
             comparison_metric="rmse",
             path_to_model=str(tmp_path / "m.pkl"),
-            phases=[HPOPhaseCfg(name="Coarse Search", n_trials=1, action="all_algorithms")],
+            phases=[
+                HPOPhaseCfg(name="Coarse Search", n_trials=1, action="all_algorithms"),
+                HPOPhaseCfg(
+                    name="Final Coarse Select",
+                    n_trials=1,
+                    action="select",
+                    strategy="cv_best",
+                    output="winner",
+                ),
+            ],
         ),
         algorithms=algos,
     )
@@ -573,7 +586,8 @@ def test_prepare_search_space_svr_default_omits_epsilon(
         fake_run_hpo,
     )
 
-    results, _ = execute_phases(cfg, prepared)
+    ctx = execute_phases(cfg, prepared)
+    results = ctx.working_set
 
     assert "svr" in results
     space = captured["search_space"]
@@ -603,7 +617,8 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
         fake_run_hpo,
     )
 
-    results, _ = execute_phases(cfg, prepared)
+    ctx = execute_phases(cfg, prepared)
+    results = ctx.working_set
 
     assert "svr" in results
     space = captured["search_space"]
@@ -619,7 +634,14 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
             comparison_metric="rmse",
             path_to_model=str(tmp_path / "m.pkl"),
             phases=[
-                HPOPhaseCfg(name="Coarse Search", n_trials=1, action="all_algorithms")
+                HPOPhaseCfg(name="Coarse Search", n_trials=1, action="all_algorithms"),
+                HPOPhaseCfg(
+                    name="Final Coarse Select",
+                    n_trials=1,
+                    action="select",
+                    strategy="cv_best",
+                    output="winner",
+                ),
             ],
         ),
         algorithms={"ridge": {"enable": True}},
@@ -636,7 +658,8 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
         fake_run_hpo,
     )
 
-    results, _ = execute_phases(cfg_ridge, _prepared_data())
+    ctx = execute_phases(cfg_ridge, _prepared_data())
+    results = ctx.working_set
 
     assert "ridge" in results
     space = captured["search_space"]

@@ -5,12 +5,10 @@ import configurable_automl_engine as caml
 data = load_diabetes(as_frame=True)
 df = data.frame
 
-# NOTE (epic #74): the config below uses the target pipeline schema.
-# The `select` steps are fully implemented (task R2); the `refine` action is
-# declared in the config schema but its execution is not implemented yet
-# (task R3): running this example raises NotImplementedError until then.
-# Remove the "refine" phase (or replace it with another "all_algorithms"
-# phase) to run the example today.
+# NOTE (epic #74): the config below uses the target pipeline schema — explicit
+# `select` and `refine` steps (tasks R2/R3). The pipeline runs end-to-end:
+# coarse HPO -> Sanity Gate keeps the top-3 candidates -> warm-started refine
+# -> terminal Sanity Gate re-audits the refined models and picks the winner.
 
 config = {
     "general": {
@@ -67,3 +65,17 @@ config = {
 results = caml.train_best_model(config=config, df=df, target="target")
 
 print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+print(f"Metric: {results['metric']}, Model: {results['model_path']}")
+
+# Report (T6, epic #74): every `select` step with `strategy: sanity_gate`
+# adds its own section to `result["sanity_gate"]` keyed by the phase name.
+for phase_name, section in results.get("sanity_gate", {}).items():
+    print(f"\nSanity Gate report — phase '{phase_name}'")
+    print(f"  Pool: {section['pool']}")
+    if section["disqualified"]:
+        print(f"  Disqualified: {section['disqualified']}")
+    else:
+        print("  Disqualified: none")
+    print(f"  Fallback used: {section['fallback_used']}")
+    print(f"  Winner RMSE_oof: {section['winner_rmse_oof']}")
+    print(f"  Overhead: {section['overhead_seconds']:.1f} s")

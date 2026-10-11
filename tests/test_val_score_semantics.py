@@ -26,12 +26,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Эпик #74 (WIP, PR !43): легаси-тесты пайплайна со старой схемой конфига
-# (refine_winner / sanity_gate.mode / нетерминальная последняя фаза) падают
-# на валидации с подсказкой миграции; исполнение select/refine появится в
-# задачах R2/R3. Нестрогий xfail держит CI зелёным в переходный период;
-# маркер снимается вместе с миграцией тестов (R2/R3/R4).
-pytestmark = pytest.mark.xfail(strict=False, reason='Legacy pipeline config (refine_winner / sanity_gate.mode / non-terminal select) or select/refine execution: migration to the epic #74 schema lands with tasks R2/R3/R4 (see PR !43, issue #75). Non-strict xfail keeps the CI green in the transition period; remove this marker together with the test migration.')
 from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.base import clone
 from sklearn.metrics import r2_score
@@ -305,7 +299,16 @@ def test_engine_path_val_score_consistent_with_result_score(tmp_path):
             "validation_strategy": "k_fold",
             "n_folds": 3,
             "path_to_model": str(model_path),
-            "phases": [{"name": "search", "n_trials": 2, "action": "all_algorithms"}],
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
         },
         "algorithms": {
             "ridge": {
@@ -362,7 +365,16 @@ def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
             "validation_strategy": "auto",
             "n_folds": 5,
             "path_to_model": str(tmp_path / "m.pkl"),
-            "phases": [{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+            "phases": [
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
         },
         "algorithms": {"ridge": {"enable": True}},
     }
@@ -420,7 +432,16 @@ def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
             "validation_strategy": "auto",
             "n_folds": 5,
             "path_to_model": str(tmp_path / "m.pkl"),
-            "phases": [{"name": "p", "n_trials": 1, "action": "all_algorithms"}],
+            "phases": [
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
         },
         "algorithms": {"ridge": {"enable": True}},
     }

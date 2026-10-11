@@ -77,7 +77,12 @@ into a failure reason instead of raising.
 ``warn_only`` mode: the gate still computes every statistic and fills
 ``reasons`` with the would-be disqualifications, but ``is_valid`` is forced to
 True and ``severity`` is capped at the "warning" level — the upper layer
-(task T4) decides whether to apply the verdict to winner selection.
+decides whether to apply the verdict to winner selection. NOTE (epic #74):
+this is a low-level diagnostic option of the audit object itself; the pipeline
+does NOT use it — select steps with ``strategy: sanity_gate`` always apply the
+disqualifications (the ``warn_only`` selection mode was removed together with
+``sanity_gate.mode`` / ``winner_if_active`` / the ``sanity_gate_warn_only``
+report key).
 
 Determinism: the permutation test uses ``np.random.default_rng`` seeded with
 ``permutation_seed``; row/column subsampling and column shuffles are all drawn

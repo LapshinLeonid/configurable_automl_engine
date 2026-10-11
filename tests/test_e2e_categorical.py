@@ -15,13 +15,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Эпик #74 (WIP, PR !43): легаси-тесты пайплайна со старой схемой конфига
-# (refine_winner / sanity_gate.mode / нетерминальная последняя фаза) падают
-# на валидации с подсказкой миграции; исполнение select/refine появится в
-# задачах R2/R3. Нестрогий xfail держит CI зелёным в переходный период;
-# маркер снимается вместе с миграцией тестов (R2/R3/R4).
-pytestmark = pytest.mark.xfail(strict=False, reason='Legacy pipeline config (refine_winner / sanity_gate.mode / non-terminal select) or select/refine execution: migration to the epic #74 schema lands with tasks R2/R3/R4 (see PR !43, issue #75). Non-strict xfail keeps the CI green in the transition period; remove this marker together with the test migration.')
-
 from configurable_automl_engine.training_engine import train_best_model
 from configurable_automl_engine.trainer import ModelTrainer
 
@@ -98,7 +91,14 @@ def _make_config(
             "validation_strategy": "train_test_split",
             "n_folds": 3,
             "phases": [
-                {"name": "search", "n_trials": n_trials, "action": "all_algorithms"}
+                {"name": "search", "n_trials": n_trials, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
         },
         "algorithms": {

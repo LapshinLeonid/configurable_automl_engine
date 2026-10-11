@@ -27,12 +27,6 @@ import optuna
 import pandas as pd
 import pytest
 
-# Эпик #74 (WIP, PR !43): легаси-тесты пайплайна со старой схемой конфига
-# (refine_winner / sanity_gate.mode / нетерминальная последняя фаза) падают
-# на валидации с подсказкой миграции; исполнение select/refine появится в
-# задачах R2/R3. Нестрогий xfail держит CI зелёным в переходный период;
-# маркер снимается вместе с миграцией тестов (R2/R3/R4).
-pytestmark = pytest.mark.xfail(strict=False, reason='Legacy pipeline config (refine_winner / sanity_gate.mode / non-terminal select) or select/refine execution: migration to the epic #74 schema lands with tasks R2/R3/R4 (see PR !43, issue #75). Non-strict xfail keeps the CI green in the transition period; remove this marker together with the test migration.')
 from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.model_selection import KFold
@@ -573,10 +567,10 @@ def test_optimize_pruning_loo_works(toy_data, quality_patches):
     assert model is not None
 
 
-def test_optimize_pruning_with_initial_params_refine_winner(
+def test_optimize_pruning_with_initial_params_refine(
     toy_data, quality_patches
 ):
-    """refine_winner (initial_params + enqueue_trial) совместим с pruning."""
+    """refine (initial_params + enqueue_trial) совместим с pruning."""
     X, y = toy_data
 
     _model, params, score = optimize(
@@ -777,7 +771,14 @@ def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
             "validation_strategy": "k_fold",
             "n_folds": 2,
             "phases": [
-                {"name": "search", "n_trials": 2, "action": "all_algorithms"}
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
             "pruning": {
                 "enable": True,
@@ -1207,7 +1208,14 @@ def test_train_best_model_auto_pruning_e2e(tmp_path: Path) -> None:
             "validation_strategy": "auto",
             "n_folds": 2,
             "phases": [
-                {"name": "search", "n_trials": 2, "action": "all_algorithms"}
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
             ],
             "pruning": {
                 "enable": True,

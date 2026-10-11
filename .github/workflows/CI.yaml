@@ -36,12 +36,15 @@ jobs:
           PYTHONPATH: .
         run: pytest --cov=src --cov-report=xml
 
-      # T9 (issue #70): регрессионный бенчмарк «до/после» Sanity Gate —
-      # обязательный критерий приёмки эпика #61. Печатает таблицу
-      # «датасет × режим × победитель × метрики × гейт» и блокирует приёмку
-      # при нарушении порогов: 0 изменений победителя на эталонных датасетах,
+      # R4 (issue #78): регрессионный бенчмарк Sanity Gate на целевом пайплайне
+      # эпика #74 — обязательный критерий приёмки эпика. Сравнивает варианты
+      # пайплайна (baseline: all_algorithms + select(cv_best, winner); target:
+      # all_algorithms + select(sanity_gate, top_k) + refine +
+      # select(sanity_gate, winner)), печатает таблицу
+      # «датасет × вариант × победитель × гейт» и блокирует приёмку при
+      # нарушении порогов: 0 изменений победителя на эталонных датасетах,
       # 100% изменений на вырожденных.
-      - name: Run Sanity Gate before/after benchmark
+      - name: Run Sanity Gate pipeline-variant benchmark
         env:
           PYTHONPATH: .
         run: python benchmarks/run_sanity_gate_benchmark.py
