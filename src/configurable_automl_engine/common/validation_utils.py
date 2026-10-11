@@ -85,10 +85,24 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
        reliable than LOO — LOO would measure the ability to repeat the global
        trend instead of generalizing to new point slices. Uses k=4 for N >= 20
        and k=3 otherwise. A low-confidence warning is attached when N < 2*P.
-    3. **Standard train-test split** for N >= 200 with a good N/P ratio.
-    4. **High-dimensional train-test split** for N >= 50000 when P is very
+    3. **Fixed 5-fold CV** for mid-size samples (200 <= N < 50000) with a good
+       N/P ratio (N >= 10*P): a single hold-out of max(30, 2*P) rows compares
+       models on too few points (issue #99) — on 30 rows the RMSE spread is
+       about ±13% while the confidence corridor is δ=0.15, so the winner is
+       selected almost at random and the Sanity Gate OOF vector covers only
+       ~3% of the data. 5-fold CV scores every row exactly once (100% OOF
+       coverage) and stays affordable up to a few tens of thousands of rows.
+    4. **Standard train-test split** for large samples (N >= 50000) with a
+       good N/P ratio: at this scale the smallest hold-out (max(30, 2*P)
+       rows, ~1-6% of the data) is already large enough for a reliable
+       comparison, while 5-fold CV would cost 5x compute for no benefit.
+       Note the deliberate discrete jump at N=50000: below the threshold 5-fold
+       CV scores 100% of rows; from the threshold on a single hold-out scores
+       ~1-6% — the hold-out floor scales with N, so the comparison stays
+       meaningful while the compute cost drops 5x.
+    5. **High-dimensional train-test split** for N >= 50000 when P is very
        large relative to N (5P <= N < 10P).
-    5. **Continuous k-fold heuristic** for everything else; k == N is relabeled
+    6. **Continuous k-fold heuristic** for everything else; k == N is relabeled
        to LOO. Micro-samples (N <= 5) are protected from k > N.
 
     Args:
@@ -144,12 +158,28 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
             "warning": fixed_kfold_warning,
         }
 
-    # 3. Standard train-test split.
-    # The minimum test set size is the larger of 30 rows or 2*P features (enough
-    # to estimate the target distribution), capped at a 30% test fraction.
+    # 3. Mid-size samples with a good N/P ratio (200 <= N < 50000, N >= 10*P):
+    # fixed 5-fold CV. A single hold-out of max(30, 2*P) rows would compare
+    # models on far too few points: on 30 rows the RMSE spread is about ±13%
+    # against a confidence corridor of δ=0.15, so the winner would be chosen
+    # almost at random, and the Sanity Gate OOF vector would cover only ~3%
+    # of the data. 5-fold CV scores every row exactly once (100% OOF coverage)
+    # and is affordable up to a few tens of thousands of rows.
+    if 200 <= n_samples < 50000 and n_samples >= 10 * n_features:
+        return {
+            "method": "kfold",
+            "k": 5,
+            "average_test_size": round(n_samples / 5, 1),
+        }
+
+    # 4. Standard train-test split for large samples (N >= 50000).
+    # At this scale the minimum test set — the larger of 30 rows or 2*P
+    # features (enough to estimate the target distribution) — is already a
+    # statistically reliable slice (~1-6% of the data), and 5-fold CV would
+    # cost 5x compute for no benefit. The test fraction is capped at 30%.
     min_test_standard = max(30, 2 * n_features)
     if (
-        n_samples >= 200
+        n_samples >= 50000
         and n_samples >= 10 * n_features
         and n_samples - min_test_standard >= 50
     ):
@@ -163,7 +193,7 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
             "train_size": n_samples - n_test,
         }
 
-    # 4. High-dimensional train-test split: when P is very large relative to N
+    # 5. High-dimensional train-test split: when P is very large relative to N
     # (5P <= N < 10P), k-fold becomes too costly, so a single split is preferred.
     min_test_high_dimensional = max(1000, 2 * n_features)
     if (
@@ -188,7 +218,7 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
             ),
         }
 
-    # 5. K-Fold (continuous heuristic).
+    # 6. K-Fold (continuous heuristic).
     # Pre-check for micro-samples (protection against k > N).
     if n_samples <= 5:
         k = n_samples

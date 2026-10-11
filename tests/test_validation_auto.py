@@ -130,34 +130,69 @@ def test_choose_fixed_kfold_transition_50_to_51():
     [
         (10, 3, "LOO", None),  # Branch 1: LOO
         (15, 2, "LOO", None),  # Branch 1 boundary preserved
-        (5, 3, "LOO", None),  # Branch 5: micro-sample relabel LOO
-        (100, 5, "kfold", 5),  # Branch 5: continuous k-fold
-        (150, 5, "kfold", 7),  # Branch 5: continuous k-fold (unchanged)
-        (1000, 5, "train_test_split", None),  # Branch 3: standard split
-        (60000, 10000, "train_test_split", None),  # Branch 4: high-dimensional
+        (5, 3, "LOO", None),  # Branch 6: micro-sample relabel LOO
+        (100, 5, "kfold", 5),  # Branch 6: continuous k-fold
+        (150, 5, "kfold", 7),  # Branch 6: continuous k-fold (unchanged)
+        (1000, 5, "kfold", 5),  # Branch 3: mid-size fixed 5-fold CV (issue #99)
+        (50000, 5, "train_test_split", None),  # Branch 4: standard split, large N
+        (60000, 10000, "train_test_split", None),  # Branch 5: high-dimensional
     ],
 )
 def test_choose_unchanged_branches(n_samples, n_features, method, expected_k):
-    """Branches 1 (N <= 15), 3-5 keep their behaviour for these inputs."""
+    """Branches 1 (N <= 15), 4-6 keep their behaviour for these inputs."""
     result = choose_validation_method(n_samples, n_features)
     assert result["method"] == method
     if expected_k is not None:
         assert result["k"] == expected_k
 
 
+def test_choose_mid_size_fixed_kfold():
+    """Branch 3: mid-size samples with a good N/P ratio use fixed 5-fold CV.
+
+    Issue #99: the old standard hold-out of max(30, 2*P) rows (30 rows for
+    N=1000, 100 rows for N=10000) compared models on far too few points,
+    making the winner nearly random and the Sanity Gate OOF vector cover only
+    ~3% of the data. 5-fold CV scores every row exactly once.
+    """
+    for n_samples, n_features in [
+        (200, 5),  # old: hold-out of 30 rows
+        (500, 5),  # old: hold-out of 30 rows
+        (999, 5),  # N не кратен 5: 5 фолдов по 200/200/200/200/199
+        (1000, 5),  # old: hold-out of 30 rows
+        (10000, 5),  # old: hold-out of 100 rows
+        (300, 3),  # pipeline-size dataset (test_prepare_dataset case)
+        (49999, 5),  # just below the large-N threshold
+    ]:
+        result = choose_validation_method(n_samples, n_features)
+        assert result["method"] == "kfold"
+        assert result["k"] == 5
+        assert result["average_test_size"] == round(n_samples / 5, 1)
+
+
 def test_choose_train_test_split_standard():
-    """Branch 3: standard train-test split with computed sizes."""
-    result = choose_validation_method(1000, 5)
+    """Branch 4: standard train-test split for large samples (N >= 50000)."""
+    result = choose_validation_method(50000, 5)
     assert result["method"] == "train_test_split"
     assert result["regime"] == "standard"
-    assert result["test_percent"] == 3
-    assert result["test_size"] == 30
-    assert result["train_size"] == 970
-    assert result["test_size"] + result["train_size"] == 1000
+    assert result["test_percent"] == 1
+    assert result["test_size"] == 500
+    assert result["train_size"] == 49500
+    assert result["test_size"] + result["train_size"] == 50000
+
+
+def test_choose_train_test_split_standard_high_dimension_p():
+    """Branch 4 with a large P: the minimum test size grows with 2*P."""
+    result = choose_validation_method(100000, 2500)
+    assert result["method"] == "train_test_split"
+    assert result["regime"] == "standard"
+    # min_test = max(30, 2*2500) = 5000 -> test_percent = ceil(5000 / 100000) = 5
+    assert result["test_percent"] == 5
+    assert result["test_size"] == 5000
+    assert result["train_size"] == 95000
 
 
 def test_choose_train_test_split_high_dimensional():
-    """Branch 4: high-dimensional train-test split with warning."""
+    """Branch 5: high-dimensional train-test split with warning."""
     result = choose_validation_method(60000, 10000)
     assert result["method"] == "train_test_split"
     assert result["regime"] == "high_dimensional"
@@ -168,7 +203,7 @@ def test_choose_train_test_split_high_dimensional():
 
 
 def test_choose_kfold_continuous():
-    """Branch 5: k-fold continuous heuristic."""
+    """Branch 6: k-fold continuous heuristic."""
     result = choose_validation_method(100, 5)
     assert result["method"] == "kfold"
     assert result["k"] == 5
@@ -255,9 +290,26 @@ def test_make_cv_auto_relabel_loo():
     assert isinstance(cv, LeaveOneOut)
 
 
-def test_make_cv_auto_train_test_split():
-    method, cv, _ = make_cv(
+def test_make_cv_auto_mid_size_kfold():
+    """auto on mid-size data (issue #99) resolves to a fixed 5-fold KFold."""
+    method, cv, decision = make_cv(
         1000,
+        val_method="auto",
+        n_folds=5,
+        random_state=42,
+        test_size=0.2,
+        n_features=5,
+    )
+    assert method == "k_fold"
+    assert isinstance(cv, KFold)
+    assert cv.get_n_splits() == 5
+    assert decision == {"method": "kfold", "k": 5, "average_test_size": 200.0}
+
+
+def test_make_cv_auto_train_test_split():
+    """auto on large samples (N >= 50000) resolves to a train/test split."""
+    method, cv, _ = make_cv(
+        50000,
         val_method="auto",
         n_folds=5,
         random_state=42,
@@ -410,12 +462,54 @@ def test_iter_splits_auto_fixed_kfold():
     assert test_sizes == {6}
 
 
-def test_iter_splits_auto_train_test_split_dynamic_test_size():
-    """auto -> train_test_split uses the computed (integer) test size, not 0.2."""
+def test_iter_splits_auto_mid_size_kfold():
+    """auto -> kfold (issue #99): N=1000 is scored with 5-fold CV, not a 30-row
+    hold-out, so every row is validated exactly once."""
     X, y = _dummy_data(n=1000, p=5)
+    splits = list(iter_splits(X, y, method="auto"))
+    assert len(splits) == 5
+    test_sizes = {len(x_te) for _, x_te, _, _ in splits}
+    assert test_sizes == {200}
+    # OOF-покрытие: каждая строка ровно один раз в валидационном фолде.
+    assert sum(len(x_te) for _, x_te, _, _ in splits) == 1000
+
+
+def test_iter_splits_auto_mid_size_kfold_uneven_n():
+    """auto -> kfold for N not divisible by 5 (issue #99): KFold produces
+    uneven folds (4x200 + 199 for N=999) and keeps 100% OOF coverage."""
+    X, y = _dummy_data(n=999, p=5)
+    splits = list(iter_splits(X, y, method="auto"))
+    assert len(splits) == 5
+    test_sizes = sorted(len(x_te) for _, x_te, _, _ in splits)
+    assert test_sizes == [199, 200, 200, 200, 200]
+    assert sum(test_sizes) == 999
+
+
+def test_iter_splits_auto_train_test_split_dynamic_test_size(monkeypatch):
+    """auto -> train_test_split (large N) uses the computed (integer) test size,
+    not 0.2.
+
+    Сама эвристика («большие N → split») покрыта числовыми тестами
+    (test_choose_train_test_split_standard / test_make_cv_auto_train_test_split);
+    здесь make_cv замокан, чтобы не создавать массив на 50k строк ради
+    проверки проброса целочисленного test_size в фактическое разбиение.
+    """
+    X, y = _dummy_data(n=1000, p=5)
+    fake_decision = {
+        "method": "train_test_split",
+        "test_size": 500,
+        "train_size": 49500,
+    }
+
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
+        return "train_test_split", None, fake_decision
+
+    monkeypatch.setattr(validation_module, "make_cv", fake_make_cv)
     (x_tr, x_te, y_tr, y_te) = next(iter_splits(X, y, method="auto"))
-    assert len(x_te) == 30
-    assert len(x_tr) == 970
+    assert len(x_te) == 500
+    assert len(x_tr) == 500
 
 
 def test_iter_splits_auto_pandas():
@@ -437,7 +531,8 @@ def test_iter_splits_auto_pandas():
         (100, 5, 80),  # kfold k=5 -> floor(100 * (1 - 1/5))
         (10, 3, 9),  # LOO -> N - 1
         (5, 3, 4),  # relabel LOO -> N - 1
-        (1000, 5, 970),  # train_test_split -> train_size
+        (1000, 5, 800),  # mid-size: fixed 5-fold CV (issue #99)
+        (50000, 5, 49500),  # large N: train_test_split -> train_size
         (24, 2, 18),  # fixed kfold k=4 -> floor(24 * (1 - 1/4))
     ],
 )
@@ -497,10 +592,10 @@ def test_get_effective_train_size_integer_test_size():
     assert result == 105
     # auto → train_test_split: choose_validation_method возвращает целое
     # число строк; get_effective_train_size обязан дать тот же train_size.
-    decision = choose_validation_method(1000, 5)
+    decision = choose_validation_method(50000, 5)
     assert decision["method"] == "train_test_split"
     result_auto = get_effective_train_size(
-        1000, ValidationStrategy.auto, n_folds=5, n_features=5
+        50000, ValidationStrategy.auto, n_folds=5, n_features=5
     )
     assert result_auto == int(decision["train_size"])
 
@@ -559,10 +654,10 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     """optimize() routes auto->train_test_split with the resolved test size.
 
     Guards the threaded-decision path: when the auto strategy resolves to a
-    train/test split, the objective must call iter_splits with
-    ``method="train_test_split"`` and the dataset-derived (integer) ``test_size``
-    from the already-resolved decision, instead of re-resolving 'auto' or using
-    the fixed 0.2 fraction.
+    train/test split (large N >= 50000, issue #99), the objective must call
+    iter_splits with ``method="train_test_split"`` and the dataset-derived
+    (integer) ``test_size`` from the already-resolved decision, instead of
+    re-resolving 'auto' or using the fixed 0.2 fraction.
     """
     from unittest.mock import MagicMock
 

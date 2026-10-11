@@ -1158,13 +1158,34 @@ def test_optimize_auto_loo_with_pruning_works():
 
 def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
     """auto→train_test_split: естественных шагов нет — прайнер не применяется,
-    все триалы выполняются полностью (поведение задокументировано)."""
+    все триалы выполняются полностью (поведение задокументировано).
+
+    По issue #99 auto резолвится в train_test_split только на больших данных
+    (N >= 50000). Чтобы не создавать DataFrame на 50k строк, make_cv замокан
+    на train_test_split-решение (сама эвристика покрыта в test_validation_auto).
+    """
     rng = np.random.default_rng(42)
-    X = pd.DataFrame(rng.random((1000, 5)))  # auto -> train_test_split
+    X = pd.DataFrame(rng.random((1000, 5)))
     y = pd.Series(rng.random(1000))
+
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
+        # Реальная эвристика вернула бы это решение при N >= 50000.
+        return (
+            "train_test_split",
+            None,
+            {
+                "method": "train_test_split",
+                "test_size": 500,
+                "train_size": 49500,
+            },
+        )
 
     with (
         caplog.at_level(logging.WARNING),
+        patch.object(tuner, "make_cv", fake_make_cv),
+        patch.object(tuner, "get_effective_train_size", lambda *a, **k: 49500),
         patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
     ):

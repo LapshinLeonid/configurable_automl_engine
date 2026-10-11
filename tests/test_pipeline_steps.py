@@ -294,14 +294,39 @@ def test_prepare_dataset_resolves_auto_to_kfold():
     assert prepared.resolved_test_size == 0.2
 
 
-def test_prepare_dataset_resolves_auto_test_size_to_int_rows():
-    # auto на 300×3: train_test_split c целочисленным test_size=30
+def test_prepare_dataset_resolves_auto_mid_size_to_fixed_kfold():
+    # auto на 300×3 (issue #99): раньше был hold-out из 30 строк; теперь
+    # фиксированный 5-fold CV, чтобы сравнение моделей не было случайным.
     cfg = Config.model_validate(
         _cfg_dict(phases=[], validation_strategy="auto", n_folds=5)
     )
     prepared = prepare_dataset(cfg, _df(n_rows=300, n_features=3), "target")
+    assert prepared.resolved_validation == ValidationStrategy.k_fold
+    assert prepared.resolved_n_folds == 5
+
+
+def test_prepare_dataset_resolves_auto_large_to_train_test_split():
+    # auto на «больших» данных (N >= 50000, issue #99) резолвится в
+    # train_test_split с целочисленным test_size из choose_validation_method
+    # (issue #24). Сама эвристика проверяется в test_validation_auto.py на
+    # числах — здесь make_cv замокан, чтобы не создавать DataFrame на 50k
+    # строк; проверяем проброс разрешённых значений в PreparedData.
+    cfg = Config.model_validate(
+        _cfg_dict(phases=[], validation_strategy="auto", n_folds=5)
+    )
+    fake_decision = {
+        "method": "train_test_split",
+        "test_size": 500,
+        "train_size": 49500,
+    }
+    with patch.object(
+        component,
+        "make_cv",
+        return_value=("train_test_split", None, fake_decision),
+    ):
+        prepared = prepare_dataset(cfg, _df(n_rows=300, n_features=3), "target")
     assert prepared.resolved_validation == ValidationStrategy.train_test_split
-    assert prepared.resolved_test_size == 30
+    assert prepared.resolved_test_size == 500
 
 
 def test_prepare_dataset_detects_feature_types():
