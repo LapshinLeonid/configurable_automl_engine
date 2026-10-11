@@ -1672,6 +1672,222 @@ class TestWorstScoreResultsExcluded:
         assert result["score"] == 0.8
         mock_save.assert_called_once()
 
+    def _processes_config(self, model_path: str) -> dict:
+        """Конфиг с ``parallel_mode: processes`` и двумя включёнными алгоритмами."""
+        return {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "parallel_strategy": "algorithms",
+                "parallel_mode": "processes",
+                "max_workers": 2,
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {
+                        "name": "final",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
+                ],
+                "path_to_model": model_path,
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "mock.tuner_rf",
+                    "trainer_module": "unittest.mock",
+                },
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "mock.tuner_en",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+
+    def _processes_fake_load(self, rf_tuner, en_tuner):
+        """Подмена _load_module для processes-режима (реальный _run_hpo)."""
+
+        def fake_load(path: str):
+            if path == "mock.tuner_rf":
+                return rf_tuner
+            if path == "mock.tuner_en":
+                return en_tuner
+            return importlib.import_module(path)
+
+        return fake_load
+
+    @patch(f"{_MODULE}._fit_and_save")
+    def test_processes_parallel_mode_produces_valid_winner(
+        self, mock_save, minimal_df, tmp_path
+    ):
+        """processes-режим: воркер сериализуется и пайплайн отрабатывает (issue #100).
+
+        Раньше ``_worker`` был замыканием внутри ``execute_phases`` и не
+        сериализовался: каждая задача падала с "Can't get local object",
+        результат — [None, None] и RuntimeError. Теперь воркер — функция
+        уровня модуля, и processes-режим даёт валидного победителя.
+        """
+        config_dict = self._processes_config(str(tmp_path / "model.pkl"))
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        rf_tuner = MagicMock()
+        rf_tuner.optimize.return_value = (None, {"n_estimators": 10}, -0.4)  # MAE 0.4
+        en_tuner = MagicMock()
+        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.8)  # MAE 0.8
+
+        with patch(
+            f"{_MODULE}._load_module",
+            side_effect=self._processes_fake_load(rf_tuner, en_tuner),
+        ):
+            result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "random_forest"
+        assert result["score"] == 0.4
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    def test_processes_parallel_disqualification_propagates(
+        self, mock_save, minimal_df, tmp_path
+    ):
+        """processes-режим: дисквалификация из воркера доходит до ctx (issue #100).
+
+        Раньше запись в ``ctx.disqualified_algorithms`` делалась внутри
+        воркера и в отдельном процессе потерялась бы. Теперь дисквалификация
+        возвращается в результате воркера и применяется в главном процессе.
+        """
+        config_dict = self._processes_config(str(tmp_path / "model.pkl"))
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        def _make_iae(message: str):
+            class InvalidAlgorithmError(Exception):
+                pass
+
+            return InvalidAlgorithmError(message)
+
+        rf_tuner = MagicMock()
+        rf_tuner.optimize.side_effect = _make_iae("not supported")
+        en_tuner = MagicMock()
+        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.5)  # MAE 0.5
+
+        with patch(
+            f"{_MODULE}._load_module",
+            side_effect=self._processes_fake_load(rf_tuner, en_tuner),
+        ):
+            result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "elasticnet"
+        assert result["score"] == 0.5
+        assert result["disqualified_algorithms"] == {"random_forest": "not supported"}
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
+    @patch(f"{_MODULE}._run_hpo")
+    def test_processes_parallel_worker_failure_does_not_corrupt_others(
+        self, mock_hpo, mock_save, minimal_df
+    ):
+        """processes-режим: провал одного воркера не коррумпирует результаты.
+
+        Аналог threads-теста (issue #32): один алгоритм возвращает None,
+        второй — валидный скор. run_parallel подменяет исключения воркеров
+        на None, а фильтр valid_results отбрасывает None-результаты:
+        победителем остаётся валидный алгоритм.
+        """
+        config_dict = self._processes_config("model.pkl")
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        def hpo_side_effect(**kwargs):
+            if kwargs["algo_name"] == "random_forest":
+                return None  # полный провал HPO (все триалы отсечены)
+            return -0.8, {"alpha": 0.5}  # MAE 0.8
+
+        mock_hpo.side_effect = hpo_side_effect
+        mock_save.return_value = None
+
+        result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "elasticnet"
+        assert result["score"] == 0.8
+        mock_save.assert_called_once()
+
+    def test_hpo_phase_worker_is_picklable(self, minimal_df):
+        """Воркер HPO — функция уровня модуля и сериализуется (issue #100).
+
+        Замыкание внутри ``execute_phases`` нельзя сериализовать
+        (ProcessPoolExecutor падает с "Can't get local object"): это и была
+        причина поломки ``parallel_mode: processes``. Функция уровня модуля
+        обязана сериализоваться наравне со своим ``_HpoPhaseSpec``.
+        """
+        import pickle
+
+        cfg_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "p1", "n_trials": 1, "action": "all_algorithms"},
+                    {
+                        "name": "final",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
+                ],
+                "path_to_model": "model.pkl",
+            },
+            "algorithms": {
+                "random_forest": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                },
+            },
+            "oversampling": {"enable": False},
+        }
+        from configurable_automl_engine.training_engine.component import (
+            _HpoPhaseSpec,
+            _hpo_phase_worker,
+        )
+
+        cfg = Config.model_validate(cfg_dict)
+        prepared = prepare_dataset(cfg, minimal_df, "target")
+        phase = cfg.general.phases[0]
+        spec = _HpoPhaseSpec(
+            phase=phase,
+            prev_results={},
+            X=prepared.X,
+            y=prepared.y,
+            metric_sklearn=prepared.metric_sklearn,
+            resolved_validation=prepared.resolved_validation,
+            resolved_n_folds=prepared.resolved_n_folds,
+            resolved_test_size=prepared.resolved_test_size,
+            categorical_features=prepared.categorical_features,
+            numerical_features=prepared.numerical_features,
+            oversampling_enabled=False,
+            oversampling_multiplier=1.0,
+            oversampling_algorithm="random",
+            pruning_cfg=None,
+            encoding="one_hot",
+            high_cardinality_threshold=20,
+            high_cardinality_encoding="hashing",
+            hashing_n_components=16,
+            target_encoding_smoothing=20.0,
+            target_encoding_fallback=None,
+            feature_selection_cfg=None,
+        )
+
+        # Сама функция воркера (pickle идёт по имени модуля + qualname).
+        restored = pickle.loads(pickle.dumps(_hpo_phase_worker))
+        assert restored is _hpo_phase_worker
+        # Снимок параметров фазы (тянется за функцией в процессах-пуле).
+        restored_spec = pickle.loads(pickle.dumps(spec))
+        assert restored_spec.phase.name == phase.name
+        assert restored_spec.metric_sklearn == prepared.metric_sklearn
+
     @patch(f"{_MODULE}._fit_and_save")
     @patch(f"{_MODULE}._run_hpo")
     def test_duplicate_scores_first_config_order_wins(

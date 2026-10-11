@@ -1719,6 +1719,307 @@ class PhaseContext:
     pre_trained_trainer: Any | None = None
 
 
+@dataclass
+class _HPOWorkerResult:
+    """Результат одного HPO-воркера (сериализуется между процессами).
+
+    Attributes:
+        name (str): Имя алгоритма.
+        score (float | None): Валидный «сырой» скор; ``None`` при провале.
+        params (dict[str, Any] | None): Лучшие параметры; ``None`` при провале.
+        disqualify_reason (str | None): Причина дисквалификации circuit
+            breaker (issue #12); ``None`` — алгоритм не дисквалифицирован.
+    """
+
+    name: str
+    score: float | None = None
+    params: dict[str, Any] | None = None
+    disqualify_reason: str | None = None
+
+
+@dataclass
+class _HpoPhaseSpec:
+    """Неизменяемый снимок параметров фазы HPO, передаваемый воркеру.
+
+    Собирается в ``execute_phases`` один раз на фазу и передаётся в
+    ``_hpo_phase_worker`` явным аргументом. Это позволяет держать воркер
+    функцией уровня модуля (а не замыканием), которая сериализуется
+    в ``processes``-режиме (issue #100): замыкание внутри ``execute_phases``
+    сериализовать нельзя.
+
+    Attributes:
+        phase (HPOPhaseCfg): Конфигурация текущей фазы.
+        prev_results (dict[str, tuple[float, dict[str, Any]]]): Снимок
+            результатов предыдущих фаз (для warm-start refine, эпик #74/R3).
+        X (pd.DataFrame): Матрица признаков.
+        y (pd.Series): Вектор целевой переменной.
+        metric_sklearn (str): Имя метрики в sklearn-семантике.
+        resolved_validation (ValidationStrategy): Разрешённая стратегия
+            валидации.
+        resolved_n_folds (int): Число фолдов для 'k_fold'.
+        resolved_test_size (float | int): Размер hold-out части.
+        categorical_features (list[str]): Детектированные категориальные колонки.
+        numerical_features (list[str]): Детектированные числовые колонки.
+        oversampling_enabled (bool): Флаг включения оверсэмплинга.
+        oversampling_multiplier (float): Коэффициент увеличения выборки.
+        oversampling_algorithm (str): Имя алгоритма оверсэмплинга.
+        pruning_cfg (dict[str, Any] | None): Настройки ранней остановки.
+        encoding (str): Стратегия кодирования категорий.
+        high_cardinality_threshold (int | None): Порог high-cardinality.
+        high_cardinality_encoding (str | None): Стратегия high-cardinality.
+        hashing_n_components (int): Число компонент хэширования.
+        target_encoding_smoothing (float): Сглаживание target encoding.
+        target_encoding_fallback (float | None): Fallback target encoding.
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): Конфигурация
+            отбора признаков.
+    """
+
+    phase: HPOPhaseCfg
+    prev_results: dict[str, tuple[float, dict[str, Any]]]
+    X: pd.DataFrame
+    y: pd.Series
+    metric_sklearn: str
+    resolved_validation: ValidationStrategy
+    resolved_n_folds: int
+    resolved_test_size: float | int
+    categorical_features: list[str]
+    numerical_features: list[str]
+    oversampling_enabled: bool
+    oversampling_multiplier: float
+    oversampling_algorithm: str
+    pruning_cfg: dict[str, Any] | None
+    encoding: str
+    high_cardinality_threshold: int | None
+    high_cardinality_encoding: str | None
+    hashing_n_components: int
+    target_encoding_smoothing: float
+    target_encoding_fallback: float | None
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+
+
+def _prepare_search_space(
+    algo_name: str, user_overrides: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Подготовить пространство поиска гиперпараметров.
+
+    Объединяет системные значения по умолчанию с пользовательскими
+    переопределениями из конфигурации. Функция уровня модуля (не замыкание),
+    чтобы воркер ``_hpo_phase_worker`` сериализовался в ``processes``-режиме
+    (issue #100).
+
+    Args:
+        algo_name (str): Имя алгоритма для поиска дефолтов.
+        user_overrides (dict[str, Any] | None): Словарь с параметрами для замены.
+
+    Returns:
+        dict[str, Any]: Итоговое пространство поиска.
+    """
+    space = DEFAULT_SPACES.get(algo_name, {}).copy()
+    if user_overrides:
+        space.update(user_overrides)
+
+    # Адаптивный epsilon для SVR (issue #55): границы поиска epsilon
+    # масштабируются разбросом y_train в рантайме (tuner.resolve_search_space),
+    # поэтому дефолтный слепой диапазон [1e-3, 1.0] из DEFAULT_SPACES
+    # опускается. Если пользователь задал epsilon явно — он уже в space
+    # (space.update(user_overrides) выше), и приоритет пользователя
+    # сохраняется: адаптивная логика не вмешивается.
+    if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
+        space.pop("epsilon", None)
+
+    return space
+
+
+def _execute_hpo_phase(
+    phase_name: str,
+    algo: str,
+    a_cfg: AlgoCfg,
+    n_trials: int,
+    spec: _HpoPhaseSpec,
+    search_space: dict[str, Any] | None = None,
+    initial_params: dict[str, Any] | None = None,
+) -> tuple[float, dict[str, Any]] | None:
+    """Выполнить конкретную фазу HPO для алгоритма (функция уровня модуля).
+
+    Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
+    Функция уровня модуля (не замыкание): все данные фазы передаются через
+    ``spec``, чтобы воркер ``_hpo_phase_worker`` сериализовался
+    в ``processes``-режиме (issue #100).
+
+    Args:
+        phase_name (str): Название текущей фазы (напр. 'coarse').
+        algo (str): Имя алгоритма.
+        a_cfg (AlgoCfg): Конфигурация алгоритма.
+        n_trials (int): Количество итераций в этой фазе.
+        spec (_HpoPhaseSpec): Снимок параметров фазы HPO.
+        search_space (dict[str, Any] | None): Пространство поиска для фазы.
+        initial_params (dict[str, Any] | None): Параметры warm-start (refine).
+
+    Returns:
+        tuple[float, dict[str, Any]] | None: Кортеж (score, params) либо
+            ``None``, когда HPO не вернул валидный результат (алгоритм
+            исключается из кандидатов, issue #13).
+
+    Raises:
+        Exception: Исключения из ``_run_hpo`` логируются и пробрасываются
+            (включая ``InvalidAlgorithmError``).
+    """
+    _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
+
+    try:
+        result = _run_hpo(
+            algo_name=algo,
+            algo_cfg=a_cfg,
+            X=spec.X,
+            y=spec.y,
+            metric_name_sklearn=spec.metric_sklearn,
+            n_trials=n_trials,
+            validation_strategy=spec.resolved_validation,
+            n_folds=spec.resolved_n_folds,
+            train_test_split_test_size=spec.resolved_test_size,
+            search_space_override=search_space,
+            data_oversampling=spec.oversampling_enabled,
+            data_oversampling_multiplier=spec.oversampling_multiplier,
+            data_oversampling_algorithm=spec.oversampling_algorithm,
+            initial_params=initial_params,
+            categorical_features=spec.categorical_features,
+            numerical_features=spec.numerical_features,
+            encoding=spec.encoding,
+            pruning=spec.pruning_cfg,
+            high_cardinality_threshold=spec.high_cardinality_threshold,
+            high_cardinality_encoding=spec.high_cardinality_encoding,
+            hashing_n_components=spec.hashing_n_components,
+            target_encoding_smoothing=spec.target_encoding_smoothing,
+            target_encoding_fallback=spec.target_encoding_fallback,
+            feature_selection_cfg=spec.feature_selection_cfg,
+        )
+
+        if result is None:
+            return None
+
+        score, params = result
+
+        # Логируем значение в пользовательской семантике: для neg_*-метрик
+        # (например, neg_root_mean_squared_error) «сырое» значение скорера
+        # инвертировано, пользователю показываем естественное (положительное).
+        # Направление сопровождает значение явно («min better» для ошибок,
+        # issue #54): флаг оптимизатора greater_is_better не применяется.
+        disp = to_user_value(spec.metric_sklearn, score)
+        _LOG.info(
+            f"{phase_name} {algo:15} | score {disp:.5f} "
+            f"({direction_label(spec.metric_sklearn)}) | params {params}"
+        )
+        return score, params
+    except Exception as err:
+        _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
+        raise
+
+
+def _hpo_phase_worker(
+    algo_name: str,
+    algo_cfg: AlgoCfg,
+    spec: _HpoPhaseSpec,
+) -> _HPOWorkerResult:
+    """Воркер параллельного или последовательного запуска задачи HPO.
+
+    Функция уровня модуля (не замыкание): сериализуется в ``processes``-режиме
+    (issue #100). Не мутирует общий контекст: дисквалификация возвращается
+    в ``disqualify_reason`` результата и применяется в главном процессе
+    (иначе запись из другого процесса была бы потеряна).
+
+    Args:
+        algo_name (str): Имя алгоритма.
+        algo_cfg (AlgoCfg): Конфигурация алгоритма.
+        spec (_HpoPhaseSpec): Снимок параметров фазы HPO.
+
+    Returns:
+        _HPOWorkerResult: Результат задачи: ``(score, params)`` при успехе,
+            ``disqualify_reason`` при дисквалификации circuit breaker
+            (issue #12), иначе — результат без скора и причины.
+    """
+    # Determine initial_params for refine (epic #74, R3): each candidate
+    # warm-starts from its OWN previous-phase parameters (enqueue_trial in the
+    # tuner guarantees score monotonicity). The prev_results snapshot lives in
+    # the immutable spec (frozen at phase definition time), so the worker uses
+    # the state at phase start. Workers only READ this dict; writes to
+    # phase_results happen after all phase workers finish, and at the end of
+    # the phase phase_results is re-bound to the filtered valid_results
+    # (objects are never mutated) — therefore the snapshot is stable in both
+    # parallel and sequential modes.
+    init_params = None
+    if spec.phase.action == "refine" and algo_name in spec.prev_results:
+        _, prev_params = spec.prev_results[algo_name]
+        init_params = prev_params
+
+    # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
+    full_search_space = _prepare_search_space(
+        algo_name,
+        algo_cfg.hyperparameters,  # это dict из вашего config_parser
+    )
+    try:
+        result = _execute_hpo_phase(
+            spec.phase.name,
+            algo_name,
+            algo_cfg,
+            spec.phase.n_trials,
+            spec,
+            full_search_space,
+            initial_params=init_params,
+        )
+
+        if result is None:
+            return _HPOWorkerResult(name=algo_name)
+
+        score, params = result
+
+        return _HPOWorkerResult(name=algo_name, score=score, params=params)
+    except _CanonicalIAE as err:
+        # Circuit breaker (issue #12): алгоритм дисквалифицирован после
+        # MAX_FATAL_FAILURES подряд фатальных ошибок. Это НЕ аварийный
+        # стоп всего запуска — алгоритм исключается из кандидатов,
+        # остальные продолжают обучение (аналогично None-результату).
+        _LOG.warning(
+            "Algorithm %s disqualified in phase %s: %s",
+            algo_name,
+            spec.phase.name,
+            err,
+        )
+        return _HPOWorkerResult(name=algo_name, disqualify_reason=str(err))
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning(f"Algorithm {algo_name} failed in phase {spec.phase.name}: {e}")
+        return _HPOWorkerResult(name=algo_name)
+
+
+def _consume_worker_results(
+    results: Iterable[_HPOWorkerResult | None],
+    phase_results: dict[str, tuple[float, dict[str, Any]]],
+    ctx: PhaseContext,
+) -> None:
+    """Разложить результаты воркеров по рабочему множеству и дисквалификациям.
+
+    В ``processes``-режиме воркер не может писать в ``ctx`` напрямую
+    (изменения в дочернем процессе потерялись бы), поэтому дисквалификации
+    возвращаются в результатах и применяются здесь, в главном процессе
+    (issue #100). ``None``-результаты (таймаут/падение задачи в пуле)
+    игнорируются.
+
+    Args:
+        results (Iterable[_HPOWorkerResult | None]): Результаты воркеров.
+        phase_results (dict[str, tuple[float, dict[str, Any]]]): Рабочее
+            множество текущей фазы — сюда попадают валидные результаты.
+        ctx (PhaseContext): Контекст фаз — сюда сливаются дисквалификации.
+    """
+    for res in results:
+        if res is None:
+            continue
+        if res.disqualify_reason is not None:
+            ctx.disqualified_algorithms[res.name] = res.disqualify_reason
+            continue
+        if res.score is None or res.params is None:
+            continue
+        phase_results[res.name] = (res.score, res.params)
+
+
 def execute_phases(
     cfg: Config,
     prepared: PreparedData,
@@ -1726,9 +2027,12 @@ def execute_phases(
     """Выполнить все фазы пайплайна и вернуть итоговый контекст фаз.
 
     Шаг 3 пайплайна (issue #31; select-шаги — эпик #74, задача R2). Содержит
-    вложенные помощники ``prepare_search_space`` и ``_execute_hpo_phase``,
     цикл по фазам, параллельное выполнение HPO, синхронные select-шаги,
     circuit breaker дисквалификации и фильтрацию невалидных результатов.
+    HPO-воркер ``_hpo_phase_worker`` и помощники ``_prepare_search_space`` /
+    ``_execute_hpo_phase`` — функции уровня модуля: все данные фазы
+    передаются через ``_HpoPhaseSpec``, чтобы воркер сериализовался
+    в ``processes``-режиме (issue #100).
 
     Multi-phase semantics (issue #13): рабочее множество не аккумулируется —
     каждая фаза HPO пересобирает его с нуля, поэтому алгоритм, провалившийся
@@ -1780,123 +2084,6 @@ def execute_phases(
     numerical_features = prepared.numerical_features
 
     ctx = PhaseContext()
-
-    def prepare_search_space(
-        algo_name: str, user_overrides: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        """Подготовить пространство поиска гиперпараметров.
-        Объединяет системные значения по умолчанию с пользовательскими
-        переопределениями из конфигурации.
-        Args:
-            algo_name (str): Имя алгоритма для поиска дефолтов.
-            user_overrides (Dict[str, Any] | None): Словарь с параметрами для замены.
-        Returns:
-            Dict[str, Any]: Итоговое пространство поиска.
-        """
-        # Получаем базовый спейс для алгоритма
-        # (копируем, чтобы не менять глобальный объект)
-        space = DEFAULT_SPACES.get(algo_name, {}).copy()
-
-        if user_overrides:
-            # Перезаписываем или добавляем параметры из конфига пользователя
-            space.update(user_overrides)
-
-        # Адаптивный epsilon для SVR (issue #55): границы поиска epsilon
-        # масштабируются разбросом y_train в рантайме (tuner.resolve_search_space),
-        # поэтому дефолтный слепой диапазон [1e-3, 1.0] из DEFAULT_SPACES
-        # опускается. Если пользователь задал epsilon явно — он уже в space
-        # (space.update(user_overrides) выше), и приоритет пользователя
-        # сохраняется: адаптивная логика не вмешивается.
-        if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
-            space.pop("epsilon", None)
-
-        return space
-
-    def _execute_hpo_phase(
-        phase_name: str,
-        algo: str,
-        a_cfg: AlgoCfg,
-        n_trials: int,
-        search_space: dict[str, Any] | None = None,
-        initial_params: dict[str, Any] | None = None,
-    ) -> tuple[float, dict[str, Any]] | None:
-        """Выполнить конкретную фазу HPO для алгоритма.
-        Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
-        Args:
-            phase_name (str): Название текущей фазы (напр. 'coarse').
-            algo (str): Имя алгоритма.
-            a_cfg (AlgoCfg): Конфигурация алгоритма.
-            n_trials (int): Количество итераций в этой фазе.
-            search_space (Dict[str, Any] | None): Пространство поиска для фазы.
-        Returns:
-            Tuple[float, Dict[str, Any]] | None: tuple (score, params),
-                or ``None`` when HPO did not return a valid result (the
-                algorithm is excluded from candidates, issue #13).
-        Raises:
-            Exception: Exceptions from ``_run_hpo`` are logged and re-raised
-                (including ``InvalidAlgorithmError``).
-        """
-        _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
-
-        # Обращаемся к полям согласно определению в config_parser.py
-        ovr = cfg.oversampling
-        pruning_cfg: dict[str, Any] | None = None
-        if cfg.general.pruning.enable:
-            pruning_cfg = {
-                "enable": cfg.general.pruning.enable,
-                "strategy": cfg.general.pruning.strategy.value,
-                "min_steps": cfg.general.pruning.min_steps,
-                "n_startup_trials": cfg.general.pruning.n_startup_trials,
-                "reduction_factor": cfg.general.pruning.reduction_factor,
-            }
-
-        try:
-            result = _run_hpo(
-                algo_name=algo,
-                algo_cfg=a_cfg,
-                X=X,
-                y=y,
-                metric_name_sklearn=metric_sklearn,
-                n_trials=n_trials,
-                validation_strategy=resolved_validation,
-                n_folds=resolved_n_folds,
-                train_test_split_test_size=resolved_test_size,
-                search_space_override=search_space,
-                data_oversampling=ovr.enable,
-                data_oversampling_multiplier=ovr.multiplier,
-                data_oversampling_algorithm=ovr.algorithm.value,  # .value т.к. это Enum
-                initial_params=initial_params,
-                categorical_features=categorical_features,
-                numerical_features=numerical_features,
-                encoding=cfg.general.categorical_encoding,
-                pruning=pruning_cfg,
-                high_cardinality_threshold=cfg.general.high_cardinality_threshold,
-                high_cardinality_encoding=cfg.general.high_cardinality_encoding,
-                hashing_n_components=cfg.general.hashing_n_components,
-                target_encoding_smoothing=cfg.general.target_encoding_smoothing,
-                target_encoding_fallback=cfg.general.target_encoding_fallback,
-                feature_selection_cfg=cfg.general.feature_selection,
-            )
-
-            if result is None:
-                return None
-
-            score, params = result
-
-            # Логируем значение в пользовательской семантике: для neg_*-метрик
-            # (например, neg_root_mean_squared_error) «сырое» значение скорера
-            # инвертировано, пользователю показываем естественное (положительное).
-            # Направление сопровождает значение явно («min better» для ошибок,
-            # issue #54): флаг оптимизатора greater_is_better не применяется.
-            disp = to_user_value(metric_sklearn, score)
-            _LOG.info(
-                f"{phase_name} {algo:15} | score {disp:.5f} "
-                f"({direction_label(metric_sklearn)}) | params {params}"
-            )
-            return score, params
-        except Exception as err:
-            _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
-            raise
 
     # Начальный список кандидатов (все включенные алгоритмы)
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
@@ -1976,72 +2163,43 @@ def execute_phases(
         # в сообщении об отсутствии валидных результатов)
         phase_candidates = list(current_candidates.keys())
 
-        def _worker(
-            algo_name: str,
-            algo_cfg: AlgoCfg,
-            p: HPOPhaseCfg = phase,
-            pr: dict[str, tuple[float, dict[str, Any]]] = prev_results,
-        ) -> tuple[str, float, dict[str, Any]] | None:
-            """Воркер для параллельного или последовательного запуска задачи HPO.
-            Args:
-                algo_name (str): Имя алгоритма.
-                algo_cfg (AlgoCfg): Конфигурация алгоритма.
-            Returns:
-                Optional[Tuple[str, float, Dict[str, Any]]]: Название, скор и параметры
-                    или None в случае ошибки.
-            """
-            # Determine initial_params for refine (epic #74, R3): each
-            # candidate warm-starts from its OWN previous-phase parameters
-            # (enqueue_trial in the tuner guarantees score monotonicity).
-            # The prev_results snapshot is fixed via a default argument
-            # (like `p`), so the worker uses the state at definition time
-            # (B023). Workers only READ this dict; writes to phase_results
-            # happen after all phase workers finish, and at the end of the
-            # phase phase_results is re-bound to the filtered valid_results
-            # (objects are never mutated) — therefore the snapshot is stable
-            # in both parallel and sequential modes.
-            init_params = None
-            if p.action == "refine" and algo_name in pr:
-                _, prev_params = pr[algo_name]
-                init_params = prev_params
-
-            # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
-            full_search_space = prepare_search_space(
-                algo_name,
-                algo_cfg.hyperparameters,  # это dict из вашего config_parser
-            )
-            try:
-                result = _execute_hpo_phase(
-                    p.name,
-                    algo_name,
-                    algo_cfg,
-                    p.n_trials,
-                    full_search_space,
-                    initial_params=init_params,
-                )
-
-                if result is None:
-                    return None
-
-                score, params = result
-
-                return algo_name, score, params
-            except _CanonicalIAE as err:
-                # Circuit breaker (issue #12): алгоритм дисквалифицирован после
-                # MAX_FATAL_FAILURES подряд фатальных ошибок. Это НЕ аварийный
-                # стоп всего запуска — алгоритм исключается из кандидатов,
-                # остальные продолжают обучение (аналогично None-результату).
-                _LOG.warning(
-                    "Algorithm %s disqualified in phase %s: %s",
-                    algo_name,
-                    p.name,
-                    err,
-                )
-                ctx.disqualified_algorithms[algo_name] = str(err)
-                return None
-            except Exception as e:  # noqa: BLE001
-                _LOG.warning(f"Algorithm {algo_name} failed in phase {p.name}: {e}")
-                return None
+        # Неизменяемый снимок параметров фазы для воркера (issue #100):
+        # воркер — функция уровня модуля, все данные фазы передаются через
+        # ``spec`` явно, чтобы воркер сериализовался в ``processes``-режиме
+        # (замыкание внутри ``execute_phases`` сериализовать нельзя).
+        ovr = cfg.oversampling
+        pruning_cfg: dict[str, Any] | None = None
+        if cfg.general.pruning.enable:
+            pruning_cfg = {
+                "enable": cfg.general.pruning.enable,
+                "strategy": cfg.general.pruning.strategy.value,
+                "min_steps": cfg.general.pruning.min_steps,
+                "n_startup_trials": cfg.general.pruning.n_startup_trials,
+                "reduction_factor": cfg.general.pruning.reduction_factor,
+            }
+        spec = _HpoPhaseSpec(
+            phase=phase,
+            prev_results=prev_results,
+            X=X,
+            y=y,
+            metric_sklearn=metric_sklearn,
+            resolved_validation=resolved_validation,
+            resolved_n_folds=resolved_n_folds,
+            resolved_test_size=resolved_test_size,
+            categorical_features=categorical_features,
+            numerical_features=numerical_features,
+            oversampling_enabled=ovr.enable,
+            oversampling_multiplier=ovr.multiplier,
+            oversampling_algorithm=ovr.algorithm.value,
+            pruning_cfg=pruning_cfg,
+            encoding=cfg.general.categorical_encoding,
+            high_cardinality_threshold=cfg.general.high_cardinality_threshold,
+            high_cardinality_encoding=cfg.general.high_cardinality_encoding,
+            hashing_n_components=cfg.general.hashing_n_components,
+            target_encoding_smoothing=cfg.general.target_encoding_smoothing,
+            target_encoding_fallback=cfg.general.target_encoding_fallback,
+            feature_selection_cfg=cfg.general.feature_selection,
+        )
 
         # Выполнение (параллельное или последовательное)
         if (
@@ -2049,24 +2207,18 @@ def execute_phases(
             and len(current_candidates) > 1
         ):
             results = run_parallel(
-                _worker,
-                args_seq=[(n, a) for n, a in current_candidates.items()],
+                _hpo_phase_worker,
+                args_seq=[(n, a, spec) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
                 timeout=cfg.general.phase_timeout or 3600,
                 task_timeout=cfg.general.task_timeout,
             )
-
-            for res in results:
-                if res:
-                    name, sc, pr = res
-                    phase_results[name] = (sc, pr)
+            _consume_worker_results(results, phase_results, ctx)
         else:
             for n, a in current_candidates.items():
-                res = _worker(n, a)
-                if res:
-                    name, sc, pr = res
-                    phase_results[name] = (sc, pr)
+                res = _hpo_phase_worker(n, a, spec)
+                _consume_worker_results([res], phase_results, ctx)
 
         # Disqualified algorithms (circuit breaker) are removed from the results and
         # from the candidates of the following phases: they must not win and must
