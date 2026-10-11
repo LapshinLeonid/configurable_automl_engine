@@ -33,6 +33,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sklearn.datasets import make_friedman3
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
@@ -489,7 +492,12 @@ def test_severity_signature_sorted_descending():
 
 
 def test_negative_deep_tree_rejected_by_circuit_g():
-    """Глубокое дерево (RMSE_train≈0) отсекается контуром Г до ранжирования."""
+    """Глубокое дерево (RMSE_train≈0) отсекается контуром Г до ранжирования.
+
+    Явный ``generalization_gap_mode="reject"``: дефолтный warn-режим
+    (issue #111) переводит RMSE_full≈0 в soft_warnings и не
+    дисквалифицирует.
+    """
     X, y = _dataset(n=120)
     kf = KFold(n_splits=4, shuffle=True, random_state=0)
     oof = np.full(len(y), np.nan)
@@ -507,12 +515,70 @@ def test_negative_deep_tree_rejected_by_circuit_g():
         y_full=y_full,
         model=tree,
     )
-    gate = ModelSanityGate(check_diversity=False, check_unique=False)
+    gate = ModelSanityGate(
+        check_diversity=False, check_unique=False, generalization_gap_mode="reject"
+    )
     res = select_robust_winner(
         {"deep_tree": cand}, pd.DataFrame(X), pd.Series(y), gate, mode="active"
     )
     assert any("Circuit D" in r for r in res.disqualified["deep_tree"])
     assert res.fallback_used is True  # единственный кандидат забракован
+
+
+def test_warn_mode_extra_trees_with_infinite_gap_wins_by_rmse_oof():
+    """Warn-режим (issue #111): кандидат с gap=∞ не дисквалифицируется.
+
+    ExtraTrees (RMSE_full≈0, gap=inf, лучший RMSE_oof) остаётся валидным
+    (Circuit D в soft_warnings), участвует в ранжировании по RMSE_oof и
+    побеждает — вместо молчаливой подмены победителя «лучшим из прошедших
+    гейт».
+    """
+    X, y = make_friedman3(n_samples=200, noise=0.05, random_state=1)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    oof_et = np.full(len(y), np.nan)
+    oof_ridge = np.full(len(y), np.nan)
+    for tr, te in kf.split(X):
+        et = ExtraTreesRegressor(random_state=0).fit(X[tr], y[tr])
+        rg = Ridge().fit(X[tr], y[tr])
+        oof_et[te] = et.predict(X[te])
+        oof_ridge[te] = rg.predict(X[te])
+    et = ExtraTreesRegressor(random_state=0).fit(X, y)
+    y_full = et.predict(X)
+    assert np.sqrt(np.mean((y - y_full) ** 2)) < 1e-12  # RMSE_full ≈ 0
+    cands = {
+        "extra_trees": _candidate(
+            "extra_trees",
+            cv_score=-0.05,
+            rmse_oof=float(oof_rmse(y, oof_et)),
+            y_oof=oof_et,
+            y_full=y_full,
+            model=et,
+        ),
+        "ridge": _candidate(
+            "ridge",
+            cv_score=-0.08,
+            rmse_oof=float(oof_rmse(y, oof_ridge)),
+            y_oof=oof_ridge,
+            y_full=y_full,
+        ),
+    }
+    gate = ModelSanityGate(
+        check_diversity=False,
+        check_unique=False,
+        check_dead_features=False,
+        generalization_gap_mode="warn",
+    )
+    res = select_robust_winner(
+        cands, pd.DataFrame(X), pd.Series(y), gate, mode="active"
+    )
+    assert res.winner_algo == "extra_trees"
+    assert "extra_trees" not in res.disqualified
+    assert res.fallback_used is False
+    assert np.isinf(res.audit["extra_trees"].generalization_gap)
+    assert any(
+        "Circuit D" in w and "RMSE_full" in w
+        for w in res.audit["extra_trees"].soft_warnings
+    )
 
 
 def test_negative_svr_sigmoid_plateau_rejected_by_circuit_a():

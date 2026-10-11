@@ -11,22 +11,29 @@
        дисквалифицирует; пермутационный путь для нелинейных моделей с
        контролем стоимости и детерминизмом; исключения predict → reason.
     4. Контур Г (Generalization Gap): переобученные модели (дерево глубины 20,
-       1-NN) проваливаются; RMSE_oof≈0 / RMSE_full≈0 — деление на ноль;
-       граница gap == max проходит; пример из issue (0.1 vs 0.19); режимы
-       generalization_gap_mode 'warn' (soft_warning, не дисквалифицирует) и
-       'reject' (строгое поведение старого дефолта, паритет).
+       1-NN) с RMSE_full≈0 / RMSE_oof≈0 — бесконечный gap; граница
+       gap == max проходит; пример из issue (0.1 vs 0.19); режимы
+       generalization_gap_mode 'warn' (soft_warning, не дисквалифицирует —
+       включая бесконечный gap из деления на ноль, issue #111) и 'reject'
+       (строгое поведение старого дефолта, паритет; деление на ноль →
+       reasons).
     5. Режимы и edge cases: warn_only; отключение контуров; NaN-маскирование;
        severity; валидация параметров; различающиеся reasons/soft_warnings.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from sklearn.linear_model import ElasticNet, Lasso
 from sklearn.model_selection import KFold
 from sklearn.neighbors import KNeighborsRegressor
@@ -774,8 +781,14 @@ def test_gap_warn_mode_finite_over_threshold_is_soft_warning_not_reason():
     assert strict.severity == 2
 
 
-def test_gap_warn_mode_deep_tree_still_disqualifies_division_by_zero():
-    """Warn-режим: RMSE_full≈0 (deep tree) — жёсткий reason в обоих режимах."""
+def test_gap_warn_mode_deep_tree_division_by_zero_is_soft_warning():
+    """Warn-режим (issue #111): RMSE_full≈0 (deep tree) — soft_warning, не reason.
+
+    Нулевая ошибка на train — нормальное свойство целого класса моделей и
+    ничего не говорит о качестве на новых данных: в warn-режиме модель
+    валидна (severity == 1), в reject-режиме — reason (паритет со старым
+    поведением).
+    """
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
     y = 2.0 * X[:, 0] + rng.randn(120)
@@ -783,17 +796,28 @@ def test_gap_warn_mode_deep_tree_still_disqualifies_division_by_zero():
     full = tree.predict(X)
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
-    for mode in ("warn", "reject"):
-        result = _gap_only_gate(1.5, mode=mode).check(
-            y=y, y_pred_oof=oof, y_pred_full=full
-        )
-        assert not result.is_valid, mode
-        assert any("Circuit D" in r and "division by zero" in r for r in result.reasons)
-        assert np.isinf(result.generalization_gap)
+
+    warn = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert warn.is_valid is True
+    assert warn.reasons == []
+    assert any("Circuit D" in w and "RMSE_full" in w for w in warn.soft_warnings)
+    assert np.isinf(warn.generalization_gap)
+    assert warn.severity == 1
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert not strict.is_valid
+    assert any(
+        "Circuit D" in r and "division by zero" in r for r in strict.reasons
+    )
+    assert np.isinf(strict.generalization_gap)
 
 
-def test_gap_warn_mode_one_nn_still_disqualifies():
-    """Warn-режим: 1-NN (идеальный in-sample фит) — reason в обоих режимах."""
+def test_gap_warn_mode_one_nn_division_by_zero_is_soft_warning():
+    """Warn-режим (issue #111): 1-NN (идеальный in-sample фит) — soft_warning."""
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
     y = 2.0 * X[:, 0] + rng.randn(120)
@@ -801,12 +825,22 @@ def test_gap_warn_mode_one_nn_still_disqualifies():
     full = knn.predict(X)
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
-    for mode in ("warn", "reject"):
-        result = _gap_only_gate(1.5, mode=mode).check(
-            y=y, y_pred_oof=oof, y_pred_full=full
-        )
-        assert not result.is_valid, mode
-        assert any("Circuit D" in r for r in result.reasons)
+
+    warn = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert warn.is_valid is True
+    assert warn.reasons == []
+    assert any("Circuit D" in w and "RMSE_full" in w for w in warn.soft_warnings)
+    assert np.isinf(warn.generalization_gap)
+    assert warn.severity == 1
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert not strict.is_valid
+    assert any("Circuit D" in r for r in strict.reasons)
+    assert np.isinf(strict.generalization_gap)
 
 
 def test_gap_warn_mode_missing_y_pred_full_is_reason():
@@ -818,14 +852,27 @@ def test_gap_warn_mode_missing_y_pred_full_is_reason():
         assert any("y_pred_full is not provided" in r for r in result.reasons)
 
 
-def test_gap_warn_mode_rmse_oof_zero_is_reason():
-    """Warn-режим: RMSE_oof≈0 — деление на ноль, reason в обоих режимах."""
+def test_gap_warn_mode_rmse_oof_zero_is_soft_warning():
+    """Warn-режим (issue #111): RMSE_oof≈0 — soft_warning об утечке таргета.
+
+    В warn-режиме модель валидна, предупреждение прямо называет подозрение
+    на утечку таргета; в reject-режиме — reason (паритет со старым
+    поведением).
+    """
     y = np.arange(100, dtype=float)
-    for mode in ("warn", "reject"):
-        result = _gap_only_gate(1.5, mode=mode).check(y=y, y_pred_oof=y, y_pred_full=y)
-        assert not result.is_valid, mode
-        assert any("RMSE_oof" in r and "division by zero" in r for r in result.reasons)
-        assert np.isinf(result.generalization_gap)
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=y, y_pred_full=y)
+    assert warn.is_valid is True
+    assert warn.reasons == []
+    assert any("target leakage" in w for w in warn.soft_warnings)
+    assert np.isinf(warn.generalization_gap)
+    assert warn.severity == 1
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=y, y_pred_full=y
+    )
+    assert not strict.is_valid
+    assert any("RMSE_oof" in r and "division by zero" in r for r in strict.reasons)
+    assert np.isinf(strict.generalization_gap)
 
 
 def test_gap_boundary_equality_passes_in_both_modes():
@@ -863,20 +910,35 @@ def test_gap_warn_mode_above_threshold_boundary():
     assert any("Circuit D" in r for r in strict.reasons)
 
 
-def test_gap_inf_boundary_rmse_full_zero_explicit_reason_in_warn_mode():
-    """Граница: RMSE_full≈0 при RMSE_oof>0 — ветка деления на ноль как reason."""
+def test_gap_inf_boundary_rmse_full_zero_soft_warning_in_warn_mode():
+    """Граница (issue #111): RMSE_full==0 ровно при RMSE_oof>0 — soft_warning.
+
+    В warn-режиме модель проходит аудит (бесконечный gap не
+    дисквалифицирует); в reject-режиме тот же вход — reason с текстом про
+    RMSE_full.
+    """
     rng = np.random.RandomState(15)
     y = np.arange(100, dtype=float) * 1.0
     full = y.copy()  # RMSE_full == 0 ровно
     oof = y + rng.randn(100) * 1e-3  # RMSE_oof ≈ 1e-3 > _ZERO_RMSE_EPS
-    result = _gap_only_gate(1.5, mode="warn").check(
+    warn = _gap_only_gate(1.5, mode="warn").check(
         y=y, y_pred_oof=oof, y_pred_full=full
     )
-    assert not result.is_valid
+    assert warn.is_valid is True
+    assert warn.reasons == []
     assert any(
-        "RMSE_full" in r and "division by zero" in r for r in result.reasons
+        "RMSE_full" in w and "division by zero" in w for w in warn.soft_warnings
     )
-    assert np.isinf(result.generalization_gap)
+    assert np.isinf(warn.generalization_gap)
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert not strict.is_valid
+    assert any(
+        "RMSE_full" in r and "division by zero" in r for r in strict.reasons
+    )
+    assert np.isinf(strict.generalization_gap)
 
 
 def test_gap_invalid_mode_raises_value_error():
@@ -914,6 +976,151 @@ def test_gap_reject_mode_parity_with_legacy_default():
     assert ok.is_valid
     assert ok.reasons == []
     assert ok.soft_warnings == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Контур Г — деление на ноль в warn-режиме (issue #111)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# Модели с нулевой ошибкой на train (RMSE_full ≈ 0): идеальный in-sample фит —
+# нормальное свойство класса моделей, ничего не говорит о качестве на новых
+# данных. В warn-режиме они НЕ дисквалифицируются.
+_GAP_INF_MODEL_FACTORIES = [
+    lambda: DecisionTreeRegressor(max_depth=20, random_state=0),
+    lambda: KNeighborsRegressor(n_neighbors=1),
+    lambda: ExtraTreesRegressor(min_samples_leaf=1, random_state=0),
+    lambda: KNeighborsRegressor(n_neighbors=3, weights="distance"),
+]
+
+
+@pytest.mark.parametrize("factory", _GAP_INF_MODEL_FACTORIES)
+def test_gap_warn_mode_division_by_zero_soft_warning_models(factory: Callable[[], Any]):
+    """Positive (warn, issue #111): модели с RMSE_full≈0 проходят аудит.
+
+    is_valid True, Circuit D-предупреждение про RMSE_full≈0 в soft_warnings,
+    generalization_gap == inf, severity == 1.
+    """
+    rng = np.random.RandomState(12)
+    X = rng.randn(120, 6)
+    y = 2.0 * X[:, 0] + rng.randn(120)
+    oof, full, model = _honest_oof_full(factory, X, y, folds=5)
+    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6  # предпосылка: RMSE_full≈0
+    warn = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
+    assert warn.is_valid is True
+    assert warn.reasons == []
+    assert any("Circuit D" in w and "RMSE_full" in w for w in warn.soft_warnings)
+    assert np.isinf(warn.generalization_gap)
+    assert warn.severity == 1
+
+
+@pytest.mark.parametrize("factory", _GAP_INF_MODEL_FACTORIES)
+def test_gap_reject_mode_division_by_zero_models_disqualified(
+    factory: Callable[[], Any],
+):
+    """Negative (reject, issue #111): те же модели отбраковываются.
+
+    Тексты причин совпадают с текущими (паритет со старым поведением).
+    """
+    rng = np.random.RandomState(12)
+    X = rng.randn(120, 6)
+    y = 2.0 * X[:, 0] + rng.randn(120)
+    oof, full, model = _honest_oof_full(factory, X, y, folds=5)
+    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
+    assert not strict.is_valid
+    assert any(
+        "Circuit D" in r and "RMSE_full" in r and "division by zero" in r
+        for r in strict.reasons
+    )
+    assert np.isinf(strict.generalization_gap)
+
+
+def test_gap_warn_mode_rmse_oof_zero_logs_warning(caplog):
+    """Warn-режим: RMSE_oof≈0 → WARNING в лог (осознанное исключение T6).
+
+    Молчаливая дисквалификация подменяла бы победителя и прятала утечку
+    таргета — нужен заметный сигнал уровня WARNING.
+    """
+    y = np.arange(100, dtype=float)
+    with caplog.at_level("WARNING", logger="configurable_automl_engine"):
+        warn = _gap_only_gate(1.5, mode="warn").check(
+            y=y, y_pred_oof=y, y_pred_full=y
+        )
+    assert warn.is_valid is True
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("target leakage" in r.message for r in warning_records)
+
+    # Контраст: RMSE_full≈0 (не утечка) в warn-режиме НЕ даёт WARNING.
+    rng = np.random.RandomState(17)
+    full = y.copy()
+    oof = y + rng.randn(100) * 1e-3
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="configurable_automl_engine"):
+        _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
+    assert not any("target leakage" in r.message for r in caplog.records)
+
+
+def test_gap_warn_boundary_rmse_full_zero_and_above_eps_both_pass():
+    """Граница _ZERO_RMSE_EPS: RMSE_full == 0 ровно и 2e-12 (чуть выше eps).
+
+    В warn-режиме оба кандидата проходят аудит; отличается только значение
+    gap (inf или конечное большое).
+    """
+    rng = np.random.RandomState(18)
+    y = np.arange(100, dtype=float) * 1.0
+    oof = y + rng.randn(100) * 1e-3  # RMSE_oof ≈ 1e-3 > eps
+    zero_full = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=y.copy()
+    )
+    assert zero_full.is_valid is True
+    assert np.isinf(zero_full.generalization_gap)
+
+    above_full = y + rng.randn(100) * 2e-12  # RMSE_full ≈ 2e-12 > _ZERO_RMSE_EPS
+    assert np.sqrt(np.mean((y - above_full) ** 2)) > 1e-12
+    near = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=above_full
+    )
+    assert near.is_valid is True
+    assert np.isfinite(near.generalization_gap)
+    assert near.generalization_gap > 1.5  # конечный большой gap → warning
+
+
+def test_gap_rmse_full_and_oof_both_zero_single_leakage_warning():
+    """RMSE_full ≈ RMSE_oof ≈ 0: одна ветка (RMSE_oof) — без дубля про RMSE_full.
+
+    В warn-режиме — одно предупреждение об утечке; в reject-режиме — одна
+    причина (RMSE_oof).
+    """
+    y = np.arange(100, dtype=float)
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=y, y_pred_full=y)
+    assert warn.is_valid is True
+    assert len(warn.soft_warnings) == 1
+    assert "target leakage" in warn.soft_warnings[0]
+    assert not any("RMSE_full" in w for w in warn.soft_warnings)
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=y, y_pred_full=y
+    )
+    assert not strict.is_valid
+    assert len(strict.reasons) == 1
+    assert "RMSE_oof" in strict.reasons[0]
+
+
+def test_gap_no_finite_pairs_is_reason_in_both_modes():
+    """Нет конечных пар (y, oof, full) — reason в обоих режимах (невычислимость)."""
+    y = np.arange(50, dtype=float)
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.5, mode=mode).check(
+            y=y, y_pred_oof=y, y_pred_full=np.full(50, np.nan)
+        )
+        assert not result.is_valid, mode
+        assert any("no finite pairs to compute RMSE" in r for r in result.reasons)
+        assert result.soft_warnings == [], mode
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -994,24 +1201,26 @@ def test_negative_svr_sigmoid_tanh_plateau():
     assert result.diversity_ratio < 0.15
 
 
-def test_negative_deep_tree_rmse_full_zero():
+def test_positive_deep_tree_rmse_full_zero_soft_warning_in_warn_mode():
+    """Warn-режим (дефолт, issue #111): глубокое дерево — Circuit D soft_warning."""
     X, y = _dataset(n=120)
     tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
     result = ModelSanityGate(check_diversity=False, check_unique=False).check(
         y=y, y_pred_oof=tree.predict(X), y_pred_full=tree.predict(X), X=X, model=tree
     )
-    assert not result.is_valid
-    assert any("Circuit D" in r for r in result.reasons)
+    assert result.is_valid
+    assert any("Circuit D" in w for w in result.soft_warnings)
 
 
-def test_negative_one_nn():
+def test_positive_one_nn_soft_warning_in_warn_mode():
+    """Warn-режим (дефолт, issue #111): 1-NN — Circuit D soft_warning."""
     X, y = _dataset(n=120)
     knn = KNeighborsRegressor(n_neighbors=1).fit(X, y)
     result = ModelSanityGate(check_diversity=False, check_unique=False).check(
         y=y, y_pred_oof=knn.predict(X), y_pred_full=knn.predict(X), X=X, model=knn
     )
-    assert not result.is_valid
-    assert any("Circuit D" in r for r in result.reasons)
+    assert result.is_valid
+    assert any("Circuit D" in w for w in result.soft_warnings)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1569,10 +1778,15 @@ def test_golden_small_n_degenerate_models_fail(
     (b) SVR-sigmoid, упёршийся в плато tanh;
     (c) дерево глубины 20 (RMSE_train≈0);
     (d) 1-NN.
+
+    Для случаев контура Г (deep_tree, knn_1) дисквалификация достигается
+    явным ``generalization_gap_mode="reject"``: дефолтный warn-режим
+    (issue #111) переводит RMSE_full≈0 в soft_warnings и не
+    дисквалифицирует.
     """
     X, y = _small_dataset(n=25, seed=7)
     oof, full, model = _honest_oof_full(factory, X, y, folds=5)
-    result = ModelSanityGate().check(
+    result = ModelSanityGate(generalization_gap_mode="reject").check(
         y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
     )
     assert not result.is_valid

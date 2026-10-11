@@ -21,6 +21,7 @@ import pandas as pd
 import math
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
 import importlib
@@ -29,8 +30,9 @@ import logging
 import re
 
 import numpy as np
-from sklearn.datasets import make_regression
+from sklearn.datasets import load_diabetes, make_friedman3, make_regression
 
+import configurable_automl_engine.training_engine.component as component
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import (
     _run_hpo,
@@ -3245,3 +3247,163 @@ def test_e2e_two_selects_report_per_phase(tmp_path: Path):
     assert res2["sanity_gate"]["GateFinal"]["pool"]  # финалисты переобучены
     for key in ("sanity_gate_warn_only", "disqualified_by_sanity_gate"):
         assert key not in res2
+
+
+# --------------------------------------------------------------------------- #
+#  E2E критерии готовности issue #111: warn не дисквалифицирует gap=∞/большой
+# --------------------------------------------------------------------------- #
+
+# Деревья с min_samples_leaf=1 (и GBM с max_depth=10) идеально обучаются на
+# train (RMSE_full ≈ 0): в warn-режиме они не дисквалифицируются и соревнуются
+# по RMSE_oof, в reject-режиме отбраковываются контуром Г (старое поведение).
+
+
+def _acceptance_cfg(model_path: str, *, gap_mode: str) -> dict[str, Any]:
+    """Дефолтный конфиг с overfit-деревьями и терминальным select: sanity_gate."""
+    return {
+        "general": {
+            "comparison_metric": "rmse",
+            "validation_strategy": "train_test_split",
+            "n_folds": 5,
+            "phases": [
+                {"name": "search", "n_trials": 1, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "sanity_gate",
+                    "output": "winner",
+                },
+            ],
+            "path_to_model": model_path,
+            "sanity_gate": {
+                "generalization_gap_mode": gap_mode,
+                "top_k_candidates": 4,
+                "corridor_delta": 0.9,
+            },
+        },
+        "algorithms": {
+            "extra_trees": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"min_samples_leaf": [1], "n_estimators": [50]},
+            },
+            "random_forest": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"min_samples_leaf": [1], "n_estimators": [50]},
+            },
+            "gradient_boosting": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {
+                    "min_samples_leaf": [1],
+                    "max_depth": [10],
+                    "n_estimators": [50],
+                },
+            },
+            "ridge": {"enable": True},
+        },
+        "oversampling": {"enable": False},
+    }
+
+
+def _run_acceptance(
+    model_path: Path, df: pd.DataFrame, *, gap_mode: str
+) -> tuple[dict[str, Any], dict[str, float]]:
+    """train_best_model с записью RMSE_oof каждого обученного финалиста.
+
+    Обёртка вокруг ``_fit_finalist`` фиксирует честный OOF-скор каждого
+    финалиста — по нему проверяется, что победитель является минимумом
+    RMSE_oof среди всех финалистов, а не «лучшим из прошедших гейт».
+    """
+    oof_scores: dict[str, float] = {}
+    real_fit = component._fit_finalist
+
+    def _recorded_fit(*args: Any, **kwargs: Any) -> Any:
+        trainer = real_fit(*args, **kwargs)
+        oof_scores[str(args[0])] = float(trainer.oof_score_)
+        return trainer
+
+    with patch.object(component, "_fit_finalist", side_effect=_recorded_fit):
+        result = train_best_model(
+            config=_acceptance_cfg(str(model_path), gap_mode=gap_mode),
+            df=df,
+            target="target",
+            model_path_override=model_path,
+        )
+    return result, oof_scores
+
+
+def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
+    """Критерий готовности (issue #111): warn на make_friedman3.
+
+    Дефолтный конфиг с extra_trees / random_forest / gradient_boosting /
+    ridge и терминальным select: sanity_gate. В warn-режиме ни один кандидат
+    не дисквалифицируется из-за gap: победитель — алгоритм с минимальным
+    RMSE_oof среди всех финалистов, а не «лучший из прошедших гейт».
+    """
+    X, y = make_friedman3(n_samples=400, noise=0.05, random_state=1)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+    df["target"] = y
+    res, oof_scores = _run_acceptance(tmp_path / "m.pkl", df, gap_mode="warn")
+    sg = res["sanity_gate"]["final"]
+    assert sg["generalization_gap_mode"] == "warn"
+    assert sg["disqualified"] == {}
+    assert sg["fallback_used"] is False
+    # Победитель — минимум RMSE_oof среди финалистов пула.
+    assert res["algorithm"] == min(sg["pool"], key=lambda n: oof_scores[n])
+    assert sg["winner_rmse_oof"] == pytest.approx(
+        min(oof_scores[n] for n in sg["pool"]), rel=1e-6
+    )
+    # В пуле есть overfit-деревья с Circuit D-предупреждением (gap > 1.5).
+    assert any(
+        any("Circuit D" in w for w in sg["audit"][n]["soft_warnings"])
+        for n in sg["pool"]
+    )
+
+
+def test_e2e_warn_mode_winner_is_min_rmse_oof_diabetes(tmp_path: Path):
+    """Критерий готовности (issue #111): warn на load_diabetes.
+
+    Тот же сценарий: победитель — минимум RMSE_oof среди всех финалистов,
+    включая overfit-деревья с нулевой ошибкой на train.
+    """
+    X, y = load_diabetes(return_X_y=True)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+    df["target"] = y
+    res, oof_scores = _run_acceptance(tmp_path / "m.pkl", df, gap_mode="warn")
+    sg = res["sanity_gate"]["final"]
+    assert sg["disqualified"] == {}
+    assert sg["fallback_used"] is False
+    assert res["algorithm"] == min(sg["pool"], key=lambda n: oof_scores[n])
+    assert sg["winner_rmse_oof"] == pytest.approx(
+        min(oof_scores[n] for n in sg["pool"]), rel=1e-6
+    )
+
+
+def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
+    """Критерий готовности (issue #111): reject воспроизводит старое поведение.
+
+    Те же overfit-деревья (RMSE_full ≈ 0 при min_samples_leaf=1) в
+    reject-режиме отбраковываются контуром Г: причины Circuit D в
+    ``disqualified`` и circuit breaker, победитель — прошедший гейт (ridge на
+    load_diabetes), а не «запоминатель».
+    """
+    X, y = load_diabetes(return_X_y=True)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+    df["target"] = y
+    res, _ = _run_acceptance(tmp_path / "m.pkl", df, gap_mode="reject")
+    sg = res["sanity_gate"]["final"]
+    assert sg["generalization_gap_mode"] == "reject"
+    assert sg["disqualified"]
+    assert all(
+        any("Circuit D" in r for r in reasons)
+        for reasons in sg["disqualified"].values()
+    )
+    # Дисквалификации гейта попадают в circuit breaker (эпик #74).
+    assert set(res["disqualified_algorithms"]) == set(sg["disqualified"])
+    # Победитель — прошедший гейт: валиден, без причин.
+    winner_audit = sg["audit"][res["algorithm"]]
+    assert winner_audit["is_valid"] is True
+    assert winner_audit["reasons"] == []

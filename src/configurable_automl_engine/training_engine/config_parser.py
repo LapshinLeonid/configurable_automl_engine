@@ -110,11 +110,13 @@ SanityGateMode = Literal["off", "active"]
 CorridorMode = Literal["multiplicative", "additive", "auto"]
 
 #: Режим контура Г ``_check_generalization_gap`` (issue #108):
-#: ``"warn"`` (дефолт) — конечный ``gap > max_generalization_gap`` уходит в
+#: ``"warn"`` (дефолт) — нарушение контура Г (конечный ``gap >
+#: max_generalization_gap`` или бесконечный gap из деления на ноль:
+#: ``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``, issue #111) уходит в
 #: ``soft_warnings`` (мягкое предупреждение, не дисквалифицирует);
 #: ``"reject"`` — строгая дисквалификация (старое поведение дефолта).
-#: Вырожденные случаи деления на ноль (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``)
-#: и ``y_pred_full = None`` остаются reason в обоих режимах. Имя поля
+#: Reasons в обоих режимах остаются только для нарушений контракта
+#: (``y_pred_full = None``) и невычислимости (нет конечных пар). Имя поля
 #: НЕ ``mode``: это имя зарезервировано за удалённым в эпике #74 полем
 #: ``sanity_gate.mode`` (валидатор ``_reject_removed_mode`` отвергает его с
 #: ошибкой миграции). Тип объявлен здесь и в ``sanity_gate.py`` (standalone)
@@ -517,11 +519,12 @@ class SanityGateCfg(BaseModel):
         zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).
         max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).
         generalization_gap_mode (GeneralizationGapMode): Режим контура Г
-            (issue #108): 'warn' (дефолт) — конечный gap > порога уходит в
-            soft_warnings (мягкое предупреждение); 'reject' — провал →
-            reasons → дисквалификация (старое строгое поведение).
-            Вырожденные случаи деления на ноль остаются reason в обоих
-            режимах.
+            (issue #108): 'warn' (дефолт) — нарушение контура Г (конечный
+            gap > порога или бесконечный gap из деления на ноль, issue #111)
+            уходит в soft_warnings (мягкое предупреждение); 'reject' —
+            провал → reasons → дисквалификация (старое строгое поведение).
+            Reasons в обоих режимах — только нарушения контракта и
+            невычислимость.
         check_permutation_sensitivity (bool): Включить пермутационный аудит
             чувствительности признаков (контур В, нелинейные модели).
         permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).
@@ -675,12 +678,14 @@ class SanityGateCfg(BaseModel):
     generalization_gap_mode: GeneralizationGapMode = Field(
         default="warn",
         description=(
-            "Режим контура Г (generalization gap): 'warn' (дефолт) — конечный "
-            "gap > max_generalization_gap записывается в soft_warnings "
-            "(не дисквалифицирует); 'reject' — провал → reasons → "
-            "дисквалификация (старое строгое поведение). Вырожденные случаи "
-            "деления на ноль (RMSE_full≈0 / RMSE_oof≈0) остаются reason в "
-            "обоих режимах. Поле намеренно НЕ называется mode (коллизия с "
+            "Режим контура Г (generalization gap): 'warn' (дефолт) — "
+            "нарушение контура Г (конечный gap > max_generalization_gap или "
+            "бесконечный gap из деления на ноль: RMSE_full≈0 / RMSE_oof≈0, "
+            "issue #111) записывается в soft_warnings (не дисквалифицирует); "
+            "'reject' — провал → reasons → дисквалификация (старое строгое "
+            "поведение). Reasons в обоих режимах остаются только для "
+            "нарушений контракта (y_pred_full=None) и невычислимости (нет "
+            "конечных пар). Поле намеренно НЕ называется mode (коллизия с "
             "удалённым в эпике #74 полем sanity_gate.mode)."
         ),
     )

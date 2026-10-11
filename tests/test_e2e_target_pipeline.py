@@ -310,10 +310,57 @@ def test_e2e_target_dag_winner_refined_params_in_gate_context():
     assert set(ctx.sanity_gate_sections) == {"gate_select", "gate_final"}
 
 
+def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path):
+    """Регресс (issue #111): кандидат с gap=∞ доживает от select до refine.
+
+    Первый sanity-select (top_k) в warn-режиме не теряет кандидата с
+    RMSE_full≈0 (gap=∞): refine обрабатывает обоих кандидатов, терминальный
+    select выбирает победителя по RMSE_oof (не «лучшего из прошедших гейт»).
+    """
+    cfg_dict = _cfg_dict(
+        _target_dag_phases(top_k=2),
+        gate_thresholds=_GATE_THRESHOLDS,
+    )
+    cfg = component.Config.model_validate(cfg_dict)
+    cfg.general.path_to_model = tmp_path / "m.pkl"
+    df = _df(n_rows=40)
+    prepared = prepare_dataset(cfg, df, "target")
+
+    def _fit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
+        if a[0] == "ridge":
+            return _FakeTrainer(prepared.y.to_numpy(), 0.5, 0.25)  # gap = 2.0
+        return _FakeTrainer(prepared.y.to_numpy(), 0.2, 0.0)  # gap = ∞, RMSE_oof лучше
+
+    with (
+        patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
+        patch.object(component, "_fit_finalist", side_effect=_fit_finalist),
+        patch.object(component, "_fit_and_save"),
+    ):
+        result = train_best_model(cfg, df, target="target")
+
+    first = result["sanity_gate"]["gate_select"]
+    terminal = result["sanity_gate"]["gate_final"]
+    # Первый select: кандидат с gap=∞ валиден, не в disqualified и не в
+    # circuit breaker (иначе следующий refine его потеряет — ловушка #102).
+    assert first["disqualified"] == {}
+    assert first["fallback_used"] is False
+    et_audit = first["audit"]["extra_trees"]
+    assert et_audit["is_valid"] is True
+    assert et_audit["generalization_gap_infinite"] is True
+    assert any(
+        "Circuit D" in w and "RMSE_full" in w for w in et_audit["soft_warnings"]
+    )
+    # Оба кандидата дожили до терминального select (пул полный).
+    assert set(terminal["pool"]) == {"ridge", "extra_trees"}
+    # Победитель — минимум RMSE_oof среди финалистов (extra_trees).
+    assert result["algorithm"] == "extra_trees"
+    assert terminal["winner_rmse_oof"] == pytest.approx(0.2, rel=1e-6)
+    assert terminal["disqualified"] == {}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  2. Негативные сквозные сценарии: legacy-сущности → дружелюбная валидация
 # ──────────────────────────────────────────────────────────────────────────────
-
 
 def test_train_best_model_rejects_legacy_refine_winner_action():
     """Конфиг с ``refine_winner`` падает на входе ``train_best_model``.

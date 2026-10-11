@@ -1073,6 +1073,53 @@ def test_select_sanity_gate_warn_mode_keeps_gap_winner(tmp_path):
         assert audit["severity"] == 1
 
 
+def test_select_sanity_gate_warn_mode_infinite_gap_winner(tmp_path):
+    """Warn-режим (issue #111): кандидат с gap=∞ (RMSE_full≈0) — победитель.
+
+    Кандидат с нулевой ошибкой на train не дисквалифицируется: выигрывает
+    по RMSE_oof, отсутствует в ``disqualified`` и circuit breaker
+    (``disqualified_algorithms``); в gate-секции — Circuit D-warning про
+    RMSE_full≈0, режим warn и явный маркер бесконечного gap
+    (``generalization_gap_infinite: true``).
+    """
+    cfg_dict = _cfg_dict(
+        [_select_phase(name="gate", strategy="sanity_gate")],
+        sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9},
+    )
+    cfg = Config.model_validate(cfg_dict)
+    cfg.general.path_to_model = tmp_path / "m.pkl"
+    df = _df(n_rows=40)
+
+    def _overfit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
+        # extra_trees: RMSE_full = 0 (gap = ∞), RMSE_oof лучше ridge.
+        if a[0] == "ridge":
+            return _FakeTrainer(df["target"].to_numpy(), 0.5, 0.25)  # gap = 2.0
+        return _FakeTrainer(df["target"].to_numpy(), 0.2, 0.0)  # gap = ∞
+
+    with (
+        _patch_hpo(),
+        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+    ):
+        res = train_best_model(cfg, df, target="target")
+
+    sg = res["sanity_gate"]["gate"]
+    assert sg["fallback_used"] is False
+    assert sg["disqualified"] == {}
+    assert "disqualified_algorithms" not in res  # circuit breaker пуст
+    assert sg["generalization_gap_mode"] == "warn"
+    assert res["algorithm"] == "extra_trees"
+    assert sg["winner_rmse_oof"] == pytest.approx(0.2, rel=1e-6)
+    winner_audit = sg["audit"]["extra_trees"]
+    assert winner_audit["is_valid"] is True
+    # inf-значение сериализуется явным флагом, а не теряется в None.
+    assert winner_audit["generalization_gap"] is None
+    assert winner_audit["generalization_gap_infinite"] is True
+    assert any(
+        "Circuit D" in w and "RMSE_full" in w for w in winner_audit["soft_warnings"]
+    )
+    assert winner_audit["severity"] == 1
+
+
 def test_select_sanity_gate_all_finalists_fail_to_train():
     """Ни один финалист не обучился на 100% данных → RuntimeError."""
     cfg_dict = _cfg_dict(
@@ -1214,6 +1261,7 @@ def test_report_audit_section_serialized():
             "unique_ratio",
             "dead_features_count",
             "generalization_gap",
+            "generalization_gap_infinite",
             "generalization_gap_mode",
             "severity",
         }
@@ -1317,9 +1365,27 @@ def test_serialize_audit_result_converts_nan_to_none():
     serialized = _serialize_audit_result(audit, "reject")
     assert serialized["diversity_ratio"] is None
     assert serialized["generalization_gap"] is None
+    assert serialized["generalization_gap_infinite"] is False
     assert serialized["generalization_gap_mode"] == "reject"
     assert serialized["unique_ratio"] == 0.5
     assert serialized["dead_features_count"] == 2
+
+
+def test_serialize_audit_result_infinite_gap_flagged_explicitly():
+    """Бесконечный gap (деление на ноль, issue #111) — явный флаг в отчёте.
+
+    Без флага inf превратился бы в None и был бы неотличим от «контур
+    выключен или не вычислим».
+    """
+    audit = SanityCheckResult(
+        is_valid=True,
+        soft_warnings=["Circuit D (generalization gap): RMSE_full≈0"],
+        generalization_gap=float("inf"),
+        severity=1,
+    )
+    serialized = _serialize_audit_result(audit, "warn")
+    assert serialized["generalization_gap"] is None
+    assert serialized["generalization_gap_infinite"] is True
 
 
 def test_build_sanity_gate_passes_thresholds():

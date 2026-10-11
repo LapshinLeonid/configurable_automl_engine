@@ -359,10 +359,15 @@ def test_warn_only_mode_removed():
 
 
 def test_boundary_active_reports_disqualifications_without_changing_pool():
-    """Boundary: ``active`` применяет дисквалификации, но не меняет пул T3."""
+    """Boundary: ``active`` применяет дисквалификации, но не меняет пул T3.
+
+    Контур Г в строгом ``reject``-режиме: вырожденные deep_tree / 1-NN
+    (RMSE_full≈0) дисквалифицируются как в старом поведении (issue #111 —
+    дефолтный warn-режим оставил бы их валидными с soft_warnings).
+    """
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
-    gate = ModelSanityGate()
+    gate = ModelSanityGate(generalization_gap_mode="reject")
     X_df, y_s = pd.DataFrame(X), pd.Series(y)
 
     off = select_robust_winner(cands, X_df, y_s, gate, mode="off")
@@ -451,11 +456,17 @@ def test_golden_small_n_winner_is_honest_model_mode_active():
     Вырожденные (a) «полка» ElasticNet, (b) SVR-sigmoid плато tanh,
     (c) дерево глубины 20, (d) 1-NN — дисквалифицируются; честный
     градиентный бустинг (e) проходит аудит и побеждает по RMSE_oof.
+    Контур Г в строгом ``reject``-режиме (issue #111: дефолтный warn-режим
+    оставил бы deep_tree / 1-NN валидными с soft_warnings).
     """
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
     res = select_robust_winner(
-        cands, pd.DataFrame(X), pd.Series(y), ModelSanityGate(), mode="active"
+        cands,
+        pd.DataFrame(X),
+        pd.Series(y),
+        ModelSanityGate(generalization_gap_mode="reject"),
+        mode="active",
     )
     assert res.winner_algo == "honest_gbr"
     assert res.winner_rmse_oof == pytest.approx(cands["honest_gbr"].rmse_oof)

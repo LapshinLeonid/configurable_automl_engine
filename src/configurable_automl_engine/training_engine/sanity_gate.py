@@ -55,11 +55,18 @@ D. Generalization Gap (``check_generalization_gap``)
    is routed by ``generalization_gap_mode`` (issue #108): the default
    ``"warn"`` records it in ``soft_warnings`` (no disqualification,
    ``is_valid`` stays True, severity ≤ 1), while ``"reject"`` reproduces the
-   legacy strict behavior — a reason and disqualification. A near-zero
-   denominator — ``RMSE_full ≈ 0`` (perfect in-sample fit such as a depth-20
-   tree or 1-NN) or ``RMSE_oof ≈ 0`` — is treated as a failure with an
-   explicit reason (division by zero) **in both modes**: that is real model
-   degradation and the protection must not be lost.
+   legacy strict behavior — a reason and disqualification. In the ``"warn"``
+   mode the circuit never disqualifies because of the gap magnitude — even
+   an infinite one (issue #111): ``RMSE_full ≈ 0`` (a perfect in-sample fit
+   such as a depth-20 tree, 1-NN or ExtraTrees with ``min_samples_leaf=1``
+   is a normal property of a whole class of models and says nothing about
+   quality on new data) and ``RMSE_oof ≈ 0`` are routed to ``soft_warnings``
+   as well, and the model keeps its right to win by ``RMSE_oof``. The
+   ``RMSE_oof ≈ 0`` case additionally raises a ``WARNING`` log record — a
+   deliberately visible signal for a suspiciously perfect out-of-fold fit
+   (possible target leakage) instead of a silent substitution of the winner.
+   In the ``"reject"`` mode both division-by-zero cases become
+   disqualification reasons exactly as before.
 
 Threshold comparison sides are fixed in one place (module-level helpers
 ``_fails_below`` / ``_fails_above`` / ``_diversity_fails``):
@@ -190,11 +197,12 @@ class SanityCheckResult:
             coefficients for linear models or permutation-insensitive columns
             for nonlinear ones; 0 when the circuit is disabled.
         generalization_gap: ``RMSE_oof / RMSE_full`` (circuit D); NaN when the
-            circuit is disabled or not computable. In ``generalization_gap_mode
-            = "warn"`` a finite gap above the threshold is reported in
-            ``soft_warnings``; in ``"reject"`` mode it becomes a
-            disqualification reason. Division-by-zero cases (``RMSE_full ≈ 0``
-            / ``RMSE_oof ≈ 0``) are reasons in both modes.
+            circuit is disabled or not computable, ``inf`` for the
+            division-by-zero cases (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``).
+            In ``generalization_gap_mode = "warn"`` every gap violation —
+            finite or infinite — is reported in ``soft_warnings`` (issue
+            #111) and never disqualifies; in ``"reject"`` mode it becomes a
+            disqualification reason.
         severity: formalized severity for the fallback (T4):
             0 — clean; 1 — soft warnings only;
             2/3/4 — one/two/three or more disqualification reasons.
@@ -370,11 +378,12 @@ class ModelSanityGate:
             count as zero (linear path of circuit C).
         max_generalization_gap: Circuit D threshold — ``RMSE_oof / RMSE_full``
             (default 1.5).
-        generalization_gap_mode: Circuit D routing of a finite gap above the
-            threshold (issue #108): ``"warn"`` (default) — ``soft_warnings``,
-            no disqualification; ``"reject"`` — a reason and disqualification
-            (legacy strict default), except division-by-zero cases which stay
-            reasons in both modes.
+        generalization_gap_mode: Circuit D routing of a gap violation (issue
+            #108): ``"warn"`` (default) — ``soft_warnings``, no
+            disqualification (including an infinite gap, issue #111);
+            ``"reject"`` — a reason and disqualification (legacy strict
+            default). Contract violations and non-computability stay reasons
+            in both modes.
         check_permutation_sensitivity: Enable the permutation sensitivity
             audit of circuit C for nonlinear models (cost control).
         permutation_max_rows: Row subsampling cap for the permutation path.
@@ -435,13 +444,14 @@ class ModelSanityGate:
             zero_coef_tolerance: coefficients with ``abs(coef) <=`` this value
                 count as zero (linear path of circuit C).
             max_generalization_gap: circuit D threshold (≥ 1, default 1.5).
-            generalization_gap_mode: circuit D routing of a finite gap above
-                the threshold (issue #108): ``"warn"`` (default) — the violation
-                lands in ``soft_warnings`` (``is_valid`` stays True, severity
-                ≤ 1); ``"reject"`` — legacy strict behavior: a reason and
-                disqualification. Division-by-zero cases (``RMSE_full ≈ 0`` /
-                ``RMSE_oof ≈ 0``) and ``y_pred_full = None`` remain reasons in
-                both modes.
+            generalization_gap_mode: circuit D routing of a gap violation
+                (issue #108/#111): ``"warn"`` (default) — the violation lands
+                in ``soft_warnings`` (``is_valid`` stays True, severity ≤ 1),
+                including an infinite gap from division by zero (``RMSE_full
+                ≈ 0`` / ``RMSE_oof ≈ 0``); ``"reject"`` — legacy strict
+                behavior: a reason and disqualification. Contract violations
+                (``y_pred_full = None``) and non-computability (no finite
+                pairs) remain reasons in both modes.
             check_permutation_sensitivity: enable the permutation sensitivity
                 audit of circuit C for nonlinear models (default True — the
                 cost-controlled permutation path runs; False — the path is
@@ -605,10 +615,12 @@ class ModelSanityGate:
                 y_arr, oof_arr, y_pred_full
             )
             reasons.extend(g_reasons)
-            # Маршрутизация конечного gap > max_generalization_gap (issue
-            # #108): warn-режим (дефолт) — soft_warnings (не дисквалифицирует);
-            # reject-режим — reasons (старое строгое поведение). Вырожденные
-            # случаи (деление на ноль) и y_pred_full=None всегда в reasons.
+            # Маршрутизация нарушений контура Г (issue #108/#111):
+            # warn-режим (дефолт) — soft_warnings (не дисквалифицирует,
+            # включая бесконечный gap при делении на ноль); reject-режим —
+            # reasons (старое строгое поведение). reasons в обоих режимах
+            # остаются только для нарушений контракта (y_pred_full=None) и
+            # невычислимости (нет конечных пар).
             if self.generalization_gap_mode == "reject":
                 reasons.extend(g_warnings)
             else:
@@ -628,16 +640,26 @@ class ModelSanityGate:
             )
         if soft_warnings:
             # Требование T6: soft_warnings (dead-признаки у линейных моделей,
-            # «ложно мёртвые» признаки на корреляции) логируются на уровне
-            # DEBUG/INFO — они не дисквалифицируют сами по себе и никогда
-            # не должны подниматься до WARNING.
+            # «ложно мёртвые» признаки на корреляции, нарушения контура Г в
+            # warn-режиме) логируются на уровне DEBUG/INFO — они не
+            # дисквалифицируют сами по себе и никогда не должны подниматься
+            # до WARNING. Осознанное исключение (issue #111): подозрение на
+            # утечку таргета (RMSE_oof ≈ 0) в warn-режиме логируется на
+            # уровне WARNING — молчаливая дисквалификация подменяла бы
+            # победителя и прятала утечку, нужен заметный сигнал.
             logger.info(
                 "Sanity gate: valid with %d soft warning(s) "
                 "(non-disqualifying signals)",
                 len(soft_warnings),
             )
             for warning in soft_warnings:
-                logger.debug("Sanity gate soft warning: %s", warning)
+                if (
+                    self.generalization_gap_mode == "warn"
+                    and "possible target leakage" in warning
+                ):
+                    logger.warning("Sanity gate soft warning: %s", warning)
+                else:
+                    logger.debug("Sanity gate soft warning: %s", warning)
 
         return SanityCheckResult(
             is_valid=is_valid,
@@ -1077,13 +1099,16 @@ class ModelSanityGate:
         (y, y_pred_oof, y_pred_full), so the ratio compares apples to apples.
 
         Returns three lists separately so that ``check()`` can route them by
-        ``generalization_gap_mode`` (issue #108): hard failures — contract
-        violations (``y_pred_full = None``) and division-by-zero cases
-        (``RMSE_full ≈ 0`` perfect in-sample fit such as a depth-20 tree or
-        1-NN, ``RMSE_oof ≈ 0``) — are returned as ``reasons`` in **both**
-        modes; a finite gap strictly above the threshold is returned as a
-        ``warnings`` entry, which ``check()`` turns into a reason in
-        ``"reject"`` mode or into ``soft_warnings`` in ``"warn"`` mode.
+        ``generalization_gap_mode`` (issue #108): a gap violation — finite
+        (strictly above the threshold) or infinite (division by zero:
+        ``RMSE_full ≈ 0`` perfect in-sample fit, ``RMSE_oof ≈ 0``) — is
+        returned as a ``warnings`` entry, which ``check()`` turns into a
+        reason in ``"reject"`` mode or into ``soft_warnings`` in ``"warn"``
+        mode (issue #111: in warn mode the circuit never disqualifies because
+        of the gap magnitude). Contract violations (``y_pred_full = None``)
+        and non-computability (no finite pairs) are returned as ``reasons``
+        in **both** modes. ``RMSE_oof ≈ 0`` is the only case additionally
+        logged at ``WARNING`` level in warn mode (possible target leakage).
 
         Args:
             y: the target.
@@ -1116,24 +1141,35 @@ class ModelSanityGate:
         rmse_full = float(np.sqrt(mean_squared_error(y[mask], full_arr[mask])))
         rmse_oof = float(np.sqrt(mean_squared_error(y[mask], y_pred_oof[mask])))
         if rmse_oof <= _ZERO_RMSE_EPS:
-            # Деление на ноль по знаменателю OOF — провал с явным reason.
+            # RMSE_oof ≈ 0: либо идеальная модель, либо утечка таргета.
+            # В warn-режиме — мягкое предупреждение с явным подозрением на
+            # утечку (дополнительно WARNING в лог, см. check(), issue #111);
+            # в reject-режиме — reason (паритет со старым поведением).
             return (
                 float("inf"),
-                ["Circuit D (generalization gap): RMSE_oof≈0 — division by zero"],
                 [],
+                [
+                    (
+                        "Circuit D (generalization gap): RMSE_oof≈0 — "
+                        "suspiciously perfect out-of-fold fit, possible "
+                        "target leakage (division by zero)"
+                    )
+                ],
             )
         if rmse_full <= _ZERO_RMSE_EPS:
-            # Идеальное обучение на train (дерево глубины 20, 1-NN) —
-            # классическое переобучение, gap уходит в бесконечность.
+            # Идеальное обучение на train (дерево глубины 20, 1-NN,
+            # ExtraTrees с min_samples_leaf=1, ...) — нормальное свойство
+            # целого класса моделей; gap уходит в бесконечность, но о
+            # качестве на новых данных это ничего не говорит (issue #111).
             return (
                 float("inf"),
+                [],
                 [
                     (
                         "Circuit D (generalization gap): RMSE_full≈0 (perfect "
                         "in-sample fit) — division by zero"
                     )
                 ],
-                [],
             )
         gap = rmse_oof / rmse_full
         if _fails_above(gap, self.max_generalization_gap):

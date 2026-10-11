@@ -696,11 +696,10 @@ def _train_finalists(
 
 # Значимость контуров для fallback-критерия (T4, п. 3): Г > А > Б > В.
 # Чем больше ранг, тем «тяжелее» нарушение. Ранги фиксированы в коде.
-# Примечание (issue #108): в warn-режиме контура Г конечный gap > порога
-# уходит в soft_warnings и НЕ даёт reason, поэтому в fallback-ранжировании
-# не участвует; ранг Г (3) применяется только к reject-режиму и к
-# вырожденным случаям (деление на ноль), которые остаются reason в обоих
-# режимах.
+# Примечание (issue #108/#111): в warn-режиме контура Г никакое нарушение
+# (ни конечный gap > порога, ни бесконечный gap из деления на ноль) не даёт
+# reason — всё уходит в soft_warnings и в fallback-ранжировании не участвует;
+# ранг Г (3) применяется только к reject-режиму.
 _CIRCUIT_RANK_BY_LETTER = {
     "A": 2,  # А — diversity
     "B": 1,  # Б — unique
@@ -2406,6 +2405,10 @@ def _serialize_audit_result(
     """Сериализовать ``SanityCheckResult`` в JSON-совместимый словарь (T6).
 
     NaN-статистики отключённых/невычислимых контуров заменяются на ``None``.
+    Бесконечный ``generalization_gap`` (деление на ноль, контур Г)
+    сериализуется явным флагом ``generalization_gap_infinite`` (issue #111):
+    в ``warn``-режиме бесконечный gap — мягкое предупреждение, и без флага
+    читатель не отличил бы его от «контур отключён или не вычислим».
     Применённый режим контура Г (``generalization_gap_mode``, issue #108)
     попадает в сериализацию каждого кандидата: в warn-режиме читатель видит
     рядом с Circuit D-warning, что нарушение НЕ дисквалифицировало модель, а
@@ -2431,6 +2434,7 @@ def _serialize_audit_result(
         "unique_ratio": _num(audit.unique_ratio),
         "dead_features_count": int(audit.dead_features_count),
         "generalization_gap": _num(audit.generalization_gap),
+        "generalization_gap_infinite": bool(audit.generalization_gap == float("inf")),
         "generalization_gap_mode": generalization_gap_mode,
         "severity": int(audit.severity),
     }

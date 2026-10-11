@@ -24,8 +24,9 @@
 2. Вырожденные датасеты (полка / плато tanh / переобучение): CV-лидер —
    вырожденная модель, гейт дисквалифицирует её — победитель ``target``
    ОБЯЗАН отличаться от победителя ``baseline`` (100% изменений).
-   Вырожденные случаи контура Г (RMSE_full≈0 — deep tree, 1-NN) остаются
-   reason даже в warn-режиме.
+   Вырожденные кейсы контура Г (RMSE_full≈0 — deep tree, 1-NN) прогоняются
+   в строгом ``generalization_gap_mode: reject``: в warn-режиме (issue #111)
+   бесконечный gap — soft_warning, а не дисквалификация.
 
 Архитектура прогона:
 
@@ -343,6 +344,13 @@ def _cfg_dict(
         "sanity_gate": {
             "top_k_candidates": case.top_k_candidates,
             "corridor_delta": case.corridor_delta,
+            # Вырожденные кейсы (deep tree с RMSE_full≈0) требуют строгого
+            # reject-режима контура Г: в warn-режиме (issue #111) бесконечный
+            # gap — soft_warning и не дисквалифицирует, а вырожденный CV-лидер
+            # не был бы исключён из первого sanity-select.
+            "generalization_gap_mode": (
+                "reject" if isinstance(case, DegenerateCase) else "warn"
+            ),
         },
     }
     return {
