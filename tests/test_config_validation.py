@@ -288,6 +288,75 @@ def test_read_config_integration(tmp_path):
     assert getattr(config.algorithms, "random_forest").enable is True
 
 
+# ─────────────────── Таймауты в режиме потоков (issue #101) ───────────────────
+def test_threads_mode_rejects_phase_timeout():
+    """phase_timeout + parallel_mode='threads' — ошибка конфига (issue #101)."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "parallel_mode": "threads",
+            "phase_timeout": 60,
+        }
+    }
+    with pytest.raises(ValidationError, match="not supported in parallel_mode='threads'"):
+        Config.model_validate(cfg_data)
+
+
+def test_threads_mode_rejects_task_timeout():
+    """task_timeout + parallel_mode='threads' — ошибка конфига (issue #101)."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "parallel_mode": "threads",
+            "task_timeout": 30,
+        }
+    }
+    with pytest.raises(ValidationError, match="not supported in parallel_mode='threads'"):
+        Config.model_validate(cfg_data)
+
+
+def test_threads_mode_rejects_both_timeouts():
+    """Оба таймаута + parallel_mode='threads' — ошибка конфига, оба названы."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "parallel_mode": "threads",
+            "phase_timeout": 60,
+            "task_timeout": 30,
+        }
+    }
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(cfg_data)
+    msg = str(exc_info.value)
+    assert "general.phase_timeout=60" in msg
+    assert "general.task_timeout=30" in msg
+
+
+def test_threads_mode_without_timeouts_valid():
+    """threads-режим без таймаутов валиден (дефолтный конфиг)."""
+    cfg_data = BASE | {"general": {**BASE["general"], "parallel_mode": "threads"}}
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.parallel_mode == "threads"
+    assert cfg.general.phase_timeout is None
+    assert cfg.general.task_timeout is None
+
+
+def test_processes_mode_allows_timeouts():
+    """Таймауты разрешены в режиме процессов (жёсткий таймаут)."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "parallel_mode": "processes",
+            "phase_timeout": 60,
+            "task_timeout": 30,
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.parallel_mode == "processes"
+    assert cfg.general.phase_timeout == 60
+    assert cfg.general.task_timeout == 30
+
+
 # Тесты для (Успешная валидация GeneralCfg)
 def test_general_cfg_valid_n_folds():
     """Успешное завершение валидатора _check_n_folds."""

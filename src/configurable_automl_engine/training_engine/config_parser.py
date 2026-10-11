@@ -908,10 +908,12 @@ class GeneralCfg(BaseModel):
         description=(
             "Глобальный таймаут на всю фазу HPO (в секундах). "
             "Если None — используется значение по умолчанию 3600 секунд (1 час). "
-            "В режиме parallel_mode='threads' таймаут мягкий (soft timeout): "
-            "при его истечении результат задачи отбрасывается, но уже запущенная "
-            "Python-функция не может быть остановлена и продолжает выполняться "
-            "до естественного завершения."
+            "Поддерживается только в режиме parallel_mode='processes', где он "
+            "жёсткий: зависшие воркеры принудительно завершаются. В режиме "
+            "parallel_mode='threads' таймауты запрещены и считаются ошибкой "
+            "конфига (issue #101): исполняющуюся Python-функцию нельзя прервать, "
+            "поэтому мягкий таймаут не экономит время, а лишь выбрасывает "
+            "готовые результаты завершившихся алгоритмов."
         ),
     )
     task_timeout: float | None = Field(
@@ -920,9 +922,11 @@ class GeneralCfg(BaseModel):
         description=(
             "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). "
             "Если None — используется phase_timeout или глобальный timeout. "
-            "В режиме parallel_mode='threads' таймаут мягкий (soft timeout): "
-            "при его истечении результат задачи отбрасывается (None), но функция "
-            "продолжает выполняться в фоне до своего завершения."
+            "Поддерживается только в режиме parallel_mode='processes', где он "
+            "жёсткий. В режиме parallel_mode='threads' таймауты запрещены и "
+            "считаются ошибкой конфига (issue #101): deadline от момента submit "
+            "отсчитывает и задачи, простоявшие в очереди, «истекают», ещё не "
+            "начавшись."
         ),
     )
     pruning: PruningCfg = Field(
@@ -1158,6 +1162,46 @@ class GeneralCfg(BaseModel):
                 f"got threshold={threshold!r}, encoding={hc_encoding!r}. "
                 "Provide both parameters to enable automatic high-cardinality "
                 "encoding, or omit both to disable it."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_threads_timeouts(self) -> GeneralCfg:
+        """Запретить таймауты в режиме потоков (issue #101).
+
+        В ``parallel_mode='threads'`` таймауты бессмысленны и вредны: уже
+        исполняющуюся Python-функцию прервать нельзя, поэтому мягкий таймаут
+        не экономит время — он лишь заставляет фазу ждать ``shutdown(wait=True)``
+        завершения всех алгоритмов, а затем выбрасывает их готовые результаты.
+        Помимо этого ``task_timeout`` отсчитывается от момента submit, из-за
+        чего задача, простоявшая в очереди, «истекает», ещё не начавшись.
+        Поэтому любое задание ``phase_timeout`` / ``task_timeout`` вместе с
+        ``parallel_mode='threads'`` считается ошибкой конфигурации
+        (ломающее изменение, обратная совместимость не сохраняется).
+
+        Returns:
+            GeneralCfg: Проверенный объект настроек.
+
+        Raises:
+            ValueError: Если ``parallel_mode='threads'`` и задан хотя бы один
+                из таймаутов ``phase_timeout`` / ``task_timeout``.
+        """
+        if self.parallel_mode == "threads" and (
+            self.phase_timeout is not None or self.task_timeout is not None
+        ):
+            offenders = []
+            if self.phase_timeout is not None:
+                offenders.append(f"general.phase_timeout={self.phase_timeout!r}")
+            if self.task_timeout is not None:
+                offenders.append(f"general.task_timeout={self.task_timeout!r}")
+            raise ValueError(
+                "timeouts are not supported in parallel_mode='threads' "
+                "(issue #101): an already-running Python function cannot be "
+                "interrupted, so a soft timeout does not save time and only "
+                "discards the ready results of completed algorithms. "
+                f"Offending settings: {', '.join(offenders)}. "
+                "Remove the timeouts or switch general.parallel_mode to "
+                "'processes' (where timeouts are hard and enforced)."
             )
         return self
 

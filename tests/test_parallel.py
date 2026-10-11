@@ -117,41 +117,27 @@ def test_run_parallel_validation_error():
         )
 
 
-def test_run_parallel_timeout_error_coverage():
-    """Проверка логирования таймаута при истечении глобального timeout."""
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.ThreadPoolExecutor"
-    ) as mock_executor:
-        mock_pool = MagicMock()
-        mock_executor.return_value = mock_pool
+def test_run_parallel_threads_timeout_ignored_with_warning(caplog):
+    """Прямой вызов run_parallel c mode='threads' и timeout — игнорируется с warning (issue #101).
 
-        mock_future = MagicMock()
-        mock_pool.submit.return_value = mock_future
+    Конфиг-валидация запрещает таймауты в threads-режиме, но она не защищает
+    прямые вызовы run_parallel: здесь timeout игнорируется, о чём выдаётся
+    warning, чтобы пользователь был осведомлён, и результат не выбрасывается.
+    """
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            simple_task, args_seq=[(1, 2), (3, 4)], mode="threads", timeout=0.1
+        )
+    assert sorted(results) == [3, 7]
+    assert "Timeouts are ignored in threads mode" in caplog.text
 
-        # as_completed — генератор. Чтобы корректно симулировать TimeoutError,
-        # нужно, чтобы исключение выбрасывалось ПРИ ИТЕРАЦИИ (внутри for fut in ...),
-        # а не при вызове as_completed(...).
-        # Для этого side_effect должна быть функцией-генератором:
-        #   def gen(*args, **kwargs):
-        #       raise concurrent.futures.TimeoutError()
-        #       yield  # делает функцию генератором
-        def _raise_timeout_at_iteration(*args, **kwargs):
-            raise concurrent.futures.TimeoutError()
-            yield  # pragma: no cover
 
-        with patch(
-            "configurable_automl_engine.training_engine.thread_pool.as_completed",
-            side_effect=_raise_timeout_at_iteration,
-        ):
-            with patch(
-                "configurable_automl_engine.training_engine.thread_pool.logger"
-            ) as mock_logger:
-                results = run_parallel(lambda: None, args_seq=[()], timeout=0.1)
-
-    assert results == [None]
-    # Проверяем, что logger.error был вызван с сообщением о таймауте
-    error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert any("Task 0 timed out" in msg for msg in error_messages)
+def test_run_parallel_threads_without_timeout_no_warning(caplog):
+    """Без таймаутов threads-запуск работает и не выдаёт warning."""
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(simple_task, args_seq=[(1, 2)], mode="threads")
+    assert results == [3]
+    assert "Timeouts are ignored" not in caplog.text
 
 
 def raise_invalid():
@@ -750,19 +736,24 @@ def test_run_parallel_worker_hard_kill():
     assert any("Task 0 timed out" in msg for msg in error_messages)
 
 
-def test_run_parallel_timeout_global_limit(caplog):
-    """Проверяет, что глобальный timeout работает как лимит фазы."""
+def test_run_parallel_threads_global_timeout_ignored(caplog):
+    """В threads-режиме глобальный timeout игнорируется с warning (issue #101).
 
-    with caplog.at_level(logging.ERROR):
+    Ранее задача, не успевшая за timeout, помечалась как timed out и её
+    результат выбрасывался (None), но фаза всё равно ждала shutdown(wait=True)
+    завершения всех алгоритмов — мягкий таймаут не экономил время. Теперь
+    timeout в mode='threads' игнорируется с warning, задача выполняется до
+    конца и возвращает результат.
+    """
+    with caplog.at_level(logging.WARNING):
         results = run_parallel(
             slow_task,
-            args_seq=[(1.0,)],  # Задача спит 1 секунду
+            args_seq=[(0.4,)],
             mode="threads",
-            timeout=0.1,  # глобальный лимит фазы
+            timeout=0.1,
         )
-
-    assert results == [None]
-    assert "Task 0 timed out" in caplog.text
+    assert results == ["done"]
+    assert "Timeouts are ignored in threads mode" in caplog.text
 
 
 def task_with_kwargs(df, multiplier=1, add=0):
@@ -937,21 +928,28 @@ class TestParallelErrorHandling(unittest.TestCase):
 def test_as_completed_normal_completion():
     """Проверка, что as_completed корректно собирает результаты."""
     results = run_parallel(
-        simple_task, args_seq=[(1, 2), (3, 4), (5, 6)], mode="threads", timeout=10
+        simple_task, args_seq=[(1, 2), (3, 4), (5, 6)], mode="threads"
     )
     assert sorted(results) == [3, 7, 11]
 
 
-def test_as_completed_with_task_timeout():
-    """Проверка, что task_timeout работает: задача не успевает."""
-    results = run_parallel(
-        slow_task,
-        args_seq=[(5.0,)],  # спит 5 секунд
-        mode="threads",
-        timeout=10,
-        task_timeout=0.5,  # индивидуальный таймаут на задачу
-    )
-    assert results == [None]
+def test_run_parallel_threads_task_timeout_ignored(caplog):
+    """В threads-режиме task_timeout игнорируется с warning (issue #101).
+
+    Раньше deadline отсчитывался от момента submit, из-за чего задача,
+    простоявшая в очереди (например, при max_workers=1), «истекала», ещё не
+    начавшись. Теперь task_timeout в mode='threads' игнорируется с warning,
+    задача выполняется до завершения и возвращает результат.
+    """
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            slow_task,
+            args_seq=[(0.3,)],
+            mode="threads",
+            task_timeout=0.01,
+        )
+    assert results == ["done"]
+    assert "Timeouts are ignored in threads mode" in caplog.text
 
 
 def test_watchdog_not_triggered_on_slow_but_alive_tasks():
@@ -964,7 +962,6 @@ def test_watchdog_not_triggered_on_slow_but_alive_tasks():
         slow_task,
         args_seq=[(2.0,)],  # задача на 2 секунды
         mode="threads",
-        timeout=10,  # достаточно большой глобальный таймаут
     )
     assert results == ["done"]  # задача должна завершиться нормально
 

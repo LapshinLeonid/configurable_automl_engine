@@ -2211,8 +2211,22 @@ def execute_phases(
                 args_seq=[(n, a, spec) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
-                timeout=cfg.general.phase_timeout or 3600,
-                task_timeout=cfg.general.task_timeout,
+                # Таймауты поддерживаются только в процессах (issue #101).
+                # В threads-режиме конфиг-валидация их запрещает, а run_parallel
+                # при прямом вызове игнорирует их с warning. Здесь в threads не
+                # передаётся fallback `or 3600`: иначе на дефолтном threads-конфиге
+                # (phase_timeout=None -> 3600) warning об игнорировании срабатывал
+                # бы на каждой фазе.
+                timeout=(
+                    None
+                    if cfg.general.parallel_mode == "threads"
+                    else (cfg.general.phase_timeout or 3600)
+                ),
+                task_timeout=(
+                    None
+                    if cfg.general.parallel_mode == "threads"
+                    else cfg.general.task_timeout
+                ),
             )
             _consume_worker_results(results, phase_results, ctx)
         else:

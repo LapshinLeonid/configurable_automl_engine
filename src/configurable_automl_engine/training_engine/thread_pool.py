@@ -410,7 +410,7 @@ def run_parallel(
     kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
     max_workers: int | None = None,
     mode: str = "threads",
-    timeout: float | None = 3600,
+    timeout: float | None = None,
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
     shutdown_grace_period: float = 5.0,
@@ -427,20 +427,23 @@ def run_parallel(
        завершение Executor (shutdown с cancel_futures=True). Это позволяет
        немедленно прерывать выполнение при сбоях или таймаутах.
     4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения
-       всей последовательности задач. Если лимит превышен, сбор результатов
-       прекращается, а оставшиеся в очереди задачи отменяются.
+       всей последовательности задач в режиме процессов. Если лимит превышен,
+       сбор результатов прекращается, а оставшиеся в очереди задачи отменяются.
     5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов
        выполняется попытка перезапуска всей последовательности в режиме "threads"
        с принудительной очисткой ресурсов.
     6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных
        файлов, а также корректную остановку всех рабочих процессов/потоков.
-    7. Семантика таймаута: В режиме "threads" таймаут является мягким
-       (soft timeout) — невозможно надёжно убить уже исполняющуюся
-       Python-функцию. При истечении лимита результат задачи отбрасывается
-       (None), но сама функция продолжает выполняться в фоне до своего
-       естественного завершения и может потреблять ресурсы после таймаута.
-       В режиме "processes" таймаут жёсткий: зависшие воркеры принудительно
-       завершаются через SIGTERM/SIGKILL (watchdog).
+    7. Семантика таймаута: В режиме "processes" таймаут жёсткий: зависшие
+       воркеры принудительно завершаются через SIGTERM/SIGKILL (watchdog).
+       Таймауты в режиме "threads" игнорируются (issue #101): уже
+       исполняющуюся Python-функцию невозможно надёжно прервать, поэтому
+       мягкий таймаут не экономил время, а лишь заставлял фазу ждать
+       shutdown(wait=True) завершения всех алгоритмов и затем выбрасывал их
+       готовые результаты. Если timeout / task_timeout переданы вместе с
+       mode="threads" (в т.ч. при прямом вызове API в обход конфиг-валидации),
+       выдаётся warning, а таймауты сбрасываются в None — все задачи
+       выполняются до естественного завершения.
 
     Args:
         func (Callable): Функция для запуска.
@@ -448,11 +451,11 @@ def run_parallel(
         kwargs_seq (Iterable): Последовательность словарей именованных аргументов.
         max_workers (int): Лимит количества рабочих воркеров.
         mode (str): Режим параллелизма ("threads" или "processes").
-        timeout (int | float): Глобальный лимит времени в секундах
-        на выполнение всех задач. Если не задан — задачи выполняются без глобального ограничения.
-        В режиме "threads" лимит является мягким (soft timeout): функции, не успевшие
-        завершиться, не прерываются и продолжают исполняться в фоне, но их результаты
-        отбрасываются (возвращается None).
+        timeout (int | float | None): Глобальный лимит времени в секундах
+        на выполнение всех задач. Применяется только в режиме "processes"
+        (жёсткий таймаут: зависшие воркеры завершаются принудительно).
+        None — без глобального ограничения. В режиме "threads" игнорируется
+        с warning (issue #101).
         shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
         disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
         shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение
@@ -460,9 +463,10 @@ def run_parallel(
         task_timeout (float | None): Индивидуальный таймаут на одну задачу (алгоритм) в секундах.
             Если None — используется глобальный timeout. Deadline для каждой задачи считается
             от момента её отправки в пул (submit_time), а не от общего start_time.
-            В режиме "threads" таймаут мягкий (soft timeout): при его истечении результат
-            задачи отбрасывается (None), но исполняющаяся Python-функция не может быть
-            остановлена и продолжает работать в фоне.
+            Применяется только в режиме "processes" (жёсткий таймаут). В режиме
+            "threads" игнорируется с warning (issue #101): deadline от момента
+            submit мог «истекать» у задачи, простоявшей в очереди и ещё не
+            начавшейся.
 
     Returns:
         list[Any]: Список результатов. Задачи, не успевшие выполниться
@@ -477,6 +481,26 @@ def run_parallel(
 
     if len(args_seq) != len(kwargs_seq):
         raise ValueError("args_seq and kwargs_seq must be of equal length")
+
+    # Таймауты в режиме потоков (issue #101): исполняющуюся Python-функцию
+    # невозможно прервать, поэтому мягкий таймаут не экономит время, а лишь
+    # выбрасывал готовые результаты завершившихся алгоритмов после ожидания
+    # shutdown(wait=True). Конфиг-валидация уже запрещает таймауты в threads-
+    # режиме, но она не защищает от прямых вызовов run_parallel — поэтому здесь
+    # таймауты игнорируются с предупреждением, а не молча.
+    if mode == "threads":
+        if timeout is not None or task_timeout is not None:
+            logger.warning(
+                "Timeouts are ignored in threads mode (issue #101): an "
+                "already-running Python function cannot be interrupted, so "
+                "a soft timeout does not save time and only discards the "
+                "ready results of completed algorithms. "
+                f"timeout={timeout!r}, task_timeout={task_timeout!r} are being "
+                "ignored. Remove the timeouts or switch mode to 'processes' "
+                "(where timeouts are hard and enforced)."
+            )
+        timeout = None
+        task_timeout = None
 
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
@@ -662,8 +686,10 @@ def run_parallel(
                 kwargs_seq,
                 max_workers,
                 mode="threads",
-                timeout=timeout,
-                task_timeout=task_timeout,
+                # В threads-режиме таймауты запрещены (issue #101), поэтому
+                # при откате они не передаются.
+                timeout=None,
+                task_timeout=None,
             )
         raise
     finally:
