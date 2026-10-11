@@ -803,7 +803,12 @@ def test_column_name_selector_duplicated_columns_raise():
 
 
 def test_preprocessor_hc_and_target_reorder_identical():
-    """High-cardinality + target кодирование устойчиво к переупорядочиванию."""
+    """High-cardinality + target кодирование устойчиво к переупорядочиванию.
+
+    Сравниваем два transform-вызова (полные статистики): fit_transform для
+    target encoding возвращает кросс-фиттинговые значения (issue #112) и не
+    обязан совпадать с transform на тех же строках.
+    """
     rng = np.random.default_rng(0)
     n = 60
     df = pd.DataFrame(
@@ -825,17 +830,23 @@ def test_preprocessor_hc_and_target_reorder_identical():
         high_cardinality_threshold=10,
         high_cardinality_encoding="target",
     )
-    train_out = preprocessor.fit_transform(df, y)
+    preprocessor.fit(df, y)
 
-    out = preprocessor.transform(df[["num", "high", "low"]])
-    assert np.allclose(out, train_out)
+    out = preprocessor.transform(df)
+    reordered = preprocessor.transform(df[["num", "high", "low"]])
+    assert np.allclose(reordered, out)
 
 
 @pytest.mark.parametrize(
     "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
 )
 def test_preprocessor_reorder_all_encoding_strategies(enc):
-    """Все стратегии кодирования корректны при переупорядочивании колонок."""
+    """Все стратегии кодирования корректны при переупорядочивании колонок.
+
+    Для target encoding сравниваем transform-вызовы (полные статистики):
+    fit_transform возвращает кросс-фиттинговые значения (issue #112) и не
+    обязан совпадать с transform на тех же строках.
+    """
     df = pd.DataFrame(
         {"cat": ["a", "b", "a", "c"], "num": [1.0, 2.0, 3.0, 4.0]}
     )
@@ -846,12 +857,13 @@ def test_preprocessor_reorder_all_encoding_strategies(enc):
         numerical_features=["num"],
         encoding=enc,
     )
-    train_out = preprocessor.fit_transform(df, y)
+    preprocessor.fit(df, y)
 
-    out = preprocessor.transform(df[["num", "cat"]])
+    out = preprocessor.transform(df)
+    reordered = preprocessor.transform(df[["num", "cat"]])
     # hashing-кодирование возвращает sparse (csr_matrix, issue #4):
     # np.allclose не поддерживает sparse-операнды, поэтому сравниваем плотно.
-    expected = train_out.toarray() if sparse.issparse(train_out) else train_out
+    expected = reordered.toarray() if sparse.issparse(reordered) else reordered
     actual = out.toarray() if sparse.issparse(out) else out
     assert np.allclose(actual, expected), f"encoding={enc}"
 

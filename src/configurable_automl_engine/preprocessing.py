@@ -31,7 +31,10 @@
     * **target** — :class:`TargetEncodingTransformer`: среднее целевой
       переменной по категории со сглаживанием; статистики считаются только
       по обучающей части (в ``fit``), fallback для неизвестных категорий —
-      глобальное среднее (или настраиваемое значение).
+      глобальное среднее (или настраиваемое значение). :meth:`~TargetEncodingTransformer.fit_transform`
+      выполняет кросс-фиттинг (issue #112): каждая обучающая строка
+      кодируется средними без собственного ``y``, что исключает утечку
+      «строка в свой признак» на высококардинальных колонках.
     * **frequency** — :class:`FrequencyEncodingTransformer`: относительная
       частота категории в обучающей выборке; неизвестные категории -> ``0.0``.
     * **hashing** — :class:`HashingEncodingTransformer`: детерминированное
@@ -65,9 +68,10 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 from scipy import sparse as sp
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import KFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
     FunctionTransformer,
@@ -114,6 +118,43 @@ def _as_2d(X: Any) -> np.ndarray:
     return arr
 
 
+def _validate_target(X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Подготовить (X, y) для target encoding.
+
+    Возвращает двумерный категориальный массив ``X_arr`` и числовой
+    вещественный ``y_float`` (``ndarray`` формы ``(n_samples,)``). Проверки
+    общие для :meth:`TargetEncodingTransformer.fit` и
+    :meth:`TargetEncodingTransformer.fit_transform`, чтобы оба пути обучения
+    отклоняли некорректный таргет одинаковым образом.
+
+    Args:
+        X: Матрица категориальных признаков.
+        y: Целевая переменная. Обязательна — без неё кодирование невозможно.
+
+    Returns:
+        Кортеж ``(X_arr, y_float)``.
+
+    Raises:
+        ValueError: Если ``y`` не передан, нечисловой либо содержит
+            нефинитные значения.
+    """
+    if y is None:
+        raise ValueError("TargetEncodingTransformer requires y during fit().")
+    X_arr = _as_2d(X)
+    y_arr = np.asarray(y).ravel()
+    try:
+        y_float = y_arr.astype(np.float64)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            "TargetEncodingTransformer requires a numeric target y."
+        ) from e
+    if not np.isfinite(y_float).all():
+        raise ValueError(
+            "TargetEncodingTransformer does not support non-finite values in y."
+        )
+    return X_arr, y_float
+
+
 # --------------------------------------------------------------------------- #
 #                       Кастомные энкодеры категорий                          #
 # --------------------------------------------------------------------------- #
@@ -127,11 +168,19 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
 
         encoded(cat) = (n_cat * mean_cat + m * global_mean) / (n_cat + m)
 
-    Все статистики вычисляются **только** в :meth:`fit` из переданного ``y``,
-    поэтому информация из валидационной/тестовой части не влияет на кодирование
-    (нет data leakage). Категории, отсутствовавшие в обучающей выборке,
+    Все статистики вычисляются **только** из переданного ``y``, поэтому
+    информация из валидационной/тестовой части не влияет на кодирование
+    (нет утечки train/test). Категории, отсутствовавшие в обучающей выборке,
     отображаются в fallback-значение (глобальное среднее либо настраиваемое
     через ``fallback``).
+
+    :meth:`fit_transform` дополнительно выполняет кросс-фиттинг (issue #112):
+    каждая обучающая строка кодируется средними, посчитанными по фолду без
+    неё самой, поэтому собственное значение ``y`` строки не участвует в её
+    же кодировании (нет утечки «строка в свой признак», которая завышает
+    корреляцию признака с ответом на обучении). Полные статистики по всей
+    выборке при этом фиксируются на самом энкодере, и последующий
+    :meth:`transform` (в т.ч. на новых данных) использует именно их.
 
     Args:
         smoothing: Параметр сглаживания ``m`` (``>= 0``). При ``m=0``
@@ -139,6 +188,11 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
             редкие категории приближаются к глобальному среднему.
         fallback: Значение для категорий, отсутствующих в обучающей выборке.
             ``None`` — использовать глобальное среднее целевой переменной.
+        cv: Число фолдов кросс-фиттинга в :meth:`fit_transform` (``>= 2``).
+            При числе строк меньше ``cv`` число фолдов уменьшается до числа
+            строк (leave-one-out), чтобы маленькие выборки не падали.
+        random_state: Зерно для перемешивания фолдов в :meth:`fit_transform`
+            (детерминизм кросс-фиттинга).
 
     Note:
         Ключи статистик сохраняют исходные типы категорий (как и в
@@ -154,12 +208,25 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         (шаг ``to_string``), что исключает рассинхрон типов.
     """
 
-    def __init__(self, smoothing: float = 20.0, fallback: float | None = None):
+    def __init__(
+        self,
+        smoothing: float = 20.0,
+        fallback: float | None = None,
+        cv: int = 5,
+        random_state: int | None = 0,
+    ):
         self.smoothing = smoothing
         self.fallback = fallback
+        self.cv = cv
+        self.random_state = random_state
 
     def fit(self, X: Any, y: Any = None) -> TargetEncodingTransformer:
         """Вычислить target-статистики по обучающим данным.
+
+        Статистики считаются по всей переданной выборке; полученный энкодер
+        применяется к новым данным через :meth:`transform`. Для обучения без
+        утечки «строка в свой признак» используйте :meth:`fit_transform`
+        (кросс-фиттинг).
 
         Args:
             X: Матрица категориальных признаков (строки после импутации).
@@ -174,20 +241,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         Raises:
             ValueError: Если ``y`` не передан либо содержит NaN.
         """
-        if y is None:
-            raise ValueError("TargetEncodingTransformer requires y during fit().")
-        X_arr = _as_2d(X)
-        y_arr = np.asarray(y).ravel()
-        try:
-            y_float = y_arr.astype(np.float64)
-        except (TypeError, ValueError) as e:
-            raise ValueError(
-                "TargetEncodingTransformer requires a numeric target y."
-            ) from e
-        if not np.isfinite(y_float).all():
-            raise ValueError(
-                "TargetEncodingTransformer does not support non-finite values in y."
-            )
+        X_arr, y_float = _validate_target(X, y)
 
         self.global_mean_ = float(np.mean(y_float))
         self.fallback_ = (
@@ -206,6 +260,63 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
                 {cat: float(value) for cat, value in smoothed.items()}
             )
         return self
+
+    def fit_transform(self, X: Any, y: Any = None, **fit_params: Any) -> np.ndarray:
+        """Закодировать обучающие строки кросс-фиттингом (issue #112).
+
+        Каждая строка кодируется статистиками, посчитанными по фолду, в
+        который она **не входит** (``KFold(cv, shuffle=True)``): собственное
+        значение ``y`` строки не участвует в её же кодировании, поэтому
+        закодированный признак не коррелирует с ответом на обучающей выборке
+        из-за утечки (критично для высококардинальных колонок с редкими
+        категориями). Для несмещённого :meth:`transform` на новых данных
+        полные статистики по всей выборке фиксируются на самом энкодере.
+
+        При числе строк меньше ``cv`` число фолдов уменьшается до числа строк
+        (leave-one-out); единственная строка кодируется полными статистиками
+        (кросс-фиттинг невозможен, значение совпадает в любом случае).
+
+        Args:
+            X: Матрица категориальных признаков.
+            y: Целевая переменная. Обязательна.
+            **fit_params: Не используются (принимаются для совместимости
+                с пайплайнами sklearn).
+
+        Returns:
+            Числовая матрица той же размерности, что и ``X``: закодированные
+            значения без вклада собственного ``y`` строки.
+
+        Raises:
+            ValueError: Если ``y`` не передан, нечисловой либо содержит
+                нефинитные значения, или ``cv < 2``.
+        """
+        X_arr, y_float = _validate_target(X, y)
+        if self.cv < 2:
+            raise ValueError(f"cv must be >= 2, got {self.cv}.")
+        # Полные статистики — для последующего transform() на новых данных.
+        self.fit(X_arr, y_float)
+
+        n_samples = X_arr.shape[0]
+        if n_samples < 2:
+            # Кросс-фиттинг с исключением строки невозможен: единственную
+            # строку кодируем полными статистиками. Они уже зафиксированы
+            # вызовом self.fit(X_arr, y_float) выше; защитно подтверждаем
+            # их наличие явной проверкой check_is_fitted, чтобы transform()
+            # не полагался на неявный порядок вызовов (значение в любом
+            # случае совпадает с собственным y строки при m=0 и близко к
+            # нему при m>0).
+            check_is_fitted(self, attributes=["statistics_"])
+            return self.transform(X_arr)
+
+        # Число фолдов не может превышать число строк (KFold падает при
+        # n_splits > n_samples): для маленьких выборок уменьшаем до LOO.
+        n_splits = min(self.cv, n_samples)
+        out = np.empty(X_arr.shape, dtype=np.float64)
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
+        for train_idx, val_idx in kf.split(X_arr):
+            fold = clone(self).fit(X_arr[train_idx], y_float[train_idx])
+            out[val_idx] = fold.transform(X_arr[val_idx])
+        return out
 
     def transform(self, X: Any) -> np.ndarray:
         """Заменить категории их target-значениями.
@@ -414,9 +525,9 @@ def _feature_names(input_features: Any, n_columns: int) -> list[str]:
 class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """По-колоночный категориальный энкодер с опциональным high-cardinality режимом.
 
-    На этапе :meth:`fit` по фактическим данным вычисляется кардинальность
-    каждой колонки. Колонки, чья кардинальность превышает
-    ``high_cardinality_threshold``, кодируются стратегией
+    На этапе :meth:`fit`/:meth:`fit_transform` по фактическим данным
+    вычисляется кардинальность каждой колонки. Колонки, чья кардинальность
+    превышает ``high_cardinality_threshold``, кодируются стратегией
     ``high_cardinality_encoding``; остальные — стратегией ``encoding``.
     Если порог не задан (``None``), все колонки кодируются стратегией
     ``encoding`` (поведение по умолчанию).
@@ -424,6 +535,12 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
     Выходы энкодеров конкатенируются горизонтально в порядке «default-колонки,
     затем high-cardinality колонки». Разделение зависит только от обучающих
     данных, поэтому решение о стратегии не «подглядывает» в валидацию.
+
+    :meth:`fit_transform` делегирует внутренним энкодерам их собственный
+    ``fit_transform`` (issue #112): для target encoding это включает
+    кросс-фиттинг, поэтому обучающие строки кодируются без собственного
+    ``y``, а полные статистики фиксируются на внутреннем энкодере для
+    последующего :meth:`transform`.
 
     Args:
         encoding: Стратегия кодирования для обычных колонок.
@@ -489,21 +606,19 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             f"expected one of {_VALID_ENCODING_STRATEGIES}."
         )
 
-    def fit(self, X: Any, y: Any = None) -> SplitCategoricalEncoder:
-        """Разделить колонки по кардинальности и обучить энкодеры.
+    def _prepare(self, X: Any) -> np.ndarray:
+        """Провалидировать параметры, разделить колонки и создать энкодеры.
 
-        Внутренние энкодеры (``default_encoder_``/``hc_encoder_``) создаются
-        только здесь, в :meth:`fit`: атрибуты с завершающим подчёркиванием
-        хранят обученное состояние, поэтому конструктор лишь сохраняет
-        параметры, а ``clone()``/``set_params()``/``get_params()`` работают
-        через базовую реализацию ``BaseEstimator`` без переопределений.
+        Общая часть :meth:`fit` и :meth:`fit_transform`: валидация стратегий,
+        вычисление кардинальностей, разделение колонок на default/HC и
+        создание внутренних энкодеров (без обучения — их обучает вызывающий
+        метод через ``fit``/``fit_transform``).
 
         Args:
-            X: Матрица категориальных признаков (строки после импутации).
-            y: Целевая переменная (требуется только для target encoding).
+            X: Матрица категориальных признаков.
 
         Returns:
-            Обученный энкодер.
+            Двумерный числовой массив ``X`` (после ``_as_2d``).
 
         Raises:
             ValueError: Если задана неизвестная стратегия кодирования либо
@@ -551,23 +666,17 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         self.default_columns_ = default_columns
         self.hc_columns_ = hc_columns
 
-        # Внутренние энкодеры создаются и обучаются здесь, в fit(): атрибуты с
-        # завершающим подчёркиванием появляются только после обучения.
+        # Внутренние энкодеры создаются здесь, в fit()/fit_transform(),
+        # безусловно — в том числе при пустом наборе колонок (n_columns=0):
+        # атрибуты default_encoder_/hc_encoder_ гарантированно существуют
+        # после обучения. Обучаются/применяются они только для непустых
+        # default_columns_/hc_columns_ (см. fit/fit_transform).
         self.default_encoder_ = self._make_encoder(self.encoding)
         self.hc_encoder_: BaseEstimator | None = (
             self._make_encoder(self.high_cardinality_encoding)
             if self.high_cardinality_encoding is not None
             else None
         )
-
-        if default_columns:
-            self.default_encoder_.fit(X_arr[:, default_columns], y)
-
-        if hc_columns:
-            # Инвариант гарантирован валидацией выше: при заданном пороге
-            # HC-стратегия обязана быть указана, значит hc_encoder_ создан.
-            assert self.hc_encoder_ is not None
-            self.hc_encoder_.fit(X_arr[:, hc_columns], y)
 
         logger.debug(
             "SplitCategoricalEncoder: %d default columns, %d high-cardinality "
@@ -577,14 +686,116 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             threshold,
             cardinalities,
         )
+        return X_arr
+
+    @staticmethod
+    def _concat_parts(
+        parts: list[np.ndarray | sp.spmatrix], n_rows: int
+    ) -> np.ndarray | sp.spmatrix:
+        """Склеить выходы default- и HC-энкодеров в одну матрицу.
+
+        Если хотя бы одна часть разреженная (hashing-кодирование), части
+        склеиваются через ``sp.hstack`` (CSR); иначе — через ``np.hstack``.
+
+        Args:
+            parts: Выходы внутренних энкодеров в порядке конкатенации.
+            n_rows: Число строк входной матрицы (для пустого результата).
+
+        Returns:
+            Числовая матрица (плотная или разреженная).
+        """
+        if not parts:
+            return np.empty((n_rows, 0), dtype=np.float64)
+        if any(sp.issparse(part) for part in parts):
+            # scipy-stubs не описывают гетерогенные последовательности
+            # (ndarray | spmatrix) для hstack: приводим блоки к общему типу.
+            sparse_blocks = cast(list[sp.spmatrix], parts)
+            return sp.hstack(sparse_blocks).tocsr()
+        # Все части плотные (sparse-ветка выше) — обычный np.hstack.
+        dense_blocks = cast(list[np.ndarray], parts)
+        return np.hstack(dense_blocks)
+
+    def fit(self, X: Any, y: Any = None) -> SplitCategoricalEncoder:
+        """Разделить колонки по кардинальности и обучить энкодеры.
+
+        Внутренние энкодеры (``default_encoder_``/``hc_encoder_``) создаются
+        только в :meth:`fit`/:meth:`fit_transform`: атрибуты с завершающим
+        подчёркиванием хранят обученное состояние, поэтому конструктор лишь
+        сохраняет параметры, а ``clone()``/``set_params()``/``get_params()``
+        работают через базовую реализацию ``BaseEstimator`` без
+        переопределений.
+
+        Args:
+            X: Матрица категориальных признаков (строки после импутации).
+            y: Целевая переменная (требуется только для target encoding).
+
+        Returns:
+            Обученный энкодер.
+
+        Raises:
+            ValueError: Если задана неизвестная стратегия кодирования либо
+                high-cardinality режим настроен некорректно.
+        """
+        X_arr = self._prepare(X)
+        if self.default_columns_:
+            self.default_encoder_.fit(X_arr[:, self.default_columns_], y)
+
+        if self.hc_columns_:
+            # Инвариант гарантирован валидацией выше: при заданном пороге
+            # HC-стратегия обязана быть указана, значит hc_encoder_ создан.
+            assert self.hc_encoder_ is not None
+            self.hc_encoder_.fit(X_arr[:, self.hc_columns_], y)
         return self
+
+    def fit_transform(
+        self, X: Any, y: Any = None, **fit_params: Any
+    ) -> np.ndarray | sp.spmatrix:
+        """Закодировать колонки через ``fit_transform`` внутренних энкодеров.
+
+        Делегирует :meth:`TargetEncodingTransformer.fit_transform` (кросс-
+        фиттинг, issue #112) для target encoding, остальным стратегиям —
+        стандартный ``fit_transform`` (эквивалентен ``fit`` + ``transform``).
+        Внутренние энкодеры остаются обученными на полных данных, поэтому
+        последующий :meth:`transform` (новые данные) работает обычным образом.
+
+        Args:
+            X: Матрица категориальных признаков.
+            y: Целевая переменная (требуется для target encoding).
+            **fit_params: Не используются (принимаются для совместимости
+                с пайплайнами sklearn).
+
+        Returns:
+            Числовая матрица (плотная или разреженная), объединяющая
+            выходы default- и high-cardinality энкодеров.
+
+        Raises:
+            ValueError: Если задана неизвестная стратегия кодирования либо
+                high-cardinality режим настроен некорректно.
+        """
+        X_arr = self._prepare(X)
+        # Пустой набор колонок (n_columns=0): энкодеры уже созданы в _prepare
+        # (инвариант выше), но обучать/применять нечего — возвращаем пустую
+        # матрицу (n_rows, 0), не обращаясь к энкодерам.
+        if not self.default_columns_ and not self.hc_columns_:
+            return np.empty((X_arr.shape[0], 0), dtype=np.float64)
+        parts: list[np.ndarray | sp.spmatrix] = []
+        if self.default_columns_:
+            parts.append(
+                self.default_encoder_.fit_transform(X_arr[:, self.default_columns_], y)
+            )
+        if self.hc_columns_:
+            # Инвариант гарантирован валидацией в _prepare: при заданном
+            # пороге HC-стратегия обязана быть указана, значит hc_encoder_ создан.
+            assert self.hc_encoder_ is not None
+            parts.append(self.hc_encoder_.fit_transform(X_arr[:, self.hc_columns_], y))
+        return self._concat_parts(parts, X_arr.shape[0])
 
     def transform(self, X: Any) -> np.ndarray | sp.spmatrix:
         """Закодировать колонки выбранными стратегиями и склеить результат.
 
-        Если хотя бы один из энкодеров вернул разреженную матрицу
-        (hashing-кодирование), части склеиваются через ``sp.hstack``
-        (CSR); иначе — через ``np.hstack`` (плотный случай).
+        Использует статистики, зафиксированные на внутренних энкодерах при
+        ``fit``/``fit_transform`` (для target encoding — полные статистики по
+        обучающей выборке, без кросс-фиттинга).
 
         Args:
             X: Матрица категориальных признаков.
@@ -602,16 +813,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             )
         if self.hc_columns_ and self.hc_encoder_ is not None:
             parts.append(self.hc_encoder_.transform(X_arr[:, self.hc_columns_]))
-        if not parts:
-            return np.empty((X_arr.shape[0], 0), dtype=np.float64)
-        if any(sp.issparse(part) for part in parts):
-            # scipy-stubs не описывают гетерогенные последовательности
-            # (ndarray | spmatrix) для hstack: приводим блоки к общему типу.
-            sparse_blocks = cast(list[sp.spmatrix], parts)
-            return sp.hstack(sparse_blocks).tocsr()
-        # Все части плотные (sparse-ветка выше) — обычный np.hstack.
-        dense_blocks = cast(list[np.ndarray], parts)
-        return np.hstack(dense_blocks)
+        return self._concat_parts(parts, X_arr.shape[0])
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
         """Вернуть имена выходных признаков в порядке конкатенации."""
@@ -926,9 +1128,13 @@ def build_preprocessor(
     и в финальном обучении, и при предсказании.
 
     Статистики target/frequency-кодирования вычисляются только по обучающей
-    части (в ``fit``), что исключает утечку данных (data leakage), включая
-    кросс-валидацию: на каждом фолде препроцессор переобучается на обучающей
-    части фолда.
+    части, что исключает утечку данных (data leakage) между train и
+    валидацией: на каждом фолде CV препроцессор переобучается на обучающей
+    части фолда. Дополнительно target encoding в :meth:`TargetEncodingTransformer.fit_transform`
+    выполняет кросс-фиттинг (issue #112): каждая обучающая строка кодируется
+    средними по фолду без неё самой, поэтому собственное ``y`` строки не
+    попадает в её же закодированный признак (устраняет завышенную корреляцию
+    признака с ответом на обучении для высококардинальных колонок).
 
     Стратегия предобработки числовых признаков задаётся параметрами
     ``imputation_strategy`` и ``scaling`` и обычно берётся из адаптивного
