@@ -80,6 +80,7 @@ __all__ = [
     "FeatureSelectionCfg",
     "FeatureSelectionMethod",
     "FeatureSelectionMode",
+    "GeneralizationGapMode",
     "HPOPhaseAction",
     "HPOPhaseCfg",
     "SanityGateCfg",
@@ -107,6 +108,18 @@ SanityGateMode = Literal["off", "active"]
 #: auto (выбор по типу метрики). Определяется здесь, чтобы ``SanityGateCfg``
 #: и ``select_finalists`` использовали один тип без циклического импорта.
 CorridorMode = Literal["multiplicative", "additive", "auto"]
+
+#: Режим контура Г ``_check_generalization_gap`` (issue #108):
+#: ``"warn"`` (дефолт) — конечный ``gap > max_generalization_gap`` уходит в
+#: ``soft_warnings`` (мягкое предупреждение, не дисквалифицирует);
+#: ``"reject"`` — строгая дисквалификация (старое поведение дефолта).
+#: Вырожденные случаи деления на ноль (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``)
+#: и ``y_pred_full = None`` остаются reason в обоих режимах. Имя поля
+#: НЕ ``mode``: это имя зарезервировано за удалённым в эпике #74 полем
+#: ``sanity_gate.mode`` (валидатор ``_reject_removed_mode`` отвергает его с
+#: ошибкой миграции). Тип объявлен здесь и в ``sanity_gate.py`` (standalone)
+#: без импорта, чтобы не связывать модули.
+GeneralizationGapMode = Literal["warn", "reject"]
 
 #: Действия фазы пайплайна (эпик #74): поиск по всем алгоритмам, дообучение
 #: всего входного множества (warm-start) и явный шаг отбора. Устаревшее
@@ -503,6 +516,12 @@ class SanityGateCfg(BaseModel):
             «много мёртвых признаков И низкий diversity».
         zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).
         max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).
+        generalization_gap_mode (GeneralizationGapMode): Режим контура Г
+            (issue #108): 'warn' (дефолт) — конечный gap > порога уходит в
+            soft_warnings (мягкое предупреждение); 'reject' — провал →
+            reasons → дисквалификация (старое строгое поведение).
+            Вырожденные случаи деления на ноль остаются reason в обоих
+            режимах.
         check_permutation_sensitivity (bool): Включить пермутационный аудит
             чувствительности признаков (контур В, нелинейные модели).
         permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).
@@ -652,6 +671,18 @@ class SanityGateCfg(BaseModel):
         default=1.5,
         ge=1.0,
         description="Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
+    )
+    generalization_gap_mode: GeneralizationGapMode = Field(
+        default="warn",
+        description=(
+            "Режим контура Г (generalization gap): 'warn' (дефолт) — конечный "
+            "gap > max_generalization_gap записывается в soft_warnings "
+            "(не дисквалифицирует); 'reject' — провал → reasons → "
+            "дисквалификация (старое строгое поведение). Вырожденные случаи "
+            "деления на ноль (RMSE_full≈0 / RMSE_oof≈0) остаются reason в "
+            "обоих режимах. Поле намеренно НЕ называется mode (коллизия с "
+            "удалённым в эпике #74 полем sanity_gate.mode)."
+        ),
     )
     check_permutation_sensitivity: bool = Field(
         default=True,

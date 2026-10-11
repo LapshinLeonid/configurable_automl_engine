@@ -879,6 +879,7 @@ def test_sanity_gate_config_full_v2_block_parses():
                 "max_dead_feature_ratio": 0.5,
                 "dead_features_require_low_diversity": True,
                 "max_generalization_gap": 2.0,
+                "generalization_gap_mode": "warn",
                 "min_unique_ratio": 0.1,
                 "min_unique_count": 10,
                 "enforce_family_diversity": True,
@@ -910,6 +911,7 @@ def test_sanity_gate_config_full_v2_block_parses():
     assert sg.min_prediction_diversity == 0.25
     assert sg.max_dead_feature_ratio == 0.5
     assert sg.max_generalization_gap == 2.0
+    assert sg.generalization_gap_mode == "warn"
     assert sg.min_unique_ratio == 0.1
     assert sg.min_unique_count == 10
     assert sg.enforce_family_diversity is True
@@ -1063,6 +1065,7 @@ general:
   sanity_gate:
     top_k_candidates: 2
     max_generalization_gap: 1.0
+    generalization_gap_mode: reject
 algorithms:
   ridge:
     enable: true

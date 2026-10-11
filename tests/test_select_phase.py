@@ -570,6 +570,7 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
             "top_k_candidates": 2,
             "corridor_delta": 0.9,
             "max_generalization_gap": 1.0,
+            "generalization_gap_mode": "reject",
         },
     )
     cfg = Config.model_validate(cfg_dict)
@@ -594,6 +595,58 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
     assert all("Circuit D" in r for rs in sg["disqualified"].values() for r in rs)
     # Победитель (fallback) — из пула финалистов.
     assert res["algorithm"] in sg["pool"]
+
+
+def test_select_sanity_gate_warn_mode_keeps_gap_winner(tmp_path):
+    """Warn-режим контура Г (дефолт, issue #108): переобучение не дисквалифицирует.
+
+    Кандидат с конечным gap > 1.5 остаётся валидным (soft_warning Circuit D),
+    выигрывает по RMSE_oof, не попадает в ``disqualified`` и в circuit breaker
+    (``disqualified_algorithms``) — иначе следующий refine/select его потеряет
+    (та же ловушка, что в #102). В gate-секции видны warning и применённый
+    режим.
+    """
+    cfg_dict = _cfg_dict(
+        [_select_phase(name="gate", strategy="sanity_gate")],
+        sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9},
+    )
+    cfg = Config.model_validate(cfg_dict)
+    cfg.general.path_to_model = tmp_path / "m.pkl"
+    df = _df(n_rows=40)
+
+    def _overfit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
+        # gap = 2.0 > 1.5 у обоих (мягкое предупреждение), но RMSE_oof у
+        # extra_trees лучше — он обязан выиграть по RMSE_oof, а не Ridge.
+        if a[0] == "ridge":
+            return _FakeTrainer(df["target"].to_numpy(), 0.5, 0.25)  # gap = 2.0
+        return _FakeTrainer(df["target"].to_numpy(), 0.2, 0.1)  # gap = 2.0, RMSE_oof лучше
+
+    with (
+        _patch_hpo(),
+        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+    ):
+        res = train_best_model(cfg, df, target="target")
+
+    sg = res["sanity_gate"]["gate"]
+    assert sg["fallback_used"] is False
+    assert sg["disqualified"] == {}
+    assert "disqualified_algorithms" not in res  # circuit breaker пуст
+    assert sg["generalization_gap_mode"] == "warn"
+    assert all(
+        audit["generalization_gap_mode"] == "warn"
+        for audit in sg["audit"].values()
+    )
+    # Лучший по RMSE_oof кандидат выиграл; оба — валидны с Circuit D-warning.
+    assert res["algorithm"] == "extra_trees"
+    assert sg["winner_rmse_oof"] == pytest.approx(0.2, rel=1e-6)
+    for audit in sg["audit"].values():
+        assert audit["is_valid"] is True
+        assert audit["generalization_gap"] == pytest.approx(2.0, rel=1e-4)
+        assert any(
+            "Circuit D" in w and "max_generalization_gap=1.500" in w
+            for w in audit["soft_warnings"]
+        )
+        assert audit["severity"] == 1
 
 
 def test_select_sanity_gate_all_finalists_fail_to_train():
@@ -737,8 +790,14 @@ def test_report_audit_section_serialized():
             "unique_ratio",
             "dead_features_count",
             "generalization_gap",
+            "generalization_gap_mode",
             "severity",
         }
+    # Применённый режим контура Г (issue #108) присутствует в отчёте.
+    assert section["generalization_gap_mode"] == "warn"
+    assert all(
+        audit["generalization_gap_mode"] == "warn" for audit in section["audit"].values()
+    )
     # Дисквалификации гейта синхронизированы с circuit breaker.
     assert set(section["disqualified"]) <= set(ctx.disqualified_algorithms)
 
@@ -831,9 +890,10 @@ def test_serialize_audit_result_converts_nan_to_none():
         generalization_gap=float("nan"),
         severity=2,
     )
-    serialized = _serialize_audit_result(audit)
+    serialized = _serialize_audit_result(audit, "reject")
     assert serialized["diversity_ratio"] is None
     assert serialized["generalization_gap"] is None
+    assert serialized["generalization_gap_mode"] == "reject"
     assert serialized["unique_ratio"] == 0.5
     assert serialized["dead_features_count"] == 2
 
@@ -843,12 +903,14 @@ def test_build_sanity_gate_passes_thresholds():
     sg_cfg = SanityGateCfg(
         min_prediction_diversity=0.25,
         max_generalization_gap=2.0,
+        generalization_gap_mode="reject",
         check_dead_features=False,
         audit_time_budget_seconds=12.5,
     )
     gate = _build_sanity_gate(sg_cfg)
     assert gate.min_prediction_diversity == 0.25
     assert gate.max_generalization_gap == 2.0
+    assert gate.generalization_gap_mode == "reject"
     assert gate.check_dead_features is False
     # warn_only гейта не используется: sanity-select дисквалифицирует.
     assert gate.warn_only is False

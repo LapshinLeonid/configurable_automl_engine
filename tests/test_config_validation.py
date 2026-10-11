@@ -1419,6 +1419,7 @@ def test_sanity_gate_v2_defaults():
     assert sg.max_dead_feature_ratio == 0.4
     assert sg.dead_features_require_low_diversity is True
     assert sg.max_generalization_gap == 1.5
+    assert sg.generalization_gap_mode == "warn"
     assert sg.check_permutation_sensitivity is True
     assert sg.permutation_max_rows == 5000
     assert sg.permutation_max_features == 100
@@ -1449,6 +1450,7 @@ def test_sanity_gate_v2_full_block_parses():
         "dead_features_require_low_diversity": False,
         "zero_coef_tolerance": 1e-10,
         "max_generalization_gap": 2.0,
+        "generalization_gap_mode": "reject",
         "check_permutation_sensitivity": False,
         "permutation_max_rows": 2000,
         "permutation_max_features": 50,
@@ -1478,6 +1480,7 @@ def test_sanity_gate_v2_full_block_parses():
     assert sg.dead_features_require_low_diversity is False
     assert sg.zero_coef_tolerance == 1e-10
     assert sg.max_generalization_gap == 2.0
+    assert sg.generalization_gap_mode == "reject"
     assert sg.check_permutation_sensitivity is False
     assert sg.permutation_max_rows == 2000
     assert sg.permutation_max_features == 50
@@ -1520,6 +1523,22 @@ def test_sanity_gate_v2_corridor_mode_invalid_rejected():
     """Неизвестная форма коридора отклоняется на этапе валидации."""
     with pytest.raises(ValidationError, match="corridor_mode"):
         Config.model_validate(_sg_cfg({"corridor_mode": "geometric"}))
+
+
+@pytest.mark.parametrize("gap_mode", ["warn", "reject"])
+def test_sanity_gate_v2_generalization_gap_mode_valid(gap_mode):
+    """Both generalization_gap_mode values are accepted by the schema."""
+    cfg = Config.model_validate(_sg_cfg({"generalization_gap_mode": gap_mode}))
+    assert cfg.general.sanity_gate.generalization_gap_mode == gap_mode
+
+
+@pytest.mark.parametrize(
+    "bad_value", ["invalid", "", "warn_only", "active", "off", 1, None]
+)
+def test_sanity_gate_v2_generalization_gap_mode_invalid_rejected(bad_value):
+    """Неизвестное значение generalization_gap_mode отклоняется."""
+    with pytest.raises(ValidationError, match="generalization_gap_mode"):
+        Config.model_validate(_sg_cfg({"generalization_gap_mode": bad_value}))
 
 
 @pytest.mark.parametrize(
@@ -1627,6 +1646,7 @@ def test_sanity_gate_v2_empty_block_is_valid_thresholds_only():
     assert sg.corridor_delta == 0.15
     assert sg.min_prediction_diversity == 0.15
     assert sg.max_generalization_gap == 1.5
+    assert sg.generalization_gap_mode == "warn"
 
 
 # ─────────────── Pipeline phases: refine / select (эпик #74) ───────────────

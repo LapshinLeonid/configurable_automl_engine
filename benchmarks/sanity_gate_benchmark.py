@@ -17,10 +17,15 @@
 1. Эталонные датасеты (нормальные данные с честным победителем: зашумлённые
    R²≈0.3, широкие с сотнями признаков, малые N): победитель ``target``
    совпадает с победителем ``baseline``, гейт НЕ срабатывает (0
-   дисквалификаций ни в одном select-шаге).
+   дисквалификаций ни в одном select-шаге). Конечный gap > 1.5 (например,
+   переобученный lasso на широких данных) в warn-режиме контура Г (issue
+   #108) — это soft_warning, а не дисквалификация: гейт считается
+   несработавшим, победитель выбирается по честному ``RMSE_oof``.
 2. Вырожденные датасеты (полка / плато tanh / переобучение): CV-лидер —
    вырожденная модель, гейт дисквалифицирует её — победитель ``target``
    ОБЯЗАН отличаться от победителя ``baseline`` (100% изменений).
+   Вырожденные случаи контура Г (RMSE_full≈0 — deep tree, 1-NN) остаются
+   reason даже в warn-режиме.
 
 Архитектура прогона:
 
@@ -106,7 +111,8 @@ class VariantResult:
         audit_valid (dict[str, bool]): is_valid каждого кандидата пула
             (аудит первого sanity-select).
         gate_triggered (bool): True — хотя бы в одном sanity-select целевого
-            DAG есть дисквалификации.
+            DAG есть ДИСКВАЛИФИКАЦИИ. Soft_warnings (в т.ч. конечный gap >
+            порога в warn-режиме контура Г, issue #108) гейт НЕ «включают».
         changed (bool): True — победители вариантов различаются.
         elapsed (float): Время прогона в секундах.
     """
@@ -187,11 +193,11 @@ class DegenerateCase:
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Эталонные датасеты (сквозной прогон): гейт не должен ни срабатывать, ни
-# менять победителя. lasso на широком датасете получает суженное пространство
-# alpha [0.05, 1.0]: с дефолтным пространством Optuna выбирает альфы, при
-# которых lasso переобучается (gap > 1.5) — известное ложное срабатывание
-# контура Г из-за плохой регуляризации, а не из-за вырожденности (см. edge
-# case в issue #70: «порог diversity слишком строгий / дефолты»).
+# менять победителя. Workaround сужения alpha для lasso НЕ нужен (issue #108):
+# с дефолтным пространством alpha на широких данных lasso может
+# переобучаться (конечный gap > 1.5) — в warn-режиме контура Г это лишь
+# soft_warning, а не дисквалификация, поэтому побеждает реально лучший по
+# RMSE_oof, а не «прошедший гейт».
 _REFERENCE_ALGORITHMS: dict[str, dict[str, Any]] = {
     "ridge": {"enable": True, "limit_hyperparameters": True},
     "lasso": {"enable": True, "limit_hyperparameters": True},
@@ -207,15 +213,7 @@ REFERENCE_CASES: list[ReferenceCase] = [
     ReferenceCase(
         name="reference_wide_p200",
         generator=make_reference_wide,
-        algorithms={
-            "ridge": {"enable": True, "limit_hyperparameters": True},
-            "lasso": {
-                "enable": True,
-                "limit_hyperparameters": True,
-                "hyperparameters": {"alpha": [0.05, 1.0, "float_log"]},
-            },
-            "elasticnet": {"enable": True, "limit_hyperparameters": True},
-        },
+        algorithms=dict(_REFERENCE_ALGORITHMS),
     ),
     ReferenceCase(
         name="reference_small_n80",

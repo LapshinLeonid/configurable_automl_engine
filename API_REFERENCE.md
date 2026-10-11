@@ -213,10 +213,15 @@ Select phases with `strategy: "sanity_gate"` (epic #74, task R2) replace the
 3. **Audit** — each finalist is checked by `ModelSanityGate` (T2): circuits A/B
    (diversity / unique) are computed on the **OOF vector**, circuit D
    (generalization gap) uses the full-fit predictions, circuit C (dead
-   features) inspects the model. The total audit phase can be capped by
-   `general.sanity_gate.audit_time_budget_seconds` (0 = no limit): when the
-   budget is exhausted, the remaining candidates are skipped with an explicit
-   reason.
+   features) inspects the model. Circuit D finite-gap violations are routed by
+   `general.sanity_gate.generalization_gap_mode` (issue #108): the default
+   `"warn"` records them in `soft_warnings` (no disqualification — the
+   candidate keeps its chance to win by `RMSE_oof`), `"reject"` turns them
+   into disqualification reasons. Division-by-zero cases and a missing
+   `y_pred_full` are reasons in both modes. The total audit phase can be
+   capped by `general.sanity_gate.audit_time_budget_seconds` (0 = no limit):
+   when the budget is exhausted, the remaining candidates are skipped with an
+   explicit reason.
 4. **Ranking** — among the candidates that passed every check the winner is
    the one with the **best (minimum) `RMSE_oof`**. CV score and `RMSE_full`
    do NOT participate in the ranking (the v2 composite score
@@ -268,9 +273,10 @@ no sanity-gate select steps the key is absent entirely:
 | Key of `result["sanity_gate"][<phase name>]` | Type | Description |
 |-----|------|-------------|
 | `strategy` | `str` | Always `"sanity_gate"`. |
+| `generalization_gap_mode` | `str` | Applied circuit D mode (issue #108): `"warn"` (default) or `"reject"`. In `"warn"` a finite gap above the threshold appears as a `soft_warnings` entry and does NOT disqualify; in `"reject"` it is a `reasons` entry. |
 | `pool` | `list[str]` | Ordered finalist names (T3 pool, best first). |
-| `audit` | `dict[str, dict]` | Per-candidate audit results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (disabled/not-computable statistics are `null`), `severity`. |
-| `disqualified` | `dict[str, list[str]]` | Applied disqualifications `{algo: [reasons]}`; the same entries are also fed into the top-level `disqualified_algorithms` (circuit breaker). |
+| `audit` | `dict[str, dict]` | Per-candidate audit results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (disabled/not-computable statistics are `null`), `generalization_gap_mode`, `severity`. |
+| `disqualified` | `dict[str, list[str]]` | Applied disqualifications `{algo: [reasons]}`; the same entries are also fed into the top-level `disqualified_algorithms` (circuit breaker). Warn-mode circuit D violations never appear here. |
 | `fallback_used` | `bool` | `true` when the whole pool was disqualified and the winner was chosen by the formal fallback criterion. |
 | `winner_rmse_oof` | `float \| null` | `RMSE_oof` of the winner (`null` when not computable). |
 | `overhead_seconds` | `float` | Wall-clock overhead of the select step: finalist training on 100% of the data + the audit phase. |
@@ -289,7 +295,11 @@ pool cap, audit limits and circuit thresholds. The global switch `mode`
 and gate diagnostics are available in the gate section of each select-step
 report. An absent block (or an empty `{}`) is valid — the section is optional,
 not a behavioral flag; a config with `sanity_gate.mode` is rejected with a
-migration hint.
+migration hint. The only routing flag the section keeps is
+`generalization_gap_mode` (issue #108) — it tunes one circuit (D), not the
+whole gate: with the default `"warn"` a finite `gap > max_generalization_gap`
+is a soft warning, and an explicit `generalization_gap_mode: reject` restores
+the legacy strict disqualification.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -308,6 +318,7 @@ migration hint.
 | `dead_features_require_low_diversity` | `bool` | `true` | Combination rule of circuit C: disqualify only when "many dead features AND low diversity". |
 | `zero_coef_tolerance` | `float` | `1e-12` | Coefficients with `abs(coef) <=` threshold count as zero (circuit C, linear path; ≥ 0). |
 | `max_generalization_gap` | `float` | `1.5` | Circuit D threshold (≥ 1): `RMSE_oof / RMSE_full >` threshold means overfitting. |
+| `generalization_gap_mode` | `string` | `"warn"` | Circuit D routing of a **finite** gap above the threshold (issue #108): `"warn"` — the violation is recorded in `soft_warnings` (no disqualification, `is_valid` stays `true`, `severity` ≤ 1); `"reject"` — legacy strict behavior: a reason and disqualification. Division-by-zero cases (`RMSE_full ≈ 0`, `RMSE_oof ≈ 0`) and a missing `y_pred_full` remain reasons in **both** modes. The field is deliberately NOT named `mode` (collision with the removed `sanity_gate.mode`, which the validator rejects with a migration hint). |
 | `check_permutation_sensitivity` | `bool` | `true` | Enable the permutation sensitivity audit of circuit C for nonlinear models (cost control of the permutation audit). `false` — the permutation path is skipped, the linear `coef_` path remains. |
 | `permutation_max_rows` | `int` | `5000` | Row subsampling for the permutation path (≥ 1). |
 | `permutation_max_features` | `int` | `100` | Cap of checked columns in the permutation path (≥ 1). |
@@ -327,6 +338,8 @@ Validation rules (rejected at config load with a clear message):
   "use an explicit select step" (`{action: 'select', strategy: 'sanity_gate',
   output: 'winner'}` as the last phase).
 * Unknown `corridor_mode`.
+* Unknown `generalization_gap_mode` (only `"warn"` and `"reject"` are
+  accepted; issue #108).
 * Out-of-range thresholds: `top_k_candidates < 1`; `corridor_delta` outside
   `(0, 1)`; `min_prediction_diversity` outside `(0, 1]`;
   `max_dead_feature_ratio` outside `[0, 1]`; `min_unique_ratio` outside
@@ -340,6 +353,11 @@ Edge cases:
   what is available).
 * `corridor_mode: "auto"` with an unknown metric — conservative additive form
   plus a warning.
+* Absent `generalization_gap_mode` — the default `"warn"` applies; an explicit
+  `generalization_gap_mode: reject` fully reproduces the legacy strict
+  behavior of circuit D (migration path, issue #108).
+* A finite `gap` strictly **equal** to `max_generalization_gap` — not a
+  violation in either mode (`_fails_above`, equality always passes).
 * Absent `sanity_gate` block or an empty `{}` — valid: the section is an
   optional threshold source, not a behavioral flag.
 * A `sanity_gate` section without any select phase with

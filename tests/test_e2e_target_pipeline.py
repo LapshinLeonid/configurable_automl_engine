@@ -427,6 +427,7 @@ def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
             "top_k_candidates": 2,
             "corridor_delta": 0.9,
             "max_generalization_gap": 1.0,
+            "generalization_gap_mode": "reject",
         },
     )
     cfg = component.Config.model_validate(cfg_dict)

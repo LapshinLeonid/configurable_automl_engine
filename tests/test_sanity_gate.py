@@ -12,7 +12,9 @@
        контролем стоимости и детерминизмом; исключения predict → reason.
     4. Контур Г (Generalization Gap): переобученные модели (дерево глубины 20,
        1-NN) проваливаются; RMSE_oof≈0 / RMSE_full≈0 — деление на ноль;
-       граница gap == max проходит; пример из issue (0.1 vs 0.19).
+       граница gap == max проходит; пример из issue (0.1 vs 0.19); режимы
+       generalization_gap_mode 'warn' (soft_warning, не дисквалифицирует) и
+       'reject' (строгое поведение старого дефолта, паритет).
     5. Режимы и edge cases: warn_only; отключение контуров; NaN-маскирование;
        severity; валидация параметров; различающиеся reasons/soft_warnings.
 """
@@ -638,9 +640,14 @@ def test_dead_features_pipeline_unwrapped_to_linear_estimator():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _gap_only_gate(max_gap: float) -> ModelSanityGate:
+def _gap_only_gate(max_gap: float, mode: str = "reject") -> ModelSanityGate:
+    # Режим по умолчанию здесь — "reject": существующие тесты контура Г
+    # (строки 636-732) фиксируют СТРОГОЕ поведение старого дефолта
+    # (паритет, issue #108). Новые тесты warn-режима передают mode="warn"
+    # явно.
     return ModelSanityGate(
         max_generalization_gap=max_gap,
+        generalization_gap_mode=mode,
         check_diversity=False,
         check_unique=False,
         check_dead_features=False,
@@ -730,6 +737,183 @@ def test_gap_rmse_oof_zero_is_division_by_zero_reason():
     assert not result.is_valid
     assert any("RMSE_oof" in r and "division by zero" in r for r in result.reasons)
     assert np.isinf(result.generalization_gap)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Контур Г — режимы warn / reject (issue #108)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_gap_warn_mode_finite_over_threshold_is_soft_warning_not_reason():
+    """Warn-режим (дефолт): конечный gap > порога — soft_warning, не reason.
+
+    ``is_valid`` остаётся True, severity == 1, ``generalization_gap`` записан.
+    В reject-режиме тот же вход — reason и ``is_valid == False``.
+    """
+    rng = np.random.RandomState(11)
+    y = rng.randn(500) * 10.0
+    full = _with_rmse(y, 1.0, rng)
+    oof = _with_rmse(y, 1.9, rng)  # gap ≈ 1.9 > 1.5
+
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
+    assert warn.is_valid is True
+    assert warn.reasons == []
+    assert any(
+        "Circuit D" in w and "max_generalization_gap=1.500" in w
+        for w in warn.soft_warnings
+    )
+    assert warn.severity == 1
+    assert warn.generalization_gap == pytest.approx(1.9, rel=1e-6)
+
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert strict.is_valid is False
+    assert any("Circuit D" in r for r in strict.reasons)
+    assert strict.soft_warnings == []
+    assert strict.severity == 2
+
+
+def test_gap_warn_mode_deep_tree_still_disqualifies_division_by_zero():
+    """Warn-режим: RMSE_full≈0 (deep tree) — жёсткий reason в обоих режимах."""
+    rng = np.random.RandomState(12)
+    X = rng.randn(120, 6)
+    y = 2.0 * X[:, 0] + rng.randn(120)
+    tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
+    full = tree.predict(X)
+    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
+    oof = full + rng.randn(120) * 0.5
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.5, mode=mode).check(
+            y=y, y_pred_oof=oof, y_pred_full=full
+        )
+        assert not result.is_valid, mode
+        assert any("Circuit D" in r and "division by zero" in r for r in result.reasons)
+        assert np.isinf(result.generalization_gap)
+
+
+def test_gap_warn_mode_one_nn_still_disqualifies():
+    """Warn-режим: 1-NN (идеальный in-sample фит) — reason в обоих режимах."""
+    rng = np.random.RandomState(12)
+    X = rng.randn(120, 6)
+    y = 2.0 * X[:, 0] + rng.randn(120)
+    knn = KNeighborsRegressor(n_neighbors=1).fit(X, y)
+    full = knn.predict(X)
+    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
+    oof = full + rng.randn(120) * 0.5
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.5, mode=mode).check(
+            y=y, y_pred_oof=oof, y_pred_full=full
+        )
+        assert not result.is_valid, mode
+        assert any("Circuit D" in r for r in result.reasons)
+
+
+def test_gap_warn_mode_missing_y_pred_full_is_reason():
+    """Warn-режим: y_pred_full=None — контрактное нарушение, reason."""
+    y = np.arange(50, dtype=float)
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.5, mode=mode).check(y=y, y_pred_oof=y)
+        assert not result.is_valid, mode
+        assert any("y_pred_full is not provided" in r for r in result.reasons)
+
+
+def test_gap_warn_mode_rmse_oof_zero_is_reason():
+    """Warn-режим: RMSE_oof≈0 — деление на ноль, reason в обоих режимах."""
+    y = np.arange(100, dtype=float)
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.5, mode=mode).check(y=y, y_pred_oof=y, y_pred_full=y)
+        assert not result.is_valid, mode
+        assert any("RMSE_oof" in r and "division by zero" in r for r in result.reasons)
+        assert np.isinf(result.generalization_gap)
+
+
+def test_gap_boundary_equality_passes_in_both_modes():
+    """Граница: gap == max_generalization_gap ровно — не провал в обоих режимах.
+
+    Семантика ``_fails_above``: строгое превышение, равенство всегда проходит.
+    """
+    rng = np.random.RandomState(13)
+    y = rng.randn(300) * 10.0
+    full = _with_rmse(y, 2.0, rng)
+    oof = _with_rmse(y, 2.0, rng)  # gap = 1.0 ровно при пороге 1.0
+    for mode in ("warn", "reject"):
+        result = _gap_only_gate(1.0, mode=mode).check(
+            y=y, y_pred_oof=oof, y_pred_full=full
+        )
+        assert result.is_valid, mode
+        assert result.reasons == []
+        assert result.soft_warnings == []
+        assert result.generalization_gap == pytest.approx(1.0, rel=1e-6)
+
+
+def test_gap_warn_mode_above_threshold_boundary():
+    """Граница: gap == 1.5 + ε — warning в warn-режиме, reason в reject-режиме."""
+    rng = np.random.RandomState(14)
+    y = rng.randn(300) * 10.0
+    full = _with_rmse(y, 1.0, rng)
+    oof = _with_rmse(y, 1.5 + 1e-3, rng)  # gap = 1.501 > 1.5
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
+    assert warn.is_valid is True
+    assert any("Circuit D" in w for w in warn.soft_warnings)
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert strict.is_valid is False
+    assert any("Circuit D" in r for r in strict.reasons)
+
+
+def test_gap_inf_boundary_rmse_full_zero_explicit_reason_in_warn_mode():
+    """Граница: RMSE_full≈0 при RMSE_oof>0 — ветка деления на ноль как reason."""
+    rng = np.random.RandomState(15)
+    y = np.arange(100, dtype=float) * 1.0
+    full = y.copy()  # RMSE_full == 0 ровно
+    oof = y + rng.randn(100) * 1e-3  # RMSE_oof ≈ 1e-3 > _ZERO_RMSE_EPS
+    result = _gap_only_gate(1.5, mode="warn").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert not result.is_valid
+    assert any(
+        "RMSE_full" in r and "division by zero" in r for r in result.reasons
+    )
+    assert np.isinf(result.generalization_gap)
+
+
+def test_gap_invalid_mode_raises_value_error():
+    """Неизвестное значение generalization_gap_mode отклоняется."""
+    with pytest.raises(ValueError, match="generalization_gap_mode"):
+        ModelSanityGate(generalization_gap_mode="invalid")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="generalization_gap_mode"):
+        ModelSanityGate(generalization_gap_mode="")  # type: ignore[arg-type]
+
+
+def test_gap_reject_mode_parity_with_legacy_default():
+    """Паритет (issue #108): reject-режим = старое строгое поведение дефолта.
+
+    Явный ``generalization_gap_mode="reject"`` полностью воспроизводит
+    поведение прежнего дефолта: переобученная модель дисквалифицируется,
+    честная проходит, деление на ноль — reason.
+    """
+    rng = np.random.RandomState(16)
+    y = rng.randn(500) * 10.0
+    full = _with_rmse(y, 0.1, rng)
+    oof = _with_rmse(y, 0.19, rng)  # gap = 1.9 > 1.5
+    strict = _gap_only_gate(1.5, mode="reject").check(
+        y=y, y_pred_oof=oof, y_pred_full=full
+    )
+    assert not strict.is_valid
+    assert any("Circuit D" in r for r in strict.reasons)
+    assert strict.generalization_gap == pytest.approx(1.9, rel=1e-6)
+
+    honest_y = rng.randn(200) * 10.0
+    honest_full = _with_rmse(honest_y, 1.0, rng)
+    honest_oof = _with_rmse(honest_y, 1.2, rng)  # gap = 1.2 <= 1.5
+    ok = _gap_only_gate(1.5, mode="reject").check(
+        y=honest_y, y_pred_oof=honest_oof, y_pred_full=honest_full
+    )
+    assert ok.is_valid
+    assert ok.reasons == []
+    assert ok.soft_warnings == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────

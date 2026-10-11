@@ -695,6 +695,11 @@ def _train_finalists(
 
 # Значимость контуров для fallback-критерия (T4, п. 3): Г > А > Б > В.
 # Чем больше ранг, тем «тяжелее» нарушение. Ранги фиксированы в коде.
+# Примечание (issue #108): в warn-режиме контура Г конечный gap > порога
+# уходит в soft_warnings и НЕ даёт reason, поэтому в fallback-ранжировании
+# не участвует; ранг Г (3) применяется только к reject-режиму и к
+# вырожденным случаям (деление на ноль), которые остаются reason в обоих
+# режимах.
 _CIRCUIT_RANK_BY_LETTER = {
     "A": 2,  # А — diversity
     "B": 1,  # Б — unique
@@ -2175,13 +2180,21 @@ def _rank_sanity_candidates(
     )
 
 
-def _serialize_audit_result(audit: SanityCheckResult) -> dict[str, Any]:
+def _serialize_audit_result(
+    audit: SanityCheckResult, generalization_gap_mode: str
+) -> dict[str, Any]:
     """Сериализовать ``SanityCheckResult`` в JSON-совместимый словарь (T6).
 
     NaN-статистики отключённых/невычислимых контуров заменяются на ``None``.
+    Применённый режим контура Г (``generalization_gap_mode``, issue #108)
+    попадает в сериализацию каждого кандидата: в warn-режиме читатель видит
+    рядом с Circuit D-warning, что нарушение НЕ дисквалифицировало модель, а
+    в reject-режиме — что оно стало reason.
 
     Args:
         audit (SanityCheckResult): Результат аудита одного финалиста.
+        generalization_gap_mode (str): Применённый режим контура Г:
+            'warn' | 'reject'.
 
     Returns:
         dict[str, Any]: Словарь для секции отчёта select-шага.
@@ -2198,6 +2211,7 @@ def _serialize_audit_result(audit: SanityCheckResult) -> dict[str, Any]:
         "unique_ratio": _num(audit.unique_ratio),
         "dead_features_count": int(audit.dead_features_count),
         "generalization_gap": _num(audit.generalization_gap),
+        "generalization_gap_mode": generalization_gap_mode,
         "severity": int(audit.severity),
     }
 
@@ -2206,8 +2220,12 @@ def _build_sanity_gate(sg_cfg: SanityGateCfg) -> ModelSanityGate:
     """Собрать ``ModelSanityGate`` из секции ``general.sanity_gate`` (T2/T5).
 
     Секция конфигурации — источник порогов: все пороги контуров и флаги
-    включения передаются в конструктор гейта без изменений. Режим ``warn_only``
-    гейта не используется: select-шаг ``sanity_gate`` дисквалифицирует.
+    включения передаются в конструктор гейта без изменений, включая режим
+    контура Г ``generalization_gap_mode`` (issue #108): ``"warn"`` (дефолт) —
+    конечный ``gap > max_generalization_gap`` уходит в ``soft_warnings``;
+    ``"reject"`` — строгая дисквалификация (старое поведение). Режим
+    ``warn_only`` гейта не используется: select-шаг ``sanity_gate`` применяет
+    дисквалификации.
 
     Args:
         sg_cfg (SanityGateCfg): Секция ``general.sanity_gate``.
@@ -2224,6 +2242,7 @@ def _build_sanity_gate(sg_cfg: SanityGateCfg) -> ModelSanityGate:
         dead_features_require_low_diversity=sg_cfg.dead_features_require_low_diversity,
         zero_coef_tolerance=sg_cfg.zero_coef_tolerance,
         max_generalization_gap=sg_cfg.max_generalization_gap,
+        generalization_gap_mode=sg_cfg.generalization_gap_mode,
         check_permutation_sensitivity=sg_cfg.check_permutation_sensitivity,
         permutation_max_rows=sg_cfg.permutation_max_rows,
         permutation_max_features=sg_cfg.permutation_max_features,
@@ -2428,12 +2447,17 @@ def _execute_select_sanity_gate(
         _fmt_audit_value(result.audit[result.winner_algo].generalization_gap),
     )
 
-    # Секция отчёта (T6): ключ — имя select-фазы (эпик #74).
+    # Секция отчёта (T6): ключ — имя select-фазы (эпик #74). Применённый
+    # режим контура Г (issue #108) попадает в отчёт вместе с аудитом, чтобы
+    # читатель видел, что Circuit D-warning не дисквалифицировал модель.
+    generalization_gap_mode = cfg.general.sanity_gate.generalization_gap_mode
     ctx.sanity_gate_sections[phase.name] = {
         "strategy": "sanity_gate",
+        "generalization_gap_mode": generalization_gap_mode,
         "pool": list(result.pool),
         "audit": {
-            name: _serialize_audit_result(res) for name, res in result.audit.items()
+            name: _serialize_audit_result(res, generalization_gap_mode)
+            for name, res in result.audit.items()
         },
         "disqualified": {
             name: list(reasons) for name, reasons in result.disqualified.items()
