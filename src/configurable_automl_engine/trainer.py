@@ -75,6 +75,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
 )
+from configurable_automl_engine.training_engine.logger import setup_logging
 from configurable_automl_engine.training_engine.metrics import (
     direction_label,
     get_scorer_object,
@@ -1840,7 +1841,17 @@ def train_model(
         y (Any): Target variable vector.
         enable_logging (bool): Flag enabling logging.
         random_state (int | None): Random seed.
-        log_path (str | Path | None): Path to the log file.
+        log_path (str | Path | None): Path to the log file. Used only when
+            ``enable_logging`` is True: file logging is initialized with
+            ``setup_logging(logfile=...)`` so the "Training finished" message
+            and the library logs are written to this file. ``None`` — no file
+            is created here and messages go to the already configured handlers
+            (e.g. the console). The file handler is attached once per process:
+            if one is already registered, the first path wins and later
+            ``log_path`` values do not re-route the output. In the "config
+            dict" branch, the ``log_path`` key takes precedence over this
+            argument, except when the key is present with the value ``None`` —
+            then this argument is used (fallback).
         feature_selection_cfg (FeatureSelectionCfg | dict | None):
             Feature selection configuration (method, percentile, min_features,
             etc.). In the "config dict" branch, the ``feature_selection_cfg``
@@ -1872,6 +1883,13 @@ def train_model(
         hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
         rs = cast(int | None, cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
+        # ``log_path`` follows the same precedence rule as
+        # ``feature_selection_cfg``: the config key takes precedence over the
+        # explicit argument, except when the key is present with the value
+        # None ("value not set") — then the explicit argument is used
+        # (fallback).
+        if "log_path" in cfg and cfg["log_path"] is not None:
+            log_path = cast(str | Path | None, cfg["log_path"])
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
@@ -1933,6 +1951,12 @@ def train_model(
 
     # Logging (if enable_logging=True)
     if enable_logging:
+        # Initialize file logging when an explicit log path is provided.
+        # ``setup_logging`` attaches a file handler only once per process:
+        # when one is already registered, the first path wins and this
+        # argument does not re-route existing output (see the docstring).
+        if log_path is not None:
+            setup_logging(logfile=Path(log_path))
         # Get the logger and write the message
         logger = logging.getLogger(__name__)
         # Metric type follows the user-facing representation: errors (RMSE/MAE,

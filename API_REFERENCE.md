@@ -756,7 +756,7 @@ Legacy facade function for training a single model. Accepts either a config dict
 | `y` | `Any` | Target vector. |
 | `enable_logging` | `bool` | Enable result logging. |
 | `random_state` | `int` or `None` | Random seed. |
-| `log_path` | `str`, `Path`, or `None` | Log file path. |
+| `log_path` | `str`, `Path`, or `None` | Log file path. Used only when `enable_logging=True`: file logging is initialized via `setup_logging` (one file handler per process — the first path wins), and the training-result message and library logs are written to this file. In the config-dict branch the `log_path` key takes precedence over this argument, except when present with a `None` value (falls back to the argument). |
 | `feature_selection_cfg` (keyword-only) | `FeatureSelectionCfg`, `dict`, or `None` | Feature selection config (method, percentile, `min_features`, etc.). In the config-dict branch the `feature_selection_cfg` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; `None` means `FeatureSelectionCfg()` (`mode='disabled'`). |
 | `feature_selection_active` (keyword-only) | `bool` or `None` | Explicit feature selection activity flag (takes precedence over the config mode). In the config-dict branch the `feature_selection_active` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; non-bool values are rejected by `ModelTrainer`; `None` defers the decision to the config. |
 

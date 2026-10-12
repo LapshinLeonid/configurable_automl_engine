@@ -6,8 +6,6 @@ import pandas as pd
 import threading
 import logging
 
-import os
-
 from sklearn.compose import ColumnTransformer
 
 from sklearn.preprocessing import RobustScaler, StandardScaler
@@ -234,14 +232,14 @@ def test_train_model_legacy_api(tmp_path):
         "log_path": str(log_file),
     }
 
-    # Now setup_logging sees an empty handler list and creates the required file
-    setup_logging(logfile=log_file)
-
+    # train_model itself initializes file logging from the "log_path" key
+    # when logging is enabled: no external setup_logging call is needed.
     score = train_model(config, "r2", {}, X, y, enable_logging=True)
 
     assert isinstance(score, float)
-    # Now the file is guaranteed to be created
-    assert os.path.exists(log_file)
+    # The file is created by train_model via setup_logging
+    assert log_file.exists()
+    assert "Training finished" in log_file.read_text(encoding="utf-8")
 
     # 2. Test of the simple API
     score2 = train_model("elasticnet", "r2", {"alpha": 0.5}, X, y)
@@ -260,6 +258,106 @@ def test_train_model_legacy_api(tmp_path):
         # inside validation scoring; all folds fail ->
         # fail-fast TrainingError preserves the error text.
         train_model("elasticnet", "r2", {"l1_ratio": 5.0}, X, y)
+
+
+def test_train_model_log_path_explicit_argument(tmp_path):
+    """Simple API: an explicit ``log_path`` argument creates the log file."""
+    base_logger = logging.getLogger("configurable_automl_engine")
+    for handler in base_logger.handlers[:]:
+        base_logger.removeHandler(handler)
+        handler.close()
+
+    X = np.random.rand(20, 2)
+    y = np.random.rand(20)
+    log_file = tmp_path / "api.log"
+
+    score = train_model(
+        "elasticnet",
+        "r2",
+        {"alpha": 0.1},
+        X,
+        y,
+        enable_logging=True,
+        log_path=log_file,
+    )
+
+    assert isinstance(score, float)
+    assert log_file.exists()
+    assert "Training finished" in log_file.read_text(encoding="utf-8")
+
+
+def test_train_model_log_path_ignored_without_logging(tmp_path):
+    """``log_path`` alone does not create a file when logging is disabled."""
+    base_logger = logging.getLogger("configurable_automl_engine")
+    for handler in base_logger.handlers[:]:
+        base_logger.removeHandler(handler)
+        handler.close()
+
+    X = np.random.rand(20, 2)
+    y = np.random.rand(20)
+    log_file = tmp_path / "disabled.log"
+
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "enable_logging": False,
+        "log_path": str(log_file),
+    }
+    score = train_model(config, "r2", {}, X, y)
+
+    assert isinstance(score, float)
+    assert not log_file.exists()
+
+
+def test_train_model_log_path_config_key_wins_over_argument(tmp_path):
+    """Config dict: the ``log_path`` key takes precedence over the argument."""
+    base_logger = logging.getLogger("configurable_automl_engine")
+    for handler in base_logger.handlers[:]:
+        base_logger.removeHandler(handler)
+        handler.close()
+
+    X = np.random.rand(20, 2)
+    y = np.random.rand(20)
+    cfg_log_file = tmp_path / "from_config.log"
+    arg_log_file = tmp_path / "from_argument.log"
+
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "enable_logging": True,
+        "log_path": str(cfg_log_file),
+    }
+    score = train_model(config, "r2", {}, X, y, log_path=arg_log_file)
+
+    assert isinstance(score, float)
+    assert cfg_log_file.exists()
+    assert not arg_log_file.exists()
+
+
+def test_train_model_log_path_config_none_falls_back_to_argument(tmp_path):
+    """Config dict: a ``log_path`` key with None falls back to the argument."""
+    base_logger = logging.getLogger("configurable_automl_engine")
+    for handler in base_logger.handlers[:]:
+        base_logger.removeHandler(handler)
+        handler.close()
+
+    X = np.random.rand(20, 2)
+    y = np.random.rand(20)
+    log_file = tmp_path / "fallback.log"
+
+    config = {
+        "algorithm": "elasticnet",
+        "metric": "r2",
+        "hyperparams": {"alpha": 0.1},
+        "enable_logging": True,
+        "log_path": None,
+    }
+    score = train_model(config, "r2", {}, X, y, log_path=log_file)
+
+    assert isinstance(score, float)
+    assert log_file.exists()
 
 
 # --- Preprocessor and oversampling tests ---
