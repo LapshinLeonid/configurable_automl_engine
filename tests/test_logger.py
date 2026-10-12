@@ -40,9 +40,10 @@ def test_setup_logging_creates_directory(tmp_path, clean_logger):
     # Check that the directory and file were created
     assert log_dir.exists()
     assert log_dir.is_dir()
+    assert logfile.exists()
 
-    # Check that the FileHandler was added
-    assert len(clean_logger.handlers) == 1
+    # Check the handlers: ConcurrentRotatingFileHandler + StreamHandler (log_to_console=True by default)
+    assert len(clean_logger.handlers) == 2
     assert isinstance(clean_logger.handlers[0], logging.FileHandler)
     assert Path(clean_logger.handlers[0].baseFilename).resolve() == logfile.resolve()
 
@@ -56,11 +57,11 @@ def test_setup_logging_idempotency(tmp_path, clean_logger):
 
     # First call
     setup_logging(logfile)
-    assert len(clean_logger.handlers) == 1
+    assert len(clean_logger.handlers) == 2
 
-    # Second call (must not add a new FileHandler)
+    # Second call (must not add a new FileHandler, even for a different path)
     setup_logging(second_logfile)
-    assert len(clean_logger.handlers) == 1
+    assert len(clean_logger.handlers) == 2
 
     # Check that the first path is kept
     assert Path(clean_logger.handlers[0].baseFilename).resolve() == logfile.resolve()
@@ -76,41 +77,6 @@ def test_setup_logging_format_and_level(tmp_path, clean_logger):
     assert handler.level == logging.DEBUG
     # Format check via the private attribute or output inspection
     assert "%(levelname)-8s" in handler.formatter._fmt
-
-
-def test_setup_logging_creates_directory(tmp_path, clean_logger):
-    """
-    Tests the creation of the log directory and file.
-    """
-    log_dir = tmp_path / "subdir"
-    logfile = log_dir / "test.log"
-
-    # Call the function (log_to_console=True by default)
-    configurable_automl_engine.training_engine.logger.setup_logging(logfile)
-
-    # Check the filesystem
-    assert log_dir.exists()
-    assert logfile.exists()
-
-    # Expect 2 handlers: ConcurrentRotatingFileHandler + StreamHandler
-    assert len(clean_logger.handlers) == 2
-
-
-def test_setup_logging_idempotency(tmp_path, clean_logger):
-    """
-    Checks idempotency (no duplicates on repeated calls).
-    """
-    logfile = tmp_path / "first.log"
-
-    # First call
-    configurable_automl_engine.training_engine.logger.setup_logging(logfile)
-    assert len(clean_logger.handlers) == 2
-
-    # Second call
-    configurable_automl_engine.training_engine.logger.setup_logging(logfile)
-
-    # FIX: the count must not grow, it must stay 2.
-    assert len(clean_logger.handlers) == 2
 
 
 def test_setup_logging_import_fallback(tmp_path):

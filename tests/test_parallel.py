@@ -206,21 +206,6 @@ class FailingExecutor:
 
 
 def test_run_parallel_init_section_coverage(monkeypatch, caplog):
-    """Updated: check when ProcessPoolExecutor is missing from the namespace."""
-    # Remove the attribute to provoke an import/initialization error
-    monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
-
-    with caplog.at_level(logging.ERROR):
-        results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
-
-    assert results == [5]
-    assert (
-        "Could not initialize ProcessPoolExecutor" in caplog.text
-        or "falling back to threads" in caplog.text
-    )
-
-
-def test_run_parallel_init_section_coverage(monkeypatch, caplog):
     """Fixed: check the log when ProcessPoolExecutor is missing from the module."""
     monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
 

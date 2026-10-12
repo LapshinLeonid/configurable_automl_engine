@@ -238,14 +238,6 @@ def test_oversampling_unknown_algorithm_rejected():
 
 
 # --- Tests for AlgoCfg ---
-def test_algo_cfg_empty_paths():
-    # Empty module paths
-    with pytest.raises(ValidationError, match=".*not a valid dotted path.*"):
-        AlgoCfg(tuner="")
-
-    with pytest.raises(ValidationError, match=".*not a valid dotted path.*"):
-        AlgoCfg(trainer_module="")
-
 
 # --- Tests for the root Config and the API ---
 def test_config_no_enabled_algorithms():
@@ -387,6 +379,15 @@ def test_algo_cfg_empty_paths():
 
     # Assert specific parts of the message
     assert "tuner" in error_msg
+    assert "not a valid dotted path" in error_msg
+    assert "Value error" in error_msg
+
+    with pytest.raises(ValidationError) as exc_info:
+        AlgoCfg(trainer_module="")
+
+    error_msg = str(exc_info.value)
+
+    assert "trainer_module" in error_msg
     assert "not a valid dotted path" in error_msg
     assert "Value error" in error_msg
 
