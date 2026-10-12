@@ -316,6 +316,30 @@ def test_disk_persistence_manager_manual():
             assert not os.path.exists(path)
 
 
+def test_disk_persistence_manager_save_df_uses_pyarrow_engine(monkeypatch):
+    """to_parquet must always be called with engine='pyarrow' (fixed engine)."""
+    df = pd.DataFrame({"a": range(5)})
+    manager = DiskPersistenceManager(use_shm=False)
+
+    calls: list[dict] = []
+    original_to_parquet = pd.DataFrame.to_parquet
+
+    def patched_to_parquet(self, path, *args, **kwargs):
+        calls.append(kwargs)
+        return original_to_parquet(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", patched_to_parquet)
+    path = None
+    try:
+        path = manager.save_df(df)
+        assert path is not None
+        assert calls and calls[0]["engine"] == "pyarrow"
+    finally:
+        manager.cleanup()
+        if path:
+            assert not os.path.exists(path)
+
+
 def test_run_parallel_with_shared_memory():
     """Test Tasks 1.1 and 1.2: Passing data through Shared Memory in processes."""
     df = pd.DataFrame({"val": [10, 20, 30]})

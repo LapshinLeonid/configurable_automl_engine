@@ -245,8 +245,7 @@ class DiskPersistenceManager:
         Saving logic:
         1. Location: the file is created in /dev/shm (RAM disk) to speed up operations
            on Linux, or in the system temporary folder.
-        2. Format: Parquet is used with automatic engine selection
-        (fastparquet or pyarrow) depending on library availability.
+        2. Format: Parquet is written via the pyarrow engine.
         3. Registration: the file path is added to the list for later cleanup.
         Args:
             df (pd.DataFrame): The dataset to save.
@@ -256,9 +255,7 @@ class DiskPersistenceManager:
 
         fd, path = tempfile.mkstemp(suffix=".parquet", dir=self.tmp_dir)
         os.close(fd)
-        df.to_parquet(
-            path, engine=("fastparquet" if "fastparquet" in globals() else "pyarrow")
-        )
+        df.to_parquet(path, engine="pyarrow")
         self.created_files.append(path)
         return path
 
