@@ -646,14 +646,7 @@ def run_parallel(
     # 1. Determine the executor class
     executor_cls: Callable[[int | None], Executor] = ThreadPoolExecutor
     if mode == "processes":
-        try:
-            executor_cls = ProcessPoolExecutor
-        except Exception as e:  # noqa: BLE001
-            logger.error(
-                f"Could not initialize ProcessPoolExecutor:"
-                f" {e}. Falling back to threads."
-            )
-            executor_cls = ThreadPoolExecutor
+        executor_cls = ProcessPoolExecutor
 
     start_time = time.time()
 

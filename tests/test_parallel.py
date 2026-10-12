@@ -193,28 +193,34 @@ def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
     assert "boom" in caplog.text
 
 
-class FailingExecutor:
-    def __init__(self, *args, **kwargs):
-        # Important: this text must match what we look for in the logs
-        raise RuntimeError("init failed")
+def test_run_parallel_process_pool_init_error_not_masked(caplog):
+    """The ProcessPoolExecutor constructor raising must surface through the
+    real outer fallback (threads), not be masked by the removed dead
+    try/except around the executor_cls assignment."""
+    args = [(1, 10)]
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor",
+        side_effect=RuntimeError("OS Error"),
+    ):
+        with caplog.at_level(logging.ERROR):
+            results = run_parallel(simple_task, args_seq=args, mode="processes")
 
-    def __enter__(self):
-        return self
+    assert results == [11]
+    # The dead-branch message no longer exists; only the real outer
+    # except handles pool-creation failures.
+    assert "Could not initialize ProcessPoolExecutor" not in caplog.text
+    assert "falling back to threads" in caplog.text
+    assert "OS Error" in caplog.text
 
-    def __exit__(self, *args):
-        pass
 
-
-def test_run_parallel_init_section_coverage(monkeypatch, caplog):
-    """Fixed: check the log when ProcessPoolExecutor is missing from the module."""
+def test_run_parallel_process_pool_missing_attr_propagates(monkeypatch):
+    """A missing ProcessPoolExecutor attribute must produce an unmasked
+    NameError out of run_parallel instead of a silent threads fallback:
+    the absence of the import is detected at module import time."""
     monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
 
-    with caplog.at_level(logging.ERROR):
-        results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
-
-    assert results == [5]
-    # In the code: "Could not initialize ProcessPoolExecutor"
-    assert "Could not initialize ProcessPoolExecutor" in caplog.text
+    with pytest.raises(NameError):
+        run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
 
 
 # Helper function for tests
