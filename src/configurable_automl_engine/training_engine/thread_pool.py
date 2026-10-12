@@ -65,7 +65,9 @@ class SharedDataFrame:
         """Initialize a shared memory object for a DataFrame.
         Initialization logic:
         1. Create: If df is passed, a new Shared Memory segment is created,
-           with a unique name (shm_ + id + random), into which the data is copied.
+           with an OS-generated unique name (name=None), into which the data
+           is copied. Multiple SharedDataFrame objects can share one segment
+           (see run_parallel: one segment per DataFrame object).
         2. Attach: If df is not passed, the object attaches to an existing
            segment by name using metadata (shape, dtype, columns).
         3. Metadata: The column name list is kept for the subsequent
@@ -85,11 +87,11 @@ class SharedDataFrame:
         self.columns: list[str] | None = None
 
         if df is not None:
-            self.name = f"shm_{id(df)}_{np.random.randint(1000)}"
             data = df.to_numpy()
-            self.shm = shared_memory.SharedMemory(
-                create=True, size=data.nbytes, name=self.name
-            )
+            # name=None makes the OS generate a unique segment name, so
+            # concurrent creations never collide (no FileExistsError).
+            self.shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
+            self.name = self.shm.name
             self.shared_array = np.ndarray(
                 data.shape, dtype=data.dtype, buffer=self.shm.buf
             )
@@ -592,6 +594,11 @@ def run_parallel(
         target_shm_indices = shared_args_indices or []
         target_disk_indices = disk_args_indices or []
 
+        # One SHM segment per DataFrame object: the same df passed to several
+        # tasks is placed into shared memory only once (saves memory and
+        # avoids name-collision risks).
+        shm_cache: dict[int, SharedDataFrame] = {}
+
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
             curr_shm_info = {}  # Index -> (name, shape, dtype, columns)
@@ -600,8 +607,12 @@ def run_parallel(
                     if idx in target_shm_indices and SharedDataFrame.is_compatible(
                         new_args[idx]
                     ):
-                        shm_wrapper = SharedDataFrame(new_args[idx])
-                        shm_refs.append(shm_wrapper)
+                        df_obj = new_args[idx]
+                        shm_wrapper = shm_cache.get(id(df_obj))
+                        if shm_wrapper is None:
+                            shm_wrapper = SharedDataFrame(df_obj)
+                            shm_cache[id(df_obj)] = shm_wrapper
+                            shm_refs.append(shm_wrapper)
                         # Save the metadata for passing to the worker
                         curr_shm_info[idx] = (
                             shm_wrapper.name,
