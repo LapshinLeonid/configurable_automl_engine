@@ -91,7 +91,6 @@ from configurable_automl_engine.validation import (
 )
 
 from .models import (
-    _ALIASES,
     create_model,
     requires_dense_input,
     resolve_algorithm_name,
@@ -1248,10 +1247,6 @@ class ModelTrainer:
                     self.numerical_features = [f"col_{i}" for i in range(n_cols)]
                 if self.feature_names is None:
                     self.feature_names = self.numerical_features
-
-            # Stage 2: Resolve the algorithm key
-            # (moved above for use in the preprocessor)
-            _ALIASES.get(self.algorithm, self.algorithm)
 
             # Stage 3: Create the model via the factory.
             # Done BEFORE preprocessor assembly so that an unknown algorithm
