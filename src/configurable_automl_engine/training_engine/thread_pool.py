@@ -17,6 +17,7 @@ Shared Memory (разделяемая память) и Disk Persistence (дис�
 
 import concurrent.futures
 import logging
+import math
 import os
 import tempfile
 import time
@@ -275,12 +276,78 @@ class DiskPersistenceManager:
                 logger.warning(f"Failed to delete temp file {path}: {e}")
 
 
+class _StartSignal:
+    """Side-channel для фиксации фактического старта задачи внутри воркера.
+
+    В режиме процессов deadline ``task_timeout`` обязан отсчитываться от момента,
+    когда задача реально начала исполняться воркером, а не от момента отправки
+    в пул (issue #110). ``future.running()`` для этого не годится:
+    ``ProcessPoolExecutor`` помечает задачу как running уже при переносе во
+    внутреннюю очередь пула (ёмкость ``max_workers+1``), т.е. до реального старта.
+
+    ``_StartSignal`` — сегмент разделяемой памяти (8 байт, float64), в который
+    воркер записывает ``time.time()`` непосредственно перед вызовом целевой
+    функции, а родитель читает в цикле ожидания. Инициализируется значением
+    ``-1.0`` (признак «ещё не стартовала»); реальные timestamps всегда
+    положительны. Удаляется владельцем (родителем) через ``unlink``.
+    """
+
+    def __init__(self) -> None:
+        self._shm = shared_memory.SharedMemory(create=True, size=8)
+        self._owner = True
+        self.name = self._shm.name
+        self._buf = np.ndarray((1,), dtype=np.float64, buffer=self._shm.buf)
+        self._buf[0] = -1.0
+
+    def mark_start(self, value: float) -> None:
+        """Записать timestamp фактического старта задачи."""
+        self._buf[0] = value
+
+    def read(self) -> float:
+        """Вернуть timestamp старта (``-1.0`` — задача ещё не стартовала)."""
+        return float(self._buf[0])
+
+    def close(self) -> None:
+        try:
+            self._shm.close()
+        except Exception:  # noqa: S110, BLE001
+            pass
+
+    def unlink(self) -> None:
+        if self._owner:
+            try:
+                self._shm.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        self._owner = False
+
+
+def _mark_worker_start(start_signal_name: str) -> None:
+    """Записать в shared-memory сигнал момент фактического старта задачи.
+
+    Вызывается воркером сразу перед исполнением целевой функции.
+
+    Args:
+        start_signal_name (str): Имя сегмента разделяемой памяти сигнала.
+    """
+    try:
+        shm = shared_memory.SharedMemory(name=start_signal_name)
+        try:
+            buf = np.ndarray((1,), dtype=np.float64, buffer=shm.buf)
+            buf[0] = time.time()
+        finally:
+            shm.close()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Start-signal write failed: {e}")
+
+
 def _worker_proxy(
     func: Callable[..., Any],
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     disk_indices: list[int] | None,
     shm_info: dict[int, tuple[Any, ...]],
+    start_signal_name: str | None = None,
 ) -> Any:
     """Десериализовать данные и выполнить целевую функцию внутри воркера.
     Логика выполнения:
@@ -298,6 +365,8 @@ def _worker_proxy(
         shm_info (dict[int, tuple]): Словарь, где ключ — индекс аргумента,
             а значение — кортеж с метаданными SHM (имя, shape, dtype, columns)
             для восстановления.
+        start_signal_name (str | None): Имя сегмента разделяемой памяти, в
+            который воркер записывает timestamp фактического старта (issue #110).
     Returns:
         Any: Результат выполнения функции func.
     """
@@ -322,6 +391,9 @@ def _worker_proxy(
                 path = final_args[idx]
                 if isinstance(path, str) and path.endswith(".parquet"):
                     final_args[idx] = pd.read_parquet(path)
+        # 3. Фиксируем фактический старт задачи (незадолго до вызова func)
+        if start_signal_name is not None:
+            _mark_worker_start(start_signal_name)
         return func(*final_args, **kwargs)
     finally:
         # Важно: закрываем только локальные ссылки (дескрипторы) воркера.
@@ -461,12 +533,17 @@ def run_parallel(
         shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение
             воркеров перед принудительным отправлением SIGTERM/SIGKILL.
         task_timeout (float | None): Индивидуальный таймаут на одну задачу (алгоритм) в секундах.
-            Если None — используется глобальный timeout. Deadline для каждой задачи считается
-            от момента её отправки в пул (submit_time), а не от общего start_time.
-            Применяется только в режиме "processes" (жёсткий таймаут). В режиме
-            "threads" игнорируется с warning (issue #101): deadline от момента
-            submit мог «истекать» у задачи, простоявшей в очереди и ещё не
-            начавшейся.
+            Если None — используется глобальный timeout. Отсчитывается от момента
+            фактического старта задачи в воркере (timestamp фиксируется воркером
+            через side-channel), а не от момента submit (issue #110): пока задача
+            стоит в очереди (например, когда алгоритмов больше, чем max_workers),
+            очередь не «съедает» её исполненный бюджет — после старта задача получает
+            до task_timeout секунд исполнения. Чтобы задача, которая так и не
+            стартует (например, из-за зависшего воркера), не «зависала» навсегда,
+            deadline ограничен сверху величиной submit_time + task_timeout + queue_budget,
+            где queue_budget = ceil(число_задач / max_workers) * task_timeout (на весь
+            дренаж батча). Применяется только в режиме "processes" (жёсткий таймаут).
+            В режиме "threads" игнорируется с warning (issue #101).
 
     Returns:
         list[Any]: Список результатов. Задачи, не успевшие выполниться
@@ -505,6 +582,8 @@ def run_parallel(
     # Логика подготовки Shared Memory для процессов
     shm_refs = []
     persistence_manager = DiskPersistenceManager()
+    # Start-сигналы фактического старта задач (только для процессов, issue #110)
+    start_signals: list[_StartSignal] = []
 
     if mode == "processes" and (shared_args_indices or disk_args_indices):
         task_payloads = []  # Список кортежей
@@ -574,21 +653,38 @@ def run_parallel(
 
         future_to_idx = {}
         submit_time_by_future: dict[Future[Any], float] = {}
+        signal_by_future: dict[Future[Any], _StartSignal | None] = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
-            if mode == "processes" and (shared_args_indices or disk_args_indices):
-                fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx)
+            if mode == "processes":
+                # Для каждой задачи создаём side-channel фактического старта:
+                # воркер записывает в него timestamp, родитель привязывает к нему
+                # deadline (issue #110). Полагать, что задача стартовала, по
+                # future.running() нельзя — ProcessPoolExecutor помечает задачу
+                # running ещё при попадании во внутреннюю очередь пула.
+                sig = _StartSignal()
+                start_signals.append(sig)
+                fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx, sig.name)
+                signal_by_future[fut] = sig
             else:
                 fut = pool.submit(func, *a, **kw)
+                signal_by_future[fut] = None
             future_to_idx[fut] = i
             submit_time_by_future[fut] = time.time()
 
-        # Абсолютные дедлайны для каждой задачи (от времени submit)
-        deadline_by_future: dict[Future[Any], float] = {}
-        for fut, idx in future_to_idx.items():
-            task_t = task_timeout or float("inf")
-            deadline_by_future[fut] = (
-                submit_time_by_future.get(fut, start_time) + task_t
-            )
+        # Верхняя граница времени, которое задача может провести в очереди,
+        # прежде чем сработает абсолютный (не сдвигаемый) дедлайн. Берётся с
+        # запасом на весь дренаж батча (ceil(n/max_workers) волн по task_timeout),
+        # чтобы любая задача, которая реально начнёт исполняться (в пределах
+        # task_timeout), успела получить свой полный исполненный бюджет, а задача,
+        # которая так и не стартовала (например, из-за зависшего воркера), не
+        # «зависала» навсегда даже при timeout=None (issue #110).
+        worker_count = max_workers or (os.cpu_count() or 1)
+        n_tasks = len(future_to_idx)
+        queue_budget = (
+            math.ceil(n_tasks / max(worker_count, 1)) * task_timeout
+            if task_timeout is not None
+            else float("inf")
+        )
 
         while future_to_idx:
             now = time.time()
@@ -603,14 +699,34 @@ def run_parallel(
                 future_to_idx.clear()
                 break
 
+            # Пересчитываем дедлайны.
+            # - Задача уже стартовала (воркер зафиксировал timestamp): deadline
+            #   отсчитывается от реального старта (started + task_timeout), но не
+            #   позднее абсолютной верхней границы submit + task_timeout + queue_budget.
+            # - Задача ещё в очереди: deadline фиксирован (submit + task_timeout
+            #   + queue_budget) и не зависит от текущего времени — очередь не
+            #   «съедает» исполненный бюджет, а сама задача не «зависает».
+            deadline_by_future: dict[Future[Any], float] = {}
+            for fut in list(future_to_idx):
+                task_t = task_timeout if task_timeout is not None else float("inf")
+                signal_obj = signal_by_future.get(fut)
+                started = signal_obj.read() if signal_obj is not None else None
+                submit_t = submit_time_by_future.get(fut, start_time)
+                if started is not None and started >= 0:
+                    deadline_by_future[fut] = min(
+                        started + task_t, submit_t + task_t + queue_budget
+                    )
+                elif task_timeout is not None:
+                    deadline_by_future[fut] = submit_t + task_t + queue_budget
+                else:
+                    deadline_by_future[fut] = float("inf")
+
             # Проверка: если индивидуальный таймаут задачи (task_timeout) истёк — выходим
-            expired_futures = []
             for fut, deadline in deadline_by_future.items():
                 if fut in future_to_idx and now >= deadline:
                     idx = future_to_idx.pop(fut)
                     logger.error(f"Task {idx} timed out")
                     results[idx] = None
-                    expired_futures.append(fut)
             if not future_to_idx:
                 break
 
@@ -704,4 +820,8 @@ def run_parallel(
             else:
                 # Для ThreadPoolExecutor или если режим не "processes"
                 pool.shutdown(wait=True, cancel_futures=True)
+        # Очистка start-сигналов фактического старта (создаются только в процессах)
+        for sig in start_signals:
+            sig.close()
+            sig.unlink()
     return results

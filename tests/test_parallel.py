@@ -952,6 +952,76 @@ def test_run_parallel_threads_task_timeout_ignored(caplog):
     assert "Timeouts are ignored in threads mode" in caplog.text
 
 
+def hang_task(seconds):
+    """Задача, которая «зависает» (не завершается в пределах ожидания теста)."""
+    time.sleep(seconds)
+    return "hung-ended"
+
+
+def test_run_parallel_processes_queued_tasks_get_full_budget():
+    """В processes-режиме очередь не «съедает» исполненный бюджет задачи.
+
+    Исправление (issue #110): раньше deadline каждого алгоритма считался от
+    момента submit, поэтому при большем числе задач, чем max_workers, часть из
+    них «истекала», ещё не начавшись. Теперь deadline привязан к фактическому
+    старту задачи в воркере (side-channel), поэтому каждая задача, чьё реальное
+    исполнение укладывается в task_timeout, успевает завершиться, даже если она
+    долго простояла в очереди. Покрывает случай «задач > max_workers+1».
+    """
+    # 10 задач по 0.2с при max_workers=2: последние задачи стартуют только через
+    # ~0.8-1.0с после submit (значительно позже task_timeout=0.8 от submit), но
+    # каждое реальное исполнение (0.2с) с запасом укладывается в 0.8с.
+    results = run_parallel(
+        slow_task,
+        args_seq=[(0.2,)] * 10,
+        mode="processes",
+        max_workers=2,
+        task_timeout=0.8,
+        shutdown_grace_period=0.1,
+    )
+    assert results == ["done"] * 10
+
+
+def test_run_parallel_processes_task_timeout_still_enforced():
+    """В processes-режиме task_timeout по-прежнему жёстко ограничивает исполнение.
+
+    После того как задача реально стартовала, она обязана уложиться в
+    task_timeout секунд исполнения — иначе принудительно помечается как
+    timed out (результат None).
+    """
+    results = run_parallel(
+        slow_task,
+        args_seq=[(0.5,)],
+        mode="processes",
+        max_workers=1,
+        task_timeout=0.2,
+        shutdown_grace_period=0.1,
+    )
+    assert results == [None]
+
+
+def test_run_parallel_never_starting_task_is_bounded():
+    """Задача, которая так и не стартует, не «зависает» навсегда (issue #110).
+
+    Первый воркер зависает на task0 (sleep 60с); task1 остаётся в очереди и не
+    стартует. Даже при timeout=None deadline очереди фиксирован сверху
+    (submit + task_timeout + queue_budget), поэтому run_parallel завершается за
+    ограниченное время, а не ждёт вечно (раньше rolling-дедлайн не истекал).
+    """
+    started = time.time()
+    results = run_parallel(
+        hang_task,
+        args_seq=[(60.0,), (60.0,)],
+        mode="processes",
+        max_workers=1,
+        task_timeout=0.5,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, None]
+    assert elapsed < 15  # завершились за ~2*task_timeout + grace, а не зависли
+
+
 def test_watchdog_not_triggered_on_slow_but_alive_tasks():
     """Проверка, что watchdog НЕ срабатывает на медленных, но живых задачах.
 
