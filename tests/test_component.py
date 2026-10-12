@@ -779,6 +779,71 @@ def test_run_hpo_skips_pruning_for_legacy_tuner():
     assert calls["pruning_passed"] is False
 
 
+# The HPO phase does not need the final full-data fit: tuners that support
+# `fit_best_model` are asked to skip it (the engine trains the final model
+# itself with ModelTrainer).
+def test_run_hpo_asks_tuner_to_skip_final_fit():
+    """fit_best_model=False is forwarded to a tuner that supports the argument."""
+    received: dict[str, object] = {}
+
+    class FitAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            fit_best_model=True,
+        ):
+            received["fit_best_model"] = fit_best_model
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=FitAwareTuner()):
+        score, params = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+        )
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    assert received["fit_best_model"] is False
+
+
+def test_run_hpo_skips_fit_best_model_for_legacy_tuner():
+    """A custom tuner without the `fit_best_model` argument does not receive it."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["fit_best_model_passed"] = "fit_best_model" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+        )
+
+    assert result == (0.5, {})
+    assert calls["fit_best_model_passed"] is False
+
+
 # Error if the target_col is missing from the DataFrame
 def test_train_best_model_missing_target_column():
     df = pd.DataFrame({"feature1": [1, 2], "feature2": [3, 4]})

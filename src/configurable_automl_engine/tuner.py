@@ -553,7 +553,7 @@ class _OptimizeRunner:
          ├─ handle_pruning()
          ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
          ├─ select_best_trial()
-         └─ fit_best_model()
+         └─ _fit_best_model()  (skipped when ``fit_best_model=False``)
 
     The run state is stored in instance attributes: each step fills in its own
     fields, and subsequent steps (as well as the Optuna objective) read them
@@ -593,6 +593,7 @@ class _OptimizeRunner:
         target_encoding_smoothing: float,
         target_encoding_fallback: float | None,
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
+        fit_best_model: bool = True,
     ) -> None:
         """Store the parameters of a single optimisation run.
 
@@ -624,6 +625,12 @@ class _OptimizeRunner:
         self.target_encoding_smoothing = target_encoding_smoothing
         self.target_encoding_fallback = target_encoding_fallback
         self.feature_selection_cfg = feature_selection_cfg
+        # Whether to train the best model on all data after the Optuna loop
+        # (``_fit_best_model``). Set to False when the caller only needs the
+        # best parameters and score (e.g. the training engine's HPO phase):
+        # the full-data fit is then skipped and the model slot of the returned
+        # tuple is None.
+        self.fit_best_model = fit_best_model
 
         # Names of columns dropped by cleaning uninformative features.
         # Filled in build_trial_pipeline for diagnostics; empty by default.
@@ -698,7 +705,15 @@ class _OptimizeRunner:
 
         if not self.select_best_trial():
             return None, None, None
-        return self.fit_best_model()
+        self._log_best_result()
+        if not self.fit_best_model:
+            # HPO-only mode (e.g. the training engine's phases): the caller
+            # needs only the best parameters and score — the final model is
+            # trained later by its own trainer. The redundant full-data fit
+            # is skipped, saving one full training per algorithm per phase;
+            # the model slot stays None to keep the tuple shape.
+            return None, self.best_params, self.best_score
+        return self._fit_best_model()
 
     # ─────────────────── run steps ─────────────────────────────────────────
 
@@ -1287,13 +1302,24 @@ class _OptimizeRunner:
         self.best_apply_fs = best_apply_fs
         return True
 
-    def fit_best_model(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
+    def _log_best_result(self) -> None:
+        """Log the outcome of the best trial (shared by both return paths)."""
+        log.info(
+            "Hyperopt: algo=%s | val=%s | score=%.5f | params=%s",
+            self.algo,
+            self.val_method_eff,
+            self.best_score,
+            self.best_params,
+        )
+
+    def _fit_best_model(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
         """Train the final model on all provided data (step 8).
 
         Assembles the pipeline with the best parameters (taking the feature
         selection decision from ``select_best_trial`` into account) and trains
         it on the full dataset. If oversampling was enabled, the final model
-        goes through it as well.
+        goes through it as well. Skipped entirely when ``fit_best_model`` is
+        False (HPO-only callers).
 
         Returns:
             tuple[Any | None, dict[str, Any] | None, float | None]: A tuple
@@ -1305,13 +1331,6 @@ class _OptimizeRunner:
         )
         best_model.fit(self.X, self.y)
 
-        log.info(
-            "Hyperopt: algo=%s | val=%s | score=%.5f | params=%s",
-            self.algo,
-            self.val_method_eff,
-            self.best_score,
-            self.best_params,
-        )
         return best_model, self.best_params, self.best_score
 
     # ─────────────────── private helpers ───────────────────────────────────
@@ -1393,11 +1412,13 @@ def optimize(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    fit_best_model: bool = True,
 ) -> tuple[Any | None, dict[str, Any] | None, float | None]:
     """Run the model hyperparameter optimisation process using Optuna.
 
     The function automatically selects the validation strategy, sets up the
-    parameter search space and trains the final model on all provided data.
+    parameter search space and trains the final model on all provided data
+    (unless ``fit_best_model=False`` is passed).
 
     Args:
         algo_name (str): Algorithm name to optimise.
@@ -1476,10 +1497,18 @@ def optimize(
             splits in competition with model hyperparameters. For
             ``isotonic_regression`` selection is forcibly disabled (a
             univariate algorithm).
+        fit_best_model (bool): Whether to train the final model on all
+            provided data after the search and return it as the first element
+            of the tuple. Defaults to True (the original behavior). Set to
+            False when only the best parameters and score are needed (e.g.
+            the training engine's HPO phases — the final model is trained by
+            its own trainer): the redundant full-data fit is skipped and the
+            model slot of the returned tuple is None.
 
     Returns:
         tuple[Any, dict[str, Any], float]: A tuple containing:
             - best_model: The trained model with the best parameters.
+              ``None`` when ``fit_best_model=False`` (the fit is skipped).
             - best_params: Dict of the found optimal hyperparameters
               (in ``'auto'`` mode it contains the auxiliary
               ``use_feature_selection`` key with the selection decision).
@@ -1527,4 +1556,5 @@ def optimize(
         target_encoding_smoothing=target_encoding_smoothing,
         target_encoding_fallback=target_encoding_fallback,
         feature_selection_cfg=feature_selection_cfg,
+        fit_best_model=fit_best_model,
     ).run()

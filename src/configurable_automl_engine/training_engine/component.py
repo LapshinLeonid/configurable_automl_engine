@@ -1160,6 +1160,10 @@ def _run_hpo(
        of specific parameters (n_folds, oversampling, space_overrides).
     3. Execution: the optimization is run. If the algorithm is deemed invalid
        via `InvalidAlgorithmError`, the canonical exception is raised.
+    The HPO phase consumes only the best parameters and score: the final
+    full-data fit of the best model is skipped (``fit_best_model=False`` for
+    tuners that support it) and the model is discarded — the engine trains
+    the final model itself with ``ModelTrainer``.
     Args:
         algo_name (str): The algorithm name.
         algo_cfg (AlgoCfg): The algorithm configuration with tuner paths.
@@ -1329,6 +1333,14 @@ def _run_hpo(
             algo_cfg.tuner,
             _feature_selection_mode(feature_selection_cfg),
         )
+
+    # The HPO phase needs only the best parameters and score — the final model
+    # is trained later by the engine's own trainer. Ask a tuner that supports
+    # skipping the final full-data fit to do so: otherwise one redundant full
+    # training per algorithm per phase is wasted (the model is discarded
+    # below).
+    if "fit_best_model" in sig.parameters:
+        kwargs["fit_best_model"] = False
 
     try:
         _, best_params, best_score = tuner.optimize(**kwargs)

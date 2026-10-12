@@ -1816,3 +1816,61 @@ def test_missing_indicator_enabled_regular_algorithms():
     """Regular algorithms — indicators enabled."""
     assert _missing_indicator_enabled("ridge") is True
     assert _missing_indicator_enabled("rf") is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  fit_best_model: skipping the redundant final full-data fit
+# ──────────────────────────────────────────────────────────────────────────────
+def _ridge_space(trial):
+    """A tiny fixed-space generator for the ridge smoke tests."""
+    return {"alpha": trial.suggest_float("alpha", 0.05, 0.5)}
+
+
+def test_optimize_fit_best_model_disabled_skips_final_fit(toy_data, monkeypatch):
+    """fit_best_model=False skips the final full-data fit: the model slot is
+    None while the best params and score stay valid."""
+    X, y = toy_data
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "_fit_best_model must not run when fit_best_model=False"
+        )
+
+    monkeypatch.setattr(hyperopt._OptimizeRunner, "_fit_best_model", _forbidden)
+
+    model, params, score = hyperopt.optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+        fit_best_model=False,
+        space_overrides={"ridge": _ridge_space},
+    )
+
+    assert model is None
+    assert isinstance(params, dict) and params
+    assert isinstance(score, float) and np.isfinite(score)
+
+
+@pytest.mark.parametrize(
+    ("fit_best_model", "expect_model"),
+    [(True, True), (False, False)],
+)
+def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
+    """The flag controls whether the tuned model (fit on all data) is returned."""
+    X, y = toy_data
+
+    model, params, score = hyperopt.optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=2,
+        random_state=0,
+        fit_best_model=fit_best_model,
+        space_overrides={"ridge": _ridge_space},
+    )
+
+    assert (model is not None) is expect_model
+    assert isinstance(params, dict) and params
+    assert isinstance(score, float) and np.isfinite(score)
