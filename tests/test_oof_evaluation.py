@@ -1,22 +1,26 @@
-"""Тесты OOF-канала оценки кандидатов (issue #62).
+"""Tests for the OOF candidate-evaluation channel.
 
-Покрытие:
-    1. ``iter_splits(include_indices=True)``: позиционные индексы валидационных
-       строк соответствуют подмножествам X_val/y_val (k_fold и train_test_split,
-       в т.ч. при random_state=None).
-    2. ``metrics.oof_rmse``: метрика по всему вектору сразу; маскирование
-       NaN/None/inf пар; ошибка при отсутствии валидных пар.
-    3. Positive: RMSE_oof ≈ среднему по фолдам при равных фолдах; точный
-       pooled-пересчёт для неравных фолдов; каждая строка предсказана моделью,
-       не видевшей её (совпадение с ручным per-fold пересчётом — отсутствие
-       утечки); покрытие 100% для k_fold/loo; выравнивание по pandas-индексу.
-    4. Negative: при утечке (модель обучалась на строке) OOF-вектор отличается
-       от честного — тест это детектирует (in-sample RMSE заметно ниже RMSE_oof).
-    5. Boundary: N меньше числа фолдов (fallback на train_test_split);
-       train_test_split покрывает только валидационную часть; фолды неравного
-       размера; NaN в предсказаниях; очень малый N; дублирующийся индекс.
-    6. Обратная совместимость: OOF — отдельный канал, ``val_score`` фаз HPO
-       не меняется; сериализация сохраняет OOF-атрибуты; сброс между fit().
+Coverage:
+    1. ``iter_splits(include_indices=True)``: the positional indices of
+       validation rows correspond to the X_val/y_val subsets (k_fold and
+       train_test_split, including with random_state=None).
+    2. ``metrics.oof_rmse``: the metric over the whole vector at once;
+       NaN/None/inf pairs are masked; an error is raised when no valid
+       pairs exist.
+    3. Positive: RMSE_oof ≈ the fold average over equal folds; an exact
+       pooled recomputation for unequal folds; each row is predicted by a
+       model that did not see it (matches a manual per-fold recomputation —
+       no leakage); 100% coverage for k_fold/loo; alignment by
+       pandas index.
+    4. Negative: with leakage (a model trained on a row), the OOF vector
+       differs from the honest one — the test detects it (in-sample RMSE is
+       noticeably lower than RMSE_oof).
+    5. Boundary: N smaller than the fold count (fallback to train_test_split);
+       train_test_split covers only the validation part; unequal fold sizes;
+       NaN in predictions; a very small N; a duplicated index.
+    6. Backward compatibility: OOF is a separate channel and the ``val_score``
+       of HPO phases does not change; serialization keeps the OOF attributes;
+       reset between fit() calls.
 """
 
 from __future__ import annotations
@@ -38,17 +42,17 @@ from configurable_automl_engine.validation import iter_splits
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Хелперы
+#  Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _noisy_regression(
     n: int = 60, p: int = 6, seed: int = 7, noise: float = 3.0
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Зашумлённый датасет: первый признак информативен, остальные — шум.
+    """Noisy dataset: the first feature is informative, the rest is noise.
 
-    На таких данных модели переобучаются, поэтому in-sample RMSE заметно ниже
-    честного OOF-RMSE (нужно для негативного теста на утечку).
+    On such data the models overfit, so the in-sample RMSE is noticeably
+    below the honest OOF-RMSE (needed for the leakage negative test).
     """
     rng = np.random.RandomState(seed)
     X = pd.DataFrame(rng.randn(n, p))
@@ -67,11 +71,11 @@ def _manual_oof(
     seed: int,
     test_size: float = 0.2,
 ) -> np.ndarray:
-    """Пересчитать OOF-вектор вручную: те же сплиты и клоны пайплайна на фолд.
+    """Recompute the OOF vector by hand: the same splits and pipeline clones per fold.
 
-    Повторяет логику ``_score_on_validation_splits`` независимо, чтобы проверить
-    отсутствие утечки: каждая строка предсказывается пайплайном, обученным без
-    её участия (test-часть фолда).
+    Repeats the logic of ``_score_on_validation_splits`` independently to
+    verify the absence of leakage: each row is predicted by a pipeline
+    trained without it (the test part of the fold).
     """
     preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
@@ -96,7 +100,7 @@ def _manual_oof(
 
 
 class _ConstRegressor(BaseEstimator):
-    """Минимальный регрессор для белого ящика: константа + опциональный NaN."""
+    """A minimal white-box regressor: a constant plus an optional NaN."""
 
     def __init__(self, value: float = 1.0, nan_condition=None):
         self.value = value
@@ -119,7 +123,7 @@ class _ConstRegressor(BaseEstimator):
 
 
 def test_iter_splits_include_indices_kfold_match_positions():
-    """k_fold: test_idx указывает на те же строки, что X_val (numpy и pandas)."""
+    """k_fold: test_idx points to the same rows as X_val (numpy and pandas)."""
     rng = np.random.RandomState(1)
     X_np = rng.randn(30, 3)
     y_np = rng.randn(30)
@@ -141,10 +145,11 @@ def test_iter_splits_include_indices_kfold_match_positions():
 
 
 def test_iter_splits_include_indices_tts_match_positions():
-    """train_test_split: test_idx согласован с X_val, в т.ч. при random_state=None.
+    """train_test_split: test_idx is consistent with X_val, incl. random_state=None.
 
-    До issue #62 сплит строился вторым вызовом train_test_split, что при
-    random_state=None давало бы другую перестановку и рассинхрон индексов.
+    Before, the split was built by a second train_test_split call, which
+    with random_state=None would produce a different permutation and
+    desynchronize the indices.
     """
     rng = np.random.RandomState(2)
     X = rng.randn(40, 3)
@@ -164,7 +169,7 @@ def test_iter_splits_include_indices_tts_match_positions():
 
 
 def test_iter_splits_default_contract_unchanged():
-    """Без include_indices контракт прежний: 4 элемента, как раньше."""
+    """Without include_indices the contract is unchanged: 4 elements, as before."""
     rng = np.random.RandomState(3)
     X = rng.randn(20, 2)
     y = rng.randn(20)
@@ -178,7 +183,7 @@ def test_iter_splits_default_contract_unchanged():
 
 
 def test_oof_rmse_over_vector():
-    """RMSE по всему вектору сразу (не усреднение по фолдам)."""
+    """RMSE over the whole vector at once (not averaged per fold)."""
     y_true = np.array([1.0, 2.0, 3.0, 4.0])
     y_pred = np.array([1.1, 1.9, 3.2, 4.0])
     expected = float(np.sqrt(mean_squared_error(y_true, y_pred)))
@@ -186,10 +191,10 @@ def test_oof_rmse_over_vector():
 
 
 def test_oof_rmse_masks_non_finite_pairs():
-    """NaN/None/inf в y_pred или y_true отбрасываются, а не роняют метрику."""
+    """NaN/None/inf in y_pred or y_true are dropped, not crash the metric."""
     y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     y_pred = np.array([1.0, np.nan, 3.0, np.inf, 5.0])
-    # Валидные пары: 0, 2, 4 — ошибки равны нулю.
+    # Valid pairs: 0, 2, 4 — the errors are zero.
     assert oof_rmse(y_true, y_pred) == pytest.approx(0.0)
 
     y_true_nan = np.array([1.0, np.nan, 3.0])
@@ -198,7 +203,7 @@ def test_oof_rmse_masks_non_finite_pairs():
 
 
 def test_oof_rmse_no_valid_pairs_raises():
-    """Нет ни одной валидной пары → ValueError (OOF-оценка невозможна)."""
+    """No valid pair → ValueError (the OOF estimate is impossible)."""
     with pytest.raises(ValueError, match="No valid"):
         oof_rmse(np.array([1.0, 2.0]), np.array([np.nan, np.nan]))
     with pytest.raises(ValueError, match="No valid"):
@@ -206,16 +211,16 @@ def test_oof_rmse_no_valid_pairs_raises():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3. Positive: честность и покрытие 100%
+#  3. Positive: honesty and 100% coverage
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_oof_rmse_approx_mean_fold_rmse_equal_folds():
-    """Равные фолды: RMSE_oof ≈ среднему RMSE по фолдам.
+    """Equal folds: RMSE_oof ≈ the average fold RMSE.
 
-    Точное соотношение — pooled: oof² = mean(MSE_fold) (фолды равного размера);
-    приближённо (в пределах ~5%) RMSE_oof ≈ mean(RMSE_fold) — утверждение из
-    issue #62.
+    The exact relation is pooled: oof² = mean(MSE_fold) (equal fold sizes);
+    approximately (within ~5%) RMSE_oof ≈ mean(RMSE_fold) — the statement
+    from the issue.
     """
     X, y = _noisy_regression(n=60, p=6, seed=7)
     trainer = ModelTrainer(
@@ -244,20 +249,20 @@ def test_oof_rmse_approx_mean_fold_rmse_equal_folds():
         fold_mse.append(float(mean_squared_error(y_te, preds)))
 
     assert trainer.oof_score_ is not None
-    # Точное pooled-соотношение для равных фолдов.
+    # Exact pooled relation for equal folds.
     assert trainer.oof_score_ == pytest.approx(
         float(np.sqrt(np.mean(fold_mse))), rel=1e-9
     )
-    # Приближённое равенство среднему RMSE по фолдам (Jensen: mean ≤ pooled).
+    # Approximate equality with the mean fold RMSE (Jensen: mean ≤ pooled).
     assert trainer.oof_score_ == pytest.approx(float(np.mean(fold_rmse)), rel=0.05)
 
 
 def test_oof_no_leakage_matches_manual_reconstruction():
-    """Отсутствие утечки: каждая строка предсказана моделью без её участия.
+    """No leakage: each row is predicted by a model that never saw it.
 
-    Ручной per-fold пересчёт (те же сплиты/клоны) даёт в точности тот же
-    OOF-вектор, что собрал тренер, — по построению это честные out-of-fold
-    предсказания, а не train-предсказания.
+    The manual per-fold recomputation (same splits/clones) yields exactly the
+    same OOF vector the trainer collected — these are honest out-of-fold
+    predictions by construction, not train predictions.
     """
     X, y = _noisy_regression(n=48, p=5, seed=11)
     trainer = ModelTrainer(
@@ -273,13 +278,13 @@ def test_oof_no_leakage_matches_manual_reconstruction():
     np.testing.assert_allclose(
         np.asarray(trainer.oof_predictions_), manual, rtol=1e-9, atol=1e-9
     )
-    # Полное покрытие: ни одна строка не осталась без честного предсказания.
+    # Full coverage: no row is left without an honest prediction.
     assert np.isfinite(manual).all()
     assert trainer.oof_coverage_ == 1.0
 
 
 def test_oof_predictions_aligned_with_pandas_index():
-    """Нестандартный pandas-индекс сохраняется в y_pred_oof (требование 2)."""
+    """A non-standard pandas index is preserved in y_pred_oof."""
     X, y = _noisy_regression(n=40, p=4, seed=13)
     X = X.copy()
     X.index = np.arange(len(X)) * 10 + 5
@@ -297,7 +302,7 @@ def test_oof_predictions_aligned_with_pandas_index():
     assert isinstance(trainer.oof_predictions_, pd.Series)
     assert list(trainer.oof_predictions_.index) == list(X.index)
     assert trainer.oof_coverage_ == 1.0
-    # Выравнивание: значение для строки с меткой idx совпадает с ручным OOF.
+    # Alignment: the value for the row labeled idx matches the manual OOF.
     manual = _manual_oof(X, y, trainer, method="k_fold", n_folds=4, seed=3)
     np.testing.assert_allclose(
         trainer.oof_predictions_.to_numpy(), manual, rtol=1e-9, atol=1e-9
@@ -305,7 +310,7 @@ def test_oof_predictions_aligned_with_pandas_index():
 
 
 def test_oof_numpy_input_positional_alignment():
-    """numpy-вход без индекса: y_pred_oof — np.ndarray, выровненный по позиции."""
+    """numpy input without an index: y_pred_oof is an np.ndarray, aligned by position."""
     X_np, y_np = _noisy_regression(n=50, p=4, seed=5)
     X_np = X_np.to_numpy()
     y_np = y_np.to_numpy()
@@ -321,13 +326,13 @@ def test_oof_numpy_input_positional_alignment():
     assert isinstance(trainer.oof_predictions_, np.ndarray)
     assert trainer.oof_coverage_ == 1.0
     assert trainer.oof_predictions_.shape == (len(X_np),)
-    # Позиционное выравнивание против ручного OOF на тех же numpy-массивах.
+    # Positional alignment against the manual OOF on the same numpy arrays.
     manual = _manual_oof(X_np, y_np, trainer, method="k_fold", n_folds=4, seed=5)
     np.testing.assert_allclose(trainer.oof_predictions_, manual, rtol=1e-9, atol=1e-9)
 
 
 def test_oof_loo_full_coverage():
-    """LOO: каждая строка — отдельный фолд, покрытие 100%."""
+    """LOO: each row is its own fold; coverage is 100%."""
     X, y = _noisy_regression(n=12, p=3, seed=17)
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="loo"
@@ -341,16 +346,17 @@ def test_oof_loo_full_coverage():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  4. Negative: детекция утечки
+#  4. Negative: leakage detection
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_leaky_in_sample_predictions_detected():
-    """Утечка детектируется: in-sample RMSE заметно ниже честного RMSE_oof.
+    """Leakage is detected: the in-sample RMSE is noticeably below the honest RMSE_oof.
 
-    Финальный пайплайн обучен на 100% строк — каждая строка «предсказана»
-    моделью, видевшей её. Такой (утечный) OOF-вектор систематически отличается
-    от честного и даёт оптимистично низкую ошибку на зашумлённых данных.
+    The final pipeline is trained on 100% of the rows, so every row is
+    'predicted' by a model that saw it. Such a (leaky) OOF vector
+    systematically differs from the honest one and yields an optimistically
+    low error on noisy data.
     """
     X, y = _noisy_regression(n=80, p=12, seed=0, noise=4.0)
     trainer = ModelTrainer(
@@ -361,14 +367,14 @@ def test_leaky_in_sample_predictions_detected():
         random_state=42,
     ).fit(X, y)
 
-    leaky_preds = trainer.predict(X)  # модель видела все строки
+    leaky_preds = trainer.predict(X)  # the model saw all rows
     leaky_rmse = float(np.sqrt(mean_squared_error(y, leaky_preds)))
 
     assert trainer.oof_score_ is not None
-    # Честный OOF-вектор не совпадает с утечным (построчно).
+    # The honest OOF vector does not match the leaky one (row by row).
     honest = np.asarray(trainer.oof_predictions_)
     assert not np.allclose(honest, leaky_preds, rtol=1e-6, atol=1e-6)
-    # In-sample ошибка систематически ниже честной out-of-fold.
+    # The in-sample error is systematically lower than the honest out-of-fold one.
     assert leaky_rmse < trainer.oof_score_
     assert trainer.oof_score_ - leaky_rmse > 0.5
 
@@ -379,7 +385,7 @@ def test_leaky_in_sample_predictions_detected():
 
 
 def test_oof_unequal_fold_sizes_pooled_rmse_exact():
-    """Неравные фолды: конкатенация не «разъезжается»; pooled-RMSE точен."""
+    """Unequal folds: the concatenation stays aligned; pooled-RMSE is exact."""
     rng = np.random.RandomState(3)
     n = 11
     X = pd.DataFrame(rng.randn(n, 3))
@@ -417,10 +423,10 @@ def test_oof_unequal_fold_sizes_pooled_rmse_exact():
 
 
 def test_oof_train_test_split_partial_coverage_warning(caplog):
-    """train_test_split: OOF покрывает только валидационную часть (ограничение).
+    """train_test_split: OOF covers only the validation part (a limitation).
 
-    Ограничение явно задокументировано в логе; RMSE_oof считается по покрытому
-    подмножеству и равен RMSE на hold-out части.
+    The limitation is explicitly documented in the log; RMSE_oof is computed
+    over the covered subset and equals the RMSE on the hold-out part.
     """
     X, y = _noisy_regression(n=80, p=5, seed=21)
     with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
@@ -437,7 +443,7 @@ def test_oof_train_test_split_partial_coverage_warning(caplog):
     assert trainer.oof_score_ is not None
     assert "covers only the validation part" in caplog.text
 
-    # Точность: RMSE_oof = RMSE по покрытой (валидационной) части hold-out.
+    # Accuracy: RMSE_oof = RMSE over the covered (validation) hold-out part.
     manual = _manual_oof(
         X, y, trainer, method="train_test_split", n_folds=5, seed=9, test_size=0.25
     )
@@ -448,12 +454,12 @@ def test_oof_train_test_split_partial_coverage_warning(caplog):
 
 
 def test_oof_small_data_kfold_fallback_to_split(caplog):
-    """N меньше числа фолдов: k_fold откатывается на train_test_split.
+    """N smaller than the fold count: k_fold falls back to train_test_split.
 
-    OOF покрывает только hold-out часть; обучение завершается штатно.
-    Предупреждение опирается на фактически применённый метод (ревью PR #31):
-    логируется ограничение «covers only the validation part», а не вводящий
-    в заблуждение лог «non-finite».
+    OOF covers only the hold-out part; training completes normally. The
+    warning refers to the method actually applied: the 'covers only the
+    validation part' limitation is logged rather than a misleading
+    'non-finite' log.
     """
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(6, 2))
@@ -472,13 +478,13 @@ def test_oof_small_data_kfold_fallback_to_split(caplog):
     assert trainer.oof_coverage_ is not None
     assert 0.0 < trainer.oof_coverage_ < 1.0
     assert trainer.oof_score_ is not None
-    # Fallback-ветка: ограничение OOF задокументировано честно (не «non-finite»).
+    # Fallback branch: the OOF limitation is documented honestly (not 'non-finite').
     assert "covers only the validation part" in caplog.text
     assert "excluded from RMSE_oof" not in caplog.text
 
 
 def test_oof_nan_predictions_reduced_coverage(caplog):
-    """NaN в предсказаниях фолда: строка исключается, RMSE_oof по остальным."""
+    """NaN in fold predictions: the row is excluded; RMSE_oof over the rest."""
     rng = np.random.RandomState(4)
     X = pd.DataFrame(rng.randn(24, 2), columns=["f0", "f1"])
     y = pd.Series(X["f0"] * 2.0 + rng.randn(24) * 0.5)
@@ -490,7 +496,7 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
     trainer.categorical_features = []
     trainer.numerical_features = ["f0", "f1"]
     preprocessor = trainer._build_preprocessor(["f0", "f1"])
-    # Модель возвращает NaN для строк с f0 > 0.5 (белый ящик).
+    # The model returns NaN for rows with f0 > 0.5 (white box).
     model = _ConstRegressor(value=1.5, nan_condition=lambda Xa: Xa[:, 0] > 0.5)
 
     with (
@@ -515,15 +521,15 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
 
 
 def test_oof_nan_in_y_reduced_coverage(caplog):
-    """NaN в y: строки с нефинитным таргетом исключаются из RMSE_oof.
+    """NaN in y: rows with a non-finite target are excluded from RMSE_oof.
 
-    Edge case из issue #62: метрика по вектору не должна «разъезжаться» —
-    пары с NaN в y_true маскируются, обучение завершается штатно.
+    Edge case: the vector metric must stay aligned — pairs with NaN in
+    y_true are masked and training completes normally.
     """
     rng = np.random.RandomState(6)
     X = pd.DataFrame(rng.randn(24, 2), columns=["f0", "f1"])
     y = pd.Series(X["f0"] * 2.0 + rng.randn(24) * 0.5)
-    y.iloc[[3, 9, 17]] = np.nan  # три строки с нефинитным таргетом
+    y.iloc[[3, 9, 17]] = np.nan  # three rows with a non-finite target
 
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="k_fold", n_folds=3
@@ -532,7 +538,7 @@ def test_oof_nan_in_y_reduced_coverage(caplog):
     trainer.categorical_features = []
     trainer.numerical_features = ["f0", "f1"]
     preprocessor = trainer._build_preprocessor(["f0", "f1"])
-    # Модель игнорирует y при fit — белый ящик для изоляции OOF-канала.
+    # The model ignores y during fit — a white box isolating the OOF channel.
     model = _ConstRegressor(value=1.5)
 
     with (
@@ -556,7 +562,7 @@ def test_oof_nan_in_y_reduced_coverage(caplog):
 
 
 def test_oof_very_small_n_warning(caplog):
-    """Очень малый N (2–5): предупреждение о высокой дисперсии OOF-оценки."""
+    """A very small N (2–5): a warning about the OOF estimate's high variance."""
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
 
@@ -574,7 +580,7 @@ def test_oof_very_small_n_warning(caplog):
 
 
 def test_oof_duplicate_index_falls_back_to_positional():
-    """Невосстановимый индекс (дубликаты): выравнивание по позиции (ndarray)."""
+    """Unrecoverable index (duplicates): alignment falls back to position (ndarray)."""
     X, y = _noisy_regression(n=30, p=3, seed=23)
     X = X.copy()
     X.index = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14]
@@ -589,7 +595,7 @@ def test_oof_duplicate_index_falls_back_to_positional():
         random_state=5,
     ).fit(X, y)
 
-    # Неуникальный индекс — серия была бы неоднозначной; отдаём ndarray по позиции.
+    # A non-unique index would be ambiguous as a Series; return an ndarray by position.
     assert isinstance(trainer.oof_predictions_, np.ndarray)
     assert trainer.oof_coverage_ == 1.0
     manual = _manual_oof(X, y, trainer, method="k_fold", n_folds=3, seed=5)
@@ -597,12 +603,12 @@ def test_oof_duplicate_index_falls_back_to_positional():
 
 
 def test_oof_multiindex_supported():
-    """MultiIndex-индекс: fit() не падает, метки строк сохраняются.
+    """A MultiIndex: fit() does not fail and the row labels are preserved.
 
-    Регрессия блокера ревью PR #31: ``Index.hasnans`` не определён для
-    MultiIndex (NotImplementedError), из-за чего ``fit()`` падал целиком,
-    хотя на main такой вход работал. Теперь уникальный MultiIndex сохраняется
-    в ``y_pred_oof`` как ``pd.Series``.
+    Regression for a review blocker: ``Index.hasnans`` is undefined for
+    MultiIndex (NotImplementedError), which crashed the whole ``fit()``
+    even though such input worked on main. Now a unique MultiIndex is
+    preserved in ``y_pred_oof`` as a ``pd.Series``.
     """
     idx = pd.MultiIndex.from_product(
         [["a", "b"], [1, 2, 3]], names=["grp", "num"]
@@ -633,15 +639,15 @@ def test_oof_multiindex_supported():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  6. Обратная совместимость и состояние
+#  6. Backward compatibility and state
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_oof_is_separate_channel_val_score_unchanged():
-    """OOF — отдельный канал: val_score/additional_scores не затрагиваются.
+    """OOF is a separate channel: val_score/additional_scores are not affected.
 
-    Для score-метрики (r2) RMSE_oof — это именно RMSE (>= 0), а не R²; значения
-    каналов не смешиваются.
+    For a score metric (r2), RMSE_oof is exactly an RMSE (>= 0), not an R²;
+    the channel values do not mix.
     """
     X, y = _noisy_regression(n=50, p=4, seed=29)
     trainer = ModelTrainer(
@@ -656,9 +662,9 @@ def test_oof_is_separate_channel_val_score_unchanged():
     assert trainer.val_score is not None and trainer.val_score <= 1.0
     assert "rmse" in trainer.additional_scores
     assert trainer.oof_score_ is not None and trainer.oof_score_ >= 0
-    # RMSE_oof не равен R²-каналу и не является train-скором.
+    # RMSE_oof is not the R² channel and is not a train score.
     assert trainer.oof_score_ != trainer.val_score
-    # OOF-RMSE согласован с каналом дополнительной метрики на полном векторе.
+    # OOF-RMSE is consistent with the additional-metric channel over the full vector.
     assert trainer.oof_score_ == pytest.approx(
         float(
             np.sqrt(mean_squared_error(y, np.asarray(trainer.oof_predictions_)))
@@ -668,11 +674,11 @@ def test_oof_is_separate_channel_val_score_unchanged():
 
 
 def test_oof_vector_persisted_in_candidate_result(tmp_path):
-    """OOF-вектор — часть результата оценки кандидата: сохраняется в артефакте.
+    """The OOF vector is part of the candidate evaluation result: it is persisted.
 
-    Требование 4 issue #62: diversity/unique контуры аудита (T2) считаются по
-    y_pred_oof, поэтому вектор (не только метрика) обязан переживать
-    сериализацию вместе с pandas-индексом строк.
+    The diversity/unique audit circuits compute over y_pred_oof, so the
+    vector (not only the metric) must survive serialization together with
+    the pandas row index.
     """
     X, y = _noisy_regression(n=45, p=4, seed=31)
     X = X.copy()
@@ -693,7 +699,7 @@ def test_oof_vector_persisted_in_candidate_result(tmp_path):
 
     assert loaded.oof_score_ == pytest.approx(trainer.oof_score_, rel=1e-12)
     assert loaded.oof_coverage_ == trainer.oof_coverage_
-    # Вектор сохранён как часть результата: тип и индекс строк целы.
+    # The vector is persisted as part of the result: its type and row index survive.
     assert isinstance(loaded.oof_predictions_, pd.Series)
     assert list(loaded.oof_predictions_.index) == list(X.index)
     np.testing.assert_allclose(
@@ -705,14 +711,14 @@ def test_oof_vector_persisted_in_candidate_result(tmp_path):
 
 
 def test_oof_reset_between_fits():
-    """Повторный fit сбрасывает OOF-состояние (нет остатков прошлого обучения)."""
+    """A repeat fit resets the OOF state (no leftovers from a previous training)."""
     X, y = _noisy_regression(n=50, p=4, seed=37)
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="k_fold", n_folds=4
     ).fit(X, y)
     assert trainer.oof_score_ is not None
 
-    # Неудачный fit не должен оставлять OOF-значения от предыдущего обучения.
+    # A failed fit must not leave OOF values from the previous training.
     with patch(
         "configurable_automl_engine.trainer.get_scorer_object",
         return_value=lambda est, Xv, yv: (_ for _ in ()).throw(RuntimeError("boom")),

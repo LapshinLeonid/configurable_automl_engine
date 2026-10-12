@@ -1,15 +1,15 @@
 """
-Data Oversampling Engine: Интеллектуальный расширитель выборок.
-Класс обеспечивает балансировку классов и синтетическое увеличение объема данных
-с сохранением типизации и поддержкой многопоточности.
+Data Oversampling Engine: An intelligent sample expander.
+The class provides class balancing and synthetic data expansion
+while preserving data types and supporting multithreading.
 
-Ключевые возможности:
-    1. Multi-Algorithm: Поддержка Random, SMOTE и ADASYN.
-    2. Noise Injection: Опциональное наложение Гауссовского шума для регуляризации.
-    3. Type Integrity: Механизм `_restore_dtypes` предотвращает деградацию типов
-       (например, каст Categorical -> Object) после преобразований в Numpy.
-    4. Thread-Safety: Использование RLock для
-    безопасного доступа к параметрам в Pipeline.
+Key features:
+    1. Multi-Algorithm: Supports Random, SMOTE and ADASYN.
+    2. Noise Injection: Optional Gaussian noise for regularization.
+    3. Type Integrity: The `_restore_dtypes` mechanism prevents type
+       degradation (e.g. Categorical -> Object cast) after Numpy transforms.
+    4. Thread-Safety: Uses an RLock for
+    safe access to parameters inside a Pipeline.
 """
 
 import logging
@@ -29,18 +29,18 @@ logger = logging.getLogger(__name__)
 
 
 def _is_categorical_col(s: pd.Series) -> bool:
-    """Определить, следует ли колонку считать категориальной.
+    """Determine whether a column should be considered categorical.
 
-    Правило детекции:
-    * Числовой dtype (``is_numeric_dtype``) → колонка числовая.
-    * Нечисловой dtype (``object``/``category``/``string``):
-        - если все значения являются 'чистым числовым' (``pd.to_numeric`` без NaN)
-          → колонка трактуется как числовая (крайний случай 'числовых строк',
-          например ID ``'10'``, ``'20'``);
-        - иначе (есть хотя бы одно нечисловое значение) → категориальная.
+    Detection rule:
+    * Numeric dtype (``is_numeric_dtype``) -> the column is numeric.
+    * Non-numeric dtype (``object``/``category``/``string``):
+        - if all values are 'purely numeric' (``pd.to_numeric`` without NaN)
+          -> the column is treated as numeric (the 'numeric strings' edge
+          case, e.g. IDs ``'10'``, ``'20'``);
+        - otherwise (at least one non-numeric value) -> categorical.
 
     Returns:
-        bool: ``True``, если колонка категориальная.
+        bool: ``True`` if the column is categorical.
     """
     if is_numeric_dtype(s):
         return False
@@ -52,19 +52,19 @@ def _is_categorical_col(s: pd.Series) -> bool:
 
 
 class DataOversampler(BaseSampler):  # type: ignore[misc]
-    """Увеличить объем данных и сбалансировать классы.
+    """Increase the data volume and balance the classes.
 
-    Интеллектуальный оберточный класс над imbalanced-learn, адаптированный для Pandas.
-    Поддерживает автоматическую обработку категориальных признаков (SMOTENC) и
-    сохранение целостности типов после синтетической генерации.
+    An intelligent wrapper class around imbalanced-learn adapted for Pandas.
+    It supports automatic handling of categorical features (SMOTENC) and
+    type integrity preservation after synthetic generation.
 
     Attributes:
-        multiplier (float | int): Коэффициент увеличения выборки.
-        algorithm (str): Название алгоритма ('random', 'smote', 'adasyn').
-        add_noise (bool): Флаг добавления Гауссовского шума к числовым признакам.
-        balance (bool): Флаг приведения всех классов к размеру мажоритарного.
-        random_state (int | None): Зерно генератора случайных чисел.
-        noise_level (float): Интенсивность шума относительно стандартного отклонения.
+        multiplier (float | int): The sample multiplier.
+        algorithm (str): The algorithm name ('random', 'smote', 'adasyn').
+        add_noise (bool): Whether to add Gaussian noise to numeric features.
+        balance (bool): Whether to bring all classes up to the majority class size.
+        random_state (int | None): Random seed.
+        noise_level (float): Noise intensity relative to the standard deviation.
     """
 
     _sampling_type = "over-sampling"
@@ -88,7 +88,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         random_state: int | None = 42,
         noise_level: float = 0.01,
     ):
-        # Сохраняем ровно то, что пришло, чтобы потом работал clone
+        # Store exactly what was passed so that clone works later
         self.multiplier = multiplier
         self.algorithm = algorithm
         self.add_noise = add_noise
@@ -100,110 +100,110 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         self._lock = threading.RLock()
 
     def _strategy(self, y: pd.Series, multiplier: float) -> dict[Any, int]:
-        """Рассчитать целевое количество экземпляров для каждого класса.
+        """Compute the target number of instances for each class.
         Args:
-            y (pd.Series): Вектор целевой переменной.
-            multiplier (float): Коэффициент масштабирования.
+            y (pd.Series): The target variable vector.
+            multiplier (float): The scaling factor.
         Returns:
-            Dict[Any, int]: Словарь, где ключи — метки классов,
-                а значения — итоговое количество строк.
+            Dict[Any, int]: A dictionary where keys are class labels
+                and values are the final number of rows.
         """
         counts = Counter(y)
-        # Если включена балансировка, подтягиваем все классы к мажоритарному,
-        # умноженному на коэффициент. Если выключена — пропорционально множим каждый.
+        # If balancing is enabled, bring all classes up to the majority class,
+        # multiplied by the factor. Otherwise scale each class proportionally.
         if self.balance:
-            # База — самый крупный класс
+            # Base is the largest class
             base_size = max(counts.values())
             return {cls: ceil(base_size * multiplier) for cls in counts}
 
-        # Важно: imbalanced-learn ожидает итоговое количество экземпляров
-        # (Total), а не дельту
+        # Important: imbalanced-learn expects the final number of instances
+        # (Total), not the delta
         return {cls: ceil(cnt * multiplier) for cls, cnt in counts.items()}
 
     def _add_gaussian_noise(
         self, df: pd.DataFrame, exclude_cols: list[str] | None = None
     ) -> pd.DataFrame:
-        """Добавить Гауссов шум в числовые столбцы и числовые элементы столбцов object.
-        Применяет векторизированное вычисление шума для повышения производительности.
-        Для нечисловых колонок пытается выполнить безопасное приведение типов.
+        """Add Gaussian noise to numeric columns and numeric elements of object columns.
+        Applies vectorized noise computation for performance.
+        For non-numeric columns it attempts a safe type conversion.
         Args:
-            df (pd.DataFrame): Набор данных для модификации.
-            exclude_cols (list[str] | None): Колонки, к которым НЕ нужно применять шум
-                (например, ordinal-закодированные категориальные).
+            df (pd.DataFrame): The dataset to modify.
+            exclude_cols (list[str] | None): Columns to which noise should NOT be applied
+                (e.g. ordinal-encoded categorical ones).
         Returns:
-            pd.DataFrame: Набор данных с добавленным шумом.
+            pd.DataFrame: The dataset with added noise.
         """
         rng = np.random.default_rng(self.random_state)
 
-        # 1. Сначала принудительно конвертируем "числовые строки" в числа
-        # Это критично для pandas 3.0 и StringDtype
+        # 1. First force-convert "numeric strings" to numbers
+        # This is critical for pandas 3.0 and StringDtype
         potential_cols = df.select_dtypes(include=["object", "string"]).columns
         for col in potential_cols:
-            # Если в колонке '1.0', она станет float.
-            # Если 'abc', останется object/string.
+            # If the column contains '1.0', it becomes float.
+            # If it contains 'abc', it stays object/string.
             converted = pd.to_numeric(df[col], errors="coerce")
             if not converted.isna().any():
                 df[col] = converted
-        # 2. Теперь выбираем ВСЕ числовые колонки
-        # (включая те, что только что конвертировали)
+        # 2. Now select ALL numeric columns
+        # (including the ones just converted)
         numeric_cols = df.select_dtypes(include=[np.number]).columns
 
-        # Исключаем колонки, которые не нужно шуметь (например, ordinal-encoded)
+        # Exclude columns that must not be noised (e.g. ordinal-encoded)
         if exclude_cols:
             numeric_cols = numeric_cols.difference(exclude_cols)
 
         if not numeric_cols.empty:
-            # Векторизованное добавление шума для всех числовых колонок сразу
+            # Vectorized noise addition for all numeric columns at once
             stds = df[numeric_cols].std().fillna(1.0).replace(0, 1.0).to_numpy()
             scales = stds * self.noise_level
             noise = rng.normal(0, 1.0, size=(len(df), len(numeric_cols))) * scales
 
-            # Используем .to_numpy() для скорости
+            # Use .to_numpy() for speed
             df[numeric_cols] = df[numeric_cols].to_numpy() + noise
         return df
 
     def __getstate__(self) -> dict[str, Any]:
-        # Копируем состояние объекта
+        # Copy the object state
         state = self.__dict__.copy()
-        # Удаляем несериализуемый объект lock по правильному имени
+        # Remove the non-serializable lock object under its correct name
         if "_lock" in state:
             del state["_lock"]
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        # Восстанавливаем состояние
+        # Restore the state
         self.__dict__.update(state)
-        # Заново инициализируем lock после десериализации
+        # Re-initialize the lock after deserialization
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
-    #  Пункт 1: Переопределение fit_resample для обхода _check_X_y       #
+    #  Section 1: Overriding fit_resample to bypass _check_X_y            #
     # ------------------------------------------------------------------ #
 
     def fit_resample(self, X: Any, y: Any, **params: Any) -> tuple[Any, Any]:
-        """Выполнить ресемплирование, минуя _check_X_y (validate_data).
+        """Perform resampling while bypassing _check_X_y (validate_data).
 
-        Родительский ``BaseSampler.fit_resample`` → ``SamplerMixin.fit_resample``
-        вызывает ``_check_X_y`` → ``validate_data`` → ``check_array`` c
-        ``dtype=np.float64``, что приводит к ``ValueError`` на нечисловых данных
-        ДО того, как выполняется кастомная проверка в ``_fit_resample``.
+        The parent ``BaseSampler.fit_resample`` -> ``SamplerMixin.fit_resample``
+        calls ``_check_X_y`` -> ``validate_data`` -> ``check_array`` with
+        ``dtype=np.float64``, which raises a ``ValueError`` on non-numeric data
+        BEFORE the custom validation in ``_fit_resample`` runs.
 
-        Данный override безопасно конвертирует X/y и делегирует напрямую
-        в ``_fit_resample``, сохраняя всю существующую логику валидации
-        (поддержка алгоритма, корректность multiplier, тип данных и т.д.).
+        This override safely converts X/y and delegates directly to
+        ``_fit_resample``, preserving all existing validation logic
+        (algorithm support, multiplier validity, data types, etc.).
 
         Args:
-            X: Признаки (DataFrame, ndarray или array-like).
-            y: Целевая переменная.
-            **params: Дополнительные параметры (принимаются для совместимости
-                с sklearn-интерфейсом, но не используются; передаются напрямую
-                в _fit_resample, который их не поддерживает).
+            X: Features (DataFrame, ndarray or array-like).
+            y: The target variable.
+            **params: Additional parameters (accepted for compatibility with the
+                sklearn interface, but unused; they are passed directly to
+                _fit_resample, which does not support them).
 
         Returns:
-            tuple: (X_resampled, y_resampled) — результаты ресемплинга.
+            tuple: (X_resampled, y_resampled) — the resampling results.
         """
-        # Базовая конвертация для совместимости с _fit_resample
-        # Разреженные матрицы не конвертируем — это сломает формат
+        # Basic conversion for compatibility with _fit_resample
+        # Sparse matrices are not converted — this would break the format
         is_sparse = hasattr(X, "tocsr")
         if not is_sparse and not isinstance(X, (pd.DataFrame, np.ndarray)):
             X = np.asarray(X)
@@ -212,26 +212,26 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return self._fit_resample(X, y)
 
     # ------------------------------------------------------------------ #
-    #  Пункт 2: Реализация защищенного метода _fit_resample              #
+    #  Section 2: Implementation of the protected _fit_resample method    #
     # ------------------------------------------------------------------ #
 
     def _restore_dtypes(
         self, df: pd.DataFrame, original_dtypes: pd.Series
     ) -> pd.DataFrame:
-        """Восстановить типы данных с адаптацией под внесенные изменения.
+        """Restore data types with adaptation to the changes made.
 
-        Логика восстановления:
-        1. Categorical: Восстанавливаются строго (включая категории и порядок).
-        2. Integer: Если add_noise=True, кастуются в Float (32/64) для сохранения
-           дробной части шума. Если шума нет — возвращается исходный Integer.
-        3. Object: Принудительно возвращаются к object для исключения каста в float/int
-           библиотеками генерации.
-        4. Floating: Сохраняют исходную точность (32/64 бита).
+        Restoration logic:
+        1. Categorical: Restored strictly (including categories and order).
+        2. Integer: If add_noise=True, cast to Float (32/64) to preserve the
+           fractional part of the noise. Without noise — the original Integer is returned.
+        3. Object: Forced back to object to prevent a cast to float/int
+           by the generation libraries.
+        4. Floating: Original precision is preserved (32/64 bits).
         Args:
-            df (pd.DataFrame): Преобразованный набор данных.
-            original_dtypes (pd.Series): Серия с исходными типами (`X.dtypes`).
+            df (pd.DataFrame): The transformed dataset.
+            original_dtypes (pd.Series): A series with the original types (`X.dtypes`).
         Returns:
-            pd.DataFrame: Набор данных с восстановленной типизацией.
+            pd.DataFrame: The dataset with restored typing.
         """
         if original_dtypes is None:
             return df
@@ -240,28 +240,28 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             if col not in df.columns:
                 continue
             try:
-                # 1. Если это категория — восстанавливаем строго
-                #  (важно для памяти и логики)
+                # 1. If it is a category — restore it strictly
+                #  (important for memory and logic)
                 if isinstance(dtype, pd.CategoricalDtype):
                     df[col] = df[col].astype(dtype)
 
-                # 2. Если это объект (строки) — возвращаем тип object
+                # 2. If it is an object (strings) — return the object type
                 elif (
                     dtype is object or isinstance(dtype, np.dtype) and dtype.kind == "O"
                 ):
-                    # Если добавили шум и колонка стала числовой,
-                    # то НЕ откатываем к object
+                    # If noise was added and the column became numeric,
+                    # then do NOT roll back to object
                     if self.add_noise and is_numeric_dtype(df[col]):
                         pass
                     else:
                         df[col] = df[col].astype(object)
 
-                # 3. Если это целое число:
+                # 3. If it is an integer:
                 elif np.issubdtype(dtype, np.integer):
-                    # Если добавляли шум, НЕЛЬЗЯ возвращать int, иначе потеряем точность
+                    # If noise was added, we MUST NOT return int, or precision is lost
                     if not self.add_noise:
-                        # Используем pd.to_numeric для безопасности
-                        # и приводим к исходному int-типу
+                        # Use pd.to_numeric for safety
+                        # and cast to the original int type
                         converted = pd.to_numeric(df[col], errors="coerce")
                         df[col] = (
                             converted.astype(dtype)
@@ -269,18 +269,18 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                             else converted
                         )
                     else:
-                        # ВЫБОР ТОЧНОСТИ: если был int64 -> float64, иначе float32
+                        # PRECISION CHOICE: int64 -> float64, otherwise float32
                         if dtype == np.int64:
                             df[col] = df[col].astype(np.float64)
                         else:
                             df[col] = df[col].astype(np.float32)
-                # 4. Если исходный тип — число с плавающей точкой (float32 или float64):
+                # 4. If the original type is a floating point (float32 or float64):
                 elif np.issubdtype(dtype, np.floating):
-                    # Сохраняем исходный тип
-                    # (если был float64 -> будет float64, если float32 -> float32)
+                    # Preserve the original type
+                    # (if it was float64 -> float64, if float32 -> float32)
                     df[col] = df[col].astype(dtype)
 
-                # 5. В остальных случаях (float и т.д.) пробуем вернуть исходный тип
+                # 5. Otherwise (float, etc.) try to return the original type
                 else:
                     if not pd.Series(df[col]).isna().any():
                         df[col] = df[col].astype(dtype)
@@ -289,44 +289,44 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return df
 
     def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
-        """Выполнить ресемплирование данных согласно выбранному алгоритму.
-        Автоматически переключается на SMOTENC, если обнаружены нечисловые колонки.
-        Для ADASYN реализован прозрачный fallback к SMOTENC при наличии категорий,
-        так как оригинальный ADASYN работает только с числовыми данными.
-        Для SMOTE/ADASYN: Динамический расчет k_neighbors.
-        Предотвращает ValueError, если количество объектов в миноритарном классе
-        меньше стандартного значения (5). Устанавливается как min(5, n_samples-1).
+        """Resample the data according to the selected algorithm.
+        Automatically switches to SMOTENC if non-numeric columns are detected.
+        For ADASYN a transparent fallback to SMOTENC is implemented when categories are present,
+        because the original ADASYN only works with numeric data.
+        For SMOTE/ADASYN: Dynamic calculation of k_neighbors.
+        Prevents ValueError if the number of samples in the minority class
+        is smaller than the standard value (5). It is set as min(5, n_samples-1).
         Args:
-            X (Any): Признаки (массив, DataFrame или разреженная матрица).
-            y (Any): Целевая переменная.
+            X (Any): Features (array, DataFrame or sparse matrix).
+            y (Any): The target variable.
         Returns:
-            tuple: Кортеж (X_resampled, y_resampled). При разреженном входе
-            (выход hashing-кодирования) X_resampled остаётся
-            ``scipy.sparse.csr_matrix`` для алгоритма 'random' и становится
-            плотным для SMOTE/ADASYN (они требуют dense).
+            tuple: A tuple (X_resampled, y_resampled). For a sparse input
+            (output of hashing encoding) X_resampled stays a
+            ``scipy.sparse.csr_matrix`` for the 'random' algorithm and becomes
+            dense for SMOTE/ADASYN (they require dense data).
         Raises:
 
-            ValueError: Если `multiplier` < 1 или алгоритм не поддерживается.
-            TypeError: Если в данных отсутствуют числовые признаки (необходимы для
-                       вычисления расстояний в SMOTE/ADASYN) или при попытке
-                       добавить шум в разреженную матрицу.
+            ValueError: If `multiplier` < 1 or the algorithm is not supported.
+            TypeError: If the data has no numeric features (needed for
+                       distance computation in SMOTE/ADASYN) or when
+                       attempting to add noise to a sparse matrix.
         """
         with self._lock:
-            # Сохраняем результат в атрибут с подчеркиванием
-            # (стандарт sklearn)
+            # Store the result in an attribute with a leading underscore
+            # (sklearn standard)
             self.multiplier_ = float(self.multiplier)
-            # Используем локальную переменную вместо изменения self.algorithm
+            # Use a local variable instead of mutating self.algorithm
             algo_local = self.algorithm.lower().replace(" ", "_")
 
         if self.multiplier_ < 1:
             raise ValueError("multiplier must be >= 1")
 
-        # Проверка на разреженные матрицы (scipy.sparse)
+        # Check for sparse matrices (scipy.sparse)
         is_sparse = hasattr(X, "tocsr")
 
-        # Разреженные матрицы несовместимы с добавлением шума.
-        # Наложение Гауссовского шума делает все нулевые элементы ненулевыми,
-        # что приводит к взрывному росту потребления памяти (денерилизации).
+        # Sparse matrices are incompatible with noise addition.
+        # Adding Gaussian noise turns every zero element into a non-zero one,
+        # which causes an explosive growth of memory usage (densification).
         if self.add_noise and is_sparse:
             raise TypeError(
                 f"The '{self.algorithm}' algorithm with "
@@ -336,17 +336,17 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             )
 
         try:
-            # Стандартная валидация входных данных
+            # Standard input data validation
             y_validated = np.asarray(y)
             y_s = pd.Series(y_validated)
 
-            # Разреженная ветка (выход hashing-кодирования, csr_matrix):
-            # данные уже числовые, категориальных колонок нет (OrdinalEncoder
-            # не нужен), а pd.DataFrame(csr) создал бы молчаливый мусорный
-            # объект-датафрейм. RandomOverSampler работает со sparse напрямую
-            # (эффективно по памяти); SMOTE/ADASYN математически требуют
-            # плотные матрицы расстояний, поэтому для них разреженный вход
-            # конвертируется в dense (как было до перевода hashing на sparse).
+            # Sparse branch (output of hashing encoding, csr_matrix):
+            # the data is already numeric, there are no categorical columns
+            # (OrdinalEncoder is not needed) and pd.DataFrame(csr) would create a
+            # silently garbage dataframe object. RandomOverSampler works with sparse
+            # directly (memory-efficient); SMOTE/ADASYN mathematically require
+            # dense distance matrices, so for them a sparse input
+            # is converted to dense (as before the hashing switch to sparse).
             if is_sparse:
                 strategy_sparse = self._strategy(y_s, self.multiplier_)
                 if algo_local == "random":
@@ -369,16 +369,16 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
             X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
 
-            # Определяем индексы нечисловых колонок для SMOTENC.
-            # Колонки с числовыми строками ("1.0", "2.0") не считаются
-            # категориальными — они будут сконвертированы в числа.
+            # Determine the indices of non-numeric columns for SMOTENC.
+            # Columns with numeric strings ("1.0", "2.0") are not
+            # categorical — they will be converted to numbers.
             cat_features_idx = [
                 i
                 for i, col in enumerate(X_df.columns)
                 if _is_categorical_col(X_df[col])
             ]
             cat_cols = [X_df.columns[i] for i in cat_features_idx]
-            # Проверка на отсутствие числовых колонок для SMOTE/ADASYN
+            # Check for the absence of numeric columns for SMOTE/ADASYN
             if algo_local in ["smote", "adasyn"] and len(cat_features_idx) == len(
                 X_df.columns
             ):
@@ -386,19 +386,19 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     f"{self.algorithm.upper()} requires at least one numeric feature."
                 )
 
-            # Для всех алгоритмов в текущей логике передаем полный набор данных
+            # For all algorithms the full dataset is passed in the current logic
             X_to_resample = X_df
 
-            # Определение алгоритма и выполнение ресемплирования
+            # Determine the algorithm and perform resampling
             strategy = self._strategy(y_s, self.multiplier_)
 
             if algo_local == "random":
                 sampler = RandomOverSampler(
                     sampling_strategy=strategy, random_state=self.random_state
                 )
-                # Кодирование категориальных признаков для прохождения
-                # _check_X_y внутри RandomOverSampler, который принудительно
-                # конвертирует DataFrame в float.
+                # Encode categorical features to pass
+                # _check_X_y inside RandomOverSampler, which forcibly
+                # converts the DataFrame to float.
                 ordinal_encoder: OrdinalEncoder | None = None
                 if cat_features_idx:
                     ordinal_encoder = OrdinalEncoder(
@@ -410,12 +410,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     )
             else:
                 ordinal_encoder = None
-                # Случай SMOTE / ADASYN
+                # SMOTE / ADASYN case
                 counts = Counter(y_s)
 
-                # Для SMOTE/ADASYN: Динамический расчет k_neighbors.
-                # Предотвращает ValueError, если объектов в классе меньше
-                # чем дефолтные 5 соседей.
+                # For SMOTE/ADASYN: Dynamic calculation of k_neighbors.
+                # Prevents ValueError if a class has fewer
+                # than the default 5 neighbors.
                 min_samples = min(counts.values())
                 k_neighbors = max(1, min(5, min_samples - 1))
 
@@ -435,7 +435,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                         )
                 elif algo_local == "adasyn":
                     if cat_features_idx:
-                        # ВАЖНО: Логируем замену, чтобы не вводить в заблуждение
+                        # IMPORTANT: Log the substitution to avoid misleading
                         logger.warning(
                             "ADASYN does not support categorical columns. "
                             "Automatically falling back to SMOTENC for data integrity."
@@ -456,19 +456,19 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     raise ValueError(f"Unsupported algorithm: {algo_local}")
 
             X_res_raw, y_res = sampler.fit_resample(X_to_resample, y_s)
-            # Приводим к DF, так как SMOTE может вернуть numpy
+            # Cast to DF since SMOTE may return numpy
             X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
 
-            # Единая точка наложения шума для всех алгоритмов
-            # Категориальные колонки исключаются из шума, чтобы не сломать
-            # последующее декодирование через OrdinalEncoder.inverse_transform
+            # A single point of noise application for all algorithms
+            # Categorical columns are excluded from the noise so as not to break
+            # the subsequent decoding via OrdinalEncoder.inverse_transform
             if self.add_noise:
                 noise_exclude = cat_cols if ordinal_encoder is not None else None
                 X_res_df = self._add_gaussian_noise(
                     X_res_df, exclude_cols=noise_exclude
                 )
 
-            # Декодирование категориальных колонок обратно (только для random)
+            # Decode categorical columns back (only for random)
             if ordinal_encoder is not None:
                 X_res_df[cat_cols] = ordinal_encoder.inverse_transform(
                     X_res_df[cat_cols]
@@ -488,17 +488,17 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             raise
 
     def oversample(self, data: pd.DataFrame, target: str | None = None) -> pd.DataFrame:
-        """Увеличить выборку в формате DataFrame с сохранением метаданных.
+        """Increase the sample as a DataFrame while preserving metadata.
         Args:
-            data (pd.DataFrame): Исходный DataFrame.
-            target (str, optional): Имя целевой колонки. Если None, возможен только
-                алгоритм 'random' (дублирование всей выборки). Для SMOTE/ADASYN
-                и балансировки параметр обязателен.
+            data (pd.DataFrame): The source DataFrame.
+            target (str, optional): The name of the target column. If None, only the
+                'random' algorithm is possible (duplicating the whole sample). For SMOTE/ADASYN
+                and balancing the parameter is required.
         Returns:
-            pd.DataFrame: Результирующий DataFrame с новыми строками.
+            pd.DataFrame: The resulting DataFrame with new rows.
         Raises:
-            ValueError: Если `target` не указан при включенной балансировке
-                или использовании алгоритмов SMOTE/ADASYN.
+            ValueError: If `target` is not specified with balancing enabled
+                or when using SMOTE/ADASYN algorithms.
         """
 
         try:
@@ -508,8 +508,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             if algo_local not in valid_algorithms:
                 raise ValueError(f"Unsupported algorithm: {self.algorithm}")
 
-            # ПРОВЕРКА: Если таргет не указан, нельзя использовать балансировку
-            # или синтетические алгоритмы
+            # CHECK: If the target is not specified, balancing
+            # or synthetic algorithms cannot be used
             if target is None and (self.balance or algo_local in ("smote", "adasyn")):
                 raise ValueError(
                     f"The 'target' parameter must be specified for "
@@ -518,12 +518,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     f"oversampling of the entire dataset is possible."
                 )
 
-            # РАННЯЯ ПРОВЕРКА: Для SMOTE/ADASYN все признаки должны быть
-            # числовыми (хотя бы один). Эта проверка выбрасывает TypeError
-            # ДО вызова self.fit_resample(), предотвращая падение imblearn
-            # с неинформативным ValueError на этапе _check_X_y.
-            # Используем ту же детекцию категорий, что и в _fit_resample,
-            # чтобы 'числовые строки' не считались категориальными.
+            # EARLY CHECK: For SMOTE/ADASYN all features must be
+            # numeric (at least one). This check raises a TypeError
+            # BEFORE the call to self.fit_resample(), preventing imblearn from
+            # crashing with an uninformative ValueError at the _check_X_y stage.
+            # Use the same category detection as in _fit_resample,
+            # so that 'numeric strings' are not treated as categorical.
             feature_cols = [col for col in data.columns if col != target]
             if algo_local in ("smote", "adasyn") and all(
                 _is_categorical_col(data[col]) for col in feature_cols
@@ -532,13 +532,13 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     f"{self.algorithm.upper()} requires at least one numeric feature."
                 )
 
-            # Если таргет не указан, создаем фиктивный вектор для
-            # совместимости с API imblearn,
-            # что позволяет использовать 'random' оверсемплинг
-            # для всей таблицы без разметки.
+            # If the target is not specified, create a dummy vector for
+            # compatibility with the imblearn API,
+            # which allows 'random' oversampling
+            # of the whole table without labels.
             if target is None and algo_local == "random":
                 X = data
-                # Создаем фиктивный y
+                # Create a dummy y
                 y_array = np.zeros(len(data), dtype=int)
                 if len(y_array) > 1:
                     y_array[0] = 1
@@ -549,12 +549,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
             original_dtypes = X.dtypes
             target_dtype = y.dtype
-            # 3. Вызываем публичный метод ресемплирования
+            # 3. Call the public resampling method
             X_res_np, y_res_np = self.fit_resample(X, y)
-            # 4. Сборка итогового DataFrame
+            # 4. Assemble the final DataFrame
             res_df = pd.DataFrame(X_res_np, columns=X.columns)
 
-            # 5. Восстановление типов данных (Фикс потери типов)
+            # 5. Restore data types (fix for lost types)
             res_df = self._restore_dtypes(res_df, original_dtypes)
 
             if target is not None:
@@ -568,7 +568,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
 
 # ------------------------------------------------------------------ #
-#  Функциональные интерфейсы                                         #
+#  Functional interfaces                                             #
 # ------------------------------------------------------------------ #
 
 
@@ -582,19 +582,19 @@ def oversample(
     random_state: int | None = 42,
     noise_level: float = 0.01,
 ) -> pd.DataFrame:
-    """Увеличить объем DataFrame через интерфейс функционального вызова.
-    Создает временный экземпляр `DataOversampler` и применяет его к данным.
+    """Increase the DataFrame volume through a functional interface.
+    Creates a temporary `DataOversampler` instance and applies it to the data.
     Args:
-        data (pd.DataFrame): Входной набор данных.
-        multiplier (float): Множитель строк. По умолчанию 1.0.
-        algorithm (str): Алгоритм ('random', 'smote', 'adasyn'). По умолчанию 'random'.
-        add_noise (bool): Флаг добавления шума. По умолчанию False.
-        balance (bool, optional): Флаг балансировки классов. По умолчанию False.
-        target (str, optional): Имя целевого столбца. По умолчанию None.
-        random_state (int, optional): Зерно случайности. По умолчанию 42.
-        noise_level (float): Уровень шума. По умолчанию 0.01.
+        data (pd.DataFrame): The input dataset.
+        multiplier (float): The row multiplier. Defaults to 1.0.
+        algorithm (str): The algorithm ('random', 'smote', 'adasyn'). Defaults to 'random'.
+        add_noise (bool): Whether to add noise. Defaults to False.
+        balance (bool, optional): Whether to balance classes. Defaults to False.
+        target (str, optional): The name of the target column. Defaults to None.
+        random_state (int, optional): The randomness seed. Defaults to 42.
+        noise_level (float): The noise level. Defaults to 0.01.
     Returns:
-        pd.DataFrame: Расширенный набор данных.
+        pd.DataFrame: The expanded dataset.
     """
     sampler = DataOversampler(
         multiplier=multiplier,

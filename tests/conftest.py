@@ -12,7 +12,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 @pytest.fixture
 def test_config(tmp_path: Path) -> Config:
     """
-    Создает объект Config с изолированными путями во временной директории.
+    Creates a Config object with isolated paths in a temporary directory.
     """
     model_dir = tmp_path / "models"
     log_dir = tmp_path / "logs"
@@ -37,8 +37,8 @@ def test_config(tmp_path: Path) -> Config:
 @pytest.fixture
 def small_dataset():
     """
-    Фикстура для быстрого тестирования базовой логики.
-    Создает минимальный набор данных: 10 строк, 3 признака.
+    Fixture for quickly testing the basic logic.
+    Creates a minimal dataset: 10 rows, 3 features.
     """
     return create_mock_df(rows=10, cols=3, target="target")
 
@@ -46,7 +46,7 @@ def small_dataset():
 @pytest.fixture
 def regression_dataset():
     """
-    Фикстура для тестирования алгоритмов регрессии или обучения.
-    Создает расширенный набор данных: 200 строк, 10 признаков.
+    Fixture for testing regression algorithms or training.
+    Creates an expanded dataset: 200 rows, 10 features.
     """
     return create_mock_df(rows=200, cols=10, target="yield_score")

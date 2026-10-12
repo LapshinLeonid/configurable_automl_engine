@@ -48,7 +48,7 @@ def _effective_size_train_test(n_total: int, test_size: float) -> int:
     ``test_size`` follows sklearn semantics: a fraction in [0.01, 0.99] is
     clamped to that range (to avoid producing 0 or ``n_total``, which would
     crash most training algorithms); an integer value is interpreted as the
-    absolute number of test rows (issue #24: the 'auto' resolution via
+    absolute number of test rows (the 'auto' resolution via
     ``choose_validation_method`` returns an integer test size).
 
     Args:
@@ -62,12 +62,12 @@ def _effective_size_train_test(n_total: int, test_size: float) -> int:
         return max(1 if n_total >= 2 else 0, n_total - test_size)
     safe_test_size = max(0.01, min(0.99, test_size))
     effective_size = math.floor(n_total * (1 - safe_test_size))
-    # Гарантируем, что если есть хотя бы 2 строки, то Neff будет минимум 1
+    # Ensure that if there are at least 2 rows, Neff is at least 1
     return max(1 if n_total >= 2 else 0, effective_size)
 
 
 def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
-    """Deterministically select a validation method for regression (v6).
+    """Deterministically select a validation method for regression.
 
     The decision is based on ``n_samples`` (N, number of observations) and
     ``n_features`` (P, number of features). The returned dict describes the
@@ -87,7 +87,7 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
        and k=3 otherwise. A low-confidence warning is attached when N < 2*P.
     3. **Fixed 5-fold CV** for mid-size samples (200 <= N < 50000) with a good
        N/P ratio (N >= 10*P): a single hold-out of max(30, 2*P) rows compares
-       models on too few points (issue #99) — on 30 rows the RMSE spread is
+       models on too few points — on 30 rows the RMSE spread is
        about ±13% while the confidence corridor is δ=0.15, so the winner is
        selected almost at random and the Sanity Gate OOF vector covers only
        ~3% of the data. 5-fold CV scores every row exactly once (100% OOF
@@ -334,31 +334,31 @@ def get_effective_train_size(
     n_features: int | None = None,
 ) -> int:
     """
-    Рассчитывает количество строк, которые модель фактически "видит" во время fit()
-    в рамках одной итерации HPO или кросс-валидации.
-    Rationale: Это значение критично для динамического клиппинга пространства поиска
-    (например, n_neighbors в KNN не может быть больше количества обучающих примеров).
+    Calculate the number of rows the model actually "sees" during fit()
+    within a single HPO iteration or cross-validation.
+    Rationale: This value is critical for dynamic search space clipping
+    (e.g. n_neighbors in KNN cannot exceed the number of training examples).
 
     Args:
-        n_total: Общее количество строк в датасете.
-        strategy: Стратегия валидации (k_fold, loo, train_test_split, auto).
-        n_folds: Количество фолдов (используется для k_fold).
-        test_size: Доля теста (используется для train_test_split).
-        n_features: Количество признаков P. Требуется для стратегии 'auto'
-            (используется в choose_validation_method).
+        n_total: Total number of rows in the dataset.
+        strategy: Validation strategy (k_fold, loo, train_test_split, auto).
+        n_folds: Number of folds (used for k_fold).
+        test_size: Test size fraction (used for train_test_split).
+        n_features: Number of features P. Required for the 'auto' strategy
+            (used in choose_validation_method).
 
     Returns:
-        int: Эффективный размер обучающей выборки.
+        int: Effective training sample size.
     """
     if n_total <= 0:
         return 0
 
-    # Приведение строки к Enum, если необходимо
+    # Convert the string to an Enum if necessary
     if isinstance(strategy, str):
         try:
             strategy = ValidationStrategy(strategy)
         except ValueError:
-            # Если передана неизвестная стратегия, возвращаем n_total как fallback
+            # If an unknown strategy is passed, return n_total as fallback
             raise ValueError(f"Unknown validation strategy string: '{strategy}'")
 
     if strategy == ValidationStrategy.auto:
@@ -366,7 +366,7 @@ def get_effective_train_size(
 
     if strategy == ValidationStrategy.k_fold:
         # Neff = floor(N_total * (1 - 1/k))
-        # k не может быть меньше 2 для k_fold
+        # k cannot be less than 2 for k_fold
         k = max(2, n_folds)
         return math.floor(n_total * (1 - 1 / k))
 

@@ -1,8 +1,8 @@
-"""Unit tests for adaptive preprocessing presets (issue #18).
+"""Unit tests for adaptive preprocessing presets.
 
-Покрывают автоматический выбор пресета предобработки по классу алгоритма,
-таблицу соответствия, переопределение пресета пользователем (FR-5) и
-поведение для незарегистрированных алгоритмов (граничный случай).
+Cover automatic selection of the preprocessing preset by algorithm class, the
+mapping table, preset override by the user, and the behavior for
+unregistered algorithms (edge case).
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from configurable_automl_engine.preprocessing_presets import (
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  FR-1 / AC-1: автоматический выбор корректного пресета по алгоритму
+#  Automatic selection of the correct preset by algorithm
 # ──────────────────────────────────────────────────────────────────────────
 def test_scale_sensitive_models_get_standard_scaling():
-    """Масштабо-чувствительные модели: scaling='standard', imputation='mean'."""
+    """Scale-sensitive models: scaling='standard', imputation='mean'."""
     for algo in [
         "elasticnet",
         "sgdregressor",
@@ -45,7 +45,7 @@ def test_scale_sensitive_models_get_standard_scaling():
 
 
 def test_trees_get_no_scaling():
-    """Деревья и ансамбли: масштабирование не применяется (AC-3)."""
+    """Trees and ensembles: scaling is not applied."""
     for algo in [
         "decision_tree",
         "random_forest",
@@ -61,7 +61,7 @@ def test_trees_get_no_scaling():
 
 
 def test_glm_skewed_gets_robust_preprocessing():
-    """GLM со скошенными распределениями: median + robust (AC-5)."""
+    """GLM with skewed distributions: median + robust."""
     for algo in ["poissonregressor", "gammaregressor", "tweedieregressor", "glm"]:
         preset = resolve_preprocessing_preset(algo)
         assert preset.algorithm_class == AlgorithmClass.GLM_SKEWED
@@ -70,7 +70,7 @@ def test_glm_skewed_gets_robust_preprocessing():
 
 
 def test_univariate_algorithms_get_no_scaling():
-    """Одномерные алгоритмы: без масштабирования (нестандартная предобработка)."""
+    """Univariate algorithms: no scaling (non-standard preprocessing)."""
     preset = resolve_preprocessing_preset("isotonic_regression")
     assert preset.algorithm_class == AlgorithmClass.UNIVARIATE
     assert preset.scaling == "none"
@@ -78,17 +78,17 @@ def test_univariate_algorithms_get_no_scaling():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Индикаторы пропусков (issue #56)
+#  Missing-value indicators
 # ──────────────────────────────────────────────────────────────────────────
 def test_missing_indicators_disabled_for_univariate_algorithms():
-    """Строго одномерные алгоритмы (isotonic) несовместимы с колонками-
-    индикаторами пропусков (входной контракт — ровно один признак)."""
+    """Strictly univariate algorithms (isotonic) are incompatible with missing-value
+    indicator columns (the input contract is exactly one feature)."""
     assert requires_missing_indicator("isotonic_regression") is False
     assert requires_missing_indicator("isotonic") is False
 
 
 def test_missing_indicators_enabled_for_all_other_algorithms():
-    """Для остальных алгоритмов индикаторы пропусков включены."""
+    """Missing-value indicators are enabled for all other algorithms."""
     for algo in AVAILABLE_ALGORITHMS:
         if ALGORITHM_CLASS_MAPPING[normalize_algorithm(algo)] is AlgorithmClass.UNIVARIATE:
             continue
@@ -96,13 +96,13 @@ def test_missing_indicators_enabled_for_all_other_algorithms():
 
 
 def test_missing_indicators_unknown_algorithm_rejected():
-    """Неизвестный алгоритм отклоняется той же явной ошибкой, что и пресет."""
+    """An unknown algorithm is rejected with the same explicit error as the preset."""
     with pytest.raises(ValueError, match="Unknown algorithm"):
         requires_missing_indicator("custom_model_2026")
 
 
 def test_every_supported_algorithm_resolves_to_a_preset():
-    """Для каждого поддерживаемого алгоритма выбирается корректный пресет (AC-1)."""
+    """A correct preset is selected for every supported algorithm."""
     for algo in AVAILABLE_ALGORITHMS:
         preset = resolve_preprocessing_preset(algo)
         assert isinstance(preset, PreprocessingPreset)
@@ -111,13 +111,13 @@ def test_every_supported_algorithm_resolves_to_a_preset():
 
 
 def test_all_canonical_algorithms_registered_in_mapping():
-    """Каждый канонический алгоритм из реестра имеет класс в таблице (FR-2)."""
+    """Every canonical algorithm in the registry has a class in the mapping."""
     for algo in AVAILABLE_ALGORITHMS:
         assert normalize_algorithm(algo) in ALGORITHM_CLASS_MAPPING, algo
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  AC-2: одинаковые классы → одинаковые пресеты; разные классы → разные
+#  Same classes → same presets; different classes → different
 # ──────────────────────────────────────────────────────────────────────────
 def test_same_class_same_preset():
     assert resolve_preprocessing_preset("ridge") == resolve_preprocessing_preset(
@@ -132,26 +132,26 @@ def test_same_class_same_preset():
 
 
 def test_different_classes_different_presets():
-    """Алгоритмы разных классов получают различную предобработку (AC-2)."""
+    """Algorithms of different classes get different preprocessing."""
     trees = resolve_preprocessing_preset("random_forest")
     sensitive = resolve_preprocessing_preset("ridge")
     glm = resolve_preprocessing_preset("gammaregressor")
 
     assert trees.scaling != sensitive.scaling
-    assert glm.imputation_strategy == trees.imputation_strategy  # median у обоих
+    assert glm.imputation_strategy == trees.imputation_strategy  # median for both
     assert glm.scaling != trees.scaling
     assert glm.imputation_strategy != sensitive.imputation_strategy
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  FR-5 / AC-7: явное переопределение пресета
+#  Explicit preset override
 # ──────────────────────────────────────────────────────────────────────────
 def test_partial_override_keeps_automatic_values():
-    """Частичное переопределение меняет только указанные поля."""
+    """A partial override changes only the specified fields."""
     preset = resolve_preprocessing_preset("rf", {"scaling": "standard"})
     assert preset.algorithm_class == AlgorithmClass.TREES
-    assert preset.scaling == "standard"  # переопределено
-    assert preset.imputation_strategy == "median"  # осталось автовыбором
+    assert preset.scaling == "standard"  # overridden
+    assert preset.imputation_strategy == "median"  # left as the automatic choice
 
 
 def test_full_override_replaces_all_fields():
@@ -187,17 +187,17 @@ def test_override_invalid_type_rejected():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Граничные случаи
+#  Edge cases
 # ──────────────────────────────────────────────────────────────────────────
 def test_unknown_algorithm_rejected():
-    """Неизвестный алгоритм (опечатка) отклоняется явной ошибкой,
-    а не молча получает default-пресет."""
+    """An unknown algorithm (typo) is rejected with an explicit error,
+    instead of silently receiving the default preset."""
     with pytest.raises(ValueError, match="Unknown algorithm.*custom_model_2026"):
         resolve_preprocessing_preset("custom_model_2026")
 
 
 def test_unknown_algorithm_error_lists_available():
-    """Сообщение об ошибке содержит список доступных алгоритмов."""
+    """The error message contains the list of available algorithms."""
     with pytest.raises(ValueError) as excinfo:
         resolve_preprocessing_preset("nonsense_algo")
     message = str(excinfo.value)
@@ -207,8 +207,8 @@ def test_unknown_algorithm_error_lists_available():
 
 
 def test_supported_but_unregistered_algorithm_uses_default(monkeypatch):
-    """Граничный случай issue #18: поддерживаемый алгоритм без явной
-    регистрации в таблице соответствия получает пресет по умолчанию."""
+    """Edge case: a supported algorithm without an explicit
+    registration in the mapping table receives the default preset."""
     from configurable_automl_engine import preprocessing_presets as pp
 
     mapping = dict(pp.ALGORITHM_CLASS_MAPPING)
@@ -222,7 +222,7 @@ def test_supported_but_unregistered_algorithm_uses_default(monkeypatch):
 
 
 def test_aliases_are_resolved():
-    """Алиасы алгоритмов раскрываются в канонические имена."""
+    """Algorithm aliases are resolved to canonical names."""
     assert resolve_preprocessing_preset("rf") == resolve_preprocessing_preset(
         "random_forest"
     )
@@ -238,7 +238,7 @@ def test_aliases_are_resolved():
 
 
 def test_preset_string_repr_for_logging():
-    """Строковое представление пресета содержит все ключевые поля (AC-9)."""
+    """The string representation of the preset contains all key fields."""
     text = str(resolve_preprocessing_preset("ridge"))
     assert "scale_sensitive" in text
     assert "imputation_strategy='mean'" in text
@@ -246,6 +246,6 @@ def test_preset_string_repr_for_logging():
 
 
 def test_presets_are_immutable():
-    """Каждый класс имеет собственный экземпляр пресета (без общего мутабельного состояния)."""
+    """Each class has its own preset instance (no shared mutable state)."""
     classes = list(AlgorithmClass)
     assert len({id(PRESET_BY_CLASS[c]) for c in classes}) == len(classes)

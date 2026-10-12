@@ -2,17 +2,17 @@
   "$defs": {
     "AlgoCfg": {
       "additionalProperties": false,
-      "description": "Техническая конфигурация конкретного ML-алгоритма в пайплайне.\n\nХранит настройки включения алгоритма, переопределенные пространства\nпоиска и пути к программным модулям тренера и тюнера.\nAttributes:\n    enable (bool): Флаг участия алгоритма в текущем эксперименте.\n    limit_hyperparameters (bool): Режим сокращенного пространства поиска.\n    hyperparameters (Dict | None): Кастомные границы параметров,\n        перекрывающие значения по умолчанию.\n    tuner (str): Dotted-path к модулю оптимизатора.\n    trainer_module (str): Dotted-path к реализации обучения модели.",
+      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, overridden search spaces,\nand paths to the trainer and tuner modules.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Reduced search-space mode.\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.\n    tuner (str): Dotted path to the optimizer module.\n    trainer_module (str): Dotted path to the model training implementation.",
       "properties": {
         "enable": {
           "default": true,
-          "description": "Использовать ли данный алгоритм в пайплайне AutoML",
+          "description": "Whether to use this algorithm in the AutoML pipeline",
           "title": "Enable",
           "type": "boolean"
         },
         "limit_hyperparameters": {
           "default": false,
-          "description": "Ограничить гиперпараметры пространства поиска",
+          "description": "Limit the hyperparameters of the search space",
           "title": "Limit Hyperparameters",
           "type": "boolean"
         },
@@ -29,7 +29,7 @@
             }
           ],
           "default": null,
-          "description": "Ключи должны соответствовать допустимым гиперпараметрам алгоритма: параметрам конструктора sklearn-оценщика (включая legacy-имена из LEGACY_PARAM_MAPPINGS). Источник истины — models.get_allowed_hyperparameters.",
+          "description": "Keys must correspond to the algorithm's allowed hyperparameters: the constructor parameters of the sklearn estimator (including legacy names from LEGACY_PARAM_MAPPINGS). The source of truth is models.get_allowed_hyperparameters.",
           "title": "Hyperparameters"
         },
         "preprocessing": {
@@ -42,7 +42,7 @@
             }
           ],
           "default": null,
-          "description": "Явное переопределение пресета предобработки признаков для данного алгоритма (FR-5). Задаётся частично или полностью: 'imputation_strategy' ('mean'|'median') и/или 'scaling' ('standard'|'robust'|'none'). Имеет приоритет над автоматическим выбором по классу алгоритма. None — автоматический выбор."
+          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
         },
         "tuner": {
           "anyOf": [
@@ -54,7 +54,7 @@
             }
           ],
           "default": "configurable_automl_engine.tuner",
-          "description": "Путь к модулю тюнера для оптимизации гиперпараметров",
+          "description": "Path to the tuner module for hyperparameter optimization",
           "title": "Tuner"
         },
         "trainer_module": {
@@ -67,7 +67,7 @@
             }
           ],
           "default": "configurable_automl_engine.trainer",
-          "description": "Dotted-path к модулю, содержащему класс `ModelTrainer`(например, 'configurable_automl_engine.trainer').",
+          "description": "Dotted path to the module containing the `ModelTrainer` class(for example, 'configurable_automl_engine.trainer').",
           "title": "Trainer Module"
         }
       },
@@ -379,7 +379,7 @@
       "type": "string"
     },
     "FloatSpace": {
-      "description": "Распределение для чисел с плавающей точкой: [min, max, 'float', step?].",
+      "description": "Distribution for floating-point numbers: [min, max, 'float', step?].",
       "properties": {
         "type": {
           "enum": [
@@ -420,11 +420,11 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "Общие настройки процесса AutoML, валидации и параллелизма.\n\nЦентральный узел управления экспериментом, отвечающий за выбор\nметрик, стратегий оценки качества (Cross-Validation / Hold-out)\nи распределение вычислительных ресурсов.\nAttributes:\n    comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.\n    additional_metrics (List[ComparisonMetric]): Дополнительные информационные\n        метрики, рассчитываемые для финальной модели тем же методом валидации,\n        что и сравнение моделей (hold-out/CV, а не train-скор).\n    path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.\n    serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).\n    log_to_file (Path | None): Файл для записи логов работы движка.\n    phases (List[HPOPhaseCfg]): Последовательность шагов пайплайна:\n        фазы HPO ('all_algorithms' / 'refine') и явные шаги отбора\n        ('select'); последняя фаза обязана быть select с output: winner.\n    validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).\n    n_folds (int): Количество разбиений для кросс-валидации.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования\n        категориальных признаков. По умолчанию 'one_hot'.\n    parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).\n    max_workers (int | None): Лимит потоков или процессов.\n    parallel_mode (str): Технический режим исполнения ('threads' или 'processes').\n    feature_selection (FeatureSelectionCfg): Настройки сокращения пространства\n        признаков. По умолчанию mode='disabled' — отбор признаков не применяется.",
+      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models.\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n    validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).\n    n_folds (int): Number of splits for cross-validation.\n    categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy\n        for categorical features. Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (by algorithms/folds).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.",
       "properties": {
         "comparison_metric": {
           "default": "r2",
-          "description": "Метрика для сравнения моделей и выбора лучшей (например, r2, rmse, accuracy)",
+          "description": "Metric for comparing models and choosing the best one (for example, r2, rmse, accuracy)",
           "enum": [
             "nrmse",
             "rmse",
@@ -437,7 +437,7 @@
           "type": "string"
         },
         "additional_metrics": {
-          "description": "Список дополнительных метрик качества, значения которых рассчитываются для финальной обученной модели тем же методом валидации, что и сравнение моделей (hold-out скоринг либо среднее по фолдам CV), и возвращаются вместе с результатами обучения (ключ 'additional_metrics'). Метрики носят исключительно информационный характер: они не участвуют в оптимизации гиперпараметров, сравнении моделей и выборе победителя. Допустимые значения совпадают с набором значений comparison_metric. Дубликаты в списке игнорируются (значение считается один раз), а совпадение с основной метрикой сравнения (включая алиасы, например rmse ↔ neg_root_mean_squared_error) исключается из списка — её значение и так возвращается как 'score'. Оба правила применяются на этапе валидации конфигурации, поэтому итоговый список в general.additional_metrics может отличаться от исходного, переданного пользователем.",
+          "description": "List of additional quality metrics, whose values are computed for the final trained model with the same validation method used for model comparison (hold-out scoring or the mean over CV folds), and are returned together with the training results (key 'additional_metrics'). The metrics are purely informational: they do not take part in hyperparameter optimization, model comparison, or winner selection. Valid values are the same as the set of comparison_metric values. Duplicates in the list are ignored (the value is counted once), and a match with the main comparison metric (including aliases, for example rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value is already returned as 'score'. Both rules are applied during config validation, so the resulting list in general.additional_metrics may differ from the one originally passed by the user.",
           "items": {
             "enum": [
               "nrmse",
@@ -454,7 +454,7 @@
         },
         "path_to_model": {
           "default": "model.pkl",
-          "description": "Путь для сохранения/загрузки результирующей обученной модели",
+          "description": "Path for saving/loading the resulting trained model",
           "format": "path",
           "title": "Path To Model",
           "type": "string"
@@ -462,7 +462,7 @@
         "serialization_format": {
           "$ref": "#/$defs/SerializationFormat",
           "default": "pickle",
-          "description": "Формат сериализации модели (pickle, joblib и т.д.)"
+          "description": "Model serialization format (pickle, joblib, etc.)"
         },
         "log_to_file": {
           "anyOf": [
@@ -475,11 +475,11 @@
             }
           ],
           "default": null,
-          "description": "Путь к файлу логов. Если не указан,логи выводятся только в консоль",
+          "description": "Path to the log file. If not set, logs are printed to the console only",
           "title": "Log To File"
         },
         "phases": {
-          "description": "Список последовательных фаз оптимизации гиперпараметров",
+          "description": "List of sequential hyperparameter optimization phases",
           "items": {
             "$ref": "#/$defs/HPOPhaseCfg"
           },
@@ -489,17 +489,17 @@
         "validation_strategy": {
           "$ref": "#/$defs/ValidationStrategy",
           "default": "auto",
-          "description": "Стратегия оценки качества:k-fold кросс-валидация, фиксированный hold-out,LOO или автоматический выбор"
+          "description": "Quality evaluation strategy:k-fold cross-validation, fixed hold-out,LOO, or automatic selection"
         },
         "n_folds": {
           "default": 5,
-          "description": "Количество блоков (фолдов) для кросс-валидации.Используется только если validation_strategy = 'k_fold'",
+          "description": "Number of blocks (folds) for cross-validation.Used only when validation_strategy = 'k_fold'",
           "title": "N Folds",
           "type": "integer"
         },
         "categorical_encoding": {
           "default": "one_hot",
-          "description": "Стратегия кодирования категориальных признаков: 'one_hot' (каждая категория -> отдельный бинарный столбец), 'ordinal' (каждая категориальная колонка -> один числовой столбец с наложенным порядком), 'target' (target encoding со сглаживанием), 'frequency' (частота категории) или 'hashing' (детерминированное хеширование в фиксированное число бинарных колонок). Ordinal кодирование не расширяет число колонок и полезно для линейных моделей, однако навязывает искусственный порядок категориям. Target/frequency/hashing эффективны для колонок высокой кардинальности.",
+          "description": "Encoding strategy for categorical features: 'one_hot' (each category -> a separate binary column), 'ordinal' (each categorical column -> one numeric column with an imposed order), 'target' (target encoding with smoothing), 'frequency' (category frequency) or 'hashing' (deterministic hashing into a fixed number of binary columns). Ordinal encoding does not increase the number of columns and is useful for linear models, but it imposes an artificial order on categories. Target/frequency/hashing are effective for high-cardinality columns.",
           "enum": [
             "one_hot",
             "ordinal",
@@ -521,7 +521,7 @@
             }
           ],
           "default": null,
-          "description": "Порог кардинальности для автоматического режима (>= 0). Колонки с числом уникальных значений строго больше порога кодируются стратегией high_cardinality_encoding, остальные — стратегией categorical_encoding. Должен задаваться вместе с high_cardinality_encoding. None — автоматический режим отключён.",
+          "description": "Cardinality threshold for the automatic mode (>= 0). Columns with a number of unique values strictly greater than the threshold are encoded with the high_cardinality_encoding strategy, the rest — with the categorical_encoding strategy. Must be set together with high_cardinality_encoding. None — the automatic mode is disabled.",
           "title": "High Cardinality Threshold"
         },
         "high_cardinality_encoding": {
@@ -541,19 +541,19 @@
             }
           ],
           "default": null,
-          "description": "Стратегия кодирования для колонок высокой кардинальности (выше high_cardinality_threshold). Должна задаваться вместе с high_cardinality_threshold. None — режим отключён.",
+          "description": "Encoding strategy for high-cardinality columns (above high_cardinality_threshold). Must be set together with high_cardinality_threshold. None — the mode is disabled.",
           "title": "High Cardinality Encoding"
         },
         "hashing_n_components": {
           "default": 16,
-          "description": "Число бинарных колонок на одну категориальную колонку при кодировании 'hashing' (>= 1). Управляет размерностью выходных признаков: рост числа признаков не зависит от кардинальности колонки.",
+          "description": "Number of binary columns per categorical column for 'hashing' encoding (>= 1). Controls the dimensionality of the output features: the growth in the number of features does not depend on the column cardinality.",
           "minimum": 1,
           "title": "Hashing N Components",
           "type": "integer"
         },
         "target_encoding_smoothing": {
           "default": 20.0,
-          "description": "Параметр сглаживания (m) target encoding (>= 0). При m=0 используется чистое среднее целевой переменной по категории; при больших m редкие категории приближаются к глобальному среднему.",
+          "description": "Smoothing parameter (m) of target encoding (>= 0). At m=0 the pure mean of the target variable per category is used; at large m rare categories approach the global mean.",
           "minimum": 0,
           "title": "Target Encoding Smoothing",
           "type": "number"
@@ -568,13 +568,13 @@
             }
           ],
           "default": null,
-          "description": "Fallback-значение target encoding для категорий, отсутствующих в обучающей выборке. None — глобальное среднее целевой переменной.",
+          "description": "Fallback value of target encoding for categories not present in the training set. None — the global mean of the target variable.",
           "title": "Target Encoding Fallback"
         },
         "parallel_strategy": {
           "$ref": "#/$defs/ParallelStrategy",
           "default": "algorithms",
-          "description": "Стратегия распараллеливания.Сейчас поддерживается только 'algorithms' (каждый алгоритм в своем потоке/процессе)."
+          "description": "Parallelization strategy.Currently only 'algorithms' is supported (each algorithm in its own thread/process)."
         },
         "max_workers": {
           "anyOf": [
@@ -586,12 +586,12 @@
             }
           ],
           "default": null,
-          "description": "Максимальное количество потоков/процессов.Если null, используется количество ядер CPU",
+          "description": "Maximum number of threads/processes.If null, the number of CPU cores is used",
           "title": "Max Workers"
         },
         "parallel_mode": {
           "default": "threads",
-          "description": "Режим многозадачности: потоки (для I/O задач) или процессы (для CPU-интенсивных вычислений)",
+          "description": "Concurrency mode: threads (for I/O-bound tasks) or processes (for CPU-intensive computations)",
           "enum": [
             "threads",
             "processes"
@@ -610,7 +610,7 @@
             }
           ],
           "default": null,
-          "description": "Глобальный таймаут на всю фазу HPO (в секундах). Если None — используется значение по умолчанию 3600 секунд (1 час). Поддерживается только в режиме parallel_mode='processes', где он жёсткий: зависшие воркеры принудительно завершаются. В режиме parallel_mode='threads' таймауты запрещены и считаются ошибкой конфига (issue #101): исполняющуюся Python-функцию нельзя прервать, поэтому мягкий таймаут не экономит время, а лишь выбрасывает готовые результаты завершившихся алгоритмов.",
+          "description": "Global timeout for the whole HPO phase (in seconds). If None — the default value of 3600 seconds (1 hour) is used. Supported only in parallel_mode='processes', where it is hard: hung workers are forcibly terminated. In parallel_mode='threads' timeouts are forbidden and are a config error: an already running Python function cannot be interrupted, so a soft timeout does not save time and only discards the ready results of completed algorithms.",
           "title": "Phase Timeout"
         },
         "task_timeout": {
@@ -624,20 +624,20 @@
             }
           ],
           "default": null,
-          "description": "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). Если None — используется phase_timeout или глобальный timeout. Поддерживается только в режиме parallel_mode='processes', где он жёсткий. В режиме parallel_mode='threads' таймауты запрещены и считаются ошибкой конфига (issue #101): deadline от момента submit отсчитывает и задачи, простоявшие в очереди, «истекают», ещё не начавшись.",
+          "description": "Timeout for a single task (algorithm) within a phase (in seconds). If None — phase_timeout or the global timeout is used. Counted from the moment the task actually starts, not from the moment it was submitted to the pool: while a task waits in the queue (more algorithms than max_workers), it does not expire before starting. Supported only in parallel_mode='processes', where it is hard. In parallel_mode='threads' timeouts are forbidden and are a config error: an already running Python function cannot be interrupted, so a soft timeout does not save time and only discards the ready results of completed algorithms.",
           "title": "Task Timeout"
         },
         "pruning": {
           "$ref": "#/$defs/PruningCfg",
-          "description": "Настройки ранней остановки (pruning) триалов Optuna. По умолчанию выключены: каждый триал выполняется полностью."
+          "description": "Early stopping (pruning) settings for Optuna trials. Disabled by default: each trial runs to completion."
         },
         "feature_selection": {
           "$ref": "#/$defs/FeatureSelectionCfg",
-          "description": "Настройки сокращения пространства признаков. По умолчанию mode='disabled' — отбор признаков не применяется."
+          "description": "Feature space reduction settings. By default mode='disabled' — feature selection is not applied."
         },
         "sanity_gate": {
           "$ref": "#/$defs/SanityGateCfg",
-          "description": "Пороги и настройки аудита Sanity Gate для select-шагов со strategy: sanity_gate (эпик #61, #74). Секция — опциональный источник порогов (коридор, top_k_candidates, лимиты аудита), а не поведенческий флаг: отбор выполняется только явными select-фазами в general.phases. Наличие секции без sanity-select-шагов валидно"
+          "description": "Thresholds and settings of the Sanity Gate audit for select steps with strategy: sanity_gate. The section is an optional source of thresholds (corridor, top_k_candidates, audit limits), not a behavioral flag: selection is performed only by explicit select phases in general.phases. Having the section without sanity select steps is valid"
         }
       },
       "required": [
@@ -648,23 +648,23 @@
     },
     "HPOPhaseCfg": {
       "additionalProperties": false,
-      "description": "Конфигурация отдельного шага пайплайна (эпик #74).\n\nКласс описывает параметры конкретного шага: фазы HPO\n(``all_algorithms`` / ``refine``) или явного шага отбора (``select``),\nпозволяя выстраивать многоступенчатые стратегии поиска и отбора\n(например: поиск по всем моделям → select с аудитом → дообучение\nфиналистов → финальный select победителя).\n\nAttributes:\n    name (str): Уникальный идентификатор фазы.\n    n_trials (int): Лимит итераций (испытаний) для фаз HPO\n        (``all_algorithms`` / ``refine``). Для ``select`` игнорируется,\n        но поле остаётся обязательным для единообразия схемы.\n    action (str): Тип действия: 'all_algorithms' (поиск по всем\n        алгоритмам), 'refine' (дообучение всего входного множества\n        с warm-start) или 'select' (шаг отбора). Устаревшее значение\n        'refine_winner' удалено (эпик #74): конфиги с ним отвергаются\n        валидацией с подсказкой миграции.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Стратегия\n        select-шага (только для action='select'): ранжирование по\n        CV-скору ('cv_best') или аудит Sanity Gate ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): Что отдаёт\n        select-шаг на выходе (только для action='select'): 'winner' —\n        единственный победитель (терминальный шаг), 'top_k' — топ-K\n        кандидатов, 'pool' — весь коридорный пул финалистов.\n    k (int | None): Количество кандидатов (>= 1) для output='top_k'.\n        Обязателен только при output='top_k'; при output='winner'/'pool'\n        запрещён.",
+      "description": "Configuration of a single pipeline step.\n\nThe class describes the parameters of a specific step: an HPO phase\n(``all_algorithms`` / ``refine``) or an explicit selection step\n(``select``), enabling multi-stage search and selection strategies\n(for example: search across all models → audited select → fine-tuning\nfinalists → final winner select).\n\nAttributes:\n    name (str): Unique phase identifier.\n    n_trials (int): Iteration (trial) limit for HPO phases\n        (``all_algorithms`` / ``refine``). Ignored for ``select``,\n        but the field remains mandatory for schema uniformity.\n    action (str): Action type: 'all_algorithms' (search across all\n        algorithms), 'refine' (fine-tune the whole input set\n        with warm-start) or 'select' (selection step). The legacy value\n        'refine_winner' was removed: configs containing it are rejected\n        by validation with a migration hint.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Select step\n        strategy (only for action='select'): ranking by CV score\n        ('cv_best') or a Sanity Gate audit ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): What the\n        select step returns (only for action='select'): 'winner' — a\n        single winner (terminal step), 'top_k' — the top-K candidates,\n        'pool' — the entire corridor pool of finalists.\n    k (int | None): Number of candidates (>= 1) for output='top_k'.\n        Required only for output='top_k'; forbidden for\n        output='winner'/'pool'.",
       "properties": {
         "name": {
           "default": "phase",
-          "description": "Определенное пользователем название фазы оптимизации (например, 'coarse_search' или 'fine_tuning')",
+          "description": "User-defined name of the optimization phase (for example, 'coarse_search' or 'fine_tuning')",
           "title": "Name",
           "type": "string"
         },
         "n_trials": {
-          "description": "Количество итераций (испытаний) для фаз HPO (all_algorithms / refine). Для action='select' игнорируется",
+          "description": "Number of iterations (trials) for HPO phases (all_algorithms / refine). Ignored for action='select'",
           "minimum": 1,
           "title": "N Trials",
           "type": "integer"
         },
         "action": {
           "default": "all_algorithms",
-          "description": "Действие фазы: 'all_algorithms' — поиск по всем алгоритмам, 'refine' — дообучение всего входного множества с warm-start, 'select' — явный шаг отбора (стратегия strategy, форма выхода output). Устаревшее 'refine_winner' удалено: используйте пару 'select' (cv_best) + 'refine'",
+          "description": "Phase action: 'all_algorithms' — search across all algorithms, 'refine' — fine-tune the whole input set with warm-start, 'select' — explicit selection step (strategy governs the strategy, output the output shape). The legacy 'refine_winner' is removed: use the pair 'select' (cv_best) + 'refine'",
           "enum": [
             "all_algorithms",
             "refine",
@@ -687,7 +687,7 @@
             }
           ],
           "default": null,
-          "description": "Стратегия select-шага (только для action='select'): 'cv_best' — ранжирование по CV-скору, 'sanity_gate' — пул финалистов + аудит ModelSanityGate + ранжирование по RMSE_oof. Для фаз all_algorithms/refine запрещено",
+          "description": "Select step strategy (only for action='select'): 'cv_best' — ranking by CV score, 'sanity_gate' — finalist pool + ModelSanityGate audit + ranking by RMSE_oof. Forbidden for all_algorithms/refine phases",
           "title": "Strategy"
         },
         "output": {
@@ -705,7 +705,7 @@
             }
           ],
           "default": null,
-          "description": "Форма выхода select-шага (только для action='select'): 'winner' — единственный победитель (терминальный шаг), 'top_k' — топ-K кандидатов (требует параметр k), 'pool' — весь коридорный пул финалистов. Для фаз all_algorithms/refine запрещено",
+          "description": "Output shape of the select step (only for action='select'): 'winner' — a single winner (terminal step), 'top_k' — the top-K candidates (requires the k parameter), 'pool' — the entire corridor pool of finalists. Forbidden for all_algorithms/refine phases",
           "title": "Output"
         },
         "k": {
@@ -719,7 +719,7 @@
             }
           ],
           "default": null,
-          "description": "Количество кандидатов (>= 1) для output='top_k'; обязателен только при output='top_k', при output='winner'/'pool' запрещён. Для фаз all_algorithms/refine запрещено",
+          "description": "Number of candidates (>= 1) for output='top_k'; required only for output='top_k', forbidden for output='winner'/'pool'. Forbidden for all_algorithms/refine phases",
           "title": "K"
         }
       },
@@ -730,7 +730,7 @@
       "type": "object"
     },
     "IntSpace": {
-      "description": "Распределение для целых чисел: [min, max, 'int', step?].",
+      "description": "Distribution for integer numbers: [min, max, 'int', step?].",
       "properties": {
         "type": {
           "const": "int",
@@ -777,17 +777,17 @@
     },
     "OversamplingCfg": {
       "additionalProperties": false,
-      "description": "Параметры балансировки классов и синтеза данных.\n\nОбеспечивает конфигурацию методов устранения дисбаланса целевой переменной.\nИспользует механизм псевдонимов (aliases) для маппинга плоских ключей\nYAML в структурированный объект.\nAttributes:\n    enable (bool): Глобальный флаг включения оверсэмплинга.\n    multiplier (float): Целевой коэффициент увеличения выборки.\n    algorithm (OversamplingAlgorithm): Выбранный метод генерации\n        (SMOTE, ADASYN и др.).",
+      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).",
       "properties": {
         "data_oversampling": {
           "default": false,
-          "description": "Флаг включения балансировки данных.Применяется только к обучающей выборке",
+          "description": "Flag enabling data balancing. Applies only to the training set",
           "title": "Data Oversampling",
           "type": "boolean"
         },
         "data_oversampling_multiplier": {
           "default": 1.0,
-          "description": "Во сколько раз увеличить количество примеров миноритарных классов",
+          "description": "How many times to increase the number of minority-class examples",
           "minimum": 1.0,
           "title": "Data Oversampling Multiplier",
           "type": "number"
@@ -795,7 +795,7 @@
         "data_oversampling_algorithm": {
           "$ref": "#/$defs/OversamplingAlgorithm",
           "default": "random",
-          "description": "Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)"
+          "description": "Algorithm for synthesizing new data (Random, SMOTE, ADASYN)"
         }
       },
       "title": "OversamplingCfg",
@@ -810,7 +810,7 @@
     },
     "PreprocessingOverride": {
       "additionalProperties": false,
-      "description": "Явное переопределение пресета предобработки пользователем (FR-5).\n\nЗадаётся частично или полностью: ``None`` в поле означает «оставить\nзначение, выбранное автоматически». Некорректные значения отклоняются\nна этапе валидации конфигурации (Pydantic) с понятным сообщением.",
+      "description": "An explicit user override of the preprocessing preset.\n\nIt may be specified partially or fully: ``None`` in a field means \"keep the\nautomatically selected value\". Invalid values are rejected at the config\nvalidation stage (Pydantic) with a clear message.",
       "properties": {
         "imputation_strategy": {
           "anyOf": [
@@ -826,7 +826,7 @@
             }
           ],
           "default": null,
-          "description": "Переопределение стратегии заполнения пропусков ('mean' или 'median'). None — автовыбор.",
+          "description": "Override of the missing value imputation strategy ('mean' or 'median'). None — automatic selection.",
           "title": "Imputation Strategy"
         },
         "scaling": {
@@ -844,7 +844,7 @@
             }
           ],
           "default": null,
-          "description": "Переопределение масштабирования ('standard', 'robust' или 'none'). None — автовыбор.",
+          "description": "Scaling override ('standard', 'robust' or 'none'). None — automatic selection.",
           "title": "Scaling"
         }
       },
@@ -853,36 +853,36 @@
     },
     "PruningCfg": {
       "additionalProperties": false,
-      "description": "Настройки ранней остановки (pruning) триалов в фазе HPO.\n\nМеханизм промежуточной оценки: при включении тюнер публикует оценку\nкачества после каждого естественного шага валидации (например, после\nкаждого фолда кросс-валидации), на основе которой прайнер Optuna может\nотсечь заведомо безнадёжный триал до завершения полной оценки.\nДля стратегий валидации без естественных шагов (hold-out /\ntrain_test_split) прайнер не применяется — поведение безопасно и\nзадокументировано (см. API_REFERENCE.md).\n\nAttributes:\n    enable (bool): Глобальный флаг включения ранней остановки.\n        По умолчанию False — фича выключена, триалы выполняются полностью.\n    strategy (PruningStrategy): Стратегия отсечения: 'median'\n        (optuna.pruners.MedianPruner) или 'hyperband'\n        (optuna.pruners.HyperbandPruner).\n    min_steps (int): Минимальное число промежуточных шагов (например,\n        фолдов CV) до первого решения об отсечении. Для 'median' это\n        n_warmup_steps, для 'hyperband' — min_resource.\n    n_startup_trials (int): Число завершённых триалов, после которого\n        включается отсечение (только для 'median'; аналог\n        n_startup_trials в Optuna).\n    reduction_factor (int): Коэффициент сокращения бюджета между раундами\n        Hyperband (только для 'hyperband'; контролирует агрессивность\n        отсечения).",
+      "description": "Early stopping (pruning) settings for trials in the HPO phase.\n\nIntermediate evaluation mechanism: when enabled, the tuner publishes a\nquality estimate after every natural validation step (for example, after\neach cross-validation fold), allowing the Optuna pruner to discard an\nobviously hopeless trial before the full evaluation finishes.\nFor validation strategies without natural steps (hold-out /\ntrain_test_split) the pruner is not applied — the behavior is safe and\ndocumented (see API_REFERENCE.md).\n\nAttributes:\n    enable (bool): Global flag enabling early stopping.\n        Default is False — the feature is off and trials run to completion.\n    strategy (PruningStrategy): Pruning strategy: 'median'\n        (optuna.pruners.MedianPruner) or 'hyperband'\n        (optuna.pruners.HyperbandPruner).\n    min_steps (int): Minimum number of intermediate steps (for example,\n        CV folds) before the first pruning decision. For 'median' this is\n        n_warmup_steps, for 'hyperband' — min_resource.\n    n_startup_trials (int): Number of completed trials after which pruning\n        is enabled (only for 'median'; analogous to\n        n_startup_trials in Optuna).\n    reduction_factor (int): Budget reduction factor between Hyperband\n        rounds (only for 'hyperband'; controls pruning aggressiveness).",
       "properties": {
         "enable": {
           "default": false,
-          "description": "Флаг включения ранней остановки (pruning) триалов Optuna. По умолчанию False — каждый триал выполняется полностью.",
+          "description": "Flag enabling early stopping (pruning) of Optuna trials. Default is False — each trial runs to completion.",
           "title": "Enable",
           "type": "boolean"
         },
         "strategy": {
           "$ref": "#/$defs/PruningStrategy",
           "default": "median",
-          "description": "Стратегия отсечения триалов: 'median' (MedianPruner) или 'hyperband' (HyperbandPruner)"
+          "description": "Trial pruning strategy: 'median' (MedianPruner) or 'hyperband' (HyperbandPruner)"
         },
         "min_steps": {
           "default": 1,
-          "description": "Минимальное число промежуточных шагов (например, фолдов кросс-валидации) до первого решения об отсечении. Для 'median' соответствует n_warmup_steps, для 'hyperband' — min_resource",
+          "description": "Minimum number of intermediate steps (for example, folds of cross-validation) before the first pruning decision. For 'median' maps to n_warmup_steps, for 'hyperband' — min_resource",
           "minimum": 1,
           "title": "Min Steps",
           "type": "integer"
         },
         "n_startup_trials": {
           "default": 5,
-          "description": "Число завершённых триалов, после которого включается отсечение (только для 'median'; аналог n_startup_trials в Optuna)",
+          "description": "Number of completed trials after which pruning is enabled (only for 'median'; analogous to n_startup_trials in Optuna)",
           "minimum": 1,
           "title": "N Startup Trials",
           "type": "integer"
         },
         "reduction_factor": {
           "default": 3,
-          "description": "Коэффициент сокращения бюджета между раундами Hyperband (только для 'hyperband'; агрессивность отсечения)",
+          "description": "Budget reduction factor between Hyperband rounds (only for 'hyperband'; pruning aggressiveness)",
           "minimum": 2,
           "title": "Reduction Factor",
           "type": "integer"
@@ -892,7 +892,7 @@
       "type": "object"
     },
     "PruningStrategy": {
-      "description": "Поддерживаемые стратегии ранней остановки (pruning) триалов Optuna.",
+      "description": "Supported early stopping (pruning) strategies for Optuna trials.",
       "enum": [
         "median",
         "hyperband"
@@ -902,18 +902,18 @@
     },
     "SanityGateCfg": {
       "additionalProperties": false,
-      "description": "Пороги и настройки аудита Sanity Gate (эпик #61, #74).\n\nС версии эпика #74 секция является исключительно **источником порогов**\nдля select-шагов со ``strategy: sanity_gate`` (пул финалистов: коридор δ\nот лидера ∩ жёсткий кап ``top_k_candidates``, опциональный мягкий добор\nсемейств; пороги контуров аудита ``ModelSanityGate`` передаются в\nконструктор гейта без изменений). Глобального переключателя больше нет:\nполе ``mode`` удалено вместе с семантикой ``warn_only`` — отбор\nпроисходит ТОЛЬКО явным шагом ``select`` в ``general.phases``, а\nдиагностика доступна в gate-секции отчёта каждого select-шага.\n\nНаличие секции без select-шагов со ``strategy: sanity_gate`` валидно:\nсекция — опциональный источник порогов, а не поведенческий флаг.\n\nAttributes:\n    top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).\n    corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).\n    corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n    enforce_family_diversity (bool): Включить мягкий добор семейств.\n    algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».\n    allowed_families (list[str] | None): Семейства, участвующие в доборе.\n    family_diversity_multiplier (float): Множитель расширенного коридора.\n    min_prediction_diversity (float): Порог контура А (в (0, 1]);\n        считается на OOF-предсказаниях.\n    adaptive_diversity (bool): Адаптивный режим контура А.\n    min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).\n    min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).\n    max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал\n        для линейных моделей; самостоятельная дисквалификация только при\n        ``dead_features_require_low_diversity=true`` и низком diversity.\n    dead_features_require_low_diversity (bool): Комбинированное правило\n        «много мёртвых признаков И низкий diversity».\n    zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).\n    max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).\n    generalization_gap_mode (GeneralizationGapMode): Режим контура Г\n        (issue #108): 'warn' (дефолт) — нарушение контура Г (конечный\n        gap > порога или бесконечный gap из деления на ноль, issue #111)\n        уходит в soft_warnings (мягкое предупреждение); 'reject' —\n        провал → reasons → дисквалификация (старое строгое поведение).\n        Reasons в обоих режимах — только нарушения контракта и\n        невычислимость.\n    check_permutation_sensitivity (bool): Включить пермутационный аудит\n        чувствительности признаков (контур В, нелинейные модели).\n    permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).\n    permutation_max_features (int): Кап проверяемых колонок (>= 1).\n    permutation_repeats (int): Повторы пермутаций (>= 1).\n    permutation_seed (int): Фиксированное зерно пермутаций.\n    permutation_tolerance (float): Порог «мёртвости» признака (>= 0).\n    audit_time_budget_seconds (float): Бюджет времени на фазу аудита\n        (>= 0; 0 — без ограничения).\n    check_diversity (bool): Включить контур А.\n    check_unique (bool): Включить контур Б.\n    check_dead_features (bool): Включить контур В.\n    check_generalization_gap (bool): Включить контур Г.",
+      "description": "Thresholds and settings of the Sanity Gate audit.\n\n        The section is exclusively a **source of thresholds** for select steps\n        with ``strategy: sanity_gate`` (finalist pool: corridor δ from the\n        leader ∩ hard cap ``top_k_candidates``, optional soft family\n        complementation; the audit thresholds of ``ModelSanityGate`` are passed\n        to the gate constructor unchanged). There is no longer a global switch:\n        the ``mode`` field was removed together with the ``warn_only`` semantics —\n        selection happens ONLY via explicit ``select`` steps in\n        ``general.phases``, and diagnostics are available in the gate section of\n        each select step's report.\n\n        Having the section without select steps with ``strategy: sanity_gate``\n        is valid: the section is an optional source of thresholds, not a\n        behavioral flag.\n\nAttributes:\n            top_k_candidates (int): Hard cap on the finalist pool size (>= 1).\n            corridor_delta (float): Relative corridor width δ (in (0, 1)).\n            corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n            enforce_family_diversity (bool): Enable soft family complementation.\n            algorithm_families (dict[str, str] | None): Map of \"algorithm → family\".\n            allowed_families (list[str] | None): Families taking part in the complementation.\n            family_diversity_multiplier (float): Expanded corridor multiplier.\n            min_prediction_diversity (float): Circuit A threshold (in (0, 1]);\n                computed on OOF predictions.\n            adaptive_diversity (bool): Adaptive mode for circuit A.\n            min_unique_count (int): Absolute minimum nunique for circuit B (>= 1).\n            min_unique_ratio (float): Lower bound for the fraction of unique values (in (0, 1]).\n            max_dead_feature_ratio (float): Circuit C threshold (in [0, 1]) — a signal\n                for linear models; standalone disqualification only when\n                ``dead_features_require_low_diversity=true`` and diversity is low.\n            dead_features_require_low_diversity (bool): Combined rule\n                \"many dead features AND low diversity\".\n            zero_coef_tolerance (float): Zero coefficient tolerance (>= 0).\n            max_generalization_gap (float): Circuit D threshold (>= 1, default 1.5).\n            generalization_gap_mode (GeneralizationGapMode): Circuit D mode\n                (default 'warn'): 'warn' — a circuit D violation (a finite gap\n                above the threshold or an infinite gap from division by zero)\n                goes to soft_warnings (a soft warning); 'reject' — a failure →\n                reasons → disqualification (the old strict behavior).\n                Reasons in both modes — only contract violations and\n                non-computability.\n            check_permutation_sensitivity (bool): Enable the permutation audit of\n                feature sensitivity (circuit C, for non-linear models).\n            permutation_max_rows (int): Row subsample used for permutations (>= 1).\n            permutation_max_features (int): Cap on the checked columns (>= 1).\n            permutation_repeats (int): Permutation repeats (>= 1).\n            permutation_seed (int): Fixed permutation seed.\n            permutation_tolerance (float): Feature \"deadness\" threshold (>= 0).\n            audit_time_budget_seconds (float): Time budget for the audit phase\n                (>= 0; 0 means unlimited).\n            check_diversity (bool): Enable circuit A.\n            check_unique (bool): Enable circuit B.\n            check_dead_features (bool): Enable circuit C.\n            check_generalization_gap (bool): Enable circuit D.",
       "properties": {
         "top_k_candidates": {
           "default": 3,
-          "description": "Жёсткий кап размера пула финалистов (>= 1, дефолт 3).",
+          "description": "Hard cap on the finalist pool size (>= 1, default 3).",
           "minimum": 1,
           "title": "Top K Candidates",
           "type": "integer"
         },
         "corridor_delta": {
           "default": 0.15,
-          "description": "Относительная ширина коридора δ от лидера (строго в (0, 1), дефолт 0.15).",
+          "description": "Relative corridor width δ from the leader (strictly in (0, 1), default 0.15).",
           "exclusiveMaximum": 1.0,
           "exclusiveMinimum": 0.0,
           "title": "Corridor Delta",
@@ -921,7 +921,7 @@
         },
         "corridor_mode": {
           "default": "auto",
-          "description": "Форма коридора пула финалистов: 'multiplicative', 'additive' или 'auto' (выбор по типу метрики, дефолт 'auto').",
+          "description": "Shape of the finalist pool corridor: 'multiplicative', 'additive' or 'auto' (chosen based on the metric type, default 'auto').",
           "enum": [
             "multiplicative",
             "additive",
@@ -932,7 +932,7 @@
         },
         "enforce_family_diversity": {
           "default": false,
-          "description": "Опциональный мягкий добор недостающих семейств в пул финалистов (дефолт False — выключен).",
+          "description": "Optional soft complementation of missing families into the finalist pool (default False — disabled).",
           "title": "Enforce Family Diversity",
           "type": "boolean"
         },
@@ -949,7 +949,7 @@
             }
           ],
           "default": null,
-          "description": "Карта «алгоритм → семейство» для правила добора семейств. None — алгоритмы без классификации считаются собственным семейством.",
+          "description": "Map of 'algorithm → family' for the family complementation rule. None — algorithms without a classification are treated as their own family.",
           "title": "Algorithm Families"
         },
         "allowed_families": {
@@ -965,19 +965,19 @@
             }
           ],
           "default": null,
-          "description": "Семейства, участвующие в правиле добора (None — все разрешены).",
+          "description": "Families taking part in the family complementation rule (None — all are allowed).",
           "title": "Allowed Families"
         },
         "family_diversity_multiplier": {
           "default": 1.5,
-          "description": "Множитель расширенного коридора для добора семейств (> 0).",
+          "description": "Multiplier of the expanded corridor for family complementation (> 0).",
           "exclusiveMinimum": 0.0,
           "title": "Family Diversity Multiplier",
           "type": "number"
         },
         "min_prediction_diversity": {
           "default": 0.15,
-          "description": "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога; считается на OOF-предсказаниях (строго в (0, 1], дефолт 0.15).",
+          "description": "Circuit A (diversity) threshold: Var(y_pred_oof)/Var(y) >= threshold; computed on OOF predictions (strictly in (0, 1], default 0.15).",
           "exclusiveMinimum": 0.0,
           "maximum": 1.0,
           "title": "Min Prediction Diversity",
@@ -985,20 +985,20 @@
         },
         "adaptive_diversity": {
           "default": false,
-          "description": "Адаптивный режим контура А: сравнение с константной моделью (нулевой разброс предсказаний — провал).",
+          "description": "Adaptive mode for circuit A: comparison with a constant model (zero variance in predictions — failure).",
           "title": "Adaptive Diversity",
           "type": "boolean"
         },
         "min_unique_count": {
           "default": 5,
-          "description": "Абсолютный нижний предел nunique контура Б (>= 1).",
+          "description": "Absolute lower bound for nunique in circuit B (>= 1).",
           "minimum": 1,
           "title": "Min Unique Count",
           "type": "integer"
         },
         "min_unique_ratio": {
           "default": 0.05,
-          "description": "Нижняя граница доли уникальных предсказаний контура Б (в (0, 1]).",
+          "description": "Lower bound for the fraction of unique predictions in circuit B (in (0, 1]).",
           "exclusiveMinimum": 0.0,
           "maximum": 1.0,
           "title": "Min Unique Ratio",
@@ -1006,7 +1006,7 @@
         },
         "max_dead_feature_ratio": {
           "default": 0.4,
-          "description": "Порог доли «мёртвых» признаков контура В (в [0, 1]) — для линейных моделей это сигнал; самостоятельная дисквалификация только при dead_features_require_low_diversity=true и низком diversity.",
+          "description": "Threshold for the fraction of 'dead' features in circuit C (in [0, 1]) — for linear models this is a signal; standalone disqualification only when dead_features_require_low_diversity=true and diversity is low.",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Max Dead Feature Ratio",
@@ -1014,27 +1014,27 @@
         },
         "dead_features_require_low_diversity": {
           "default": true,
-          "description": "Комбинированное правило контура В: дисквалификация только при сочетании «много мёртвых признаков И низкий diversity».",
+          "description": "Combined circuit C rule: disqualification only on the combination of 'many dead features AND low diversity'.",
           "title": "Dead Features Require Low Diversity",
           "type": "boolean"
         },
         "zero_coef_tolerance": {
           "default": 1e-12,
-          "description": "Коэффициенты с |coef| <= порога считаются нулевыми (контур В).",
+          "description": "Coefficients with |coef| <= the threshold are considered zero (circuit C).",
           "minimum": 0.0,
           "title": "Zero Coef Tolerance",
           "type": "number"
         },
         "max_generalization_gap": {
           "default": 1.5,
-          "description": "Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
+          "description": "Circuit D threshold: RMSE_oof/RMSE_full > threshold — overfitting.",
           "minimum": 1.0,
           "title": "Max Generalization Gap",
           "type": "number"
         },
         "generalization_gap_mode": {
           "default": "warn",
-          "description": "Режим контура Г (generalization gap): 'warn' (дефолт) — нарушение контура Г (конечный gap > max_generalization_gap или бесконечный gap из деления на ноль: RMSE_full≈0 / RMSE_oof≈0, issue #111) записывается в soft_warnings (не дисквалифицирует); 'reject' — провал → reasons → дисквалификация (старое строгое поведение). Reasons в обоих режимах остаются только для нарушений контракта (y_pred_full=None) и невычислимости (нет конечных пар). Поле намеренно НЕ называется mode (коллизия с удалённым в эпике #74 полем sanity_gate.mode).",
+          "description": "Circuit D (generalization gap) mode: 'warn' (default) — a circuit D violation (a finite gap > max_generalization_gap or an infinite gap from division by zero: RMSE_full≈0 / RMSE_oof≈0) is recorded in soft_warnings (does not disqualify); 'reject' — a failure → reasons → disqualification (the old strict behavior). Reasons in both modes remain only for contract violations (y_pred_full=None) and non-computability (no finite pairs). The field is deliberately NOT named mode (a collision with the removed sanity_gate.mode field).",
           "enum": [
             "warn",
             "reject"
@@ -1044,72 +1044,72 @@
         },
         "check_permutation_sensitivity": {
           "default": true,
-          "description": "Включить пермутационный аудит чувствительности признаков (контур В для нелинейных моделей; контроль стоимости аудита). По умолчанию True; False — пермутационный путь пропускается, линейный путь по коэффициентам остаётся.",
+          "description": "Enable the permutation audit of feature sensitivity (circuit C for non-linear models; controls audit cost). Default is True; False — the permutation path is skipped, the linear coefficient-based path remains.",
           "title": "Check Permutation Sensitivity",
           "type": "boolean"
         },
         "permutation_max_rows": {
           "default": 5000,
-          "description": "Подвыборка строк для пермутационного пути контура В (>= 1, дефолт 5000).",
+          "description": "Row subsample for the permutation path of circuit C (>= 1, default 5000).",
           "minimum": 1,
           "title": "Permutation Max Rows",
           "type": "integer"
         },
         "permutation_max_features": {
           "default": 100,
-          "description": "Кап проверяемых колонок в пермутационном пути (>= 1, дефолт 100).",
+          "description": "Cap on the columns checked in the permutation path (>= 1, default 100).",
           "minimum": 1,
           "title": "Permutation Max Features",
           "type": "integer"
         },
         "permutation_repeats": {
           "default": 3,
-          "description": "Число повторов пермутаций на колонку (>= 1).",
+          "description": "Number of permutation repeats per column (>= 1).",
           "minimum": 1,
           "title": "Permutation Repeats",
           "type": "integer"
         },
         "permutation_seed": {
           "default": 42,
-          "description": "Фиксированное зерно пермутаций (детерминизм).",
+          "description": "Fixed permutation seed (for determinism).",
           "title": "Permutation Seed",
           "type": "integer"
         },
         "permutation_tolerance": {
           "default": 0.001,
-          "description": "Относительный порог «мёртвости» признака в пермутациях.",
+          "description": "Relative 'deadness' threshold for a feature in permutations.",
           "minimum": 0.0,
           "title": "Permutation Tolerance",
           "type": "number"
         },
         "audit_time_budget_seconds": {
           "default": 0,
-          "description": "Бюджет времени на фазу аудита Sanity Gate (в секундах). 0 — без ограничения (дефолт).",
+          "description": "Time budget for the Sanity Gate audit phase (in seconds). 0 — unlimited (default).",
           "minimum": 0.0,
           "title": "Audit Time Budget Seconds",
           "type": "number"
         },
         "check_diversity": {
           "default": true,
-          "description": "Включить контур А.",
+          "description": "Enable circuit A.",
           "title": "Check Diversity",
           "type": "boolean"
         },
         "check_unique": {
           "default": true,
-          "description": "Включить контур Б.",
+          "description": "Enable circuit B.",
           "title": "Check Unique",
           "type": "boolean"
         },
         "check_dead_features": {
           "default": true,
-          "description": "Включить контур В.",
+          "description": "Enable circuit C.",
           "title": "Check Dead Features",
           "type": "boolean"
         },
         "check_generalization_gap": {
           "default": true,
-          "description": "Включить контур Г.",
+          "description": "Enable circuit D.",
           "title": "Check Generalization Gap",
           "type": "boolean"
         }
@@ -1118,7 +1118,7 @@
       "type": "object"
     },
     "SearchSpaceEntry": {
-      "description": "Описание пространства поиска для отдельного гиперпараметра.\n\nУниверсальный контейнер, поддерживающий как категориальные списки,\nтак и числовые диапазоны. Реализует логику прозрачной конвертации\nиз сокращенной YAML-записи в типизированные объекты распределений.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный\n        объект конкретного типа распределения.",
+      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated\n        object of a concrete distribution type.",
       "properties": {
         "config": {
           "discriminator": {
@@ -1151,7 +1151,7 @@
       "type": "object"
     },
     "SerializationFormat": {
-      "description": "Поддерживаемые форматы сериализации моделей.\nRationale: Обеспечивает типизацию и единый источник истины для выбора\nмежду стандартным pickle и оптимизированным для тяжелых весов joblib.",
+      "description": "Supported model serialization formats.\nRationale: Provides typing and a single source of truth for choosing\nbetween the standard pickle and joblib optimized for heavy weights.",
       "enum": [
         "pickle",
         "joblib"
@@ -1160,7 +1160,7 @@
       "type": "string"
     },
     "ValidationStrategy": {
-      "description": "Разрешённые способы валидации при hyperopt.",
+      "description": "Allowed validation strategies for hyperopt.",
       "enum": [
         "train_test_split",
         "k_fold",
@@ -1172,11 +1172,11 @@
     }
   },
   "additionalProperties": false,
-  "description": "Корневой объект всей системы конфигурации AutoML.\n\nАгрегирует все секции настроек и выполняет финальную валидацию\nцелостности графа параметров, включая проверку системных зависимостей.\nAttributes:\n    general (GeneralCfg): Общие параметры эксперимента.\n    oversampling (OversamplingCfg): Настройки предобработки данных.\n    algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.",
+  "description": "Root object of the whole AutoML configuration system.\n\nAggregates all configuration sections and performs the final validation\nof the parameter graph integrity, including system dependency checks.\nAttributes:\n    general (GeneralCfg): General experiment parameters.\n    oversampling (OversamplingCfg): Data preprocessing settings.\n    algorithms (AlgorithmsConfig): Registry of available and active algorithms.",
   "properties": {
     "general": {
       "$ref": "#/$defs/GeneralCfg",
-      "description": "Общие настройки эксперимента и валидации"
+      "description": "General experiment and validation settings"
     },
     "oversampling": {
       "$ref": "#/$defs/OversamplingCfg",
@@ -1185,11 +1185,11 @@
         "data_oversampling_multiplier": 1.0,
         "data_oversampling_algorithm": "random"
       },
-      "description": "Настройки балансировки данных"
+      "description": "Data balancing settings"
     },
     "algorithms": {
       "$ref": "#/$defs/AlgorithmsConfig",
-      "description": "Словарь алгоритмов, где ключ — имя алгоритма (например, 'xgboost', 'random_forest')"
+      "description": "Dictionary of algorithms, where the key is the algorithm name (for example, 'xgboost', 'random_forest')"
     }
   },
   "required": [

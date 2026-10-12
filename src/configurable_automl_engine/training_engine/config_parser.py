@@ -1,26 +1,25 @@
 """
-AutoML Config Engine: Валидация и парсинг иерархических YAML-конфигураций.
-Модуль реализует строго типизированную объектную модель конфигурации
-на базе Pydantic v2, обеспечивая проверку целостности параметров
-эксперимента, стратегий валидации и пространств поиска гиперпараметров
-перед запуском пайплайна AutoML.
-Ключевые возможности:
-    1. Multi-Stage Pipeline: Конфигурирование последовательности шагов
-       (фазы HPO 'all_algorithms' / 'refine' и явные шаги отбора 'select'
-       со стратегиями cv_best / sanity_gate) с кросс-валидацией фаз
-       (эпик #74).
-    2. Intelligent Validation Logic: Автоматическая проверка согласованности
-       настроек, включая контроль количества фолдов для k-fold стратегии
-       и валидацию границ числовых диапазонов.
-    3. Flexible Search Space DSL: Поддержка компактного YAML-синтаксиса
-       для определения пространств поиска (Categorical, Float, Int, Log)
-       с автоматическим приведением типов из списочных структур.
-    4. Dependency Guard: Встроенный механизм проверки наличия необходимых
-       сторонних пакетов (XGBoost и др.) для всех включенных
-       в конфиг алгоритмов еще на этапе инициализации.
-    5. Data Balancing Schema: Управление стратегиями оверсэмплинга
-       (SMOTE, ADASYN) с поддержкой псевдонимов полей (aliasing)
-       для чистоты структуры YAML-файла.
+AutoML Config Engine: Validation and parsing of hierarchical YAML configs.
+The module implements a strictly typed configuration object model
+based on Pydantic v2, ensuring integrity checks of experiment parameters,
+validation strategies, and hyperparameter search spaces
+before the AutoML pipeline is launched.
+Key features:
+    1. Multi-Stage Pipeline: Configuring a sequence of steps
+       (HPO phases 'all_algorithms' / 'refine' and explicit 'select' steps
+       with cv_best / sanity_gate strategies) with phase cross-validation.
+    2. Intelligent Validation Logic: Automatic consistency checks for
+       settings, including the number of folds for the k-fold strategy
+       and validation of numeric range boundaries.
+    3. Flexible Search Space DSL: Support for a compact YAML syntax
+       for defining search spaces (Categorical, Float, Int, Log)
+       with automatic type coercion from list-like structures.
+    4. Dependency Guard: A built-in mechanism that verifies whether the
+       required third-party packages (XGBoost and others) are installed
+       for all algorithms enabled in the config, at initialization time.
+    5. Data Balancing Schema: Management of oversampling strategies
+       (SMOTE, ADASYN) with field aliasing support
+       for a cleaner YAML-file structure.
 """
 
 from __future__ import annotations
@@ -42,9 +41,8 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-# Стабильные коды ошибок миграции (эпик #74): тесты могут завязываться на
-# ``error['type']`` из ValidationError вместо текста подсказки, который
-# может меняться.
+# Stable migration error codes: tests may rely on ``error['type']`` from
+# ValidationError instead of the hint text, which is subject to change.
 ERR_REMOVED_REFINE_WINNER = "removed_refine_winner_action"
 ERR_REMOVED_SANITY_GATE_MODE = "removed_sanity_gate_mode"
 
@@ -67,7 +65,7 @@ from configurable_automl_engine.training_engine.metrics import (
     to_sklearn_name,
 )
 
-# Создаем тип на лету. *AVAILABLE_METRICS распакует список в аргументы Literal
+# Build the type on the fly. *AVAILABLE_METRICS unpacks the list into Literal arguments
 ComparisonMetric = Literal[*AVAILABLE_METRICS]  # type: ignore
 
 
@@ -90,87 +88,86 @@ __all__ = [
     "read_config",
 ]
 
-#: Режим robust-выбора победителя ``select_robust_winner`` (эпик #61, T4),
-#: используемый select-шагами пайплайна (эпик #74): 'off' — ранжирование
-#: только по CV-скору (без аудита); 'active' — дисквалификации применяются,
-#: победитель = лучший RMSE_oof. Select-шаги со ``strategy: sanity_gate``
-#: выполняют режим 'active'. Режим 'warn_only' удалён вместе с ключами
-#: отчёта ``sanity_gate_warn_only``/``winner_if_active`` (эпик #74, задача
-#: R2). Это внутренний режим шага отбора, а НЕ поле конфигурации: поле
-#: ``general.sanity_gate.mode`` удалено (эпик #74), стратегия задается
-#: явно в action='select' фазах. Определение остаётся здесь (без экспорта
-#: в ``__all__``), так как механизм robust-выбора в
-#: ``training_engine/component.py`` импортирует этот тип напрямую; в
-#: конфиг-схеме он не используется.
+#: Robust winner-selection mode for ``select_robust_winner``, used by the
+#: pipeline's select steps: 'off' ranks candidates by CV score only (without
+#: audit); 'active' applies disqualifications, with the winner being the best
+#: RMSE_oof. Select steps with ``strategy: sanity_gate`` run in 'active' mode.
+#: The 'warn_only' mode was removed along with the report keys
+#: ``sanity_gate_warn_only``/``winner_if_active``. This is an internal mode of
+#: the select step, NOT a configuration field: the ``general.sanity_gate.mode``
+#: field was removed, and the strategy is set explicitly in action='select'
+#: phases. The definition remains here (not exported in ``__all__``) because
+#: the robust-selection mechanism in ``training_engine/component.py`` imports
+#: this type directly; it is not used in the config schema.
 SanityGateMode = Literal["off", "active"]
 
-#: Форма коридора пула финалистов (T3, issue #65): multiplicative / additive /
-#: auto (выбор по типу метрики). Определяется здесь, чтобы ``SanityGateCfg``
-#: и ``select_finalists`` использовали один тип без циклического импорта.
+#: Shape of the finalist-pool corridor: multiplicative / additive / auto
+#: (chosen based on the metric type). Defined here so that ``SanityGateCfg``
+#: and ``select_finalists`` share one type without a circular import.
 CorridorMode = Literal["multiplicative", "additive", "auto"]
 
-#: Режим контура Г ``_check_generalization_gap`` (issue #108):
-#: ``"warn"`` (дефолт) — нарушение контура Г (конечный ``gap >
-#: max_generalization_gap`` или бесконечный gap из деления на ноль:
-#: ``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``, issue #111) уходит в
-#: ``soft_warnings`` (мягкое предупреждение, не дисквалифицирует);
-#: ``"reject"`` — строгая дисквалификация (старое поведение дефолта).
-#: Reasons в обоих режимах остаются только для нарушений контракта
-#: (``y_pred_full = None``) и невычислимости (нет конечных пар). Имя поля
-#: НЕ ``mode``: это имя зарезервировано за удалённым в эпике #74 полем
-#: ``sanity_gate.mode`` (валидатор ``_reject_removed_mode`` отвергает его с
-#: ошибкой миграции). Тип объявлен здесь и в ``sanity_gate.py`` (standalone)
-#: без импорта, чтобы не связывать модули.
+#: Circuit D mode for ``_check_generalization_gap``:
+#: ``"warn"`` (default) — a circuit D violation (a finite ``gap >
+#: max_generalization_gap`` or an infinite gap from division by zero:
+#: ``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``) goes to
+#: ``soft_warnings`` (a soft warning, does not disqualify);
+#: ``"reject"`` — strict disqualification (the old default behavior).
+#: Reasons in both modes remain only for contract violations
+#: (``y_pred_full = None``) and non-computability (no finite pairs).
+#: The field name is NOT ``mode``: that name is reserved for the removed
+#: ``sanity_gate.mode`` field (the ``_reject_removed_mode`` validator rejects
+#: it with a migration error). The type is declared here and in
+#: ``sanity_gate.py`` (standalone) without an import, to keep the modules
+#: decoupled.
 GeneralizationGapMode = Literal["warn", "reject"]
 
-#: Действия фазы пайплайна (эпик #74): поиск по всем алгоритмам, дообучение
-#: всего входного множества (warm-start) и явный шаг отбора. Устаревшее
-#: значение 'refine_winner' удалено — конфиги с ним отвергаются валидацией
-#: с подсказкой миграции.
+#: Pipeline phase actions: search across all algorithms, fine-tuning of the
+#: whole input set (warm-start), and an explicit selection step. The legacy
+#: 'refine_winner' value was removed — configs containing it are rejected by
+#: validation with a migration hint.
 HPOPhaseAction = Literal["all_algorithms", "refine", "select"]
 
-#: Стратегия select-шага: ранжирование по CV-скору или аудит Sanity Gate.
+#: Select step strategy: ranking by CV score or a Sanity Gate audit.
 SelectStrategy = Literal["cv_best", "sanity_gate"]
 
-#: Что отдаёт select-шаг на выходе: единственный победитель, топ-K кандидатов
-#: или весь коридорный пул финалистов.
+#: What the select step returns: a single winner, the top-K candidates,
+#: or the entire corridor pool of finalists.
 SelectOutput = Literal["winner", "top_k", "pool"]
 
 
 # ─────────────────── pruning (early stopping) ──────────────────── #
 class PruningStrategy(str, Enum):
-    """Поддерживаемые стратегии ранней остановки (pruning) триалов Optuna."""
+    """Supported early stopping (pruning) strategies for Optuna trials."""
 
     median = "median"
     hyperband = "hyperband"
 
 
 class PruningCfg(BaseModel):
-    """Настройки ранней остановки (pruning) триалов в фазе HPO.
+    """Early stopping (pruning) settings for trials in the HPO phase.
 
-    Механизм промежуточной оценки: при включении тюнер публикует оценку
-    качества после каждого естественного шага валидации (например, после
-    каждого фолда кросс-валидации), на основе которой прайнер Optuna может
-    отсечь заведомо безнадёжный триал до завершения полной оценки.
-    Для стратегий валидации без естественных шагов (hold-out /
-    train_test_split) прайнер не применяется — поведение безопасно и
-    задокументировано (см. API_REFERENCE.md).
+    Intermediate evaluation mechanism: when enabled, the tuner publishes a
+    quality estimate after every natural validation step (for example, after
+    each cross-validation fold), allowing the Optuna pruner to discard an
+    obviously hopeless trial before the full evaluation finishes.
+    For validation strategies without natural steps (hold-out /
+    train_test_split) the pruner is not applied — the behavior is safe and
+    documented (see API_REFERENCE.md).
 
     Attributes:
-        enable (bool): Глобальный флаг включения ранней остановки.
-            По умолчанию False — фича выключена, триалы выполняются полностью.
-        strategy (PruningStrategy): Стратегия отсечения: 'median'
-            (optuna.pruners.MedianPruner) или 'hyperband'
+        enable (bool): Global flag enabling early stopping.
+            Default is False — the feature is off and trials run to completion.
+        strategy (PruningStrategy): Pruning strategy: 'median'
+            (optuna.pruners.MedianPruner) or 'hyperband'
             (optuna.pruners.HyperbandPruner).
-        min_steps (int): Минимальное число промежуточных шагов (например,
-            фолдов CV) до первого решения об отсечении. Для 'median' это
-            n_warmup_steps, для 'hyperband' — min_resource.
-        n_startup_trials (int): Число завершённых триалов, после которого
-            включается отсечение (только для 'median'; аналог
-            n_startup_trials в Optuna).
-        reduction_factor (int): Коэффициент сокращения бюджета между раундами
-            Hyperband (только для 'hyperband'; контролирует агрессивность
-            отсечения).
+        min_steps (int): Minimum number of intermediate steps (for example,
+            CV folds) before the first pruning decision. For 'median' this is
+            n_warmup_steps, for 'hyperband' — min_resource.
+        n_startup_trials (int): Number of completed trials after which pruning
+            is enabled (only for 'median'; analogous to
+            n_startup_trials in Optuna).
+        reduction_factor (int): Budget reduction factor between Hyperband
+            rounds (only for 'hyperband'; controls pruning aggressiveness).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -178,74 +175,74 @@ class PruningCfg(BaseModel):
     enable: bool = Field(
         default=False,
         description=(
-            "Флаг включения ранней остановки (pruning) триалов Optuna. "
-            "По умолчанию False — каждый триал выполняется полностью."
+            "Flag enabling early stopping (pruning) of Optuna trials. "
+            "Default is False — each trial runs to completion."
         ),
     )
     strategy: PruningStrategy = Field(
         default=PruningStrategy.median,
         description=(
-            "Стратегия отсечения триалов: 'median' (MedianPruner) "
-            "или 'hyperband' (HyperbandPruner)"
+            "Trial pruning strategy: 'median' (MedianPruner) "
+            "or 'hyperband' (HyperbandPruner)"
         ),
     )
     min_steps: int = Field(
         default=1,
         ge=1,
         description=(
-            "Минимальное число промежуточных шагов (например, фолдов "
-            "кросс-валидации) до первого решения об отсечении. Для 'median' "
-            "соответствует n_warmup_steps, для 'hyperband' — min_resource"
+            "Minimum number of intermediate steps (for example, folds "
+            "of cross-validation) before the first pruning decision. For 'median' "
+            "maps to n_warmup_steps, for 'hyperband' — min_resource"
         ),
     )
     n_startup_trials: int = Field(
         default=5,
         ge=1,
         description=(
-            "Число завершённых триалов, после которого включается отсечение "
-            "(только для 'median'; аналог n_startup_trials в Optuna)"
+            "Number of completed trials after which pruning is enabled "
+            "(only for 'median'; analogous to n_startup_trials in Optuna)"
         ),
     )
     reduction_factor: int = Field(
         default=3,
         ge=2,
         description=(
-            "Коэффициент сокращения бюджета между раундами Hyperband "
-            "(только для 'hyperband'; агрессивность отсечения)"
+            "Budget reduction factor between Hyperband rounds "
+            "(only for 'hyperband'; pruning aggressiveness)"
         ),
     )
 
 
 # ─────────────────── phases ──────────────────── #
 class HPOPhaseCfg(BaseModel):
-    """Конфигурация отдельного шага пайплайна (эпик #74).
+    """Configuration of a single pipeline step.
 
-    Класс описывает параметры конкретного шага: фазы HPO
-    (``all_algorithms`` / ``refine``) или явного шага отбора (``select``),
-    позволяя выстраивать многоступенчатые стратегии поиска и отбора
-    (например: поиск по всем моделям → select с аудитом → дообучение
-    финалистов → финальный select победителя).
+    The class describes the parameters of a specific step: an HPO phase
+    (``all_algorithms`` / ``refine``) or an explicit selection step
+    (``select``), enabling multi-stage search and selection strategies
+    (for example: search across all models → audited select → fine-tuning
+    finalists → final winner select).
 
     Attributes:
-        name (str): Уникальный идентификатор фазы.
-        n_trials (int): Лимит итераций (испытаний) для фаз HPO
-            (``all_algorithms`` / ``refine``). Для ``select`` игнорируется,
-            но поле остаётся обязательным для единообразия схемы.
-        action (str): Тип действия: 'all_algorithms' (поиск по всем
-            алгоритмам), 'refine' (дообучение всего входного множества
-            с warm-start) или 'select' (шаг отбора). Устаревшее значение
-            'refine_winner' удалено (эпик #74): конфиги с ним отвергаются
-            валидацией с подсказкой миграции.
-        strategy (Literal['cv_best', 'sanity_gate'] | None): Стратегия
-            select-шага (только для action='select'): ранжирование по
-            CV-скору ('cv_best') или аудит Sanity Gate ('sanity_gate').
-        output (Literal['winner', 'top_k', 'pool'] | None): Что отдаёт
-            select-шаг на выходе (только для action='select'): 'winner' —
-            единственный победитель (терминальный шаг), 'top_k' — топ-K
-            кандидатов, 'pool' — весь коридорный пул финалистов.
-        k (int | None): Количество кандидатов (>= 1) для output='top_k'.
-            Обязателен только при output='top_k'; при output='winner'/'pool'
-            запрещён.
+        name (str): Unique phase identifier.
+        n_trials (int): Iteration (trial) limit for HPO phases
+            (``all_algorithms`` / ``refine``). Ignored for ``select``,
+            but the field remains mandatory for schema uniformity.
+        action (str): Action type: 'all_algorithms' (search across all
+            algorithms), 'refine' (fine-tune the whole input set
+            with warm-start) or 'select' (selection step). The legacy value
+            'refine_winner' was removed: configs containing it are rejected
+            by validation with a migration hint.
+        strategy (Literal['cv_best', 'sanity_gate'] | None): Select step
+            strategy (only for action='select'): ranking by CV score
+            ('cv_best') or a Sanity Gate audit ('sanity_gate').
+        output (Literal['winner', 'top_k', 'pool'] | None): What the
+            select step returns (only for action='select'): 'winner' — a
+            single winner (terminal step), 'top_k' — the top-K candidates,
+            'pool' — the entire corridor pool of finalists.
+        k (int | None): Number of candidates (>= 1) for output='top_k'.
+            Required only for output='top_k'; forbidden for
+            output='winner'/'pool'.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -253,82 +250,82 @@ class HPOPhaseCfg(BaseModel):
     name: str = Field(
         default="phase",
         description=(
-            "Определенное пользователем название фазы оптимизации"
-            " (например, 'coarse_search' или 'fine_tuning')"
+            "User-defined name of the optimization phase"
+            " (for example, 'coarse_search' or 'fine_tuning')"
         ),
     )
     n_trials: int = Field(
         ge=1,
         description=(
-            "Количество итераций (испытаний) для фаз HPO (all_algorithms / "
-            "refine). Для action='select' игнорируется"
+            "Number of iterations (trials) for HPO phases (all_algorithms / "
+            "refine). Ignored for action='select'"
         ),
     )
     action: HPOPhaseAction = Field(
         default="all_algorithms",
         description=(
-            "Действие фазы: 'all_algorithms' — поиск по всем алгоритмам, "
-            "'refine' — дообучение всего входного множества с warm-start, "
-            "'select' — явный шаг отбора (стратегия strategy, форма выхода "
-            "output). Устаревшее 'refine_winner' удалено: используйте пару "
-            "'select' (cv_best) + 'refine'"
+            "Phase action: 'all_algorithms' — search across all algorithms, "
+            "'refine' — fine-tune the whole input set with warm-start, "
+            "'select' — explicit selection step (strategy governs the "
+            "strategy, output the output shape). The legacy 'refine_winner' "
+            "is removed: use the pair 'select' (cv_best) + 'refine'"
         ),
     )
     strategy: SelectStrategy | None = Field(
         default=None,
         description=(
-            "Стратегия select-шага (только для action='select'): 'cv_best' — "
-            "ранжирование по CV-скору, 'sanity_gate' — пул финалистов + "
-            "аудит ModelSanityGate + ранжирование по RMSE_oof. Для фаз "
-            "all_algorithms/refine запрещено"
+            "Select step strategy (only for action='select'): 'cv_best' — "
+            "ranking by CV score, 'sanity_gate' — finalist pool + "
+            "ModelSanityGate audit + ranking by RMSE_oof. Forbidden for "
+            "all_algorithms/refine phases"
         ),
     )
     output: SelectOutput | None = Field(
         default=None,
         description=(
-            "Форма выхода select-шага (только для action='select'): "
-            "'winner' — единственный победитель (терминальный шаг), "
-            "'top_k' — топ-K кандидатов (требует параметр k), 'pool' — "
-            "весь коридорный пул финалистов. Для фаз all_algorithms/refine "
-            "запрещено"
+            "Output shape of the select step (only for action='select'): "
+            "'winner' — a single winner (terminal step), "
+            "'top_k' — the top-K candidates (requires the k parameter), "
+            "'pool' — the entire corridor pool of finalists. Forbidden for "
+            "all_algorithms/refine phases"
         ),
     )
     k: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "Количество кандидатов (>= 1) для output='top_k'; обязателен "
-            "только при output='top_k', при output='winner'/'pool' запрещён. "
-            "Для фаз all_algorithms/refine запрещено"
+            "Number of candidates (>= 1) for output='top_k'; required "
+            "only for output='top_k', forbidden for output='winner'/'pool'. "
+            "Forbidden for all_algorithms/refine phases"
         ),
     )
 
     @model_validator(mode="before")
     @classmethod
     def _reject_legacy_refine_winner(cls, data: Any) -> Any:
-        """Отвергнуть устаревший action 'refine_winner' с подсказкой миграции.
+        """Reject the legacy 'refine_winner' action with a migration hint.
 
-        Значение удалено осознанно (эпик #74) без обратной совместимости:
-        молчаливое игнорирование или автоматическая трансляция скрыли бы
-        смену семантики (refine_winner сужал множество до одного кандидата,
-        новая пара select + refine этого не делает). Ошибка сопровождается
-        подсказкой миграции.
+        The value was deliberately removed without backward compatibility:
+        silently ignoring it or translating it automatically would hide a
+        semantic change (refine_winner narrowed the set to a single candidate,
+        whereas the new select + refine pair does not). The error ships with a
+        migration hint.
 
         Args:
-            data: Сырые входные данные фазы (dict при YAML/JSON-парсинге).
+            data: Raw input data of the phase (a dict when parsed from YAML/JSON).
 
         Returns:
-            Any: Данные без изменений, если legacy-значения нет.
+            Any: The data unchanged, if no legacy value is present.
 
         Raises:
-            ValueError: Если action равен 'refine_winner'.
+            ValueError: If action equals 'refine_winner'.
         """
         if isinstance(data, dict) and data.get("action") == "refine_winner":
-            # Стабильный код ошибки (ERR_REMOVED_REFINE_WINNER) позволяет
-            # тестам завязываться на error['type'], а не на текст подсказки.
+            # The stable error code (ERR_REMOVED_REFINE_WINNER) lets tests rely
+            # on error['type'] instead of the hint text.
             raise PydanticCustomError(
                 ERR_REMOVED_REFINE_WINNER,
-                "action 'refine_winner' has been removed (epic #74). "
+                "action 'refine_winner' has been removed. "
                 "Migration: replace the 'refine_winner' phase with explicit "
                 "'select' and 'refine' phases, e.g. "
                 "all_algorithms -> select(strategy: cv_best, output: top_k, "
@@ -341,21 +338,21 @@ class HPOPhaseCfg(BaseModel):
 
     @model_validator(mode="after")
     def _validate_select_fields(self) -> HPOPhaseCfg:
-        """Проверить согласованность strategy/output/k с действием фазы.
+        """Validate the consistency of strategy/output/k with the phase action.
 
-        Логика проверки:
-        1. Для action='select' поля strategy и output обязательны.
-        2. При output='top_k' параметр k обязателен (k >= 1 накладывается
-           ограничением поля); при output='winner'/'pool' параметр k
-           запрещён.
-        3. Для action='all_algorithms'/'refine' поля strategy/output/k
-           запрещены (сужение множества — работа select-шага).
+        Validation logic:
+        1. For action='select' the strategy and output fields are required.
+        2. For output='top_k' the k parameter is required (k >= 1 is enforced
+           by the field constraint); for output='winner'/'pool' the k parameter
+           is forbidden.
+        3. For action='all_algorithms'/'refine' the strategy/output/k fields
+           are forbidden (candidate narrowing is the job of a select step).
 
         Returns:
-            HPOPhaseCfg: Валидированный объект фазы.
+            HPOPhaseCfg: The validated phase object.
 
         Raises:
-            ValueError: Если набор полей не согласован с действием фазы.
+            ValueError: If the set of fields is inconsistent with the phase action.
         """
         if self.action == "select":
             missing = [
@@ -391,7 +388,7 @@ class HPOPhaseCfg(BaseModel):
             raise ValueError(
                 f"fields {forbidden} are only allowed for action 'select' "
                 f"(got action '{self.action}'): candidate narrowing is the "
-                "job of explicit select phases (epic #74)"
+                "job of explicit select phases"
             )
         return self
 
@@ -484,60 +481,62 @@ class FeatureSelectionCfg(BaseModel):
 
 # ─────────────────── sanity gate / select-step thresholds ─────────── #
 class SanityGateCfg(BaseModel):
-    """Пороги и настройки аудита Sanity Gate (эпик #61, #74).
+    """Thresholds and settings of the Sanity Gate audit.
 
-    С версии эпика #74 секция является исключительно **источником порогов**
-    для select-шагов со ``strategy: sanity_gate`` (пул финалистов: коридор δ
-    от лидера ∩ жёсткий кап ``top_k_candidates``, опциональный мягкий добор
-    семейств; пороги контуров аудита ``ModelSanityGate`` передаются в
-    конструктор гейта без изменений). Глобального переключателя больше нет:
-    поле ``mode`` удалено вместе с семантикой ``warn_only`` — отбор
-    происходит ТОЛЬКО явным шагом ``select`` в ``general.phases``, а
-    диагностика доступна в gate-секции отчёта каждого select-шага.
+            The section is exclusively a **source of thresholds** for select steps
+            with ``strategy: sanity_gate`` (finalist pool: corridor δ from the
+            leader ∩ hard cap ``top_k_candidates``, optional soft family
+            complementation; the audit thresholds of ``ModelSanityGate`` are passed
+            to the gate constructor unchanged). There is no longer a global switch:
+            the ``mode`` field was removed together with the ``warn_only`` semantics —
+            selection happens ONLY via explicit ``select`` steps in
+            ``general.phases``, and diagnostics are available in the gate section of
+            each select step's report.
 
-    Наличие секции без select-шагов со ``strategy: sanity_gate`` валидно:
-    секция — опциональный источник порогов, а не поведенческий флаг.
+            Having the section without select steps with ``strategy: sanity_gate``
+            is valid: the section is an optional source of thresholds, not a
+            behavioral flag.
 
     Attributes:
-        top_k_candidates (int): Жёсткий кап размера пула финалистов (>= 1).
-        corridor_delta (float): Относительная ширина коридора δ (в (0, 1)).
-        corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.
-        enforce_family_diversity (bool): Включить мягкий добор семейств.
-        algorithm_families (dict[str, str] | None): Карта «алгоритм → семейство».
-        allowed_families (list[str] | None): Семейства, участвующие в доборе.
-        family_diversity_multiplier (float): Множитель расширенного коридора.
-        min_prediction_diversity (float): Порог контура А (в (0, 1]);
-            считается на OOF-предсказаниях.
-        adaptive_diversity (bool): Адаптивный режим контура А.
-        min_unique_count (int): Абсолютный минимум nunique контура Б (>= 1).
-        min_unique_ratio (float): Нижняя граница доли уникальных (в (0, 1]).
-        max_dead_feature_ratio (float): Порог контура В (в [0, 1]) — сигнал
-            для линейных моделей; самостоятельная дисквалификация только при
-            ``dead_features_require_low_diversity=true`` и низком diversity.
-        dead_features_require_low_diversity (bool): Комбинированное правило
-            «много мёртвых признаков И низкий diversity».
-        zero_coef_tolerance (float): Допуск нулевых коэффициентов (>= 0).
-        max_generalization_gap (float): Порог контура Г (>= 1, дефолт 1.5).
-        generalization_gap_mode (GeneralizationGapMode): Режим контура Г
-            (issue #108): 'warn' (дефолт) — нарушение контура Г (конечный
-            gap > порога или бесконечный gap из деления на ноль, issue #111)
-            уходит в soft_warnings (мягкое предупреждение); 'reject' —
-            провал → reasons → дисквалификация (старое строгое поведение).
-            Reasons в обоих режимах — только нарушения контракта и
-            невычислимость.
-        check_permutation_sensitivity (bool): Включить пермутационный аудит
-            чувствительности признаков (контур В, нелинейные модели).
-        permutation_max_rows (int): Подвыборка строк для пермутаций (>= 1).
-        permutation_max_features (int): Кап проверяемых колонок (>= 1).
-        permutation_repeats (int): Повторы пермутаций (>= 1).
-        permutation_seed (int): Фиксированное зерно пермутаций.
-        permutation_tolerance (float): Порог «мёртвости» признака (>= 0).
-        audit_time_budget_seconds (float): Бюджет времени на фазу аудита
-            (>= 0; 0 — без ограничения).
-        check_diversity (bool): Включить контур А.
-        check_unique (bool): Включить контур Б.
-        check_dead_features (bool): Включить контур В.
-        check_generalization_gap (bool): Включить контур Г.
+                top_k_candidates (int): Hard cap on the finalist pool size (>= 1).
+                corridor_delta (float): Relative corridor width δ (in (0, 1)).
+                corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.
+                enforce_family_diversity (bool): Enable soft family complementation.
+                algorithm_families (dict[str, str] | None): Map of "algorithm → family".
+                allowed_families (list[str] | None): Families taking part in the complementation.
+                family_diversity_multiplier (float): Expanded corridor multiplier.
+                min_prediction_diversity (float): Circuit A threshold (in (0, 1]);
+                    computed on OOF predictions.
+                adaptive_diversity (bool): Adaptive mode for circuit A.
+                min_unique_count (int): Absolute minimum nunique for circuit B (>= 1).
+                min_unique_ratio (float): Lower bound for the fraction of unique values (in (0, 1]).
+                max_dead_feature_ratio (float): Circuit C threshold (in [0, 1]) — a signal
+                    for linear models; standalone disqualification only when
+                    ``dead_features_require_low_diversity=true`` and diversity is low.
+                dead_features_require_low_diversity (bool): Combined rule
+                    "many dead features AND low diversity".
+                zero_coef_tolerance (float): Zero coefficient tolerance (>= 0).
+                max_generalization_gap (float): Circuit D threshold (>= 1, default 1.5).
+                generalization_gap_mode (GeneralizationGapMode): Circuit D mode
+                    (default 'warn'): 'warn' — a circuit D violation (a finite gap
+                    above the threshold or an infinite gap from division by zero)
+                    goes to soft_warnings (a soft warning); 'reject' — a failure →
+                    reasons → disqualification (the old strict behavior).
+                    Reasons in both modes — only contract violations and
+                    non-computability.
+                check_permutation_sensitivity (bool): Enable the permutation audit of
+                    feature sensitivity (circuit C, for non-linear models).
+                permutation_max_rows (int): Row subsample used for permutations (>= 1).
+                permutation_max_features (int): Cap on the checked columns (>= 1).
+                permutation_repeats (int): Permutation repeats (>= 1).
+                permutation_seed (int): Fixed permutation seed.
+                permutation_tolerance (float): Feature "deadness" threshold (>= 0).
+                audit_time_budget_seconds (float): Time budget for the audit phase
+                    (>= 0; 0 means unlimited).
+                check_diversity (bool): Enable circuit A.
+                check_unique (bool): Enable circuit B.
+                check_dead_features (bool): Enable circuit C.
+                check_generalization_gap (bool): Enable circuit D.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -545,28 +544,29 @@ class SanityGateCfg(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_mode(cls, data: Any) -> Any:
-        """Отвергнуть удалённое поле ``mode`` с подсказкой миграции.
+        """Reject the removed ``mode`` field with a migration hint.
 
-        Поле удалено целиком вместе с семантикой ``warn_only`` (осознанное
-        решение эпика #74): отбор происходит только явным select-шагом.
-        Молчаливое игнорирование скрыло бы смену семантики, поэтому конфиг
-        с ``sanity_gate.mode`` отвергается с подсказкой миграции.
+        The field was removed entirely along with the ``warn_only`` semantics
+        (a deliberate design decision): selection happens only via an
+        explicit select step. Silently ignoring it would hide the semantic
+        change, so a config with ``sanity_gate.mode`` is rejected with a
+        migration hint.
 
         Args:
-            data: Сырые входные данные секции (dict при YAML/JSON-парсинге).
+            data: Raw input data of the section (a dict when parsed from YAML/JSON).
 
         Returns:
-            Any: Данные без изменений, если ключа ``mode`` нет.
+            Any: The data unchanged, if the ``mode`` key is absent.
 
         Raises:
-            ValueError: Если в данных присутствует ключ ``mode``.
+            ValueError: If the data contains the ``mode`` key.
         """
         if isinstance(data, dict) and "mode" in data:
-            # Стабильный код ошибки (ERR_REMOVED_SANITY_GATE_MODE) позволяет
-            # тестам завязываться на error['type'], а не на текст подсказки.
+            # The stable error code (ERR_REMOVED_SANITY_GATE_MODE) lets tests rely
+            # on error['type'] instead of the hint text.
             raise PydanticCustomError(
                 ERR_REMOVED_SANITY_GATE_MODE,
-                "general.sanity_gate.mode has been removed (epic #74). "
+                "general.sanity_gate.mode has been removed. "
                 "Migration: remove sanity_gate.mode and add an explicit "
                 "select phase, e.g. {action: 'select', strategy: "
                 "'sanity_gate', output: 'winner'} as the last phase; "
@@ -580,191 +580,193 @@ class SanityGateCfg(BaseModel):
     top_k_candidates: int = Field(
         default=3,
         ge=1,
-        description="Жёсткий кап размера пула финалистов (>= 1, дефолт 3).",
+        description="Hard cap on the finalist pool size (>= 1, default 3).",
     )
     corridor_delta: float = Field(
         default=0.15,
         gt=0.0,
         lt=1.0,
         description=(
-            "Относительная ширина коридора δ от лидера (строго в (0, 1), дефолт 0.15)."
+            "Relative corridor width δ from the leader (strictly in (0, 1), default 0.15)."
         ),
     )
     corridor_mode: CorridorMode = Field(
         default="auto",
         description=(
-            "Форма коридора пула финалистов: 'multiplicative', 'additive' "
-            "или 'auto' (выбор по типу метрики, дефолт 'auto')."
+            "Shape of the finalist pool corridor: 'multiplicative', 'additive' "
+            "or 'auto' (chosen based on the metric type, default 'auto')."
         ),
     )
     enforce_family_diversity: bool = Field(
         default=False,
         description=(
-            "Опциональный мягкий добор недостающих семейств в пул финалистов "
-            "(дефолт False — выключен)."
+            "Optional soft complementation of missing families into the finalist pool "
+            "(default False — disabled)."
         ),
     )
     algorithm_families: dict[str, str] | None = Field(
         default=None,
         description=(
-            "Карта «алгоритм → семейство» для правила добора семейств. "
-            "None — алгоритмы без классификации считаются собственным семейством."
+            "Map of 'algorithm → family' for the family complementation rule. "
+            "None — algorithms without a classification are treated as their own family."
         ),
     )
     allowed_families: list[str] | None = Field(
         default=None,
-        description=("Семейства, участвующие в правиле добора (None — все разрешены)."),
+        description=(
+            "Families taking part in the family complementation rule (None — all are allowed)."
+        ),
     )
     family_diversity_multiplier: float = Field(
         default=1.5,
         gt=0.0,
-        description="Множитель расширенного коридора для добора семейств (> 0).",
+        description="Multiplier of the expanded corridor for family complementation (> 0).",
     )
     min_prediction_diversity: float = Field(
         default=0.15,
         gt=0.0,
         le=1.0,
         description=(
-            "Порог контура А (diversity): Var(y_pred_oof)/Var(y) >= порога; "
-            "считается на OOF-предсказаниях (строго в (0, 1], дефолт 0.15)."
+            "Circuit A (diversity) threshold: Var(y_pred_oof)/Var(y) >= threshold; "
+            "computed on OOF predictions (strictly in (0, 1], default 0.15)."
         ),
     )
     adaptive_diversity: bool = Field(
         default=False,
         description=(
-            "Адаптивный режим контура А: сравнение с константной моделью "
-            "(нулевой разброс предсказаний — провал)."
+            "Adaptive mode for circuit A: comparison with a constant model "
+            "(zero variance in predictions — failure)."
         ),
     )
     min_unique_count: int = Field(
         default=5,
         ge=1,
-        description="Абсолютный нижний предел nunique контура Б (>= 1).",
+        description="Absolute lower bound for nunique in circuit B (>= 1).",
     )
     min_unique_ratio: float = Field(
         default=0.05,
         gt=0.0,
         le=1.0,
-        description="Нижняя граница доли уникальных предсказаний контура Б (в (0, 1]).",
+        description="Lower bound for the fraction of unique predictions in circuit B (in (0, 1]).",
     )
     max_dead_feature_ratio: float = Field(
         default=0.4,
         ge=0.0,
         le=1.0,
         description=(
-            "Порог доли «мёртвых» признаков контура В (в [0, 1]) — для "
-            "линейных моделей это сигнал; самостоятельная дисквалификация "
-            "только при dead_features_require_low_diversity=true и низком "
-            "diversity."
+            "Threshold for the fraction of 'dead' features in circuit C (in [0, 1]) — for "
+            "linear models this is a signal; standalone disqualification "
+            "only when dead_features_require_low_diversity=true and diversity "
+            "is low."
         ),
     )
     dead_features_require_low_diversity: bool = Field(
         default=True,
         description=(
-            "Комбинированное правило контура В: дисквалификация только при "
-            "сочетании «много мёртвых признаков И низкий diversity»."
+            "Combined circuit C rule: disqualification only on the "
+            "combination of 'many dead features AND low diversity'."
         ),
     )
     zero_coef_tolerance: float = Field(
         default=1e-12,
         ge=0.0,
-        description="Коэффициенты с |coef| <= порога считаются нулевыми (контур В).",
+        description="Coefficients with |coef| <= the threshold are considered zero (circuit C).",
     )
     max_generalization_gap: float = Field(
         default=1.5,
         ge=1.0,
-        description="Порог контура Г: RMSE_oof/RMSE_full > порога — переобучение.",
+        description="Circuit D threshold: RMSE_oof/RMSE_full > threshold — overfitting.",
     )
     generalization_gap_mode: GeneralizationGapMode = Field(
         default="warn",
         description=(
-            "Режим контура Г (generalization gap): 'warn' (дефолт) — "
-            "нарушение контура Г (конечный gap > max_generalization_gap или "
-            "бесконечный gap из деления на ноль: RMSE_full≈0 / RMSE_oof≈0, "
-            "issue #111) записывается в soft_warnings (не дисквалифицирует); "
-            "'reject' — провал → reasons → дисквалификация (старое строгое "
-            "поведение). Reasons в обоих режимах остаются только для "
-            "нарушений контракта (y_pred_full=None) и невычислимости (нет "
-            "конечных пар). Поле намеренно НЕ называется mode (коллизия с "
-            "удалённым в эпике #74 полем sanity_gate.mode)."
+            "Circuit D (generalization gap) mode: 'warn' (default) — "
+            "a circuit D violation (a finite gap > max_generalization_gap or "
+            "an infinite gap from division by zero: RMSE_full≈0 / RMSE_oof≈0) "
+            "is recorded in soft_warnings (does not disqualify); "
+            "'reject' — a failure → reasons → disqualification (the old strict "
+            "behavior). Reasons in both modes remain only for "
+            "contract violations (y_pred_full=None) and non-computability (no "
+            "finite pairs). The field is deliberately NOT named mode (a "
+            "collision with the removed sanity_gate.mode field)."
         ),
     )
     check_permutation_sensitivity: bool = Field(
         default=True,
         description=(
-            "Включить пермутационный аудит чувствительности признаков "
-            "(контур В для нелинейных моделей; контроль стоимости аудита). "
-            "По умолчанию True; False — пермутационный путь пропускается, "
-            "линейный путь по коэффициентам остаётся."
+            "Enable the permutation audit of feature sensitivity "
+            "(circuit C for non-linear models; controls audit cost). "
+            "Default is True; False — the permutation path is skipped, "
+            "the linear coefficient-based path remains."
         ),
     )
     permutation_max_rows: int = Field(
         default=5000,
         ge=1,
-        description="Подвыборка строк для пермутационного пути контура В (>= 1, дефолт 5000).",
+        description="Row subsample for the permutation path of circuit C (>= 1, default 5000).",
     )
     permutation_max_features: int = Field(
         default=100,
         ge=1,
-        description="Кап проверяемых колонок в пермутационном пути (>= 1, дефолт 100).",
+        description="Cap on the columns checked in the permutation path (>= 1, default 100).",
     )
     permutation_repeats: int = Field(
         default=3,
         ge=1,
-        description="Число повторов пермутаций на колонку (>= 1).",
+        description="Number of permutation repeats per column (>= 1).",
     )
     permutation_seed: int = Field(
         default=42,
-        description="Фиксированное зерно пермутаций (детерминизм).",
+        description="Fixed permutation seed (for determinism).",
     )
     permutation_tolerance: float = Field(
         default=1e-3,
         ge=0.0,
-        description="Относительный порог «мёртвости» признака в пермутациях.",
+        description="Relative 'deadness' threshold for a feature in permutations.",
     )
     audit_time_budget_seconds: float = Field(
         default=0,
         ge=0.0,
         description=(
-            "Бюджет времени на фазу аудита Sanity Gate (в секундах). "
-            "0 — без ограничения (дефолт)."
+            "Time budget for the Sanity Gate audit phase (in seconds). "
+            "0 — unlimited (default)."
         ),
     )
-    check_diversity: bool = Field(default=True, description="Включить контур А.")
-    check_unique: bool = Field(default=True, description="Включить контур Б.")
-    check_dead_features: bool = Field(default=True, description="Включить контур В.")
+    check_diversity: bool = Field(default=True, description="Enable circuit A.")
+    check_unique: bool = Field(default=True, description="Enable circuit B.")
+    check_dead_features: bool = Field(default=True, description="Enable circuit C.")
     check_generalization_gap: bool = Field(
-        default=True, description="Включить контур Г."
+        default=True, description="Enable circuit D."
     )
 
 
 # ─────────────────── general ─────────────────── #
 class GeneralCfg(BaseModel):
-    """Общие настройки процесса AutoML, валидации и параллелизма.
+    """General settings of the AutoML process, validation, and parallelism.
 
-    Центральный узел управления экспериментом, отвечающий за выбор
-    метрик, стратегий оценки качества (Cross-Validation / Hold-out)
-    и распределение вычислительных ресурсов.
+    The central control node of the experiment, responsible for choosing
+    metrics, quality evaluation strategies (Cross-Validation / Hold-out),
+    and distributing computational resources.
     Attributes:
-        comparison_metric (ComparisonMetric): Основная метрика для ранжирования моделей.
-        additional_metrics (List[ComparisonMetric]): Дополнительные информационные
-            метрики, рассчитываемые для финальной модели тем же методом валидации,
-            что и сравнение моделей (hold-out/CV, а не train-скор).
-        path_to_model (Path): Путь в файловой системе для экспорта артефакта модели.
-        serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
-        log_to_file (Path | None): Файл для записи логов работы движка.
-        phases (List[HPOPhaseCfg]): Последовательность шагов пайплайна:
-            фазы HPO ('all_algorithms' / 'refine') и явные шаги отбора
-            ('select'); последняя фаза обязана быть select с output: winner.
-        validation_strategy (ValidationStrategy): Метод оценки (k-fold или hold-out).
-        n_folds (int): Количество разбиений для кросс-валидации.
-        categorical_encoding (Literal['one_hot', 'ordinal']): Стратегия кодирования
-            категориальных признаков. По умолчанию 'one_hot'.
-        parallel_strategy (str): Уровень распараллеливания (по алгоритмам/фолдам).
-        max_workers (int | None): Лимит потоков или процессов.
-        parallel_mode (str): Технический режим исполнения ('threads' или 'processes').
-        feature_selection (FeatureSelectionCfg): Настройки сокращения пространства
-            признаков. По умолчанию mode='disabled' — отбор признаков не применяется.
+        comparison_metric (ComparisonMetric): Main metric for ranking models.
+        additional_metrics (List[ComparisonMetric]): Additional informational
+            metrics, computed for the final model with the same validation method
+            used for model comparison (hold-out/CV, not train score).
+        path_to_model (Path): Filesystem path for exporting the model artifact.
+        serialization_format (SerializationFormat): Save format (pickle/joblib).
+        log_to_file (Path | None): File for writing the engine's run logs.
+        phases (List[HPOPhaseCfg]): Sequence of pipeline steps:
+            HPO phases ('all_algorithms' / 'refine') and explicit selection
+            steps ('select'); the last phase must be a select with output: winner.
+        validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).
+        n_folds (int): Number of splits for cross-validation.
+        categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy
+            for categorical features. Default is 'one_hot'.
+        parallel_strategy (str): Parallelization level (by algorithms/folds).
+        max_workers (int | None): Limit on threads or processes.
+        parallel_mode (str): Technical execution mode ('threads' or 'processes').
+        feature_selection (FeatureSelectionCfg): Feature space reduction
+            settings. By default mode='disabled' — feature selection is not applied.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -772,194 +774,195 @@ class GeneralCfg(BaseModel):
     comparison_metric: ComparisonMetric = Field(
         default="r2",
         description=(
-            "Метрика для сравнения моделей"
-            " и выбора лучшей (например, r2, rmse, accuracy)"
+            "Metric for comparing models"
+            " and choosing the best one (for example, r2, rmse, accuracy)"
         ),
     )
     additional_metrics: list[ComparisonMetric] = Field(
         default_factory=list,
         description=(
-            "Список дополнительных метрик качества, значения которых рассчитываются "
-            "для финальной обученной модели тем же методом валидации, что и "
-            "сравнение моделей (hold-out скоринг либо среднее по фолдам CV), и "
-            "возвращаются вместе с результатами обучения (ключ 'additional_metrics'). "
-            "Метрики носят исключительно информационный характер: они не участвуют "
-            "в оптимизации гиперпараметров, сравнении моделей и выборе победителя. "
-            "Допустимые значения совпадают с набором значений comparison_metric. "
-            "Дубликаты в списке игнорируются (значение считается один раз), а "
-            "совпадение с основной метрикой сравнения (включая алиасы, например "
-            "rmse ↔ neg_root_mean_squared_error) исключается из списка — её значение "
-            "и так возвращается как 'score'. Оба правила применяются на этапе "
-            "валидации конфигурации, поэтому итоговый список в "
-            "general.additional_metrics может отличаться от исходного, переданного "
-            "пользователем."
+            "List of additional quality metrics, whose values are computed "
+            "for the final trained model with the same validation method used for "
+            "model comparison (hold-out scoring or the mean over CV folds), and "
+            "are returned together with the training results (key 'additional_metrics'). "
+            "The metrics are purely informational: they do not take part "
+            "in hyperparameter optimization, model comparison, or winner selection. "
+            "Valid values are the same as the set of comparison_metric values. "
+            "Duplicates in the list are ignored (the value is counted once), and a "
+            "match with the main comparison metric (including aliases, for example "
+            "rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value "
+            "is already returned as 'score'. Both rules are applied during "
+            "config validation, so the resulting list in "
+            "general.additional_metrics may differ from the one originally passed "
+            "by the user."
         ),
     )
     path_to_model: Path = Field(
         default=Path("model.pkl"),
-        description="Путь для сохранения/загрузки результирующей обученной модели",
+        description="Path for saving/loading the resulting trained model",
     )
     serialization_format: SerializationFormat = Field(
         default=SerializationFormat.pickle,
-        description="Формат сериализации модели (pickle, joblib и т.д.)",
+        description="Model serialization format (pickle, joblib, etc.)",
     )
     log_to_file: Path | None = Field(
         default=None,
         description=(
-            "Путь к файлу логов. Если не указан,логи выводятся только в консоль"
+            "Path to the log file. If not set, logs are printed to the console only"
         ),
     )
     phases: list[HPOPhaseCfg] = Field(
-        ..., description="Список последовательных фаз оптимизации гиперпараметров"
+        ..., description="List of sequential hyperparameter optimization phases"
     )
     validation_strategy: ValidationStrategy = Field(
         default=ValidationStrategy.auto,
         description=(
-            "Стратегия оценки качества:"
-            "k-fold кросс-валидация, фиксированный hold-out,"
-            "LOO или автоматический выбор"
+            "Quality evaluation strategy:"
+            "k-fold cross-validation, fixed hold-out,"
+            "LOO, or automatic selection"
         ),
     )
     n_folds: int = Field(
         default=5,
         description=(
-            "Количество блоков (фолдов) для кросс-валидации."
-            "Используется только если validation_strategy = 'k_fold'"
+            "Number of blocks (folds) for cross-validation."
+            "Used only when validation_strategy = 'k_fold'"
         ),
     )
     categorical_encoding: EncodingStrategy = Field(
         default="one_hot",
         description=(
-            "Стратегия кодирования категориальных признаков: 'one_hot' (каждая "
-            "категория -> отдельный бинарный столбец), 'ordinal' (каждая "
-            "категориальная колонка -> один числовой столбец с наложенным "
-            "порядком), 'target' (target encoding со сглаживанием), 'frequency' "
-            "(частота категории) или 'hashing' (детерминированное хеширование "
-            "в фиксированное число бинарных колонок). Ordinal кодирование не "
-            "расширяет число колонок и полезно для линейных моделей, однако "
-            "навязывает искусственный порядок категориям. Target/frequency/"
-            "hashing эффективны для колонок высокой кардинальности."
+            "Encoding strategy for categorical features: 'one_hot' (each "
+            "category -> a separate binary column), 'ordinal' (each "
+            "categorical column -> one numeric column with an imposed "
+            "order), 'target' (target encoding with smoothing), 'frequency' "
+            "(category frequency) or 'hashing' (deterministic hashing "
+            "into a fixed number of binary columns). Ordinal encoding does "
+            "not increase the number of columns and is useful for linear models, "
+            "but it imposes an artificial order on categories. Target/frequency/"
+            "hashing are effective for high-cardinality columns."
         ),
     )
     high_cardinality_threshold: int | None = Field(
         default=None,
         ge=0,
         description=(
-            "Порог кардинальности для автоматического режима (>= 0). Колонки "
-            "с числом уникальных значений строго больше порога кодируются "
-            "стратегией high_cardinality_encoding, остальные — стратегией "
-            "categorical_encoding. Должен задаваться вместе с "
-            "high_cardinality_encoding. None — автоматический режим отключён."
+            "Cardinality threshold for the automatic mode (>= 0). Columns "
+            "with a number of unique values strictly greater than the threshold "
+            "are encoded with the high_cardinality_encoding strategy, the rest — "
+            "with the categorical_encoding strategy. Must be set together with "
+            "high_cardinality_encoding. None — the automatic mode is disabled."
         ),
     )
     high_cardinality_encoding: EncodingStrategy | None = Field(
         default=None,
         description=(
-            "Стратегия кодирования для колонок высокой кардинальности "
-            "(выше high_cardinality_threshold). Должна задаваться вместе с "
-            "high_cardinality_threshold. None — режим отключён."
+            "Encoding strategy for high-cardinality columns "
+            "(above high_cardinality_threshold). Must be set together with "
+            "high_cardinality_threshold. None — the mode is disabled."
         ),
     )
     hashing_n_components: int = Field(
         default=16,
         ge=1,
         description=(
-            "Число бинарных колонок на одну категориальную колонку при "
-            "кодировании 'hashing' (>= 1). Управляет размерностью выходных "
-            "признаков: рост числа признаков не зависит от кардинальности колонки."
+            "Number of binary columns per categorical column for "
+            "'hashing' encoding (>= 1). Controls the dimensionality of the "
+            "output features: the growth in the number of features does not "
+            "depend on the column cardinality."
         ),
     )
     target_encoding_smoothing: float = Field(
         default=20.0,
         ge=0,
         description=(
-            "Параметр сглаживания (m) target encoding (>= 0). При m=0 "
-            "используется чистое среднее целевой переменной по категории; "
-            "при больших m редкие категории приближаются к глобальному среднему."
+            "Smoothing parameter (m) of target encoding (>= 0). At m=0 "
+            "the pure mean of the target variable per category is used; "
+            "at large m rare categories approach the global mean."
         ),
     )
     target_encoding_fallback: float | None = Field(
         default=None,
         description=(
-            "Fallback-значение target encoding для категорий, отсутствующих "
-            "в обучающей выборке. None — глобальное среднее целевой переменной."
+            "Fallback value of target encoding for categories not present "
+            "in the training set. None — the global mean of the target variable."
         ),
     )
     parallel_strategy: ParallelStrategy = Field(
         default=next(iter(ParallelStrategy)),
         description=(
-            "Стратегия распараллеливания."
-            "Сейчас поддерживается только 'algorithms'"
-            " (каждый алгоритм в своем потоке/процессе)."
+            "Parallelization strategy."
+            "Currently only 'algorithms' is supported"
+            " (each algorithm in its own thread/process)."
         ),
     )
     max_workers: int | None = Field(
         default=None,
         description=(
-            "Максимальное количество потоков/процессов."
-            "Если null, используется количество ядер CPU"
+            "Maximum number of threads/processes."
+            "If null, the number of CPU cores is used"
         ),
     )
     parallel_mode: Literal["threads", "processes"] = Field(
         default="threads",
         description=(
-            "Режим многозадачности: потоки (для I/O задач)"
-            " или процессы (для CPU-интенсивных вычислений)"
+            "Concurrency mode: threads (for I/O-bound tasks)"
+            " or processes (for CPU-intensive computations)"
         ),
     )
     phase_timeout: float | None = Field(
         default=None,
         ge=1.0,
         description=(
-            "Глобальный таймаут на всю фазу HPO (в секундах). "
-            "Если None — используется значение по умолчанию 3600 секунд (1 час). "
-            "Поддерживается только в режиме parallel_mode='processes', где он "
-            "жёсткий: зависшие воркеры принудительно завершаются. В режиме "
-            "parallel_mode='threads' таймауты запрещены и считаются ошибкой "
-            "конфига (issue #101): исполняющуюся Python-функцию нельзя прервать, "
-            "поэтому мягкий таймаут не экономит время, а лишь выбрасывает "
-            "готовые результаты завершившихся алгоритмов."
+            "Global timeout for the whole HPO phase (in seconds). "
+            "If None — the default value of 3600 seconds (1 hour) is used. "
+            "Supported only in parallel_mode='processes', where it is hard: "
+            "hung workers are forcibly terminated. In parallel_mode='threads' "
+            "timeouts are forbidden and are a config error: an already "
+            "running Python function cannot be interrupted, so a soft timeout "
+            "does not save time and only discards the ready results of "
+            "completed algorithms."
         ),
     )
     task_timeout: float | None = Field(
         default=None,
         ge=1.0,
         description=(
-            "Таймаут на одну задачу (алгоритм) внутри фазы (в секундах). "
-            "Если None — используется phase_timeout или глобальный timeout. "
-            "Отсчитывается от момента фактического старта задачи, а не от "
-            "момента её отправки в пул: пока задача стоит в очереди (алгоритмов "
-            "больше, чем max_workers), она не истекает, не начавшись (issue #110). "
-            "Поддерживается только в режиме parallel_mode='processes', где он "
-            "жёсткий. В режиме parallel_mode='threads' таймауты запрещены и "
-            "считаются ошибкой конфига (issue #101): исполняющуюся Python-функцию "
-            "нельзя прервать, поэтому мягкий таймаут не экономит время, а лишь "
-            "выбрасывает готовые результаты завершившихся алгоритмов."
+            "Timeout for a single task (algorithm) within a phase (in seconds). "
+            "If None — phase_timeout or the global timeout is used. "
+            "Counted from the moment the task actually starts, not from the "
+            "moment it was submitted to the pool: while a task waits in the "
+            "queue (more algorithms than max_workers), it does not expire "
+            "before starting. Supported only in parallel_mode='processes', "
+            "where it is hard. In parallel_mode='threads' timeouts are "
+            "forbidden and are a config error: an already running Python "
+            "function cannot be interrupted, so a soft timeout does not save "
+            "time and only discards the ready results of completed algorithms."
         ),
     )
     pruning: PruningCfg = Field(
         default_factory=PruningCfg,
         description=(
-            "Настройки ранней остановки (pruning) триалов Optuna. "
-            "По умолчанию выключены: каждый триал выполняется полностью."
+            "Early stopping (pruning) settings for Optuna trials. "
+            "Disabled by default: each trial runs to completion."
         ),
     )
     feature_selection: FeatureSelectionCfg = Field(
         default_factory=FeatureSelectionCfg,
         description=(
-            "Настройки сокращения пространства признаков. По умолчанию "
-            "mode='disabled' — отбор признаков не применяется."
+            "Feature space reduction settings. By default "
+            "mode='disabled' — feature selection is not applied."
         ),
     )
     sanity_gate: SanityGateCfg = Field(
         default_factory=SanityGateCfg,
         description=(
-            "Пороги и настройки аудита Sanity Gate для select-шагов со "
-            "strategy: sanity_gate (эпик #61, #74). Секция — опциональный "
-            "источник порогов (коридор, top_k_candidates, лимиты аудита), "
-            "а не поведенческий флаг: отбор выполняется только явными "
-            "select-фазами в general.phases. Наличие секции без "
-            "sanity-select-шагов валидно"
+            "Thresholds and settings of the Sanity Gate audit for select steps "
+            "with strategy: sanity_gate. The section is an optional "
+            "source of thresholds (corridor, top_k_candidates, audit limits), "
+            "not a behavioral flag: selection is performed only by explicit "
+            "select phases in general.phases. Having the section without "
+            "sanity select steps is valid"
         ),
     )
 
@@ -968,14 +971,14 @@ class GeneralCfg(BaseModel):
     def _deduplicate_additional_metrics(
         cls, v: list[ComparisonMetric]
     ) -> list[ComparisonMetric]:
-        """Устранить дубликаты в списке дополнительных метрик.
+        """Remove duplicates from the list of additional metrics.
 
-        Задокументированное поведение: одна и та же метрика, указанная
-        несколько раз, вычисляется и возвращается ровно один раз
-        (порядок первого вхождения сохраняется). Дедупликация выполняется
-        по строковому представлению метрики в нижнем регистре: элементы
-        ``ComparisonMetric`` являются строками, поэтому вызов ``.lower()``
-        типобезопасен и не зависит от произвольного типа элемента.
+        Documented behavior: the same metric specified several times is
+        computed and returned exactly once (the order of the first
+        occurrence is preserved). Deduplication is done using the
+        lowercased string representation of the metric: ``ComparisonMetric``
+        items are strings, so calling ``.lower()`` is type-safe and does not
+        depend on an arbitrary element type.
         """
         seen: set[str] = set()
         result: list[ComparisonMetric] = []
@@ -988,14 +991,14 @@ class GeneralCfg(BaseModel):
 
     @model_validator(mode="after")
     def _exclude_comparison_from_additional(self) -> GeneralCfg:
-        """Исключить основную метрику сравнения из списка дополнительных.
+        """Exclude the main comparison metric from the additional metrics list.
 
-        Значение основной метрики сравнения уже возвращается в результатах
-        обучения как ``score``, поэтому дублировать его в
-        ``additional_metrics`` не нужно. Сравнение выполняется по
-        sklearn-имени метрики, поэтому алиасы одной и той же метрики
-        (например, 'rmse' и 'neg_root_mean_squared_error') считаются
-        совпадением.
+        The value of the main comparison metric is already returned in the
+        training results as ``score``, so duplicating it in
+        ``additional_metrics`` is unnecessary. The comparison is done by the
+        sklearn name of the metric, so aliases of the same metric
+        (for example, 'rmse' and 'neg_root_mean_squared_error') count as a
+        match.
         """
         comparison_sklearn = to_sklearn_name(self.comparison_metric)
         filtered = [
@@ -1015,19 +1018,19 @@ class GeneralCfg(BaseModel):
 
     @model_validator(mode="after")
     def _check_n_folds(self) -> GeneralCfg:
-        """Проверить логическую целостность настроек валидации и сериализации.
+        """Check the logical consistency of validation and serialization settings.
 
-        Логика проверки:
-        1. Проверка доступности пакета `joblib`, если выбран соответствующий формат.
-        2. Гарантия, что `n_folds` является положительным числом для любых стратегий.
-        3. Строгая проверка для `k_fold`: количество блоков должно быть не менее 2.
+        Validation logic:
+        1. Checks that the `joblib` package is available when the corresponding format is selected.
+        2. Ensures `n_folds` is a positive number for any strategy.
+        3. Strict check for `k_fold`: the number of blocks must be at least 2.
 
         Returns:
-            GeneralCfg: Валидированный объект настроек.
+            GeneralCfg: The validated settings object.
 
         Raises:
-            ValueError: Если пакет 'joblib' не установлен или значение `n_folds`
-                недопустимо для выбранной стратегии.
+            ValueError: If the 'joblib' package is not installed or `n_folds` is
+                invalid for the selected strategy.
         """
         if self.serialization_format == SerializationFormat.joblib and not is_installed(
             "joblib"
@@ -1038,27 +1041,27 @@ class GeneralCfg(BaseModel):
             )
         if self.n_folds < 1:
             raise ValueError("`n_folds` must be at least 1")
-        # Строгая проверка только для k-fold
+        # Strict validation only for k-fold
         if self.validation_strategy == ValidationStrategy.k_fold and self.n_folds < 2:
             raise ValueError("n_folds must be ≥ 2 for k-fold validation")
         return self
 
     @model_validator(mode="after")
     def _check_pruning_consistency(self) -> GeneralCfg:
-        """Проверить согласованность настроек ранней остановки с валидацией.
+        """Check the consistency of early stopping settings with validation.
 
-        Логика проверки:
-        1. Для 'k_fold' прайнер должен иметь возможность сработать раньше
-           окончания оценки: min_steps не может превышать n_folds.
-        2. Для 'train_test_split' естественных шагов нет — ранняя остановка
-           не применяется; выдаём предупреждение, а не ошибку (поведение
-           задокументировано и безопасно).
+        Validation logic:
+        1. For 'k_fold' the pruner must be able to fire before the evaluation
+           finishes: min_steps cannot exceed n_folds.
+        2. For 'train_test_split' there are no natural steps — early stopping
+           is not applied; we emit a warning rather than an error (the
+           behavior is documented and safe).
 
         Returns:
-            GeneralCfg: Валидированный объект настроек.
+            GeneralCfg: The validated settings object.
 
         Raises:
-            ValueError: Если настройки pruning конфликтуют с валидацией.
+            ValueError: If the pruning settings conflict with validation.
         """
         if not self.pruning.enable:
             return self
@@ -1084,30 +1087,30 @@ class GeneralCfg(BaseModel):
 
     @model_validator(mode="after")
     def _validate_phase_pipeline(self) -> GeneralCfg:
-        """Кросс-валидация последовательности фаз пайплайна (эпик #74).
+        """Cross-validate the sequence of pipeline phases.
 
-        Порядок after-валидаторов в Pydantic v2 детерминирован порядком
-        определения, поэтому этот валидатор осознанно объявлен РАНЬШЕ
-        ``_check_high_cardinality_encoding``: ошибки структуры пайплайна
-        (первопричина конфига) гарантированно сообщаются раньше ошибок
-        кодирования категориальных колонок.
+        The order of after-validators in Pydantic v2 is determined by their
+        definition order, so this validator is deliberately declared BEFORE
+        ``_check_high_cardinality_encoding``: pipeline structure errors (the
+        root cause of a config) are guaranteed to be reported before errors
+        in categorical column encoding.
 
-        Логика проверки (пустой список фаз не проверяется — защита от
-        отсутствия фаз остаётся в рантайме ``train_best_model``):
-        1. ``select`` не может быть первой фазой: до какого-либо поиска
-           аудировать/ранжировать нечего.
-        2. Фазы после терминального select (``output: winner``) запрещены:
-           такой шаг отдаёт единственного победителя, и последующее
-           дообучение скрыло бы результат отбора.
-        3. Последняя фаза обязана быть ``select`` с ``output: winner``:
-           финальный артефакт строится только из результата терминального
-           шага отбора.
+        Validation logic (an empty phase list is not checked — the guard
+        against missing phases stays in the ``train_best_model`` runtime):
+        1. ``select`` cannot be the first phase: before any search there is
+           nothing to audit/rank.
+        2. Phases after a terminal select (``output: winner``) are forbidden:
+           such a step yields a single winner, and any subsequent
+           fine-tuning would hide the selection result.
+        3. The last phase must be a ``select`` with ``output: winner``:
+           the final artifact is built only from the result of the terminal
+           selection step.
 
         Returns:
-            GeneralCfg: Валидированный объект настроек.
+            GeneralCfg: The validated settings object.
 
         Raises:
-            ValueError: Если последовательность фаз нарушает правила пайплайна.
+            ValueError: If the phase sequence violates the pipeline rules.
         """
         phases = self.phases
         if not phases:
@@ -1135,8 +1138,8 @@ class GeneralCfg(BaseModel):
             raise ValueError(
                 f"the last phase '{last.name}' (action '{last.action}') must "
                 "be a 'select' phase with output 'winner': the final artifact "
-                "is built from the result of the terminal select step "
-                "(epic #74). Migration: append "
+                "is built from the result of the terminal select step. "
+                "Migration: append "
                 "{action: 'select', strategy: 'cv_best', output: 'winner'} "
                 "as the last phase. See the migration table in README.md."
             )
@@ -1144,22 +1147,22 @@ class GeneralCfg(BaseModel):
 
     @model_validator(mode="after")
     def _check_high_cardinality_encoding(self) -> GeneralCfg:
-        """Проверить согласованность настроек кодирования high-cardinality колонок.
+        """Check the consistency of the high-cardinality encoding settings.
 
-        Логика проверки:
-        1. ``high_cardinality_threshold`` и ``high_cardinality_encoding``
-           задаются только вместе (иначе поведение неоднозначно — ошибка
-           отклоняется до запуска обучения).
-        2. Значения ``categorical_encoding`` / ``high_cardinality_encoding``
-           валидируются типом ``EncodingStrategy`` (неподдерживаемая стратегия
-           отклоняется на этапе парсинга конфигурации).
+        Validation logic:
+        1. ``high_cardinality_threshold`` and ``high_cardinality_encoding``
+           must be set together (otherwise the behavior is ambiguous — the
+           configuration is rejected before training starts).
+        2. The values of ``categorical_encoding`` / ``high_cardinality_encoding``
+           are validated by the ``EncodingStrategy`` type (an unsupported
+           strategy is rejected during config parsing).
 
         Returns:
-            GeneralCfg: Валидированный объект настроек.
+            GeneralCfg: The validated settings object.
 
         Raises:
-            ValueError: Если задан только один из пары параметров
-                high-cardinality кодирования.
+            ValueError: If only one of the high-cardinality encoding
+                parameters is set.
         """
         threshold = self.high_cardinality_threshold
         hc_encoding = self.high_cardinality_encoding
@@ -1175,22 +1178,23 @@ class GeneralCfg(BaseModel):
 
     @model_validator(mode="after")
     def _check_threads_timeouts(self) -> GeneralCfg:
-        """Запретить таймауты в режиме потоков (issue #101).
+        """Forbid timeouts in threads mode.
 
-        В ``parallel_mode='threads'`` таймауты бессмысленны и вредны: уже
-        исполняющуюся Python-функцию прервать нельзя, поэтому мягкий таймаут
-        не экономит время — он лишь заставляет фазу ждать ``shutdown(wait=True)``
-        завершения всех алгоритмов, а затем выбрасывает их готовые результаты.
-        Поэтому любое задание ``phase_timeout`` / ``task_timeout`` вместе с
-        ``parallel_mode='threads'`` считается ошибкой конфигурации
-        (ломающее изменение, обратная совместимость не сохраняется).
+        In ``parallel_mode='threads'`` timeouts are meaningless and harmful:
+                an already running Python function cannot be interrupted, so a soft
+                timeout does not save time — it only forces the phase to wait for
+                ``shutdown(wait=True)`` completion of all algorithms and then
+                discards their ready results. Therefore setting any of
+                ``phase_timeout`` / ``task_timeout`` together with
+                ``parallel_mode='threads'`` is a configuration error (a breaking
+                change; backward compatibility is not preserved).
 
-        Returns:
-            GeneralCfg: Проверенный объект настроек.
+                Returns:
+                    GeneralCfg: The validated settings object.
 
-        Raises:
-            ValueError: Если ``parallel_mode='threads'`` и задан хотя бы один
-                из таймаутов ``phase_timeout`` / ``task_timeout``.
+                Raises:
+                    ValueError: If ``parallel_mode='threads'`` and at least one of the
+                        timeouts ``phase_timeout`` / ``task_timeout`` is set.
         """
         if self.parallel_mode == "threads" and (
             self.phase_timeout is not None or self.task_timeout is not None
@@ -1201,8 +1205,8 @@ class GeneralCfg(BaseModel):
             if self.task_timeout is not None:
                 offenders.append(f"general.task_timeout={self.task_timeout!r}")
             raise ValueError(
-                "timeouts are not supported in parallel_mode='threads' "
-                "(issue #101): an already-running Python function cannot be "
+                "timeouts are not supported in parallel_mode='threads': an "
+                "already-running Python function cannot be "
                 "interrupted, so a soft timeout does not save time and only "
                 "discards the ready results of completed algorithms. "
                 f"Offending settings: {', '.join(offenders)}. "
@@ -1220,37 +1224,34 @@ class OversamplingAlgorithm(str, Enum):
 
 
 class OversamplingCfg(BaseModel):
-    """Параметры балансировки классов и синтеза данных.
+    """Class balancing and data synthesis parameters.
 
-    Обеспечивает конфигурацию методов устранения дисбаланса целевой переменной.
-    Использует механизм псевдонимов (aliases) для маппинга плоских ключей
-    YAML в структурированный объект.
+    Provides configuration of methods for resolving the target-variable imbalance.
+    Uses an aliases mechanism to map flat YAML keys into a structured object.
     Attributes:
-        enable (bool): Глобальный флаг включения оверсэмплинга.
-        multiplier (float): Целевой коэффициент увеличения выборки.
-        algorithm (OversamplingAlgorithm): Выбранный метод генерации
-            (SMOTE, ADASYN и др.).
+        enable (bool): Global flag enabling oversampling.
+        multiplier (float): Target sample-increase factor.
+        algorithm (OversamplingAlgorithm): Selected generation method
+            (SMOTE, ADASYN, etc.).
     """
 
-    # принимать alias‑имена
+    # accept alias names
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     enable: bool = Field(
         default=False,
         alias="data_oversampling",
-        description=(
-            "Флаг включения балансировки данных.Применяется только к обучающей выборке"
-        ),
+        description=("Flag enabling data balancing. Applies only to the training set"),
     )
     multiplier: float = Field(
         default=1.0,
         alias="data_oversampling_multiplier",
         ge=1.0,
-        description="Во сколько раз увеличить количество примеров миноритарных классов",
+        description="How many times to increase the number of minority-class examples",
     )
     algorithm: OversamplingAlgorithm = Field(
         default=OversamplingAlgorithm.random,
         alias="data_oversampling_algorithm",
-        description="Алгоритм синтеза новых данных (Random, SMOTE, ADASYN)",
+        description="Algorithm for synthesizing new data (Random, SMOTE, ADASYN)",
     )
 
     @model_validator(mode="after")
@@ -1266,88 +1267,88 @@ class OversamplingCfg(BaseModel):
 
 
 class AlgoCfg(BaseModel):
-    """Техническая конфигурация конкретного ML-алгоритма в пайплайне.
+    """Technical configuration of a specific ML algorithm in the pipeline.
 
-    Хранит настройки включения алгоритма, переопределенные пространства
-    поиска и пути к программным модулям тренера и тюнера.
+    Stores the algorithm enablement settings, overridden search spaces,
+    and paths to the trainer and tuner modules.
     Attributes:
-        enable (bool): Флаг участия алгоритма в текущем эксперименте.
-        limit_hyperparameters (bool): Режим сокращенного пространства поиска.
-        hyperparameters (Dict | None): Кастомные границы параметров,
-            перекрывающие значения по умолчанию.
-        tuner (str): Dotted-path к модулю оптимизатора.
-        trainer_module (str): Dotted-path к реализации обучения модели.
+        enable (bool): Flag for the algorithm's participation in the current experiment.
+        limit_hyperparameters (bool): Reduced search-space mode.
+        hyperparameters (Dict | None): Custom parameter bounds
+            overriding the default values.
+        tuner (str): Dotted path to the optimizer module.
+        trainer_module (str): Dotted path to the model training implementation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enable: bool = Field(
-        default=True, description="Использовать ли данный алгоритм в пайплайне AutoML"
+        default=True, description="Whether to use this algorithm in the AutoML pipeline"
     )
     limit_hyperparameters: bool = Field(
-        default=False, description=("Ограничить гиперпараметры пространства поиска")
+        default=False, description=("Limit the hyperparameters of the search space")
     )
     hyperparameters: dict[str, SearchSpaceEntry] | None = Field(
         default=None,
         description=(
-            "Ключи должны соответствовать допустимым гиперпараметрам алгоритма: "
-            "параметрам конструктора sklearn-оценщика (включая legacy-имена из "
-            "LEGACY_PARAM_MAPPINGS). Источник истины — "
+            "Keys must correspond to the algorithm's allowed hyperparameters: "
+            "the constructor parameters of the sklearn estimator (including legacy "
+            "names from LEGACY_PARAM_MAPPINGS). The source of truth is "
             "models.get_allowed_hyperparameters."
         ),
     )
     preprocessing: PreprocessingOverride | None = Field(
         default=None,
         description=(
-            "Явное переопределение пресета предобработки признаков для данного "
-            "алгоритма (FR-5). Задаётся частично или полностью: 'imputation_strategy' "
-            "('mean'|'median') и/или 'scaling' ('standard'|'robust'|'none'). "
-            "Имеет приоритет над автоматическим выбором по классу алгоритма. "
-            "None — автоматический выбор."
+            "Explicit override of the feature preprocessing preset for this "
+            "algorithm. Set partially or fully: 'imputation_strategy' "
+            "('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'). "
+            "Takes precedence over the automatic choice based on the algorithm "
+            "class. None — automatic selection."
         ),
     )
     tuner: str | None = Field(
         default="configurable_automl_engine.tuner",
-        description="Путь к модулю тюнера для оптимизации гиперпараметров",
+        description="Path to the tuner module for hyperparameter optimization",
     )
     trainer_module: str | None = Field(
         default="configurable_automl_engine.trainer",
         description=(
-            "Dotted-path к модулю, содержащему класс `ModelTrainer`"
-            "(например, 'configurable_automl_engine.trainer')."
+            "Dotted path to the module containing the `ModelTrainer` class"
+            "(for example, 'configurable_automl_engine.trainer')."
         ),
     )
 
     def get_required_package(self, algo_name: str) -> str | None:
-        """Определить имя внешнего Python-пакета, необходимого для работы алгоритма.
+        """Determine the name of the external Python package required by the algorithm.
 
-        Логика поиска:
-        1. Обращается к глобальному маппингу `ALGO_PACKAGE_MAPPING`.
-        2. Сопоставляет внутреннее имя алгоритма (например, 'xgboost')
-            с названием в PyPI.
+        Lookup logic:
+        1. Consults the global `ALGO_PACKAGE_MAPPING`.
+        2. Maps the internal algorithm name (for example, 'xgboost')
+            to its PyPI name.
 
         Args:
-            algo_name (str): Уникальный идентификатор алгоритма.
+            algo_name (str): Unique identifier of the algorithm.
         Returns:
-            Optional[str]: Название пакета для установки через pip или None,
-                если зависимость не определена.
+            Optional[str]: Name of the package to install via pip, or None
+                if no dependency is defined.
         """
         return ALGO_PACKAGE_MAPPING.get(algo_name)
 
     def get_unknown_hyperparameters(self, algo_name: str) -> list[str]:
-        """Вернуть список гиперпараметров, несовместимых с данным алгоритмом.
+        """Return the hyperparameters incompatible with the given algorithm.
 
-        Сверяет ключи `self.hyperparameters` с допустимым множеством
-        параметров конструктора оценки (см.
-        `models.get_allowed_hyperparameters`), включая legacy-имена из
-        `LEGACY_PARAM_MAPPINGS`. Если допустимое множество определить нельзя
-        (алгоритм неизвестен, зависимость не установлена или конструктор
-        принимает **kwargs) — проверка пропускается (мягкий fallback).
+        Checks the keys of `self.hyperparameters` against the allowed set of
+        estimator constructor parameters (see
+        `models.get_allowed_hyperparameters`), including legacy names from
+        `LEGACY_PARAM_MAPPINGS`. If the allowed set cannot be determined
+        (the algorithm is unknown, the dependency is not installed, or the
+        constructor accepts **kwargs), the check is skipped (soft fallback).
 
         Args:
-            algo_name (str): Уникальный идентификатор алгоритма.
+            algo_name (str): Unique identifier of the algorithm.
         Returns:
-            List[str]: Список недопустимых ключей. Пустой список — всё корректно.
+            List[str]: List of invalid keys. An empty list means everything is correct.
         """
         if self.hyperparameters is None:
             return []
@@ -1382,46 +1383,46 @@ AlgorithmsConfig = create_model(
 )  # type: ignore[call-overload]
 
 if TYPE_CHECKING:
-    # для mypy используем статический alias
+    # use a static alias for mypy
     AlgorithmsConfigType = _AlgorithmsConfigBase
 else:
-    # runtime — динамический create_model
+    # runtime — dynamic create_model
     AlgorithmsConfigType = AlgorithmsConfig
 
 
 # ─────────────────── root ──────────────────── #
 class Config(BaseModel):
-    """Корневой объект всей системы конфигурации AutoML.
+    """Root object of the whole AutoML configuration system.
 
-    Агрегирует все секции настроек и выполняет финальную валидацию
-    целостности графа параметров, включая проверку системных зависимостей.
+    Aggregates all configuration sections and performs the final validation
+    of the parameter graph integrity, including system dependency checks.
     Attributes:
-        general (GeneralCfg): Общие параметры эксперимента.
-        oversampling (OversamplingCfg): Настройки предобработки данных.
-        algorithms (AlgorithmsConfig): Реестр доступных и активных алгоритмов.
+        general (GeneralCfg): General experiment parameters.
+        oversampling (OversamplingCfg): Data preprocessing settings.
+        algorithms (AlgorithmsConfig): Registry of available and active algorithms.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     general: GeneralCfg = Field(
-        ..., description="Общие настройки эксперимента и валидации"
+        ..., description="General experiment and validation settings"
     )
     oversampling: OversamplingCfg = Field(
-        default=OversamplingCfg(), description="Настройки балансировки данных"
+        default=OversamplingCfg(), description="Data balancing settings"
     )
     algorithms: AlgorithmsConfigType = Field(
         ...,
         description=(
-            "Словарь алгоритмов, где ключ — имя алгоритма "
-            "(например, 'xgboost', 'random_forest')"
+            "Dictionary of algorithms, where the key is the algorithm name "
+            "(for example, 'xgboost', 'random_forest')"
         ),
     )
 
     @field_validator("algorithms")
     @classmethod
     def _must_have_enabled(cls, v: Any) -> Any:
-        # Поскольку 'v' теперь — это AlgorithmsConfig (объект),
-        # мы получаем все его поля через .model_dump()
+        # Since 'v' is now an AlgorithmsConfig (object),
+        # we get all its fields via .model_dump()
         enabled_algorithms = [
             algo
             for algo in v.model_dump().values()
@@ -1434,8 +1435,8 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _check_algorithm_dependencies(self) -> Config:
-        # model_fields через экземпляр тоже работает, но deprecated
-        # (PydanticDeprecatedSince211, удаление в V3.0) — используем класс
+        # model_fields works through an instance too, but it is deprecated
+        # (PydanticDeprecatedSince211, removal in V3.0) — use the class instead
         for name in type(self.algorithms).model_fields:
             # Get the attribute value (could be None if not provided in data)
             algo_cfg = getattr(self.algorithms, name)
@@ -1483,22 +1484,22 @@ class Config(BaseModel):
 
 # ────────────────── API ────────────────────── #
 def read_config(path: str | Path) -> Config:
-    """Загрузить, распарсить и валидировать конфигурационный файл эксперимента.
+    """Load, parse, and validate an experiment configuration file.
 
-    Логика работы:
-    1. Открывает файл по указанному пути в кодировке UTF-8.
-    2. Выполняет безопасную загрузку YAML-структуры в Python-словарь.
-    3. Инициирует каскадную валидацию Pydantic
-        для создания типизированного объекта `Config`.
+    How it works:
+    1. Opens the file at the given path in UTF-8 encoding.
+    2. Safely loads the YAML structure into a Python dictionary.
+    3. Triggers cascading Pydantic validation
+        to build a typed `Config` object.
     Args:
-        path (str | Path): Путь к файлу конфигурации в формате .yaml или .yml.
+        path (str | Path): Path to a .yaml or .yml configuration file.
     Returns:
-        Config: Корневой объект конфигурации, готовый к использованию в движке AutoML.
+        Config: The root configuration object, ready for use in the AutoML engine.
 
     Raises:
-        FileNotFoundError: Если файл по указанному пути не найден.
-        ValidationError: Если структура файла не соответствует схеме или
-            нарушена логика параметров.
+        FileNotFoundError: If the file at the given path is not found.
+        ValidationError: If the file structure does not match the schema or
+            the parameter logic is violated.
     """
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}

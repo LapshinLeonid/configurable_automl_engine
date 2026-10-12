@@ -145,12 +145,12 @@ def test_create_model_svr_user_max_iter():
 
 
 def test_create_model_svr_explicit_sigmoid_kernel_allowed():
-    """Явно заданный пользователем kernel='sigmoid' продолжает работать.
+    """Explicitly requested kernel='sigmoid' keeps working.
 
-    Регрессионный тест на issue #58: правка DEFAULT_SPACES['svr'] исключает
-    sigmoid/poly только из автоматического перебора HPO. Валидация построена
-    на get_allowed_hyperparameters (сигнатура конструктора SVR), поэтому явный
-    выбор 'sigmoid' через hyperparameters / space_overrides не запрещается.
+    A regression test: the DEFAULT_SPACES['svr'] change excludes sigmoid/poly
+    only from the automatic HPO search. Validation is built on
+    get_allowed_hyperparameters (SVR constructor signature), so an explicit
+    'sigmoid' choice via hyperparameters / space_overrides is not forbidden.
     """
     allowed = get_allowed_hyperparameters("svr")
     assert "kernel" in allowed
@@ -178,56 +178,56 @@ def test_clean_hyperparameters_logs_dropped(caplog):
 
 def test_create_model_invalid_type():
     """
-    Проверка возбуждения TypeError, если аргумент algorithm не является строкой.
+    Verify TypeError is raised when the algorithm argument is not a string.
     """
-    # Передаем список вместо строки
-    with pytest.raises(TypeError, match="Алгоритм должен быть строкой"):
+    # Pass a list instead of a string
+    with pytest.raises(TypeError, match="Algorithm must be a string"):
         create_model(algorithm=["elasticnet"])
 
-    # Передаем число вместо строки
-    with pytest.raises(TypeError, match="Алгоритм должен быть строкой"):
+    # Pass a number instead of a string
+    with pytest.raises(TypeError, match="Algorithm must be a string"):
         create_model(algorithm=123)
 
 
 def test_create_model_import_error_for_missing_package():
     """
-    Тест покрытия строки 107: проверка возбуждения ImportError,
-    если класс модели в фабрике равен None (имитация отсутствия XGBoost).
+    Coverage of line 107: verify ImportError is raised when the model class
+    in the factory is None (simulating a missing XGBoost).
     """
-    # Используем patch, чтобы временно подменить значение в _FACTORY на None
-    # Это имитирует ситуацию, когда XGBRegressor не был импортирован
+    # Patch _FACTORY to temporarily replace the value with None
+    # This simulates the situation where XGBRegressor was not imported
     with patch("configurable_automl_engine.models._FACTORY") as mocked_factory:
-        # Настраиваем мок так, чтобы для 'xgboosting' возвращался None
+        # Configure the mock so that None is returned for 'xgboosting'
         mocked_factory.__contains__.return_value = True
         mocked_factory.__getitem__.return_value = None
 
-        # Пытаемся создать модель через алиас 'xgboost'
-        with pytest.raises(ImportError, match="требует дополнительного пакета"):
+        # Try to create a model through the 'xgboost' alias
+        with pytest.raises(ImportError, match="requires an additional package"):
             create_model("xgboost")
 
 
 def test_create_model_unknown_algorithm():
     """
-    Дополнительный тест для ветки неизвестного алгоритма (строка 102-103).
+    Additional test for the unknown-algorithm branch (lines 102-103).
     """
-    with pytest.raises(ValueError, match="Неизвестный алгоритм: 'unknown_model'"):
+    with pytest.raises(ValueError, match="Unknown algorithm: 'unknown_model'"):
         create_model("unknown_model")
 
 
 def test_create_model_gpr_default_kernel():
     """
-    Проверка специфической логики для GaussianProcessRegressor (строки 114-115).
+    Verify the specific logic for GaussianProcessRegressor (lines 114-115).
     """
     model = create_model("gpr")
-    # Проверяем, что ядро RBF было установлено по умолчанию
+    # Verify the RBF kernel was set by default
     assert hasattr(model, "kernel")
-    # В sklearn GPR после инициализации kernel сохраняется в параметрах
+    # In sklearn GPR, the kernel is kept in the parameters after initialization
     assert "RBF" in str(model.get_params()["kernel"])
 
 
-# --- get_allowed_hyperparameters (единый источник истины валидации) ---
+# --- get_allowed_hyperparameters (single source of truth for validation) ---
 def test_get_allowed_hyperparameters_constructor_params():
-    """Допустимое множество строится по сигнатуре конструктора оценщика."""
+    """The allowed set is built from the estimator constructor signature."""
     allowed = get_allowed_hyperparameters("elasticnet")
     assert "alpha" in allowed
     assert "l1_ratio" in allowed
@@ -236,7 +236,7 @@ def test_get_allowed_hyperparameters_constructor_params():
 
 
 def test_get_allowed_hyperparameters_nondefault_params_included():
-    """Параметры вне DEFAULT_SPACES (issue #15) входят в допустимое множество."""
+    """Params outside DEFAULT_SPACES are included in the allowed set."""
     rf_allowed = get_allowed_hyperparameters("random_forest")
     assert "min_samples_split" in rf_allowed
     assert "max_features" in rf_allowed
@@ -247,14 +247,14 @@ def test_get_allowed_hyperparameters_nondefault_params_included():
 
 
 def test_get_allowed_hyperparameters_legacy_names_included():
-    """Legacy-имена из LEGACY_PARAM_MAPPINGS считаются допустимыми."""
+    """Legacy names from LEGACY_PARAM_MAPPINGS count as allowed."""
     allowed = get_allowed_hyperparameters("ardregression")
     assert "max_iter" in allowed
-    assert "n_iter" in allowed  # ремапится в max_iter
+    assert "n_iter" in allowed  # remapped to max_iter
 
 
 def test_get_allowed_hyperparameters_alias_resolution():
-    """Алиасы алгоритма дают то же множество, что и каноническое имя."""
+    """Algorithm aliases give the same set as the canonical name."""
     assert get_allowed_hyperparameters("rf") == get_allowed_hyperparameters(
         "random_forest"
     )
@@ -264,12 +264,12 @@ def test_get_allowed_hyperparameters_alias_resolution():
 
 
 def test_get_allowed_hyperparameters_unknown_algo():
-    """Неизвестный алгоритм → None (проверка мягко пропускается)."""
+    """Unknown algorithm → None (the check is skipped softly)."""
     assert get_allowed_hyperparameters("no_such_algo") is None
 
 
 def test_get_allowed_hyperparameters_missing_dependency(monkeypatch):
-    """Отсутствующая зависимость (estimator=None) → None."""
+    """Missing dependency (estimator=None) → None."""
     monkeypatch.setattr(
         "configurable_automl_engine.models._FACTORY", {"xgboosting": None}
     )
@@ -277,7 +277,7 @@ def test_get_allowed_hyperparameters_missing_dependency(monkeypatch):
 
 
 def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
-    """Конструктор с **kwargs не ограничивает множество параметров → None."""
+    """A constructor with **kwargs does not restrict the param set → None."""
 
     class _FlexibleEstimator:
         def __init__(self, **kwargs):

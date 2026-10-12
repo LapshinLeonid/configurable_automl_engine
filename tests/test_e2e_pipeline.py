@@ -1,37 +1,37 @@
 """E2E Quality Regression Suite for configurable-automl-engine.
 
-Реальные интеграционные тесты без моков на синтетических данных.
-Проверяют сквозную работоспособность и стабильность качества всех
-алгоритмов реестра через прямой вызов ``tuner.optimize()``.
+Real integration tests without mocks on synthetic data.
+Verify end-to-end functionality and quality stability of all
+registry algorithms through a direct ``tuner.optimize()`` call.
 
-Генерация данных
------------------
-* ``sklearn.datasets.make_regression`` с фиксированным ``random_state=42``
+Data generation
+---------------
+* ``sklearn.datasets.make_regression`` with a fixed ``random_state=42``
 * N=100 samples, 10 features, noise=0.05
-* Для tree-based / KNN увеличено число сэмплов (200-300) — на чисто
-  линейных данных эти алгоритмы требуют больше точек для аппроксимации.
+* For tree-based / KNN the number of samples is increased (200-300) — on
+  purely linear data these algorithms need more points to approximate.
 
-Оптимизация
------------
-* 25 trials на алгоритм (20 для слабых: tree-based, KNN)
-* GLM-алгоритмы с дорогим fitting'ом: 8 (gammaregressor), 15 (tweedieregressor)
-* ``train_test_split`` (80/20) — быстрее k-fold
-* Метрика R², порог качества ≥ 0.70
-* Явный ``random_state=42`` для полной воспроизводимости
+Optimization
+------------
+* 25 trials per algorithm (20 for weak ones: tree-based, KNN)
+* GLM algorithms with expensive fitting: 8 (gammaregressor), 15 (tweedieregressor)
+* ``train_test_split`` (80/20) — faster than k-fold
+* R² metric, quality threshold ≥ 0.70
+* Explicit ``random_state=42`` for full reproducibility
 
-Покрытие алгоритмов (11)
-------------------------
+Algorithm coverage (11)
+-----------------------
 ridge, elasticnet, sgdregressor, random_forest, decision_tree,
 svr, gammaregressor, tweedieregressor, ardregression,
 nearest_neighbors_regression, xgboosting
 
-Примечание
----------
-decision_tree исключён из основного quality-теста: одно дерево решений
-принципиально не может достичь R² ≥ 0.70 на линейной синтетике
-с N=100 (structural ceiling ~0.55). Для него есть отдельный тест
-``test_decision_tree_quality`` на нелинейном датасете ``make_friedman1``
-с порогом R² ≥ 0.40.
+Note
+----
+decision_tree is excluded from the main quality test: a single decision tree
+fundamentally cannot reach R² ≥ 0.70 on linear synthetic data with N=100
+(structural ceiling ~0.55). It has a separate test
+``test_decision_tree_quality`` on the non-linear dataset ``make_friedman1``
+with an R² ≥ 0.40 threshold.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ _WEAK_LEARNERS: frozenset[str] = frozenset(
 )
 
 # GLM-based algorithms with expensive per-trial fitting (log-link, IRLS).
-# These need fewer trials to keep total suite time under AC-5 (< 60 s).
+# These need fewer trials to keep the total suite time under budget (< 60 s).
 _SLOW_ALGORITHMS: frozenset[str] = frozenset(
     {
         "gammaregressor",
@@ -181,10 +181,10 @@ def _n_trials_for(algo: str) -> int:
     * Slow GLM-based algorithms (Gamma, Tweedie) are expensive per
       trial (log-link IRLS fitting) so they get fewer trials to keep
       the suite under budget.
-    * ``gammaregressor`` получил 15 испытаний вместо 6: с тех пор как HPO
-      на чисто числовых данных стал применять ``StandardScaler`` (единая
-      логика с финальным ``ModelTrainer``), гамма-регрессия сходится медленнее
-      и нуждается в более широком поиске, чтобы достичь планки R² ≥ 0.70.
+    * ``gammaregressor`` gets 15 trials instead of 6: since HPO started
+      applying ``StandardScaler`` on purely numeric data (the same logic as
+      the final ``ModelTrainer``), gamma regression converges more slowly and
+      needs a wider search to reach the R² ≥ 0.70 bar.
     * All others run with the standard 25 trials.
     """
     if algo in _SLOW_ALGORITHMS:

@@ -1,11 +1,10 @@
 """
-Параметризованные тесты для configurable_automl_engine.tuner.
+Parameterized tests for configurable_automl_engine.tuner.
 
-• Smoke-проверяем, что optimize отрабатывает на каждом алгоритме,
-  для которого задан search-space (включая CF-18: SGD, GPR, Isotonic,
-  ARD, Poisson/Gamma/Tweedie).
-• Валидируем пользовательский space-override.
-• Проверяем ошибки: неизвестный алгоритм, плохие данные, n_trials ≤ 0.
+• Smoke-test that optimize succeeds for every algorithm with a defined
+  search space (including SGD, GPR, Isotonic, ARD, Poisson/Gamma/Tweedie).
+• Validate the user-supplied space-override.
+• Check errors: unknown algorithm, bad data, n_trials ≤ 0.
 """
 
 from __future__ import annotations
@@ -44,14 +43,14 @@ from configurable_automl_engine.tuner import (
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0. Делаем пакет видимым и импортируем модуль
+# 0. Make the package visible and import the module
 # ──────────────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Фикстура с игрушечными данными
+# 1. Fixture with toy data
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def toy_data() -> tuple[pd.DataFrame, pd.Series]:
@@ -65,45 +64,45 @@ def toy_data() -> tuple[pd.DataFrame, pd.Series]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Вспомогательная адаптация X/y под «капризные» модели
+# 2. Helper to adapt X/y for "fussy" models
 # ──────────────────────────────────────────────────────────────────────────────
 def _prepare_data(algo: str, X: pd.DataFrame, y: pd.Series):
-    """Подгоняем форму и диапазон под требования конкретных алгоритмов."""
-    # IsotonicRegression — ровно один признак
+    """Adapt the shape and range to the requirements of specific algorithms."""
+    # IsotonicRegression needs exactly one feature
     if algo == "isotonicregression":
         X = X.iloc[:, [0]]
-    # GLM-семейство требует y > 0
+    # The GLM family requires y > 0
     if algo in {"poissonregressor", "gammaregressor", "tweedieregressor"}:
         y = np.abs(y) + 1.0
     return X, y
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Smoke-тест на каждый поддерживаемый алгоритм
+# 3. Smoke test for each supported algorithm
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "algo",
     ["knn"],
 )
 def test_optimize_smoke(algo: str, toy_data):
-    """optimize не должен падать и возвращает валидные объекты."""
+    """optimize must not fail and returns valid objects."""
     X, y = _prepare_data(algo, *toy_data)
 
     model, params, score = hyperopt.optimize(
         algo,
         X,
         y,
-        n_trials=3,  # минимально для быстроты
+        n_trials=3,  # minimal for speed
         random_state=0,
     )
 
-    assert isinstance(params, dict) and params, "пустой best_params"
-    assert isinstance(score, float) and not np.isnan(score), "score некорректен"
-    assert hasattr(model, "predict"), "у модели нет метода predict"
+    assert isinstance(params, dict) and params, "best_params is empty"
+    assert isinstance(score, float) and not np.isnan(score), "score is invalid"
+    assert hasattr(model, "predict"), "model has no predict method"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Пользовательский space-override
+# 4. User-supplied space-override
 # ──────────────────────────────────────────────────────────────────────────────
 def test_space_override(toy_data):
     X, y = toy_data
@@ -122,7 +121,7 @@ def test_space_override(toy_data):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Негативные сценарии
+# 5. Negative scenarios
 # ──────────────────────────────────────────────────────────────────────────────
 def test_invalid_algo(toy_data):
     X, y = toy_data
@@ -143,11 +142,11 @@ def test_non_positive_trials(bad_trials, toy_data):
 
 
 def test_zero_trials_returns_no_result(toy_data):
-    """B2 (issue #32): n_trials=0 → пустой список триалов → (None, None, None).
+    """n_trials=0 → an empty trial list → (None, None, None).
 
-    Раньше n_trials=0 считался невалидным и вызывал ValueError. Теперь это
-    легальный «пустой поиск»: ни одного триала — значит, нет и валидного
-    результата, и optimize() сигнализирует об этом сплошным None.
+    Previously n_trials=0 was considered invalid and raised ValueError. Now it is
+    a legal "empty search": no trials means no valid result, so optimize()
+    signals that by returning all None.
     """
     X, y = toy_data
     model, params, score = hyperopt.optimize("ridge", X, y, n_trials=0)
@@ -159,8 +158,8 @@ def test_zero_trials_returns_no_result(toy_data):
 
 def test_apply_dynamic_space_types(toy_data):
     """
-    Покрывает логику _apply_dynamic_space.
-    Используем алгоритм 'knn', так как для него в коде есть фабрика пространств.
+    Covers the logic of _apply_dynamic_space.
+    We use the 'knn' algorithm because the code has a space factory for it.
     """
     X, y = toy_data
 
@@ -184,13 +183,13 @@ def test_apply_dynamic_space_types(toy_data):
         def step(self):
             return self.bounds[3] if len(self.bounds) > 3 else None
 
-    # Имитируем структуру из YAML для KNN
-    # Это покроет ветки int, float, float_log, categorical и константы
+    # Mimic the YAML structure for KNN
+    # This covers the int, float, float_log, categorical and constant branches
     dynamic_config = {
         "n_neighbors": MockEntry([5, 15, "int"]),
         "p": MockEntry([1, 2, "int"]),
         "weights": MockEntry([["uniform", "distance"], None, "categorical"]),
-        "leaf_size": 30,  # Константа (строка 144)
+        "leaf_size": 30,  # Constant (line 144)
     }
     model, params, score = hyperopt.optimize(
         "knn", X, y, n_trials=2, space_overrides={"knn": dynamic_config}
@@ -198,15 +197,15 @@ def test_apply_dynamic_space_types(toy_data):
 
     assert isinstance(params["n_neighbors"], int)
     assert params["weights"] in ["uniform", "distance"]
-    # Проверяем, что константа попала в модель.
-    # С автодетекцией препроцессора модель оборачивается в ImbPipeline
-    # (даже для чисто числовых данных), поэтому извлекаем шаг 'model'.
+    # Check that the constant made it into the model.
+    # With preprocessor autodetection the model is wrapped in an ImbPipeline
+    # (even for purely numeric data), so we extract the 'model' step.
     assert isinstance(model, ImbPipeline)
     assert model.named_steps["model"].leaf_size == 30
 
 
 def test_validate_data_mismatch():
-    """Проверка ошибки при несовпадении длин X и y (строка 159)."""
+    """Checks the error when the lengths of X and y do not match (line 159)."""
     X = np.zeros((10, 2))
     y = np.zeros(5)
     with pytest.raises(hyperopt.InvalidDataError, match="Size mismatch"):
@@ -214,16 +213,16 @@ def test_validate_data_mismatch():
 
 
 def test_validate_data_invalid_y_type():
-    """Проверка ошибки при недопустимом типе y (строка 155)."""
+    """Checks the error for an invalid y type (line 155)."""
     X = np.zeros((5, 2))
-    y = {1: 0, 2: 0}  # dict не входит в ok_types
+    y = {1: 0, 2: 0}  # dict is not in ok_types
     with pytest.raises(hyperopt.InvalidDataError, match="y must be"):
         hyperopt._validate_data(X, y)
 
 
 def test_optimize_with_oversampling(toy_data):
     """
-    Покрывает логику включения оверсэмплинга в Pipeline.
+    Covers the logic of enabling oversampling in the Pipeline.
     """
     X, y = toy_data
     y_bin = (y > y.mean()).astype(int)
@@ -243,11 +242,11 @@ def test_optimize_with_oversampling(toy_data):
 
 
 def test_optimize_pure_numeric_builds_preprocessor(toy_data):
-    """На чисто числовом DataFrame без явных списков колонок optimize
-    строит препроцессор с StandardScaler (рассинхрон ветки ``if cats:``)."""
+    """On a purely numeric DataFrame without explicit column lists, optimize
+    builds a preprocessor with StandardScaler (desync of the ``if cats:`` branch)."""
     from sklearn.preprocessing import StandardScaler
 
-    X, y = toy_data  # полностью числовой DataFrame
+    X, y = toy_data  # fully numeric DataFrame
 
     model, _, _ = hyperopt.optimize(
         "knn",
@@ -257,7 +256,7 @@ def test_optimize_pure_numeric_builds_preprocessor(toy_data):
         random_state=0,
     )
 
-    # Препроцессор должен быть собран даже при отсутствии категорий
+    # The preprocessor must be built even when there are no categories
     assert isinstance(model, ImbPipeline)
     assert "preprocessor" in [step[0] for step in model.steps]
 
@@ -271,55 +270,55 @@ def test_optimize_pure_numeric_builds_preprocessor(toy_data):
 
 
 def test_can_stratify_negative():
-    """Проверка условий, когда стратификация невозможна (строки 182-183)."""
-    # Много уникальных значений (регрессия)
+    """Checks the conditions under which stratification is impossible (lines 182-183)."""
+    # Many unique values (regression)
     y_reg = np.linspace(0, 1, 100)
     assert hyperopt._can_stratify(y_reg) is False
 
-    # Многомерный y
+    # Multi-dimensional y
     y_multi = np.zeros((10, 2))
     assert hyperopt._can_stratify(y_multi) is False
 
 
 def test_split_train_test_fallback():
-    """Проверка fallback в train_test_split при ошибке стратификации (строки 194-196)."""
-    # Создаем ситуацию, где стратификация невозможна из-за 1 экземпляра класса
+    """Checks the fallback in train_test_split when stratification fails (lines 194-196)."""
+    # Create a situation where stratification is impossible because a class has 1 instance
     X = np.random.rand(10, 2)
     y = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
 
-    # Метод должен отработать без ошибок, поймав ValueError внутри
+    # The method must complete without errors, catching the ValueError internally
     res = hyperopt._split_train_test(X, y, test_size=0.5)
     assert len(res) == 4
 
 
 def test_optimize_pruning(toy_data):
     """
-    Покрывает блок обработки исключений в _objective.
-    Исправлено: параметры теперь регистрируются через trial.suggest_int.
+    Covers the exception handling block in _objective.
+    Fixed: parameters are now registered via trial.suggest_int.
     """
     X, y = toy_data
 
     def pruning_space(trial):
-        # Используем suggest_int, чтобы optuna зафиксировала параметры в trial.params
+        # Use suggest_int so optuna records the parameters in trial.params
         if trial.number == 0:
             n_neighbors = trial.suggest_int("n_neighbors", 5, 5)
             return {"n_neighbors": n_neighbors, "weights": "uniform", "p": 2}
 
-        # Вторая попытка вызовет ошибку (n_neighbors <= 0)
+        # The second attempt will raise an error (n_neighbors <= 0)
         n_neighbors = trial.suggest_int("n_neighbors", 0, 0)
         return {"n_neighbors": n_neighbors, "weights": "uniform", "p": 2}
 
-    # Метод не должен упасть, Trial 1 просто будет помечен как Pruned
+    # The method must not fail; Trial 1 will simply be marked as Pruned
     model, params, score = hyperopt.optimize(
         "knn",
         X,
         y,
         n_trials=2,
-        # Передаем как словарь для конкретного алгоритма
+        # Pass it as a dict for the specific algorithm
         space_overrides={"knn": pruning_space},
     )
 
-    # Теперь params не будет пустым, так как Trial 0 успешно завершился
+    # Now params will not be empty because Trial 0 completed successfully
     assert "n_neighbors" in params
     assert params["n_neighbors"] == 5
 
@@ -328,7 +327,7 @@ def test_optimize_pruning(toy_data):
 # 6. initial_params: enqueue_trial tests
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_with_initial_params_enqueues_trial(toy_data):
-    """Проверяет, что study.enqueue_trial() вызывается с initial_params."""
+    """Checks that study.enqueue_trial() is called with initial_params."""
     X, y = toy_data
     initial_params = {"alpha": 0.5, "l1_ratio": 0.3}
 
@@ -338,7 +337,7 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
         mock_study.best_value = 0.9
         mock_create.return_value = mock_study
 
-        # Мокаем create_model и _validate_data/_get_estimator
+        # Mock create_model and _validate_data/_get_estimator
         with (
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
@@ -358,14 +357,14 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
                 },
             )
 
-            # Проверяем, что enqueue_trial вызван с правильными параметрами
+            # Check that enqueue_trial was called with the correct parameters
             mock_study.enqueue_trial.assert_called_once_with(initial_params)
-            # Проверяем, что optimize все еще вызывается
+            # Check that optimize is still called
             mock_study.optimize.assert_called_once()
 
 
 def test_optimize_without_initial_params_does_not_enqueue(toy_data):
-    """Проверяет, что без initial_params enqueue_trial НЕ вызывается."""
+    """Checks that without initial_params, enqueue_trial is NOT called."""
     X, y = toy_data
 
     with patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create:
@@ -393,17 +392,17 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
                 },
             )
 
-            # enqueue_trial НЕ должен быть вызван
+            # enqueue_trial must NOT be called
             mock_study.enqueue_trial.assert_not_called()
             mock_study.optimize.assert_called_once()
 
 
 def test_knn_space_dynamic_limit():
-    """Проверка динамического ограничения k в KNN (строки 80-81)."""
-    # Для 10 сэмплов 80% это 8. max_k должен быть 8.
+    """Checks the dynamic k limit in KNN (lines 80-81)."""
+    # For 10 samples, 80% is 8. max_k must be 8.
     space_fn = hyperopt._make_knn_space(n_samples=10)
 
-    # Эмулируем запрос n_neighbors
+    # Emulate the n_neighbors request
     trial = FixedTrial({"n_neighbors": 5, "weights": "uniform", "p": 1})
     params = space_fn(trial)
     assert params["n_neighbors"] <= 8
@@ -440,20 +439,20 @@ def test_apply_dynamic_space_floats():
 
     _apply_dynamic_space(trial, space_dict)
 
-    # Проверяем вызовы
+    # Check the calls
     trial.suggest_float.assert_any_call("learning_rate", 0.01, 0.1, step=None)
     trial.suggest_float.assert_any_call("gamma", 1e-05, 0.1, log=True)
 
 
 @pytest.fixture
 def log_space_entry() -> Callable[[float], SearchSpaceEntry]:
-    """Фабрика реальных SearchSpaceEntry с распределением float_log.
+    """Factory of real SearchSpaceEntry objects with a float_log distribution.
 
-    Негативные значения создаются через ``model_construct`` — в обход
-    Pydantic-валидации. Штатная схема намеренно отклоняет ``low <= 0``
-    для float_log (issue #20), поэтому проверить защиту тюнера можно только
-    объектами, собранными мимо валидации: это в точности имитирует
-    словарный конфиг старого формата, попадающий в тюнер напрямую.
+    Negative values are created via ``model_construct``, bypassing
+    Pydantic validation. The standard schema intentionally rejects ``low <= 0``
+    for float_log, so the tuner's guard can only be tested with objects built
+    outside validation: this exactly mimics a dict config of the old format
+    reaching the tuner directly.
     """
 
     def _make(low: float) -> SearchSpaceEntry:
@@ -465,11 +464,11 @@ def log_space_entry() -> Callable[[float], SearchSpaceEntry]:
 
 
 def test_apply_dynamic_space_float_log_rejects_non_positive_low(log_space_entry):
-    """Защита в _apply_dynamic_space: float_log с low <= 0 отклоняется.
+    """Guard in _apply_dynamic_space: float_log with low <= 0 is rejected.
 
-    Негативные сценарии используют реальные SearchSpaceEntry из фикстуры
-    (собранные в обход валидации); позитивный проходит штатную валидацию
-    через ``SearchSpaceEntry.model_validate`` — полный интеграционный путь.
+    Negative scenarios use real SearchSpaceEntry objects from the fixture
+    (built outside validation); the positive one goes through standard
+    validation via ``SearchSpaceEntry.model_validate`` — the full integration path.
     """
     trial = MagicMock()
 
@@ -478,7 +477,7 @@ def test_apply_dynamic_space_float_log_rejects_non_positive_low(log_space_entry)
             _apply_dynamic_space(trial, {"alpha": log_space_entry(bad_low)})
     assert trial.suggest_float.call_count == 0
 
-    # Позитивный сценарий: валидный entry уходит в suggest_float(log=True)
+    # Positive scenario: a valid entry goes to suggest_float(log=True)
     valid_entry = SearchSpaceEntry.model_validate([1e-6, 1.0, "float_log"])
     _apply_dynamic_space(trial, {"alpha": valid_entry})
     trial.suggest_float.assert_called_once_with("alpha", 1e-06, 1.0, log=True)
@@ -494,13 +493,13 @@ def test_can_stratify_pandas():
     assert _can_stratify(y_series) is True
 
     y_df = pd.DataFrame({"target": [0, 1, 0, 1]})
-    assert _can_stratify(y_df) is False  # Т.к. ndim != 1 для DF с 1 колонкой (обычно)
+    assert _can_stratify(y_df) is False  # Because ndim != 1 for a DF with 1 column (usually)
 
 
 def test_optimize_train_test_split_mode(toy_data):
     X, y = toy_data
-    # Принудительно вызываем режим hold-out через передачу малого количества данных
-    # или явное указание стратегии
+    # Force the hold-out mode by passing a small amount of data
+    # or by explicitly specifying the strategy
     model, params, score = optimize(
         "knn", X, y, validation_strategy="train_test_split", n_trials=1
     )
@@ -508,13 +507,13 @@ def test_optimize_train_test_split_mode(toy_data):
 
 
 def test_optimize_raises_when_no_search_space(monkeypatch):
-    """Проверяет выброс HyperoptError если для алгоритма нет search-space."""
+    """Checks that HyperoptError is raised when there is no search space for the algorithm."""
 
-    # --- 1. Подготавливаем фиктивные данные ---
+    # --- 1. Prepare dummy data ---
     X = np.random.rand(20, 3)
     y = np.random.rand(20)
 
-    # --- 2. Мокаем create_model → чтобы алгоритм считался валидным ---
+    # --- 2. Mock create_model → so the algorithm is considered valid ---
     def fake_create_model(algo, **kwargs):
         class DummyModel:
             def fit(self, X, y):
@@ -525,10 +524,10 @@ def test_optimize_raises_when_no_search_space(monkeypatch):
 
         return DummyModel()
 
-    # --- делаем алгоритм валидным ---
+    # --- make the algorithm valid ---
     monkeypatch.setattr(hyperopt, "_get_estimator", lambda algo: True)
 
-    with pytest.raises(HyperoptError, match="нет search-space"):
+    with pytest.raises(HyperoptError, match="No search space for algorithm"):
         optimize("fake_algo", X, y, n_trials=1)
 
 
@@ -543,12 +542,12 @@ class TestTunerObjective:
 
     def test_objective_trigger_fallback(self, dummy_data, mock_space):
         """
-        Тест принудительно заставляет np.isfinite вернуть False,
-        чтобы проверить возврат константы HPO_WORST_SCORE.
+        The test forcibly makes np.isfinite return False
+        to verify the HPO_WORST_SCORE constant fallback.
         """
         X, y = dummy_data
         EXPECTED_FALLBACK = HPO_WORST_SCORE
-        # 1. Патчим ВСЁ окружение, чтобы ни одна реальная функция не выполнилась
+        # 1. Patch the ENTIRE environment so no real function runs
         with (
             patch(
                 "configurable_automl_engine.tuner.model_selection.cross_val_score"
@@ -562,34 +561,34 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            # ГАРАНТИРУЕМ:
-            # 1. Мы в ветке k-fold
+            # WE GUARANTEE:
+            # 1. We are in the k-fold branch
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # 2. cross_val_score возвращает что-то
+            # 2. cross_val_score returns something
             mock_cv.return_value = np.array([0.5])
-            # 3. КРИТИЧЕСКИЙ МОМЕНТ: Любое число НЕ конечное
+            # 3. CRITICAL POINT: Any number is NOT finite
             mock_finite.return_value = False
 
-            # Остальные заглушки
+            # The remaining stubs
             mock_create.return_value = MagicMock()
             mock_scorer_factory.return_value = MagicMock()
-            # Вызываем
+            # Call
             _, _, best_score = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
-            # Проверяем
+            # Verify
             assert best_score == EXPECTED_FALLBACK
             assert mock_finite.called
 
     def test_objective_via_actual_nan(self, dummy_data, mock_space):
         """
-        Тест через подмену np.mean (более естественный путь).
-        Если в tuner.py: 'import numpy as np', патчим 'np.mean'.
-        Если 'from numpy import mean', патчим 'mean'.
+        Test by patching np.mean (a more natural path).
+        If tuner.py uses 'import numpy as np', patch 'np.mean'.
+        If it uses 'from numpy import mean', patch 'mean'.
         """
         X, y = dummy_data
 
-        # Попробуем запатчить mean в пространстве имен модуля tuner
+        # Try patching mean in the tuner module's namespace
         with (
             patch(
                 "configurable_automl_engine.tuner.model_selection.cross_val_score"
@@ -604,7 +603,7 @@ class TestTunerObjective:
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_cv.return_value = np.array(
                 [1.0]
-            )  # значение не важно, так как mean вернет nan
+            )  # the value does not matter since mean will return nan
             _, _, best_score = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
@@ -612,9 +611,9 @@ class TestTunerObjective:
 
     def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
         """
-        5 последовательных RuntimeError в cross_val_score → InvalidAlgorithmError.
-        Проверяет, что optimize() выбрасывает InvalidAlgorithmError после
-        MAX_FATAL_FAILURES (5) последовательных фатальных ошибок.
+        5 consecutive RuntimeErrors in cross_val_score → InvalidAlgorithmError.
+        Checks that optimize() raises InvalidAlgorithmError after
+        MAX_FATAL_FAILURES (5) consecutive fatal errors.
         """
         X, y = dummy_data
         with (
@@ -628,7 +627,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # Каждый вызов cross_val_score кидает RuntimeError
+            # Each cross_val_score call raises RuntimeError
             mock_cv.side_effect = RuntimeError("fatal failure")
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
@@ -638,9 +637,9 @@ class TestTunerObjective:
 
     def test_four_failures_one_success_not_disqualified(self, dummy_data, mock_space):
         """
-        4 фатальных ошибки + 1 успех → алгоритм НЕ дисквалифицируется.
-        Проверяет, что при 4 последовательных RuntimeError и 1 успешном
-        запуске cross_val_score оптимизация завершается успешно.
+        4 fatal errors + 1 success → the algorithm is NOT disqualified.
+        Checks that with 4 consecutive RuntimeErrors and 1 successful
+        cross_val_score run, optimization completes successfully.
         """
         X, y = dummy_data
         with (
@@ -654,7 +653,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # 4 ошибки подряд, затем успех
+            # 4 errors in a row, then success
             mock_cv.side_effect = [
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
@@ -670,9 +669,9 @@ class TestTunerObjective:
 
     def test_consecutive_failures_with_train_test_split(self, dummy_data, mock_space):
         """
-        5 последовательных RuntimeError в train_test_split → InvalidAlgorithmError.
-        Проверяет, что circuit breaker работает при train_test_split,
-        а не только при k-fold/Leave-One-Out.
+        5 consecutive RuntimeErrors in train_test_split → InvalidAlgorithmError.
+        Checks that the circuit breaker works with train_test_split,
+        not only with k-fold/Leave-One-Out.
         """
         X, y = dummy_data
         with (
@@ -685,10 +684,10 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
-            # Принудительно выбираем train_test_split
+            # Force train_test_split
             mock_make_cv.return_value = ("train_test_split", None, None)
 
-            # iter_splits должен возвращать свежий итератор при каждом вызове
+            # iter_splits must return a fresh iterator on each call
             def fresh_iter(*args, **kwargs):
                 return iter(
                     [
@@ -703,7 +702,7 @@ class TestTunerObjective:
 
             mock_iter_splits.side_effect = fresh_iter
 
-            # Модель: fit всегда падает с RuntimeError
+            # Model: fit always fails with RuntimeError
             mock_model = MagicMock()
             mock_model.fit.side_effect = RuntimeError("fatal failure")
             mock_create.return_value = mock_model
@@ -716,8 +715,8 @@ class TestTunerObjective:
 
     def test_train_test_split_success_resets_counter(self, dummy_data, mock_space):
         """
-        4 фатальных ошибки + 1 успех при train_test_split → алгоритм НЕ дисквалифицируется.
-        Проверяет, что успешный train_test_split сбрасывает consecutive_fatal_failures.
+        4 fatal errors + 1 success with train_test_split → the algorithm is NOT disqualified.
+        Checks that a successful train_test_split resets consecutive_fatal_failures.
         """
         X, y = dummy_data
         with (
@@ -746,19 +745,19 @@ class TestTunerObjective:
 
             mock_iter_splits.side_effect = fresh_iter
 
-            # 4 ошибки подряд, затем успех
+            # 4 errors in a row, then success
             mock_model = MagicMock()
             mock_model.fit.side_effect = [
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
-                None,  # trial 5 success → _objective возвращает score
-                None,  # финальный best_model.fit(X, y)
+                None,  # trial 5 success → _objective returns score
+                None,  # final best_model.fit(X, y)
             ]
             mock_create.return_value = mock_model
 
-            # Скор возвращает 0.85 при успешном вызове
+            # The scorer returns 0.85 on a successful call
             mock_scorer = MagicMock(return_value=0.85)
             mock_scorer_factory.return_value = mock_scorer
 
@@ -769,9 +768,9 @@ class TestTunerObjective:
 
     def test_valueerror_not_fatal(self, dummy_data, mock_space):
         """
-        10 последовательных ValueError → алгоритм НЕ дисквалифицируется.
-        Проверяет, что ValueError считается нефатальной ошибкой и не
-        увеличивает счётчик consecutive_fatal_failures.
+        10 consecutive ValueErrors → the algorithm is NOT disqualified.
+        Checks that ValueError is considered a non-fatal error and does not
+        increment the consecutive_fatal_failures counter.
         """
         X, y = dummy_data
         with (
@@ -785,31 +784,31 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # Все 10 вызовов cross_val_score кидают ValueError
+            # All 10 cross_val_score calls raise ValueError
             mock_cv.side_effect = ValueError("non-fatal value error")
 
-            # Оптимизация завершается без InvalidAlgorithmError,
-            # ValueError просто прерывает trial (optuna.TrialPruned)
+            # Optimization completes without InvalidAlgorithmError;
+            # ValueError simply interrupts the trial (optuna.TrialPruned)
             best_algo, best_model, best_score = optimize(
                 algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
             )
-            # Ни один trial не успешен: study.best_params бросает ValueError,
-            # и optimize() сигнализирует отказ полным None (issue #13) —
-            # это НЕ «магическая» константа -3.4028235e38, которая выглядела
-            # как валидный результат для оркестратора.
+            # No trial is successful: study.best_params raises ValueError,
+            # and optimize() signals failure by returning all None —
+            # this is NOT the "magic" constant -3.4028235e38, which looked
+            # like a valid result to the orchestrator.
             assert best_algo is None
             assert best_model is None
             assert best_score is None
 
     def test_pruned_trials_reset_fatal_counter(self, dummy_data, mock_space):
         """
-        1 фатальная ошибка + триалы, отсечённые прунером, + 4 фатальные ошибки
-        → алгоритм НЕ дисквалифицируется (регрессия issue #22).
+        1 fatal error + trials pruned by the pruner + 4 fatal errors
+        → the algorithm is NOT disqualified (regression).
 
-        Проверяет, что optuna.TrialPruned из ранней остановки
-        (_evaluate_with_intermediate_reports) обрывает последовательность
-        фатальных сбоев и сбрасывает consecutive_fatal_failures: всего сбоев
-        набралось 5, но подряд — только 4.
+        Checks that optuna.TrialPruned from early stopping
+        (_evaluate_with_intermediate_reports) breaks the sequence of
+        fatal failures and resets consecutive_fatal_failures: 5 failures in
+        total, but only 4 in a row.
         """
         X, y = dummy_data
         with (
@@ -823,8 +822,8 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # Триал 1 — фатальный сбой; триал 2 — штатно отсечён прунером;
-            # триалы 3–6 — фатальные сбои; триал 7 — успех.
+            # Trial 1 — fatal failure; trial 2 — pruned as expected;
+            # trials 3–6 — fatal failures; trial 7 — success.
             mock_eval.side_effect = [
                 RuntimeError("fatal failure"),  # trial 1
                 optuna.TrialPruned(),  # trial 2 (early stopping)
@@ -852,12 +851,12 @@ class TestTunerObjective:
 
     def test_valueerror_between_failures_resets_counter(self, dummy_data, mock_space):
         """
-        1 фатальная ошибка + нефатальные ValueError + 4 фатальные ошибки
-        → алгоритм НЕ дисквалифицируется (регрессия issue #22).
+        1 fatal error + non-fatal ValueErrors + 4 fatal errors
+        → the algorithm is NOT disqualified (regression).
 
-        Проверяет, что нефатальный ValueError обрывает последовательность
-        фатальных сбоев и сбрасывает consecutive_fatal_failures: всего сбоев
-        набралось 5, но подряд — только 4.
+        Checks that a non-fatal ValueError breaks the sequence of
+        fatal failures and resets consecutive_fatal_failures: 5 failures in
+        total, but only 4 in a row.
         """
         X, y = dummy_data
         with (
@@ -889,20 +888,20 @@ class TestTunerObjective:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. Сквозной тест training_engine (train_best_model)
+# 7. End-to-end test of training_engine (train_best_model)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 def test_full_training_engine_pipeline(tmp_path: Path) -> None:
     """
-    Сквозной интеграционный тест полного пайплайна обучения.
+    End-to-end integration test of the full training pipeline.
 
-    Проверяет:
-    1. Чтение YAML-конфига.
-    2. Выполнение двух фаз HPO (all_algorithms → refine) и терминального
-       select-шага (схема эпик #74).
-    3. Сохранение итоговой модели на диск (.pkl).
-    4. Возврат корректной структуры результата.
+    Checks:
+    1. Reading the YAML config.
+    2. Running two HPO phases (all_algorithms → refine) and the terminal
+       select step.
+    3. Saving the final model to disk (.pkl).
+    4. Returning a correct result structure.
     """
     from configurable_automl_engine.training_engine import train_best_model
 
@@ -937,7 +936,7 @@ def test_full_training_engine_pipeline(tmp_path: Path) -> None:
     with open(config_path, "w") as f:
         yaml.dump(config, f)
 
-    # Генерируем синтетические данные регрессии
+    # Generate synthetic regression data
     X, y = make_regression(n_samples=120, n_features=5, noise=0.1, random_state=42)
     df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
     df["target"] = y
@@ -948,40 +947,40 @@ def test_full_training_engine_pipeline(tmp_path: Path) -> None:
         target="target",
     )
 
-    # Проверка структуры результата
-    assert isinstance(result, dict), f"Ожидался dict, получен {type(result)}"
-    assert "algorithm" in result, "Нет ключа 'algorithm'"
-    assert "score" in result, "Нет ключа 'score'"
-    assert "params" in result, "Нет ключа 'params'"
-    assert "model_path" in result, "Нет ключа 'model_path'"
+    # Check the result structure
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert "algorithm" in result, "Missing key 'algorithm'"
+    assert "score" in result, "Missing key 'score'"
+    assert "params" in result, "Missing key 'params'"
+    assert "model_path" in result, "Missing key 'model_path'"
 
     assert result["algorithm"] in ("ridge", "random_forest"), (
-        f"Неизвестный алгоритм-победитель: {result['algorithm']}"
+        f"Unknown winning algorithm: {result['algorithm']}"
     )
-    assert isinstance(result["score"], float), f"score не float: {result['score']}"
+    assert isinstance(result["score"], float), f"score is not float: {result['score']}"
     assert isinstance(result["params"], dict) and result["params"], (
-        "best_params пуст или не dict"
+        "best_params is empty or not a dict"
     )
 
-    # Проверка сохранения файла модели на диск
+    # Check that the model file was saved to disk
     saved_path = Path(result["model_path"])
-    assert saved_path.exists(), f"Файл модели не найден: {saved_path}"
+    assert saved_path.exists(), f"Model file not found: {saved_path}"
 
-    # Проверка, что модель можно загрузить обратно
+    # Check that the model can be loaded back
     loaded = ModelTrainer.load(str(saved_path))
-    assert loaded.pipeline is not None, "Загруженная модель не содержит pipeline"
+    assert loaded.pipeline is not None, "Loaded model does not contain a pipeline"
     assert loaded.algorithm == result["algorithm"], (
-        f"Алгоритм не совпадает: {loaded.algorithm} != {result['algorithm']}"
+        f"Algorithm mismatch: {loaded.algorithm} != {result['algorithm']}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 8. Adaptive preprocessing presets in optimize() (issue #18)
+# 8. Adaptive preprocessing presets in optimize()
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _num_transformer_of(preprocessor):
-    """Извлечь числовой трансформер из ColumnTransformer."""
+    """Extract the numeric transformer from a ColumnTransformer."""
     transformers = dict(
         (name, transformer) for name, transformer, _ in preprocessor.transformers
     )
@@ -989,7 +988,7 @@ def _num_transformer_of(preprocessor):
 
 
 def test_optimize_trees_preprocessor_without_scaling(toy_data):
-    """AC-3 в фазе HPO: для деревьев масштабирование не применяется."""
+    """In the HPO phase, trees do not use scaling."""
     from sklearn.preprocessing import RobustScaler, StandardScaler
 
     X, y = toy_data
@@ -1014,7 +1013,7 @@ def test_optimize_trees_preprocessor_without_scaling(toy_data):
 
 
 def test_optimize_glm_uses_robust_scaler(toy_data):
-    """AC-5 в фазе HPO: GLM использует RobustScaler + median-импутацию."""
+    """In the HPO phase, GLM uses RobustScaler + median imputation."""
     from sklearn.preprocessing import RobustScaler
 
     X, y = toy_data
@@ -1040,12 +1039,12 @@ def test_optimize_glm_uses_robust_scaler(toy_data):
 
 
 def test_optimize_preprocessing_override_applied(toy_data):
-    """AC-7 в фазе HPO: явное переопределение пресета имеет приоритет."""
+    """In the HPO phase, an explicit preset override takes priority."""
     from sklearn.preprocessing import StandardScaler
 
     X, y = toy_data
 
-    # Для дерева пользователь явно просит standard scaling
+    # For a tree, the user explicitly asks for standard scaling
     model, _, _ = hyperopt.optimize(
         "random_forest",
         X,
@@ -1060,12 +1059,12 @@ def test_optimize_preprocessing_override_applied(toy_data):
 
     num = _num_transformer_of(model.named_steps["preprocessor"])
     assert isinstance(num.named_steps["scaler"], StandardScaler)
-    # Импутация осталась автовыбором класса деревьев
+    # Imputation remained the auto-choice of the tree class
     assert num.named_steps["imputer"].strategy == "median"
 
 
 def test_optimize_logs_resolved_preset(toy_data, caplog):
-    """AC-9 в фазе HPO: выбранный пресет фиксируется в логах."""
+    """In the HPO phase, the resolved preset is recorded in the logs."""
     X, y = toy_data
 
     with caplog.at_level("INFO", logger="configurable_automl_engine.tuner"):
@@ -1085,16 +1084,15 @@ def test_optimize_logs_resolved_preset(toy_data, caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 9. Feature selection integration (issue #11)
+# 9. Feature selection integration
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def noisy_fs_data() -> tuple[pd.DataFrame, pd.Series]:
-    """Датасет для проверки отбора признаков: 2 информативных + 18 шумовых.
+    """Dataset for testing feature selection: 2 informative + 18 noisy columns.
 
-    Чистый шум в 18 колонках делает отбор признаков полезным: модель,
-    обучающаяся на полном пространстве, вынуждена бороться с нерелевантными
-    признаками, тогда как селектор (importance через ExtraTreesRegressor)
-    оставляет информативные колонки.
+    Pure noise in 18 columns makes feature selection useful: a model trained
+    on the full space has to fight irrelevant features, while the selector
+    (importance via ExtraTreesRegressor) keeps the informative columns.
     """
     rng = np.random.RandomState(7)
     X_info, y = make_regression(
@@ -1127,9 +1125,9 @@ _FS_ISOTONIC_SPACE = {
 def _run_optimize_with_captured_study(
     *args: Any, **kwargs: Any
 ) -> tuple[Any, optuna.Study, Any, dict[str, Any] | None, float]:
-    """Запустить optimize, перехватив реальный study Optuna через create_study.
+    """Run optimize, intercepting the real Optuna study via create_study.
 
-    Возвращает кортеж (model, study, params, score).
+    Returns the tuple (model, study, params, score).
     """
     real_study = optuna.create_study(
         direction="maximize",
@@ -1143,11 +1141,11 @@ def _run_optimize_with_captured_study(
 
 
 def test_auto_mode_explores_both_and_wins_with_fs(noisy_fs_data):
-    """mode='auto': Optuna пробует True/False и побеждает триал с отбором.
+    """mode='auto': Optuna tries True/False and the trial with selection wins.
 
-    На датасете из 2 информативных признаков и 18 колонок чистого шума
-    сокращение пространства признаков объективно улучшает качество, поэтому
-    лучший триал обязан выбрать use_feature_selection=True.
+    On a dataset of 2 informative features and 18 columns of pure noise,
+    shrinking the feature space objectively improves quality, so the best
+    trial must pick use_feature_selection=True.
     """
     X, y = noisy_fs_data
     model, study, params, score = _run_optimize_with_captured_study(
@@ -1160,7 +1158,7 @@ def test_auto_mode_explores_both_and_wins_with_fs(noisy_fs_data):
         space_overrides=_FS_ELASTICNET_SPACE,
     )
 
-    # Optuna исследовала обе гипотезы отбора
+    # Optuna explored both selection hypotheses
     tried = {
         t.params["use_feature_selection"]
         for t in study.trials
@@ -1168,7 +1166,7 @@ def test_auto_mode_explores_both_and_wins_with_fs(noisy_fs_data):
     }
     assert tried == {True, False}
 
-    # Победивший триал — с отбором признаков
+    # The winning trial uses feature selection
     assert params["use_feature_selection"] is True
     assert "feature_selector" in model.named_steps
     assert isinstance(model.named_steps["feature_selector"], FeatureSelector)
@@ -1176,11 +1174,11 @@ def test_auto_mode_explores_both_and_wins_with_fs(noisy_fs_data):
 
 
 def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
-    """mode='auto': победитель выбрал False -> селектора нет в финальной модели.
+    """mode='auto': the winner picked False -> no selector in the final model.
 
-    Покрывает путь «auto → победитель выбрал False» в финальной сборке:
-    ``best_apply_fs`` обязан разрешиться в False, шаг feature_selector не
-    попадает в модель, а решение сохраняется в возвращаемом best_params.
+    Covers the path "auto → winner picked False" in the final assembly:
+    ``best_apply_fs`` must resolve to False, the feature_selector step is not
+    added to the model, and the decision is kept in the returned best_params.
     """
     X, y = toy_data
     with (
@@ -1199,8 +1197,8 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
             "use_feature_selection": False,
         }
         mock_study.best_value = 0.9
-        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
-        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        # Explicit trial-state accounting: one COMPLETED trial,
+        # so optimize() passes the n_completed > 0 check and reaches best_params.
         mock_study.get_trials.return_value = [
             MagicMock(state=optuna.trial.TrialState.COMPLETE)
         ]
@@ -1217,7 +1215,7 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
             },
         )
 
-    # Победитель HPO явно отказался от отбора: селектор не встроен
+    # The HPO winner explicitly opted out of selection: no selector is built in
     assert "use_feature_selection" in params
     assert params["use_feature_selection"] is False
     assert "feature_selector" not in model.named_steps
@@ -1225,7 +1223,7 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
 
 
 def test_always_mode_forces_feature_selector(noisy_fs_data):
-    """mode='always': селектор в пайплайне, best_params без служебных подсказок."""
+    """mode='always': the selector is in the pipeline, best_params has no service hints."""
     X, y = noisy_fs_data
     model, _, params, _ = _run_optimize_with_captured_study(
         "elasticnet",
@@ -1237,15 +1235,15 @@ def test_always_mode_forces_feature_selector(noisy_fs_data):
         space_overrides=_FS_ELASTICNET_SPACE,
     )
 
-    # Служебного ключа тюнера нет в best_params (suggest_categorical не вызывался)
+    # The tuner's service key is absent from best_params (suggest_categorical was not called)
     assert "use_feature_selection" not in params
-    # Финальная модель собрана с шагом отбора признаков
+    # The final model is assembled with a feature selection step
     assert "feature_selector" in model.named_steps
     assert isinstance(model.named_steps["feature_selector"], FeatureSelector)
 
 
 def test_disabled_mode_omits_feature_selector(noisy_fs_data):
-    """mode='disabled': селектор не появляется в финальной модели."""
+    """mode='disabled': the selector does not appear in the final model."""
     X, y = noisy_fs_data
     model, _, params, _ = _run_optimize_with_captured_study(
         "elasticnet",
@@ -1262,7 +1260,7 @@ def test_disabled_mode_omits_feature_selector(noisy_fs_data):
 
 
 def test_auto_mode_default_is_disabled_when_cfg_none(noisy_fs_data):
-    """feature_selection_cfg=None равнозначен disabled (обратная совместимость)."""
+    """feature_selection_cfg=None is equivalent to disabled (backward compatibility)."""
     X, y = noisy_fs_data
     model, _, params, _ = _run_optimize_with_captured_study(
         "elasticnet",
@@ -1278,7 +1276,7 @@ def test_auto_mode_default_is_disabled_when_cfg_none(noisy_fs_data):
 
 
 def test_auto_mode_initial_params_preserves_fs_decision(noisy_fs_data):
-    """enqueue_trial с use_feature_selection из фазы 1 стартует с этим решением."""
+    """enqueue_trial with use_feature_selection from phase 1 starts with that decision."""
     X, y = noisy_fs_data
     initial = {"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True}
     _, study, params, _ = _run_optimize_with_captured_study(
@@ -1292,21 +1290,21 @@ def test_auto_mode_initial_params_preserves_fs_decision(noisy_fs_data):
         space_overrides=_FS_ELASTICNET_SPACE,
     )
 
-    # Первый (enqueued) триал стартует с решением предыдущей фазы
+    # The first (enqueued) trial starts with the previous phase's decision
     first = study.trials[0]
     assert first.params.get("use_feature_selection") is True
     assert first.params.get("alpha") == 0.5
     assert first.params.get("l1_ratio") == 0.3
-    # Ключ решения сохраняется в best_params (монотонность между фазами)
+    # The decision key is kept in best_params (monotonicity between phases)
     assert "use_feature_selection" in params
 
 
 def test_isotonic_regression_ignores_feature_selection(toy_data):
-    """Изотоническая регрессия: тюнинг не падает, отбор принудительно выключен."""
+    """Isotonic regression: tuning does not fail, selection is forcibly disabled."""
     X, y = toy_data
     X_iso = X.iloc[:, [0]]
 
-    # mode='always' — даже принудительный режим не ломает одномерный алгоритм
+    # mode='always' — even forced mode does not break the univariate algorithm
     model_always, _, _ = hyperopt.optimize(
         "isotonic_regression",
         X_iso,
@@ -1320,7 +1318,7 @@ def test_isotonic_regression_ignores_feature_selection(toy_data):
     steps_always = [name for name, _ in getattr(model_always, "steps", [])]
     assert "feature_selector" not in steps_always
 
-    # mode='auto' — даже если Optuna выбрала True, селектор не попадает в модель
+    # mode='auto' — even if Optuna picks True, the selector does not enter the model
     model_auto, params_auto, _ = hyperopt.optimize(
         "isotonic_regression",
         X_iso,
@@ -1333,23 +1331,23 @@ def test_isotonic_regression_ignores_feature_selection(toy_data):
     assert hasattr(model_auto, "predict")
     steps_auto = [name for name, _ in getattr(model_auto, "steps", [])]
     assert "feature_selector" not in steps_auto
-    # Для isotonic категория use_feature_selection не предлагается Optuna
-    # (флаг принудительно False), поэтому служебный ключ не попадает
-    # в best_params даже в режиме 'auto'.
+    # For isotonic, the use_feature_selection category is not offered to Optuna
+    # (the flag is forcibly False), so the service key does not reach
+    # best_params even in 'auto' mode.
     assert "use_feature_selection" not in params_auto
 
 
 def test_invalid_feature_selection_cfg_rejected(toy_data):
-    """Невалидный feature_selection_cfg отклоняется до запуска поиска."""
+    """An invalid feature_selection_cfg is rejected before the search starts."""
     X, y = toy_data
 
-    # Неверный тип: строка вместо dict/FeatureSelectionCfg
+    # Wrong type: a string instead of dict/FeatureSelectionCfg
     with pytest.raises(TypeError, match="feature_selection_cfg must be a"):
         hyperopt.optimize(
             "ridge", X, y, n_trials=2, feature_selection_cfg="always"
         )
 
-    # Невалидный dict: неизвестный method отклоняется валидацией Pydantic
+    # Invalid dict: an unknown method is rejected by Pydantic validation
     with pytest.raises(HyperoptError, match="Invalid feature_selection_cfg"):
         hyperopt.optimize(
             "ridge",
@@ -1361,10 +1359,10 @@ def test_invalid_feature_selection_cfg_rejected(toy_data):
 
 
 def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data):
-    """B2: при random_state=None FeatureSelector получает фиксированный seed 42.
+    """With random_state=None, FeatureSelector gets a fixed seed of 42.
 
-    Иначе каждый вызов fs_transformer_factory создавал бы селектор с новым
-    случайным зерном и отбор признаков был бы невоспроизводим.
+    Otherwise each fs_transformer_factory call would create a selector with a
+    new random seed and feature selection would not be reproducible.
     """
     X, y = toy_data
     with (
@@ -1382,8 +1380,8 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
         mock_study = MagicMock()
         mock_study.best_params = {"alpha": 0.6}
         mock_study.best_value = 0.9
-        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
-        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        # Explicit trial-state accounting: one COMPLETED trial,
+        # so optimize() passes the n_completed > 0 check and reaches best_params.
         mock_study.get_trials.return_value = [
             MagicMock(state=optuna.trial.TrialState.COMPLETE)
         ]
@@ -1403,11 +1401,11 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
 
 
 def test_fs_reproducible_with_random_state_none(noisy_fs_data):
-    """B2: два запуска random_state=None дают одинаковый результат.
+    """Two runs with random_state=None produce the same result.
 
-    Случайность Optuna (TPE, разбиения) при random_state=None не
-    фиксируется, но отбор признаков использует фиксированный seed 42,
-    поэтому при константном пространстве поиска итоговые модели идентичны.
+    Optuna's randomness (TPE, splits) is not fixed with random_state=None,
+    but feature selection uses a fixed seed of 42, so with a constant search
+    space the resulting models are identical.
     """
     X, y = noisy_fs_data
     run_kwargs = dict(
@@ -1423,12 +1421,11 @@ def test_fs_reproducible_with_random_state_none(noisy_fs_data):
 
 
 def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
-    """Служебный ключ use_feature_selection не попадает в конструктор модели.
+    """The service key use_feature_selection does not reach the model constructor.
 
-    Покрывает B4/B6: initial_params (enqueue_trial) переносит решение
-    предыдущей фазы между фазами HPO, но при создании модели через
-    create_model ключ обязан быть вычищен, а исходный study.best_params —
-    не мутирован.
+    Covers: initial_params (enqueue_trial) carries the previous phase's decision
+    between HPO phases, but when creating the model through create_model the key
+    must be stripped, and the original study.best_params must not be mutated.
     """
     X, y = toy_data
     initial_params = {"alpha": 0.5, "use_feature_selection": True}
@@ -1451,8 +1448,8 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
             "use_feature_selection": True,
         }
         mock_study.best_value = 0.9
-        # Явный подсчёт состояний триалов (issue #32): один COMPLETED-триал,
-        # чтобы optimize() прошёл проверку n_completed > 0 и дошёл до best_params.
+        # Explicit trial-state accounting: one COMPLETED trial,
+        # so optimize() passes the n_completed > 0 check and reaches best_params.
         mock_study.get_trials.return_value = [
             MagicMock(state=optuna.trial.TrialState.COMPLETE)
         ]
@@ -1470,20 +1467,20 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
             },
         )
 
-        # enqueue_trial получает решение предыдущей фазы (монотонность HPO)
+        # enqueue_trial receives the previous phase's decision (HPO monotonicity)
         mock_study.enqueue_trial.assert_called_once_with(initial_params)
-        # Финальный create_model не получает служебный ключ
+        # The final create_model does not receive the service key
         assert "use_feature_selection" not in mock_create_model.call_args.kwargs
-        # Возвращаемый best_params сохраняет ключ (монотонность между фазами)
+        # The returned best_params keeps the key (monotonicity between phases)
         assert params["use_feature_selection"] is True
 
 
 def test_fs_pipeline_from_optimize_serializes(tmp_path: Path, noisy_fs_data):
-    """B6: пайплайн с шагом feature_selector корректно сериализуется.
+    """A pipeline with the feature_selector step serializes correctly.
 
-    Новый шаг не нарушает обратную совместимость сериализации пайплайнов:
-    после save/load predict идентичен, шаг присутствует в восстановленной
-    модели.
+    The new step does not break backward compatibility of pipeline
+    serialization: after save/load predict is identical and the step is present
+    in the restored model.
     """
     import joblib
 
@@ -1508,18 +1505,18 @@ def test_fs_pipeline_from_optimize_serializes(tmp_path: Path, noisy_fs_data):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 10. Регрессия рефакторинга optimize() на шаги (issue #30, блокер B1)
+# 10. Regression tests for refactoring optimize() into steps
 # ══════════════════════════════════════════════════════════════════════════════
-# Генерация гиперпараметров (space_fn) и конструктора модели (create_model)
-# выполняется в _objective ВНЕ try/except: их ошибки обязаны пробрасываться
-# наружу (триал FAIL + исключение из study.optimize), а не превращаться в
-# тихие pruned-триалы → (None, None, None) или учитываться circuit breaker'ом.
+# Hyperparameter generation (space_fn) and the model constructor (create_model)
+# run in _objective OUTSIDE try/except: their errors must propagate outward
+# (FAIL trial + an exception from study.optimize), not become silent pruned
+# trials → (None, None, None) or be counted by the circuit breaker.
 def test_space_fn_error_marks_trial_failed_and_propagates(toy_data):
-    """B1: ValueError из пользовательской space-функции → FAIL, а не PRUNED.
+    """ValueError from a user space function → FAIL, not PRUNED.
 
-    Исходный контракт: ошибка в space-функции отмечает триал как FAIL и
-    прерывает study.optimize (исключение наружу), что делает провал видимым
-    для вызывающего кода, а не маскирует его под отсечённый триал.
+    Original contract: an error in the space function marks the trial as FAIL
+    and interrupts study.optimize (exception propagates outward), making the
+    failure visible to the caller instead of masking it as a pruned trial.
     """
     X, y = toy_data
     real_study = optuna.create_study(direction="maximize")
@@ -1541,16 +1538,16 @@ def test_space_fn_error_marks_trial_failed_and_propagates(toy_data):
             )
 
     assert real_study.trials[0].state == optuna.trial.TrialState.FAIL
-    # Отсечения не происходит: это не ранняя остановка и не нефатальный сбой.
+    # No pruning happens: this is neither early stopping nor a non-fatal failure.
     assert all(t.state != optuna.trial.TrialState.PRUNED for t in real_study.trials)
 
 
 def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
-    """B1: сбой конструктора модели (MemoryError) → FAIL, а не дисквалификация.
+    """Model constructor failure (MemoryError) → FAIL, not disqualification.
 
-    Ошибка конструктора не является фатальным сбоем ОЦЕНКИ: она не должна
-    инкрементировать consecutive_fatal_failures и приводить к
-    InvalidAlgorithmError после N попыток — контракт исходного кода.
+    A constructor error is not a fatal EVALUATION failure: it must not
+    increment consecutive_fatal_failures or lead to InvalidAlgorithmError
+    after N attempts — per the original code contract.
     """
     X, y = toy_data
     real_study = optuna.create_study(direction="maximize")
@@ -1580,18 +1577,18 @@ def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
                 space_overrides={"ridge": lambda t: {"alpha": 0.1}},
             )
 
-    # Первый же триал FAIL — без накопления счётчика фатальных сбоев
-    # (иначе после 5 попыток был бы InvalidAlgorithmError, а не MemoryError).
+    # The very first trial is FAIL — without accumulating the fatal-failure counter
+    # (otherwise after 5 attempts it would be InvalidAlgorithmError, not MemoryError).
     assert real_study.trials[0].state == optuna.trial.TrialState.FAIL
     assert len(real_study.trials) == 1
 
 
 def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
-    """B1: ValueError на этапе ОЦЕНКИ (fit/scoring) по-прежнему → PRUNED.
+    """ValueError at the EVALUATION stage (fit/scoring) is still → PRUNED.
 
-    Разделение сохранено: за пределами try/except остались только генерация
-    параметров/модели; ошибки самой оценки обрабатываются handle_failure
-    как раньше (нефатальный ValueError → TrialPruned, без дисквалификации).
+    The separation is preserved: only parameter/model generation stays outside
+    try/except; errors of the evaluation itself are handled by handle_failure
+    as before (non-fatal ValueError → TrialPruned, no disqualification).
     """
     X, y = toy_data
     with (
@@ -1605,7 +1602,7 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
         patch("configurable_automl_engine.tuner._get_estimator"),
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-        # Все 10 вызовов cross_val_score (этап оценки) кидают ValueError
+        # All 10 cross_val_score calls (evaluation stage) raise ValueError
         mock_cv.side_effect = ValueError("non-fatal scoring error")
 
         best_algo, best_model, best_score = optimize(
@@ -1615,18 +1612,18 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
             n_trials=10,
             space_overrides={"rf": lambda trial: {"n_estimators": 10}},
         )
-        # Ни один триал не завершён → контракт «нет валидного результата»
-        # (issue #13/#32): сплошной None, без InvalidAlgorithmError.
+        # No trial completed → the "no valid result" contract:
+        # all None, without InvalidAlgorithmError.
         assert best_algo is None
         assert best_model is None
         assert best_score is None
 
 
-# ─────────── Очистка неинформативных признаков (issue #57) ───────────────────
+# ─────────── Cleaning uninformative features ───────────────────
 
 
 def _tuner_garbage_data(n: int = 120, seed: int = 7) -> tuple[pd.DataFrame, pd.Series]:
-    """DataFrame с информативными колонками и мусором (константные/пустые)."""
+    """DataFrame with informative columns and garbage (constant/empty)."""
     rng = np.random.default_rng(seed)
     X = pd.DataFrame(
         {
@@ -1643,9 +1640,9 @@ def _tuner_garbage_data(n: int = 120, seed: int = 7) -> tuple[pd.DataFrame, pd.S
 
 
 def test_optimize_cleans_uninformative_features():
-    """optimize() очищает мусорные колонки до построения препроцессора:
-    финальная модель работает с информативными признаками, предсказания
-    конечны, лишние колонки на входе не влияют на результат."""
+    """optimize() cleans garbage columns before building the preprocessor:
+    the final model works with informative features, predictions are finite,
+    and extra input columns do not affect the result."""
     X, y = _tuner_garbage_data()
 
     model, params, score = hyperopt.optimize(
@@ -1662,22 +1659,22 @@ def test_optimize_cleans_uninformative_features():
     assert isinstance(score, float) and np.isfinite(score)
     assert isinstance(params, dict) and params
     assert hasattr(model, "predict")
-    # Модель обучалась на очищенных данных: предсказания конечны и устойчивы
-    # к лишним (мусорным) колонкам на входе.
+    # The model was trained on cleaned data: predictions are finite and robust
+    # to extra (garbage) input columns.
     preds = model.predict(X)
     assert np.isfinite(preds).all()
     preds_clean = model.predict(X[["x1", "x2"]])
     assert np.allclose(preds, preds_clean)
 
-    # Препроцессор собран только по 2 информативным колонкам (не 6).
+    # The preprocessor is built from only the 2 informative columns (not 6).
     preprocessor = model.named_steps["preprocessor"]
     out = preprocessor.transform(X[["x1", "x2"]])
     assert out.shape[1] == 2
 
 
 def test_optimize_numpy_input_skips_cleaning():
-    """np.ndarray без имён колонок: очистка пропускается (ограничение),
-    оптимизация проходит без падений."""
+    """np.ndarray without column names: cleaning is skipped (a limitation),
+    and optimization completes without failures."""
     rng = np.random.default_rng(3)
     X_arr = rng.normal(size=(100, 3))
     y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
@@ -1699,7 +1696,7 @@ def test_optimize_numpy_input_skips_cleaning():
 
 
 def test_runner_dropped_features_recorded():
-    """_OptimizeRunner фиксирует список удалённых колонок для диагностики."""
+    """_OptimizeRunner records the list of dropped columns for diagnostics."""
     X, y = _tuner_garbage_data()
     runner = hyperopt._OptimizeRunner(
         algo_name="ridge",
@@ -1744,8 +1741,8 @@ def test_runner_dropped_features_recorded():
 
 
 def test_optimize_external_preprocessor_skips_cleaning():
-    """Если передан готовый preprocessor, очистка self.X не выполняется:
-    пользователь сам зафиксировал набор признаков."""
+    """If a ready preprocessor is provided, self.X is not cleaned:
+    the user has fixed the feature set themselves."""
     from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import StandardScaler
 
@@ -1799,23 +1796,23 @@ def test_optimize_external_preprocessor_skips_cleaning():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Индикаторы пропусков: безопасный fallback в tuner (issue #56)
+#  Missing indicators: a safe fallback in the tuner
 # ──────────────────────────────────────────────────────────────────────────────
 def test_missing_indicator_enabled_guards_invalid_algorithms():
-    """Пустое/None/неизвестное имя алгоритма не роняет сборку препроцессора:
-    возвращается безопасное значение True (индикаторы включены)."""
+    """An empty/None/unknown algorithm name does not break preprocessor assembly:
+    a safe value of True is returned (indicators enabled)."""
     assert _missing_indicator_enabled(None) is True
     assert _missing_indicator_enabled("") is True
     assert _missing_indicator_enabled("unknown_algo_2026") is True
 
 
 def test_missing_indicator_enabled_univariate_disabled():
-    """Строго одномерные алгоритмы (isotonic) — индикаторы выключены."""
+    """Strictly univariate algorithms (isotonic) — indicators disabled."""
     assert _missing_indicator_enabled("isotonic_regression") is False
     assert _missing_indicator_enabled("isotonic") is False
 
 
 def test_missing_indicator_enabled_regular_algorithms():
-    """Обычные алгоритмы — индикаторы включены."""
+    """Regular algorithms — indicators enabled."""
     assert _missing_indicator_enabled("ridge") is True
     assert _missing_indicator_enabled("rf") is True

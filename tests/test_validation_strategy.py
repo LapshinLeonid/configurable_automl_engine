@@ -6,7 +6,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
 )
 
-# Схема фаз (эпик #74): last phase обязана быть терминальным select.
+# Phase schema: the last phase must be a terminal select.
 BASE_CFG = """
 {
     "general": {

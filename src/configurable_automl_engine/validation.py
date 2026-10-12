@@ -1,24 +1,24 @@
 """
-Validation Engine: Единая фабрика разбиений для обучения и оптимизации (Optuna).
-Данный модуль инкапсулирует логику разделения данных на обучающие
-и проверочные выборки.
-Ключевой особенностью является интеллектуальное управление стратегиями: система
-автоматически оценивает достаточность данных и может понижать сложность валидации
-(например, откат с K-Fold на Train-Test Split), чтобы предотвратить статистическую
-недостоверность на малых выборках.
-Поддерживаемые стратегии (ValidationStrategy):
-    • train_test_split : Классическое разделение (по умолчанию 80/20).
-    • k_fold           : Перекрестная проверка (K-Fold CV) с фиксированным сидом.
-    • loo              : Leave-One-Out (валидация на каждом объекте), для малых выборок.
-    • auto             : Автоматический выбор между LOO/k_fold/train_test_split
-                         на основе размера выборки (N) и числа признаков (P).
-Особенности реализации:
-    1. Robustness: Автоматический fallback-механизм в `make_cv` предотвращает падение
-       процесса обучения при малом количестве наблюдений (N < 2*Folds).
-    2. Consistency: Все генераторы используют единый RANDOM_STATE для обеспечения
-       воспроизводимости экспериментов и честного сравнения моделей.
-    3. Type Safety: Полная поддержка Enum ValidationStrategy и строгих Type Hints.
-    4. Integration: Полная совместимость с интерфейсами sklearn.model_selection.
+Validation Engine: A unified split factory for training and optimization (Optuna).
+This module encapsulates the logic of splitting data into training
+and validation sets.
+Its key feature is intelligent strategy management: the system
+automatically assesses data sufficiency and can lower the validation complexity
+(e.g. fall back from K-Fold to Train-Test Split) to prevent statistical
+unreliability on small samples.
+Supported strategies (ValidationStrategy):
+    • train_test_split : Classic split (80/20 by default).
+    • k_fold           : Cross-validation (K-Fold CV) with a fixed seed.
+    • loo              : Leave-One-Out (validation on each sample), for small samples.
+    • auto             : Automatic selection between LOO/k_fold/train_test_split
+                         based on the sample size (N) and the number of features (P).
+Implementation features:
+    1. Robustness: The automatic fallback mechanism in `make_cv` prevents the training
+       process from crashing with a small number of observations (N < 2*Folds).
+    2. Consistency: All generators use a single RANDOM_STATE to ensure
+       experiment reproducibility and fair model comparison.
+    3. Type Safety: Full support for the ValidationStrategy Enum and strict Type Hints.
+    4. Integration: Full compatibility with the sklearn.model_selection interfaces.
 """
 
 from __future__ import annotations
@@ -41,14 +41,14 @@ from configurable_automl_engine.common.validation_utils import (
 
 log = logging.getLogger(__name__)
 
-RANDOM_STATE = 42  # фиксируем сид в одном месте
+RANDOM_STATE = 42  # fix the seed in a single place
 
-#: Методы валидации, поддерживаемые ``make_cv``/``iter_splits`` в текущей
-#: версии. Единая точка расширения интерфейса стратегий валидации (issue #62,
-#: edge case «временные ряды»): для новой стратегии (например,
-#: order-aware ``TimeSeriesSplit`` из T10) достаточно добавить метод в этот
-#: кортеж и ветку в ``make_cv`` — ``ModelTrainer`` и OOF-канал подхватят его
-#: автоматически, без переписывания.
+#: Validation methods supported by ``make_cv``/``iter_splits`` in the current
+#: version. A single point of extension for the validation strategy interface
+#: (edge case "time series"): for a new strategy (e.g. an
+#: order-aware ``TimeSeriesSplit``) it is enough to add the method to this
+#: tuple and a branch to ``make_cv`` — ``ModelTrainer`` and the OOF channel will
+#: pick it up automatically, without rewriting.
 SUPPORTED_VALIDATION_METHODS: tuple[str, ...] = (
     "train_test_split",
     "k_fold",
@@ -60,23 +60,23 @@ SUPPORTED_VALIDATION_METHODS: tuple[str, ...] = (
 
 
 class ValidationError(Exception):
-    """Базовая ошибка модуля."""
+    """A base error of the module."""
 
 
 class InvalidDataError(ValidationError):
-    """Некорректный X / y."""
+    """Invalid X / y."""
 
 
 # ═══════════════════════════════ helper CV factory ═══════════════════════════
 def norm_val_method(val_method: ValidationStrategy | str) -> str:
     """
-    Приводит входной метод к единому строковому идентификатору.
-    Это центральная точка для маппинга Enum -> String.
+    Brings the input method to a single string identifier.
+    This is the central point for the Enum -> String mapping.
     """
-    # Если передан объект Enum, сразу возвращаем его строковое значение
+    # If an Enum object is passed, immediately return its string value
     if isinstance(val_method, ValidationStrategy):
         return val_method.value
-    # Если передана строка, пытаемся привести её к нижнему регистру
+    # If a string is passed, try to lower-case it
     return str(val_method).lower()
 
 
@@ -90,26 +90,26 @@ def make_cv(
     n_features: int | None = None,
 ) -> tuple[str, model_selection.BaseCrossValidator | None, dict[str, Any] | None]:
     """
-    Фабрика объектов валидации scikit-learn с механизмом адаптации под объем данных.
+    A factory of scikit-learn validation objects with an adaptation mechanism for data size.
     Args:
-        n_samples: Общее количество объектов в выборке.
-        val_method: Желаемая стратегия
-        (Enum или строка: 'k_fold', 'loo', 'train_test_split', 'auto').
-        n_folds: Количество фолдов (используется для 'k_fold').
-        random_state: Инициализатор генератора случайных чисел для воспроизводимости.
-        n_features: Количество признаков P. Требуется для стратегии 'auto'.
+        n_samples: The total number of samples.
+        val_method: The desired strategy
+        (Enum or string: 'k_fold', 'loo', 'train_test_split', 'auto').
+        n_folds: The number of folds (used for 'k_fold').
+        random_state: The random number generator initializer for reproducibility.
+        n_features: The number of features P. Required for the 'auto' strategy.
     Returns:
-        tuple: Кортеж, содержащий:
-            - final_method (str): Реально выбранный метод
-            (может отличаться от запрошенного при fallback).
-            - cv_object (BaseCrossValidator | None): Объект валидатора sklearn
-            или None, если выбран 'train_test_split'.
-            - decision (dict[str, Any] | None): Разрешённое решение стратегии
-            'auto' (от choose_validation_method) для синхронизации test_size
-            между точками принятия решения. None для не-auto стратегий.
+        tuple: A tuple containing:
+            - final_method (str): The actually selected method
+            (may differ from the requested one on fallback).
+            - cv_object (BaseCrossValidator | None): The sklearn validator
+            object, or None if 'train_test_split' is selected.
+            - decision (dict[str, Any] | None): The resolved 'auto' strategy
+            decision (from choose_validation_method) for synchronizing test_size
+            between decision points. None for non-auto strategies.
     Note:
-        Если n_samples < max(4, 2 * n_folds), стратегия 'k_fold' будет автоматически
-        заменена на 'train_test_split' для сохранения статистической значимости.
+        If n_samples < max(4, 2 * n_folds), the 'k_fold' strategy is automatically
+        replaced by 'train_test_split' to preserve statistical significance.
     """
     method = norm_val_method(val_method)
 
@@ -126,8 +126,8 @@ def make_cv(
         return "train_test_split", None, None
 
     if method == "k_fold":
-        # Логика защиты: K-Fold требует минимум 2*k образцов для репрезентативности.
-        # Число 4 — абсолютный минимум для корректного расчета дисперсии.
+        # Protection logic: K-Fold requires a minimum of 2*k samples for representativeness.
+        # The number 4 is the absolute minimum for a correct variance computation.
         min_required = max(4, 2 * n_folds)
         if n_samples < min_required:
             log.warning(
@@ -192,7 +192,7 @@ def _resolve_auto_cv(
     decision = choose_validation_method(n_samples, n_features)
     method = decision["method"]
 
-    # Предупреждения (low confidence) единообразно логируются для всех веток.
+    # Warnings (low confidence) are logged uniformly for all branches.
     if "warning" in decision:
         log.warning("Auto validation: %s", decision["warning"])
 
@@ -214,13 +214,13 @@ def _resolve_auto_cv(
     raise InvalidDataError(decision.get("reason", "Insufficient data for validation."))
 
 
-# Результат ``iter_splits``: кортеж из четырёх подмножеств (X_train, X_val,
-# y_train, y_val) либо из пяти при ``include_indices=True`` — пятым элементом
-# добавляется ``np.ndarray`` позиционных индексов валидационных строк в
-# исходных данных (issue #62, сборка OOF-предсказаний в ``ModelTrainer``).
-# Точная типизация через ``@overload`` с ``Literal`` (ревью PR #31): вызовы с
-# ``include_indices=False`` (по умолчанию) получают 4-элементный кортеж,
-# с ``include_indices=True`` — 5-элементный.
+# The ``iter_splits`` result: a tuple of four subsets (X_train, X_val,
+# y_train, y_val) or of five when ``include_indices=True`` — the fifth element
+# is an ``np.ndarray`` of positional indices of the validation rows in the
+# original data (assembly of OOF predictions in ``ModelTrainer``).
+# Precise typing via ``@overload`` with ``Literal``: calls with
+# ``include_indices=False`` (default) get a 4-element tuple,
+# with ``include_indices=True`` — a 5-element one.
 Split = tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
 SplitWithIndices = tuple[
     np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray
@@ -264,47 +264,47 @@ def iter_splits(
     include_indices: bool = False,
 ) -> Generator[Split | SplitWithIndices, None, None]:
     """
-    Генерирует итеративные разбиения данных на обучающую и валидационную выборки.
-    Функция инкапсулирует логику кросс-валидации и простого разделения, возвращая
-    готовые подмножества данных для каждой итерации.
+    Generates iterative splits of the data into training and validation sets.
+    The function encapsulates the cross-validation and simple split logic, returning
+    ready subsets of data for each iteration.
     Args:
-        X: Признаки (массив numpy или DataFrame pandas).
-        y: Целевая переменная. Если None, возвращает None для y_train и y_val.
-        method: Стратегия разделения.
-        Поддерживаются 'k_fold', 'loo', 'train_test_split', 'auto'.
-        n_folds: Количество блоков для кросс-валидации.
-        test_size: Доля валидационной выборки
-        (используется только при методе 'train_test_split').
-        random_state: Зерно для фиксации случайности при перемешивании.
-        include_indices: Если True, каждый кортеж дополняется пятым элементом —
-            ``np.ndarray`` позиционных индексов валидационных строк в исходном
-            ``X`` (порядок соответствует порядку ``X_val``). Используется для
-            сборки OOF-предсказаний, выровненных по исходному порядку строк
-            (issue #62). По умолчанию False — поведение полностью совместимо
-            со старым 4-элементным контрактом.
+        X: Features (a numpy array or a pandas DataFrame).
+        y: The target variable. If None, returns None for y_train and y_val.
+        method: The split strategy.
+        Supported: 'k_fold', 'loo', 'train_test_split', 'auto'.
+        n_folds: The number of folds for cross-validation.
+        test_size: The fraction of the validation set
+        (used only with the 'train_test_split' method).
+        random_state: The seed for fixing randomness during shuffling.
+        include_indices: If True, each tuple is extended with a fifth element —
+            an ``np.ndarray`` of positional indices of the validation rows in the
+            original ``X`` (the order corresponds to the order of ``X_val``). Used for
+            assembling OOF predictions aligned with the original row order.
+            Defaults to False — the behavior is fully compatible
+            with the old 4-element contract.
     Yields:
-        Tuple: Кортеж из четырех (или пяти при ``include_indices=True``)
-            элементов:
-            - X_train: Данные для обучения.
-            - X_val: Данные для проверки.
-            - y_train: Метки для обучения (или None).
-            - y_val: Метки для проверки (или None).
-            - test_idx (только при ``include_indices=True``): Позиционные
-              индексы строк ``X_val`` в исходном ``X``.
+        Tuple: A tuple of four (or five when ``include_indices=True``)
+            elements:
+            - X_train: Data for training.
+            - X_val: Data for validation.
+            - y_train: Labels for training (or None).
+            - y_val: Labels for validation (or None).
+            - test_idx (only with ``include_indices=True``): The positional
+              indices of the ``X_val`` rows in the original ``X``.
     Raises:
-        InvalidDataError: Если входные данные пусты или размеры X и y не совпадают.
-        ValidationError: При критической ошибке инициализации объекта валидации.
+        InvalidDataError: If the input data is empty or the sizes of X and y do not match.
+        ValidationError: On a critical error during validation object initialization.
     """
     method_str = norm_val_method(method)
 
-    # 1. Валидация входных данных
+    # 1. Input data validation
     if isinstance(X, pd.DataFrame):
         validate_df_not_empty(X)
     elif len(X) == 0:
         raise InvalidDataError("Input array X is empty.")
     if y is not None and len(X) != len(y):
         raise InvalidDataError(f"X and y length mismatch: {len(X)} != {len(y)}")
-    # 2. Получение финальной стратегии (с учетом возможного отката/fallback)
+    # 2. Obtain the final strategy (taking into account a possible fallback)
     n_features = X.shape[1] if method_str == "auto" else None
     final_method, cv, decision = make_cv(
         len(X),
@@ -314,19 +314,19 @@ def iter_splits(
         test_size=test_size,
         n_features=n_features,
     )
-    # 3. Генерация разбиений
+    # 3. Generate the splits
     if final_method == "train_test_split":
-        # Для 'auto' используем динамический размер теста, вычисленный
-        # choose_validation_method (целое число строк), а не фиксированный.
+        # For 'auto' use the dynamic test size computed by
+        # choose_validation_method (an integer number of rows), not a fixed one.
         effective_test_size: float | int = test_size
         if method_str == "auto" and decision is not None:
             effective_test_size = int(decision["test_size"])
-        # Разбиваем ПОЗИЦИОННЫЕ индексы один раз, чтобы при include_indices=True
-        # отдавать настоящие позиции валидационных строк в исходном X, а сами
-        # подмножества получать индексацией по этим же позициям. Это гарантирует
-        # согласованность X_val/y_val/test_idx и корректную работу при
-        # random_state=None (два независимых вызова train_test_split дали бы
-        # разные перестановки).
+        # Split the POSITIONAL indices once, so that with include_indices=True we
+        # return the real positions of the validation rows in the original X, and the
+        # subsets themselves are obtained by indexing with the same positions. This
+        # guarantees the consistency of X_val/y_val/test_idx and correct behavior with
+        # random_state=None (two independent train_test_split calls would yield
+        # different permutations).
         all_idx = np.arange(len(X))
         train_idx, test_idx = train_test_split(
             all_idx,
@@ -354,15 +354,15 @@ def iter_splits(
                 f"Critical error: CV object is not"
                 f" initialized for strategy '{final_method}'"
             )
-        # Объединяем логику для всех BaseCrossValidator объектов (KFold, LeaveOneOut)
+        # Combine the logic for all BaseCrossValidator objects (KFold, LeaveOneOut)
         for train_idx, test_idx in cv.split(X):
-            # Безопасная индексация X (Pandas vs Numpy)
+            # Safe indexing of X (Pandas vs Numpy)
             if hasattr(X, "iloc"):
                 x_tr, x_te = X.iloc[train_idx], X.iloc[test_idx]
             else:
                 x_tr, x_te = X[train_idx], X[test_idx]
 
-            # Безопасная индексация y (с учетом того, что он может быть None)
+            # Safe indexing of y (taking into account that it may be None)
             y_tr, y_te = None, None
             if y is not None:
                 if hasattr(y, "iloc"):

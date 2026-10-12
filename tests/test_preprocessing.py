@@ -26,7 +26,7 @@ from configurable_automl_engine.preprocessing import (
 
 
 def test_detect_feature_types_mixed_dataframe():
-    """detect_feature_types различает категориальные и числовые колонки."""
+    """detect_feature_types distinguishes categorical and numeric columns."""
     df = pd.DataFrame(
         {
             "cat_color": ["red", "green", "blue"],
@@ -43,7 +43,7 @@ def test_detect_feature_types_mixed_dataframe():
 
 
 def test_detect_feature_types_all_numeric():
-    """На чисто числовом DataFrame категориальных колонок нет."""
+    """On a purely numeric DataFrame there are no categorical columns."""
     df = pd.DataFrame({"a": [1, 2], "b": [0.5, 0.7]})
     cat, num = detect_feature_types(df)
 
@@ -52,7 +52,7 @@ def test_detect_feature_types_all_numeric():
 
 
 def test_build_preprocessor_onehot_for_categorical():
-    """build_preprocessor возвращает ColumnTransformer с OneHotEncoder для категорий."""
+    """build_preprocessor returns a ColumnTransformer with OneHotEncoder for categories."""
     feature_names = ["cat", "num"]
     preprocessor = build_preprocessor(
         feature_names,
@@ -66,11 +66,11 @@ def test_build_preprocessor_onehot_for_categorical():
     assert "cat" in names
     assert "num" in names
 
-    # Категориальный трансформер использует SplitCategoricalEncoder с
-    # default-энкодером OneHotEncoder (high-cardinality режим отключён).
-    # Внутренние энкодеры создаются в fit() (sklearn-конвенция: атрибуты
-    # с завершающим подчёркиванием появляются только после обучения),
-    # поэтому сначала обучаем препроцессор на данных.
+    # The categorical transformer uses SplitCategoricalEncoder with a
+    # default OneHotEncoder (high-cardinality mode is disabled).
+    # Internal encoders are created in fit() (sklearn convention: attributes
+    # with a trailing underscore appear only after training),
+    # so we first fit the preprocessor on the data.
     df = pd.DataFrame(
         {"cat": ["red", "green", "red", "blue"], "num": [1.0, 2.0, 3.0, 4.0]}
     )
@@ -82,7 +82,7 @@ def test_build_preprocessor_onehot_for_categorical():
 
 
 def test_build_preprocessor_end_to_end_encoding():
-    """Проверка сквозного кодирования категорий через препроцессор."""
+    """Check end-to-end category encoding through the preprocessor."""
     df = pd.DataFrame(
         {
             "cat": ["red", "green", "red", "blue"],
@@ -96,11 +96,11 @@ def test_build_preprocessor_end_to_end_encoding():
     )
     out = preprocessor.fit_transform(df)
 
-    assert out.shape == (4, 3 + 1)  # 3 one-hot колонки + 1 числовая
+    assert out.shape == (4, 3 + 1)  # 3 one-hot columns + 1 numeric column
 
 
 def test_build_preprocessor_no_features_passthrough():
-    """При отсутствии совпавших колонок возвращается passthrough-трансформер."""
+    """A passthrough transformer is returned when no columns match."""
     preprocessor = build_preprocessor(
         ["some_random_column"],
         categorical_features=[],
@@ -113,7 +113,7 @@ def test_build_preprocessor_no_features_passthrough():
 
 
 def test_build_preprocessor_numeric_strings_treated_as_categorical():
-    """Колонки 'числовых строк' (ID '10','20') детектируются как категории по dtype."""
+    """'Numeric string' columns (ID '10','20') are detected as categorical by dtype."""
     df = pd.DataFrame({"id_code": ["10", "20", "30", "20"]})
     cat, _ = detect_feature_types(df)
 
@@ -125,15 +125,15 @@ def test_build_preprocessor_numeric_strings_treated_as_categorical():
     out = preprocessor.fit_transform(df)
     assert out.shape == (4, 3)
 
-    # Все значения в матрице являются числами (one-hot)
+    # All values in the matrix are numeric (one-hot)
     assert np.isfinite(out).all()
 
 
 def test_build_preprocessor_bool_column_not_crash():
-    """Чисто bool-колонка не роняет препроцессор при fit_transform.
+    """A pure bool column does not crash the preprocessor during fit_transform.
 
-    Регрессия на критический баг: SimpleImputer(strategy="most_frequent")
-    падал на numpy-bool ("SimpleImputer does not support data with dtype bool").
+    Regression for a critical bug: SimpleImputer(strategy="most_frequent")
+    failed on numpy-bool ("SimpleImputer does not support data with dtype bool").
     """
     df = pd.DataFrame(
         {
@@ -149,14 +149,14 @@ def test_build_preprocessor_bool_column_not_crash():
     preprocessor = build_preprocessor(list(df.columns), cat, num)
     out = preprocessor.fit_transform(df)
 
-    # bool -> one-hot (2 категории) + 1 числовая
+    # bool -> one-hot (2 categories) + 1 numeric column
     assert out.shape == (4, 3)
     assert np.isfinite(out).all()
 
 
 def test_build_preprocessor_mixed_object_and_bool():
-    """Совместная обработка object- и bool-колонок через один категориальный
-    пайплайн без падения на dtype bool."""
+    """Object and bool columns are processed together through one categorical
+    pipeline without failing on the bool dtype."""
     df = pd.DataFrame(
         {
             "color": ["red", "green", "red", "blue"],
@@ -172,7 +172,7 @@ def test_build_preprocessor_mixed_object_and_bool():
     preprocessor = build_preprocessor(list(df.columns), cat, num)
     out = preprocessor.fit_transform(df)
 
-    # color (3 категории) + flag (2 категории) + 1 числовая
+    # color (3 categories) + flag (2 categories) + 1 numeric column
     assert out.shape == (4, 6)
     assert np.isfinite(out).all()
 
@@ -181,7 +181,7 @@ def test_build_preprocessor_mixed_object_and_bool():
 
 
 def test_build_preprocessor_ordinal_uses_ordinal_encoder():
-    """build_preprocessor(encoding='ordinal') использует OrdinalEncoder (не OneHotEncoder)."""
+    """build_preprocessor(encoding='ordinal') uses OrdinalEncoder (not OneHotEncoder)."""
     preprocessor = build_preprocessor(
         ["cat", "num"],
         categorical_features=["cat"],
@@ -194,7 +194,7 @@ def test_build_preprocessor_ordinal_uses_ordinal_encoder():
     assert "cat" in names
     assert "num" in names
 
-    # Внутренние энкодеры создаются в fit(), поэтому сначала обучаем.
+    # Internal encoders are created in fit(), so we fit first.
     df = pd.DataFrame({"cat": ["red", "green", "red"], "num": [1.0, 2.0, 3.0]})
     preprocessor.fit(df)
 
@@ -205,7 +205,7 @@ def test_build_preprocessor_ordinal_uses_ordinal_encoder():
 
 
 def test_build_preprocessor_default_is_onehot():
-    """По умолчанию (encoding не задан / 'one_hot') сохраняется OneHotEncoder."""
+    """By default (encoding unset / 'one_hot') OneHotEncoder is kept."""
     df = pd.DataFrame({"cat": ["red", "green", "red"], "num": [1.0, 2.0, 3.0]})
     for kwargs in ({}, {"encoding": "one_hot"}):
         preprocessor = build_preprocessor(
@@ -214,7 +214,7 @@ def test_build_preprocessor_default_is_onehot():
             numerical_features=["num"],
             **kwargs,
         )
-        # Внутренние энкодеры создаются в fit() (sklearn-конвенция).
+        # Internal encoders are created in fit() (sklearn convention).
         preprocessor.fit(df)
         assert isinstance(
             preprocessor.named_transformers_["cat"].named_steps[
@@ -225,7 +225,7 @@ def test_build_preprocessor_default_is_onehot():
 
 
 def test_build_preprocessor_ordinal_end_to_end_shape():
-    """Сквозное ordinal-кодирование: категории НЕ расширяются (1 столбец на колонку)."""
+    """End-to-end ordinal encoding: categories are NOT expanded (one column per input column)."""
     df = pd.DataFrame(
         {
             "cat": ["red", "green", "red", "blue"],
@@ -240,13 +240,13 @@ def test_build_preprocessor_ordinal_end_to_end_shape():
     )
     out = preprocessor.fit_transform(df)
 
-    # 1 ordinal колонка (для 'cat') + 1 числовая = 2
+    # 1 ordinal column (for 'cat') + 1 numeric = 2
     assert out.shape == (4, 2)
     assert np.isfinite(out).all()
 
 
 def test_build_preprocessor_ordinal_bool_column():
-    """bool-колонка с ordinal не падает и даёт конечную числовую матрицу."""
+    """A bool column with ordinal does not crash and yields a finite numeric matrix."""
     df = pd.DataFrame(
         {
             "flag": [True, False, True, False],
@@ -259,13 +259,13 @@ def test_build_preprocessor_ordinal_bool_column():
     preprocessor = build_preprocessor(list(df.columns), cat, num, encoding="ordinal")
     out = preprocessor.fit_transform(df)
 
-    # 1 ordinal (flag) + 1 числовая
+    # 1 ordinal (flag) + 1 numeric column
     assert out.shape == (4, 2)
     assert np.isfinite(out).all()
 
 
 def test_build_preprocessor_ordinal_unknown_category_no_raise():
-    """Неизвестная категория на transform в ordinal-режиме не бросает исключение
+    """An unknown category on transform in ordinal mode does not raise an exception
     (handle_unknown='use_encoded_value', unknown_value=-1)."""
     df = pd.DataFrame({"cat": ["a", "b", "c"]})
     preprocessor = build_preprocessor(
@@ -280,12 +280,12 @@ def test_build_preprocessor_ordinal_unknown_category_no_raise():
     out = preprocessor.transform(new_df)
     assert out.shape == (1, 1)
     assert np.isfinite(out).all()
-    # неизвестная категория -> -1
+    # unknown category -> -1
     assert out[0, 0] == -1.0
 
 
 def test_build_preprocessor_invalid_encoding_raises():
-    """Невалидное значение encoding -> ValueError."""
+    """Invalid encoding value -> ValueError."""
     with pytest.raises(ValueError, match="Unknown encoding strategy"):
         build_preprocessor(
             ["cat"],
@@ -296,7 +296,7 @@ def test_build_preprocessor_invalid_encoding_raises():
 
 
 def test_build_preprocessor_ordinal_single_unique_category():
-    """Категориальная колонка с единственной уникальной категорией даёт 1 столбец."""
+    """A categorical column with a single unique category yields 1 column."""
     df = pd.DataFrame({"cat": ["only", "only", "only"]})
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -310,8 +310,8 @@ def test_build_preprocessor_ordinal_single_unique_category():
 
 
 def test_build_preprocessor_ordinal_all_missing_after_impute():
-    """Полностью пропущенная категориальная колонка после impute most_frequent
-    корректно кодируется ordinal."""
+    """A fully missing categorical column is correctly ordinal-encoded
+    after most_frequent imputation."""
     df = pd.DataFrame({"cat": [None, None, None], "num": [1.0, 2.0, 3.0]})
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -325,7 +325,7 @@ def test_build_preprocessor_ordinal_all_missing_after_impute():
 
 
 def test_build_preprocessor_ordinal_empty_features_passthrough():
-    """Пустые categorical/numerical -> passthrough ('bypass') независимо от encoding."""
+    """Empty categorical/numerical -> passthrough ('bypass') regardless of encoding."""
     for enc in ("one_hot", "ordinal"):
         preprocessor = build_preprocessor(
             ["some_random_column"],
@@ -338,27 +338,27 @@ def test_build_preprocessor_ordinal_empty_features_passthrough():
         assert preprocessor.transformers[0][1] == "passthrough"
 
 
-# ───────────────────────── Adaptive presets (issue #18) ─────────────────────────
+# ─────────────────────────────── Adaptive presets ───────────────────────────────
 
 
 def _num_pipeline(preprocessor: ColumnTransformer):
-    """Извлечь числовой пайплайн из ColumnTransformer."""
+    """Extract the numeric pipeline from a ColumnTransformer."""
     transformers = dict(
         (name, transformer) for name, transformer, _ in preprocessor.transformers
     )
-    assert "num" in transformers, "числовой трансформер отсутствует"
+    assert "num" in transformers, "numeric transformer is missing"
     return transformers["num"]
 
 
 def test_build_preprocessor_default_imputation_is_mean():
-    """По умолчанию (пресет scale_sensitive) — импутация mean с add_indicator."""
+    """By default (scale_sensitive preset) — mean imputation with add_indicator."""
     preprocessor = build_preprocessor(
         ["a", "b"], categorical_features=[], numerical_features=["a", "b"]
     )
     num = _num_pipeline(preprocessor)
     assert isinstance(num.named_steps["imputer"], SimpleImputer)
     assert num.named_steps["imputer"].strategy == "mean"
-    # Индикаторы пропусков включены для числового пайплайна (issue #56)
+    # Missing-value indicators are enabled for the numeric pipeline
     assert num.named_steps["imputer"].add_indicator is True
 
 
@@ -377,7 +377,7 @@ def test_build_preprocessor_median_imputation():
 
 
 def test_build_preprocessor_scaling_none_omits_scaler():
-    """scaling='none' → шаг масштабирования отсутствует (AC-3 для деревьев)."""
+    """scaling='none' → the scaling step is absent (trees)."""
     preprocessor = build_preprocessor(
         ["a", "b"],
         categorical_features=[],
@@ -391,7 +391,7 @@ def test_build_preprocessor_scaling_none_omits_scaler():
 
 
 def test_build_preprocessor_scaling_standard_uses_standard_scaler():
-    """scaling='standard' → StandardScaler (AC-4 для масштабо-чувствительных)."""
+    """scaling='standard' → StandardScaler (scale-sensitive models)."""
     preprocessor = build_preprocessor(
         ["a", "b"],
         categorical_features=[],
@@ -403,7 +403,7 @@ def test_build_preprocessor_scaling_standard_uses_standard_scaler():
 
 
 def test_build_preprocessor_scaling_robust_uses_robust_scaler():
-    """scaling='robust' → RobustScaler (AC-5 для GLM со скошенными распределениями)."""
+    """scaling='robust' → RobustScaler (GLM with skewed distributions)."""
     preprocessor = build_preprocessor(
         ["a", "b"],
         categorical_features=[],
@@ -435,8 +435,8 @@ def test_build_preprocessor_invalid_scaling_raises():
 
 
 def test_tree_preset_end_to_end_no_scaling():
-    """Пресет деревьев (median + none): пропуски заполняются медианой, данные
-    передаются в модель без масштабирования; индикаторы пропусков добавляются."""
+    """Tree preset (median + none): missing values are filled with the median, data
+    is passed to the model without scaling; missing-value indicators are added."""
     df = pd.DataFrame(
         {"num_a": [1.0, 2.0, np.nan, 4.0], "num_b": [10.0, 20.0, 30.0, np.nan]}
     )
@@ -448,19 +448,19 @@ def test_tree_preset_end_to_end_no_scaling():
         scaling="none",
     )
     out = preprocessor.fit_transform(df)
-    # 2 импутированные колонки + 2 индикатора пропусков (по одному на признак)
+    # 2 imputed columns + 2 missing-value indicators (one per feature)
     assert out.shape == (4, 4)
     assert np.isfinite(out).all()
-    # Без масштабирования значения остаются в исходном диапазоне
+    # Without scaling, values stay in their original range
     assert set(np.round(out[:, 0]).astype(int)) <= {1, 2, 4}
     assert set(np.round(out[:, 1]).astype(int)) <= {10, 20, 30}
-    # Индикаторы: 1 там, где был NaN, 0 иначе
+    # Indicators: 1 where there was a NaN, 0 otherwise
     np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0])
     np.testing.assert_array_equal(out[:, 3], [0, 0, 0, 1])
 
 
 def test_glm_preset_end_to_end_robust():
-    """Пресет GLM (median + robust): корректная обработка выбросов и пропусков."""
+    """GLM preset (median + robust): correct handling of outliers and missing values."""
     df = pd.DataFrame(
         {
             "num_a": [1.0, 2.0, np.nan, 4.0, 1000.0],
@@ -475,18 +475,18 @@ def test_glm_preset_end_to_end_robust():
         scaling="robust",
     )
     out = preprocessor.fit_transform(df)
-    # 2 скалированные колонки + 1 индикатор пропуска (NaN только в num_a)
+    # 2 scaled columns + 1 missing-value indicator (NaN only in num_a)
     assert out.shape == (5, 3)
     assert np.isfinite(out).all()
     np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0, 0])
 
 
-# ─────────────────── Индикаторы пропусков (issue #56) ───────────────────
+# ───────────────────────── Missing-value indicators ─────────────────────────
 
 
 def test_build_preprocessor_indicator_columns_on_fit_transform():
-    """fit_transform с NaN в числовых признаках: индикаторы = 1 на пропусках,
-    импутированные значения корректны."""
+    """fit_transform with NaN in numeric features: indicators = 1 on missing values,
+    imputed values are correct."""
     df = pd.DataFrame(
         {"num_a": [1.0, 2.0, np.nan, 4.0], "num_b": [10.0, 20.0, 30.0, np.nan]}
     )
@@ -499,18 +499,18 @@ def test_build_preprocessor_indicator_columns_on_fit_transform():
     )
     out = preprocessor.fit_transform(df)
 
-    # 2 импутированные колонки + 2 индикатора (по одному на признак с NaN)
+    # 2 imputed columns + 2 indicators (one per feature with NaN)
     assert out.shape == (4, 4)
-    # Импутация средним: mean([1,2,4]) = 7/3, mean([10,20,30]) = 20
+    # Mean imputation: mean([1,2,4]) = 7/3, mean([10,20,30]) = 20
     np.testing.assert_allclose(out[:, 0], [1.0, 2.0, 7 / 3, 4.0])
     np.testing.assert_allclose(out[:, 1], [10.0, 20.0, 30.0, 20.0])
-    # Индикаторы: 1 там, где был NaN, 0 иначе (порядок = порядок признаков)
+    # Indicators: 1 where there was a NaN, 0 otherwise (order = feature order)
     np.testing.assert_array_equal(out[:, 2], [0, 0, 1, 0])
     np.testing.assert_array_equal(out[:, 3], [0, 0, 0, 1])
 
 
 def test_build_preprocessor_indicator_only_for_missing_features():
-    """Полностью заполненный признак не получает индикатор (missing-only)."""
+    """A fully populated feature does not get an indicator (missing-only)."""
     df = pd.DataFrame(
         {"num_a": [1.0, 2.0, np.nan], "num_b": [10.0, 20.0, 30.0]}
     )
@@ -522,14 +522,14 @@ def test_build_preprocessor_indicator_only_for_missing_features():
     )
     out = preprocessor.fit_transform(df)
 
-    # num_b заполнен полностью → индикатор только для num_a
+    # num_b is fully populated → indicator only for num_a
     assert out.shape == (3, 3)
     np.testing.assert_array_equal(out[:, 2], [0, 0, 1])
 
 
 def test_build_preprocessor_no_indicators_when_all_features_filled():
-    """Все числовые признаки заполнены → выход без индикаторов
-    (обратная совместимость с текущим поведением)."""
+    """All numeric features are populated → output without indicators
+    (backward compatibility with the current behavior)."""
     df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0], "num_b": [10.0, 20.0, 30.0]})
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -544,8 +544,8 @@ def test_build_preprocessor_no_indicators_when_all_features_filled():
 
 
 def test_build_preprocessor_all_nan_on_transform_indicator_ones():
-    """Колонка со всеми NaN на transform: импутация константой из train +
-    индикатор со всеми 1."""
+    """A column with all NaN on transform: imputation with the train constant +
+    an indicator with all 1s."""
     df_train = pd.DataFrame({"num_a": [1.0, np.nan, 3.0]})
     df_test = pd.DataFrame({"num_a": [np.nan, np.nan]})
     preprocessor = build_preprocessor(
@@ -564,8 +564,8 @@ def test_build_preprocessor_all_nan_on_transform_indicator_ones():
 
 
 def test_build_preprocessor_missing_on_inference_without_indicator():
-    """Пропуск на инференсе в признаке без пропусков на train: значение
-    импутируется, индикатор не создаётся (features='missing-only')."""
+    """A missing value at inference in a feature with no train-time missing values:
+    the value is imputed, no indicator is created (features='missing-only')."""
     df_train = pd.DataFrame({"num_a": [1.0, 2.0, 3.0]})
     df_test = pd.DataFrame({"num_a": [1.0, np.nan, 3.0]})
     preprocessor = build_preprocessor(
@@ -584,7 +584,7 @@ def test_build_preprocessor_missing_on_inference_without_indicator():
 
 @pytest.mark.parametrize("scaling", ["standard", "robust", "none"])
 def test_build_preprocessor_indicator_with_all_scaling_types(scaling):
-    """Индикаторы корректно работают при scaling='standard'/'robust'/'none'."""
+    """Indicators work correctly with scaling='standard'/'robust'/'none'."""
     df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0]})
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -596,8 +596,8 @@ def test_build_preprocessor_indicator_with_all_scaling_types(scaling):
 
     assert out.shape == (4, 2)
     assert np.isfinite(out).all()
-    # Индикатор отделяет строку с пропуском при любом scaling:
-    # значение в строке с NaN строго больше значений без пропуска
+    # The indicator separates the row with a missing value under any scaling:
+    # the value in the NaN row is strictly greater than the values without missing values
     indicator = out[:, 1]
     assert indicator[2] > indicator[0]
     assert indicator[2] > indicator[1]
@@ -605,9 +605,9 @@ def test_build_preprocessor_indicator_with_all_scaling_types(scaling):
 
 
 def test_build_preprocessor_indicator_end_to_end_with_model():
-    """Сквозной сценарий: препроцессор + модель на данных с пропусками —
-    обучение и предсказание работают; число колонок = базовое + число
-    признаков с пропусками."""
+    """End-to-end scenario: preprocessor + model on data with missing values —
+    training and prediction work; the number of columns = base + number of
+    features with missing values."""
     from sklearn.linear_model import LinearRegression
     from sklearn.pipeline import make_pipeline
 
@@ -636,13 +636,13 @@ def test_build_preprocessor_indicator_end_to_end_with_model():
 
     assert preds.shape == (n,)
     assert np.isfinite(preds).all()
-    # 3 базовые колонки + 2 индикатора (пропуски были в num_a и num_c)
+    # 3 base columns + 2 indicators (missing values were in num_a and num_c)
     assert preprocessor.transform(df).shape == (n, 5)
 
 
 def test_build_preprocessor_categorical_imputer_without_indicator():
-    """Категориальный пайплайн не меняется: SimpleImputer(strategy=
-    'most_frequent') без add_indicator (индикаторы только для числовых)."""
+    """The categorical pipeline is unchanged: SimpleImputer(strategy=
+    'most_frequent') without add_indicator (indicators only for numeric features)."""
     preprocessor = build_preprocessor(
         ["cat", "num"],
         categorical_features=["cat"],
@@ -659,8 +659,8 @@ def test_build_preprocessor_categorical_imputer_without_indicator():
 
 
 def test_build_preprocessor_add_indicator_false_omits_indicators():
-    """add_indicator=False отключает индикаторы пропусков (совместимость со
-    строго одномерными алгоритмами вроде isotonic_regression)."""
+    """add_indicator=False disables missing-value indicators (compatibility with
+    strictly univariate algorithms such as isotonic_regression)."""
     df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0]})
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -671,18 +671,18 @@ def test_build_preprocessor_add_indicator_false_omits_indicators():
     )
     out = preprocessor.fit_transform(df)
 
-    # NaN импутирован, но индикаторная колонка не добавлена
+    # NaN is imputed, but no indicator column is added
     assert out.shape == (4, 1)
     np.testing.assert_allclose(out[:, 0], [1.0, 2.0, 7 / 3, 4.0])
     imputer = _num_pipeline(preprocessor).named_steps["imputer"]
     assert imputer.add_indicator is False
 
 
-# ─────────────────── Выбор колонок по имени (issue #2) ───────────────────────
+# ─────────────────────────── Column selection by name ──────────────────────────
 
 
 def _mixed_df() -> pd.DataFrame:
-    """DataFrame с категориальной и числовой колонками для тестов issue #2."""
+    """A DataFrame with categorical and numeric columns for these tests."""
     return pd.DataFrame(
         {
             "cat": ["red", "green", "red", "blue"],
@@ -692,10 +692,10 @@ def _mixed_df() -> pd.DataFrame:
 
 
 def test_preprocessor_reordered_dataframe_transform_identical():
-    """Переупорядоченный DataFrame на transform даёт тот же результат (issue #2).
+    """A reordered DataFrame on transform yields the same result.
 
-    Регрессия: позиционные индексы в ColumnTransformer игнорируют имена колонок,
-    и энкодер применялся к числовым колонкам, а скалер — к категориальным.
+    Regression: positional indices in ColumnTransformer ignored column names,
+    and the encoder was applied to numeric columns while the scaler to categorical ones.
     """
     df = _mixed_df()
     preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
@@ -709,7 +709,7 @@ def test_preprocessor_reordered_dataframe_transform_identical():
 
 
 def test_preprocessor_numpy_positional_fallback():
-    """numpy-вход в обучающем порядке обрабатывается позиционно (issue #2)."""
+    """A numpy input in training order is handled positionally."""
     df = _mixed_df()
     preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
     train_out = preprocessor.fit_transform(df)
@@ -720,17 +720,17 @@ def test_preprocessor_numpy_positional_fallback():
 
 
 def test_preprocessor_missing_column_raises():
-    """Отсутствующая колонка на transform даёт явную ошибку (issue #2)."""
+    """A missing column on transform raises an explicit error."""
     df = _mixed_df()
     preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
     preprocessor.fit(df)
 
     with pytest.raises(ValueError):
-        preprocessor.transform(df[["num"]])  # колонки 'cat' нет
+        preprocessor.transform(df[["num"]])  # the 'cat' column is absent
 
 
 def test_preprocessor_extra_columns_ignored():
-    """Лишние колонки на transform не влияют на результат (issue #2)."""
+    """Extra columns on transform do not affect the result."""
     df = _mixed_df()
     preprocessor = build_preprocessor(list(df.columns), ["cat"], ["num"])
     train_out = preprocessor.fit_transform(df)
@@ -743,9 +743,9 @@ def test_preprocessor_extra_columns_ignored():
 
 
 def test_build_preprocessor_unknown_feature_name_raises():
-    """Имя колонки вне feature_names отклоняется на этапе сборки (issue #2).
+    """A column name outside feature_names is rejected at build time.
 
-    Раньше отсутствующие имена молча пропускались; теперь это явная ошибка.
+    Previously missing names were silently skipped; now it is an explicit error.
     """
     with pytest.raises(ValueError, match="Unknown feature name"):
         build_preprocessor(
@@ -762,7 +762,7 @@ def test_build_preprocessor_unknown_feature_name_raises():
 
 
 def test_column_name_selector_picklable():
-    """ColumnNameSelector переживает pickle (важно для trainer.save())."""
+    """ColumnNameSelector survives pickle (important for trainer.save())."""
     selector = ColumnNameSelector(["cat", "num"], ["cat"])
     restored = pickle.loads(pickle.dumps(selector))
 
@@ -773,20 +773,20 @@ def test_column_name_selector_picklable():
 
 
 def test_column_name_selector_dataframe_matching():
-    """Для DataFrame селектор сопоставляет по имени, а не по позиции."""
+    """For a DataFrame the selector matches by name, not by position."""
     selector = ColumnNameSelector(["cat", "num"], ["cat", "num"])
-    df = pd.DataFrame({"num": [1.0], "cat": ["x"]})  # порядок переставлен
+    df = pd.DataFrame({"num": [1.0], "cat": ["x"]})  # order reordered
     assert selector(df) == [1, 0]
 
 
 def test_column_name_selector_numpy_fallback():
-    """Для numpy-входа селектор использует обучающий порядок (feature_names)."""
+    """For a numpy input the selector uses the training order (feature_names)."""
     selector = ColumnNameSelector(["cat", "num"], ["num", "cat"])
     assert selector(np.zeros((1, 2))) == [1, 0]
 
 
 def test_column_name_selector_missing_columns_raise():
-    """Отсутствующие колонки дают явную ошибку для обоих типов входов."""
+    """Missing columns raise an explicit error for both input types."""
     selector = ColumnNameSelector(["a", "b"], ["a", "z"])
     with pytest.raises(ValueError, match="not found"):
         selector(pd.DataFrame({"a": [1]}))
@@ -795,7 +795,7 @@ def test_column_name_selector_missing_columns_raise():
 
 
 def test_column_name_selector_duplicated_columns_raise():
-    """Дублирующиеся колонки в DataFrame дают явную ошибку (неоднозначность)."""
+    """Duplicate columns in a DataFrame raise an explicit error (ambiguity)."""
     selector = ColumnNameSelector(["a", "b"], ["a"])
     df = pd.DataFrame([[1, 2]], columns=["a", "a"])
     with pytest.raises(ValueError, match="more than once"):
@@ -803,11 +803,11 @@ def test_column_name_selector_duplicated_columns_raise():
 
 
 def test_preprocessor_hc_and_target_reorder_identical():
-    """High-cardinality + target кодирование устойчиво к переупорядочиванию.
+    """High-cardinality + target encoding is robust to reordering.
 
-    Сравниваем два transform-вызова (полные статистики): fit_transform для
-    target encoding возвращает кросс-фиттинговые значения (issue #112) и не
-    обязан совпадать с transform на тех же строках.
+    Two transform calls are compared (full statistics): the fit_transform of
+    target encoding returns cross-fitted values and is not required to match
+    transform on the same rows.
     """
     rng = np.random.default_rng(0)
     n = 60
@@ -841,11 +841,11 @@ def test_preprocessor_hc_and_target_reorder_identical():
     "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
 )
 def test_preprocessor_reorder_all_encoding_strategies(enc):
-    """Все стратегии кодирования корректны при переупорядочивании колонок.
+    """All encoding strategies are correct when columns are reordered.
 
-    Для target encoding сравниваем transform-вызовы (полные статистики):
-    fit_transform возвращает кросс-фиттинговые значения (issue #112) и не
-    обязан совпадать с transform на тех же строках.
+    For target encoding, transform calls are compared (full statistics):
+    fit_transform returns cross-fitted values and is not required to match
+    transform on the same rows.
     """
     df = pd.DataFrame(
         {"cat": ["a", "b", "a", "c"], "num": [1.0, 2.0, 3.0, 4.0]}
@@ -861,19 +861,19 @@ def test_preprocessor_reorder_all_encoding_strategies(enc):
 
     out = preprocessor.transform(df)
     reordered = preprocessor.transform(df[["num", "cat"]])
-    # hashing-кодирование возвращает sparse (csr_matrix, issue #4):
-    # np.allclose не поддерживает sparse-операнды, поэтому сравниваем плотно.
+    # hashing encoding returns sparse (csr_matrix):
+    # np.allclose does not support sparse operands, so we compare densely.
     expected = reordered.toarray() if sparse.issparse(reordered) else reordered
     actual = out.toarray() if sparse.issparse(out) else out
     assert np.allclose(actual, expected), f"encoding={enc}"
 
 
-# ────────────────── Sparse-выход hashing (issue #4) ──────────────────
+# ──────────────────────── Sparse output of hashing ───────────────────────
 
 
 def test_build_preprocessor_hashing_sparse_by_default():
-    """hashing-кодирование возвращает csr_matrix через ColumnTransformer
-    (стандартный sparse_threshold=0.3 отдаёт csr при любой sparse-части)."""
+    """hashing encoding returns a csr_matrix through ColumnTransformer
+    (the default sparse_threshold=0.3 yields csr with any sparse part)."""
     df = pd.DataFrame(
         {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
     )
@@ -892,8 +892,8 @@ def test_build_preprocessor_hashing_sparse_by_default():
 
 
 def test_build_preprocessor_force_dense_output():
-    """force_dense_output=True конвертирует sparse-части (hashing) в dense:
-    требуется для GPR/Isotonic/ARD, отвергающих scipy.sparse."""
+    """force_dense_output=True converts the sparse parts (hashing) to dense:
+    required for GPR/Isotonic/ARD, which reject scipy.sparse."""
     df = pd.DataFrame(
         {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
     )
@@ -912,7 +912,7 @@ def test_build_preprocessor_force_dense_output():
 
 
 def test_build_preprocessor_force_dense_passthrough():
-    """force_dense_output не ломает passthrough-ветку (нет совпавших колонок)."""
+    """force_dense_output does not break the passthrough branch (no matching columns)."""
     preprocessor = build_preprocessor(
         ["some_random_column"],
         categorical_features=[],
@@ -928,11 +928,11 @@ def test_build_preprocessor_force_dense_passthrough():
 
 
 
-# ─────────────── Очистка неинформативных признаков (issue #57) ───────────────
+# ───────────────────── Cleaning of uninformative features ─────────────────────
 
 
 def test_clean_drops_all_nan_column():
-    """Колонка со 100% NaN удаляется; остальные колонки сохраняются."""
+    """A column with 100% NaN is dropped; the other columns are kept."""
     df = pd.DataFrame(
         {
             "good_num": [1.0, 2.0, 3.0],
@@ -947,7 +947,7 @@ def test_clean_drops_all_nan_column():
 
 
 def test_clean_drops_constant_numeric_column():
-    """Строго константная числовая колонка удаляется."""
+    """A strictly constant numeric column is dropped."""
     df = pd.DataFrame({"informative": [1.0, 2.0, 3.0], "const": [5.0, 5.0, 5.0]})
     out = _clean_uninformative_features(df)
 
@@ -955,7 +955,7 @@ def test_clean_drops_constant_numeric_column():
 
 
 def test_clean_drops_constant_categorical_column():
-    """Константная категориальная колонка удаляется (бесполезна после one-hot)."""
+    """A constant categorical column is dropped (useless after one-hot)."""
     df = pd.DataFrame(
         {
             "num": [1.0, 2.0, 3.0],
@@ -969,14 +969,14 @@ def test_clean_drops_constant_categorical_column():
 
 
 def test_clean_nan_ratio_threshold_boundary():
-    """nan_ratio ровно на пороге (0.95) — колонка удаляется; чуть ниже — нет."""
-    # Колонка с долей пропусков ровно 0.95: 19 NaN из 20.
+    """nan_ratio exactly at the threshold (0.95) — the column is dropped; slightly below — it is kept."""
+    # A column with a missing-value ratio of exactly 0.95: 19 NaN out of 20.
     df_border = pd.DataFrame({"good": np.arange(20.0)})
     df_border["border"] = [np.nan] * 19 + [1.0]
     out_at = _clean_uninformative_features(df_border, max_nan_ratio=0.95)
     assert "border" not in out_at.columns
 
-    # Чуть ниже порога: 18/20 = 0.9 < 0.95 — колонка сохраняется.
+    # Slightly below the threshold: 18/20 = 0.9 < 0.95 — the column is kept.
     df_below = df_border.copy()
     df_below["border"] = [np.nan] * 18 + [1.0, 2.0]
     out_below = _clean_uninformative_features(df_below, max_nan_ratio=0.95)
@@ -984,7 +984,7 @@ def test_clean_nan_ratio_threshold_boundary():
 
 
 def test_clean_combination_single_unique_with_nans_dropped():
-    """Колонка с одним уникальным значением после dropna и 10% NaN удаляется."""
+    """A column with a single unique value after dropna and 10% NaN is dropped."""
     df = pd.DataFrame(
         {
             "good": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
@@ -997,7 +997,7 @@ def test_clean_combination_single_unique_with_nans_dropped():
 
 
 def test_clean_min_unique_two_keeps_two_unique_values():
-    """min_unique=2: колонка с ровно 2 уникальными значениями сохраняется."""
+    """min_unique=2: a column with exactly 2 unique values is kept."""
     df = pd.DataFrame({"a": [1.0, 2.0, 1.0, 2.0], "b": [0.0, 0.0, 0.0, 0.0]})
     out = _clean_uninformative_features(df, min_unique=2)
 
@@ -1005,7 +1005,7 @@ def test_clean_min_unique_two_keeps_two_unique_values():
 
 
 def test_clean_informative_two_unique_column_not_dropped():
-    """Информативная колонка с двумя уникальными значениями не удаляется."""
+    """An informative column with two unique values is not dropped."""
     df = pd.DataFrame({"flag": [0, 1, 0, 1], "num": [1.0, 2.0, 3.0, 4.0]})
     out = _clean_uninformative_features(df)
 
@@ -1013,14 +1013,14 @@ def test_clean_informative_two_unique_column_not_dropped():
 
 
 def test_clean_all_columns_dropped_raises():
-    """Все колонки неинформативны -> ValueError (guard от пустой матрицы)."""
+    """All columns are uninformative -> ValueError (guard against an empty matrix)."""
     df = pd.DataFrame({"c1": [1.0, 1.0, 1.0], "c2": [np.nan, np.nan, np.nan]})
     with pytest.raises(ValueError, match="uninformative"):
         _clean_uninformative_features(df)
 
 
 def test_clean_single_column_preserved_even_if_constant():
-    """Единственная колонка сохраняется, даже если константна или пуста."""
+    """The only column is kept even if it is constant or empty."""
     const_df = pd.DataFrame({"only": [1.0, 1.0, 1.0]})
     out_const = _clean_uninformative_features(const_df)
     assert list(out_const.columns) == ["only"]
@@ -1031,7 +1031,7 @@ def test_clean_single_column_preserved_even_if_constant():
 
 
 def test_clean_is_idempotent():
-    """Повторный вызов на уже очищенных данных не меняет результат."""
+    """Calling again on already cleaned data does not change the result."""
     df = pd.DataFrame(
         {
             "good": [1.0, 2.0, 3.0, 4.0],
@@ -1047,7 +1047,7 @@ def test_clean_is_idempotent():
 
 
 def test_clean_clean_data_unchanged():
-    """Колонки без пропусков и с дисперсией сохраняются (регрессия)."""
+    """Columns without missing values and with variance are kept (regression)."""
     df = pd.DataFrame(
         {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
     )
@@ -1058,7 +1058,7 @@ def test_clean_clean_data_unchanged():
 
 
 def test_clean_empty_dataframe_no_crash():
-    """Пустой DataFrame (0 строк / 0 колонок) обрабатывается без падений."""
+    """An empty DataFrame (0 rows / 0 columns) is handled without crashes."""
     empty_cols = pd.DataFrame()
     out_cols = _clean_uninformative_features(empty_cols)
     assert out_cols.shape == (0, 0)
@@ -1070,8 +1070,8 @@ def test_clean_empty_dataframe_no_crash():
 
 
 def test_clean_numpy_input_raises_type_error():
-    """np.ndarray без имён колонок отклоняется явной ошибкой (документальное
-    ограничение, как у detect_feature_types)."""
+    """An np.ndarray without column names is rejected with an explicit error (documented
+    limitation, same as detect_feature_types)."""
     with pytest.raises(TypeError, match="pandas.DataFrame"):
         _clean_uninformative_features(np.zeros((5, 3)))
 
@@ -1085,14 +1085,14 @@ def test_clean_numpy_input_raises_type_error():
     ],
 )
 def test_clean_invalid_thresholds_raise(kwargs, match):
-    """Некорректные пороги отклоняются явной ошибкой."""
+    """Invalid thresholds are rejected with an explicit error."""
     df = pd.DataFrame({"a": [1.0, 2.0]})
     with pytest.raises(ValueError, match=match):
         _clean_uninformative_features(df, **kwargs)
 
 
 def test_clean_does_not_mutate_input():
-    """Функция не мутирует исходный DataFrame."""
+    """The function does not mutate the input DataFrame."""
     df = pd.DataFrame({"good": [1.0, 2.0], "const": [0.0, 0.0]})
     _clean_uninformative_features(df)
 
@@ -1100,16 +1100,16 @@ def test_clean_does_not_mutate_input():
 
 
 def test_clean_removes_zero_variance_constant_column_via_preprocessor():
-    """Мотивация issue #57: константная колонка даёт нулевую дисперсию через
-    препроцессор (q75 == q25 у RobustScaler; в старых версиях sklearn —
-    NaN/±inf из-за деления на нулевой IQR), очистка убирает мусор до сборки."""
+    """Motivation: a constant column yields zero variance through
+    the preprocessor (q75 == q25 for RobustScaler; in older sklearn versions —
+    NaN/±inf due to division by zero IQR), and cleaning removes the garbage before build."""
     df = pd.DataFrame(
         {"informative": [1.0, 2.0, 3.0, 4.0, 5.0], "const": [7.0] * 5}
     )
 
-    # Без очистки константная колонка проходит через скалер нулевой
-    # дисперсией — «мусорное» измерение в матрице расстояний метрических
-    # моделей (SVR/KNN/Ridge).
+    # Without cleaning, a constant column passes through the scaler with zero
+    # variance — a "garbage" dimension in the distance matrix of metric
+    # models (SVR/KNN/Ridge).
     dirty_preprocessor = build_preprocessor(
         list(df.columns),
         categorical_features=[],
@@ -1119,10 +1119,10 @@ def test_clean_removes_zero_variance_constant_column_via_preprocessor():
     )
     dirty_out = dirty_preprocessor.fit_transform(df)
     assert np.isfinite(dirty_out).all()
-    assert dirty_out[:, 1].std() == 0.0  # константная колонка -> нулевая дисперсия
+    assert dirty_out[:, 1].std() == 0.0  # constant column -> zero variance
 
-    # С очисткой константная колонка удаляется, остаётся один информативный
-    # признак с ненулевой дисперсией.
+    # With cleaning, the constant column is dropped, leaving one informative
+    # feature with non-zero variance.
     cleaned = _clean_uninformative_features(df)
     assert list(cleaned.columns) == ["informative"]
     clean_preprocessor = build_preprocessor(

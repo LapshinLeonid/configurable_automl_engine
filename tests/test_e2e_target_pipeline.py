@@ -1,23 +1,23 @@
-"""E2E целевого пайплайна эпика #74 (задача R4, issue #78).
+"""E2E tests of the target pipeline.
 
-Целевой DAG: ``all_algorithms → select(sanity_gate, top_k) → refine →
+Target DAG: ``all_algorithms → select(sanity_gate, top_k) → refine →
 select(sanity_gate, winner)``.
 
-Покрытие:
+Coverage:
 
-1. E2E-сценарий: сквозной прогон DAG на тестовом датасете —
-   gate-победитель дообучается (refine получает его параметры как
-   ``initial_params`` из gate-контекста), повторный select переаудитит
-   обновлённые модели (финалисты обучаются заново — честная цена),
-   финальный артефакт сохраняется через ``pre_trained_trainer`` без
-   переобучения победителя, отчёт содержит секции ``sanity_gate`` по обоим
-   select-шагам с их именами фаз.
-2. Негативные сквозные сценарии: конфиг с устаревшими сущностями
-   (``refine_winner``, ``sanity_gate.mode``) доходит до дружелюбной ошибки
-   валидации на входе ``train_best_model``.
-3. Пограничные: refine после select(top_k) не теряет ни одного из k
-   кандидатов; повторная дисквалификация всех после refine → fallback T4
-   в терминальном select.
+1. E2E scenario: full DAG run on a test dataset — the gate winner is refined
+   (refine receives its parameters as ``initial_params`` from the gate
+   context), the repeated select re-audits the updated models (finalists are
+   retrained — the honest price), the final artifact is saved via
+   ``pre_trained_trainer`` without retraining the winner, and the report
+   contains ``sanity_gate`` sections for both select steps with their phase
+   names.
+2. Negative end-to-end scenarios: a config with legacy entities
+   (``refine_winner``, ``sanity_gate.mode``) reaches a friendly validation
+   error at the ``train_best_model`` entry point.
+3. Edge cases: refine after select(top_k) keeps all k candidates; when all
+   models are disqualified again after refine, the terminal select falls back
+   to the fallback criterion.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Общие помощники
+#  Common helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -54,7 +54,7 @@ def _target_dag_phases(
     refine_name: str = "refine",
     terminal_select_name: str = "gate_final",
 ) -> list[dict[str, Any]]:
-    """Фазы целевого DAG эпика #74."""
+    """Phases of the target DAG."""
     return [
         {"name": "coarse", "n_trials": 2, "action": "all_algorithms"},
         {
@@ -82,7 +82,7 @@ def _cfg_dict(
     gate_thresholds: dict[str, Any] | None = None,
     **general_extra: Any,
 ) -> dict[str, Any]:
-    """Валидный конфиг с заданными фазами (последняя — терминальный select)."""
+    """Valid config with the given phases (the last one is the terminal select)."""
     general: dict[str, Any] = {
         "comparison_metric": "mae",
         "validation_strategy": "train_test_split",
@@ -111,7 +111,7 @@ def _cfg_dict(
 
 
 def _df(n_rows: int = 40, seed: int = 0) -> pd.DataFrame:
-    """Числовой DataFrame с целевой колонкой."""
+    """Numeric DataFrame with a target column."""
     rng = np.random.RandomState(seed)
     data = {f"f{i}": rng.randn(n_rows) for i in range(3)}
     data["target"] = 2.0 * data["f0"] + rng.randn(n_rows) * 0.1
@@ -122,10 +122,10 @@ _GATE_THRESHOLDS = {"top_k_candidates": 2, "corridor_delta": 0.9}
 
 
 class _FakeTrainer:
-    """Фейк ModelTrainer с контролируемым качеством OOF/full предсказаний.
+    """Fake ModelTrainer with controlled quality of OOF/full predictions.
 
-    ``oof_rmse`` — RMSE OOF-вектора относительно y; ``full_rmse`` — RMSE
-    full-fit предсказаний (контур Г: gap = oof_rmse / full_rmse).
+    ``oof_rmse`` — RMSE of the OOF vector with respect to y; ``full_rmse`` —
+    RMSE of the full-fit predictions (Circuit D: gap = oof_rmse / full_rmse).
     """
 
     def __init__(self, y: np.ndarray, oof_rmse: float, full_rmse: float) -> None:
@@ -148,20 +148,20 @@ class _FakeTrainer:
 
 
 def _houndstooth_hpo(**kwargs: Any) -> tuple[float, dict[str, Any]]:
-    """Детерминированный HPO: extra_trees лучше ridge; refine — boost.
+    """Deterministic HPO: extra_trees beats ridge; refine boosts.
 
-    Coarse-фаза возвращает фиксированные (score, params). Refine-фаза
-    вызывается с ``initial_params`` из gate-контекста (проверяется ниже)
-    и возвращает улучшенные (score', params').
+    The coarse phase returns fixed (score, params). The refine phase is called
+    with ``initial_params`` from the gate context (verified below) and returns
+    improved (score', params').
     """
     algo = kwargs["algo_name"]
     if kwargs.get("initial_params") is None:
-        # coarse (all_algorithms): gate-контекстные параметры фазы 1.
+        # coarse (all_algorithms): gate-context parameters of phase 1.
         return {
             "ridge": (-0.10, {"alpha": 1.0}),
             "extra_trees": (-0.08, {"n_estimators": 10}),
         }[algo]
-    # refine: warm-start от параметров выхода первого select (gate-контекст).
+    # refine: warm start from the output parameters of the first select (gate context).
     if algo == "ridge":
         assert kwargs["initial_params"] == {"alpha": 1.0}, kwargs["initial_params"]
         return -0.09, {"alpha": 1.5}
@@ -170,22 +170,22 @@ def _houndstooth_hpo(**kwargs: Any) -> tuple[float, dict[str, Any]]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  1. E2E целевого DAG
+#  1. E2E of the target DAG
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path):
-    """Сквозной прогон целевого DAG: дообучение, повторный аудит, артефакт.
+    """End-to-end run of the target DAG: refine, re-audit, artifact.
 
-    Проверки:
-    - refine получает параметры gate-победителя как ``initial_params``
-      (тюнер победителя стартует с параметров из gate-контекста);
-    - терминальный select переаудитит обновлённые модели — финалисты
-      обучаются заново (честная цена, старые full-fit тренеры не
-      переиспользуются);
-    - артефакт сохраняется через ``pre_trained_trainer`` — ``_fit_and_save``
-      не вызывается;
-    - отчёт содержит секции ``sanity_gate`` с именами обоих select-фаз.
+    Checks:
+    - refine receives the gate winner's parameters as ``initial_params``
+      (the winner's tuner starts from the gate-context parameters);
+    - the terminal select re-audits the updated models — finalists are
+      retrained (the honest price, old full-fit trainers are not reused);
+    - the artifact is saved via ``pre_trained_trainer`` — ``_fit_and_save``
+      is not called;
+    - the report contains ``sanity_gate`` sections with the names of both
+      select phases.
     """
     cfg_dict = _cfg_dict(
         _target_dag_phases(top_k=2),
@@ -196,8 +196,8 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
     df = _df(n_rows=40)
     prepared = prepare_dataset(cfg, df, "target")
 
-    # Тренировка финалистов: фаза 1 (gate_select) и фаза 2 (gate_final)
-    # обучают финалистов новыми экземплярами; refine финалистов не обучает.
+    # Finalist training: phase 1 (gate_select) and phase 2 (gate_final)
+    # train finalists with new instances; refine does not train finalists.
     trainers_by_phase: dict[str, list[_FakeTrainer]] = {}
     current_phase: list[str] = []
     real_build_pool = component._build_finalists_pool
@@ -228,13 +228,13 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
     ):
         result = train_best_model(cfg, df, target="target", model_path_override=tmp_path / "m.pkl")
 
-    # 1a. Артефакт сохранён без переобучения победителя (pre_trained_trainer).
+    # 1a. The artifact is saved without retraining the winner (pre_trained_trainer).
     mock_fit.assert_not_called()
     assert Path(result["model_path"]).exists()
 
-    # 1b. Refine стартовал warm-start'ом от параметров из gate-контекста.
-    # Вызовы _run_hpo: 2 (coarse) + 2 (refine). Для каждого кандидата
-    # initial_params refine == параметры из выхода первого select.
+    # 1b. Refine started with a warm start from the gate-context parameters.
+    # _run_hpo calls: 2 (coarse) + 2 (refine). For each candidate the refine
+    # initial_params equal the parameters from the first select output.
     refine_calls = [
         call
         for call in mock_hpo.call_args_list
@@ -250,18 +250,18 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
         "extra_trees": {"n_estimators": 10},
     }
 
-    # 1c. Повторный select переаудитит обновлённые модели: финалисты
-    # терминального select обучаются заново (не переиспользуются тренеры
-    # первого select).
+    # 1c. The repeated select re-audits the updated models: the terminal
+    # select finalists are retrained (the first select's trainers are not
+    # reused).
     assert set(trainers_by_phase) == {"gate_select", "gate_final"}
     assert all(trainers_by_phase.values())
     first = trainers_by_phase["gate_select"]
     final = trainers_by_phase["gate_final"]
     assert not set(map(id, first)) & set(map(id, final))
-    # Победитель терминального select — из пула финалистов ЕГО фазы.
+    # The terminal select winner is from its phase's finalist pool.
     assert result["algorithm"] in result["sanity_gate"]["gate_final"]["pool"]
 
-    # 1d. Отчёт: секции sanity_gate по обоим select-шагам с именами фаз.
+    # 1d. Report: sanity_gate sections for both select steps with phase names.
     assert set(result["sanity_gate"]) == {"gate_select", "gate_final"}
     for section in result["sanity_gate"].values():
         assert section["strategy"] == "sanity_gate"
@@ -271,10 +271,11 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
 
 
 def test_e2e_target_dag_winner_refined_params_in_gate_context():
-    """Победитель терминального select действительно дообучен (R3+R4).
+    """The terminal select winner is indeed refined.
 
-    refine заменяет параметры победителя улучшенными (warm-start): терминальный
-    select аудитит обновлённую модель и выдаёт её параметры в result.
+    refine replaces the winner's parameters with improved ones (warm start):
+    the terminal select audits the updated model and puts its parameters in
+    result.
     """
     cfg_dict = _cfg_dict(
         _target_dag_phases(top_k=1),
@@ -296,14 +297,14 @@ def test_e2e_target_dag_winner_refined_params_in_gate_context():
     ):
         ctx = execute_phases(cfg, prepared)
 
-    # top_k=1: после первого select в рабочем множестве один кандидат —
-    # лучший по RMSE_oof. Его refine-параметры — улучшенная версия
-    # coarse-параметров (warm-start шёл от gate-контекста).
+    # top_k=1: after the first select the working set holds a single candidate —
+    # the best one by RMSE_oof. Its refine parameters are an improved version
+    # of the coarse parameters (the warm start came from the gate context).
     assert len(ctx.working_set) == 1
     winner = ctx.winner_algo
     assert winner is not None
     score, params = ctx.working_set[winner]
-    # Победитель обновлён refine-фазой: параметры из refine-стаба.
+    # The winner was updated by the refine phase: parameters from the refine stub.
     assert params in ({"alpha": 1.5}, {"n_estimators": 20})
     assert score in (-0.09, -0.07)
     assert ctx.pre_trained_trainer is not None
@@ -311,11 +312,12 @@ def test_e2e_target_dag_winner_refined_params_in_gate_context():
 
 
 def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path):
-    """Регресс (issue #111): кандидат с gap=∞ доживает от select до refine.
+    """Regression: a candidate with gap=∞ survives from select to refine.
 
-    Первый sanity-select (top_k) в warn-режиме не теряет кандидата с
-    RMSE_full≈0 (gap=∞): refine обрабатывает обоих кандидатов, терминальный
-    select выбирает победителя по RMSE_oof (не «лучшего из прошедших гейт»).
+    The first sanity-select (top_k) in the warn mode does not lose a candidate
+    with RMSE_full≈0 (gap=∞): refine processes both candidates, and the
+    terminal select picks the winner by RMSE_oof (not "the best of those who
+    passed the gate").
     """
     cfg_dict = _cfg_dict(
         _target_dag_phases(top_k=2),
@@ -329,7 +331,7 @@ def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path
     def _fit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
         if a[0] == "ridge":
             return _FakeTrainer(prepared.y.to_numpy(), 0.5, 0.25)  # gap = 2.0
-        return _FakeTrainer(prepared.y.to_numpy(), 0.2, 0.0)  # gap = ∞, RMSE_oof лучше
+        return _FakeTrainer(prepared.y.to_numpy(), 0.2, 0.0)  # gap = ∞, better RMSE_oof
 
     with (
         patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
@@ -340,8 +342,8 @@ def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path
 
     first = result["sanity_gate"]["gate_select"]
     terminal = result["sanity_gate"]["gate_final"]
-    # Первый select: кандидат с gap=∞ валиден, не в disqualified и не в
-    # circuit breaker (иначе следующий refine его потеряет — ловушка #102).
+    # The first select: the candidate with gap=∞ is valid, not in disqualified
+    # and not in the circuit breaker (otherwise the next refine would lose it).
     assert first["disqualified"] == {}
     assert first["fallback_used"] is False
     et_audit = first["audit"]["extra_trees"]
@@ -350,23 +352,23 @@ def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path
     assert any(
         "Circuit D" in w and "RMSE_full" in w for w in et_audit["soft_warnings"]
     )
-    # Оба кандидата дожили до терминального select (пул полный).
+    # Both candidates survived to the terminal select (full pool).
     assert set(terminal["pool"]) == {"ridge", "extra_trees"}
-    # Победитель — минимум RMSE_oof среди финалистов (extra_trees).
+    # The winner — the minimum RMSE_oof among the finalists (extra_trees).
     assert result["algorithm"] == "extra_trees"
     assert terminal["winner_rmse_oof"] == pytest.approx(0.2, rel=1e-6)
     assert terminal["disqualified"] == {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  2. Негативные сквозные сценарии: legacy-сущности → дружелюбная валидация
+#  2. Negative end-to-end scenarios: legacy entities -> friendly validation
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_train_best_model_rejects_legacy_refine_winner_action():
-    """Конфиг с ``refine_winner`` падает на входе ``train_best_model``.
+    """A config with ``refine_winner`` fails at the ``train_best_model`` entry point.
 
-    Ошибка — дружелюбная валидация со стабильным кодом
-    ``removed_refine_winner_action`` и подсказкой миграции.
+    The error is a friendly validation with the stable code
+    ``removed_refine_winner_action`` and a migration hint.
     """
     cfg_dict = {
         "general": {
@@ -389,10 +391,10 @@ def test_train_best_model_rejects_legacy_refine_winner_action():
 
 
 def test_train_best_model_rejects_legacy_sanity_gate_mode():
-    """Конфиг с ``sanity_gate.mode`` падает на входе ``train_best_model``.
+    """A config with ``sanity_gate.mode`` fails at the ``train_best_model`` entry point.
 
-    Ошибка — дружелюбная валидация со стабильным кодом
-    ``removed_sanity_gate_mode`` и подсказкой миграции.
+    The error is a friendly validation with the stable code
+    ``removed_sanity_gate_mode`` and a migration hint.
     """
     cfg_dict = {
         "general": {
@@ -422,23 +424,23 @@ def test_train_best_model_rejects_legacy_sanity_gate_mode():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3. Пограничные сценарии
+#  3. Edge cases
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_refine_after_select_top_k_keeps_all_k_candidates():
-    """refine после select(sanity_gate, top_k) не теряет ни одного из k.
+    """refine after select(sanity_gate, top_k) keeps all k candidates.
 
-    Схема требует терминальный select последней фазой, поэтому конфиг
-    валидируется с ним, а для прогона фазы усекаются до
-    [all_algorithms, select(top_k), refine] (подход юнит-тестов R2/R3).
+    The schema requires the terminal select as the last phase, so the config
+    is validated with it, and for the run the phases are truncated to
+    [all_algorithms, select(top_k), refine].
     """
     cfg_dict = _cfg_dict(
         _target_dag_phases(top_k=2),
         gate_thresholds=_GATE_THRESHOLDS,
     )
     cfg = component.Config.model_validate(cfg_dict)
-    cfg.general.phases = cfg.general.phases[:-1]  # убрать терминальный select
+    cfg.general.phases = cfg.general.phases[:-1]  # drop the terminal select
     df = _df(n_rows=40)
     prepared = prepare_dataset(cfg, df, "target")
 
@@ -454,19 +456,19 @@ def test_refine_after_select_top_k_keeps_all_k_candidates():
     ):
         ctx = execute_phases(cfg, prepared)
 
-    # Первый select (top_k=2) не сузил множество: оба кандидата остались,
-    # refine не теряет ни одного (все прошли refine-HPO).
+    # The first select (top_k=2) did not narrow the set: both candidates remain,
+    # and refine keeps all of them (all passed refine-HPO).
     assert set(ctx.working_set) == {"ridge", "extra_trees"}
     assert len(ctx.working_set) == 2
 
 
 def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
-    """Повторная дисквалификация всех после refine → fallback T4.
+    """All candidates disqualified again after refine → fallback in the terminal select.
 
-    Первый sanity-select пропускает честных финалистов; после refine
-    терминальный select аудитит обновлённые (вырожденные) модели — весь
-    пул дисквалифицирован, победитель выбирается fallback-критерием T4,
-    запуск не падает.
+    The first sanity select passes honest finalists; after refine the terminal
+    select audits the updated (degenerate) models — the whole pool is
+    disqualified, the winner is chosen by the fallback criterion, and the run
+    does not fail.
     """
     cfg_dict = _cfg_dict(
         _target_dag_phases(top_k=2),
@@ -498,10 +500,10 @@ def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
 
     def _fit_finalist(*a: Any, **kw: Any) -> _FakeTrainer:
         if current_phase[-1] == "gate_select":
-            # Первый select: честные финалисты (gap=0.83 < 1.0 — строго ниже
-            # порога контура Г; равенство плавающей арифметикой не срабатывает).
+            # First select: honest finalists (gap=0.83 < 1.0 — strictly below the
+            # Circuit D threshold; floating-point equality does not trigger).
             return _FakeTrainer(prepared.y.to_numpy(), 0.25, 0.30)
-        # Терминальный select: вырожденные модели (gap=10 > 1.0 → контур Г).
+        # Terminal select: degenerate models (gap=10 > 1.0 → Circuit D).
         return _FakeTrainer(prepared.y.to_numpy(), 0.5, 0.05)
 
     with (
@@ -514,8 +516,8 @@ def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
 
     terminal = result["sanity_gate"]["gate_final"]
     assert terminal["fallback_used"] is True
-    assert terminal["disqualified"]  # все финалисты забракованы после refine
+    assert terminal["disqualified"]  # all finalists rejected after refine
     assert all("Circuit D" in r for rs in terminal["disqualified"].values() for r in rs)
-    # Победитель (fallback) — из пула финалистов терминального select.
+    # The winner (fallback) is from the terminal select's finalist pool.
     assert result["algorithm"] in terminal["pool"]
     assert result["algorithm"] in result["sanity_gate"]["gate_select"]["pool"]

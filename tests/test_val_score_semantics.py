@@ -1,19 +1,19 @@
-"""Семантические тесты ``val_score`` / ``additional_scores`` (issue #24).
+"""Semantic tests for ``val_score`` / ``additional_scores``.
 
-Покрытие:
-    1. ``val_score`` — «честная» оценка на отложенных данных (hold-out/CV),
-       а не train-скор: на зашумлённых данных заметно ниже train-R²;
-       совпадает с ручным пересчётом через ``validation.iter_splits``.
-    2. ``additional_scores`` считаются тем же методом валидации, что и основная
-       метрика (тот же hold-out сплит / среднее по фолдам).
-    3. Engine-путь (``train_best_model`` с k_fold): ``trainer.val_score``
-       совпадает с ``result["score"]`` при совпадении метода/фолдов/зерна.
-    4. ``auto``-стратегия резолвится один раз; в финальный fit передаются
-       разрешённые k/test_size (не строка ``auto``).
-    5. Негативные и граничные сценарии: неизвестная стратегия, падение всех
-       фолдов (fail-fast без остаточного состояния), N=2, fallback k_fold→split,
-       константный таргет (NRMSE→inf), детерминизм при random_state=None,
-       обратная совместимость старых pickle без новых атрибутов.
+Coverage:
+    1. ``val_score`` — an 'honest' estimate on held-out data (hold-out/CV),
+       not a train score: on noisy data it is noticeably below train-R²;
+       it matches a manual recomputation via ``validation.iter_splits``.
+    2. ``additional_scores`` are computed with the same validation method
+       as the main metric (the same hold-out split / fold average).
+    3. The engine path (``train_best_model`` with k_fold): ``trainer.val_score``
+       matches ``result["score"]`` when method/folds/seed match.
+    4. The ``auto`` strategy is resolved once; the resolved k/test_size
+       (not the string ``auto``) are forwarded into the final fit.
+    5. Negative and boundary scenarios: unknown strategy, all folds failing
+       (fail-fast without leftover state), N=2, k_fold→split fallback,
+       a constant target (NRMSE→inf), determinism with random_state=None,
+       backward compatibility of old pickles without the new attributes.
 """
 
 from __future__ import annotations
@@ -44,15 +44,16 @@ from configurable_automl_engine.training_engine.metrics import (
 from configurable_automl_engine.validation import iter_splits
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Хелперы
+#  Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _noisy_regression(n: int = 40, p: int = 8, seed: int = 0) -> tuple[pd.DataFrame, pd.Series]:
-    """Зашумлённый датасет: первый признак информативен, остальные — шум.
+    """Noisy dataset: the first feature is informative, the rest is noise.
 
-    На таких данных модель систематически переобучается, поэтому train-R²
-    заметно выше честной hold-out оценки (воспроизводит пример из issue #24).
+    On such data the model systematically overfits, so train-R² is
+    noticeably higher than the honest hold-out estimate (reproduces the
+    motivating example).
     """
     rng = np.random.RandomState(seed)
     X = pd.DataFrame(rng.randn(n, p))
@@ -72,13 +73,13 @@ def _manual_fold_score(
     test_size: float | int,
     seed: int,
 ) -> float:
-    """Пересчитать val_score вручную: те же сплиты и клоны пайплайна на фолд.
+    """Recompute val_score by hand: the same splits and pipeline clones per fold.
 
-    Повторяет логику ``ModelTrainer._score_on_validation_splits``, чтобы
-    независимо проверить равенство значений (а не самоконсистентность).
+    Repeats the logic of ``ModelTrainer._score_on_validation_splits`` so that
+    the equality is verified independently (not self-consistently).
 
-    ``feature_names`` передаётся явно (ревью PR #17): хелпер не должен
-    полагаться на атрибуты тренера, которые могли быть не установлены.
+    ``feature_names`` is passed explicitly: the helper must not rely on
+    trainer attributes that may not be set.
     """
     preprocessor = trainer._build_preprocessor(feature_names)
     model = create_model(trainer.algorithm, **trainer.hyperparams)
@@ -103,28 +104,28 @@ def _manual_fold_score(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  1. Позитивные: честность оценки и равенство с ручным пересчётом
+#  1. Positive: honest estimates and equality with manual recomputation
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_val_score_is_holdout_not_train_score():
-    """На зашумлённых данных val_score заметно ниже train-R² (issue #24).
+    """On noisy data, val_score is noticeably below train-R².
 
-    Воспроизводит пример из issue: раньше val_score == train-R² на полной
-    выборке (систематически оптимистичная оценка качества).
+    Reproduces the motivating example: previously val_score was equal to the
+    full-sample train-R² (a systematically optimistic quality estimate).
     """
     X, y = _noisy_regression()
     trainer = ModelTrainer(algorithm="ridge", metric="r2", random_state=42).fit(X, y)
 
     train_r2 = float(r2_score(y, trainer.predict(X)))
     assert trainer.val_score is not None
-    # Hold-out оценка «честнее»: ощутимо ниже train-скора на полных данных.
+    # The hold-out estimate is 'more honest': noticeably lower than the full-data train score.
     assert trainer.val_score < train_r2
     assert train_r2 - trainer.val_score > 0.05
 
 
 def test_val_score_matches_manual_iter_splits_for_holdout():
-    """train_test_split: val_score совпадает с ручным hold-out пересчётом."""
+    """train_test_split: val_score matches the manual hold-out recomputation."""
     X, y = _noisy_regression(n=80, p=6, seed=3)
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -144,12 +145,12 @@ def test_val_score_matches_manual_iter_splits_for_holdout():
         test_size=0.25,
         seed=7,
     )
-    # rel=1e-6: устойчивый допуск для float-арифметики после np.mean (ревью PR #17).
+    # rel=1e-6: a robust tolerance for the float arithmetic after np.mean.
     assert trainer.val_score == pytest.approx(manual, rel=1e-6)
 
 
 def test_val_score_matches_manual_iter_splits_for_kfold():
-    """k_fold: val_score — среднее по фолдам, совпадает с ручным пересчётом."""
+    """k_fold: val_score is the fold average, matching the manual recomputation."""
     X, y = _noisy_regression(n=80, p=6, seed=5)
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -173,11 +174,10 @@ def test_val_score_matches_manual_iter_splits_for_kfold():
 
 
 def test_val_score_matches_cross_val_score():
-    """k_fold: val_score совпадает со sklearn cross_val_score (те же фолды).
+    """k_fold: val_score matches sklearn's cross_val_score (the same folds).
 
-    Дополнительно проверяется равенство индексов фолдов между
-    ``iter_splits`` и ``KFold`` (ревью PR #17): иначе сравнение со
-    ``cross_val_score`` было бы бессмысленным.
+    The fold index equality between ``iter_splits`` and ``KFold`` is also
+    checked: otherwise comparing with ``cross_val_score`` would be pointless.
     """
     X, y = _noisy_regression(n=80, p=6, seed=5)
     trainer = ModelTrainer(
@@ -189,9 +189,9 @@ def test_val_score_matches_cross_val_score():
     ).fit(X, y)
 
     cv = KFold(n_splits=4, shuffle=True, random_state=7)
-    # Гарантия совпадения фолдов: iter_splits отдаёт подмножества данных
-    # (X.iloc[idx]), у DataFrame с RangeIndex метки строк равны позиционным
-    # индексам — сравниваем их с индексами фолдов KFold.
+    # Guarantee the folds match: iter_splits returns data subsets
+    # (X.iloc[idx]); with a RangeIndex the row labels equal the positional
+    # indices — compare them against the KFold fold indices.
     cv_folds = [(tr.tolist(), te.tolist()) for tr, te in cv.split(X)]
     iter_folds = [
         (list(X_tr.index), list(X_te.index))
@@ -214,10 +214,10 @@ def test_val_score_matches_cross_val_score():
 
 
 def test_additional_scores_use_same_validation_method():
-    """additional_scores считаются тем же методом: тот же сплит, что и val_score.
+    """additional_scores use the same method: the same split as val_score.
 
-    Для метрики, совпадающей с основной, значения должны быть равны; для
-    hold-out сплита дополнительная метрика считается ровно на том же разбиении.
+    For a metric equal to the main one the values must be identical; for a
+    hold-out split the extra metric is computed on exactly the same partition.
     """
     X, y = _noisy_regression(n=80, p=6, seed=11)
     trainer = ModelTrainer(
@@ -234,8 +234,8 @@ def test_additional_scores_use_same_validation_method():
     )
     assert trainer.additional_scores["rmse"] >= 0
 
-    # Ручной пересчёт rmse на том же сплите. Скорер возвращает отрицательные
-    # значения (neg_rmse), поэтому усредняем модули (ревью PR #17).
+    # Manual rmse recomputation on the same split. The scorer returns negative
+    # values (neg_rmse), so we average the absolute values.
     preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     scorer = get_scorer_object("rmse")
@@ -256,7 +256,7 @@ def test_additional_scores_use_same_validation_method():
 
 
 def test_additional_scores_kfold_mean_over_folds():
-    """k_fold: additional_scores — среднее по фолдам, не train-скор."""
+    """k_fold: additional_scores are the fold average, not a train score."""
     X, y = _noisy_regression(n=60, p=5, seed=2)
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -267,22 +267,22 @@ def test_additional_scores_kfold_mean_over_folds():
         random_state=5,
     ).fit(X, y)
 
-    # mse — ошибка: val-score положительный, а train-MSE на полных данных
-    # систематически ниже (переобучение).
+    # mse is an error: the val score is positive, while the full-data train-MSE
+    # is systematically lower (overfitting).
     train_mse = float(np.mean((y - trainer.predict(X)) ** 2))
     assert trainer.additional_scores["mse"] > train_mse
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  2. Engine-путь: согласованность val_score и result["score"]
+#  2. Engine path: consistency of val_score and result["score"]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_engine_path_val_score_consistent_with_result_score(tmp_path):
     """train_best_model(k_fold): trainer.val_score ≈ result['score'].
 
-    Оба значения — CV-оценки на одних и тех же фолдах (резолюция метода
-    выполняется один раз, D3 issue #24); расхождение — только float-шум.
+    Both values are CV estimates on the same folds (the method is resolved
+    once), so any discrepancy is only float noise.
     """
     rng = np.random.RandomState(42)
     df = pd.DataFrame(
@@ -324,20 +324,21 @@ def test_engine_path_val_score_consistent_with_result_score(tmp_path):
     loaded = ModelTrainer.load(str(model_path))
     assert loaded.validation_strategy == "k_fold"
     assert loaded.n_folds == 3
-    # r2 — score-метрика (greater_is_better), sign-коррекция не меняет знак.
+    # r2 is a score metric (greater_is_better); the sign correction does not flip it.
     assert loaded.val_score == pytest.approx(result["score"], rel=1e-4)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3. auto-резолюция
+#  3. auto resolution
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
-    """auto: make_cv резолвится один раз; разрешённые k/test_size доходят до тренера.
+    """auto: make_cv is resolved once; the resolved k/test_size reach the trainer.
 
-    Проверяем через мок make_cv: компонент передаёт в _fit_and_save именно
-    разрешённые значения (метод + фолды/размер), а не строку 'auto'.
+    Checked through a make_cv mock: the component forwards exactly the
+    resolved values (method + folds/size) to _fit_and_save, not the string
+    'auto'.
     """
     X_df = pd.DataFrame({"a": np.arange(50, dtype=float)})
     df = X_df.copy()
@@ -397,15 +398,15 @@ def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
 
     assert result["score"] == 0.9
     call_kwargs = mock_save.call_args.kwargs
-    # В финальный fit передаются разрешённые значения, а не 'auto'
+    # The final fit receives the resolved values, not 'auto'
     assert call_kwargs["validation_strategy"].value == "k_fold"
     assert call_kwargs["n_folds"] == 3
-    # _run_hpo получает тот же разрешённый метод
+    # _run_hpo receives the same resolved method
     assert mock_save.call_count == 1
 
 
 def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
-    """auto → train_test_split: целочисленный test_size доходит до тюнера и тренера."""
+    """auto → train_test_split: the integer test_size reaches the tuner and trainer."""
     df = pd.DataFrame({"a": np.arange(50, dtype=float)})
     df["target"] = np.arange(50, dtype=float)
 
@@ -476,20 +477,20 @@ def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  4. Негативные сценарии
+#  4. Negative scenarios
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_unknown_validation_strategy_rejected_at_init():
-    """Неизвестная validation_strategy → TrainingError на этапе инициализации."""
+    """An unknown validation_strategy → TrainingError at initialization."""
     with pytest.raises(TrainingError, match="Unknown validation_strategy"):
         ModelTrainer(validation_strategy="magic_split")
-    # Enum-значение тоже нормализуется; строка с неверным регистром — ок
+    # Enum values are normalized too; a case-mismatched string is fine
     assert ModelTrainer(validation_strategy="K_FOLD").validation_strategy == "k_fold"
 
 
 def test_invalid_n_folds_rejected_at_init():
-    """n_folds < 1 отклоняется; для k_fold — n_folds < 2 отклоняется."""
+    """n_folds < 1 is rejected; for k_fold, n_folds < 2 is rejected."""
     with pytest.raises(TrainingError, match="n_folds"):
         ModelTrainer(n_folds=0)
     with pytest.raises(TrainingError, match="n_folds"):
@@ -497,22 +498,22 @@ def test_invalid_n_folds_rejected_at_init():
 
 
 def test_invalid_test_size_rejected_at_init():
-    """test_size вне (0, 1) для доли или < 1 для целого отклоняется."""
+    """test_size outside (0, 1) for a fraction, or < 1 for an integer, is rejected."""
     with pytest.raises(TrainingError, match="test_size"):
         ModelTrainer(test_size=0.0)
     with pytest.raises(TrainingError, match="test_size"):
         ModelTrainer(test_size=1.5)
     with pytest.raises(TrainingError, match="test_size"):
-        ModelTrainer(test_size=0)  # целое < 1
+        ModelTrainer(test_size=0)  # an integer < 1
     with pytest.raises(TrainingError, match="test_size must be a number"):
-        ModelTrainer(test_size="big")  # нечисловое значение
+        ModelTrainer(test_size="big")  # a non-numeric value
 
 
 def test_validation_split_init_failure_wrapped(caplog):
-    """Критическая ошибка инициализации разбиений оборачивается в TrainingError.
+    """A critical failure while materializing splits is wrapped into a TrainingError.
 
-    Покрывает ветку «материализация сплитов упала» в
-    ``_score_on_validation_splits`` (например, сбой валидатора make_cv).
+    Covers the 'split materialization failed' branch in
+    ``_score_on_validation_splits`` (e.g. a make_cv validator failure).
     """
     X, y = _noisy_regression(n=40, p=3, seed=1)
     trainer = ModelTrainer(algorithm="ridge", metric="r2")
@@ -534,10 +535,10 @@ def test_validation_split_init_failure_wrapped(caplog):
 
 
 def test_all_folds_fail_raises_and_resets_state():
-    """Все фолды скоринга падают → TrainingError; pipeline/val_score не остаются.
+    """All scoring folds fail → TrainingError; pipeline/val_score are not left stale.
 
-    Сначала успешное обучение, затем fit() с заведомо нерабочим скорером:
-    состояние предыдущего обучения не должно сохраняться.
+    First a successful training, then fit() with a deliberately broken
+    scorer: the state of the previous training must not persist.
     """
     X, y = _noisy_regression(n=60, p=4, seed=1)
     trainer = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
@@ -557,7 +558,7 @@ def test_all_folds_fail_raises_and_resets_state():
 
 
 def test_single_additional_metric_failure_skipped_with_warning(caplog):
-    """Сбой одной дополнительной метрики → WARNING + пропуск, обучение успешно."""
+    """A single extra-metric failure → WARNING + skip; training still succeeds."""
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
     real_scorer_factory = __import__(
@@ -586,12 +587,12 @@ def test_single_additional_metric_failure_skipped_with_warning(caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  5. Граничные случаи
+#  5. Boundary cases
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_minimum_two_samples():
-    """N = 2 (минимум): обучение завершается штатно (hold-out 1/1)."""
+    """N = 2 (the minimum): training completes normally (hold-out 1/1)."""
     X = pd.DataFrame({"a": [1.0, 2.0]})
     y = pd.Series([1.0, 2.0])
     trainer = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
@@ -600,10 +601,10 @@ def test_minimum_two_samples():
 
 
 def test_kfold_fallback_to_split_on_small_data(caplog):
-    """k_fold на малой выборке (N < max(4, 2K)) → fallback на train_test_split.
+    """k_fold on a small sample (N < max(4, 2K)) → fallback to train_test_split.
 
-    Поведение согласовано с HPO (make_cv): обучение завершается штатно,
-    val_score не None.
+    The behavior is consistent with HPO (make_cv); training completes
+    normally and val_score is not None.
     """
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(6, 2))
@@ -623,7 +624,7 @@ def test_kfold_fallback_to_split_on_small_data(caplog):
 
 
 def test_constant_target_nrmse_inf_kept():
-    """Константный таргет: NRMSE → inf возвращается как есть, обучение успешно."""
+    """A constant target: NRMSE → inf is kept as is; training succeeds."""
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([5.0, 5.0, 5.0, 5.0])
     trainer = ModelTrainer(
@@ -636,10 +637,10 @@ def test_constant_target_nrmse_inf_kept():
 
 
 def test_deterministic_splits_when_random_state_none():
-    """random_state=None: сплиты валидации детерминированы (фикс-зерно 42).
+    """random_state=None: the validation splits are deterministic (fixed seed 42).
 
-    Сравнение через pytest.approx (ревью PR #17): строгое == для float после
-    усреднения по фолдам может быть хрупким.
+    Comparison via pytest.approx: strict == on floats after fold averaging
+    can be brittle.
     """
     X, y = _noisy_regression(n=80, p=5, seed=9)
     t1 = ModelTrainer(algorithm="ridge", metric="r2", random_state=None).fit(X, y)
@@ -650,30 +651,30 @@ def test_deterministic_splits_when_random_state_none():
 
 
 def test_old_pickle_without_validation_attrs_compatible():
-    """Старый pickle без новых атрибутов: load + повторный fit работают.
+    """An old pickle without the new attributes: load + a re-fit both work.
 
-    Новые атрибуты читаются через getattr-фолбэк (train_test_split/5/0.2):
-    атрибуты не «материализуются» при загрузке старого артефакта, но fit()
-    вычисляет val_score по дефолтной стратегии.
+    The new attributes are read via a getattr fallback (train_test_split/5/0.2):
+    the attributes are not 'materialized' when an old artifact is loaded, but
+    fit() computes val_score using the default strategy.
     """
     X, y = _noisy_regression(n=60, p=4, seed=4)
     trainer = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
     for attr in ("validation_strategy", "n_folds", "test_size"):
         delattr(trainer, attr)
 
-    # Сериализация/десериализация «старого» объекта
+    # Serialize/deserialize the 'old' object
     restored = pickle.loads(pickle.dumps(trainer))
     restored.fit(X, y)
     assert restored.val_score is not None
-    # Атрибуты отсутствуют (как в старом pickle), но fit использует дефолты:
-    # val_score совпадает с тренером, обученным с явными дефолтами.
+    # The attributes are absent (as in an old pickle), but fit uses the defaults:
+    # val_score matches a trainer trained with the explicit defaults.
     assert not hasattr(restored, "validation_strategy")
     baseline = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
     assert restored.val_score == pytest.approx(baseline.val_score, rel=1e-6)
 
 
 def test_serialization_round_trip_preserves_validation_attrs(tmp_path):
-    """Round-trip через save/load сохраняет новые атрибуты валидации."""
+    """A save/load round-trip preserves the new validation attributes."""
     X, y = _noisy_regression(n=60, p=4, seed=6)
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -695,7 +696,7 @@ def test_serialization_round_trip_preserves_validation_attrs(tmp_path):
 
 
 def test_val_score_reset_between_fits():
-    """Повторный fit с другим методом валидации пересчитывает val_score."""
+    """A repeat fit with a different validation method recomputes val_score."""
     X, y = _noisy_regression(n=80, p=5, seed=8)
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="train_test_split"
@@ -706,7 +707,7 @@ def test_val_score_reset_between_fits():
     trainer.n_folds = 4
     trainer.fit(X, y)
     assert trainer.val_score is not None
-    # Значения при разных методах не обязаны совпадать, но обязаны пересчитаться
-    # (сравнение с train-скором не производится — это семантика оценки).
+    # The values across different methods need not match, but must be recomputed
+    # (no comparison against a train score — this is about estimate semantics).
     assert isinstance(trainer.val_score, float)
     assert trainer.pipeline is not None

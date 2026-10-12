@@ -1,19 +1,19 @@
 import pytest
 
-# Эпик #74 (WIP, R2/R4 в процессе): легаси-тесты пайплайна со старой схемой
-# конфига (sanity_gate.mode / нетерминальная последняя фаза / select в
-# рантайме) падают на валидации или на NotImplementedError. Нестрогий xfail
-# держит CI зелёным в переходный период; маркер снимается вместе с миграцией
-# тестов (R2/R4). Тесты refine-шага мигрированы на action='refine' (R3) и
-# маркера не имеют.
+# Legacy pipeline tests with the old config schema (sanity_gate.mode /
+# non-terminal last phase / select at runtime) fail on validation or on
+# NotImplementedError. A non-strict xfail keeps the CI green during the
+# transition period; the marker is removed together with the migration of the
+# tests. The refine-step tests are migrated to action='refine' and have no
+# marker.
 _LEGACY_XFAIL = pytest.mark.xfail(
     strict=False,
     reason=(
         "Legacy pipeline config (sanity_gate.mode / non-terminal select) or "
-        "unimplemented select execution: migration to the epic #74 schema "
-        "lands with tasks R2/R4 (see PR !43, issue #75). Non-strict xfail "
-        "keeps the CI green in the transition period; remove this marker "
-        "together with the test migration."
+        "unimplemented select execution: migration to the terminal-select "
+        "schema is still in progress. Non-strict xfail keeps the CI green in "
+        "the transition period; remove this marker together with the test "
+        "migration."
     ),
 )
 
@@ -52,7 +52,7 @@ from configurable_automl_engine.tuner import HPO_WORST_SCORE, InvalidAlgorithmEr
 
 import textwrap
 
-# Терминальный select-шаг (эпик #74): последняя фаза любого валидного конфига.
+# Terminal select step: the last phase of any valid config.
 TERMINAL_SELECT = {
     "name": "final_select",
     "n_trials": 1,
@@ -69,13 +69,12 @@ def _hpo_only_cfg_and_prepared(
     df: pd.DataFrame,
     algorithms: dict | None = None,
 ) -> tuple[Config, object]:
-    """Валидный Config, усечённый до HPO-фаз, и PreparedData для execute_phases.
+    """A valid Config truncated to the HPO phases, and PreparedData for execute_phases.
 
-    Схема (эпик #74) требует терминальный select последней фазой; исполнение
-    select-шагов появится в задаче R2, поэтому юнит-тесты execute_phases
-    добавляют терминальный select только для прохождения валидации и затем
-    усекают его (мутация после валидации безопасна: execute_phases читает
-    только general.phases).
+    The schema requires a terminal select as the last phase; the
+    execute_phases unit tests append a terminal select only to pass validation
+    and then truncate it
+    (mutating after validation is safe: execute_phases reads only general.phases).
     """
     cfg_dict = {
         "general": {
@@ -118,7 +117,7 @@ algorithms:
     enable: true
     limit_hyperparameters: true
     hyperparameters:
-      n_estimators: [10, 20]  # Убрали фигурные скобки, используем отступы
+      n_estimators: [10, 20]  # Removed the curly braces, using indentation
   extra_trees:
     enable: true
     limit_hyperparameters: true
@@ -160,7 +159,7 @@ algorithms:
     enable: false
 """
 
-# Конфиг, где XGBoost ВКЛЮЧЁН → компонент обязан упасть (если XGBoost не реализован в tuner)
+# Config where XGBoost is ENABLED → the component must fail (if XGBoost is not implemented in the tuner)
 BROKEN_CFG = BROKEN_CFG = """
 general:
   comparison_metric: rmse
@@ -181,13 +180,13 @@ algorithms:
 # --------------------------------------------------------------------------- #
 def test_happy_path(tmp_path: Path, small_dataset):
     """
-    Проверка успешного цикла обучения на синтетических данных из фикстуры.
+    Check the successful training cycle on synthetic data from the fixture.
     """
     cfg_file = tmp_path / "cfg.yaml"
     model_path = tmp_path / "model.pkl"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
 
-    # Используем фикстуру small_dataset вместо локальной функции
+    # Use the small_dataset fixture instead of a local function
     res = train_best_model(cfg_file, small_dataset, model_path_override=model_path)
 
     assert Path(res["model_path"]).exists()
@@ -209,13 +208,13 @@ def test_happy_path(tmp_path: Path, small_dataset):
 # --------------------------------------------------------------------------- #
 def test_bad_input_type(tmp_path: Path):
     """
-    Проверка, что передача не-DataFrame вызывает TypeError.
+    Check that passing a non-DataFrame raises a TypeError.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
 
     with pytest.raises(TypeError):
-        # Передаем список вместо pandas.DataFrame
+        # Pass a list instead of a pandas.DataFrame
         train_best_model(
             cfg_file, ["not", "a", "df"], model_path_override=tmp_path / "m.pkl"
         )
@@ -226,7 +225,7 @@ def test_bad_input_type(tmp_path: Path):
 # --------------------------------------------------------------------------- #
 def test_no_algorithms_enabled(tmp_path: Path, small_dataset):
     """
-    Проверка падения, если в конфиге не включен ни один алгоритм.
+    Check the failure when no algorithm is enabled in the config.
     """
     empty_cfg = """
 general:
@@ -248,9 +247,9 @@ algorithms:
 # --------------------------------------------------------------------------- #
 def _make_iae(message: str):
     """
-    Создаёт экземпляр исключения с __class__.__name__ == 'InvalidAlgorithmError'.
-    Нужно потому что _run_hpo проверяет имя класса строкой,
-    а не через isinstance — это позволяет поймать IAE из любого модуля.
+    Creates an exception instance whose __class__.__name__ == 'InvalidAlgorithmError'.
+    This is needed because _run_hpo checks the class name as a string
+    rather than with isinstance, which allows catching an IAE from any module.
     """
 
     class InvalidAlgorithmError(Exception):
@@ -261,17 +260,17 @@ def _make_iae(message: str):
 
 def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     """
-    Проверка, что алгоритм, чей тюнер бросает InvalidAlgorithmError,
-    дисквалифицируется, а не прерывает запуск (issue #12).
-    Если дисквалифицированы ВСЕ алгоритмы — поднимается штатный
-    RuntimeError со списком упавших алгоритмов.
-    Покрывает ветку в _worker:
-        except _CanonicalIAE: логируем причину и возвращаем None
+    Check that an algorithm whose tuner raises InvalidAlgorithmError
+    is disqualified rather than aborting the run.
+    If ALL algorithms are disqualified, a regular RuntimeError with the
+    list of failed algorithms is raised.
+    Covers the branch in _worker:
+        except _CanonicalIAE: log the reason and return None
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
 
-    # Имитируем тюнер, чей optimize() бросает InvalidAlgorithmError
+    # Simulate a tuner whose optimize() raises InvalidAlgorithmError
     mock_tuner = MagicMock()
     mock_tuner.optimize.side_effect = _make_iae("Algorithm not supported")
 
@@ -289,7 +288,7 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
 
 
 # --------------------------------------------------------------------------- #
-#  CIRCUIT BREAKER (issue #12): дисквалификация не прерывает запуск
+#  CIRCUIT BREAKER: disqualification does not interrupt the run
 # --------------------------------------------------------------------------- #
 _CIRCUIT_BREAKER_CFG = """
 general:
@@ -321,7 +320,7 @@ algorithms:
 
 
 def _make_broken_tuner(message: str) -> MagicMock:
-    """Тюнер, который всегда бросает InvalidAlgorithmError."""
+    """A tuner that always raises InvalidAlgorithmError."""
     tuner = MagicMock()
     tuner.optimize.side_effect = _make_iae(message)
     return tuner
@@ -330,22 +329,22 @@ def _make_broken_tuner(message: str) -> MagicMock:
 def _make_good_tuner(
     best_params: dict, best_score: float = 0.9
 ) -> MagicMock:
-    """Тюнер, который успешно возвращает (model, best_params, best_score)."""
+    """A tuner that successfully returns (model, best_params, best_score)."""
     tuner = MagicMock()
     tuner.optimize.return_value = (None, best_params, best_score)
     return tuner
 
 
 def _patch_load_modules(broken_tuner, good_tuner):
-    """Подменяет _load_module так, чтобы разные тюнеры возвращались
-    по разным путям модулей, указанным в конфиге."""
+    """Patches _load_module so that different tuners are returned
+    for the different module paths specified in the config."""
 
     def fake_load(path: str):
         if path == "mock.tuner_ridge":
             return broken_tuner
         if path == "mock.tuner_rf":
             return good_tuner
-        # Все остальные пути (например, trainer_module) грузим по-настоящему
+        # All other paths (e.g., trainer_module) are really imported
         return importlib.import_module(path)
 
     return patch(
@@ -358,10 +357,10 @@ def test_circuit_breaker_disqualifies_only_broken_algorithm(
     tmp_path: Path, small_dataset
 ):
     """
-    e2e-тест issue #12: один алгоритм дисквалифицируется (тюнер бросает
-    InvalidAlgorithmError), второй успешно завершает HPO — запуск обязан
-    завершиться успешно, победителем становится рабочий алгоритм, а
-    дисквалифицированный фиксируется в result["disqualified_algorithms"].
+    e2e test: one algorithm is disqualified (its tuner raises
+    InvalidAlgorithmError), the second completes HPO successfully — the run
+    must finish successfully, the working algorithm becomes the winner, and
+    the disqualified one is recorded in result["disqualified_algorithms"].
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
@@ -378,10 +377,10 @@ def test_circuit_breaker_disqualifies_only_broken_algorithm(
             cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
         )
 
-    # Запуск завершился успешно, победил рабочий алгоритм
+    # The run finished successfully, the working algorithm won
     assert res["algorithm"] == "random_forest"
     assert Path(res["model_path"]).exists()
-    # Дисквалифицированный алгоритм зафиксирован с причиной
+    # The disqualified algorithm is recorded with its reason
     assert res["disqualified_algorithms"] == {
         "ridge": (
             "Algorithm 'ridge' disqualified after 5 consecutive fatal failures"
@@ -393,8 +392,8 @@ def test_circuit_breaker_all_algorithms_disqualified_raises(
     tmp_path: Path, small_dataset
 ):
     """
-    Негативный e2e-тест issue #12: если дисквалифицированы ВСЕ алгоритмы,
-    поднимается штатный RuntimeError со списком упавших алгоритмов.
+    Negative e2e test: if ALL algorithms are disqualified,
+    a regular RuntimeError with the list of failed algorithms is raised.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
@@ -425,10 +424,10 @@ from configurable_automl_engine.training_engine import train_best_model
 
 def test_train_best_model_lazy_proxy():
     """
-    Проверяет, что train_best_model:
-    - лениво импортирует training_engine.component.train_best_model
-    - корректно проксирует аргументы
-    - возвращает результат вызова
+    Verifies that train_best_model:
+    - lazily imports training_engine.component.train_best_model
+    - correctly proxies arguments
+    - returns the result of the call
     """
     expected_result = "mocked_result"
 
@@ -442,7 +441,7 @@ def test_train_best_model_lazy_proxy():
         assert result == expected_result
 
 
-# --- Исправленные фикстуры ---
+# --- Fixed fixtures ---
 @pytest.fixture
 def sample_df():
     return pd.DataFrame({"feature": [1, 2], "target": [0, 1]})
@@ -460,7 +459,7 @@ def mock_algo_cfg():
 
 @pytest.fixture
 def base_config_dict():
-    """Полный валидный словарь для Pydantic модели Config"""
+    """A complete valid dictionary for the Pydantic Config model"""
     return {
         "general": {
             "comparison_metric": "mae",
@@ -471,7 +470,7 @@ def base_config_dict():
                     "name": "fast",
                     "n_trials": 2,
                     "action": "all_algorithms",
-                },  # Исправлено 'all' -> 'all_algorithms'
+                },  # Fixed 'all' -> 'all_algorithms'
                 {
                     "name": "final",
                     "n_trials": 1,
@@ -499,13 +498,13 @@ class TestTrainingEngineCoverage:
     def test_run_hpo_invalid_algorithm_error(self, mock_load, mock_algo_cfg, sample_df):
         mock_tuner = MagicMock()
 
-        # Динамически создаем класс с ТОЧНЫМ именем, которое ждет код
+        # Dynamically create a class with the EXACT name the code expects
         CustomIAE = type("InvalidAlgorithmError", (Exception,), {})
 
         mock_tuner.optimize.side_effect = CustomIAE("Test Error")
         mock_load.return_value = mock_tuner
-        # Мы ожидаем проброса канонического исключения InvalidAlgorithmError
-        # (которое в компоненте импортировано как _CanonicalIAE)
+        # We expect the canonical InvalidAlgorithmError exception to be propagated
+        # (imported in the component as _CanonicalIAE)
         with pytest.raises(InvalidAlgorithmError) as excinfo:
             _run_hpo(
                 algo_name="rf",
@@ -517,16 +516,16 @@ class TestTrainingEngineCoverage:
                 validation_strategy=ValidationStrategy.k_fold,
             )
 
-        # Проверяем, что текст ошибки сохранился
+        # Check that the error text was preserved
         assert "Test Error" in str(excinfo.value)
 
-    # Исправленный тест на отсутствие ModelTrainer
+    # Fixed test for a missing ModelTrainer
     @patch("configurable_automl_engine.training_engine.component._load_module")
     def test_fit_and_save_missing_trainer_class(
         self, mock_load, mock_algo_cfg, sample_df, base_config_dict
     ):
         mock_load.return_value = MagicMock(spec=[])
-        # Используем валидный конфиг вместо неполного словаря
+        # Use a valid config instead of an incomplete dictionary
         cfg = Config.model_validate(base_config_dict)
 
         with pytest.raises(AttributeError, match="lacks `ModelTrainer` class"):
@@ -540,14 +539,14 @@ class TestTrainingEngineCoverage:
                 cfg,
             )
 
-    # Исправленный тест логирования
+    # Fixed logging test
     @patch("configurable_automl_engine.training_engine.component.setup_logging")
     @patch("configurable_automl_engine.training_engine.component.read_config")
     def test_logging_setup(self, mock_read, mock_setup, sample_df, base_config_dict):
         base_config_dict["general"]["log_to_file"] = "test.log"
         mock_read.return_value = Config.model_validate(base_config_dict)
 
-        # Мокаем HPO, чтобы не запускать реальное обучение
+        # Mock HPO so that real training is not run
         with patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
             return_value=(0.9, {}),
@@ -559,18 +558,18 @@ class TestTrainingEngineCoverage:
 
         mock_setup.assert_called_once()
 
-    # Исправленный тест на ошибку в воркере
+    # Fixed test for an error in the worker
     @patch("configurable_automl_engine.training_engine.component._run_hpo")
     def test_worker_exception_handling(self, mock_hpo, sample_df, base_config_dict):
-        # Настраиваем HPO на выброс исключения, которое НЕ является InvalidAlgorithmError
+        # Configure HPO to raise an exception that is NOT InvalidAlgorithmError
         mock_hpo.side_effect = ValueError("Something went wrong")
         cfg = Config.model_validate(base_config_dict)
 
-        # Ожидаем RuntimeError, так как phase_results останется пустым (строка 279)
+        # Expect RuntimeError, since phase_results will remain empty (line 279)
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=cfg, df=sample_df, target="target")
 
-    # Исправленный тест на ошибку сохранения
+    # Fixed test for a save error
     @patch(
         "configurable_automl_engine.training_engine.component._run_hpo",
         return_value=(0.9, {"p": 1}),
@@ -585,20 +584,20 @@ class TestTrainingEngineCoverage:
         with pytest.raises(RuntimeError, match="Disk full"):
             train_best_model(config=cfg, df=sample_df, target="target")
 
-    # Неподдерживаемый тип конфига
+    # Unsupported config type
     def test_train_best_model_invalid_config_type(self, sample_df):
         with pytest.raises(TypeError, match="Unsupported config type"):
             train_best_model(config=123.45, df=sample_df)
 
-    # Пустой DataFrame
+    # Empty DataFrame
     def test_train_best_model_empty_df(self):
         with pytest.raises(ValueError, match="Input dataframe is empty"):
             train_best_model(config={}, df=pd.DataFrame())
 
 
-# Проверка отсутствия функции optimize в тюнере
+# Check the absence of the optimize function in the tuner
 def test_run_hpo_lacks_optimize_attr():
-    # Создаем mock-модуль без атрибута optimize
+    # Create a mock module without the optimize attribute
     mock_tuner = MagicMock(spec=[])
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
@@ -615,10 +614,10 @@ def test_run_hpo_lacks_optimize_attr():
             )
 
 
-# Проверка успешного возврата из блока try в _run_hpo
+# Check the successful return from the try block in _run_hpo
 def test_run_hpo_success_return():
     mock_tuner = MagicMock()
-    # Настраиваем mock так, чтобы он возвращал кортеж (модель, параметры, скор)
+    # Configure the mock so that it returns the tuple (model, params, score)
     mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
 
     algo_cfg = MagicMock(spec=AlgoCfg)
@@ -638,11 +637,11 @@ def test_run_hpo_success_return():
 
 
 def test_run_hpo_forwards_resolved_test_size_to_tuner():
-    """Разрешённый test_size (issue #24, D3) прокидывается тюнеру с поддержкой.
+    """The resolved test_size is forwarded to tuners that support it.
 
-    При 'auto' → 'train_test_split' choose_validation_method возвращает целое
-    число строк; HPO обязан оценивать модели на том же сплите, что и финальный
-    fit, иначе оценки разойдутся.
+    With 'auto' → 'train_test_split' choose_validation_method returns an integer
+    number of rows; HPO must evaluate models on the same split as the final fit,
+    otherwise the scores will diverge.
     """
     received: dict[str, object] = {}
 
@@ -682,7 +681,7 @@ def test_run_hpo_forwards_resolved_test_size_to_tuner():
 
 
 def test_run_hpo_skips_test_size_for_legacy_tuner():
-    """Кастомный тюнер без параметра не получает train_test_split_test_size."""
+    """A custom tuner without the parameter does not receive train_test_split_test_size."""
     calls: dict[str, object] = {}
 
     class LegacyTuner:
@@ -708,9 +707,9 @@ def test_run_hpo_skips_test_size_for_legacy_tuner():
     assert calls["test_size_passed"] is False
 
 
-# Ранняя остановка (pruning): прокидывание настроек в тюнер
+# Early stopping (pruning): forwarding the settings to the tuner
 def test_run_hpo_passes_pruning_when_tuner_supports_it():
-    """Настройки ранней остановки передаются тюнеру, поддерживающему `pruning`."""
+    """Early-stopping settings are passed to a tuner that supports `pruning`."""
     received: dict[str, object] = {}
 
     class PruningAwareTuner:
@@ -754,7 +753,7 @@ def test_run_hpo_passes_pruning_when_tuner_supports_it():
 
 
 def test_run_hpo_skips_pruning_for_legacy_tuner():
-    """Кастомный тюнер без аргумента `pruning` не получает его (не затрагивается)."""
+    """A custom tuner without the `pruning` argument does not receive it (it is unaffected)."""
     calls: dict[str, object] = {}
 
     class LegacyTuner:
@@ -780,20 +779,20 @@ def test_run_hpo_skips_pruning_for_legacy_tuner():
     assert calls["pruning_passed"] is False
 
 
-# Ошибка, если target_col отсутствует в DataFrame
+# Error if the target_col is missing from the DataFrame
 def test_train_best_model_missing_target_column():
     df = pd.DataFrame({"feature1": [1, 2], "feature2": [3, 4]})
-    config = {"dummy": "config"}  # Неважно, так как упадет раньше
+    config = {"dummy": "config"}  # Irrelevant, since it will fail earlier
     with pytest.raises(ValueError, match="Target column 'missing_col' not found"):
         train_best_model(config=config, df=df, target="missing_col")
 
 
 def test_train_best_model_empty_phases_raises_runtime_error():
-    """Пустой список фаз (phases: []) → RuntimeError, а не ValueError.
+    """An empty phases list (phases: []) → RuntimeError, not ValueError.
 
-    Конфиг допускает phases: [] — цикл фаз не выполняется, phase_results
-    остаётся пустым, и финальный select_winner({}) бросил бы ValueError.
-    Явная защита поднимает понятную RuntimeError (ревью PR #22).
+    The config allows phases: [] — the phase loop does not run, phase_results
+    stays empty, and the final select_winner({}) would have raised ValueError.
+    An explicit guard raises a clear RuntimeError.
     """
     config_dict = {
         "general": {
@@ -818,12 +817,12 @@ def test_train_best_model_empty_phases_raises_runtime_error():
 
 
 def test_train_best_model_config_from_dict_and_refine_flow():
-    """refine из dict-конфига (R3): второй раунд HPO для всех кандидатов.
+    """refine from a dict config: a second HPO round for all candidates.
 
-    Схема (эпик #74) требует терминальный select последней фазой; для
-    unit-проверки HPO-потока конфиг валидируется с ним, а фазы усекаются до
-    [all_algorithms, refine] (модификация после валидации безопасна:
-    execute_phases читает только general.phases).
+    The schema requires a terminal select as the last phase; for
+    this unit check of the HPO flow the config is validated with it, and the
+    phases are truncated to [all_algorithms, refine] (mutating after validation
+    is safe: execute_phases reads only general.phases).
     """
     valid_config_dict = {
         "general": {
@@ -865,7 +864,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
         calls.append((kwargs["algo_name"], kwargs.get("initial_params")))
         return 0.9, {"C": 1.0}
 
-    # Патчим _run_hpo (вызывается внутри вложенной _execute_hpo_phase)
+    # Patch _run_hpo (called inside the nested _execute_hpo_phase)
     with patch(
         "configurable_automl_engine.training_engine.component._run_hpo",
         side_effect=hpo_side_effect,
@@ -874,8 +873,8 @@ def test_train_best_model_config_from_dict_and_refine_flow():
         phase_results = ctx.working_set
         disqualified = ctx.disqualified_algorithms
 
-    # Ожидаем 4 вызова: по одному на каждый алгоритм в каждой из двух фаз;
-    # в refine оба кандидата получают initial_params (warm-start).
+    # Expect 4 calls: one per algorithm in each of the two phases;
+    # in refine both candidates receive initial_params (warm-start).
     assert mock_hpo.call_count == 4
     assert sorted(n for n, _ in calls[:2]) == ["elasticnet", "ridge"]
     assert all(p is None for _, p in calls[:2])
@@ -886,36 +885,36 @@ def test_train_best_model_config_from_dict_and_refine_flow():
 
 
 # --------------------------------------------------------------------------- #
-#  Debug-логи в ветке dict-конфига (issue #23)
+#  Debug logs in the dict-config branch
 # --------------------------------------------------------------------------- #
 def test_train_best_model_debug_logs_formatted_no_logging_error(
     caplog, capsys, sample_df, base_config_dict
 ):
     """
-    Проверка корректного форматирования debug-вызовов логирования
-    в ветке dict-конфига ``train_best_model`` (issue #23).
+    Check correct formatting of the debug logging calls
+    in the dict-config branch of ``train_best_model``.
 
-    Раньше сообщения не содержали %s-плейсхолдеров, из-за чего при уровне
-    DEBUG ``LogRecord.getMessage()`` падал с TypeError и пользователь видел
-    ``--- Logging error ---`` в stderr, а само сообщение терялось.
+    Previously the messages did not contain %s placeholders, which made
+    ``LogRecord.getMessage()`` raise a TypeError at DEBUG level and the user
+    saw ``--- Logging error ---`` in stderr while the message itself was lost.
 
-    Проверяем:
-    - сообщения CONFIG TYPE / ALGORITHMS содержат подставленные значения;
-    - ни одна запись не падает в ``getMessage()`` (форматирование корректно);
-    - в caplog попадают записи именно от логгера ``training_engine``;
-    - в stderr не появляется ``--- Logging error ---`` даже при обработке
-      реальным StreamHandler.
+    We check:
+    - the CONFIG TYPE / ALGORITHMS messages contain the substituted values;
+    - no record fails in ``getMessage()`` (formatting is correct);
+    - caplog receives records exactly from the ``training_engine`` logger;
+    - ``--- Logging error ---`` does not appear in stderr even when processed
+      by a real StreamHandler.
     """
     import logging
 
-    # Ожидаемое значение алгоритма из base_config_dict
+    # The expected algorithm value from base_config_dict
     expected_algorithm = "random_forest"
-    # Проверяем, что конфигурация действительно содержит ожидаемый алгоритм,
-    # на который рассчитаны проверки сообщений ниже
+    # Check that the config really contains the expected algorithm,
+    # on which the message checks below rely
     assert expected_algorithm in base_config_dict["algorithms"]
 
-    # Реальный StreamHandler(stderr) на DEBUG — имитация продакшн-обработчика,
-    # который форматирует запись и триггерит handleError при ошибке
+    # A real StreamHandler(stderr) at DEBUG — imitating a production handler
+    # that formats the record and triggers handleError on error
     logger = logging.getLogger("training_engine")
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.DEBUG)
@@ -941,9 +940,9 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
     finally:
         logger.removeHandler(stream_handler)
 
-    # Форматирование не падает: getMessage() возвращает подставленную строку.
-    # Фильтруем записи строго по имени тестируемого логгера, чтобы исключить
-    # посторонние логгеры с тем же именем
+    # Formatting does not fail: getMessage() returns the substituted string.
+    # Filter records strictly by the tested logger name to exclude
+    # foreign loggers with the same name
     debug_msgs = [
         record.getMessage()
         for record in caplog.records
@@ -958,7 +957,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
         for msg in debug_msgs
     )
 
-    # Никакого "--- Logging error ---" в stderr
+    # No "--- Logging error ---" in stderr
     assert "--- Logging error ---" not in capsys.readouterr().err
 
 
@@ -966,14 +965,14 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
 #  initial_params integration test: monotonicity across phases
 # --------------------------------------------------------------------------- #
 def test_refine_uses_initial_params_from_phase1():
-    """Phase 2 (refine) передаёт initial_params из Phase 1 (эпик #74, R3).
+    """Phase 2 (refine) passes initial_params from Phase 1.
 
-    Если initial_params передан — Phase 2 возвращает улучшенный score
-    (warm-start через enqueue_trial гарантирует монотонность).
+    If initial_params is passed — Phase 2 returns an improved score
+    (warm-start through enqueue_trial guarantees monotonicity).
 
-    Метрика сравнения — 'mae' (ошибка): `_run_hpo` возвращает «сырые»
-    значения скорера (-MAE), а result["score"] пользовательской семантики —
-    естественное положительное значение MAE (issue #26).
+    The comparison metric is 'mae' (an error): `_run_hpo` returns the "raw"
+    scorer values (-MAE), while result["score"] in user semantics is a natural
+    positive MAE value.
     """
     config_dict = {
         "general": {
@@ -997,7 +996,7 @@ def test_refine_uses_initial_params_from_phase1():
 
     df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
-    # Счётчик вызовов для возврата разных результатов
+    # Call counter to return different results
     call_count = 0
 
     def hpo_side_effect(**kwargs):
@@ -1006,11 +1005,11 @@ def test_refine_uses_initial_params_from_phase1():
         if call_count == 1:
             # Phase 1: MAE = 0.9 (raw = -0.9)
             return -0.9, {"alpha": 0.5, "l1_ratio": 0.3}
-        # Phase 2 (refine): initial_params обязан содержать параметры фазы 1
+        # Phase 2 (refine): initial_params must contain the Phase 1 parameters
         assert kwargs["initial_params"] == {"alpha": 0.5, "l1_ratio": 0.3}, (
             f"expected Phase 1 params, got {kwargs['initial_params']}"
         )
-        # Возвращаем улучшенный score: MAE = 0.8 (raw = -0.8)
+        # Return an improved score: MAE = 0.8 (raw = -0.8)
         return -0.8, {"alpha": 0.6, "l1_ratio": 0.4}
 
     cfg, prepared = _hpo_only_cfg_and_prepared(
@@ -1024,21 +1023,21 @@ def test_refine_uses_initial_params_from_phase1():
         ctx = execute_phases(cfg, prepared)
         phase_results = ctx.working_set
 
-    # Те же имена, обновлённые записи: выход refine замещает рабочее множество
+    # Same names, updated records: refine output replaces the working set
     assert set(phase_results) == {"elasticnet"}
-    # Монотонность: raw-скор Phase 2 (-0.8) не хуже Phase 1 (-0.9)
+    # Monotonicity: the raw Phase 2 score (-0.8) is not worse than Phase 1 (-0.9)
     score, params = phase_results["elasticnet"]
     assert score == pytest.approx(-0.8)
-    assert score > -0.9, "Score должен монотонно не убывать между фазами"
+    assert score > -0.9, "Score must be monotonically non-decreasing between phases"
     assert params == {"alpha": 0.6, "l1_ratio": 0.4}
     assert mock_hpo.call_count == 2
 
 
 def test_result_score_matches_logged_user_value(caplog):
-    """Логи фаз HPO и result["score"] используют единую семантику (issue #26).
+    """HPO phase logs and result["score"] use a single semantics.
 
-    «Сырое» значение скорера для rmse — -RMSE. И фазовый лог, и
-    result["score"]/result["metric"] отдают пользователю положительный RMSE.
+    The "raw" scorer value for rmse is -RMSE. Both the phase log and
+    result["score"]/result["metric"] give the user a positive RMSE.
     """
     config_dict = {
         "general": {
@@ -1081,23 +1080,23 @@ def test_result_score_matches_logged_user_value(caplog):
     ):
         result = train_best_model(config=config_dict, df=df, target="target")
 
-    # Пользовательская семантика: положительный RMSE + имя метрики
+    # User semantics: positive RMSE + metric name
     assert result["score"] == pytest.approx(0.12345)
     assert result["metric"] == "rmse"
-    # Фазовый лог выводит то же значение (пользовательская семантика) с явным
-    # направлением «min better» для ошибок (issue #54, T6).
+    # The phase log prints the same value (user semantics) with an explicit
+    # "min better" direction for errors.
     assert re.search(
         r"score 0\.12345 \(min better\) \| params", caplog.text
     )
-    # «Сырое» инвертированное значение наружу не утекает
+    # The "raw" inverted value must not leak outward
     assert "score -0.12345" not in caplog.text
 
 
 def test_refine_first_phase_runs_without_warm_start():
-    """refine первой фазой валиден и исполняется без warm-start (M1, R3).
+    """refine as the first phase is valid and runs without warm-start.
 
-    Входное рабочее множество первой фазы — полный набор включённых
-    алгоритмов; warm-start не передаётся (предыдущих результатов нет).
+    The input working set of the first phase is the full set of enabled
+    algorithms; warm-start is not passed (there are no previous results).
     """
     config_dict = {
         "general": {
@@ -1112,7 +1111,7 @@ def test_refine_first_phase_runs_without_warm_start():
     df = pd.DataFrame({"f": [1, 2], "target": [0, 1]})
 
     def hpo_side_effect(**kwargs):
-        # Первая фаза — warm-start взяться неоткуда
+        # The first phase — warm-start has nowhere to come from
         assert kwargs.get("initial_params") is None
         return 0.9, {"alpha": 0.5}
 
@@ -1132,12 +1131,12 @@ def test_refine_first_phase_runs_without_warm_start():
     assert disqualified == {}
 
 
-# 1. Тест на логирование ошибки в _run_hpo
+# 1. Test for logging an error in _run_hpo
 def test_run_hpo_logs_error_on_exception():
     with patch(
         "configurable_automl_engine.training_engine.component._load_module"
     ) as mock_load:
-        # Имитируем ошибку в тюнере
+        # Simulate an error in the tuner
         mock_tuner = MagicMock()
         mock_tuner.optimize.side_effect = Exception("HPO failure")
         mock_load.return_value = mock_tuner
@@ -1156,7 +1155,7 @@ def test_run_hpo_logs_error_on_exception():
             )
 
             assert result is None
-            # Проверяем, что была вызвана ошибка логгера
+            # Check that the logger error was called
             mock_log.error.assert_called()
 
 
@@ -1217,16 +1216,16 @@ def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
 
 
 # ---------------------------------------------------------------- #
-# 3️⃣ _run_hpo: тюнер сигнализирует отказ (issue #13)
+# 3️⃣ _run_hpo: the tuner signals failure
 # ---------------------------------------------------------------- #
 def test_run_hpo_returns_none_when_tuner_reports_failure():
-    """Тюнер без валидного результата → _run_hpo возвращает None.
+    """A tuner without a valid result → _run_hpo returns None.
 
-    Покрывает оба сигнала отказа из tuner.optimize (issue #13):
-    - (модель, None, HPO_WORST_SCORE) — старый «фиктивный» результат;
-    - (None, None, None) — новый канонический сигнал отказа.
-    В обоих случаях оркестратор должен исключить алгоритм из кандидатов,
-    а не тащить params=None до финального обучения.
+    Covers both failure signals from tuner.optimize:
+    - (model, None, HPO_WORST_SCORE) — the old "dummy" result;
+    - (None, None, None) — the new canonical failure signal.
+    In both cases the orchestrator must exclude the algorithm from the
+    candidates rather than carry params=None up to the final training.
     """
     cases = [
         ("model", None, HPO_WORST_SCORE),
@@ -1251,10 +1250,10 @@ def test_run_hpo_returns_none_when_tuner_reports_failure():
 
 
 def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_dict):
-    """best_params=None → понятный ValueError, а не TypeError iterable.
+    """best_params=None → a clear ValueError instead of a TypeError 'iterable'.
 
-    Защита от TypeError вида ``'NoneType' object is not iterable``
-    в ``dict(best_params)`` (issue #13).
+    Protection against a TypeError of the form ``'NoneType' object is not iterable``
+    in ``dict(best_params)``.
     """
     cfg = Config.model_validate(base_config_dict)
     with pytest.raises(ValueError, match="produced no hyperparameters"):
@@ -1269,11 +1268,11 @@ def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_d
         )
 
 
-# Путь к модулю где реально живут _run_hpo и _fit_and_save
+# The module path where _run_hpo and _fit_and_save actually live
 _MODULE = "configurable_automl_engine.training_engine.component"
 
 
-# ── Фикстуры ────────────────────────────────────────────────────────────────
+# ── Fixtures ────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -1285,7 +1284,7 @@ def minimal_df():
 
 @pytest.fixture
 def config_single_algo(tmp_path):
-    """Конфиг с одним включённым алгоритмом — для изоляции тестируемых веток."""
+    """A config with a single enabled algorithm — to isolate the branches under test."""
     model_path = tmp_path / "model.pkl"
     cfg_text = textwrap.dedent(f"""
         general:
@@ -1330,7 +1329,7 @@ def config_single_algo(tmp_path):
 
 @pytest.fixture
 def config_two_algos(tmp_path):
-    """Конфиг с двумя включёнными алгоритмами — для теста частичного None."""
+    """A config with two enabled algorithms — for the partial-None test."""
     model_path = tmp_path / "model.pkl"
     cfg_text = textwrap.dedent(f"""
         general:
@@ -1376,15 +1375,15 @@ def config_two_algos(tmp_path):
     return cfg_file
 
 
-# ── Тест 1: _run_hpo → None, цепочка None-веток → RuntimeError ──────────────
+# ── Test 1: _run_hpo → None, the chain of None branches → RuntimeError ──────
 
 
 class TestExecuteHpoPhaseReturnsNone:
     """
-    Цепочка: _run_hpo() → None
-                └─► _execute_hpo_phase: if result is None: return None  ← покрываем
-                        └─► _worker: if result is None: return None      ← покрываем
-                                └─► valid_results пуст → RuntimeError
+    Chain: _run_hpo() → None
+                └─► _execute_hpo_phase: if result is None: return None  ← covered
+                        └─► _worker: if result is None: return None      ← covered
+                                └─► valid_results empty → RuntimeError
     """
 
     @patch(f"{_MODULE}._run_hpo", return_value=None)
@@ -1416,13 +1415,13 @@ class TestExecuteHpoPhaseReturnsNone:
         assert mock_hpo.call_args.kwargs["algo_name"] == "random_forest"
 
 
-# ── Тест 2: Два алгоритма — один None, второй валидный ──────────────────────
+# ── Test 2: Two algorithms — one None, the second valid ────────────────────
 
 
 class TestPartialNoneResults:
     """
-    random_forest → None  (триггерит обе None-ветки),
-    extra_trees   → валидный результат → побеждает.
+    random_forest → None  (triggers both None branches),
+    extra_trees   → a valid result → wins.
     """
 
     @patch(f"{_MODULE}._fit_and_save")
@@ -1433,8 +1432,8 @@ class TestPartialNoneResults:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return None
-            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
-            # пользователю возвращается положительный RMSE (issue #26)
+            # comparison_metric='rmse': the "raw" scorer value is -RMSE,
+            # the user is returned a positive RMSE
             return (-0.42, {"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
@@ -1468,13 +1467,13 @@ class TestPartialNoneResults:
         assert result["algorithm"] != "random_forest"
 
 
-# ── Тест 3: «Худший скор» HPO_WORST_SCORE исключается (issue #13) ────────────
+# ─── Test 3: The "worst score" HPO_WORST_SCORE is excluded ───────────
 
 
 class TestWorstScoreResultsExcluded:
     """
-    Алгоритмы, вернувшие «худший скор» HPO_WORST_SCORE (-3.4028235e38),
-    считаются провалившимися: результат отбрасывается фильтром valid_results.
+    Algorithms that returned the "worst score" HPO_WORST_SCORE (-3.4028235e38)
+    are treated as failed: the result is discarded by the valid_results filter.
     """
 
     @patch(f"{_MODULE}._fit_and_save")
@@ -1482,14 +1481,14 @@ class TestWorstScoreResultsExcluded:
     def test_all_worst_scores_raise_runtime_error(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
-        """Все алгоритмы вернули HPO_WORST_SCORE → чистая RuntimeError."""
+        """All algorithms returned HPO_WORST_SCORE → a clean RuntimeError."""
         mock_hpo.side_effect = lambda **kwargs: (HPO_WORST_SCORE, {"n_estimators": 10})
 
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=config_two_algos, df=minimal_df, target="target")
 
-        # До финального обучения дело не доходит: TypeError 'NoneType' object
-        # is not iterable больше не возникает.
+        # The final training is never reached: the TypeError 'NoneType' object
+        # is not iterable no longer occurs.
         mock_save.assert_not_called()
 
     @patch(f"{_MODULE}._fit_and_save")
@@ -1497,12 +1496,12 @@ class TestWorstScoreResultsExcluded:
     def test_worst_score_algorithm_excluded_when_mixed(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
-        """Один алгоритм с HPO_WORST_SCORE, второй валидный → побеждает второй."""
+        """One algorithm with HPO_WORST_SCORE, the second valid → the second wins."""
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return HPO_WORST_SCORE, {"n_estimators": 10}
-            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
-            # пользователю возвращается положительный RMSE (issue #26)
+            # comparison_metric='rmse': the "raw" scorer value is -RMSE,
+            # the user is returned a positive RMSE
             return -0.42, {"n_estimators": 10}
 
         mock_hpo.side_effect = hpo_side_effect
@@ -1521,13 +1520,13 @@ class TestWorstScoreResultsExcluded:
     def test_raw_float32_min_excluded_when_mixed(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
-        """P3/B4 (issue #32): «сырой» float32 min отбрасывается фильтром.
+        """The "raw" float32 min is discarded by the filter.
 
-        Ключевой пробел старого фильтра: ``math.isclose(f32min,
-        HPO_WORST_SCORE, rel_tol=1e-9)`` возвращает False (относительная
-        разница ≈ 9.88e-9 > 1e-9), поэтому raw ``float(np.finfo(np.float32).min)``
-        проходил и мог «победить» со скором ~-3.4e38. Усиленный фильтр
-        (``score <= WORST_SCORE_THRESHOLD``) обязан его отбросить.
+        The key gap of the old filter: ``math.isclose(f32min,
+        HPO_WORST_SCORE, rel_tol=1e-9)`` returns False (the relative
+        difference is ≈ 9.88e-9 > 1e-9), so the raw ``float(np.finfo(np.float32).min)``
+        passed through and could "win" with a score of ~-3.4e38. The strengthened filter
+        (``score <= WORST_SCORE_THRESHOLD``) must discard it.
         """
         raw_f32_min = float(np.finfo(np.float32).min)
 
@@ -1552,12 +1551,12 @@ class TestWorstScoreResultsExcluded:
     def test_defensive_filter_drops_none_nan_inf(
         self, mock_hpo, mock_save, minimal_df, config_single_algo
     ):
-        """Защитный фильтр valid_results: None/NaN/-inf/params=None отбрасываются.
+        """The defensive valid_results filter: None/NaN/-inf/params=None are discarded.
 
-        Эти сигналы не должны возникать после фикса в _run_hpo (issue #13),
-        но фильтр страхует оркестратор от кастомных тюнеров и регрессий.
-        Дополнительно (issue #32): numpy-типы (np.float32 nan/inf) и «сырой»
-        float32 minimum отбрасываются — старый isclose-фильтр их пропускал.
+        These signals should not occur after the fix in _run_hpo,
+        but the filter protects the orchestrator from custom tuners and regressions.
+        Additionally: numpy types (np.float32 nan/inf) and the "raw"
+        float32 minimum are discarded — the old isclose filter let them through.
         """
         bad_results = [
             (None, {"n_estimators": 10}),  # score is None
@@ -1565,12 +1564,12 @@ class TestWorstScoreResultsExcluded:
             (float("nan"), {"n_estimators": 10}),  # NaN
             (float("-inf"), {"n_estimators": 10}),  # -inf
             (float("inf"), {"n_estimators": 10}),  # +inf
-            # numpy-cast нефинитные значения (issue #32)
+            # numpy-cast non-finite values
             (np.float32("nan"), {"n_estimators": 10}),
             (np.float32("inf"), {"n_estimators": 10}),
             (np.float32("-inf"), {"n_estimators": 10}),
-            # класс worst-score сентинела (issue #32): точная константа и
-            # «сырой» float32 minimum (и его numpy-представление)
+            # worst-score sentinel class: the exact constant and the
+            # "raw" float32 minimum (and its numpy representation)
             (HPO_WORST_SCORE, {"n_estimators": 10}),
             (float(np.finfo(np.float32).min), {"n_estimators": 10}),
             (np.float32(np.finfo(np.float32).min), {"n_estimators": 10}),
@@ -1583,7 +1582,7 @@ class TestWorstScoreResultsExcluded:
                 train_best_model(
                     config=config_single_algo, df=minimal_df, target="target"
                 )
-        # Ни одна итерация не должна дойти до финального обучения.
+        # No iteration should reach the final training.
         mock_save.assert_not_called()
 
     @patch(f"{_MODULE}._fit_and_save")
@@ -1591,18 +1590,18 @@ class TestWorstScoreResultsExcluded:
     def test_garbage_custom_tuner_results_excluded_without_crash(
         self, mock_hpo, mock_save, minimal_df, config_single_algo
     ):
-        """N7 (issue #32): мусор от кастомного тюнера не роняет весь запуск.
+        """Garbage from a custom tuner does not crash the whole run.
 
-        Неконвертируемая строка падает ещё в to_user_value (фаза логирования)
-        и исключается воркером; числовая строка и прочие «мусорные» типы
-        отсекаются фильтром valid_results (is_valid_winner_score). Итог в
-        обоих случаях — каноническая RuntimeError об отсутствии валидных
-        скоров, а не исключение уровня запуска.
+        A non-convertible string fails already in to_user_value (logging phase)
+        and is excluded by the worker; a numeric string and other "garbage" types
+        are cut off by the valid_results filter (is_valid_winner_score). In both
+        cases the outcome is a canonical RuntimeError about the absence of valid
+        scores, not a run-level exception.
         """
         garbage_results = [
-            "not-a-number",  # строка: ValueError в to_user_value → исключён
-            ("0.5", {"n_estimators": 10}),  # числовая строка → исключена фильтром
-            (0.5, "params-garbage"),  # params не dict/None — исключён фильтром
+            "not-a-number",  # string: ValueError in to_user_value → excluded
+            ("0.5", {"n_estimators": 10}),  # numeric string → excluded by the filter
+            (0.5, "params-garbage"),  # params not dict/None — excluded by the filter
         ]
         for garbage in garbage_results:
             mock_hpo.side_effect = lambda g=garbage, **kwargs: g
@@ -1619,12 +1618,12 @@ class TestWorstScoreResultsExcluded:
     def test_parallel_worker_failure_does_not_corrupt_others(
         self, mock_hpo, mock_save, minimal_df
     ):
-        """Параллельный режим: провал одного воркера не коррумпирует результаты.
+        """Parallel mode: a failure of one worker does not corrupt the results.
 
-        Один алгоритм возвращает None (все триалы pruned), второй — валидный
-        скор. run_parallel подменяет исключения воркеров на None, а фильтр
-        valid_results отбрасывает None-результаты: победителем остаётся
-        валидный алгоритм, запуск не падает (issue #32).
+        One algorithm returns None (all trials pruned), the second — a valid
+        score. run_parallel replaces worker exceptions with None, and the
+        valid_results filter discards the None results: the valid algorithm
+        remains the winner and the run does not fail.
         """
         config_dict = {
             "general": {
@@ -1662,7 +1661,7 @@ class TestWorstScoreResultsExcluded:
 
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
-                return None  # полный провал HPO (все триалы отсечены)
+                return None  # complete HPO failure (all trials cut off)
             return -0.8, {"alpha": 0.5}  # MAE 0.8
 
         mock_hpo.side_effect = hpo_side_effect
@@ -1675,7 +1674,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     def _processes_config(self, model_path: str) -> dict:
-        """Конфиг с ``parallel_mode: processes`` и двумя включёнными алгоритмами."""
+        """Config with ``parallel_mode: processes`` and two enabled algorithms."""
         return {
             "general": {
                 "comparison_metric": "mae",
@@ -1711,7 +1710,7 @@ class TestWorstScoreResultsExcluded:
         }
 
     def _processes_fake_load(self, rf_tuner, en_tuner):
-        """Подмена _load_module для processes-режима (реальный _run_hpo)."""
+        """Replacement of _load_module for the processes mode (real _run_hpo)."""
 
         def fake_load(path: str):
             if path == "mock.tuner_rf":
@@ -1726,12 +1725,12 @@ class TestWorstScoreResultsExcluded:
     def test_processes_parallel_mode_produces_valid_winner(
         self, mock_save, minimal_df, tmp_path
     ):
-        """processes-режим: воркер сериализуется и пайплайн отрабатывает (issue #100).
+        """Processes mode: the worker is serialized and the pipeline works.
 
-        Раньше ``_worker`` был замыканием внутри ``execute_phases`` и не
-        сериализовался: каждая задача падала с "Can't get local object",
-        результат — [None, None] и RuntimeError. Теперь воркер — функция
-        уровня модуля, и processes-режим даёт валидного победителя.
+        Previously ``_worker`` was a closure inside ``execute_phases`` and could
+        not be serialized: every task failed with "Can't get local object",
+        the result was [None, None] and a RuntimeError. Now the worker is a
+        module-level function, and the processes mode yields a valid winner.
         """
         config_dict = self._processes_config(str(tmp_path / "model.pkl"))
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
@@ -1755,11 +1754,12 @@ class TestWorstScoreResultsExcluded:
     def test_processes_parallel_disqualification_propagates(
         self, mock_save, minimal_df, tmp_path
     ):
-        """processes-режим: дисквалификация из воркера доходит до ctx (issue #100).
+        """Processes mode: a worker disqualification reaches the ctx.
 
-        Раньше запись в ``ctx.disqualified_algorithms`` делалась внутри
-        воркера и в отдельном процессе потерялась бы. Теперь дисквалификация
-        возвращается в результате воркера и применяется в главном процессе.
+        Previously the write to ``ctx.disqualified_algorithms`` happened inside
+        the worker and would be lost in a separate process. Now the
+        disqualification is returned in the worker result and applied in the
+        main process.
         """
         config_dict = self._processes_config(str(tmp_path / "model.pkl"))
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
@@ -1791,19 +1791,19 @@ class TestWorstScoreResultsExcluded:
     def test_processes_parallel_worker_failure_does_not_corrupt_others(
         self, mock_hpo, mock_save, minimal_df
     ):
-        """processes-режим: провал одного воркера не коррумпирует результаты.
+        """Processes mode: a failure of one worker does not corrupt the results.
 
-        Аналог threads-теста (issue #32): один алгоритм возвращает None,
-        второй — валидный скор. run_parallel подменяет исключения воркеров
-        на None, а фильтр valid_results отбрасывает None-результаты:
-        победителем остаётся валидный алгоритм.
+        The analogue of the threads test: one algorithm returns None,
+        the second — a valid score. run_parallel replaces worker exceptions
+        with None, and the valid_results filter drops None results: the valid
+        algorithm remains the winner.
         """
         config_dict = self._processes_config("model.pkl")
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
-                return None  # полный провал HPO (все триалы отсечены)
+                return None  # complete HPO failure (all trials pruned)
             return -0.8, {"alpha": 0.5}  # MAE 0.8
 
         mock_hpo.side_effect = hpo_side_effect
@@ -1816,12 +1816,12 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     def test_hpo_phase_worker_is_picklable(self, minimal_df):
-        """Воркер HPO — функция уровня модуля и сериализуется (issue #100).
+        """The HPO worker is a module-level function and is serializable.
 
-        Замыкание внутри ``execute_phases`` нельзя сериализовать
-        (ProcessPoolExecutor падает с "Can't get local object"): это и была
-        причина поломки ``parallel_mode: processes``. Функция уровня модуля
-        обязана сериализоваться наравне со своим ``_HpoPhaseSpec``.
+        A closure inside ``execute_phases`` cannot be serialized
+        (ProcessPoolExecutor fails with "Can't get local object"): that was
+        the reason the ``parallel_mode: processes`` was broken. A module-level
+        function must be serializable together with its ``_HpoPhaseSpec``.
         """
         import pickle
 
@@ -1882,10 +1882,10 @@ class TestWorstScoreResultsExcluded:
             feature_selection_cfg=None,
         )
 
-        # Сама функция воркера (pickle идёт по имени модуля + qualname).
+        # The worker function itself (pickle goes by module name + qualname).
         restored = pickle.loads(pickle.dumps(_hpo_phase_worker))
         assert restored is _hpo_phase_worker
-        # Снимок параметров фазы (тянется за функцией в процессах-пуле).
+        # The phase parameter snapshot (follows the function in the process pool).
         restored_spec = pickle.loads(pickle.dumps(spec))
         assert restored_spec.phase.name == phase.name
         assert restored_spec.metric_sklearn == prepared.metric_sklearn
@@ -1895,11 +1895,11 @@ class TestWorstScoreResultsExcluded:
     def test_duplicate_scores_first_config_order_wins(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
-        """B6 (issue #32): равные скоры → детерминированный победитель.
+        """Equal scores → a deterministic winner.
 
-        Ничья разрешается порядком конфигурации: random_forest идёт раньше
-        extra_trees в реестре AVAILABLE_ALGORITHMS, поэтому при равных скорах
-        победителем объявляется random_forest (max стабилен).
+        A tie is resolved by the config order: random_forest comes before
+        extra_trees in the AVAILABLE_ALGORITHMS registry, so on equal scores
+        random_forest is declared the winner (max is stable).
         """
         mock_hpo.side_effect = lambda **kwargs: (-0.5, {"n_estimators": 10})
         mock_save.return_value = None
@@ -1915,10 +1915,10 @@ class TestWorstScoreResultsExcluded:
     @pytest.mark.parametrize(
         "raw_score",
         [
-            -0.9,  # обычный валидный скор
-            -3.4e38,  # очень маленький, но валидный скор (выше float32 min)
-            0.0,  # нулевой скор
-            1.0,  # положительный
+            -0.9,  # an ordinary valid score
+            -3.4e38,  # very small, but valid (above float32 min)
+            0.0,  # zero score
+            1.0,  # positive
         ],
     )
     @patch(f"{_MODULE}._fit_and_save")
@@ -1926,11 +1926,11 @@ class TestWorstScoreResultsExcluded:
     def test_reported_winner_score_is_finite_and_above_sentinel(
         self, mock_hpo, mock_save, raw_score, minimal_df, config_single_algo
     ):
-        """B7 (issue #32): инвариант отчёта — result["score"] конечен и > сентинела.
+        """Report invariant — result["score"] is finite and > sentinel.
 
-        Для любой комбинации валидных скоров (включая граничные) значение,
-        попавшее в result["score"], обязано быть конечным и строго выше
-        HPO_WORST_SCORE; сентинел/NaN/±inf физически не может протечь.
+        For any combination of valid scores (including boundary ones), the value
+        that ends up in result["score"] must be finite and strictly above
+        HPO_WORST_SCORE; a sentinel/NaN/±inf cannot physically leak through.
         """
         mock_hpo.side_effect = lambda **kwargs: (raw_score, {"n_estimators": 10})
         mock_save.return_value = None
@@ -1946,19 +1946,19 @@ class TestWorstScoreResultsExcluded:
 
 
 class TestWorstScoreIntegrationThroughTuner:
-    """Полный путь: реальный _run_hpo + тюнер, вернувший HPO_WORST_SCORE."""
+    """Full path: a real _run_hpo + a tuner that returned HPO_WORST_SCORE."""
 
     @patch(f"{_MODULE}._load_module")
     def test_tuner_worst_score_excluded_end_to_end(
         self, mock_load, minimal_df, config_single_algo
     ):
-        """Тюнер вернул (модель, params, HPO_WORST_SCORE) → алгоритм исключён.
+        """The tuner returned (model, params, HPO_WORST_SCORE) → the algorithm is excluded.
 
-        Интеграционный сценарий (замечание ревью к
-        test_optimize_pruning_nonfinite_score_uses_worst_score): не мокаем
-        _run_hpo, а прогоняем всю цепочку _run_hpo → _execute_hpo_phase →
-        фильтр valid_results → RuntimeError. Финальное обучение не вызывается,
-        TypeError 'NoneType' object is not iterable не возникает.
+        Integration scenario (reviewer's note to
+        test_optimize_pruning_nonfinite_score_uses_worst_score): we do not mock
+        _run_hpo but run the whole chain _run_hpo → _execute_hpo_phase →
+        valid_results filter → RuntimeError. The final training is not called,
+        and the TypeError 'NoneType' object is not iterable does not occur.
         """
 
         class WorstScoreTuner:
@@ -1978,21 +1978,21 @@ class TestWorstScoreIntegrationThroughTuner:
             mock_save.assert_not_called()
 
 
-# ── Тест 4: полный провал refine не коррумпирует результат ──────────────────
+# ── Test 4: a complete refine failure does not corrupt the result ─────────────
 
 
 class TestRefineFailureCleanup:
-    """Refine вычистил всё входное множество → RuntimeError, а не откат."""
+    """When refine wiped out the whole input set → RuntimeError, not a fallback."""
 
     @patch(f"{_MODULE}._run_hpo")
     def test_refine_total_failure_raises_runtime_error(
         self, mock_hpo, minimal_df
     ):
-        """Phase 1 успешна; Phase 2 (refine) вычистила всё множество.
+        """Phase 1 succeeds; Phase 2 (refine) wiped out the whole set.
 
-        Refine (эпик #74, R3) не имеет фолбэка на до-refine параметры: он
-        скрыл бы регрессию. Фаза завершается чистой RuntimeError со списком
-        упавших алгоритмов.
+        Refine has no fallback to pre-refine parameters: it
+        would hide a regression. The phase ends with a clean RuntimeError that
+        lists the failed algorithms.
         """
         config_dict = {
             "general": {
@@ -2021,10 +2021,10 @@ class TestRefineFailureCleanup:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                # Phase 1: валидный результат
+                # Phase 1: a valid result
                 return 0.8, {"alpha": 0.5}
-            # Phase 2 (refine): полный провал — тюнер вернул
-            # «худший скор» с параметрами (все триалы с нефинитной метрикой)
+            # Phase 2 (refine): a complete failure — the tuner returned
+            # the "worst score" with parameters (all trials with a non-finite metric)
             return HPO_WORST_SCORE, {"alpha": 0.9}
 
         mock_hpo.side_effect = hpo_side_effect
@@ -2036,26 +2036,27 @@ class TestRefineFailureCleanup:
             execute_phases(cfg, prepared)
 
 
-# ── Тест 5: многофазные регрессии S1–S4 (issue #13) ─────────────────────────
+# ─────────────────────── Test 5: multi-phase regressions ──────────────────────
 
 
 class TestMultiPhaseFailureExclusion:
-    """Провал алгоритма в поздней фазе не «воскрешает» его запись из прошлой.
+    """A failure of an algorithm in a later phase does not "resurrect" its past record.
 
-    Регрессии из повторного ревью: phase_results пересобирается по итогам
-    только текущей фазы, поэтому «протухшие» записи прошлых фаз не выживают.
-    Тесты переведены на execute_phases: терминальный select ещё не исполним
-    (R2), полный поток train_best_model проверяется задачами R2/R4.
+    Regressions from the second review: phase_results is rebuilt from the
+    results of the current phase only, so "stale" records from past phases
+    do not survive. The tests were moved to execute_phases: the terminal
+    select is not yet executable, so the full train_best_model flow is
+    checked end-to-end.
     """
 
     @patch(f"{_MODULE}._run_hpo")
     def test_s1_two_all_algorithms_phases_failed_in_phase2_excluded(
         self, mock_hpo, minimal_df
     ):
-        """S1: две фазы all_algorithms; rf валиден в фазе 1, в фазе 2 — None.
+        """Two all_algorithms phases; rf is valid in phase 1 and None in phase 2.
 
-        rf не побеждает со «протухшими» параметрами фазы 1: он исключён,
-        а рабочий множество определяется результатами фазы 2.
+        rf does not win with the "stale" Phase 1 parameters: it is excluded,
+        and the working set is determined by the Phase 2 results.
         """
         config_dict = {
             "general": {
@@ -2091,8 +2092,8 @@ class TestMultiPhaseFailureExclusion:
                 if calls[algo] == 1:
                     # MAE = 0.9 (raw = -0.9)
                     return -0.9, {"n_estimators": 50}
-                return None  # полный провал во 2-й фазе
-            # elasticnet — валиден в обеих фазах: MAE 0.7 → 0.8 (raw: -0.7 → -0.8)
+                return None  # complete failure in the 2nd phase
+            # elasticnet — valid in both phases: MAE 0.7 → 0.8 (raw: -0.7 → -0.8)
             if calls[algo] == 1:
                 return -0.7, {"alpha": 0.5}
             return -0.8, {"alpha": 0.7}
@@ -2112,10 +2113,10 @@ class TestMultiPhaseFailureExclusion:
     def test_s2_refine_none_failure_raises_runtime_error(
         self, mock_hpo, minimal_df
     ):
-        """S2/S4: единственный кандидат падает через None в refine → RuntimeError.
+        """A single candidate falls through None in refine → RuntimeError.
 
-        Refine не имеет фолбэка на до-refine результаты: молчаливый откат к
-        результату фазы 1 скрыл бы регрессию (эпик #74).
+        Refine has no fallback to the pre-refine results: a silent rollback to
+        the Phase 1 result would hide a regression.
         """
         config_dict = {
             "general": {
@@ -2144,7 +2145,7 @@ class TestMultiPhaseFailureExclusion:
             call_count += 1
             if call_count == 1:
                 return 0.9, {"alpha": 0.5}
-            return None  # канонический сигнал отказа (все триалы отсечены)
+            return None  # canonical failure signal (all trials cut off)
 
         mock_hpo.side_effect = hpo_side_effect
 
@@ -2158,11 +2159,11 @@ class TestMultiPhaseFailureExclusion:
     def test_s3_refine_failed_candidate_does_not_resurrect(
         self, mock_hpo, minimal_df
     ):
-        """S3: кандидат, провалившийся в refine, исключён; остальные живут.
+        """A candidate that failed in refine is excluded; the others survive.
 
-        В refine нет сужения — участвуют все кандидаты входного множества,
-        но провал отдельного алгоритма (None) не роняет остальных и не
-        «воскрешает» его запись из прошлой фазы.
+        Refine does not narrow — all candidates of the input set participate,
+        but the failure of one algorithm (None) does not crash the others and
+        does not "resurrect" its record from a past phase.
         """
         config_dict = {
             "general": {
@@ -2197,8 +2198,8 @@ class TestMultiPhaseFailureExclusion:
             if algo == "random_forest":
                 if calls[algo] == 1:
                     return 0.9, {"n_estimators": 50}
-                return None  # провал в refine — кандидат исключается
-            # elasticnet: MAE 0.8 → 0.5 (warm-start улучшил скор)
+                return None  # failure in refine — the candidate is excluded
+            # elasticnet: MAE 0.8 → 0.5 (warm-start improved the score)
             if calls[algo] == 1:
                 return -0.8, {"alpha": 0.5}
             return -0.5, {"alpha": 0.7}
@@ -2213,23 +2214,23 @@ class TestMultiPhaseFailureExclusion:
 
         assert set(phase_results) == {"elasticnet"}
         assert phase_results["elasticnet"] == (-0.5, {"alpha": 0.7})
-        # Оба кандидата участвовали в refine (сужения нет)
+        # Both candidates participated in refine (there is no narrowing)
         assert calls["random_forest"] == 2
         assert calls["elasticnet"] == 2
 
 
-# ── Тест 6: комбинированная регрессия circuit breaker (issue #12) +           #
-#           пересборка фаз (issue #13)                                         #
+# ── Test 6: combined regression — circuit breaker +                          #
+#           phase reassembly                                                  #
 # --------------------------------------------------------------------------- #
 def test_disqualified_algorithm_not_rerun_in_later_all_algorithms_phase(
     tmp_path: Path, small_dataset
 ):
-    """Дисквалифицированный алгоритм не возвращается в следующие фазы.
+    """A disqualified algorithm is not returned in subsequent phases.
 
-    Комбинированная регрессия (замечание ревью): при пересборке
-    current_candidates для all_algorithms-фазы дисквалифицированные circuit
-    breaker'ом алгоритмы должны исключаться (issue #12) — иначе они повторно
-    тратят вычислительные ресурсы и могут «воскресать» в следующих фазах.
+    Combined regression (reviewer's note): when current_candidates is rebuilt
+    for an all_algorithms phase, algorithms disqualified by the circuit breaker
+    must be excluded — otherwise they repeatedly waste compute
+    resources and may "resurrect" in later phases.
     """
     cfg_text = """
 general:
@@ -2272,28 +2273,28 @@ algorithms:
             cfg_file, small_dataset, model_path_override=tmp_path / "m.pkl"
         )
 
-    # Победил рабочий алгоритм, дисквалифицированный зафиксирован.
+    # The working algorithm won; the disqualified one is recorded.
     assert res["algorithm"] == "random_forest"
     assert Path(res["model_path"]).exists()
     assert res["disqualified_algorithms"] == {
         "ridge": "disqualified after 5 fatal failures"
     }
-    # Ridge НЕ перезапускался во второй all_algorithms-фазе: тюнер вызван ровно
-    # один раз (только в фазе 1, где произошла дисквалификация).
+    # Ridge was NOT re-run in the second all_algorithms phase: the tuner was called
+    # exactly once (only in phase 1, where the disqualification happened).
     assert broken_tuner.optimize.call_count == 1
-    # Рабочий алгоритм отработал в обеих фазах.
+    # The working algorithm ran in both phases.
     assert good_tuner.optimize.call_count == 2
 
 
 # --------------------------------------------------------------------------- #
-#  Adaptive preprocessing preset override propagation (issue #18)
+#  Adaptive preprocessing preset override propagation
 # --------------------------------------------------------------------------- #
 def test_run_hpo_passes_preprocessing_override_to_tuner():
-    """Блок preprocessing из конфига алгоритма передаётся в tuner.optimize (FR-5)."""
+    """The preprocessing block from the algorithm config is passed to tuner.optimize."""
     from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 
     class FakeTuner:
-        """Тюнер с реальной сигнатурой optimize (принимает preprocessing_override)."""
+        """A tuner with a real optimize signature (accepts preprocessing_override)."""
 
         def __init__(self) -> None:
             self.received: dict = {}
@@ -2337,7 +2338,7 @@ def test_run_hpo_passes_preprocessing_override_to_tuner():
 
 
 def test_run_hpo_no_override_when_absent():
-    """Без блока preprocessing тюнеру передаётся None."""
+    """Without a preprocessing block the tuner receives None."""
     mock_tuner = MagicMock()
     mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
 
@@ -2359,10 +2360,10 @@ def test_run_hpo_no_override_when_absent():
 
 
 def test_train_best_model_applies_preprocessing_override(tmp_path, regression_dataset):
-    """AC-7 end-to-end: переопределение пресета из конфига применяется в финальной модели.
+    """End-to-end: a preset override from the config is applied to the final model.
 
-    Для random_forest автовыбор класса деревьев — 'none'/'median'; явное
-    переопределение ('standard'/'mean') должно победить.
+    For random_forest the automatic choice of the tree class is 'none'/'median';
+    an explicit override ('standard'/'mean') must win.
     """
     from sklearn.preprocessing import StandardScaler
 
@@ -2415,12 +2416,12 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
 
 
 # --------------------------------------------------------------------------- #
-#  Feature selection integration (issue #11)
+#  Feature selection integration
 # --------------------------------------------------------------------------- #
 
 
 def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
-    """feature_selection_cfg из корневого Config пробрасывается в tuner.optimize."""
+    """feature_selection_cfg from the root Config is forwarded to tuner.optimize."""
     received: dict[str, object] = {}
 
     class FsAwareTuner:
@@ -2459,7 +2460,7 @@ def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
 
 
 def test_run_hpo_skips_feature_selection_cfg_for_legacy_tuner():
-    """Кастомный тюнер без аргумента feature_selection_cfg не затрагивается."""
+    """A custom tuner without the feature_selection_cfg argument is unaffected."""
     calls: dict[str, object] = {}
 
     class LegacyTuner:
@@ -2488,7 +2489,7 @@ def test_run_hpo_skips_feature_selection_cfg_for_legacy_tuner():
 
 
 def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
-    """A1: legacy-тюнер + активный режим отбора -> warning о рассинхроне."""
+    """A legacy tuner + an active selection mode → a warning about the mismatch."""
     calls: dict[str, object] = {}
 
     class LegacyTuner:
@@ -2513,7 +2514,7 @@ def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
                 ),
             )
 
-    # Тюнер не затрагивается, но пользователь предупреждён
+    # The tuner is untouched, but the user is warned
     assert result == (0.5, {})
     assert calls["fs_passed"] is False
     assert "does not accept `feature_selection_cfg`" in caplog.text
@@ -2521,7 +2522,7 @@ def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
 
 
 def test_run_hpo_no_warning_when_fs_disabled_for_legacy_tuner(caplog):
-    """A1: режим 'disabled' (или None) для legacy-тюнера — warning не нужен."""
+    """The 'disabled' mode (or None) for a legacy tuner — no warning needed."""
     class LegacyTuner:
         def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
             return ("model", {}, 0.5)
@@ -2538,20 +2539,20 @@ def test_run_hpo_no_warning_when_fs_disabled_for_legacy_tuner(caplog):
                 metric_name_sklearn="mae",
                 n_trials=1,
                 validation_strategy=ValidationStrategy.k_fold,
-                feature_selection_cfg=FeatureSelectionCfg(),  # disabled по умолчанию
+                feature_selection_cfg=FeatureSelectionCfg(),  # disabled by default
             )
 
     assert "does not accept `feature_selection_cfg`" not in caplog.text
 
 
 def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
-    """A1: тюнер с **kwargs считается совместимым (симметрия с _fit_and_save).
+    """A tuner with **kwargs is considered compatible (symmetric with _fit_and_save).
 
-    Раньше ``_run_hpo`` проверял только наличие имени ``feature_selection_cfg``
-    в сигнатуре, поэтому тюнер с ``**kwargs`` получал вводящий в заблуждение
-    warning о рассинхроне, хотя конфигурацию можно было безопасно прокинуть —
-    при активном режиме отбора это приводило к молчаливому рассинхрону
-    HPO ↔ финальный fit.
+    Previously ``_run_hpo`` only checked for the presence of the name
+    ``feature_selection_cfg`` in the signature, so a ``**kwargs`` tuner received
+    a misleading mismatch warning even though the config could be safely
+    forwarded — with an active selection mode this led to a silent mismatch
+    between HPO and the final fit.
     """
     received: dict[str, object] = {}
 
@@ -2581,13 +2582,13 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
 
     assert score == 0.95
     assert params == {"param": 1}
-    # Конфигурация доставлена через **kwargs, warning о рассинхроне отсутствует
+    # The config was delivered through **kwargs, no mismatch warning present
     assert received["feature_selection_cfg"] is fs_cfg
     assert "does not accept `feature_selection_cfg`" not in caplog.text
 
 
 def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
-    """A1: тюнер с **kwargs получает конфигурацию и в режиме 'disabled'."""
+    """A tuner with **kwargs receives the config even in the 'disabled' mode."""
     received: dict[str, object] = {}
 
     class VarKwargsTuner:
@@ -2608,7 +2609,7 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
             metric_name_sklearn="mae",
             n_trials=1,
             validation_strategy=ValidationStrategy.k_fold,
-            feature_selection_cfg=FeatureSelectionCfg(),  # disabled по умолчанию
+            feature_selection_cfg=FeatureSelectionCfg(),  # disabled by default
         )
 
     assert result == (0.5, {})
@@ -2617,7 +2618,7 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
 
 
 def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
-    """_fit_and_save передаёт feature_selection_cfg и feature_selection_active."""
+    """_fit_and_save passes feature_selection_cfg and feature_selection_active."""
     mock_trainer_cls = Mock()
     mock_trainer_instance = mock_trainer_cls.return_value
     mock_trainer_instance.additional_scores = {}
@@ -2683,16 +2684,16 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
     assert call_kwargs["feature_selection_active"] is True
     assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
     assert isinstance(call_kwargs["feature_selection_cfg"], FeatureSelectionCfg)
-    # B5: служебный ключ вычищен из гиперпараметров тренера
+    # The helper key is cleaned out of the trainer hyperparameters
     assert "use_feature_selection" not in call_kwargs["hyperparams"]
-    # Исходный best_params (возвращается в result["params"]) не мутирован
+    # The original best_params (returned in result["params"]) is not mutated
     assert "use_feature_selection" in best_params
     mock_trainer_instance.fit.assert_called_once()
     mock_trainer_instance.save.assert_called_once()
 
 
 def test_fit_and_save_fs_active_none_when_key_absent():
-    """Без ключа use_feature_selection тренеру передаётся None (решение по конфигу)."""
+    """Without the use_feature_selection key the trainer receives None (decision by config)."""
     mock_trainer_cls = Mock()
     mock_trainer_instance = mock_trainer_cls.return_value
     mock_trainer_instance.additional_scores = {}
@@ -2755,12 +2756,11 @@ def test_fit_and_save_fs_active_none_when_key_absent():
 
 
 def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
-    """B5: путь «auto → победитель выбрал False» в финальной сборке модели.
+    """The "auto → the winner chose False" path in the final model build.
 
-    Если Optuna зафиксировала use_feature_selection=False в best_params
-    победителя, ``_fit_and_save`` обязан передать тренеру
-    feature_selection_active=False (а не None/True) и вычистить служебный
-    ключ из гиперпараметров.
+    If Optuna recorded use_feature_selection=False in the winner's best_params,
+    ``_fit_and_save`` must pass feature_selection_active=False (not None/True)
+    to the trainer and clean the helper key out of the hyperparameters.
     """
     mock_trainer_cls = Mock()
     mock_trainer_instance = mock_trainer_cls.return_value
@@ -2796,19 +2796,19 @@ def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
     call_kwargs = mock_trainer_cls.call_args.kwargs
     assert call_kwargs["feature_selection_active"] is False
     assert call_kwargs["feature_selection_cfg"] is cfg.general.feature_selection
-    # Служебный ключ вычищен из гиперпараметров тренера
+    # The helper key is cleaned out of the trainer hyperparameters
     assert "use_feature_selection" not in call_kwargs["hyperparams"]
-    # Исходный best_params (возвращается в result["params"]) не мутирован
+    # The original best_params (returned in result["params"]) is not mutated
     assert best_params["use_feature_selection"] is False
 
 
 class _LegacyTrainerNoFs:
-    """Кастомный ModelTrainer БЕЗ аргументов отбора признаков (A2).
+    """A custom ModelTrainer WITHOUT feature-selection arguments.
 
-    Сигнатура покрывает все «старые» аргументы, которые передаёт
-    ``_fit_and_save``, но не содержит ``feature_selection_cfg`` /
-    ``feature_selection_active`` и не принимает ``**kwargs`` — раньше такой
-    тренер падал бы с TypeError.
+    The signature covers all the "old" arguments that ``_fit_and_save``
+    passes, but does not contain ``feature_selection_cfg`` /
+    ``feature_selection_active`` and does not accept ``**kwargs`` — previously
+    such a trainer would fail with a TypeError.
     """
 
     def __init__(
@@ -2840,7 +2840,7 @@ class _LegacyTrainerNoFs:
 
 
 def _fs_cfg_dict(mode: str) -> dict:
-    """Валидный конфиг Config с указанным режимом отбора признаков."""
+    """A valid Config dictionary with the given feature-selection mode."""
     return {
         "general": {
             "comparison_metric": "mae",
@@ -2870,7 +2870,7 @@ def _fs_cfg_dict(mode: str) -> dict:
 
 
 def test_feature_selection_mode_helper():
-    """_feature_selection_mode: FeatureSelectionCfg/dict/None -> строка режима."""
+    """_feature_selection_mode: FeatureSelectionCfg/dict/None → a mode string."""
     from configurable_automl_engine.training_engine.component import (
         _feature_selection_mode,
     )
@@ -2885,11 +2885,11 @@ def test_feature_selection_mode_helper():
 
 
 def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
-    """A2: legacy ModelTrainer без fs-аргументов не получает их (warning).
+    """A legacy ModelTrainer without the fs arguments does not receive them (warning).
 
-    Раньше ``_fit_and_save`` передавал ``feature_selection_cfg`` /
-    ``feature_selection_active`` безусловно -> TypeError для кастомных
-    тренеров без этих аргументов.
+    Previously ``_fit_and_save`` passed ``feature_selection_cfg`` /
+    ``feature_selection_active`` unconditionally → TypeError for custom
+    trainers without these arguments.
     """
     algo_cfg = AlgoCfg(
         enable=True,
@@ -2914,10 +2914,10 @@ def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
                 cfg=cfg,
             )
 
-    # Обучение/сохранение прошли без TypeError, служебный ключ вычищен
+    # Training/saving passed without a TypeError, the helper key is cleaned out
     assert isinstance(trainer, _LegacyTrainerNoFs)
     assert trainer.hyperparams == {"n_estimators": 50}
-    # Пользователь предупреждён о молчаливом игнорировании обоих аргументов
+    # The user is warned about the silent ignoring of both arguments
     assert "does not accept `feature_selection_cfg`" in caplog.text
     assert "does not accept `feature_selection_active`" in caplog.text
 
@@ -2925,7 +2925,7 @@ def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
 def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
     caplog, tmp_path
 ):
-    """A2: режим 'disabled' для legacy-тренера — предупреждений нет."""
+    """The 'disabled' mode for a legacy trainer — no warnings."""
     algo_cfg = AlgoCfg(
         enable=True,
         tuner="mock.mock_tuner",
@@ -2954,7 +2954,7 @@ def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
 
 
 def test_refine_preserves_feature_selection_status_between_phases():
-    """Статус отбора (use_feature_selection) из фазы 1 не теряется в refine (R3)."""
+    """The selection status (use_feature_selection) from phase 1 is not lost in refine."""
     config_dict = {
         "general": {
             "comparison_metric": "mae",
@@ -2984,9 +2984,9 @@ def test_refine_preserves_feature_selection_status_between_phases():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # Phase 1: кандидат зафиксировал use_feature_selection=True
+            # Phase 1: the candidate recorded use_feature_selection=True
             return 0.8, {"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True}
-        # Phase 2 (refine): initial_params обязан содержать статус отбора из фазы 1
+        # Phase 2 (refine): initial_params must contain the selection status from phase 1
         assert kwargs.get("initial_params") == {
             "alpha": 0.5,
             "l1_ratio": 0.3,
@@ -3004,19 +3004,19 @@ def test_refine_preserves_feature_selection_status_between_phases():
         ctx = execute_phases(cfg, prepared)
         phase_results = ctx.working_set
 
-    # Выход refine сохранил решение по отбору из предыдущей фазы
+    # The refine output preserved the selection decision from the previous phase
     assert phase_results["elasticnet"][1]["use_feature_selection"] is True
     assert mock_hpo.call_count == 2
 
 
 def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
-    """E2E «тюнер→компонент→тренер» в auto-режиме отбора признаков.
+    """E2E "tuner→component→trainer" in the auto feature-selection mode.
 
-    Реальный tuner.optimize (mode='auto') -> train_best_model -> реальный
-    ModelTrainer: решение Optuna по use_feature_selection доезжает до
-    финальной сборки модели — фактический статус отбора тренера совпадает
-    с best_params победителя, а пайплайн содержит/не содержит шаг
-    feature_selector согласованно.
+    A real tuner.optimize (mode='auto') -> train_best_model -> a real
+    ModelTrainer: Optuna's use_feature_selection decision reaches the
+    final model build — the actual selection status of the trainer matches
+    the winner's best_params, and the pipeline contains/omits the
+    feature_selector step consistently.
     """
     rng = np.random.RandomState(7)
     X_info, y = make_regression(
@@ -3060,13 +3060,13 @@ def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
 
     assert result["algorithm"] == "elasticnet"
     assert isinstance(result["score"], float)
-    # В auto-режиме решение Optuna по отбору сохраняется в best_params
+    # In auto mode Optuna's selection decision is kept in best_params
     assert isinstance(result["params"].get("use_feature_selection"), bool)
     assert model_path.exists()
 
     loaded = ModelTrainer.load(str(model_path))
     assert loaded.pipeline is not None
-    # Решение победителя HPO применено в финальной сборке модели
+    # The HPO winner's decision is applied in the final model build
     assert loaded.feature_selection_active_ is result["params"]["use_feature_selection"]
     if loaded.feature_selection_active_:
         assert "feature_selector" in loaded.pipeline.named_steps
@@ -3075,14 +3075,13 @@ def test_e2e_tuner_component_trainer_auto_mode(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Sanity Gate e2e (эпик #61, задача T7, issue #69; явный select-шаг —
-#  эпик #74, задача R2)
+#  Sanity Gate e2e (explicit select step)
 # --------------------------------------------------------------------------- #
 
-# NOTE (эпик #74, R2): неявный гейт и sanity_gate.mode удалены; отбор
-# выполняется явным select-шагом. Модульный xfail-маркер остаётся для
-# остальных легаси-тестов этого файла (миграция R3/R4), поэтому эти
-# переписанные тесты могут репортиться как XPASS (non-strict).
+# NOTE: the implicit gate and sanity_gate.mode are removed;
+# selection is performed by an explicit select step. The module-level xfail
+# marker remains for the other legacy tests in this file that are still being
+# migrated, so these rewritten tests may be reported as XPASS (non-strict).
 _SANITY_E2E_CFG = """
 general:
   comparison_metric: rmse
@@ -3113,7 +3112,7 @@ algorithms:
       l1_ratio: [0.2, 0.8]
 """
 
-# select после select (эпик #74, R2): sanity-select top_k -> sanity-select winner.
+# select after select: sanity-select top_k -> sanity-select winner.
 _SANITY_E2E_TWO_SELECTS_CFG = """
 general:
   comparison_metric: rmse
@@ -3152,7 +3151,7 @@ algorithms:
 
 
 def _sanity_e2e_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
-    """Синтетический датасет с чётким сигналом (честные линейные модели)."""
+    """A synthetic dataset with a clean signal (honest linear models)."""
     rng = np.random.RandomState(seed)
     df = pd.DataFrame(rng.randn(n, 4))
     df["target"] = 2.0 * df[0] + rng.randn(n) * 0.3
@@ -3160,11 +3159,12 @@ def _sanity_e2e_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
 
 
 def test_e2e_sanity_gate_select_winner_without_degeneracy(tmp_path: Path):
-    """E2E (T7/R2): select(sanity_gate, winner) — победитель проходит аудит.
+    """E2E: select(sanity_gate, winner) — the winner passes the audit.
 
-    Пул финалистов строится, победитель ранжируется по RMSE_oof среди
-    прошедших аудит, и его ``is_valid`` обязан быть True (гейт не пропускает
-    вырожденные модели); секция отчёта ключуется именем фазы.
+    The pool of finalists is built, the winner is ranked by RMSE_oof among
+    those that passed the audit, and its ``is_valid`` must be True (the gate
+    does not let degenerate models through); the report section is keyed by the
+    phase name.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
@@ -3183,22 +3183,22 @@ def test_e2e_sanity_gate_select_winner_without_degeneracy(tmp_path: Path):
     assert Path(res["model_path"]).exists()
     sg = res["sanity_gate"]["GateSelect"]
     assert sg["pool"]
-    # Победитель — из пула финалистов.
+    # The winner comes from the pool of finalists.
     assert res["algorithm"] in sg["pool"]
-    # Победитель прошёл аудит: is_valid=True (победитель без вырождения).
+    # The winner passed the audit: is_valid=True (winner without degeneration).
     winner_audit = sg["audit"][res["algorithm"]]
     assert winner_audit["is_valid"] is True
     assert winner_audit["reasons"] == []
-    # Fallback не потребовался: хотя бы один кандидат валиден.
+    # No fallback was needed: at least one candidate is valid.
     assert sg["fallback_used"] is False
 
 
 def test_e2e_cv_best_select_no_sanity_keys(tmp_path: Path):
-    """E2E (T7/R2): select(cv_best, winner) — старое поведение без gate-секции.
+    """E2E: select(cv_best, winner) — the old behavior without a gate section.
 
-    Никаких ключей отчёта гейта (sanity_gate, disqualified_by_sanity_gate,
-    sanity_gate_warn_only, sanity_gate_overhead_seconds) — обратная
-    совместимость пайплайна.
+    None of the gate report keys (sanity_gate, disqualified_by_sanity_gate,
+    sanity_gate_warn_only, sanity_gate_overhead_seconds) — backward
+    compatibility of the pipeline.
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
@@ -3226,12 +3226,12 @@ def test_e2e_cv_best_select_no_sanity_keys(tmp_path: Path):
 
 
 def test_e2e_two_selects_report_per_phase(tmp_path: Path):
-    """E2E (R2): select после select — секции отчёта по именам фаз.
+    """E2E: select after select — report sections keyed by phase names.
 
-    Первый sanity-select (top_k) сужает рабочее множество, второй
-    sanity-select (winner) переобучает финалистов заново; обе секции
-    присутствуют в отчёте под своими именами, warn_only-ключи удалены.
-    Терминальный cv_best-select не добавляет секций (проверяется в
+    The first sanity-select (top_k) narrows the working set, the second
+    sanity-select (winner) retrains the finalists from scratch; both sections
+    are present in the report under their own names, and the warn_only keys
+    are removed. The terminal cv_best select does not add sections (checked in
     ``test_e2e_cv_best_select_no_sanity_keys``).
     """
     two_selects_cfg = tmp_path / "cfg2.yaml"
@@ -3244,22 +3244,23 @@ def test_e2e_two_selects_report_per_phase(tmp_path: Path):
     )
     assert set(res2["sanity_gate"]) == {"GateSelect", "GateFinal"}
     assert res2["sanity_gate"]["GateSelect"]["strategy"] == "sanity_gate"
-    assert res2["sanity_gate"]["GateFinal"]["pool"]  # финалисты переобучены
+    assert res2["sanity_gate"]["GateFinal"]["pool"]  # finalists retrained
     for key in ("sanity_gate_warn_only", "disqualified_by_sanity_gate"):
         assert key not in res2
 
 
 # --------------------------------------------------------------------------- #
-#  E2E критерии готовности issue #111: warn не дисквалифицирует gap=∞/большой
+#  E2E acceptance criteria: warn does not disqualify gap=∞/large
 # --------------------------------------------------------------------------- #
 
-# Деревья с min_samples_leaf=1 (и GBM с max_depth=10) идеально обучаются на
-# train (RMSE_full ≈ 0): в warn-режиме они не дисквалифицируются и соревнуются
-# по RMSE_oof, в reject-режиме отбраковываются контуром Г (старое поведение).
+# Trees with min_samples_leaf=1 (and GBM with max_depth=10) fit the train set
+# perfectly (RMSE_full ≈ 0): in the warn mode they are not disqualified and
+# compete by RMSE_oof; in the reject mode they are rejected by circuit D
+# (the old behavior).
 
 
 def _acceptance_cfg(model_path: str, *, gap_mode: str) -> dict[str, Any]:
-    """Дефолтный конфиг с overfit-деревьями и терминальным select: sanity_gate."""
+    """Default config with overfit trees and a terminal sanity_gate select."""
     return {
         "general": {
             "comparison_metric": "rmse",
@@ -3311,11 +3312,11 @@ def _acceptance_cfg(model_path: str, *, gap_mode: str) -> dict[str, Any]:
 def _run_acceptance(
     model_path: Path, df: pd.DataFrame, *, gap_mode: str
 ) -> tuple[dict[str, Any], dict[str, float]]:
-    """train_best_model с записью RMSE_oof каждого обученного финалиста.
+    """train_best_model recording the RMSE_oof of every trained finalist.
 
-    Обёртка вокруг ``_fit_finalist`` фиксирует честный OOF-скор каждого
-    финалиста — по нему проверяется, что победитель является минимумом
-    RMSE_oof среди всех финалистов, а не «лучшим из прошедших гейт».
+    A wrapper around ``_fit_finalist`` captures the honest OOF score of each
+    finalist — by it we check that the winner is the minimum of
+    RMSE_oof among all finalists, not "the best of those who passed the gate".
     """
     oof_scores: dict[str, float] = {}
     real_fit = component._fit_finalist
@@ -3336,12 +3337,13 @@ def _run_acceptance(
 
 
 def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
-    """Критерий готовности (issue #111): warn на make_friedman3.
+    """Acceptance criterion: the warn mode on make_friedman3.
 
-    Дефолтный конфиг с extra_trees / random_forest / gradient_boosting /
-    ridge и терминальным select: sanity_gate. В warn-режиме ни один кандидат
-    не дисквалифицируется из-за gap: победитель — алгоритм с минимальным
-    RMSE_oof среди всех финалистов, а не «лучший из прошедших гейт».
+    Default config with extra_trees / random_forest / gradient_boosting /
+    ridge and a terminal sanity_gate select. In the warn mode no candidate is
+    disqualified because of the gap: the winner is the algorithm with the
+    minimal RMSE_oof among all finalists, not "the best of those who passed
+    the gate".
     """
     X, y = make_friedman3(n_samples=400, noise=0.05, random_state=1)
     df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
@@ -3351,12 +3353,12 @@ def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
     assert sg["generalization_gap_mode"] == "warn"
     assert sg["disqualified"] == {}
     assert sg["fallback_used"] is False
-    # Победитель — минимум RMSE_oof среди финалистов пула.
+    # The winner — the minimum RMSE_oof among the finalists of the pool.
     assert res["algorithm"] == min(sg["pool"], key=lambda n: oof_scores[n])
     assert sg["winner_rmse_oof"] == pytest.approx(
         min(oof_scores[n] for n in sg["pool"]), rel=1e-6
     )
-    # В пуле есть overfit-деревья с Circuit D-предупреждением (gap > 1.5).
+    # The pool contains overfit trees with a Circuit D warning (gap > 1.5).
     assert any(
         any("Circuit D" in w for w in sg["audit"][n]["soft_warnings"])
         for n in sg["pool"]
@@ -3364,10 +3366,10 @@ def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
 
 
 def test_e2e_warn_mode_winner_is_min_rmse_oof_diabetes(tmp_path: Path):
-    """Критерий готовности (issue #111): warn на load_diabetes.
+    """Acceptance criterion: the warn mode on load_diabetes.
 
-    Тот же сценарий: победитель — минимум RMSE_oof среди всех финалистов,
-    включая overfit-деревья с нулевой ошибкой на train.
+    The same scenario: the winner is the minimum RMSE_oof among all
+    finalists, including overfit trees with zero train error.
     """
     X, y = load_diabetes(return_X_y=True)
     df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
@@ -3383,12 +3385,12 @@ def test_e2e_warn_mode_winner_is_min_rmse_oof_diabetes(tmp_path: Path):
 
 
 def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
-    """Критерий готовности (issue #111): reject воспроизводит старое поведение.
+    """Acceptance criterion: the reject mode reproduces the old behavior.
 
-    Те же overfit-деревья (RMSE_full ≈ 0 при min_samples_leaf=1) в
-    reject-режиме отбраковываются контуром Г: причины Circuit D в
-    ``disqualified`` и circuit breaker, победитель — прошедший гейт (ridge на
-    load_diabetes), а не «запоминатель».
+    The same overfit trees (RMSE_full ≈ 0 at min_samples_leaf=1) in the
+    reject mode are rejected by circuit D: Circuit D reasons appear in
+    ``disqualified`` and the circuit breaker, and the winner is the one that
+    passed the gate (ridge on load_diabetes), not the "memorizer".
     """
     X, y = load_diabetes(return_X_y=True)
     df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
@@ -3401,9 +3403,9 @@ def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
         any("Circuit D" in r for r in reasons)
         for reasons in sg["disqualified"].values()
     )
-    # Дисквалификации гейта попадают в circuit breaker (эпик #74).
+    # Gate disqualifications enter the circuit breaker.
     assert set(res["disqualified_algorithms"]) == set(sg["disqualified"])
-    # Победитель — прошедший гейт: валиден, без причин.
+    # The winner passed the gate: valid, without reasons.
     winner_audit = sg["audit"][res["algorithm"]]
     assert winner_audit["is_valid"] is True
     assert winner_audit["reasons"] == []

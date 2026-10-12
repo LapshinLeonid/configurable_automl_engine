@@ -1,19 +1,20 @@
 """
-Юнит-тесты формирования пула финалистов Top-K (эпик #61, задача T3, issue #65).
+Unit tests for the Top-K finalists pool construction.
 
-Покрывают функцию ``select_finalists`` из ``training_engine/component.py``:
+They cover ``select_finalists`` from ``training_engine/component.py``:
 
-• коридор δ в пользовательской семантике (направление из ``user_direction``,
-  issue #54): multiplicative для ошибок, additive для score-метрик со знаком;
-• жёсткий кап ``top_k_candidates`` и явная комбинация «коридор ∩ top_k»;
-• опциональный мягкий добор семейств (``enforce_family_diversity``);
-• исключение дисквалифицированных алгоритмов (circuit breaker, issue #12);
-• детерминизм: порядок по «сырому» скору, ничьи — порядок конфигурации.
+• the corridor δ in user semantics (direction from ``user_direction``):
+  multiplicative for errors, additive for signed score metrics;
+• the hard ``top_k_candidates`` cap and the explicit 'corridor ∩ top_k'
+  combination;
+• the optional soft family top-up (``enforce_family_diversity``);
+• exclusion of disqualified algorithms (circuit breaker);
+• determinism: ordering by 'raw' score, ties resolved by configuration order.
 
-Формат ``results`` соответствует контракту ``phase_results``: «алгоритм →
-(сырой скор, параметры)», где сырой скор — значение в семантике оптимизатора
-(для метрик-ошибок — инвертированное, ``to_user_value`` возвращает
-естественное).
+The ``results`` format matches the ``phase_results`` contract: 'algorithm →
+(raw score, parameters)', where the raw score is in optimizer semantics
+(for error metrics it is inverted, and ``to_user_value`` returns the
+natural value).
 """
 
 from __future__ import annotations
@@ -42,13 +43,14 @@ FAMILIES = {
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Positive: пример из постановки и базовые коридоры
+# Positive: example from the specification and basic corridors
 # ──────────────────────────────────────────────────────────────────────────────
 def test_positive_example_from_issue_statement():
-    """ElasticNet (0.081), SVR (0.085), Random Forest (0.089) → пул при δ=0.15.
+    """ElasticNet (0.081), SVR (0.085), Random Forest (0.089) → pool at δ=0.15.
 
-    Метрика rmse (min-better), auto-режим → multiplicative:
-    порог = 0.081 × 1.15 = 0.09315, все три кандидата внутри коридора.
+    The rmse metric (min-better) in auto mode → multiplicative:
+    threshold = 0.081 × 1.15 = 0.09315; all three candidates fit inside
+    the corridor.
     """
     results: R = {
         "elasticnet": (-0.081, {"alpha": 0.1}),
@@ -62,13 +64,13 @@ def test_positive_example_from_issue_statement():
 
 
 def test_min_better_multiplicative_corridor_includes_within_delta():
-    """min-better: кандидаты с ошибкой ≤ best×(1+δ) попадают в пул."""
+    """min-better: candidates with error ≤ best×(1+δ) enter the pool."""
     results: R = {
         "ridge": (-0.05, {}),
         "svr": (-0.055, {}),
         "random_forest": (-0.06, {}),
     }
-    # Порог = 0.05 × 1.2 = 0.06: SVR (0.055) и RF (0.06, ровно граница) внутри.
+    # Threshold = 0.05 × 1.2 = 0.06: SVR (0.055) and RF (0.06, exactly on the boundary) inside.
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.2, top_k_candidates=3
     )
@@ -76,13 +78,13 @@ def test_min_better_multiplicative_corridor_includes_within_delta():
 
 
 def test_max_better_multiplicative_corridor_explicit_mode():
-    """max-better: порог = best×(1−δ); явный multiplicative для r2."""
+    """max-better: threshold = best×(1−δ); explicit multiplicative for r2."""
     results: R = {
         "ridge": (0.90, {}),
         "svr": (0.85, {}),
         "random_forest": (0.80, {}),
     }
-    # Порог = 0.90 × 0.85 = 0.765: 0.85 и 0.80 внутри, 0.70 — вне.
+    # Threshold = 0.90 × 0.85 = 0.765: 0.85 and 0.80 inside, 0.70 outside.
     pool = select_finalists(
         results,
         metric_user="r2",
@@ -94,12 +96,12 @@ def test_max_better_multiplicative_corridor_explicit_mode():
 
 
 def test_auto_mode_selects_multiplicative_for_errors():
-    """auto для ошибки (rmse) → multiplicative: кандидат за порогом вне пула."""
+    """auto for an error metric (rmse) → multiplicative: a candidate beyond the threshold is outside the pool."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "xgboosting": (-0.09, {}),
     }
-    # Порог = 0.081 × 1.05 = 0.08505: 0.09 > порога → xgboosting вне пула.
+    # Threshold = 0.081 × 1.05 = 0.08505: 0.09 > threshold → xgboosting outside the pool.
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.05, corridor_mode="auto"
     )
@@ -107,26 +109,26 @@ def test_auto_mode_selects_multiplicative_for_errors():
 
 
 def test_auto_mode_selects_additive_for_score_metric():
-    """auto для r2 (score-метрика со знаком) → additive, а не multiplicative."""
+    """auto for r2 (a signed score metric) → additive, not multiplicative."""
     results: R = {
         "a": (-0.5, {}),
         "b": (-0.55, {}),
     }
-    # additive: range = 0.05, порог = 0.15×0.05 = 0.0075 → b вне пула.
+    # additive: range = 0.05, threshold = 0.15×0.05 = 0.0075 → b outside the pool.
     pool = select_finalists(results, metric_user="r2", corridor_delta=0.15)
     assert pool == ["a"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Negative: кандидаты вне коридора и слабые семейства
+# Negative: candidates outside the corridor and weak families
 # ──────────────────────────────────────────────────────────────────────────────
 def test_negative_model_outside_corridor_excluded():
-    """Модель с CV-скоро вне коридора не попадает в пул (min-better)."""
+    """A model whose CV score lies outside the corridor does not enter the pool (min-better)."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "svr": (-0.085, {}),
         "random_forest": (-0.089, {}),
-        "xgboosting": (-0.20, {}),  # 0.20 > 0.09315 → вне коридора
+        "xgboosting": (-0.20, {}),  # 0.20 > 0.09315 → outside the corridor
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -135,11 +137,11 @@ def test_negative_model_outside_corridor_excluded():
 
 
 def test_negative_model_outside_corridor_excluded_max_better():
-    """max-better: модель с r2 ниже порога best×(1−δ) не попадает в пул."""
+    """max-better: a model whose r2 is below the best×(1−δ) threshold does not enter the pool."""
     results: R = {
         "ridge": (0.90, {}),
         "svr": (0.85, {}),
-        "random_forest": (0.70, {}),  # 0.70 < 0.765 → вне коридора
+        "random_forest": (0.70, {}),  # 0.70 < 0.765 → outside the corridor
     }
     pool = select_finalists(
         results,
@@ -152,15 +154,15 @@ def test_negative_model_outside_corridor_excluded_max_better():
 
 
 def test_negative_family_diversity_disabled_no_topup():
-    """enforce_family_diversity=false: слабая модель другого семейства не добирается.
+    """enforce_family_diversity=false: a weak model from another family is not topped up.
 
-    В базовом пуле только линейные (одно семейство); слабый SVR другого
-    семейства вне базового коридора не добавляется.
+    The base pool contains only linear models (a single family); the weak
+    SVR from another family, being outside the base corridor, is not added.
     """
     results: R = {
         "elasticnet": (-0.081, {}),
         "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),  # вне базового коридора (0.095 > 0.09315)
+        "svr": (-0.095, {}),  # outside the base corridor (0.095 > 0.09315)
     }
     pool = select_finalists(
         results,
@@ -174,10 +176,10 @@ def test_negative_family_diversity_disabled_no_topup():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Boundary: top_k, отрицательные скоры, один кандидат, дисквалификация
+# Boundary: top_k, negative scores, a single candidate, disqualification
 # ──────────────────────────────────────────────────────────────────────────────
 def test_boundary_top_k_equals_one():
-    """top_k=1: пул из одного лидера — эквивалент текущего поведения."""
+    """top_k=1: the pool is a single leader — equivalent to the current behavior."""
     results: R = {
         "ridge": (0.90, {}),
         "svr": (0.85, {}),
@@ -193,7 +195,7 @@ def test_boundary_top_k_equals_one():
 
 
 def test_boundary_pool_capped_at_top_k():
-    """Пул больше top_k: жёсткий кап обрезает до top_k_candidates."""
+    """A pool larger than top_k: the hard cap truncates it to top_k_candidates."""
     results: R = {
         "ridge": (0.90, {}),
         "svr": (0.85, {}),
@@ -210,7 +212,7 @@ def test_boundary_pool_capped_at_top_k():
 
 
 def test_boundary_single_valid_algorithm():
-    """Один валидный алгоритм — пул из одного кандидата."""
+    """A single valid algorithm — the pool has one candidate."""
     pool = select_finalists(
         {"ridge": (0.7, {})}, metric_user="r2", top_k_candidates=3
     )
@@ -218,13 +220,13 @@ def test_boundary_single_valid_algorithm():
 
 
 def test_boundary_corridor_gives_less_than_top_k():
-    """Коридор даёт меньше кандидатов, чем top_k: пул из того, что есть.
+    """The corridor yields fewer candidates than top_k: the pool keeps what exists.
 
-    Добор за пределы коридора не производится (без опционального правила).
+    No top-up beyond the corridor happens (without the optional rule).
     """
     results: R = {
         "elasticnet": (-0.081, {}),
-        "xgboosting": (-0.20, {}),  # вне коридора
+        "xgboosting": (-0.20, {}),  # outside the corridor
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -233,11 +235,11 @@ def test_boundary_corridor_gives_less_than_top_k():
 
 
 def test_boundary_negative_r2_additive_form():
-    """Отрицательные r2-скоры: additive-форма корректна, граница включается.
+    """Negative r2 scores: the additive form is correct and the boundary is included.
 
-    range = 0.1, порог = 0.5×0.1 = 0.05: |−0.55 − (−0.5)| = 0.05 ровно на
-    границе → включается (задокументированный tie-break), |−0.6+0.5| = 0.1 —
-    вне.
+    range = 0.1, threshold = 0.5×0.1 = 0.05: |−0.55 − (−0.5)| = 0.05 is exactly
+    on the boundary → included (documented tie-break); |−0.6+0.5| = 0.1 —
+    outside.
     """
     results: R = {
         "a": (-0.5, {}),
@@ -255,11 +257,11 @@ def test_boundary_negative_r2_additive_form():
 
 
 def test_boundary_multiplicative_empty_with_negative_best_falls_back_to_additive():
-    """Коридор пуст при max-better с отрицательным лидером → additive.
+    """The corridor is empty for max-better with a negative leader → additive.
 
-    Явный multiplicative для r2: порог = −0.5×0.85 = −0.425, лидер −0.5 не
-    проходит (коридор пуст) → выбирается аддитивная форма; при δ=1.0 оба
-    кандидата попадают в пул.
+    Explicit multiplicative for r2: threshold = −0.5×0.85 = −0.425, the
+    leader −0.5 does not pass (empty corridor) → the additive form is
+    chosen; at δ=1.0 both candidates enter the pool.
     """
     results: R = {
         "a": (-0.5, {}),
@@ -276,9 +278,9 @@ def test_boundary_multiplicative_empty_with_negative_best_falls_back_to_additive
 
 
 def test_boundary_mae_near_zero_additive_form():
-    """MAE≈0: явная additive-форма (мультипликативная некорректна).
+    """MAE≈0: an explicit additive form (multiplicative is incorrect here).
 
-    user-скоры 0.001/0.0015/0.002; range = 0.001, порог = 0.5×0.001 = 0.0005.
+    User scores 0.001/0.0015/0.002; range = 0.001, threshold = 0.5×0.001 = 0.0005.
     """
     results: R = {
         "a": (-0.001, {}),
@@ -296,7 +298,7 @@ def test_boundary_mae_near_zero_additive_form():
 
 
 def test_boundary_disqualified_leader_excluded():
-    """Дисквалифицированный алгоритм исключён из пула (даже лидер)."""
+    """A disqualified algorithm is excluded from the pool (even the leader)."""
     results: R = {
         "svr": (0.95, {}),
         "ridge": (0.90, {}),
@@ -313,7 +315,7 @@ def test_boundary_disqualified_leader_excluded():
 
 
 def test_boundary_tie_breaks_by_configuration_order():
-    """Равные скоры → порядок конфигурации (как в select_winner)."""
+    """Equal scores → configuration order (as in select_winner)."""
     results: R = {
         "random_forest": (0.5, {}),
         "extra_trees": (0.5, {}),
@@ -329,13 +331,13 @@ def test_boundary_tie_breaks_by_configuration_order():
 
 
 def test_boundary_equal_scores_on_corridor_edge_all_included():
-    """Скоры ровно на границе коридора включаются все (tie-break включения)."""
+    """Scores exactly on the corridor edge are all included (inclusive tie-break)."""
     results: R = {
         "ridge": (-0.05, {}),
         "svr": (-0.06, {}),
         "random_forest": (-0.06, {}),
     }
-    # Порог = 0.05 × 1.2 = 0.06: оба кандидата ровно на границе.
+    # Threshold = 0.05 × 1.2 = 0.06: both candidates are exactly on the boundary.
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.2, top_k_candidates=3
     )
@@ -343,20 +345,20 @@ def test_boundary_equal_scores_on_corridor_edge_all_included():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Семейства алгоритмов: опциональный мягкий добор
+# Algorithm families: optional soft top-up
 # ──────────────────────────────────────────────────────────────────────────────
 def test_family_diversity_topup_from_extended_corridor():
-    """Добор лучшего представителя недостающего семейства из расширенного коридора.
+    """The best representative of a missing family is topped up from the extended corridor.
 
-    Базовый пул: [elasticnet, ridge] (линейные). SVR (kernel, 0.095) вне
-    базового коридора (0.095 > 0.09315), но внутри расширенного
-    (0.081 × 1.225 = 0.0992) → добавляется, пул достигает top_k=3.
+    Base pool: [elasticnet, ridge] (linear). SVR (kernel, 0.095) is outside
+    the base corridor (0.095 > 0.09315) but inside the extended one
+    (0.081 × 1.225 = 0.0992) → added; the pool reaches top_k=3.
     """
     results: R = {
         "elasticnet": (-0.081, {}),
         "ridge": (-0.082, {}),
         "svr": (-0.095, {}),
-        "random_forest": (-0.11, {}),  # вне даже расширенного коридора
+        "random_forest": (-0.11, {}),  # outside even the extended corridor
     }
     pool = select_finalists(
         results,
@@ -370,7 +372,7 @@ def test_family_diversity_topup_from_extended_corridor():
 
 
 def test_family_diversity_respects_top_k_cap():
-    """Добор семейств не превышает top_k_candidates."""
+    """The family top-up does not exceed top_k_candidates."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "ridge": (-0.082, {}),
@@ -388,7 +390,7 @@ def test_family_diversity_respects_top_k_cap():
 
 
 def test_family_diversity_allowed_families_restriction():
-    """allowed_families ограничивает, какие семейства можно добрать."""
+    """allowed_families restricts which families can be topped up."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "ridge": (-0.082, {}),
@@ -401,17 +403,17 @@ def test_family_diversity_allowed_families_restriction():
         top_k_candidates=3,
         enforce_family_diversity=True,
         algorithm_families=FAMILIES,
-        allowed_families={"ensemble"},  # kernel запрещён → добора нет
+        allowed_families={"ensemble"},  # kernel is forbidden → no top-up
     )
     assert pool == ["elasticnet", "ridge"]
 
 
 def test_family_diversity_no_topup_when_two_families_in_pool():
-    """В пуле уже два семейства — правило добора не применяется."""
+    """The pool already has two families — the top-up rule is not applied."""
     results: R = {
         "elasticnet": (-0.081, {}),  # linear
         "svr": (-0.085, {}),  # kernel
-        "ridge": (-0.095, {}),  # linear, вне базового коридора
+        "ridge": (-0.095, {}),  # linear, outside the base corridor
     }
     pool = select_finalists(
         results,
@@ -425,11 +427,11 @@ def test_family_diversity_no_topup_when_two_families_in_pool():
 
 
 def test_family_diversity_unmapped_algorithms_own_family():
-    """Алгоритмы без классификации — собственное семейство (детерминизм)."""
+    """Algorithms without a family mapping get their own family (determinism)."""
     results: R = {
         "elasticnet": (-0.081, {}),  # linear
         "ridge": (-0.082, {}),  # linear
-        "custom_algo": (-0.095, {}),  # своё семейство
+        "custom_algo": (-0.095, {}),  # its own family
     }
     pool = select_finalists(
         results,
@@ -443,10 +445,10 @@ def test_family_diversity_unmapped_algorithms_own_family():
 
 
 def test_family_diversity_without_families_map():
-    """Без карты семейств каждый алгоритм — собственное семейство.
+    """Without a family map each algorithm is its own family.
 
-    Базовый пул [a] содержит одно «семейство»; добор добавляет лучшего
-    кандидата из расширенного коридора (b, 0.095 ≤ 0.081×1.225 = 0.0992).
+    The base pool [a] holds a single 'family'; the top-up adds the best
+    candidate from the extended corridor (b, 0.095 ≤ 0.081×1.225 = 0.0992).
     """
     results: R = {
         "a": (-0.081, {}),
@@ -464,25 +466,25 @@ def test_family_diversity_without_families_map():
 
 
 def test_family_diversity_default_multiplier_constant():
-    """Дефолтный множитель расширенного коридора — 1.5 (из постановки)."""
+    """The default extended-corridor multiplier is 1.5 (from the specification)."""
     assert FAMILY_DIVERSITY_MULTIPLIER_DEFAULT == 1.5
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Edge cases и failure modes
+# Edge cases and failure modes
 # ──────────────────────────────────────────────────────────────────────────────
 def test_edge_empty_results_raises_runtime_error():
-    """Пустой phase_results → RuntimeError (по постановке T3).
+    """An empty phase_results → RuntimeError (per the specification).
 
-    Примечание: ``select_winner`` для пустого словаря бросает ``ValueError``,
-    но для пула финалистов постановка требует ``RuntimeError`` (ревью PR #33).
+    Note: ``select_winner`` raises ``ValueError`` for an empty dict, but
+    the specification requires ``RuntimeError`` for the finalists pool.
     """
     with pytest.raises(RuntimeError, match="empty results"):
         select_finalists({}, metric_user="r2")
 
 
 def test_edge_all_disqualified_raises_runtime_error():
-    """Все алгоритмы дисквалифицированы → RuntimeError."""
+    """All algorithms are disqualified → RuntimeError."""
     results: R = {"svr": (0.95, {}), "ridge": (0.90, {})}
     with pytest.raises(RuntimeError, match="disqualified"):
         select_finalists(
@@ -524,7 +526,7 @@ def test_edge_unknown_metric_raises():
 
 
 def test_edge_determinism_repeated_calls():
-    """Детерминизм: повторные вызовы дают идентичный пул и порядок."""
+    """Determinism: repeated calls return an identical pool and order."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "ridge": (-0.082, {}),
@@ -544,10 +546,10 @@ def test_edge_determinism_repeated_calls():
 
 
 def test_edge_zero_delta_only_leader():
-    """δ=0: коридор схлопывается до точного равенства — только лидер."""
+    """δ=0: the corridor collapses to exact equality — only the leader."""
     results: R = {
         "ridge": (0.90, {}),
-        "svr": (0.90, {}),  # ровно равен лидеру
+        "svr": (0.90, {}),  # exactly equal to the leader
         "random_forest": (0.89, {}),
     }
     pool = select_finalists(
@@ -557,21 +559,21 @@ def test_edge_zero_delta_only_leader():
         corridor_delta=0.0,
         top_k_candidates=3,
     )
-    # Лидер + кандидат с равным скором (граница включается), 0.89 — вне.
+    # Leader + candidate with an equal score (boundary included); 0.89 — outside.
     assert pool == ["ridge", "svr"]
 
 
 def test_edge_min_better_and_max_better_metrics_parametrized():
-    """Направление берётся из user_direction: min- и max-better метрики."""
-    # min-better (rmse): лидер с минимальной ошибкой
+    """The direction comes from user_direction: min- and max-better metrics."""
+    # min-better (rmse): leader with the smallest error
     min_results: R = {"good": (-0.05, {}), "bad": (-0.10, {})}
-    # Порог = 0.05 × 1.5 = 0.075: bad (0.10) вне коридора.
+    # Threshold = 0.05 × 1.5 = 0.075: bad (0.10) outside the corridor.
     assert select_finalists(
         min_results, metric_user="rmse", corridor_delta=0.5, top_k_candidates=3
     ) == ["good"]
-    # max-better (r2): лидер с максимальным скором
+    # max-better (r2): leader with the highest score
     max_results: R = {"good": (0.90, {}), "bad": (0.80, {})}
-    # Порог = 0.90 × 0.5 = 0.45: bad (0.80) внутри, порог широкий.
+    # Threshold = 0.90 × 0.5 = 0.45: bad (0.80) inside; the threshold is wide.
     assert select_finalists(
         max_results,
         metric_user="r2",
@@ -582,20 +584,21 @@ def test_edge_min_better_and_max_better_metrics_parametrized():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Регрессии ревью PR #33
+# Code-review regressions
 # ──────────────────────────────────────────────────────────────────────────────
 def test_regression_disqualified_generator_not_consumed():
-    """Генератор в ``disqualified`` не «съедается» dict-comprehension.
+    """A generator in ``disqualified`` is not consumed by the dict-comprehension.
 
-    Блокирующее замечание ревью: раньше ``set(disqualified)`` вычислялся
-    внутри comprehension, генератор потреблялся на первой итерации, и
-    дисквалифицированные имена «протекали» в пул (воспроизведение: ['c']
-    вместо ['a', 'b']). Теперь iterable материализуется до comprehension.
+    Blocking review finding: previously ``set(disqualified)`` was computed
+    inside the comprehension, the generator was consumed on the first
+    iteration, and disqualified names 'leaked' into the pool
+    (reproduced as ['c'] instead of ['a', 'b']). Now the iterable is
+    materialized before the comprehension.
     """
     results: R = {
         "a": (0.90, {}),
         "b": (0.85, {}),
-        "c": (0.95, {}),  # лучший по CV, но дисквалифицирован
+        "c": (0.95, {}),  # best by CV, but disqualified
     }
     pool = select_finalists(
         results,
@@ -608,16 +611,16 @@ def test_regression_disqualified_generator_not_consumed():
 
 
 def test_regression_pool_family_not_allowed_no_topup():
-    """Единственное семейство пула не разрешено → добор не выполняется.
+    """The only pool family is not allowed → the top-up is not performed.
 
-    Блокирующее замечание ревью: поведение приведено к документации — если
-    единственное семейство пула отсутствует в ``allowed_families``, мягкий
-    добор не применяется (раньше было ['elasticnet', 'svr'] вместо
-    ['elasticnet']).
+    Blocking review finding: behavior aligned with the documentation — if
+    the only pool family is absent from ``allowed_families``, the soft
+    top-up is not applied (previously it returned ['elasticnet', 'svr']
+    instead of ['elasticnet']).
     """
     results: R = {
         "elasticnet": (-0.081, {}),  # linear
-        "svr": (-0.095, {}),  # kernel, в расширенном коридоре
+        "svr": (-0.095, {}),  # kernel, inside the extended corridor
     }
     pool = select_finalists(
         results,
@@ -626,23 +629,23 @@ def test_regression_pool_family_not_allowed_no_topup():
         top_k_candidates=3,
         enforce_family_diversity=True,
         algorithm_families=FAMILIES,
-        allowed_families={"ensemble"},  # линейное семейство пула запрещено
+        allowed_families={"ensemble"},  # the pool's linear family is forbidden
     )
     assert pool == ["elasticnet"]
 
 
 def test_regression_pool_family_allowed_and_missing_allowed():
-    """Семейство пула и добавляемое семейство разрешены → добор выполняется.
+    """The pool family and the added family are allowed → the top-up runs.
 
-    Позитивный контроль к ``test_regression_pool_family_not_allowed_no_topup``:
-    добор происходит, когда единственное семейство пула разрешено
-    ``allowed_families`` и недостающее семейство тоже разрешено.
+    Positive control for ``test_regression_pool_family_not_allowed_no_topup``:
+    the top-up happens when the only pool family is allowed by
+    ``allowed_families`` and the missing family is allowed too.
     """
     results: R = {
         "elasticnet": (-0.081, {}),  # linear
         "ridge": (-0.082, {}),  # linear
-        "svr": (-0.095, {}),  # kernel, в расширенном коридоре
-        "random_forest": (-0.11, {}),  # ensemble, вне расширенного коридора
+        "svr": (-0.095, {}),  # kernel, inside the extended corridor
+        "random_forest": (-0.11, {}),  # ensemble, outside the extended corridor
     }
     pool = select_finalists(
         results,
@@ -657,17 +660,18 @@ def test_regression_pool_family_allowed_and_missing_allowed():
 
 
 def test_regression_auto_mode_best_near_zero_switches_to_additive():
-    """auto при best≈0 (MAE≈0) переключается на additive (ревью PR #33).
+    """auto with best≈0 (MAE≈0) switches to additive.
 
-    Мультипликативная форма при best=0 даёт порог 0 и схлопывает пул до
-    лидера; аддитивная включает кандидатов в пределах δ×размах.
+    The multiplicative form with best=0 yields a 0 threshold and collapses
+    the pool to the leader; the additive form includes candidates within
+    δ×range.
     """
     results: R = {
-        "a": (0.0, {}),  # MAE ≈ 0 (raw -0.0 после инверсии)
+        "a": (0.0, {}),  # MAE ≈ 0 (raw -0.0 after inversion)
         "b": (-1e-4, {}),
         "c": (-2e-4, {}),
     }
-    # additive: range = 2e-4, порог = 0.5×2e-4 = 1e-4 → b на границе включается.
+    # additive: range = 2e-4, threshold = 0.5×2e-4 = 1e-4 → b, on the boundary, is included.
     pool = select_finalists(
         results, metric_user="mae", corridor_delta=0.5, top_k_candidates=3
     )

@@ -1,24 +1,25 @@
-"""Тесты двухстадийного выбора победителя с Sanity Gate (эпик #61, T4, issue #64).
+"""Tests for two-stage winner selection with the Sanity Gate.
 
-Покрытие:
+Coverage:
 
-1. ``select_robust_winner`` — режимы ``off`` / ``active`` (режим ``warn_only``
-   удалён вместе с ключами отчёта ``sanity_gate_warn_only``/
-   ``winner_if_active``, эпик #74, задача R2).
-2. Ранжирование прошедших аудит по ``RMSE_oof``: CV и ``RMSE_full`` в
-   ранжировании НЕ участвуют (композитный скор отсутствует).
-3. Negative: «плоский» ElasticNet-лидер (константный OOF) дисквалифицируется;
-   глубокое дерево с ``RMSE_train≈0`` отсекается контуром Г; SVR-sigmoid
-   с плато tanh отсекается контуром А.
-4. Boundary: ``mode=off`` (старое поведение); все кандидаты забракованы
-   (fallback с формальным критерием); равные ``RMSE_oof`` (детерминированный
-   tie-break порядком пула).
-5. Fallback: минимум числа нарушенных контуров → минимум тяжести
-   (значимость контуров Г > А > Б > В, ``_circuit_rank``) → лучший
-   ``RMSE_oof``; в лог пишется WARNING с причинами.
-6. Интеграция с ``train_best_model`` через явный select-шаг
-   (эпик #74, задача R2): секция ``sanity_gate`` в отчёте под именем фазы,
-   дисквалификации гейта в circuit breaker, обучение финалиста ровно один раз.
+1. ``select_robust_winner`` — the ``off`` / ``active`` modes (the
+   ``warn_only`` mode was removed along with the report keys
+   ``sanity_gate_warn_only``/``winner_if_active``).
+2. Ranking of audit-passing candidates by ``RMSE_oof``: CV and ``RMSE_full``
+   do NOT participate in the ranking (there is no composite score).
+3. Negative: a 'flat' ElasticNet leader (constant OOF) is disqualified;
+   a deep tree with ``RMSE_train≈0`` is cut off by Circuit D; SVR-sigmoid
+   on the tanh plateau is cut off by Circuit A.
+4. Boundary: ``mode=off`` (legacy behavior); all candidates rejected
+   (fallback with a formal criterion); equal ``RMSE_oof`` (deterministic
+   tie-break by pool order).
+5. Fallback: minimum number of violated circuits → minimum severity
+   (circuit significance D > A > B > C, ``_circuit_rank``) → best
+   ``RMSE_oof``; a WARNING with the reasons is logged.
+6. Integration with ``train_best_model`` through an explicit select phase:
+   the ``sanity_gate`` section in the report is keyed by the phase name,
+   gate disqualifications reach the circuit breaker, and the finalist is
+   trained exactly once.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ from configurable_automl_engine.training_engine.sanity_gate import (
 )
 
 
-# Терминальный select-шаг (эпик #74): последняя фаза любого валидного конфига.
+# Terminal select step: the last phase of any valid config.
 FINAL_SELECT_PHASE = {
     "name": "final_select",
     "n_trials": 1,
@@ -71,12 +72,12 @@ FINAL_SELECT_PHASE = {
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Хелперы
+#  Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _dataset(seed: int = 7, n: int = 150, p: int = 6, noise: float = 1.0):
-    """Чистый датасет: X0/X1 информативны, остальное — шум."""
+    """Clean dataset: X0/X1 are informative, the rest is noise."""
     rng = np.random.RandomState(seed)
     X = rng.randn(n, p)
     y = 2.0 * X[:, 0] + 0.5 * X[:, 1] + rng.randn(n) * noise
@@ -86,10 +87,10 @@ def _dataset(seed: int = 7, n: int = 150, p: int = 6, noise: float = 1.0):
 def _honest_vectors(
     n: int = 120, seed: int = 0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Честные векторы: y с дисперсией, OOF/full с малым шумом.
+    """Honest vectors: y with variance, OOF/full with small noise.
 
-    Контур А: diversity ≈ 1 >> 0.15; контур Б: nunique ~ N; контур Г:
-    gap = RMSE_oof/RMSE_full = 0.25/0.2 = 1.25 <= 1.5 — модель валидна.
+    Circuit A: diversity ≈ 1 >> 0.15; Circuit B: nunique ~ N; Circuit D:
+    gap = RMSE_oof/RMSE_full = 0.25/0.2 = 1.25 <= 1.5 — the model is valid.
     """
     rng = np.random.RandomState(seed)
     x = np.linspace(0.0, 1.0, n)
@@ -100,7 +101,7 @@ def _honest_vectors(
 
 
 def _oof_with_rmse(y: np.ndarray, target_rmse: float, seed: int) -> np.ndarray:
-    """Вектор OOF с заданным RMSE относительно ``y`` (шум нормирован)."""
+    """An OOF vector with the given RMSE relative to ``y`` (normalized noise)."""
     rng = np.random.RandomState(seed)
     noise = rng.randn(len(y))
     noise = noise / np.sqrt(np.mean(noise**2)) * target_rmse
@@ -108,7 +109,7 @@ def _oof_with_rmse(y: np.ndarray, target_rmse: float, seed: int) -> np.ndarray:
 
 
 def _flat_vectors(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Плоские (константные) предсказания — вырожденная модель."""
+    """Flat (constant) predictions — a degenerate model."""
     const = float(np.mean(y))
     return np.full(len(y), const), np.full(len(y), const)
 
@@ -122,7 +123,7 @@ def _candidate(
     model: Any = None,
     rmse_full: float | None = None,
 ) -> FinalistCandidate:
-    """Собрать кандидата с заданными векторами и скорами."""
+    """Build a candidate with the given vectors and scores."""
     return FinalistCandidate(
         algo_name=name,
         model=model,
@@ -136,12 +137,12 @@ def _candidate(
 
 
 def _gate(**kwargs: Any) -> ModelSanityGate:
-    """Гейт без контура В (в юнит-тестах модели не предоставляются)."""
+    """A gate without Circuit C (unit tests provide no models)."""
     return ModelSanityGate(check_dead_features=False, **kwargs)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  select_robust_winner: базовые инварианты и режим off
+#  select_robust_winner: basic invariants and the off mode
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -165,7 +166,7 @@ def test_robust_winner_unknown_mode_raises():
 
 
 def test_off_mode_picks_cv_leader_without_audit():
-    """mode=off: старое поведение select_winner, аудит не выполняется."""
+    """mode=off: the legacy select_winner behavior; no audit is performed."""
     y, y_oof, y_full = _honest_vectors()
     cands = {
         "svr": _candidate(
@@ -178,7 +179,7 @@ def test_off_mode_picks_cv_leader_without_audit():
     res = select_robust_winner(
         cands, pd.DataFrame(np.zeros((len(y), 2))), pd.Series(y), _gate(), mode="off"
     )
-    assert res.winner_algo == "svr"  # лучший «сырой» CV-скор
+    assert res.winner_algo == "svr"  # best 'raw' CV score
     assert res.audit == {}
     assert res.disqualified == {}
     assert res.fallback_used is False
@@ -194,19 +195,19 @@ def test_off_mode_tie_breaks_by_pool_order():
     res = select_robust_winner(
         cands, pd.DataFrame(np.zeros((len(y), 2))), pd.Series(y), _gate(), mode="off"
     )
-    assert res.winner_algo == "first"  # детерминированный tie-break
+    assert res.winner_algo == "first"  # deterministic tie-break
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Режим active: ранжирование по RMSE_oof среди прошедших аудит
+#  Active mode: ranking by RMSE_oof among audit-passing candidates
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_active_winner_is_best_rmse_oof_among_valid():
-    """Победитель = лучший RMSE_oof среди прошедших аудит (CV не участвует)."""
+    """Winner = best RMSE_oof among those that passed the audit (CV is not involved)."""
     y, _, _ = _honest_vectors()
     cands = {
-        # CV-лидер, но вырожден (плоский OOF) → дисквалифицируется
+        # CV leader, but degenerate (flat OOF) → disqualified
         "elasticnet": _candidate(
             "elasticnet",
             cv_score=-0.081,
@@ -214,7 +215,7 @@ def test_active_winner_is_best_rmse_oof_among_valid():
             y_oof=_flat_vectors(y)[0],
             y_full=_flat_vectors(y)[1],
         ),
-        # Честные модели: rf лучше по RMSE_oof, чем svr, но хуже по CV
+        # Honest models: rf better by RMSE_oof than svr but worse by CV
         "svr": _candidate(
             "svr", cv_score=-0.085, rmse_oof=0.09, y_oof=_oof_with_rmse(y, 0.09, 1)
         ),
@@ -232,13 +233,13 @@ def test_active_winner_is_best_rmse_oof_among_valid():
     assert res.winner_rmse_oof == pytest.approx(0.085)
     assert "elasticnet" in res.disqualified
     assert res.fallback_used is False
-    # Причины дисквалификации доступны для отчёта (T6)
+    # Disqualification reasons are available for the report
     assert any("Circuit A" in r for r in res.disqualified["elasticnet"])
     assert any("Circuit B" in r for r in res.disqualified["elasticnet"])
 
 
 def test_active_disqualified_best_rmse_cannot_win():
-    """Кандидат с лучшим RMSE_oof, но вырожденный, не может победить."""
+    """A candidate with the best RMSE_oof but degenerate predictions cannot win."""
     y, _, _ = _honest_vectors()
     cands = {
         "flat": _candidate(
@@ -260,7 +261,7 @@ def test_active_disqualified_best_rmse_cannot_win():
 
 
 def test_active_equal_rmse_oof_tie_breaks_by_pool_order():
-    """Равные RMSE_oof → детерминированный tie-break порядком пула (T3)."""
+    """Equal RMSE_oof → deterministic tie-break by pool order."""
     y, _, _ = _honest_vectors()
     cands = {
         "first": _candidate(
@@ -277,7 +278,7 @@ def test_active_equal_rmse_oof_tie_breaks_by_pool_order():
 
 
 def test_active_audit_failure_is_disqualification():
-    """Сбой самого аудита (исключение в check) = дисквалификация кандидата."""
+    """An audit failure itself (an exception in check) disqualifies the candidate."""
     y, y_oof, y_full = _honest_vectors()
     cand = _candidate("broken", cv_score=-0.1, rmse_oof=0.2, y_oof=y_oof, y_full=y_full)
 
@@ -293,18 +294,18 @@ def test_active_audit_failure_is_disqualification():
         mode="active",
     )
     assert res.disqualified["broken"] == ["Sanity audit failed: boom"]
-    # Один кандидат, забракован → fallback всё равно выбирает его
+    # A single candidate, rejected → fallback still picks it
     assert res.fallback_used is True
     assert res.winner_algo == "broken"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Бюджет времени аудита (T5)
+#  Audit time budget
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_audit_time_budget_zero_audits_all_candidates():
-    """Бюджет = 0 (дефолт): лимита нет, аудируются все кандидаты."""
+    """Budget = 0 (default): no limit, all candidates are audited."""
     y, y_oof, y_full = _honest_vectors()
     cands = {
         "a": _candidate("a", cv_score=-0.08, rmse_oof=0.3, y_oof=y_oof, y_full=y_full),
@@ -323,10 +324,10 @@ def test_audit_time_budget_zero_audits_all_candidates():
 
 
 def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
-    """Исчерпание бюджета: оставшиеся кандидаты не аудируются (reason в отчёте).
+    """Budget exhaustion: remaining candidates are not audited (a reason in the report).
 
-    ``time.monotonic`` замокан: старт в 0.0, первый кандидат проверяется на
-    1.0 (< бюджета 5.0), остальные — на 10.0 (>= бюджета) → пропуск.
+    ``time.monotonic`` is mocked: start at 0.0, the first candidate is
+    checked at 1.0 (< budget 5.0), the rest at 10.0 (>= budget) → skipped.
     """
     import configurable_automl_engine.training_engine.component as comp
 
@@ -349,7 +350,7 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
         mode="active",
         audit_time_budget_seconds=5.0,
     )
-    # Аудит выполнен только для первого кандидата; остальные пропущены.
+    # Only the first candidate is audited; the rest are skipped.
     assert set(res.audit) == {"a", "b", "c"}
     assert res.audit["a"].is_valid is True
     assert res.audit["b"].is_valid is False
@@ -357,13 +358,13 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
     assert all(
         "audit time budget" in r for name in ("b", "c") for r in res.disqualified[name]
     )
-    # Пропущенный кандидат не может победить в active.
+    # A skipped candidate cannot win in active mode.
     assert res.winner_algo == "a"
     assert "a" not in res.disqualified
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Fallback: все кандидаты забракованы
+#  Fallback: all candidates rejected
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -372,7 +373,7 @@ def _result(reasons: list[str]) -> SanityCheckResult:
 
 
 def test_fallback_min_number_of_violated_circuits():
-    """Fallback: меньше нарушенных контуров → «наименее проблемная» модель."""
+    """Fallback: fewer violated circuits → the 'least problematic' model."""
     y, y_oof, y_full = _honest_vectors()
     gate = _gate()
     mocker_gate = MagicMock()
@@ -401,16 +402,16 @@ def test_fallback_min_number_of_violated_circuits():
 
 
 def test_fallback_tie_breaks_by_severity_circuit_order():
-    """Fallback: одинаковое число нарушений → тяжесть по порядку Г > А > Б > В.
+    """Fallback: equal violation counts → severity in the order D > A > B > C.
 
-    Кандидат с нарушением А (ранг 2) «легче», чем с нарушением Г (ранг 3).
+    A candidate violating A (rank 2) is 'lighter' than one violating D (rank 3).
     """
     y, y_oof, y_full = _honest_vectors()
     gate = _gate()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),  # Г — самое тяжёлое
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),  # А — легче Г
+        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),  # D — the heaviest
+        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),  # A — lighter than D
     ]
     cands = {
         "violates_G": _candidate("violates_G", -0.08, 0.3, y_oof),
@@ -427,7 +428,7 @@ def test_fallback_tie_breaks_by_severity_circuit_order():
 
 
 def test_fallback_tie_breaks_by_best_rmse_oof():
-    """Fallback: равное число и тяжесть нарушений → лучший RMSE_oof."""
+    """Fallback: equal violation count and severity → the best RMSE_oof."""
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
@@ -449,7 +450,7 @@ def test_fallback_tie_breaks_by_best_rmse_oof():
 
 
 def test_fallback_logs_warning_with_reasons(caplog):
-    """Fallback: WARNING в лог с причинами, запуск не падает."""
+    """Fallback: a WARNING with the reasons is logged; the run does not fail."""
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
@@ -471,7 +472,7 @@ def test_fallback_logs_warning_with_reasons(caplog):
 
 
 def test_circuit_rank_order_fixed():
-    """Значимость контуров зафиксирована в коде: Г(3) > А(2) > Б(1) > В(0)."""
+    """Circuit significance is fixed in the code: D(3) > A(2) > B(1) > C(0)."""
     assert _circuit_rank("Circuit A (diversity): ...") == 2
     assert _circuit_rank("Circuit B (unique): ...") == 1
     assert _circuit_rank("Circuit C (dead features): ...") == 0
@@ -483,20 +484,19 @@ def test_severity_signature_sorted_descending():
     sig = _severity_signature(
         ["Circuit B (unique): ...", "Circuit D (generalization gap): ..."]
     )
-    assert sig == (3, 1)  # Г первым, Б вторым
+    assert sig == (3, 1)  # D first, B second
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Negative: реальные вырожденные модели (контуры Г и А)
+#  Negative: real degenerate models (Circuits D and A)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_negative_deep_tree_rejected_by_circuit_g():
-    """Глубокое дерево (RMSE_train≈0) отсекается контуром Г до ранжирования.
+    """A deep tree (RMSE_train≈0) is cut off by Circuit D before ranking.
 
-    Явный ``generalization_gap_mode="reject"``: дефолтный warn-режим
-    (issue #111) переводит RMSE_full≈0 в soft_warnings и не
-    дисквалифицирует.
+    Explicit ``generalization_gap_mode="reject"``: the default warn mode
+    moves RMSE_full≈0 into soft_warnings and does not disqualify.
     """
     X, y = _dataset(n=120)
     kf = KFold(n_splits=4, shuffle=True, random_state=0)
@@ -522,16 +522,16 @@ def test_negative_deep_tree_rejected_by_circuit_g():
         {"deep_tree": cand}, pd.DataFrame(X), pd.Series(y), gate, mode="active"
     )
     assert any("Circuit D" in r for r in res.disqualified["deep_tree"])
-    assert res.fallback_used is True  # единственный кандидат забракован
+    assert res.fallback_used is True  # the only candidate is rejected
 
 
 def test_warn_mode_extra_trees_with_infinite_gap_wins_by_rmse_oof():
-    """Warn-режим (issue #111): кандидат с gap=∞ не дисквалифицируется.
+    """Warn mode: a candidate with gap=∞ is not disqualified.
 
-    ExtraTrees (RMSE_full≈0, gap=inf, лучший RMSE_oof) остаётся валидным
-    (Circuit D в soft_warnings), участвует в ранжировании по RMSE_oof и
-    побеждает — вместо молчаливой подмены победителя «лучшим из прошедших
-    гейт».
+    ExtraTrees (RMSE_full≈0, gap=inf, best RMSE_oof) stays valid (Circuit D
+    in soft_warnings), participates in the RMSE_oof ranking and wins —
+    instead of silently replacing the winner with the 'best of those that
+    passed the gate'.
     """
     X, y = make_friedman3(n_samples=200, noise=0.05, random_state=1)
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -582,11 +582,11 @@ def test_warn_mode_extra_trees_with_infinite_gap_wins_by_rmse_oof():
 
 
 def test_negative_svr_sigmoid_plateau_rejected_by_circuit_a():
-    """SVR-sigmoid с плато tanh отсекается контуром А (diversity на OOF)."""
+    """SVR-sigmoid on the tanh plateau is cut off by Circuit A (diversity on OOF)."""
     X, y = _dataset(n=150, seed=11)
     sigmoid = SVR(kernel="sigmoid", gamma=0.001, coef0=0.0).fit(X, y)
     pred = sigmoid.predict(X)
-    assert pred.std() < 0.1 * y.std()  # предпосылка: плато tanh
+    assert pred.std() < 0.1 * y.std()  # precondition: the tanh plateau
     cand = _candidate(
         "svr_sigmoid",
         cv_score=-0.05,
@@ -603,11 +603,11 @@ def test_negative_svr_sigmoid_plateau_rejected_by_circuit_a():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Интеграция с train_best_model (явный select-шаг, эпик #74, задача R2)
+#  Integration with train_best_model (explicit select phase)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-# Терминальный select со strategy: sanity_gate заменяет неявный гейт (эпик #74).
+# A terminal select with strategy: sanity_gate replaces the implicit gate.
 _SANITY_CFG = """
 general:
   comparison_metric: rmse
@@ -647,7 +647,7 @@ def _tiny_df(n: int = 60, seed: int = 0) -> pd.DataFrame:
 
 
 def test_train_best_model_cv_best_select_has_no_sanity_key(tmp_path: Path):
-    """select(cv_best, winner): артефакт без ключа sanity_gate (аудита нет)."""
+    """select(cv_best, winner): artifact without the sanity_gate key (no audit)."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
         _SANITY_CFG.format(model_path="m.pkl", strategy="cv_best", output="winner"),
@@ -660,7 +660,7 @@ def test_train_best_model_cv_best_select_has_no_sanity_key(tmp_path: Path):
 
 
 def test_train_best_model_sanity_gate_select_report(tmp_path: Path):
-    """select(sanity_gate, winner): секция отчёта под именем фазы (T6, эпик #74)."""
+    """select(sanity_gate, winner): the report section is keyed by the phase name."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
         _SANITY_CFG.format(model_path="m.pkl", strategy="sanity_gate", output="winner"),
@@ -668,24 +668,24 @@ def test_train_best_model_sanity_gate_select_report(tmp_path: Path):
     )
     res = train_best_model(cfg_file, _tiny_df(), model_path_override=tmp_path / "m.pkl")
     assert Path(res["model_path"]).exists()
-    # Секции отчёта ключуются именем select-фазы (эпик #74).
+    # Report sections are keyed by the select phase name.
     assert set(res["sanity_gate"]) == {"GateSelect"}
     sg = res["sanity_gate"]["GateSelect"]
     assert sg["strategy"] == "sanity_gate"
     assert set(sg["pool"]) <= {"ridge", "elasticnet"}
-    assert sg["pool"]  # непустой
+    assert sg["pool"]  # non-empty
     assert "audit" in sg
     assert isinstance(sg["winner_rmse_oof"], float)
     assert sg["overhead_seconds"] >= 0
-    # Победитель обязан быть из пула
+    # The winner must come from the pool
     assert res["algorithm"] in sg["pool"]
-    # Аудит проведён для всех финалистов пула
+    # Audits were run for all pool finalists
     assert set(sg["audit"].keys()) == set(sg["pool"])
-    # Победитель валиден либо сработал fallback (пул полностью забракован).
+    # The winner is valid or the fallback fired (the whole pool was rejected).
     assert (
         sg["audit"][res["algorithm"]]["is_valid"] is True or sg["fallback_used"] is True
     )
-    # Удалённые ключи warn_only (эпик #74) больше не появляются.
+    # The removed warn_only keys no longer appear.
     for key in ("disqualified_by_sanity_gate", "sanity_gate_warn_only"):
         assert key not in res
 
@@ -693,11 +693,11 @@ def test_train_best_model_sanity_gate_select_report(tmp_path: Path):
 def test_train_best_model_sanity_winner_not_retrained_in_persist(
     tmp_path: Path, mocker
 ):
-    """Финалисты обучаются один раз: persist_artifact не переобучает победителя.
+    """Finalists are trained once: persist_artifact does not retrain the winner.
 
-    В двухстадийном режиме обучение финалиста уже выполнено на 100% данных;
-    ``persist_artifact`` получает готовый ``ModelTrainer`` и не вызывает
-    ``_fit_and_save`` (требование 4 постановки T4 — без дублирования обучения).
+    In the two-stage mode a finalist's training on 100% of the data has
+    already been done; ``persist_artifact`` receives the ready ``ModelTrainer``
+    and does not call ``_fit_and_save`` (no duplicated training).
     """
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
@@ -713,7 +713,7 @@ def test_train_best_model_sanity_winner_not_retrained_in_persist(
 
 
 class _FakeTrainer:
-    """Минимальный фейк ModelTrainer для тестов _train_finalists."""
+    """A minimal fake ModelTrainer for the _train_finalists tests."""
 
     def __init__(self, n: int) -> None:
         self.n = n
@@ -728,7 +728,7 @@ class _FakeTrainer:
 def test_train_finalists_failure_skips_candidate_and_logs_reason(
     mocker, caplog, tmp_path: Path
 ):
-    """Провал обучения финалиста → переход к следующему, reason в лог (T4, п.5)."""
+    """A finalist training failure → move on to the next one; the reason is logged."""
     import configurable_automl_engine.training_engine.component as comp
 
     cfg = Config(
@@ -768,7 +768,7 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
 
 
 def test_train_best_model_all_finalists_fail_raises(tmp_path: Path):
-    """Все финалисты упали при обучении на 100% данных → понятная RuntimeError."""
+    """All finalists failed to train on 100% of the data → a clear RuntimeError."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
         _SANITY_CFG.format(model_path="m.pkl", strategy="sanity_gate", output="winner"),
@@ -787,7 +787,7 @@ def test_train_best_model_all_finalists_fail_raises(tmp_path: Path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Конфигурация SanityGateCfg
+#  SanityGateCfg configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -803,7 +803,7 @@ def test_sanity_gate_config_defaults():
         algorithms={"ridge": {"enable": True}},
     )
     sg = cfg.general.sanity_gate
-    assert "mode" not in SanityGateCfg.model_fields  # эпик #74: поле mode удалено
+    assert "mode" not in SanityGateCfg.model_fields  # the mode field was removed
     assert sg.top_k_candidates == 3
     assert sg.corridor_delta == 0.15
     assert sg.corridor_mode == "auto"
@@ -840,11 +840,12 @@ def test_sanity_gate_config_parses_mode_and_thresholds():
 
 @pytest.mark.parametrize("legacy_mode", ["off", "warn_only", "active", "weird"])
 def test_sanity_gate_config_mode_removed_with_migration_hint(legacy_mode):
-    """Поле sanity_gate.mode удалено (эпик #74): ошибка с подсказкой миграции.
+    """The sanity_gate.mode field was removed: an error with a migration hint.
 
-    Идентификация ошибки — по стабильному коду
-    (``ERR_REMOVED_SANITY_GATE_MODE`` из error['type']); содержательные
-    части подсказки (упоминание поля и select-шага) проверяются отдельно.
+    The error is identified by a stable code
+    (``ERR_REMOVED_SANITY_GATE_MODE`` in error['type']); the meaningful
+    parts of the hint (mentioning the field and the select phase) are
+    checked separately.
     """
     from pydantic import ValidationError
 
@@ -906,8 +907,8 @@ def test_sanity_gate_config_invalid_values_rejected(bad, expected):
 
 
 def test_sanity_gate_config_empty_block_is_valid_thresholds_only():
-    """Пустой блок sanity_gate: {} валиден — источник порогов без
-    поведенческого флага (эпик #74: поле mode удалено)."""
+    """An empty sanity_gate block (``{}``) is valid — a source of thresholds
+    without a behavioral flag (the mode field was removed)."""
     data = {
         "general": {
             "comparison_metric": "rmse",
@@ -929,7 +930,7 @@ def test_sanity_gate_config_empty_block_is_valid_thresholds_only():
 
 
 def test_sanity_gate_config_full_v2_block_parses():
-    """Полный блок sanity_gate (v2, постановка эпика #61 / T5) парсится."""
+    """The full sanity_gate v2 block parses."""
     data = {
         "general": {
             "comparison_metric": "rmse",
@@ -992,7 +993,7 @@ def test_sanity_gate_config_full_v2_block_parses():
 
 
 def test_sanity_gate_config_cost_control_defaults():
-    """Дефолты новых полей T5: пермутации включены, бюджет без ограничения."""
+    """Defaults of the new fields: permutations on, unlimited budget."""
     cfg = Config(
         general=GeneralCfg(
             comparison_metric="rmse",
@@ -1015,17 +1016,17 @@ def test_sanity_gate_config_cost_control_defaults():
 @pytest.mark.parametrize(
     "values",
     [
-        # Граничные значения (равенство порогу — валидно).
+        # Boundary values (equality with the threshold is valid).
         {"min_prediction_diversity": 1.0},
         {"max_generalization_gap": 1.0},
         {"min_unique_ratio": 1.0},
         {"max_dead_feature_ratio": 1.0},
         {"max_dead_feature_ratio": 0.0},
-        # corridor_delta → 0 (строго больше нуля, но сколь угодно мал).
+        # corridor_delta → 0 (strictly positive, but arbitrarily small).
         {"corridor_delta": 1e-9},
-        # top_k_candidates=1 — допустимо (пул из лидера).
+        # top_k_candidates=1 — allowed (a pool of one leader).
         {"top_k_candidates": 1},
-        # audit_time_budget_seconds=0 — без ограничения.
+        # audit_time_budget_seconds=0 — no limit.
         {"audit_time_budget_seconds": 0},
     ],
 )
@@ -1047,12 +1048,12 @@ def test_sanity_gate_config_boundary_values_valid(values):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  T6 (issue #66): отчёт и логи Sanity Gate
+#  Sanity Gate report and logs
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_active_disqualification_logs_warning_per_candidate(caplog):
-    """Логи (T6): каждый забракованный кандидат — WARNING с причинами."""
+    """Logging: each rejected candidate logs a WARNING with the reasons."""
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
@@ -1088,7 +1089,7 @@ def test_active_disqualification_logs_warning_per_candidate(caplog):
 
 
 def test_fallback_logs_formal_criterion(caplog):
-    """Логи (T6): fallback-WARNING называет применённый формальный критерий (T4)."""
+    """Logging: the fallback WARNING names the applied formal criterion."""
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
@@ -1111,9 +1112,9 @@ def test_fallback_logs_formal_criterion(caplog):
     assert "D > A > B > C" in fallback_msgs[0].message
 
 
-# Конфигурация со строгим порогом контура Г (gap > 1.0): линейные финалисты
-# на шумных данных почти наверняка дают RMSE_oof > RMSE_full, поэтому пул
-# гарантированно дисквалифицируется — детерминированный сценарий для T6.
+# A configuration with a strict Circuit D threshold (gap > 1.0): linear
+# finalists on noisy data almost surely produce RMSE_oof > RMSE_full, so
+# the pool is guaranteed to be disqualified — a deterministic scenario.
 _SANITY_CFG_STRICT_GAP = """
 general:
   comparison_metric: rmse
@@ -1148,7 +1149,7 @@ algorithms:
 
 
 def _run_sanity(tmp_path: Path) -> dict[str, Any]:
-    """Запустить train_best_model со строгим порогом контура Г (детерминизм)."""
+    """Run train_best_model with a strict Circuit D threshold (determinism)."""
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(
         _SANITY_CFG_STRICT_GAP.format(model_path="m.pkl"),
@@ -1162,30 +1163,30 @@ def _run_sanity(tmp_path: Path) -> dict[str, Any]:
 def test_train_best_model_sanity_gate_disqualifications_in_circuit_breaker(
     tmp_path: Path,
 ):
-    """Positive (T6, эпик #74): дисквалификации гейта попадают в circuit breaker.
+    """Positive: gate disqualifications reach the circuit breaker.
 
-    Причины доступны в gate-секции отчёта; при тотальном провале пула
-    срабатывает fallback и запуск не падает.
+    The reasons are available in the report's gate section; when the whole
+    pool fails, the fallback fires and the run does not fail.
     """
     res = _run_sanity(tmp_path)
     sg = res["sanity_gate"]["GateSelect"]
     dq = sg["disqualified"]
-    assert dq  # присутствует и непуст
+    assert dq  # present and non-empty
     assert isinstance(dq, dict)
     assert set(dq) <= {"ridge", "elasticnet"}
     assert all(isinstance(reasons, list) and reasons for reasons in dq.values())
     assert all(
         any("Circuit D" in reason for reason in reasons) for reasons in dq.values()
     )
-    # Дисквалификации гейта попадают в circuit breaker (disqualified_algorithms)
-    # наравне с HPO-провалами (эпик #74, задача R2).
+    # Gate disqualifications reach the circuit breaker
+    # (disqualified_algorithms) alongside HPO failures.
     cb = res.get("disqualified_algorithms")
     assert cb
     assert set(cb) == set(dq)
     assert all("Circuit D" in reason for reason in cb.values())
-    # Все кандидаты пула забракованы → fallback с формальным критерием.
+    # The whole pool was rejected → fallback with the formal criterion.
     assert sg["fallback_used"] is True
-    # Удалённые ключи warn_only (эпик #74) больше не появляются.
+    # The removed warn_only keys no longer appear.
     for key in ("disqualified_by_sanity_gate", "sanity_gate_warn_only"):
         assert key not in res
 
@@ -1193,13 +1194,13 @@ def test_train_best_model_sanity_gate_disqualifications_in_circuit_breaker(
 def test_train_best_model_sanity_gate_overhead_and_winner_audit_logged(
     tmp_path: Path, caplog
 ):
-    """T6: overhead_seconds в gate-секции и INFO-лог итогов аудита победителя."""
+    """overhead_seconds in the gate section and an INFO log of the winner audit summary."""
     with caplog.at_level(logging.INFO, logger="training_engine"):
         res = _run_sanity(tmp_path)
     sg = res["sanity_gate"]["GateSelect"]
     assert isinstance(sg["overhead_seconds"], float)
     assert sg["overhead_seconds"] >= 0
-    # INFO с итогами аудита победителя: diversity/unique/dead features/gap.
+    # INFO with the winner's audit summary: diversity/unique/dead features/gap.
     assert re.search(
         r"\[sanity_gate\] Winner \w+ audit summary: "
         r"diversity_ratio=(?:-?\d+\.\d{4}|n/a), "

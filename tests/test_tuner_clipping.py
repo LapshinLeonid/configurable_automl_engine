@@ -20,10 +20,10 @@ from configurable_automl_engine.trainer import ModelTrainer, train_model, Traini
 
 def test_clip_search_space_logic():
     """
-    Проверяет базовую логику клиппинга:
-    1. n_neighbors ограничивается n_samples - 1
-    2. min_samples_leaf ограничивается n_samples
-    3. Low подтягивается к High, если High стал меньше исходного Low
+    Checks the basic clipping logic:
+    1. n_neighbors is limited to n_samples - 1
+    2. min_samples_leaf is limited to n_samples
+    3. Low is pulled up to High if High became smaller than the original Low
     """
     space = {
         "n_neighbors": SearchSpaceEntry.model_validate([5, 100, "int"]),
@@ -40,50 +40,50 @@ def test_clip_search_space_logic():
     assert isinstance(clipped["n_neighbors"].config, IntSpace)
 
     assert clipped["min_samples_leaf"].high == 3
-    assert clipped["min_samples_leaf"].low == 3  # Исправлено: low теперь 3, а не 1
+    assert clipped["min_samples_leaf"].low == 3  # Fixed: low is now 3, not 1
 
 
 def test_knn_factory_clipping():
-    """Проверяет, что фабрика KNN передает в Optuna правильные границы."""
-    # Сценарий: 2 образца. Физический лимит n_neighbors = 1.
+    """Checks that the KNN factory passes the correct bounds to Optuna."""
+    # Scenario: 2 samples. The physical limit of n_neighbors is 1.
     space_fn = _make_knn_space(n_samples=2)
 
     trial = MagicMock()
-    # Настраиваем мок, чтобы он возвращал значение в рамках границ
+    # Configure the mock so it returns a value within the bounds
     trial.suggest_int.return_value = 1
 
     _ = space_fn(trial)
 
-    # Проверяем, что suggest_int вызван с границами [1, 1]
+    # Check that suggest_int was called with the bounds [1, 1]
     trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
 
 
 def test_optimize_integration_clipping(monkeypatch):
     """
-    Проверяет, что optimize() применяет клиппинг к переданным параметрам.
+    Checks that optimize() applies clipping to the passed parameters.
     """
-    # Создаем 20 строк, чтобы избежать проблем с делением при валидации
+    # Create 20 rows to avoid division issues during validation
     X = pd.DataFrame(np.random.rand(20, 2), columns=["a", "b"])
     y = pd.Series(np.random.rand(20))
 
-    # Намеренно завышенные границы
+    # Intentionally inflated bounds
     overrides = {
         "knn": {
             "n_neighbors": SearchSpaceEntry.model_validate([15, 100, "int"]),
         }
     }
 
-    # 1. Мокаем метрику, чтобы она всегда возвращала 0.5 (избегаем NaN)
+    # 1. Mock the metric so it always returns 0.5 (avoid NaN)
     monkeypatch.setattr(
         "configurable_automl_engine.tuner.get_scorer_object",
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
 
-    # 2. Мокаем создание модели, чтобы проверить входящий n_neighbors
+    # 2. Mock model creation to check the incoming n_neighbors
     def mock_create_model(algo, **params):
-        if algo == "xgboosting":  # Пропускаем инициализацию в начале optimize
+        if algo == "xgboosting":  # Skip initialization at the start of optimize
             return Ridge()
-        # Для KNN лимит n_samples-1 = 19
+        # For KNN the limit is n_samples-1 = 19
         if algo == "knn" and params.get("n_neighbors", 0) > 19:
             pytest.fail(f"n_neighbors {params['n_neighbors']} exceeds limit 19")
         return Ridge()
@@ -92,13 +92,13 @@ def test_optimize_integration_clipping(monkeypatch):
         "configurable_automl_engine.tuner.create_model", mock_create_model
     )
 
-    # 3. Мокаем кросс-валидацию (на случай если сменится стратегия)
+    # 3. Mock cross-validation (in case the strategy changes)
     monkeypatch.setattr(
         "configurable_automl_engine.tuner.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 
-    # Запускаем оптимизацию
+    # Run the optimization
     _, best_params, _ = optimize(
         "knn",
         X,
@@ -109,25 +109,25 @@ def test_optimize_integration_clipping(monkeypatch):
         random_state=42,
     )
 
-    # При 20 образцах лимит n_neighbors = 19.
-    # Исходный диапазон был [15, 100], должен стать [15, 19].
+    # With 20 samples the n_neighbors limit is 19.
+    # The original range [15, 100] must become [15, 19].
     assert 15 <= best_params["n_neighbors"] <= 19
 
 
 def test_clipping_preserves_original_space():
-    """Убеждаемся, что клиппинг не мутирует исходные объекты (Deep Copy)."""
+    """Ensure clipping does not mutate the original objects (Deep Copy)."""
     original_entry = SearchSpaceEntry.model_validate([10, 100, "int"])
     space = {"n_neighbors": original_entry}
 
     _ = clip_search_space(space, n_samples=5)
 
-    # Исходный объект в словаре space не должен измениться
+    # The original object in the space dict must not change
     assert original_entry.high == 100
     assert original_entry.low == 10
 
 
 def test_clip_extreme_small_data():
-    """Проверяет клиппинг при n_samples = 1."""
+    """Checks clipping with n_samples = 1."""
     space = {"n_neighbors": SearchSpaceEntry.model_validate([5, 10, "int"])}
     # n=1, limit = max(1, 1-1) = 1.
     clipped = clip_search_space(space, n_samples=1)
@@ -136,7 +136,7 @@ def test_clip_extreme_small_data():
 
 
 def test_clip_ignores_unrelated_params():
-    """Проверяет, что клиппинг не трогает параметры не из списка ограничений."""
+    """Checks that clipping leaves parameters outside the restriction list untouched."""
     space = {
         "max_depth": SearchSpaceEntry.model_validate([2, 32, "int"]),
         "learning_rate": SearchSpaceEntry.model_validate([0.01, 0.1, "float"]),
@@ -147,16 +147,16 @@ def test_clip_ignores_unrelated_params():
 
 
 def test_clip_preserves_types():
-    """Проверяет, что FloatSpace остается FloatSpace после клиппинга."""
+    """Checks that FloatSpace remains FloatSpace after clipping."""
     space = {"min_samples_leaf": SearchSpaceEntry.model_validate([0.1, 0.5, "float"])}
-    # При n=10, limit=10.0. Границы 0.1 и 0.5 не должны измениться,
-    # но важно, чтобы тип остался FloatSpace.
+    # With n=10 the limit is 10.0. The bounds 0.1 and 0.5 must not change,
+    # but it is important that the type stays FloatSpace.
     clipped = clip_search_space(space, n_samples=10)
     assert isinstance(clipped["min_samples_leaf"].config, FloatSpace)
 
 
 def test_clip_handles_categorical():
-    """Проверяет, что категориальные параметры проходят через фильтр без изменений."""
+    """Checks that categorical parameters pass through the filter unchanged."""
     space = {
         "weights": SearchSpaceEntry.model_validate(
             [["uniform", "distance"], "categorical"]
@@ -178,11 +178,11 @@ def test_clip_handles_categorical():
         (100, ValidationStrategy.loo, 5, 0.2, 99),
         # Train-Test Split: floor(100 * (1 - 0.25)) = 75
         (100, ValidationStrategy.train_test_split, 5, 0.25, 75),
-        # Тест безопасности (clamping) test_size: 1.5 -> 0.99. floor(100 * 0.01) = 1
+        # Safety test (clamping) test_size: 1.5 -> 0.99. floor(100 * 0.01) = 1
         (100, ValidationStrategy.train_test_split, 5, 1.5, 1),
-        # Тест граничного случая: n=0
+        # Edge case test: n=0
         (0, ValidationStrategy.k_fold, 5, 0.2, 0),
-        # Минимум для Neff при n_total >= 2
+        # Minimum for Neff when n_total >= 2
         (2, ValidationStrategy.train_test_split, 5, 0.99, 1),
     ],
 )
@@ -194,15 +194,15 @@ def test_get_effective_train_size_logic(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Тесты для trainer.py (Refactoring ModelTrainer)
+# 2. Tests for trainer.py (Refactoring ModelTrainer)
 # ──────────────────────────────────────────────────────────────────────
 
 
 def test_model_trainer_no_longer_splits_internally():
-    """Проверяет, что ModelTrainer теперь обучается на всех переданных данных."""
+    """Checks that ModelTrainer now trains on all passed data."""
     df = pd.DataFrame({"feature1": np.random.rand(10), "target": np.random.rand(10)})
 
-    # Инициализация без test_size (теперь его нет в сигнатуре)
+    # Initialization without test_size (it is no longer in the signature)
     trainer = ModelTrainer(algorithm="ridge")
 
     with patch.object(
@@ -210,20 +210,20 @@ def test_model_trainer_no_longer_splits_internally():
     ) as mock_fit:
         trainer.fit(df, y="target")
 
-        # Проверяем, что в _fit_internal передано 10 строк (весь df), а не часть
+        # Check that _fit_internal received 10 rows (the whole df), not a part
         args, _ = mock_fit.call_args
-        # args[0] это X_train
+        # args[0] is X_train
         assert len(args[0]) == 10
         assert trainer.val_score is not None
 
 
 def test_train_model_facade_compatibility():
-    """Проверка, что функция-фасад train_model не падает без test_size."""
+    """Checks that the train_model facade function does not fail without test_size."""
     X = pd.DataFrame(np.random.rand(10, 2))
     y = pd.Series(np.random.rand(10))
 
-    # Вызов старого API (params_or_metric — это dict параметров)
-    # test_size теперь просто игнорируется внутри или отсутствует
+    # Call of the old API (params_or_metric is a dict of parameters)
+    # test_size is now simply ignored inside or missing
     score = train_model(
         cfg_or_algo="ridge",
         metric_or_testsize="r2",
@@ -235,12 +235,12 @@ def test_train_model_facade_compatibility():
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 3. Тесты для tuner.py (KNN & Space Clipping)
+# 3. Tests for tuner.py (KNN & Space Clipping)
 # ──────────────────────────────────────────────────────────────────────
 
 
 def test_knn_space_limit_uses_effective_size():
-    """Проверяет, что верхний предел KNN учитывает Neff, а не N_total."""
+    """Checks that the KNN upper bound uses Neff, not N_total."""
     # Neff = 5
     trial = MagicMock()
     space_gen = _make_knn_space(n_samples=6)
@@ -248,7 +248,7 @@ def test_knn_space_limit_uses_effective_size():
     space_gen(trial)
 
     # physical_limit = max(1, 6 - 1) = 5.
-    # suggest_int должен быть вызван с high=5 (min(30, 5))
+    # suggest_int must be called with high=5 (min(30, 5))
     trial.suggest_int.assert_any_call("n_neighbors", 1, 5)
 
 
@@ -258,14 +258,14 @@ def test_knn_space_limit_uses_effective_size():
 def test_optimize_calls_clipping_with_effective_size(
     mock_study, mock_create, mock_clip
 ):
-    """Проверяет, что при оптимизации клиппинг вызывается с эффективным размером."""
+    """Checks that during optimization clipping is called with the effective size."""
     X = pd.DataFrame(np.random.rand(20, 2))
     y = pd.Series(np.random.rand(20))
 
-    # Имитируем внешний конфиг пространства поиска
+    # Simulate an external search-space config
     space_overrides = {"ridge": {"alpha": [0.1, 1.0]}}
 
-    # Запускаем оптимизацию со стратегией k_fold (n_folds=2)
+    # Run optimization with the k_fold strategy (n_folds=2)
     # Neff = floor(20 * (1 - 1/2)) = 10
     try:
         optimize(
@@ -278,41 +278,41 @@ def test_optimize_calls_clipping_with_effective_size(
             space_overrides=space_overrides,
         )
     except Exception:
-        pass  # Нам важен только вызов клиппинга
+        pass  # Only the clipping call matters here
 
-    # Проверяем, что clip_search_space получил n_samples=10 (Neff)
+    # Check that clip_search_space received n_samples=10 (Neff)
     mock_clip.assert_called_once()
     assert mock_clip.call_args[0][1] == 10
 
 
 def test_knn_space_limit_at_minimum():
     trial = MagicMock()
-    # Если осталась всего 1 строка после сплита
+    # If only 1 row remains after the split
     space_gen = _make_knn_space(n_samples=1)
     space_gen(trial)
-    # Должен предложить 1 соседа (минимум для sklearn), а не 0
+    # It must suggest 1 neighbor (the sklearn minimum), not 0
     trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
 
 
 def test_model_trainer_raises_error_on_empty_data():
-    """Проверка генерации исключения TrainingError при передаче пустых данных."""
+    """Checks that TrainingError is raised when empty data is passed."""
     trainer = ModelTrainer(algorithm="ridge")
 
-    # Сценарий 1: Пустой DataFrame
+    # Scenario 1: empty DataFrame
     empty_df = pd.DataFrame()
     empty_y = pd.Series(dtype=float)
 
     with pytest.raises(TrainingError, match="Data is empty"):
         trainer.fit(empty_df, empty_y)
 
-    # Сценарий 2: Пустой numpy массив
+    # Scenario 2: empty numpy array
     empty_X_np = np.array([]).reshape(0, 2)
     empty_y_np = np.array([])
 
     with pytest.raises(TrainingError, match="Data is empty"):
         trainer.fit(empty_X_np, empty_y_np)
 
-    # Сценарий 3: Данные с колонками, но без строк
+    # Scenario 3: data with columns but no rows
     df_zero_rows = pd.DataFrame(columns=["a", "b"])
     y_zero_rows = pd.Series(dtype=float)
 
@@ -321,13 +321,13 @@ def test_model_trainer_raises_error_on_empty_data():
 
 
 def test_get_effective_train_size_raises_on_invalid_string():
-    """Проверка, что функция падает на неизвестной строке."""
+    """Checks that the function raises on an unknown string."""
     with pytest.raises(ValueError, match="Unknown validation strategy string"):
         get_effective_train_size(100, strategy="magic_split")
 
 
 def test_get_effective_train_size_raises_on_invalid_type():
-    """Проверка, что функция падает на некорректном типе (например, None)."""
+    """Checks that the function raises on an invalid type (e.g. None)."""
     with pytest.raises(ValueError, match="Unsupported validation strategy type"):
         get_effective_train_size(100, strategy=None)
 
@@ -337,12 +337,12 @@ def test_get_effective_train_size_raises_on_invalid_type():
 
 def test_clip_search_space_raises_on_negative_samples():
     """
-    Проверка, что clip_search_space выбрасывает ValueError при отрицательном n_samples.
+    Checks that clip_search_space raises ValueError for a negative n_samples.
     """
-    # Создаем минимальное корректное пространство поиска для теста
+    # Create a minimal valid search space for the test
     space = {"n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])}
 
-    # Сценарий 1: Отрицательное значение
+    # Scenario 1: negative value
     with pytest.raises(ValueError, match="must be positive"):
         clip_search_space(space, n_samples=-1)
 
@@ -351,7 +351,7 @@ def test_clip_search_space_raises_on_negative_samples():
 
 
 def test_clip_search_space_raises_on_zero_samples():
-    """Проверка, что 0 образцов теперь вызывает ошибку, а не возвращает space."""
+    """Checks that 0 samples now raises an error instead of returning the space."""
     space = {"n_neighbors": SearchSpaceEntry.model_validate([1, 50, "int"])}
 
     with pytest.raises(ValueError, match="must be positive"):

@@ -1,27 +1,29 @@
 """
-Юнит-тесты чистой логики выбора победителя и инварианта winner-скора.
+Unit tests for the pure winner-selection logic and the winner-score invariant.
 
-Покрывают функции ``select_winner`` и ``is_valid_winner_score`` из
-``training_engine/component.py`` (issue #32):
+They cover ``select_winner`` and ``is_valid_winner_score`` from
+``training_engine/component.py``:
 
-• select_winner — детерминированный tie-break при равных скорах
-  (побеждает первый в порядке конфигурации);
-• is_valid_winner_score — порог класса worst-score сентинела
-  (score <= float32 minimum → невалиден), включая «сырой» float32 minimum,
-  который старый фильтр через ``math.isclose(rel_tol=1e-9)`` пропускал.
+• select_winner — a deterministic tie-break on equal scores
+  (the first in configuration order wins);
+• is_valid_winner_score — the worst-score sentinel class threshold
+  (score <= float32 minimum → invalid), including the 'raw' float32
+  minimum that the old filter via ``math.isclose(rel_tol=1e-9)`` missed.
 
-Интеграция двухстадийного выбора победителя (эпик #61, задача T7, issue #69):
+Integration of the two-stage winner selection:
 
-• пул финалистов (``select_finalists``, T3) + ``select_robust_winner`` (T4):
-  режимы ``off`` / ``active`` и fallback при тотальном провале пула;
-  режим ``warn_only`` удалён вместе с ключами отчёта
-  ``sanity_gate_warn_only``/``winner_if_active`` (эпик #74, задача R2);
-• кейс из постановки: ElasticNet CV=0.081, SVR=0.085, RF=0.089, δ=0.15 →
-  пул из трёх; победитель по RMSE_oof — SVR или RF, но не ElasticNet;
-• «золотые» сценарии на синтетических данных N=10–30: победитель —
-  честная модель, вырожденные (a)–(d) дисквалифицируются при ``mode=active``.
+• the finalists pool (``select_finalists``) + ``select_robust_winner``:
+  the ``off`` / ``active`` modes and the fallback when the whole pool
+  fails; the ``warn_only`` mode was removed along with the report keys
+  ``sanity_gate_warn_only``/``winner_if_active``;
+• the specification case: ElasticNet CV=0.081, SVR=0.085, RF=0.089,
+  δ=0.15 → a pool of three; the RMSE_oof winner is SVR or RF, but not
+  ElasticNet;
+• 'golden' scenarios on synthetic data N=10–30: the winner is an honest
+  model, while the degenerate (a)–(d) are disqualified under
+  ``mode=active``.
 
-Все тесты используют фиксированные seed (стандарт репозитория).
+All tests use fixed seeds (the repository standard).
 """
 
 from __future__ import annotations
@@ -55,10 +57,10 @@ from configurable_automl_engine.tuner import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# select_winner: детерминированный выбор победителя
+# select_winner: deterministic winner selection
 # ──────────────────────────────────────────────────────────────────────────────
 def test_select_winner_single_algorithm():
-    """Единственный алгоритм — он и есть победитель (возвращается имя-строка)."""
+    """A single algorithm — it wins (a string name is returned)."""
     results = {"ridge": (0.7, {"alpha": 1.0})}
     winner = select_winner(results)
     assert isinstance(winner, str)
@@ -66,7 +68,7 @@ def test_select_winner_single_algorithm():
 
 
 def test_select_winner_max_score_wins():
-    """Побеждает алгоритм с максимальным «сырым» скором."""
+    """The algorithm with the maximum 'raw' score wins."""
     results = {
         "ridge": (0.4, {"alpha": 1.0}),
         "random_forest": (0.9, {"n_estimators": 10}),
@@ -76,11 +78,11 @@ def test_select_winner_max_score_wins():
 
 
 def test_select_winner_tie_breaks_by_configuration_order():
-    """B6 (issue #32): равные скоры → первый в порядке конфигурации.
+    """Equal scores → the first one in configuration order wins.
 
-    ``max`` стабилен, а dict сохраняет порядок вставки, поэтому ничья
-    разрешается порядком итерации (порядок конфигурации для
-    последовательного пути).
+    ``max`` is stable and a dict preserves insertion order, so a tie is
+    resolved by the iteration order (the configuration order for the
+    sequential path).
     """
     results = {
         "random_forest": (0.5, {"n_estimators": 10}),
@@ -91,7 +93,7 @@ def test_select_winner_tie_breaks_by_configuration_order():
 
 
 def test_select_winner_tie_reorders_with_negative_scores():
-    """Ничья корректна и для отрицательных (инвертированных) скоров."""
+    """The tie-break is correct for negative (inverted) scores too."""
     results = {
         "extra_trees": (-0.5, {}),
         "random_forest": (-0.5, {}),
@@ -100,13 +102,13 @@ def test_select_winner_tie_reorders_with_negative_scores():
 
 
 def test_select_winner_empty_raises_value_error():
-    """Пустой словарь результатов → ValueError (победителя нет)."""
+    """An empty results dict → ValueError (there is no winner)."""
     with pytest.raises(ValueError, match="empty results"):
         select_winner({})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# is_valid_winner_score: инвариант winner-скора
+# is_valid_winner_score: the winner-score invariant
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "score",
@@ -114,16 +116,16 @@ def test_select_winner_empty_raises_value_error():
         0.42,
         1.0,
         -0.9,
-        -3.4e38,  # очень маленький, но валидный скор (выше float32 min)
+        -3.4e38,  # very small, but a valid score (above the float32 min)
         -3.39e38,
         0.0,
-        5,  # целочисленный скор
+        5,  # an integer score
         np.float32(0.5),
         np.float64(-0.75),
     ],
 )
 def test_is_valid_winner_score_accepts_finite_above_threshold(score: Any):
-    """Валидные скоры: числа, конечные и строго выше float32-min порога."""
+    """Valid scores: numbers that are finite and strictly above the float32-min threshold."""
     assert is_valid_winner_score(score) is True
 
 
@@ -132,7 +134,7 @@ def test_is_valid_winner_score_accepts_finite_above_threshold(score: Any):
     [
         None,
         "not-a-number",
-        "0.5",  # числовая строка — всё равно мусор (issue #32, ревью PR #22)
+        "0.5",  # a numeric string — still garbage
         b"0.5",
         (0.5,),
         [0.5],
@@ -144,35 +146,35 @@ def test_is_valid_winner_score_accepts_finite_above_threshold(score: Any):
         np.float32("inf"),
         np.float32("-inf"),
         HPO_WORST_SCORE,
-        float(np.finfo(np.float32).min),  # B4: «сырой» float32 min
+        float(np.finfo(np.float32).min),  # 'raw' float32 min
         np.float32(np.finfo(np.float32).min),
-        -1e39,  # ниже float32 min — класс сентинела
+        -1e39,  # below the float32 min — the sentinel class
         float("-inf"),
     ],
 )
 def test_is_valid_winner_score_rejects_sentinel_and_nonfinite(score: Any):
-    """Невалидные скоры: не-числа, мусор, NaN/±inf и класс worst-score сентинела."""
+    """Invalid scores: non-numbers, garbage, NaN/±inf, and the worst-score sentinel class."""
     assert is_valid_winner_score(score) is False
 
 
 def test_threshold_covers_hpo_worst_score_and_raw_f32_min():
-    """Порог класса сентинела покрывает обе известные сигнатуры.
+    """The sentinel-class threshold covers both known signatures.
 
-    HPO_WORST_SCORE (-3.4028235e38) и «сырой» float(np.finfo(np.float32).min)
-    отличаются на ~9.88e-9 относительно — старый isclose(rel_tol=1e-9) второй
-    не ловил. Оба обязаны попадать в класс сентинела (issue #32).
+    HPO_WORST_SCORE (-3.4028235e38) and the 'raw' float(np.finfo(np.float32).min)
+    differ by ~9.88e-9 relative — the old isclose(rel_tol=1e-9) missed the
+    second one. Both must fall into the sentinel class.
     """
     raw_f32_min = float(np.finfo(np.float32).min)
-    assert HPO_WORST_SCORE != raw_f32_min  # разные double-значения
+    assert HPO_WORST_SCORE != raw_f32_min  # different double values
     assert not math.isclose(raw_f32_min, HPO_WORST_SCORE, rel_tol=1e-9)
     assert raw_f32_min <= WORST_SCORE_THRESHOLD
     assert HPO_WORST_SCORE <= WORST_SCORE_THRESHOLD
-    # Валидный скор обязан быть строго выше порога
+    # A valid score must be strictly above the threshold
     assert -3.4e38 > WORST_SCORE_THRESHOLD
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Интеграция двухстадийного выбора победителя (T3 + T4, issue #69)
+#  Integration of the two-stage winner selection
 # ──────────────────────────────────────────────────────────────────────────────
 
 R = dict[str, tuple[float, dict[str, Any]]]
@@ -181,9 +183,9 @@ R = dict[str, tuple[float, dict[str, Any]]]
 def _golden_dataset(
     n: int = 30, seed: int = 7, noise: float = 0.5, p: int = 4
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Синтетический датасет: X0/X1 информативны, остальное — шум.
+    """Synthetic dataset: X0/X1 are informative, the rest is noise.
 
-    N=10–30 как в реальных кейсах постановки T7; фиксированный seed.
+    N=10–30 as in the real golden cases; fixed seed.
     """
     rng = np.random.RandomState(seed)
     X = rng.randn(n, p)
@@ -197,10 +199,10 @@ def _fit_oof_full(
     y: np.ndarray,
     folds: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, Any]:
-    """Честный OOF-вектор (модель фолда не видела строку) + full-fit.
+    """Honest OOF vector (the fold model has not seen the row) + full-fit.
 
-    Возвращает (y_pred_oof, y_pred_full, full_model). Число фолдов 5 для
-    маленьких датасетов N≈30 — каждая строка попадает в тест ровно один раз.
+    Returns (y_pred_oof, y_pred_full, full_model). The number of folds is 5
+    for small datasets N≈30, so each row lands in the test set exactly once.
     """
     kf = KFold(n_splits=folds, shuffle=True, random_state=0)
     oof = np.full(len(y), np.nan)
@@ -220,7 +222,7 @@ def _candidate(
     y_full: np.ndarray,
     model: Any,
 ) -> FinalistCandidate:
-    """Собрать ``FinalistCandidate`` из обученной модели и её векторов."""
+    """Build a ``FinalistCandidate`` from a trained model and its vectors."""
     return FinalistCandidate(
         algo_name=name,
         model=model,
@@ -235,20 +237,20 @@ def _candidate(
 def _golden_candidates(
     X: np.ndarray, y: np.ndarray
 ) -> dict[str, FinalistCandidate]:
-    """Обучить «золотой» пул (a)–(e) на синтетических данных N=10–30.
+    """Train the 'golden' pool (a)–(e) on synthetic data N=10–30.
 
-    (a) ElasticNet с занулёнными коэффициентами («полка») → плоские OOF;
-    (b) SVR-sigmoid, упёршийся в плато tanh → почти константные предсказания;
-    (c) дерево глубины 20 (RMSE_train≈0) → контур Г;
-    (d) 1-NN → контур Г;
-    (e) честная модель (градиентный бустинг малой глубины) → проходит аудит.
+    (a) ElasticNet with zeroed coefficients ('shelf') → flat OOF;
+    (b) SVR-sigmoid stuck on the tanh plateau → almost constant predictions;
+    (c) a depth-20 tree (RMSE_train≈0) → Circuit D;
+    (d) 1-NN → Circuit D;
+    (e) an honest model (shallow gradient boosting) → passes the audit.
 
-    Порядок словаря — детерминированный порядок пула из T3 (по CV-скору
-    убыванию), как его строит ``select_finalists``.
+    The dict order is the deterministic pool order from the pool builder
+    (by descending CV score), exactly as ``select_finalists`` produces it.
     """
     factories: dict[str, tuple[Callable[[], Any], float]] = {
-        # CV-скор в «сырой» семантике оптимизатора (neg-RMSE): лучший — самый
-        # близкий к нулю. Вырожденные модели «выигрывают» по CV (постановка).
+        # CV score in the optimizer's 'raw' semantics (neg-RMSE): the best is
+        # the closest to zero. The degenerate models 'win' by CV (per the spec).
         "elasticnet_zero": (lambda: ElasticNet(alpha=500.0, random_state=0), -0.081),
         "svr_sigmoid": (
             lambda: SVR(kernel="sigmoid", gamma=0.001, coef0=0.0),
@@ -278,16 +280,16 @@ def _golden_candidates(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Режимы off / active (интеграция пула T3 + robust T4)
+#  Modes off / active (pool + robust winner integration)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_integration_off_and_active_pool_to_robust_winner():
-    """Пул финалистов (T3) → select_robust_winner (T4): семантика режимов.
+    """Finalists pool → select_robust_winner: the semantics of the modes.
 
-    CV-лидер — вырожденная модель (плоский ElasticNet): в ``off`` он побеждает
-    как раньше, в ``active`` — дисквалифицируется, и побеждает честная модель
-    с лучшим RMSE_oof. Режим ``warn_only`` удалён (эпик #74).
+    The CV leader is a degenerate model (flat ElasticNet): in ``off`` it
+    wins as before; in ``active`` it is disqualified and an honest model
+    with the best RMSE_oof wins. The ``warn_only`` mode was removed.
     """
     X, y = _golden_dataset(n=80, seed=11)
     results: R = {
@@ -300,7 +302,7 @@ def test_integration_off_and_active_pool_to_robust_winner():
     )
     assert pool == ["elasticnet_zero", "svr", "random_forest"]
 
-    # Обучаем финалистов в порядке пула (детерминированный tie-break T3).
+    # Train the finalists in pool order (the deterministic pool tie-break).
     factories = {
         "elasticnet_zero": (lambda: ElasticNet(alpha=500.0, random_state=0), -0.081),
         "svr": (lambda: SVR(kernel="rbf", C=1.0), -0.085),
@@ -322,7 +324,7 @@ def test_integration_off_and_active_pool_to_robust_winner():
     X_df, y_s = pd.DataFrame(X), pd.Series(y)
 
     off = select_robust_winner(cands, X_df, y_s, gate, mode="off")
-    assert off.winner_algo == "elasticnet_zero"  # старое поведение: лучший CV
+    assert off.winner_algo == "elasticnet_zero"  # legacy behavior: best CV
     assert off.audit == {}
     assert off.disqualified == {}
 
@@ -335,7 +337,7 @@ def test_integration_off_and_active_pool_to_robust_winner():
 
 
 def test_warn_only_mode_removed():
-    """Boundary (эпик #74, R2): режим ``warn_only`` удалён — ValueError."""
+    """Boundary: the ``warn_only`` mode was removed — ValueError."""
     rng = np.random.RandomState(0)
     n = 40
     y = 5.0 * np.linspace(0.0, 1.0, n) + rng.randn(n) * 0.1
@@ -359,11 +361,11 @@ def test_warn_only_mode_removed():
 
 
 def test_boundary_active_reports_disqualifications_without_changing_pool():
-    """Boundary: ``active`` применяет дисквалификации, но не меняет пул T3.
+    """Boundary: ``active`` applies disqualifications but does not change the pool.
 
-    Контур Г в строгом ``reject``-режиме: вырожденные deep_tree / 1-NN
-    (RMSE_full≈0) дисквалифицируются как в старом поведении (issue #111 —
-    дефолтный warn-режим оставил бы их валидными с soft_warnings).
+    Circuit D in the strict ``reject`` mode: degenerate deep_tree / 1-NN
+    (RMSE_full≈0) are disqualified as in the old behavior (the default warn
+    mode would leave them valid with soft_warnings).
     """
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
@@ -372,7 +374,7 @@ def test_boundary_active_reports_disqualifications_without_changing_pool():
 
     off = select_robust_winner(cands, X_df, y_s, gate, mode="off")
     active = select_robust_winner(cands, X_df, y_s, gate, mode="active")
-    # Пул T3 в обоих режимах одинаков; отличаются только дисквалификации.
+    # The pool is the same in both modes; only the disqualifications differ.
     assert active.pool == off.pool
     assert set(active.disqualified) == {
         "elasticnet_zero",
@@ -384,7 +386,7 @@ def test_boundary_active_reports_disqualifications_without_changing_pool():
 
 
 def test_boundary_pool_exactly_top_k_candidates():
-    """Boundary: пул ровно из top_k кандидатов (все внутри коридора δ)."""
+    """Boundary: a pool of exactly top_k candidates (all inside the δ corridor)."""
     results: R = {
         "elasticnet": (-0.081, {}),
         "svr": (-0.085, {}),
@@ -398,15 +400,15 @@ def test_boundary_pool_exactly_top_k_candidates():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Кейс из постановки (T7, п. 6): ElasticNet 0.081 / SVR 0.085 / RF 0.089, δ=0.15
+#  Case from the specification: ElasticNet 0.081 / SVR 0.085 / RF 0.089, δ=0.15
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_issue_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
-    """ElasticNet CV=0.081, SVR=0.085, RF=0.089, δ=0.15 → пул из трёх.
+    """ElasticNet CV=0.081, SVR=0.085, RF=0.089, δ=0.15 → a pool of three.
 
-    ElasticNet с занулёнными коэффициентами дисквалифицируется; победитель
-    по RMSE_oof — SVR или RF (но не ElasticNet).
+    ElasticNet with zeroed coefficients is disqualified; the RMSE_oof winner
+    is SVR or RF (but not ElasticNet).
     """
     X, y = _golden_dataset(n=80, seed=11, noise=0.5, p=5)
     results: R = {
@@ -417,7 +419,7 @@ def test_issue_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
     )
-    assert pool == ["elasticnet", "svr", "random_forest"]  # пул из трёх
+    assert pool == ["elasticnet", "svr", "random_forest"]  # a pool of three
 
     factories = {
         "elasticnet": (lambda: ElasticNet(alpha=500.0, random_state=0), -0.081),
@@ -446,18 +448,18 @@ def test_issue_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Золотые сценарии (N=10–30): (a)–(d) дисквалифицируются, победитель — (e)
+#  Golden scenarios (N=10–30): (a)–(d) disqualified, winner is (e)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_golden_small_n_winner_is_honest_model_mode_active():
-    """Golden (T7, п. 5): при mode=active победитель — честная модель (e).
+    """Golden: under mode=active the winner is an honest model (e).
 
-    Вырожденные (a) «полка» ElasticNet, (b) SVR-sigmoid плато tanh,
-    (c) дерево глубины 20, (d) 1-NN — дисквалифицируются; честный
-    градиентный бустинг (e) проходит аудит и побеждает по RMSE_oof.
-    Контур Г в строгом ``reject``-режиме (issue #111: дефолтный warn-режим
-    оставил бы deep_tree / 1-NN валидными с soft_warnings).
+The degenerate (a) 'shelf' ElasticNet, (b) SVR-sigmoid on the tanh
+    plateau, (c) depth-20 tree and (d) 1-NN are disqualified; the honest
+    gradient boosting (e) passes the audit and wins by RMSE_oof.
+    Circuit D is in the strict ``reject`` mode (the default warn mode would
+    leave deep_tree / 1-NN valid with soft_warnings).
     """
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
@@ -481,23 +483,23 @@ def test_golden_small_n_winner_is_honest_model_mode_active():
 
 
 def test_golden_small_n_mode_off_old_behavior():
-    """Golden (T7, п. 5): mode=off — старое поведение select_winner.
+    """Golden: mode=off — the legacy select_winner behavior.
 
-    Победитель — лучший CV-скор (вырожденная модель), аудит не выполняется.
+    The winner is the best CV score (a degenerate model); no audit is run.
     """
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
     res = select_robust_winner(
         cands, pd.DataFrame(X), pd.Series(y), ModelSanityGate(), mode="off"
     )
-    assert res.winner_algo == "elasticnet_zero"  # лучший «сырой» CV-скор
+    assert res.winner_algo == "elasticnet_zero"  # best 'raw' CV score
     assert res.audit == {}
     assert res.disqualified == {}
     assert res.fallback_used is False
 
 
 def test_golden_small_n_determinism_repeated_runs():
-    """Golden (T7, п. 5): воспроизводимость — повторные запуски идентичны."""
+    """Golden: reproducibility — repeated runs are identical."""
     X, y = _golden_dataset(n=30, seed=7)
     cands = _golden_candidates(X, y)
     first = select_robust_winner(
@@ -514,15 +516,15 @@ def test_golden_small_n_determinism_repeated_runs():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Fallback: все кандидаты забракованы
+#  Fallback: all candidates rejected
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_boundary_all_candidates_rejected_fallback():
-    """Boundary: все кандидаты пула забракованы → fallback-критерий (T4).
+    """Boundary: the whole pool is rejected → the fallback criterion.
 
-    Формальный критерий: минимум числа нарушенных контуров → минимум
-    тяжести (Г > А > Б > В) → лучший RMSE_oof. Запуск не падает.
+    The formal criterion: minimum number of violated circuits → minimum
+    severity (D > A > B > C) → best RMSE_oof. The run does not fail.
     """
     from unittest.mock import MagicMock
 
@@ -564,6 +566,6 @@ def test_boundary_all_candidates_rejected_fallback():
     ]
     res = select_robust_winner(cands, x_df, pd.Series(y), gate, mode="active")
     assert res.fallback_used is True
-    # Меньше нарушенных контуров → «наименее проблемная» модель.
+    # Fewer violated circuits → the 'least problematic' model.
     assert res.winner_algo == "one_violation"
     assert res.winner_rmse_oof == pytest.approx(0.3)

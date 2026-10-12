@@ -1,53 +1,54 @@
-"""Ядро регрессионного бенчмарка Sanity Gate на целевом пайплайне (эпик #74, R4).
+"""Core of the Sanity Gate regression benchmark on the target pipeline.
 
-Бенчмарк сравнивает два варианта пайплайна движка на одном и том же датасете.
-Сравнение «до/после» времен эпика #61 переосмыслено: конфиг со старой схемой
-(``refine_winner`` / ``sanity_gate.mode``) недоступен и отвергается валидацией,
-поэтому базовая линия — современный аналог старого поведения выбора победителя:
+The benchmark compares two engine pipeline variants on the same dataset.
+The "before/after" comparison from earlier times is reinterpreted: a config
+with the old schema (``refine_winner`` / ``sanity_gate.mode``) is unavailable
+and rejected by validation, so the baseline is a modern analogue of the old
+winner selection behavior:
 
 * ``baseline``: ``all_algorithms → select(strategy: cv_best, output: winner)``
-  — победитель по «сырому» CV-скору без аудита Sanity Gate;
+  — winner by the "raw" CV score without the Sanity Gate audit;
 * ``target``: ``all_algorithms → select(sanity_gate, top_k) → refine →
-  select(sanity_gate, winner)`` — целевой DAG эпика #74: пул финалистов с
-  аудитом (T3+T4), дообучение (warm-start), повторный аудит обновлённых
-  моделей (честная цена — финалисты обучаются заново).
+  select(sanity_gate, winner)`` — the target DAG: a pool of finalists with
+  audit, retraining (warm-start), repeated audit of the updated models
+  (fair cost — finalists are retrained from scratch).
 
-Критерии приёмки:
+Acceptance criteria:
 
-1. Эталонные датасеты (нормальные данные с честным победителем: зашумлённые
-   R²≈0.3, широкие с сотнями признаков, малые N): победитель ``target``
-   совпадает с победителем ``baseline``, гейт НЕ срабатывает (0
-   дисквалификаций ни в одном select-шаге). Конечный gap > 1.5 (например,
-   переобученный lasso на широких данных) в warn-режиме контура Г (issue
-   #108) — это soft_warning, а не дисквалификация: гейт считается
-   несработавшим, победитель выбирается по честному ``RMSE_oof``.
-2. Вырожденные датасеты (полка / плато tanh / переобучение): CV-лидер —
-   вырожденная модель, гейт дисквалифицирует её — победитель ``target``
-   ОБЯЗАН отличаться от победителя ``baseline`` (100% изменений).
-   Вырожденные кейсы контура Г (RMSE_full≈0 — deep tree, 1-NN) прогоняются
-   в строгом ``generalization_gap_mode: reject``: в warn-режиме (issue #111)
-   бесконечный gap — soft_warning, а не дисквалификация.
+1. Reference datasets (normal data with an honest winner: noisy R²≈0.3, wide
+   with hundreds of features, small N): the ``target`` winner matches the
+   ``baseline`` winner, the gate does NOT trigger (0 disqualifications in
+   any select step). A finite gap > 1.5 (e.g. an overfit lasso on wide data)
+   in the warn mode of circuit D is a soft_warning, not a disqualification:
+   the gate is considered not triggered and the winner is chosen by the
+   honest ``RMSE_oof``.
+2. Degenerate datasets (flat shelf / tanh plateau / overfitting): the CV
+   leader is a degenerate model, the gate disqualifies it — the ``target``
+   winner MUST differ from the ``baseline`` winner (100% of changes).
+   Degenerate circuit D cases (RMSE_full≈0 — deep tree, 1-NN) run in the
+   strict ``generalization_gap_mode: reject``: in the warn mode an infinite
+   gap is a soft_warning, not a disqualification.
 
-Архитектура прогона:
+Run architecture:
 
-* Эталонные датасеты прогоняются сквозным пайплайном движка
-  (``execute_phases``) с реальным HPO (``n_trials=1``, N ≤ 300) — проверяется,
-  что аудит не ухудшает отбор на нормальных данных.
-* Вырожденные датасеты используют детерминированную подмену ``_run_hpo``:
-  вырожденный кандидат получает параметры, при которых реальное обучение на
-  100% данных даёт вырожденную модель (``alpha=500`` для ElasticNet,
-  ``max_depth=20`` для дерева, sigmoid-ядро для SVR), и «сырой» CV-скор лучше
-  честного кандидата. Это единственный детерминированный способ гарантировать
-  «вырожденный CV-лидер»: такие модели по построению НЕ выигрывают честную
-  кросс-валидацию, поэтому сквозной HPO не может их воспроизвести стабильно
-  (подход наследует негативные сценарии T4). Финалисты при этом обучаются и
-  аудируются по-настоящему.
+* Reference datasets run through the engine's end-to-end pipeline
+  (``execute_phases``) with real HPO (``n_trials=1``, N ≤ 300) — this checks
+  that the audit does not degrade selection on normal data.
+* Degenerate datasets use a deterministic replacement of ``_run_hpo``:
+  the degenerate candidate receives parameters under which real training on
+  100% of the data yields a degenerate model (``alpha=500`` for ElasticNet,
+  ``max_depth=20`` for the tree, sigmoid kernel for SVR), and the "raw" CV
+  score is better than the honest candidate's. This is the only deterministic
+  way to guarantee a "degenerate CV leader": by construction such models do
+  NOT win an honest cross-validation, so the end-to-end HPO cannot reproduce
+  them reliably (the approach inherits the negative scenarios). The finalists
+  are still trained and audited for real.
 
-Время прогона ограничено (CI): 6 датасетов, n_trials=1, N ≤ 300 — суммарно
-порядка 10–20 секунд.
+Run time is limited (CI): 6 datasets, n_trials=1, N ≤ 300 — about 10–20
+seconds in total.
 
-Формат вывода — таблица «датасет × вариант × победитель × сработал ли гейт»
-(см. ``render_table``); критерии приёмки — ``check_acceptance``.
+Output format — a table "dataset × variant × winner × whether the gate
+triggered" (see ``render_table``); acceptance criteria — ``check_acceptance``.
 """
 
 from __future__ import annotations
@@ -90,32 +91,34 @@ __all__ = [
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Результат прогона вариантов пайплайна
+#  Result of running pipeline variants
 # ──────────────────────────────────────────────────────────────────────────────
 
-#: Имя фазы первого sanity-select целевого DAG (пул финалистов T3, аудит T2).
+#: Name of the first sanity-select phase of the target DAG (finalist pool, audit).
 GATE_SELECT_PHASE = "GateSelect"
 
 
 @dataclass(frozen=True)
 class VariantResult:
-    """Результат сравнения ``baseline`` vs ``target`` на одном датасете.
+    """Result of comparing ``baseline`` vs ``target`` on a single dataset.
 
     Attributes:
-        dataset (str): Имя датасета.
+        dataset (str): Dataset name.
         kind (str): 'reference' | 'degenerate'.
-        winner_baseline (str): Победитель пайплайна ``cv_best`` (CV-лидер).
-        winner_target (str): Победитель целевого DAG с аудитом и refine.
-        pool (list[str]): Пул финалистов первого sanity-select целевого DAG.
-        disqualified (dict[str, list[str]]): Дисквалификации Sanity Gate
-            (имя select-фазы → дисквалифицированные кандидаты).
-        audit_valid (dict[str, bool]): is_valid каждого кандидата пула
-            (аудит первого sanity-select).
-        gate_triggered (bool): True — хотя бы в одном sanity-select целевого
-            DAG есть ДИСКВАЛИФИКАЦИИ. Soft_warnings (в т.ч. конечный gap >
-            порога в warn-режиме контура Г, issue #108) гейт НЕ «включают».
-        changed (bool): True — победители вариантов различаются.
-        elapsed (float): Время прогона в секундах.
+winner_baseline (str): Winner of the ``cv_best`` pipeline (CV leader).
+        winner_target (str): Winner of the target DAG with audit and refine.
+        pool (list[str]): Finalist pool of the first sanity-select of the
+            target DAG.
+        disqualified (dict[str, list[str]]): Sanity Gate disqualifications
+            (select phase name → disqualified candidates).
+        audit_valid (dict[str, bool]): is_valid of each candidate in the pool
+            (audit of the first sanity-select).
+        gate_triggered (bool): True — at least one sanity-select of the target
+            DAG has DISQUALIFICATIONS. Soft_warnings (including a finite gap
+            above the threshold in the warn mode of circuit D) do NOT
+            "trigger" the gate.
+        changed (bool): True — the variant winners differ.
+        elapsed (float): Run time in seconds.
     """
 
     dataset: str
@@ -131,22 +134,22 @@ class VariantResult:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Описания кейсов
+#  Case descriptions
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class ReferenceCase:
-    """Эталонный кейс: сквозной прогон с реальным HPO.
+    """Reference case: end-to-end run with real HPO.
 
     Attributes:
-        name (str): Имя датасета.
-        generator (Callable): Генератор (X, y) с фиксированным seed.
-        algorithms (dict[str, dict]): Конфигурация алгоритмов для HPO
-            (имя → доп. поля AlgoCfg, например гиперпараметры).
-        n_trials (int): Число триалов HPO на алгоритм (ограничение времени CI).
-        top_k_candidates (int): Кап размера пула финалистов.
-        corridor_delta (float): Ширина коридора пула.
+        name (str): Dataset name.
+        generator (Callable): Generator (X, y) with a fixed seed.
+        algorithms (dict[str, dict]): Algorithm configuration for HPO
+            (name → extra AlgoCfg fields, e.g. hyperparameters).
+        n_trials (int): Number of HPO trials per algorithm (CI time limit).
+        top_k_candidates (int): Cap on the finalist pool size.
+        corridor_delta (float): Width of the pool corridor.
     """
 
     name: str
@@ -162,21 +165,22 @@ class ReferenceCase:
 
 @dataclass(frozen=True)
 class DegenerateCase:
-    """Вырожденный кейс: сквозной прогон с детерминированной подменой HPO.
+    """Degenerate case: end-to-end run with a deterministic HPO replacement.
 
-    ``stub_hpo`` возвращает ``(score, params)`` для каждого имени алгоритма:
-    вырожденный кандидат получает параметры, при которых реальное обучение
-    финалиста даёт вырожденную модель, и «сырой» CV-скор лучше честного
-    кандидата (он и был бы «победителем» старого поведения по CV-скору).
+    ``stub_hpo`` returns ``(score, params)`` for each algorithm name:
+    the degenerate candidate receives parameters under which real training of
+    the finalist yields a degenerate model, and the "raw" CV score is better
+    than the honest candidate's (which would be the "winner" of the old
+    behavior by CV score).
 
     Attributes:
-        name (str): Имя датасета.
-        generator (Callable): Генератор (X, y) с фиксированным seed.
-        algorithms (dict[str, dict]): Конфигурация алгоритмов.
-        stub_hpo (Callable[[str], tuple[float, dict[str, Any]]]): Детермини-
-            рованный «тюнер»: имя алгоритма → (сырой CV-скор, параметры).
-        top_k_candidates (int): Кап размера пула финалистов.
-        corridor_delta (float): Ширина коридора пула.
+        name (str): Dataset name.
+        generator (Callable): Generator (X, y) with a fixed seed.
+        algorithms (dict[str, dict]): Algorithm configuration.
+        stub_hpo (Callable[[str], tuple[float, dict[str, Any]]]): Deterministic
+            "tuner": algorithm name → (raw CV score, parameters).
+        top_k_candidates (int): Cap on the finalist pool size.
+        corridor_delta (float): Width of the pool corridor.
     """
 
     name: str
@@ -190,15 +194,15 @@ class DegenerateCase:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Реестр кейсов бенчмарка
+#  Benchmark case registry
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Эталонные датасеты (сквозной прогон): гейт не должен ни срабатывать, ни
-# менять победителя. Workaround сужения alpha для lasso НЕ нужен (issue #108):
-# с дефолтным пространством alpha на широких данных lasso может
-# переобучаться (конечный gap > 1.5) — в warn-режиме контура Г это лишь
-# soft_warning, а не дисквалификация, поэтому побеждает реально лучший по
-# RMSE_oof, а не «прошедший гейт».
+# Reference datasets (end-to-end run): the gate must neither trigger nor
+# change the winner. The alpha-narrowing workaround for lasso is NOT needed
+# anymore: with the default alpha space on wide data lasso may overfit
+# (a finite gap > 1.5) — in the warn mode of circuit D this is only a
+# soft_warning, not a disqualification, so the genuinely best model by
+# RMSE_oof wins rather than "the one that passed the gate".
 _REFERENCE_ALGORITHMS: dict[str, dict[str, Any]] = {
     "ridge": {"enable": True, "limit_hyperparameters": True},
     "lasso": {"enable": True, "limit_hyperparameters": True},
@@ -223,15 +227,16 @@ REFERENCE_CASES: list[ReferenceCase] = [
     ),
 ]
 
-# Вырожденные датасеты (детерминированная подмена HPO): вырожденный кандидат —
-# CV-лидер (как если бы старое поведение выбрало его), честный кандидат —
-# второй. При аудите Sanity Gate вырожденный кандидат дисквалифицируется —
-# победитель целевого DAG обязан измениться (100% изменений).
+# Degenerate datasets (deterministic HPO replacement): the degenerate
+# candidate is the CV leader (as if the old behavior had selected it), the
+# honest candidate is second. During the Sanity Gate audit the degenerate
+# candidate is disqualified — the target DAG winner must change (100% of
+# changes).
 #
-# «Сырые» скоры (метрика rmse, семантика оптимизатора — больше лучше) заданы
-# так, чтобы оба кандидата попали в пул финалистов (коридор δ=0.3 в
-# пользовательской семантике: RMSE 0.08 против 0.09) и при этом вырожденный
-# кандидат оставался CV-лидером.
+# The "raw" scores (rmse metric, optimizer semantics — higher is better) are
+# set so that both candidates enter the finalist pool (corridor δ=0.3 in
+# user semantics: RMSE 0.08 vs 0.09) while the degenerate candidate remains
+# the CV leader.
 DEGENERATE_CASES: list[DegenerateCase] = [
     DegenerateCase(
         name="degenerate_flat_shelf",
@@ -281,19 +286,19 @@ ALL_CASES: list[ReferenceCase | DegenerateCase] = [
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Конфигурации вариантов пайплайна
+#  Pipeline variant configurations
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _algo_cfg(extra: dict[str, Any]) -> dict[str, Any]:
-    """Нормализовать конфигурацию алгоритма из кейса в AlgoCfg-словарь."""
+    """Normalize an algorithm configuration from a case into an AlgoCfg dict."""
     cfg: dict[str, Any] = {"enable": True, "limit_hyperparameters": True}
     cfg.update(extra)
     return cfg
 
 
 def _phase(name: str, n_trials: int, action: str, **extra: Any) -> dict[str, Any]:
-    """Собрать фазу пайплайна."""
+    """Build a pipeline phase."""
     phase: dict[str, Any] = {"name": name, "n_trials": n_trials, "action": action}
     phase.update(extra)
     return phase
@@ -304,15 +309,15 @@ def _cfg_dict(
     *,
     target_dag: bool,
 ) -> dict[str, Any]:
-    """Собрать конфигурацию варианта пайплайна (baseline или target DAG).
+    """Build a pipeline variant configuration (baseline or target DAG).
 
     Args:
-        case: Кейс бенчмарка.
-        target_dag (bool): True — целевой DAG с аудитом и refine; False —
-            базовая линия ``cv_best`` без аудита.
+        case: Benchmark case.
+        target_dag (bool): True — target DAG with audit and refine; False —
+            the ``cv_best`` baseline without audit.
 
     Returns:
-        dict[str, Any]: Конфигурация для ``Config.model_validate``.
+        dict[str, Any]: Configuration for ``Config.model_validate``.
     """
     n_trials = case.n_trials
     if target_dag:
@@ -344,10 +349,10 @@ def _cfg_dict(
         "sanity_gate": {
             "top_k_candidates": case.top_k_candidates,
             "corridor_delta": case.corridor_delta,
-            # Вырожденные кейсы (deep tree с RMSE_full≈0) требуют строгого
-            # reject-режима контура Г: в warn-режиме (issue #111) бесконечный
-            # gap — soft_warning и не дисквалифицирует, а вырожденный CV-лидер
-            # не был бы исключён из первого sanity-select.
+            # Degenerate cases (a deep tree with RMSE_full≈0) require the strict
+            # reject mode of circuit D: in the warn mode an infinite
+            # gap is a soft_warning and does not disqualify, so the degenerate
+            # CV leader would not be excluded from the first sanity-select.
             "generalization_gap_mode": (
                 "reject" if isinstance(case, DegenerateCase) else "warn"
             ),
@@ -363,12 +368,12 @@ def _cfg_dict(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Прогон вариантов
+#  Running the variants
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _df_from_case(case: ReferenceCase | DegenerateCase) -> pd.DataFrame:
-    """Собрать DataFrame из генератора кейса."""
+    """Build a DataFrame from the case generator."""
     X, y = case.generator()
     df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
     df["target"] = y
@@ -381,16 +386,16 @@ def _execute(
     *,
     stub_hpo: Callable[[str], tuple[float, dict[str, Any]]] | None = None,
 ) -> PhaseContext:
-    """Прогнать ``execute_phases`` на конфигурации, опционально подменяя HPO.
+    """Run ``execute_phases`` on a configuration, optionally replacing HPO.
 
     Args:
-        cfg_dict: Конфигурация варианта пайплайна.
-        df: Датасет с целевой колонкой.
-        stub_hpo: Детерминированная подмена ``_run_hpo`` (вырожденные кейсы);
-            ``None`` — реальный HPO.
+        cfg_dict: Pipeline variant configuration.
+        df: Dataset with the target column.
+        stub_hpo: Deterministic replacement of ``_run_hpo`` (degenerate
+            cases); ``None`` — real HPO.
 
     Returns:
-        PhaseContext: Итоговый контекст фаз (победитель в ``winner_algo``).
+        PhaseContext: Final phase context (winner in ``winner_algo``).
     """
     cfg = Config.model_validate(cfg_dict)
     prepared = prepare_dataset(cfg, df, "target")
@@ -405,18 +410,18 @@ def _execute(
 
 
 def _audit_valid_from_section(section: dict[str, Any]) -> dict[str, bool]:
-    """is_valid каждого кандидата из gate-секции (T6)."""
+    """is_valid of each candidate from the gate section."""
     return {name: bool(audit["is_valid"]) for name, audit in section["audit"].items()}
 
 
 def run_case(case: ReferenceCase | DegenerateCase) -> VariantResult:
-    """Прогнать кейс «baseline vs target DAG».
+    """Run a "baseline vs target DAG" case.
 
     Args:
-        case: Описание кейса (``ReferenceCase`` или ``DegenerateCase``).
+        case: Case description (``ReferenceCase`` or ``DegenerateCase``).
 
     Returns:
-        VariantResult: Результат сравнения вариантов пайплайна.
+        VariantResult: Result of comparing the pipeline variants.
     """
     started = time.monotonic()
     df = _df_from_case(case)
@@ -452,7 +457,7 @@ def run_case(case: ReferenceCase | DegenerateCase) -> VariantResult:
 
 
 def run_all() -> tuple[list[VariantResult], bool, list[str]]:
-    """Прогнать все кейсы и проверить критерии приёмки.
+    """Run all cases and check the acceptance criteria.
 
     Returns:
         tuple[list[VariantResult], bool, list[str]]: (results, passed, errors).
@@ -463,33 +468,33 @@ def run_all() -> tuple[list[VariantResult], bool, list[str]]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Таблица и критерии приёмки
+#  Table and acceptance criteria
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def render_table(results: list[VariantResult]) -> str:
-    """Таблица «датасет × вариант × победитель × сработал ли гейт».
+    """Table "dataset × variant × winner × whether the gate triggered".
 
-    Для каждого датасета две строки: ``baseline`` (CV-лидер без аудита) и
-    ``target`` (победитель целевого DAG с аудитом и refine, дисквалификации
-    гейта по обоим select-шагам).
+    For each dataset there are two rows: ``baseline`` (CV leader without
+    audit) and ``target`` (winner of the target DAG with audit and refine,
+    gate disqualifications for both select steps).
 
     Args:
-        results: Результаты прогонов.
+        results: Run results.
 
     Returns:
-        str: Текстовая таблица фиксированной ширины.
+        str: Fixed-width text table.
     """
     header = (
-        f"{'датасет':<28} {'вариант':<9} {'победитель':<18} "
-        f"{'гейт':<9} {'дисквалификации':<16}"
+        f"{'dataset':<28} {'variant':<9} {'winner':<18} "
+        f"{'gate':<9} {'disqualifications':<16}"
     )
     sep = "-" * len(header)
     lines = [sep, header, sep]
     for r in results:
-        gate_b = "нет"
-        changed_mark = " (изм.)" if r.changed else ""
-        gate_t = "да" if r.gate_triggered else "нет"
+        gate_b = "no"
+        changed_mark = " (chg.)" if r.changed else ""
+        gate_t = "yes" if r.gate_triggered else "no"
         disq = "; ".join(
             f"{phase}: {','.join(names)}"
             for phase, names in r.disqualified.items()
@@ -508,50 +513,50 @@ def render_table(results: list[VariantResult]) -> str:
 
 
 def check_acceptance(results: list[VariantResult]) -> tuple[bool, list[str]]:
-    """Проверить критерии приёмки эпика #74 (R4).
+    """Check the acceptance criteria.
 
-    Эталонные датасеты: 0 изменений победителя и гейт не срабатывает.
-    Вырожденные: 100% изменений, вырожденный CV-лидер дисквалифицирован,
-    честный победитель валиден в первом sanity-select.
+    Reference datasets: 0 winner changes and the gate does not trigger.
+    Degenerate: 100% of changes, the degenerate CV leader is disqualified,
+    and the honest winner is valid in the first sanity-select.
 
     Args:
-        results: Результаты прогонов.
+        results: Run results.
 
     Returns:
-        tuple[bool, list[str]]: (passed, список нарушений).
+        tuple[bool, list[str]]: (passed, list of violations).
     """
     errors: list[str] = []
     for r in results:
         if r.kind == "reference":
             if r.changed:
                 errors.append(
-                    f"{r.dataset}: победитель изменился на эталонных данных "
+                    f"{r.dataset}: winner changed on reference data "
                     f"({r.winner_baseline} -> {r.winner_target})"
                 )
             if r.gate_triggered:
                 errors.append(
-                    f"{r.dataset}: гейт сработал на эталонных данных: "
+                    f"{r.dataset}: gate triggered on reference data: "
                     f"{r.disqualified}"
                 )
         else:  # degenerate
             if not r.changed:
                 errors.append(
-                    f"{r.dataset}: победитель НЕ изменился на вырожденных "
-                    f"данных ({r.winner_baseline} == {r.winner_target})"
+                    f"{r.dataset}: winner did NOT change on degenerate "
+                    f"data ({r.winner_baseline} == {r.winner_target})"
                 )
             if not r.gate_triggered:
                 errors.append(
-                    f"{r.dataset}: гейт не сработал на вырожденных данных"
+                    f"{r.dataset}: gate did not trigger on degenerate data"
                 )
             if r.winner_baseline not in r.disqualified.get(GATE_SELECT_PHASE, []):
                 errors.append(
-                    f"{r.dataset}: вырожденный CV-лидер {r.winner_baseline} "
-                    f"не дисквалифицирован в первом sanity-select"
+                    f"{r.dataset}: degenerate CV leader {r.winner_baseline} "
+                    f"was not disqualified in the first sanity-select"
                 )
             if not r.audit_valid.get(r.winner_target, False):
                 errors.append(
-                    f"{r.dataset}: победитель target {r.winner_target} не "
-                    f"прошёл аудит в первом sanity-select (ожидался честный "
-                    f"кандидат)"
+                    f"{r.dataset}: target winner {r.winner_target} did not "
+                    f"pass the audit in the first sanity-select (an honest "
+                    f"candidate was expected)"
                 )
     return (not errors, errors)

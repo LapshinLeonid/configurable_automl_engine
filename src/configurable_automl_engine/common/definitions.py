@@ -3,7 +3,7 @@ from enum import Enum
 
 # ──────────────── validation enum ──────────────── #
 class ValidationStrategy(str, Enum):
-    """Разрешённые способы валидации при hyperopt."""
+    """Allowed validation strategies for hyperopt."""
 
     train_test_split = "train_test_split"
     k_fold = "k_fold"
@@ -14,9 +14,9 @@ class ValidationStrategy(str, Enum):
 # ──────────────── serialization enum ─────────────── #
 class SerializationFormat(str, Enum):
     """
-    Поддерживаемые форматы сериализации моделей.
-    Rationale: Обеспечивает типизацию и единый источник истины для выбора
-    между стандартным pickle и оптимизированным для тяжелых весов joblib.
+    Supported model serialization formats.
+    Rationale: Provides typing and a single source of truth for choosing
+    between the standard pickle and joblib optimized for heavy weights.
     """
 
     pickle = "pickle"

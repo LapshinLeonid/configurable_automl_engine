@@ -1,12 +1,12 @@
-"""Тесты адаптивного диапазона ``epsilon`` для SVR (issue #55).
+"""Tests of the adaptive ``epsilon`` range for SVR.
 
-Покрытие:
-- Модульные тесты хелпера ``compute_svr_epsilon_bounds`` (границы из σ(y),
-  fallback для константного/NaN-таргета, клампинг для float_log, IQR).
-- Интеграционные тесты тюнера: epsilon предлагается Optuna строго в
-  адаптивных границах; приоритет пользовательского ``epsilon``.
-- e2e через ``train_best_model``: ни один триал не выходит за адаптивный
-  диапазон, ``best_params["epsilon"]`` внутри диапазона.
+Coverage:
+- Unit tests of the ``compute_svr_epsilon_bounds`` helper (bounds from σ(y),
+  fallback for a constant/NaN target, clamping for float_log, IQR).
+- Tuner integration tests: epsilon is proposed by Optuna strictly within the
+  adaptive bounds; a user-specified ``epsilon`` takes priority.
+- e2e through ``train_best_model``: no trial leaves the adaptive range, and
+  ``best_params["epsilon"]`` stays inside it.
 """
 
 from __future__ import annotations
@@ -44,10 +44,10 @@ from configurable_automl_engine.tuner import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Хелпер: границы из разброса y
+# 1. Helper: bounds from the spread of y
 # ──────────────────────────────────────────────────────────────────────────────
 def test_helper_known_sigma_returns_relative_bounds():
-    """Для y с известным σ возвращает (0.005·σ, 0.10·σ)."""
+    """For y with a known σ returns (0.005·σ, 0.10·σ)."""
     y = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
     sigma = float(np.std(y))  # σ ≈ 1.41421356 (population std, ddof=0)
     low, high = compute_svr_epsilon_bounds(y)
@@ -58,7 +58,7 @@ def test_helper_known_sigma_returns_relative_bounds():
 
 
 def test_helper_accepts_series_and_dataframe():
-    """Хелпер принимает pd.Series и pd.DataFrame (одна колонка)."""
+    """The helper accepts pd.Series and pd.DataFrame (single column)."""
     y_series = pd.Series(np.arange(20, dtype=float))
     y_frame = pd.DataFrame({"y": np.arange(20, dtype=float)})
     y_list = list(range(20))
@@ -69,7 +69,7 @@ def test_helper_accepts_series_and_dataframe():
 
 
 def test_helper_custom_rel_factors():
-    """Параметры rel_min/rel_max переопределяются."""
+    """The rel_min/rel_max parameters are overridden."""
     y = np.array([0.0, 2.0, 4.0])
     low, high = compute_svr_epsilon_bounds(y, rel_min=0.01, rel_max=0.2)
     sigma = float(np.std(y))
@@ -80,33 +80,33 @@ def test_helper_custom_rel_factors():
 @pytest.mark.parametrize(
     "bad_y",
     [
-        np.array([1.0, 1.0, 1.0, 1.0]),  # константный y → σ = 0
+        np.array([1.0, 1.0, 1.0, 1.0]),  # constant y → σ = 0
         np.array([1.0, np.nan, 3.0]),  # NaN
-        np.array([np.nan] * 4),  # только NaN
+        np.array([np.nan] * 4),  # only NaN
         np.array([1.0, np.inf]),  # +inf
         np.array([-np.inf, 2.0]),  # -inf
-        np.array([]),  # пустой вектор
-        np.array([0.0, 0.0]),  # нулевой разброс
+        np.array([]),  # empty vector
+        np.array([0.0, 0.0]),  # zero spread
     ],
 )
 def test_helper_fallback_for_constant_or_non_finite_y(bad_y):
-    """Константный/NaN/±inf/пустой y → fallback (1e-4, 1e-2) без исключений."""
+    """Constant/NaN/±inf/empty y → fallback (1e-4, 1e-2) without exceptions."""
     assert compute_svr_epsilon_bounds(bad_y) == SVR_EPSILON_FALLBACK
 
 
 def test_helper_very_small_sigma_clamps_low_positive():
-    """Очень малый σ → low клампится > 0 (инвариант float_log), low < high."""
+    """Very small σ → low is clamped > 0 (float_log invariant), low < high."""
     y = np.array([1e-12, 1.1e-12, 1.2e-12, 1.3e-12])
     low, high = compute_svr_epsilon_bounds(y)
 
-    # Без клампинга low был бы ~5.6e-16; гарантируем строго положительный минимум.
+    # Without clamping, low would be ~5.6e-16; we guarantee a strictly positive minimum.
     assert low > 0.0
-    assert low == pytest.approx(1e-8)  # клампинг к SVR_EPSILON_MIN_LOW
+    assert low == pytest.approx(1e-8)  # clamped to SVR_EPSILON_MIN_LOW
     assert low < high
 
 
 def test_helper_iqr_strategy_robust_to_outliers():
-    """IQR-вариант робастен к выбросам: разброс меньше, чем у std."""
+    """The IQR variant is robust to outliers: the spread is smaller than with std."""
     y = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1000.0], dtype=float)
 
     std_low, std_high = compute_svr_epsilon_bounds(y, strategy="std")
@@ -115,18 +115,18 @@ def test_helper_iqr_strategy_robust_to_outliers():
     expected_spread = (np.percentile(y, 75) - np.percentile(y, 25)) / 1.349
     assert iqr_low == pytest.approx(0.005 * expected_spread)
     assert iqr_high == pytest.approx(0.10 * expected_spread)
-    # Выброс завышает σ, но не IQR → robust-диапазон уже.
+    # An outlier inflates σ but not IQR → the robust range is narrower.
     assert iqr_high < std_high
 
 
 def test_helper_invalid_strategy_raises():
-    """Неизвестная стратегия разброса → ValueError."""
+    """Unknown spread strategy → ValueError."""
     with pytest.raises(ValueError, match="Unknown epsilon spread strategy"):
         compute_svr_epsilon_bounds([1, 2, 3], strategy="mad")
 
 
 def test_helper_non_positive_min_low_raises():
-    """min_low <= 0 → ValueError (log-шкала требует low > 0)."""
+    """min_low <= 0 → ValueError (the log scale requires low > 0)."""
     with pytest.raises(ValueError, match="min_low must be > 0"):
         compute_svr_epsilon_bounds([1, 2, 3], min_low=0.0)
     with pytest.raises(ValueError, match="min_low must be > 0"):
@@ -134,9 +134,9 @@ def test_helper_non_positive_min_low_raises():
 
 
 def test_helper_target_scenario_upper_bound_near_025():
-    """Регрессия целевого сценария: при σ ≈ 0.244 верхняя граница ≈ 0.025.
+    """Regression of the target scenario: with σ ≈ 0.244 the upper bound ≈ 0.025.
 
-    Зона 0.06–0.08 (вырождение в плоскую линию) физически недостижима.
+    The 0.06–0.08 zone (degeneration into a flat line) is physically unreachable.
     """
     rng = np.random.default_rng(0)
     y = rng.normal(0.0, 0.244, size=500)
@@ -148,10 +148,10 @@ def test_helper_target_scenario_upper_bound_near_025():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Тюнер: фабрика пространства SVR и интеграция
+# 2. Tuner: SVR space factory and integration
 # ──────────────────────────────────────────────────────────────────────────────
 def test_make_svr_space_uses_adaptive_epsilon_bounds():
-    """Фабрика предлагает epsilon строго в границах, производных от y."""
+    """The factory proposes epsilon strictly within the bounds derived from y."""
     y = np.arange(50, dtype=float)
     low, high = compute_svr_epsilon_bounds(y)
 
@@ -167,7 +167,7 @@ def _mock_optimize_infra(
     collect_epsilons: list[float],
     model_factory=None,
 ):
-    """Замокать инфраструктуру оптимизации и собирать epsilon из триалов."""
+    """Mock the optimization infrastructure and collect epsilon from trials."""
 
     def default_factory(algo: str, **params):
         return Ridge()
@@ -193,7 +193,7 @@ def _mock_optimize_infra(
 
 
 def test_tuner_svr_default_space_all_trials_within_adaptive_bounds(monkeypatch):
-    """Тюнер (svr, дефолтный спейс): все значения epsilon триалов ∈ [eps_min, eps_max]."""
+    """Tuner (svr, default space): all trial epsilon values lie in [eps_min, eps_max]."""
     X = pd.DataFrame(np.random.randn(80, 5))
     y = pd.Series(np.random.randn(80))
     low, high = compute_svr_epsilon_bounds(y)
@@ -210,7 +210,7 @@ def test_tuner_svr_default_space_all_trials_within_adaptive_bounds(monkeypatch):
 
 
 def test_tuner_svr_dict_override_without_epsilon_gets_adaptive(monkeypatch):
-    """space_overrides[svr] — dict без epsilon → добавляются адаптивные границы."""
+    """space_overrides[svr] — a dict without epsilon → adaptive bounds are added."""
     X = pd.DataFrame(np.random.randn(80, 5))
     y = pd.Series(np.random.randn(80))
     low, high = compute_svr_epsilon_bounds(y)
@@ -235,10 +235,10 @@ def test_tuner_svr_dict_override_without_epsilon_gets_adaptive(monkeypatch):
 
 
 def test_tuner_svr_user_epsilon_override_has_priority(monkeypatch):
-    """Явный пользовательский epsilon (dict override) → адаптивная логика не применяется."""
+    """Explicit user epsilon (dict override) → adaptive logic is not applied."""
     X = pd.DataFrame(np.random.randn(80, 5))
     y = pd.Series(np.random.randn(80))
-    # Адаптивный диапазон для такого y заведомо меньше 0.1 (rel_max=0.10).
+    # The adaptive range for such y is guaranteed to be below 0.1 (rel_max=0.10).
     _, adaptive_high = compute_svr_epsilon_bounds(y)
     assert adaptive_high < 0.5
 
@@ -258,12 +258,12 @@ def test_tuner_svr_user_epsilon_override_has_priority(monkeypatch):
     assert seen
     for eps in seen:
         assert 0.5 <= eps <= 1.0
-        assert eps > adaptive_high  # вне адаптивного диапазона — override применён
+        assert eps > adaptive_high  # outside the adaptive range — override applied
     assert 0.5 <= params["epsilon"] <= 1.0
 
 
 def test_tuner_svr_callable_override_unchanged(monkeypatch):
-    """space_overrides[svr] как callable (старый механизм) → поведение не меняется."""
+    """space_overrides[svr] as a callable (old mechanism) → behavior is unchanged."""
     X = pd.DataFrame(np.random.randn(80, 5))
     y = pd.Series(np.random.randn(80))
 
@@ -289,15 +289,15 @@ def test_tuner_svr_callable_override_unchanged(monkeypatch):
 
 
 def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
-    """enqueue_trial: epsilon из предыдущей фазы (refine) валиден в адаптивном диапазоне.
+    """enqueue_trial: epsilon from the previous phase (refine) is valid in the adaptive range.
 
-    Границы считаются от того же y_train в обеих фазах, поэтому значение
-    победителя первой фазы гарантированно лежит внутри диапазона второй.
+    The bounds are computed from the same y_train in both phases, so the winner
+    value of the first phase is guaranteed to lie inside the range of the second.
     """
     X = pd.DataFrame(np.random.randn(80, 5))
     y = pd.Series(np.random.randn(80))
     low, high = compute_svr_epsilon_bounds(y)
-    prev_epsilon = (low + high) / 2.0  # «победитель» предыдущей фазы
+    prev_epsilon = (low + high) / 2.0  # "winner" of the previous phase
 
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
@@ -317,14 +317,14 @@ def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
     )
 
     assert low <= prev_epsilon <= high
-    assert seen[0] == prev_epsilon  # первый триал — enqueued значение
+    assert seen[0] == prev_epsilon  # the first trial is the enqueued value
     assert low <= params["epsilon"] <= high
 
 
 def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
-    """σ = 0 + пользовательский epsilon → работает пользовательское значение, не fallback."""
+    """σ = 0 + user epsilon → the user value is used, not the fallback."""
     X = pd.DataFrame(np.random.randn(60, 5))
-    y = pd.Series([1.0] * 60)  # константный y → σ = 0
+    y = pd.Series([1.0] * 60)  # constant y → σ = 0
 
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
@@ -341,12 +341,12 @@ def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
 
     assert seen
     for eps in seen:
-        assert 0.5 <= eps <= 1.0  # пользовательский диапазон, а не fallback (1e-4, 1e-2)
+        assert 0.5 <= eps <= 1.0  # user range, not the fallback (1e-4, 1e-2)
     assert 0.5 <= params["epsilon"] <= 1.0
 
 
 def test_tuner_svr_constant_y_falls_back(monkeypatch):
-    """Константный y → fallback (1e-4, 1e-2), запуск без исключений."""
+    """Constant y → fallback (1e-4, 1e-2), runs without exceptions."""
     X = pd.DataFrame(np.random.randn(60, 5))
     y = pd.Series([2.5] * 60)
 
@@ -362,12 +362,12 @@ def test_tuner_svr_constant_y_falls_back(monkeypatch):
 
 
 def test_tuner_svr_nan_y_falls_back(monkeypatch):
-    """y с NaN → fallback, без исключений."""
+    """y with NaN → fallback, without exceptions."""
     X = pd.DataFrame(np.random.randn(60, 5))
     y = pd.Series([1.0, np.nan] + list(np.random.randn(58)))
 
     class _FitOnlyEstimator:
-        """Заглушка вместо реального регрессора: Ridge падает на y с NaN."""
+        """Stub instead of a real regressor: Ridge fails on y with NaN."""
 
         def fit(self, *args, **kwargs):
             return self
@@ -387,7 +387,7 @@ def test_tuner_svr_nan_y_falls_back(monkeypatch):
 
 
 def test_tuner_other_algorithms_unaffected(monkeypatch):
-    """Поведение остальных алгоритмов не меняется (например, ridge)."""
+    """Behavior of the other algorithms is unchanged (e.g., ridge)."""
     X = pd.DataFrame(np.random.randn(60, 5))
     y = pd.Series(np.random.randn(60))
 
@@ -408,7 +408,7 @@ def test_tuner_other_algorithms_unaffected(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. e2e через train_best_model
+# 3. e2e through train_best_model
 # ──────────────────────────────────────────────────────────────────────────────
 def _svr_only_cfg(model_path: str, n_trials: int = 3) -> str:
     return f"""
@@ -434,16 +434,16 @@ algorithms:
 def test_e2e_svr_adaptive_epsilon_all_trials_and_best_within_bounds(
     tmp_path: Path, monkeypatch
 ):
-    """e2e: ни один триал не выходит за адаптивный диапазон; best_params внутри."""
+    """e2e: no trial leaves the adaptive range; best_params stays inside."""
     rows = 60
     rng = np.random.default_rng(7)
     df = pd.DataFrame(rng.standard_normal((rows, 4)), columns=[f"f{i}" for i in range(4)])
-    # Целевая переменная с детерминированным разбросом σ(y).
+    # Target variable with a deterministic spread σ(y).
     df["target"] = np.arange(rows, dtype=float)
     sigma = float(np.std(df["target"].to_numpy()))
     low, high = 0.005 * sigma, 0.10 * sigma
 
-    # Перехватываем каждый вызов create_model в тюнере (все триалы + финальный fit).
+    # Intercept every create_model call in the tuner (all trials + the final fit).
     real_create_model = tuner_module.create_model
     seen: list[float] = []
 
@@ -461,22 +461,22 @@ def test_e2e_svr_adaptive_epsilon_all_trials_and_best_within_bounds(
     res = train_best_model(cfg_file, df, target="target", model_path_override=model_path)
 
     assert res["algorithm"] == "svr"
-    assert seen, "ни один epsilon не был предложен — тест бесполезен"
+    assert seen, "no epsilon was proposed — the test is useless"
     for eps in seen:
         assert low <= eps <= high
     assert low <= res["params"]["epsilon"] <= high
 
 
 def test_e2e_svr_user_epsilon_override_respected(tmp_path: Path, monkeypatch):
-    """e2e: пользовательский epsilon в YAML → адаптивный диапазон не применяется."""
+    """e2e: user epsilon in YAML → the adaptive range is not applied."""
     rows = 60
     rng = np.random.default_rng(11)
     df = pd.DataFrame(rng.standard_normal((rows, 4)), columns=[f"f{i}" for i in range(4)])
-    # Масштабируем таргет, чтобы адаптивный диапазон был заведомо ниже [0.5, 1.0].
+    # Scale the target so that the adaptive range is guaranteed to be below [0.5, 1.0].
     df["target"] = np.arange(rows, dtype=float) * 0.02
     sigma = float(np.std(df["target"].to_numpy()))
     adaptive_high = 0.10 * sigma
-    assert adaptive_high < 0.5  # пользовательский диапазон [0.5, 1.0] вне адаптивного
+    assert adaptive_high < 0.5  # the user range [0.5, 1.0] is outside the adaptive one
 
     model_path = tmp_path / "model.pkl"
     cfg_file = tmp_path / "cfg.yaml"
@@ -518,15 +518,15 @@ algorithms:
     assert seen
     for eps in seen:
         assert 0.5 <= eps <= 1.0
-        assert eps > adaptive_high  # вне адаптивного диапазона — override применён
+        assert eps > adaptive_high  # outside the adaptive range — override applied
     assert 0.5 <= res["params"]["epsilon"] <= 1.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Компонент: prepare_search_space (контракт приоритета пользователя)
+# 4. Component: prepare_search_space (user-priority contract)
 # ──────────────────────────────────────────────────────────────────────────────
 def _svr_config(tmp_path: Path, hyperparameters: dict | None = None) -> Config:
-    """Config с единственным включённым алгоритмом svr."""
+    """Config with a single enabled svr algorithm."""
     algos: dict[str, dict] = {"svr": {"enable": True}}
     if hyperparameters:
         algos["svr"]["hyperparameters"] = hyperparameters
@@ -566,11 +566,11 @@ def _prepared_data() -> PreparedData:
 def test_prepare_search_space_svr_default_omits_epsilon(
     tmp_path: Path, monkeypatch
 ):
-    """prepare_search_space: svr без user-epsilon → epsilon опущен (адаптация в тюнере).
+    """prepare_search_space: svr without a user epsilon → epsilon is omitted (adaptation in the tuner).
 
-    Дефолтный слепой диапазон DEFAULT_SPACES["svr"]["epsilon"]=[1e-3, 1.0] не
-    должен попадать в итоговое пространство: иначе тюнер не сможет отличить
-    его от явного пользовательского значения.
+    The default blind range DEFAULT_SPACES["svr"]["epsilon"]=[1e-3, 1.0] must
+    not end up in the final space: otherwise the tuner cannot tell it apart
+    from an explicit user value.
     """
     cfg = _svr_config(tmp_path)
     prepared = _prepared_data()
@@ -592,17 +592,17 @@ def test_prepare_search_space_svr_default_omits_epsilon(
     assert "svr" in results
     space = captured["search_space"]
     assert "epsilon" not in space, (
-        "дефолтный epsilon не должен попадать в пространство — "
-        "его место занимают адаптивные границы в тюнере"
+        "default epsilon must not end up in the space — "
+        "its place is taken by adaptive bounds in the tuner"
     )
-    # Остальные дефолтные параметры SVR сохраняются.
+    # The remaining default SVR parameters are kept.
     assert "C" in space
     assert "kernel" in space
     assert "gamma" in space
 
 
 def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch):
-    """prepare_search_space: явный пользовательский epsilon сохраняется (приоритет)."""
+    """prepare_search_space: an explicit user epsilon is kept (priority)."""
     cfg = _svr_config(tmp_path, hyperparameters={"epsilon": [0.5, 1.0]})
     prepared = _prepared_data()
 
@@ -628,7 +628,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
 
 
 def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkeypatch):
-    """prepare_search_space: для остальных алгоритмов поведение не меняется."""
+    """prepare_search_space: behavior for the other algorithms is unchanged."""
     cfg_ridge = Config(
         general=GeneralCfg(
             comparison_metric="rmse",
@@ -663,6 +663,6 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
 
     assert "ridge" in results
     space = captured["search_space"]
-    # Дефолтный alpha ridge сохраняется как раньше (ничего не опускается).
+    # The default ridge alpha is kept as before (nothing is omitted).
     assert "alpha" in space
     assert space["alpha"].dist_type == "float_log"

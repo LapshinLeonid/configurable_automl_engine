@@ -7,14 +7,14 @@ from configurable_automl_engine.validation import RANDOM_STATE
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold, LeaveOneOut
 
-# Исправленные импорты
+# Fixed imports
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.validation import norm_val_method
 from optuna.trial import Trial
 from typing import Any, Callable
 
 
-# ═════════════════════ EXPORT: _objective (для тестов) ══════════════════════
+# ════════════════════ EXPORT: _objective (for tests) ════════════════════
 def _objective(
     trial: Trial,
     X,
@@ -25,7 +25,7 @@ def _objective(
     model_factory: Callable[[Trial], Any],
     random_state: int | None = 42,
 ) -> float:
-    """Целевая функция «accuracy» для внешнего юнит-теста."""
+    """Objective function "accuracy" for an external unit test."""
     method = norm_val_method(val_method)
 
     if method == "train_test_split":
@@ -39,7 +39,7 @@ def _objective(
         cv = LeaveOneOut()
     else:
         raise ValueError(
-            "val_method должен быть 'train_test_split', 'k_fold' или 'loo'"
+            "val_method must be 'train_test_split', 'k_fold' or 'loo'"
         )
 
     scores: list[float] = []
@@ -51,7 +51,7 @@ def _objective(
 
 
 class DummyClf(BaseEstimator):
-    """Модель, которая предсказывает самый частый класс."""
+    """A model that predicts the most frequent class."""
 
     def fit(self, X, y):
         counts = np.bincount(y)
@@ -78,6 +78,6 @@ def test_objective_mean_equals_accuracy():
         n_folds=1,
         model_factory=factory,
     )
-    # Accuracy dummy-классификатора = доля мажоритарного класса
+    # Accuracy of the dummy classifier = share of the majority class
     expected = max(np.mean(y == 0), np.mean(y == 1))
     assert abs(score - expected) < 1e-9

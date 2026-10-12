@@ -1,12 +1,12 @@
-"""Модуль для параллельного выполнения задач с управлением памятью.
-Предоставляет инструменты для параллельного запуска функций (ThreadPool/ProcessPool)
-с оптимизированной передачей тяжелых объектов pandas.DataFrame через механизмы
-Shared Memory (разделяемая память) и Disk Persistence (дисковый кэш).
-Основные компоненты:
-    - SharedDataFrame: Контейнер для размещения данных в разделяемой памяти ОС.
-    - DiskPersistenceManager: Менеджер временного хранения данных в Parquet.
-    - run_parallel: Универсальный интерфейс для запуска вычислений.
-Пример использования:
+"""Module for parallel execution of tasks with memory management.
+Provides tools for running functions in parallel (ThreadPool/ProcessPool)
+with optimized transfer of heavy pandas.DataFrame objects through
+Shared Memory and Disk Persistence (disk cache) mechanisms.
+Main components:
+    - SharedDataFrame: A container for placing data in the OS shared memory.
+    - DiskPersistenceManager: A manager for temporary Parquet data storage.
+    - run_parallel: A universal interface for running computations.
+Usage example:
     results = run_parallel(
         func=my_heavy_function,
         args_seq=[(df1,), (df2,)],
@@ -39,19 +39,19 @@ logger = logging.getLogger(__name__)
 
 
 class SharedDataFrame:
-    """Обертка для размещения DataFrame в разделяемой памяти (Shared Memory).
+    """Wrapper for placing a DataFrame in shared memory.
 
-    Позволяет передавать большие объемы данных между процессами без накладных
-    расходов на сериализацию (pickle), используя механизм POSIX Shared Memory.
+    Allows passing large data volumes between processes without the overhead
+    of serialization (pickle), using the POSIX Shared Memory mechanism.
 
     Attributes:
-        name (str | None): Уникальное имя сегмента разделяемой памяти в ОС.
-        shm (shared_memory.SharedMemory): Объект управления сегментом памяти.
-        shared_array (np.ndarray): NumPy-представление данных, указывающее на SHM буфер.
-        (может быть помечено как read-only при восстановлении).
-        shape (tuple): Размерность исходного массива данных.
-        dtype (np.dtype): Тип данных элементов массива.
-        columns (list[str]): Список имен столбцов для восстановления DataFrame.
+        name (str | None): Unique name of the shared memory segment in the OS.
+        shm (shared_memory.SharedMemory): Object managing the memory segment.
+        shared_array (np.ndarray): NumPy view of the data pointing to the SHM buffer
+        (may be marked read-only after restoration).
+        shape (tuple): Dimensionality of the original data array.
+        dtype (np.dtype): Data type of the array elements.
+        columns (list[str]): Column names for restoring the DataFrame.
     """
 
     def __init__(
@@ -62,20 +62,20 @@ class SharedDataFrame:
         dtype: np.dtype | Any = None,
         columns: list[str] | None = None,
     ) -> None:
-        """Инициализировать объект разделяемой памяти для DataFrame.
-        Логика инициализации:
-        1. Создание: Если передан df, создается новый сегмент Shared Memory,
-           с уникальным именем (shm_ + id + random), куда копируются данные
-        2. Подключение: Если df не передан, выполняется подключение к существующему
-           сегменту по имени (name) с использованием метаданных (shape, dtype, columns).
-        3. Метаданные: Список имен столбцов сохраняется для последующего
-           восстановления структуры DataFrame.
+        """Initialize a shared memory object for a DataFrame.
+        Initialization logic:
+        1. Create: If df is passed, a new Shared Memory segment is created,
+           with a unique name (shm_ + id + random), into which the data is copied.
+        2. Attach: If df is not passed, the object attaches to an existing
+           segment by name using metadata (shape, dtype, columns).
+        3. Metadata: The column name list is kept for the subsequent
+           restoration of the DataFrame structure.
         Args:
-            df (pd.DataFrame | None): Исходный DataFrame для размещения в SHM.
-            name (str | None): Имя существующего сегмента памяти.
-            shape (tuple | None): Размерность массива данных.
-            dtype (np.dtype | Any): Тип данных элементов массива.
-            columns (list[str] | None): Список имен столбцов.
+            df (pd.DataFrame | None): Source DataFrame to place in SHM.
+            name (str | None): Name of an existing memory segment.
+            shape (tuple | None): Dimensionality of the data array.
+            dtype (np.dtype | Any): Data type of the array elements.
+            columns (list[str] | None): Column name list.
         Returns:
             None
         """
@@ -110,19 +110,19 @@ class SharedDataFrame:
     @staticmethod
     def is_shared_array(X: Any) -> bool:
         """
-        Проверяет, является ли объект массивом numpy, использующим SharedMemory.
-        Это критично для исключения повторного копирования в ModelTrainer.
+        Check whether an object is a numpy array backed by SharedMemory.
+        This is critical for avoiding repeated copying in ModelTrainer.
         """
         if not isinstance(X, np.ndarray):
             return False
-        # Проверяем, указывает ли буфер массива на сегмент разделяемой памяти
-        # (в Python 3.8+ SharedMemory.buf возвращает memoryview)
+        # Check whether the array buffer points to a shared memory segment
+        # (in Python 3.8+ SharedMemory.buf returns a memoryview)
         return hasattr(X, "base") and isinstance(X.base, memoryview)
 
     @staticmethod
     def get_data_info(X: Any) -> tuple[int, list[str] | list[int]]:
         """
-        Извлекает количество признаков и их имена (или индексы) без копирования.
+        Extract the number of features and their names (or indices) without copying.
         """
         if isinstance(X, pd.DataFrame):
             return X.shape[1], X.columns.tolist()
@@ -140,53 +140,53 @@ class SharedDataFrame:
 
     @staticmethod
     def is_compatible(df: Any) -> bool:
-        """Проверяет, можно ли разместить DF в SHM
-        (только простые типы и RangeIndex)."""
-        """Проверяет, можно ли разместить DF в SHM 
-        (уже разделяемый массив, либо DF с простыми типами и RangeIndex)."""
+        """Check whether a DF can be placed into SHM
+        (only simple types and a RangeIndex)."""
+        """Check whether a DF can be placed into SHM 
+        (an already shared array, or a DF with simple types and a RangeIndex)."""
         if SharedDataFrame.is_shared_array(df):
             return True
         if not isinstance(df, pd.DataFrame):
             return False
 
-        # Проверка типов данных (белый список: int, uint, float, bool)
+        # Check data types (whitelist: int, uint, float, bool)
         allowed_kinds = {"i", "u", "f", "b"}
         if not all(dt.kind in allowed_kinds for dt in df.dtypes):
             return False
 
-        # Проверка индекса: SHM в текущей реализации не поддерживает сложные индексы
-        # Если индекс не является RangeIndex, объект признается несовместимым с SHM
-        # и будет автоматически перенаправлен в DiskPersistenceManager.
+        # Check the index: the current SHM implementation does not support complex indices.
+        # If the index is not a RangeIndex, the object is considered incompatible with SHM
+        # and is automatically redirected to DiskPersistenceManager.
         return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
-        """Восстановить pandas.DataFrame из разделяемой памяти.
-        Логика восстановления:
-        1. Проксирование: Создается объект np.ndarray, для которого принудительно
-        устанавливается флаг writeable=False для предотвращения
-        лишнего копирования в pandas.
-        2. Реконструкция: На базе массива и сохраненного списка столбцов формируется
-           новый объект DataFrame.
-        3. Изоляция: Итоговый DataFrame является независимым объектом в памяти
-           текущего процесса.
+        """Restore a pandas.DataFrame from shared memory.
+        Restoration logic:
+        1. Proxying: an np.ndarray is created with the writeable=False flag
+        forcibly set to prevent
+        unnecessary copying in pandas.
+        2. Reconstruction: a new DataFrame is built from the array and the
+           stored column name list.
+        3. Isolation: the resulting DataFrame is an independent object in the
+           memory of the current process.
         Returns:
-            pd.DataFrame: Восстановленный набор данных.
+            pd.DataFrame: The restored dataset.
         """
 
-        # Устанавливаем флаг writeable=False. Это критично: pandas часто делает
-        # скрытую копию, если «опасается», что кто-то изменит общий буфер.
+        # Set the writeable=False flag. This is critical: pandas often makes a
+        # hidden copy if it "fears" that someone might modify the shared buffer.
         self.shared_array.setflags(write=False)
 
-        # copy=False в конструкторе и использование однородного numpy-массива
-        # гарантирует создание DataFrame без выделения новой памяти под данные.
+        # copy=False in the constructor along with a homogeneous numpy array
+        # guarantees a DataFrame is created without allocating new memory for the data.
         return pd.DataFrame(self.shared_array, columns=self.columns, copy=False)
 
     def close(self) -> None:
-        """Закрыть доступ к сегменту разделяемой памяти.
-        Логика закрытия:
-        1. Хендл: Закрывает дескриптор доступа к SHM в текущем процессе.
-        2. Сохранность: Сами данные в ОС не уничтожаются, что позволяет другим
-           процессам продолжать работу с сегментом.
+        """Close access to the shared memory segment.
+        Closing logic:
+        1. Handle: closes the SHM access descriptor in the current process.
+        2. Preservation: the data itself in the OS is not destroyed, allowing other
+           processes to keep working with the segment.
         Returns:
             None
         """
@@ -195,11 +195,11 @@ class SharedDataFrame:
             self.shm.close()
 
     def unlink(self) -> None:
-        """Уничтожить сегмент разделяемой памяти в операционной системе.
-        Логика удаления:
-        1. Владение: Операция выполняется только процессом-создателем (_owner=True).
-        2. Освобождение: Помечает сегмент для удаления; память будет полностью
-           освобождена ОС, когда все процессы закроют свои ссылки на него.
+        """Destroy the shared memory segment in the operating system.
+        Deletion logic:
+        1. Ownership: the operation is only performed by the creating process (_owner=True).
+        2. Release: marks the segment for deletion; the memory will be fully
+           freed by the OS once all processes close their references to it.
         Returns:
             None
         """
@@ -208,48 +208,48 @@ class SharedDataFrame:
             try:
                 self.shm.unlink()
             except (FileNotFoundError, OSError):
-                pass  # Уже удалено
+                pass  # Already removed
 
     def get_view(self, columns: list[str] | None = None) -> pd.DataFrame:
         """
-        Возвращает представление (view) данных.
-        Если переданы columns, возвращает view только для этих столбцов.
+        Return a view of the data.
+        If columns are passed, returns a view restricted to those columns.
         """
         if columns is None:
             return self.to_df()
 
-        # Важно: используем .loc для создания slice-view, а не копии
+        # Important: use .loc to create a slice-view, not a copy
         return self.to_df().loc[:, columns]
 
 
 class DiskPersistenceManager:
-    """Утилита для временного сохранения DataFrame на диск в формате Parquet.
+    """Utility for temporarily saving a DataFrame to disk in Parquet format.
 
-    Используется как альтернатива Shared Memory, когда данные слишком велики
-    для оперативной памяти или требуется строгая типизация через дисковый кэш.
+    Used as an alternative to Shared Memory when the data is too large for
+    RAM or when strict typing via a disk cache is required.
 
     Attributes:
-        tmp_dir (str | None): Путь к временной директории (например, /dev/shm).
-        created_files (list[str]): Список путей к созданным временным файлам.
+        tmp_dir (str | None): Path to the temporary directory (e.g. /dev/shm).
+        created_files (list[str]): List of paths to the created temporary files.
     """
 
     def __init__(self, use_shm: bool = True):
-        # Используем /dev/shm для Linux если доступно, иначе стандартный temp
+        # Use /dev/shm on Linux if available, otherwise the standard temp dir
         self.tmp_dir = "/dev/shm" if use_shm and os.path.exists("/dev/shm") else None
         self.created_files: list[str] = []
 
     def save_df(self, df: pd.DataFrame) -> str:
-        """Сохранить DataFrame во временный файл Parquet.
-        Логика сохранения:
-        1. Локация: Файл создается в /dev/shm (RAM-диск) для ускорения операций
-           в Linux или в системной временной папке.
-        2. Формат: Используется Parquet с автоматическим выбором движка
-        (fastparquet или pyarrow) в зависимости от доступности библиотек.
-        3. Регистрация: Путь к файлу добавляется в список для последующей очистки.
+        """Save a DataFrame to a temporary Parquet file.
+        Saving logic:
+        1. Location: the file is created in /dev/shm (RAM disk) to speed up operations
+           on Linux, or in the system temporary folder.
+        2. Format: Parquet is used with automatic engine selection
+        (fastparquet or pyarrow) depending on library availability.
+        3. Registration: the file path is added to the list for later cleanup.
         Args:
-            df (pd.DataFrame): Набор данных для сохранения.
+            df (pd.DataFrame): The dataset to save.
         Returns:
-            str: Абсолютный путь к созданному временному файлу.
+            str: Absolute path to the created temporary file.
         """
 
         fd, path = tempfile.mkstemp(suffix=".parquet", dir=self.tmp_dir)
@@ -261,10 +261,10 @@ class DiskPersistenceManager:
         return path
 
     def cleanup(self) -> None:
-        """Удалить все созданные временные файлы.
-        Логика очистки:
-        1. Итерация: Проходит по списку путей, зарегистрированных в created_files.
-        2. Безопасность: Подавляет ошибки отсутствия файла, если он был удален ранее.
+        """Delete all created temporary files.
+        Cleanup logic:
+        1. Iteration: walks through the paths registered in created_files.
+        2. Safety: suppresses file-missing errors if the file was deleted earlier.
         Returns:
             None
         """
@@ -277,19 +277,20 @@ class DiskPersistenceManager:
 
 
 class _StartSignal:
-    """Side-channel для фиксации фактического старта задачи внутри воркера.
+    """Side-channel for recording the actual start of a task inside a worker.
 
-    В режиме процессов deadline ``task_timeout`` обязан отсчитываться от момента,
-    когда задача реально начала исполняться воркером, а не от момента отправки
-    в пул (issue #110). ``future.running()`` для этого не годится:
-    ``ProcessPoolExecutor`` помечает задачу как running уже при переносе во
-    внутреннюю очередь пула (ёмкость ``max_workers+1``), т.е. до реального старта.
+    In processes mode the ``task_timeout`` deadline must be counted from the
+    moment the task really starts executing in the worker, not from the moment
+    it was submitted to the pool. ``future.running()`` is not suitable for
+    this: ``ProcessPoolExecutor`` marks a task as running already when it is
+    moved to the pool's internal queue (capacity ``max_workers+1``), i.e.
+    before the actual start.
 
-    ``_StartSignal`` — сегмент разделяемой памяти (8 байт, float64), в который
-    воркер записывает ``time.time()`` непосредственно перед вызовом целевой
-    функции, а родитель читает в цикле ожидания. Инициализируется значением
-    ``-1.0`` (признак «ещё не стартовала»); реальные timestamps всегда
-    положительны. Удаляется владельцем (родителем) через ``unlink``.
+    ``_StartSignal`` is a shared memory segment (8 bytes, float64) into which
+    the worker writes ``time.time()`` right before calling the target
+    function, while the parent reads it in the wait loop. It is initialized
+    with ``-1.0`` (meaning "not started yet"); real timestamps are always
+    positive. It is removed by the owner (the parent) via ``unlink``.
     """
 
     def __init__(self) -> None:
@@ -300,11 +301,11 @@ class _StartSignal:
         self._buf[0] = -1.0
 
     def mark_start(self, value: float) -> None:
-        """Записать timestamp фактического старта задачи."""
+        """Record the timestamp of the task's actual start."""
         self._buf[0] = value
 
     def read(self) -> float:
-        """Вернуть timestamp старта (``-1.0`` — задача ещё не стартовала)."""
+        """Return the start timestamp (``-1.0`` — the task has not started yet)."""
         return float(self._buf[0])
 
     def close(self) -> None:
@@ -323,12 +324,12 @@ class _StartSignal:
 
 
 def _mark_worker_start(start_signal_name: str) -> None:
-    """Записать в shared-memory сигнал момент фактического старта задачи.
+    """Record the actual start timestamp of the task in the shared-memory signal.
 
-    Вызывается воркером сразу перед исполнением целевой функции.
+    Called by the worker right before executing the target function.
 
     Args:
-        start_signal_name (str): Имя сегмента разделяемой памяти сигнала.
+        start_signal_name (str): Name of the shared memory segment of the signal.
     """
     try:
         shm = shared_memory.SharedMemory(name=start_signal_name)
@@ -349,35 +350,35 @@ def _worker_proxy(
     shm_info: dict[int, tuple[Any, ...]],
     start_signal_name: str | None = None,
 ) -> Any:
-    """Десериализовать данные и выполнить целевую функцию внутри воркера.
-    Логика выполнения:
-    1. Shared Memory: Находит объекты SharedDataFrame по индексам и
-       конвертирует их обратно в DataFrame.
-    2. Disk: Читает Parquet-файлы по переданным путям и восстанавливает DataFrame.
-    3. Вызов: Передает восстановленные данные в целевую функцию func.
-    4. Очистка: Закрывает локальные хендлы Shared Memory и принудительно
-        очищает список аргументов для ускорения работы Garbage Collector.
+    """Deserialize data and run the target function inside a worker.
+    Execution logic:
+    1. Shared Memory: finds SharedDataFrame objects by index and
+       converts them back into DataFrames.
+    2. Disk: reads Parquet files by the passed paths and restores DataFrames.
+    3. Call: passes the restored data to the target function func.
+    4. Cleanup: closes the local Shared Memory handles and forcibly
+        clears the argument list to speed up the Garbage Collector.
     Args:
-        func (Callable): Целевая функция для выполнения.
-        args (Sequence): Список аргументов (включая прокси-объекты).
-        kwargs (Mapping): Именованные аргументы.
-        disk_indices (list[int]): Индексы аргументов, сохраненных на диск.
-        shm_info (dict[int, tuple]): Словарь, где ключ — индекс аргумента,
-            а значение — кортеж с метаданными SHM (имя, shape, dtype, columns)
-            для восстановления.
-        start_signal_name (str | None): Имя сегмента разделяемой памяти, в
-            который воркер записывает timestamp фактического старта (issue #110).
+        func (Callable): Target function to run.
+        args (Sequence): List of arguments (including proxy objects).
+        kwargs (Mapping): Keyword arguments.
+        disk_indices (list[int]): Indices of arguments saved to disk.
+        shm_info (dict[int, tuple]): A dict where the key is the argument index
+            and the value is a tuple of SHM metadata (name, shape, dtype, columns)
+            used for restoration.
+        start_signal_name (str | None): Name of the shared memory segment into
+            which the worker writes the timestamp of the actual start.
     Returns:
-        Any: Результат выполнения функции func.
+        Any: Result of running the function func.
     """
 
     final_args = list(args)
-    # Используем контекстный менеджер для автоматического закрытия дескрипторов SHM
-    # Это освобождает системные ресурсы сразу после вызова функции.
+    # Use a context manager to automatically close SHM descriptors
+    # This frees the system resources right after the function call.
     shm_wrappers: list[SharedDataFrame] = []
     try:
-        # 1. Восстановление из Shared Memory
-        # Восстановление SHM по метаданным (имя, shape, dtype, columns)
+        # 1. Restore from Shared Memory
+        # Restore SHM from metadata (name, shape, dtype, columns)
         if shm_info:
             for idx, meta in shm_info.items():
                 wrapper = SharedDataFrame(
@@ -385,46 +386,46 @@ def _worker_proxy(
                 )
                 final_args[idx] = wrapper.to_df()
                 shm_wrappers.append(wrapper)
-        # 2. Загрузка с диска
+        # 2. Load from disk
         if disk_indices:
             for idx in disk_indices:
                 path = final_args[idx]
                 if isinstance(path, str) and path.endswith(".parquet"):
                     final_args[idx] = pd.read_parquet(path)
-        # 3. Фиксируем фактический старт задачи (незадолго до вызова func)
+        # 3. Record the actual start of the task (right before calling func)
         if start_signal_name is not None:
             _mark_worker_start(start_signal_name)
         return func(*final_args, **kwargs)
     finally:
-        # Важно: закрываем только локальные ссылки (дескрипторы) воркера.
-        # Сами данные в SHM остаются живы,
-        # пока их не удалит главный процесс через .unlink()
+        # Important: we close only the worker's local references (descriptors).
+        # The SHM data itself stays alive
+        # until the main process removes it via .unlink()
         for w in shm_wrappers:
             try:
                 w.close()
             except Exception:  # noqa: S110, BLE001
                 pass
-        final_args.clear()  # Помогаем GC быстрее освободить ссылки
+        final_args.clear()  # Help the GC free references faster
 
 
 def _perform_cleanup(
     shm_refs: list[SharedDataFrame] | None,
     persistence_manager: DiskPersistenceManager | None,
 ) -> None:
-    """Вспомогательная функция для безопасной очистки с защитой от системных ошибок."""
+    """Helper function for safe cleanup with protection against system errors."""
     if shm_refs:
         for ref in shm_refs:
-            # Сначала закрываем дескриптор
+            # First close the descriptor
             try:
                 ref.close()
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"SHM close error (expected during forced shutdown): {e}")
 
-            # Затем пытаемся уничтожить сегмент в ОС
+            # Then try to destroy the segment in the OS
             try:
                 ref.unlink()
             except (FileNotFoundError, OSError):
-                # Игнорируем, если уже удалено или нет доступа
+                # Ignore if it was already removed or there is no access
                 pass
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Non-critical SHM unlink failure: {e}")
@@ -439,14 +440,14 @@ def _perform_cleanup(
 
 
 def _force_shutdown_processes(pool: Any, shutdown_grace_period: float = 5.0) -> None:
-    """Принудительное завершение всех процессов в пуле.
+    """Forcefully shut down all processes in the pool.
 
-    Используется watchdog-механизмом при обнаружении зависших задач
-    (C-level crash воркера).
+    Used by the watchdog mechanism when hung tasks are detected
+    (a C-level worker crash).
 
     Args:
-        pool: ProcessPoolExecutor или ThreadPoolExecutor
-        shutdown_grace_period: время ожидания graceful shutdown в секундах
+        pool: ProcessPoolExecutor or ThreadPoolExecutor
+        shutdown_grace_period: graceful shutdown wait time in seconds
     """
     workers = list(getattr(pool, "_processes", {}).values())
     pool.shutdown(wait=False, cancel_futures=True)
@@ -486,70 +487,70 @@ def run_parallel(
     shared_args_indices: list[int] | None = None,
     disk_args_indices: list[int] | None = None,
     shutdown_grace_period: float = 5.0,
-    task_timeout: float | None = None,  # индивидуальный таймаут на задачу
+    task_timeout: float | None = None,  # per-task timeout
 ) -> list[Any]:
-    """Организовать параллельное выполнение функции
-    с управлением памятью и жизненным циклом.
+    """Run a function in parallel with memory and lifecycle management.
 
-    Логика параллелизма:
-    1. Режим: Поддерживает многопоточность (threads) и многопроцессорность (processes).
-    2. Оптимизация данных: При работе с процессами переносит DataFrame в Shared Memory
-       или на диск, исключая накладные расходы на Pickle-сериализацию.
-    3. Управление жизненным циклом: Использует явную инициализацию и
-       завершение Executor (shutdown с cancel_futures=True). Это позволяет
-       немедленно прерывать выполнение при сбоях или таймаутах.
-    4. Глобальный таймер: Параметр timeout ограничивает суммарное время выполнения
-       всей последовательности задач в режиме процессов. Если лимит превышен,
-       сбор результатов прекращается, а оставшиеся в очереди задачи отменяются.
-    5. Отказоустойчивость: При сбое инициализации или выполнении пула процессов
-       выполняется попытка перезапуска всей последовательности в режиме "threads"
-       с принудительной очисткой ресурсов.
-    6. Ресурсный менеджмент: Гарантирует удаление сегментов памяти и временных
-       файлов, а также корректную остановку всех рабочих процессов/потоков.
-    7. Семантика таймаута: В режиме "processes" таймаут жёсткий: зависшие
-       воркеры принудительно завершаются через SIGTERM/SIGKILL (watchdog).
-       Таймауты в режиме "threads" игнорируются (issue #101): уже
-       исполняющуюся Python-функцию невозможно надёжно прервать, поэтому
-       мягкий таймаут не экономил время, а лишь заставлял фазу ждать
-       shutdown(wait=True) завершения всех алгоритмов и затем выбрасывал их
-       готовые результаты. Если timeout / task_timeout переданы вместе с
-       mode="threads" (в т.ч. при прямом вызове API в обход конфиг-валидации),
-       выдаётся warning, а таймауты сбрасываются в None — все задачи
-       выполняются до естественного завершения.
+        Parallelism logic:
+            1. Mode: supports threads and processes.
+            2. Data optimization: in processes mode, moves DataFrames into Shared Memory
+               or to disk, eliminating Pickle serialization overhead.
+            3. Lifecycle management: uses explicit Executor
+               initialization and shutdown (with cancel_futures=True). This allows
+               interrupting execution immediately on failures or timeouts.
+            4. Global timer: The timeout parameter limits the total execution time
+               of the entire sequence of tasks in processes mode. If the limit is exceeded,
+               result collection stops and the remaining queued tasks are cancelled.
+            5. Fault tolerance: if the initialization or execution of the process pool
+               fails, the whole sequence is retried in "threads" mode
+               with forced resource cleanup.
+            6. Resource management: guarantees removal of memory segments and temporary
+               files and the correct stop of all worker processes/threads.
+            7. Timeout semantics: in "processes" mode the timeout is hard: hung
+               workers are forcibly terminated via SIGTERM/SIGKILL (watchdog).
+               Timeouts in "threads" mode are ignored: an already running Python
+               function cannot be reliably interrupted, so a soft timeout did not
+               save time and only forced the phase to wait for shutdown(wait=True)
+               completion of all algorithms and then discard their ready results.
+               If timeout / task_timeout are passed together with mode="threads"
+               (including direct API calls bypassing config validation), a warning
+               is emitted and the timeouts are reset to None — all tasks run to
+               their natural completion.
 
     Args:
-        func (Callable): Функция для запуска.
-        args_seq (Iterable): Последовательность кортежей аргументов.
-        kwargs_seq (Iterable): Последовательность словарей именованных аргументов.
-        max_workers (int): Лимит количества рабочих воркеров.
-        mode (str): Режим параллелизма ("threads" или "processes").
-        timeout (int | float | None): Глобальный лимит времени в секундах
-        на выполнение всех задач. Применяется только в режиме "processes"
-        (жёсткий таймаут: зависшие воркеры завершаются принудительно).
-        None — без глобального ограничения. В режиме "threads" игнорируется
-        с warning (issue #101).
-        shared_args_indices (list[int]): Индексы DataFrame для Shared Memory.
-        disk_args_indices (list[int]): Индексы DataFrame для дискового кэша.
-        shutdown_grace_period (float): Время в секундах, отводимое на мягкое завершение
-            воркеров перед принудительным отправлением SIGTERM/SIGKILL.
-        task_timeout (float | None): Индивидуальный таймаут на одну задачу (алгоритм) в секундах.
-            Если None — используется глобальный timeout. Отсчитывается от момента
-            фактического старта задачи в воркере (timestamp фиксируется воркером
-            через side-channel), а не от момента submit (issue #110): пока задача
-            стоит в очереди (например, когда алгоритмов больше, чем max_workers),
-            очередь не «съедает» её исполненный бюджет — после старта задача получает
-            до task_timeout секунд исполнения. Чтобы задача, которая так и не
-            стартует (например, из-за зависшего воркера), не «зависала» навсегда,
-            deadline ограничен сверху величиной submit_time + task_timeout + queue_budget,
-            где queue_budget = ceil(число_задач / max_workers) * task_timeout (на весь
-            дренаж батча). Применяется только в режиме "processes" (жёсткий таймаут).
-            В режиме "threads" игнорируется с warning (issue #101).
+            func (Callable): The function to run.
+            args_seq (Iterable): Sequence of argument tuples.
+            kwargs_seq (Iterable): Sequence of keyword-argument dicts.
+            max_workers (int): Maximum number of worker processes.
+            mode (str): Parallelism mode ("threads" or "processes").
+            timeout (int | float | None): Global time limit in seconds
+                for running all tasks. Applies only in "processes" mode
+                (hard timeout: hung workers are terminated forcibly).
+                None — no global limit. In "threads" mode ignored
+                with a warning.
+            shared_args_indices (list[int]): DataFrame indices for Shared Memory.
+            disk_args_indices (list[int]): DataFrame indices for the disk cache.
+            shutdown_grace_period (float): Time in seconds allowed for the graceful shutdown
+                of workers before SIGTERM/SIGKILL is forcibly sent.
+            task_timeout (float | None): Per-task (per-algorithm) timeout in seconds.
+                If None — the global timeout is used. Counted from the moment the
+                task actually starts in the worker (the timestamp is recorded by the
+                worker through a side-channel), not from the moment of submit: while
+                a task waits in the queue (for example, when there are more
+                algorithms than max_workers), the queue does not "consume" its
+                execution budget — after starting, the task gets up to task_timeout
+                seconds of execution. So that a task that never starts (for example,
+                due to a hung worker) does not hang forever, the deadline is bounded
+                from above by submit_time + task_timeout + queue_budget, where
+                queue_budget = ceil(number_of_tasks / max_workers) * task_timeout
+                (for the whole batch drain). Applies only in "processes" mode
+                (hard timeout). In "threads" mode ignored with a warning.
 
-    Returns:
-        list[Any]: Список результатов. Задачи, не успевшие выполниться
-            или вызвавшие исключения (включая InvalidAlgorithmError),
-            заменяются на None. Прерывания пользователя (KeyboardInterrupt)
-            пробрасываются вызывающему коду.
+            Returns:
+                list[Any]: List of results. Tasks that did not finish in time
+                    or raised exceptions (including InvalidAlgorithmError),
+                    are replaced with None. User interruptions (KeyboardInterrupt)
+                    are re-raised to the calling code.
     """
     pool = None
 
@@ -559,16 +560,16 @@ def run_parallel(
     if len(args_seq) != len(kwargs_seq):
         raise ValueError("args_seq and kwargs_seq must be of equal length")
 
-    # Таймауты в режиме потоков (issue #101): исполняющуюся Python-функцию
-    # невозможно прервать, поэтому мягкий таймаут не экономит время, а лишь
-    # выбрасывал готовые результаты завершившихся алгоритмов после ожидания
-    # shutdown(wait=True). Конфиг-валидация уже запрещает таймауты в threads-
-    # режиме, но она не защищает от прямых вызовов run_parallel — поэтому здесь
-    # таймауты игнорируются с предупреждением, а не молча.
+    # Timeouts in threads mode: an already running Python function cannot be
+    # interrupted, so a soft timeout does not save time and only discarded the
+    # ready results of completed algorithms after waiting for
+    # shutdown(wait=True). Config validation already forbids timeouts in the
+    # threads mode, but it does not protect against direct run_parallel calls —
+    # therefore timeouts are ignored here with a warning rather than silently.
     if mode == "threads":
         if timeout is not None or task_timeout is not None:
             logger.warning(
-                "Timeouts are ignored in threads mode (issue #101): an "
+                "Timeouts are ignored in threads mode: an "
                 "already-running Python function cannot be interrupted, so "
                 "a soft timeout does not save time and only discards the "
                 "ready results of completed algorithms. "
@@ -579,21 +580,21 @@ def run_parallel(
         timeout = None
         task_timeout = None
 
-    # Логика подготовки Shared Memory для процессов
+    # Shared Memory preparation logic for processes
     shm_refs = []
     persistence_manager = DiskPersistenceManager()
-    # Start-сигналы фактического старта задач (только для процессов, issue #110)
+    # Start-signals of the actual task starts (only for processes)
     start_signals: list[_StartSignal] = []
 
     if mode == "processes" and (shared_args_indices or disk_args_indices):
-        task_payloads = []  # Список кортежей
+        task_payloads = []  # List of tuples
         # (args, kwargs, actual_shm_idx, actual_disk_idx)
         target_shm_indices = shared_args_indices or []
         target_disk_indices = disk_args_indices or []
 
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
-            curr_shm_info = {}  # Индекс -> (имя, shape, dtype, columns)
+            curr_shm_info = {}  # Index -> (name, shape, dtype, columns)
             for idx in set(target_shm_indices) | set(target_disk_indices):
                 if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
                     if idx in target_shm_indices and SharedDataFrame.is_compatible(
@@ -601,14 +602,14 @@ def run_parallel(
                     ):
                         shm_wrapper = SharedDataFrame(new_args[idx])
                         shm_refs.append(shm_wrapper)
-                        # Сохраняем метаданные для передачи в воркер
+                        # Save the metadata for passing to the worker
                         curr_shm_info[idx] = (
                             shm_wrapper.name,
                             shm_wrapper.shape,
                             shm_wrapper.dtype,
                             shm_wrapper.columns,
                         )
-                        new_args[idx] = None  # Сам объект не передаем
+                        new_args[idx] = None  # We do not pass the object itself
                     else:
                         path = persistence_manager.save_df(new_args[idx])
                         new_args[idx] = path
@@ -623,18 +624,18 @@ def run_parallel(
 
             task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm_info))
 
-        # Переопределяем итерируемый объект для запуска
+        # Override the iterable for execution
         execution_tasks = task_payloads
     else:
-        # Для потоков или обычных процессов без SHM/Disk
+        # For threads or plain processes without SHM/Disk
         execution_tasks = [
             (tuple(a), kw, disk_args_indices or [], {})
             for a, kw in zip(args_seq, kwargs_seq)
         ]
-    # Преаллокация списка для сохранения длины и порядка
+    # Pre-allocate the list to preserve length and order
     results: list[Any] = [None] * len(execution_tasks)
 
-    # 1. Определяем класс исполнителя
+    # 1. Determine the executor class
     executor_cls: Callable[[int | None], Executor] = ThreadPoolExecutor
     if mode == "processes":
         try:
@@ -656,11 +657,12 @@ def run_parallel(
         signal_by_future: dict[Future[Any], _StartSignal | None] = {}
         for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
             if mode == "processes":
-                # Для каждой задачи создаём side-channel фактического старта:
-                # воркер записывает в него timestamp, родитель привязывает к нему
-                # deadline (issue #110). Полагать, что задача стартовала, по
-                # future.running() нельзя — ProcessPoolExecutor помечает задачу
-                # running ещё при попадании во внутреннюю очередь пула.
+                # For each task create a side-channel of the actual start: the
+                # worker writes a timestamp into it, the parent binds the
+                # deadline to it. It is impossible to assume the task has
+                # started based on future.running() — ProcessPoolExecutor
+                # marks a task as running already when it enters the pool's
+                # internal queue.
                 sig = _StartSignal()
                 start_signals.append(sig)
                 fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx, sig.name)
@@ -671,13 +673,12 @@ def run_parallel(
             future_to_idx[fut] = i
             submit_time_by_future[fut] = time.time()
 
-        # Верхняя граница времени, которое задача может провести в очереди,
-        # прежде чем сработает абсолютный (не сдвигаемый) дедлайн. Берётся с
-        # запасом на весь дренаж батча (ceil(n/max_workers) волн по task_timeout),
-        # чтобы любая задача, которая реально начнёт исполняться (в пределах
-        # task_timeout), успела получить свой полный исполненный бюджет, а задача,
-        # которая так и не стартовала (например, из-за зависшего воркера), не
-        # «зависала» навсегда даже при timeout=None (issue #110).
+        # Upper bound on the time a task may spend in the queue before the
+        # absolute (non-rollable) deadline kicks in. It covers the whole batch
+        # drain (ceil(n/max_workers) waves of task_timeout), so any task that
+        # actually starts executing (within task_timeout) gets its full
+        # execution budget, while a task that never starts (for example, due to
+        # a hung worker) does not hang forever even with timeout=None.
         worker_count = max_workers or (os.cpu_count() or 1)
         n_tasks = len(future_to_idx)
         queue_budget = (
@@ -690,7 +691,7 @@ def run_parallel(
             now = time.time()
             elapsed = now - start_time
 
-            # Проверка: если глобальный таймаут истёк — выходим
+            # Check: if the global timeout has expired — exit
             effective_timeout = timeout
             if effective_timeout is not None and elapsed >= effective_timeout:
                 for fut, idx in future_to_idx.items():
@@ -699,13 +700,15 @@ def run_parallel(
                 future_to_idx.clear()
                 break
 
-            # Пересчитываем дедлайны.
-            # - Задача уже стартовала (воркер зафиксировал timestamp): deadline
-            #   отсчитывается от реального старта (started + task_timeout), но не
-            #   позднее абсолютной верхней границы submit + task_timeout + queue_budget.
-            # - Задача ещё в очереди: deadline фиксирован (submit + task_timeout
-            #   + queue_budget) и не зависит от текущего времени — очередь не
-            #   «съедает» исполненный бюджет, а сама задача не «зависает».
+            # Recompute the deadlines.
+            # - A task that has already started (the worker recorded the
+            #   timestamp): the deadline is counted from the real start
+            #   (started + task_timeout), but no later than the absolute upper
+            #   bound submit + task_timeout + queue_budget.
+            # - A task still in the queue: the deadline is fixed
+            #   (submit + task_timeout + queue_budget) and does not depend on
+            #   the current time — the queue does not "consume" the execution
+            #   budget, and the task itself does not "hang".
             deadline_by_future: dict[Future[Any], float] = {}
             for fut in list(future_to_idx):
                 task_t = task_timeout if task_timeout is not None else float("inf")
@@ -721,7 +724,7 @@ def run_parallel(
                 else:
                     deadline_by_future[fut] = float("inf")
 
-            # Проверка: если индивидуальный таймаут задачи (task_timeout) истёк — выходим
+            # Check: if the per-task timeout (task_timeout) has expired — exit
             for fut, deadline in deadline_by_future.items():
                 if fut in future_to_idx and now >= deadline:
                     idx = future_to_idx.pop(fut)
@@ -730,7 +733,7 @@ def run_parallel(
             if not future_to_idx:
                 break
 
-            # Вычисляем минимальный оставшийся таймаут среди оставшихся задач
+            # Compute the minimum remaining timeout among the remaining tasks
             remaining_by_future = {}
             for fut, deadline in deadline_by_future.items():
                 if fut in future_to_idx:
@@ -740,7 +743,7 @@ def run_parallel(
                 min(remaining_by_future.values()) if remaining_by_future else None
             )
 
-            # Если глобальный таймаут меньше — используем его
+            # If the global timeout is smaller — use it
             if effective_timeout is not None:
                 global_remaining = max(0.1, effective_timeout - elapsed)
                 if min_remaining is not None:
@@ -779,8 +782,8 @@ def run_parallel(
                             results[idx] = None
 
             except concurrent.futures.TimeoutError:
-                # as_completed не дождался ни одной задачи за timeout_for_ac
-                # Просто продолжаем ожидание — это не C-level падение, а медленные задачи
+                # as_completed did not finish any task within timeout_for_ac
+                # Just keep waiting — this is not a C-level crash, merely slow tasks
                 continue
 
             except KeyboardInterrupt:
@@ -802,8 +805,8 @@ def run_parallel(
                 kwargs_seq,
                 max_workers,
                 mode="threads",
-                # В threads-режиме таймауты запрещены (issue #101), поэтому
-                # при откате они не передаются.
+                # Timeouts are forbidden in threads mode, so they are not passed
+                # to the fallback retry.
                 timeout=None,
                 task_timeout=None,
             )
@@ -815,12 +818,12 @@ def run_parallel(
             )
             if mode == "processes" and is_proc_executor:
                 _force_shutdown_processes(pool, shutdown_grace_period)
-                # Финальная очистка SHM/Disk (только в режиме процессов)
+                # Final SHM/Disk cleanup (only in processes mode)
                 _perform_cleanup(shm_refs, persistence_manager)
             else:
-                # Для ThreadPoolExecutor или если режим не "processes"
+                # For ThreadPoolExecutor or if the mode is not "processes"
                 pool.shutdown(wait=True, cancel_futures=True)
-        # Очистка start-сигналов фактического старта (создаются только в процессах)
+        # Cleanup of the actual-start signals (created only in processes)
         for sig in start_signals:
             sig.close()
             sig.unlink()

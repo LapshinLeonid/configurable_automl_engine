@@ -14,7 +14,7 @@ on:
 
 workflows:
   # ----------------------------------------------------
-  # Синхронизация SourceCraft → GitHub
+  # SourceCraft → GitHub synchronization
   # ----------------------------------------------------
   sync-to-github:
     tasks:
@@ -28,53 +28,53 @@ workflows:
               - |
                 set -e
 
-                echo "🔍 Проверяем commit title на флаг пропуска..."
+                echo "🔍 Checking commit title for the skip flag..."
                 COMMIT_TITLE=$(git log -1 --pretty=%s)
                 if echo "$COMMIT_TITLE" | grep -q "\\[skip-sync\\]"; then
-                  echo "⏭️ Commit title содержит [skip-sync], пропускаем синхронизацию в GitHub"
+                  echo "⏭️ Commit title contains [skip-sync], skipping GitHub synchronization"
                   exit 0
                 fi
 
                 BRANCH="${SOURCECRAFT_COMMIT_REF_NAME}"
-                echo "🔄 Синхронизируем ветку '$BRANCH' в GitHub..."
+                echo "🔄 Syncing branch '$BRANCH' to GitHub..."
 
                 git config user.name "SourceCraft Sync"
                 git config user.email "noreply@sourcecraft.dev"
 
-                # Очищаем токен от возможных пробелов и переносов строк
+                # Strip whitespace and newlines from the token
                 CLEAN_TOKEN=$(echo "${GITHUB_TOKEN}" | tr -d '\n\r ')
 
-                # Добавляем GitHub как remote и пушим через HEAD (detached HEAD в CI/CD)
+                # Add GitHub as a remote and push via HEAD (detached HEAD in CI/CD)
                 git remote add github "https://x-access-token:${CLEAN_TOKEN}@github.com/${GITHUB_REPO}.git"
                 git push github "HEAD:refs/heads/${BRANCH}"
 
-                echo "✅ Ветка '$BRANCH' синхронизирована в GitHub"
+                echo "✅ Branch '$BRANCH' synced to GitHub"
 
   # ----------------------------------------------------
-  # Единый пайплайн: планирование → код → ревью → правки → ревью → правки
-  # Все шаги в одном task, чтобы артефакты (pr_number.txt, review_output.txt)
-  # были доступны между кубами.
+  # Single pipeline: planning → coding → review → fixes → review → fixes
+  # All steps in one task so that artifacts (pr_number.txt, review_output.txt)
+  # are available between cubes.
   # ----------------------------------------------------
   ai-development-pipeline:
     inputs:
       issue_id:
         type: string
         required: true
-        description: "Укажите ID (номер) задачи"
+        description: "Enter the issue ID (number)"
 
     tasks:
       - name: full-cycle
         env:
           ISSUE_ID: ${{ inputs.issue_id }}
         cubes:
-          # Шаг 0: Установка Python 3.11, зависимостей проекта, CLI и настройка auth
+          # Step 0: Install Python 3.11, project dependencies, the CLI, and configure auth
           - name: setup-cli
             script:
               - |
                 set -e
 
-                # Установка Python 3.11
-                echo "🐍 Устанавливаем Python 3.11..."
+                # Install Python 3.11
+                echo "🐍 Installing Python 3.11..."
                 apt-get update -qq
                 apt-get install -y -qq software-properties-common
                 add-apt-repository -y ppa:deadsnakes/ppa
@@ -85,48 +85,48 @@ workflows:
                 curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
                 python3 --version
 
-                # Установка зависимостей проекта из pyproject.toml
-                echo "📦 Устанавливаем зависимости проекта..."
+                # Install project dependencies from pyproject.toml
+                echo "📦 Installing project dependencies..."
                 python3 -m pip install --upgrade pip
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
-                # Установка SourceCraft CLI
-                echo "🔧 Устанавливаем SourceCraft CLI..."
+                # Install the SourceCraft CLI
+                echo "🔧 Installing the SourceCraft CLI..."
                 curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
                 export PATH="/root/sourcecraft/bin:$PATH"
 
-                # Настройка аутентификации через SOURCECRAFT_TOKEN (неинтерактивно)
+                # Configure authentication via SOURCECRAFT_TOKEN (non-interactive)
                 mkdir -p ~/.config/sourcecraft
                 cat > ~/.config/sourcecraft/config.yaml << EOF
                 auth: "${SOURCECRAFT_TOKEN}"
                 storage: filesystem
                 EOF
 
-                # Сохраняем PATH для следующих кубов
+                # Save PATH for the following cubes 
                 echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
 
-          # Шаг 1: Генерация архитектурного плана
+          # Step 1: Generate the architecture plan
           - name: generate-plan
             script:
               - |
                 export PATH="/root/sourcecraft/bin:$PATH"
-                src do --autoinstall "Проанализируй задачу #$ISSUE_ID, составь архитектурный план реализации и сохрани его в файл plan.json"
+                src do --autoinstall "Analyze issue #$ISSUE_ID, create an implementation architecture plan and save it to plan.json"
             artifacts:
               paths:
                 - plan.json
 
-          # Шаг 2: Написание кода с использованием плана
+          # Step 2: Write code using the plan
           - name: execute-coding
             script:
               - |
                 export PATH="/root/sourcecraft/bin:$PATH"
                 src do --autoinstall "
-                Реализуй задачу #$ISSUE_ID, используя архитектурный план из plan.json.
-                Строго следуй стандартам и шагам проверки из AGENTS.md.
+                Implement issue #$ISSUE_ID using the architecture plan from plan.json.
+                Strictly follow the standards and verification steps from AGENTS.md.
 
-                После написания кода, тестов и успешного прохождения всех проверок (ruff, mypy, pytest) закоммить изменения и создай Pull Request.
+                After writing the code and tests and successfully passing all checks (ruff, mypy, pytest), commit the changes and create a Pull Request.
                 
-                После создания PR сохрани его номер в файл pr_number.txt (командой: src pr list --json | grep -o '\"publicId\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
+                After creating the PR, save its number to pr_number.txt (command: src pr list --json | grep -o '\"publicId\":[0-9]*' | head -1 | cut -d: -f2 > pr_number.txt).
                 "
             artifacts:
               paths:
@@ -134,10 +134,10 @@ workflows:
                 - pr_number.txt
 
           # --------------------------------------------------
-          # Итерация 1: ревью → правки
+          # Iteration 1: review → fixes
           # --------------------------------------------------
 
-          # Шаг 3: Первое ревью
+          # Step 3: First review
           - name: review-1
             script:
               - |
@@ -146,20 +146,20 @@ workflows:
                 PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
 
                 if [ -n "$PR_NUMBER" ]; then
-                  echo "🔍 Итерация 1: запускаем ревью для PR #$PR_NUMBER"
+                  echo "🔍 Iteration 1: running review for PR #$PR_NUMBER"
                   src pr checkout "$PR_NUMBER"
                   src codereview "$PR_NUMBER" --autoinstall 2>&1 | tee review_output.txt
                 else
-                  echo "⚠️ Номер PR не найден, пропускаем ревью"
+                  echo "⚠️ PR number not found, skipping review"
                   exit 1
                 fi
 
-                echo "Ревью #1 завершено."
+                echo "Review #1 complete."
             artifacts:
               paths:
                 - review_output.txt
 
-          # Шаг 4: Первые правки
+          # Step 4: First fixes
           - name: fix-1
             script:
               - |
@@ -168,52 +168,52 @@ workflows:
                 PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
 
                 if [ -z "$PR_NUMBER" ]; then
-                  echo "⚠️ Номер PR не найден, пропускаем"
+                  echo "⚠️ PR number not found, skipping"
                   exit 0
                 fi
 
-                # Читаем вывод ревью из review_output.txt
-                echo "📋 Анализируем результаты ревью из review_output.txt..."
+                # Read the review output from review_output.txt
+                echo "📋 Analyzing review results from review_output.txt..."
                 if [ ! -f review_output.txt ]; then
-                  echo "⚠️ Файл review_output.txt не найден. Правки не требуются."
+                  echo "⚠️ review_output.txt not found. No fixes required."
                   exit 0
                 fi
 
                 REVIEW_CONTENT=$(cat review_output.txt)
 
                 if [ -z "$REVIEW_CONTENT" ]; then
-                  echo "✅ Вывод ревью пуст. Правки не требуются."
+                  echo "✅ Review output is empty. No fixes required."
                   exit 0
                 fi
 
-                echo "📝 Итерация 1: передаём результаты ревью AI для анализа и исправления..."
+                echo "📝 Iteration 1: passing review results to AI for analysis and fixing..."
                 src pr checkout "$PR_NUMBER"
 
 
-                # Получаем имя ветки PR, чтобы пушить правки именно в неё, а не в main
+                # Get the PR branch name so fixes are pushed to it rather than to main
                 PR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-                echo "🌿 Ветка PR: $PR_BRANCH"
+                echo "🌿 PR branch: $PR_BRANCH"
 
                 src do --autoinstall "
-                Внеси исправления в код согласно следующим замечаниям ревью:
+                Apply fixes to the code according to the following review comments:
 
                 ${REVIEW_CONTENT}
 
-                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${PR_BRANCH}'.
+                Follow the instructions from AGENTS.md (add tests if necessary, run ruff, mypy, pytest).
+                After all checks pass, commit the changes and push them to the '${PR_BRANCH}' branch.
                
-                === НАЧАЛО РЕЗУЛЬТАТА РЕВЬЮ ===
+                === START OF REVIEW RESULT ===
 
                 ${REVIEW_CONTENT}
 
-                === КОНЕЦ РЕЗУЛЬТАТА РЕВЬЮ ===
+                === END OF REVIEW RESULT ===
                 "
 
           # --------------------------------------------------
-          # Итерация 2: ревью → правки
+          # Iteration 2: review → fixes
           # --------------------------------------------------
 
-          # Шаг 5: Второе ревью (проверяем, что правки применены)
+          # Step 5: Second review (verify that the fixes were applied)
           - name: review-2
             script:
               - |
@@ -222,20 +222,20 @@ workflows:
                 PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
 
                 if [ -n "$PR_NUMBER" ]; then
-                  echo "🔍 Итерация 2: повторное ревью для PR #$PR_NUMBER"
+                  echo "🔍 Iteration 2: re-running review for PR #$PR_NUMBER"
                   src pr checkout "$PR_NUMBER"
                   src codereview "$PR_NUMBER" --autoinstall 2>&1 | tee review_output_2.txt
                 else
-                  echo "⚠️ Номер PR не найден, пропускаем"
+                  echo "⚠️ PR number not found, skipping"
                   exit 1
                 fi
 
-                echo "Ревью #2 завершено."
+                echo "Review #2 complete."
             artifacts:
               paths:
                 - review_output_2.txt
 
-          # Шаг 6: Вторые правки (если ревью всё ещё недовольно)
+          # Step 6: Second fixes (if the review is still not satisfied)
           - name: fix-2
             script:
               - |
@@ -244,48 +244,48 @@ workflows:
                 PR_NUMBER=$(cat pr_number.txt 2>/dev/null || echo "")
 
                 if [ -z "$PR_NUMBER" ]; then
-                  echo "⚠️ Номер PR не найден, пропускаем"
+                  echo "⚠️ PR number not found, skipping"
                   exit 0
                 fi
 
-                # Читаем вывод ревью из review_output_2.txt
-                echo "📋 Анализируем результаты ревью из review_output_2.txt..."
+                # Read the review output from review_output_2.txt
+                echo "📋 Analyzing review results from review_output_2.txt..."
                 if [ ! -f review_output_2.txt ]; then
-                  echo "⚠️ Файл review_output_2.txt не найден. Правки не требуются."
+                  echo "⚠️ review_output_2.txt not found. No fixes required."
                   exit 0
                 fi
 
                 REVIEW_CONTENT=$(cat review_output_2.txt)
 
                 if [ -z "$REVIEW_CONTENT" ]; then
-                  echo "✅ Вывод ревью пуст. Правки не требуются."
+                  echo "✅ Review output is empty. No fixes required."
                   exit 0
                 fi
 
-                echo "📝 Итерация 2: передаём результаты ревью AI для анализа и исправления..."
+                echo "📝 Iteration 2: passing review results to AI for analysis and fixing..."
                 src pr checkout "$PR_NUMBER"
 
-                # Получаем имя ветки PR, чтобы пушить правки именно в неё, а не в main
+                # Get the PR branch name so fixes are pushed to it rather than to main
                 PR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-                echo "🌿 Ветка PR: $PR_BRANCH"
+                echo "🌿 PR branch: $PR_BRANCH"
 
                 src do --autoinstall "
-                Внеси исправления в код согласно следующим замечаниям ревью (финальная итерация):
+                Apply fixes to the code according to the following review comments (final iteration):
                 ${REVIEW_CONTENT}
 
-                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${PR_BRANCH}'.
+                Follow the instructions from AGENTS.md (add tests if necessary, run ruff, mypy, pytest).
+                After all checks pass, commit the changes and push them to the '${PR_BRANCH}' branch.
                 "
 
   # ----------------------------------------------------
-  # Применение правок по ревью (ручной запуск)
+  # Apply review fixes (manual run)
   # ----------------------------------------------------
   apply-review-fixes:
     inputs:
       review_comments:
         type: string
         required: true
-        description: "Текст замечаний/правок, которые нужно внести в код"
+        description: "Text of the comments/fixes to apply to the code"
 
     tasks:
       - name: fix-and-push
@@ -297,8 +297,8 @@ workflows:
               - |
                 set -e
 
-                # Установка Python 3.11
-                echo "🐍 Устанавливаем Python 3.11..."
+                # Install Python 3.11
+                echo "🐍 Installing Python 3.11..."
                 apt-get update -qq
                 apt-get install -y -qq software-properties-common
                 add-apt-repository -y ppa:deadsnakes/ppa
@@ -309,24 +309,24 @@ workflows:
                 curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
                 python3 --version
 
-                # Установка зависимостей проекта из pyproject.toml
-                echo "📦 Устанавливаем зависимости проекта..."
+                # Install project dependencies from pyproject.toml
+                echo "📦 Installing project dependencies..."
                 python3 -m pip install --upgrade pip
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
-                # Установка SourceCraft CLI
-                echo "🔧 Устанавливаем SourceCraft CLI..."
+                # Install the SourceCraft CLI
+                echo "🔧 Installing the SourceCraft CLI..."
                 curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
                 export PATH="/root/sourcecraft/bin:$PATH"
 
-                # Настройка аутентификации через SOURCECRAFT_TOKEN (неинтерактивно)
+                # Configure authentication via SOURCECRAFT_TOKEN (non-interactive)
                 mkdir -p ~/.config/sourcecraft
                 cat > ~/.config/sourcecraft/config.yaml << EOF
                 auth: "${SOURCECRAFT_TOKEN}"
                 storage: filesystem
                 EOF
 
-                # Сохраняем PATH для следующих кубов 
+                # Save PATH for the following cubes 
                 echo "export PATH=\"/root/sourcecraft/bin:\$PATH\"" >> ~/.bashrc
 
           - name: apply-fixes
@@ -334,20 +334,20 @@ workflows:
               - |
                 export PATH="/root/sourcecraft/bin:$PATH"
 
-                # Получаем имя текущей ветки (ветка PR, на которой запущен workflow)
-                echo "🌿 Текущая ветка: ${SOURCECRAFT_COMMIT_REF_NAME}"
+                # Get the current branch name (the PR branch the workflow is running on)
+                echo "🌿 Current branch: ${SOURCECRAFT_COMMIT_REF_NAME}"
 
                 src do --autoinstall "
-                Внеси исправления в код согласно следующим замечаниям ревью:
+                Apply fixes to the code according to the following review comments:
 
                 ${REVIEW_COMMENTS}
 
-                Соблюдай инструкции из AGENTS.md (добавь тесты при необходимости, выполни ruff, mypy, pytest).
-                При успешном прохождении всех проверок закоммить изменения и запуши их в ветку '${SOURCECRAFT_COMMIT_REF_NAME}'.
+                Follow the instructions from AGENTS.md (add tests if necessary, run ruff, mypy, pytest).
+                After all checks pass, commit the changes and push them to the '${SOURCECRAFT_COMMIT_REF_NAME}' branch.
                 "
 
 # ----------------------------------------------------
-  # Проверка качества кода при каждом пуше
+  # Run code quality checks on every push
   # ----------------------------------------------------
   quality-checks:
     tasks:
@@ -362,20 +362,20 @@ workflows:
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
-                echo "  1. ПРОВЕРКА СТИЛЯ КОДА (Ruff)"
+                echo "  1. CODE STYLE CHECK (Ruff)"
                 echo "═══════════════════════════════════════════════════════════════"
                 ruff check src/
-                echo "✅ Ruff: замечаний нет"
+                echo "✅ Ruff: no issues found"
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
-                echo "  2. ПРОВЕРКА ТИПОВ (Mypy)"
+                echo "  2. TYPE CHECK (Mypy)"
                 echo "═══════════════════════════════════════════════════════════════"
                 mypy src --install-types --non-interactive
-                echo "✅ Mypy: замечаний нет"
+                echo "✅ Mypy: no issues found"
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
-                echo "  3. ЗАПУСК ТЕСТОВ И ПОКРЫТИЕ (Pytest)"
+                echo "  3. RUN TESTS AND COVERAGE (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
                 pytest --cov=src

@@ -1,9 +1,9 @@
-"""E2E-тесты обучения моделей на данных с категориальными признаками.
+"""E2E tests of training models on data with categorical features.
 
-Проверяют, что движок корректно обучается на наборах данных с категориальными
-признаками (one-hot encoding по умолчанию) через внешний метод
-``train_best_model``: HPO не даёт pruned-испытаний, финальная модель
-сохраняется и способна предсказывать на новых данных.
+Verify that the engine trains correctly on datasets with categorical features
+(one-hot encoding by default) through the public ``train_best_model`` entry
+point: HPO produces no pruned trials, the final model is saved and is able to
+predict on new data.
 """
 
 from __future__ import annotations
@@ -20,15 +20,15 @@ from configurable_automl_engine.trainer import ModelTrainer
 
 
 def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
-    """Синтетический датасет регрессии с категориальными признаками.
+    """Synthetic regression dataset with categorical features.
 
-    Включает object/category колонки (кардинальность 2-5), в том числе колонку
-    'числовых строк' (``id_code``), и одну числовую колонку.
+    Includes object/category columns (cardinality 2-5), including a column of
+    numeric strings (``id_code``), and one numeric column.
     """
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
-    id_code = rng.choice(["10", "20", "30"], size=n)  # 'числовые строки'-категории
+    id_code = rng.choice(["10", "20", "30"], size=n)  # numeric-string categories
     city = rng.choice(["NY", "LA", "SF", "CH"], size=n)
     num = rng.normal(size=n)
 
@@ -55,7 +55,7 @@ def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
 
 
 def _make_binary_df(n: int = 200, seed: int = 7) -> pd.DataFrame:
-    """Синтетический датасет с бинарным таргетом (для оверсэмплинга SMOTE)."""
+    """Synthetic dataset with a binary target (for SMOTE oversampling)."""
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
@@ -82,7 +82,7 @@ def _make_config(
     os_algorithm: str = "random",
     n_trials: int = 2,
 ) -> dict[str, Any]:
-    """Собрать конфигурацию для train_best_model."""
+    """Build a configuration for train_best_model."""
     return {
         "general": {
             "comparison_metric": "r2",
@@ -114,18 +114,18 @@ def _make_config(
 
 
 def _assert_valid_result(result: dict[str, Any], expected_algos: set[str]) -> None:
-    """Общие проверки структуры результата train_best_model."""
+    """Common structural checks for the train_best_model result."""
     assert isinstance(result, dict)
     assert result["algorithm"] in expected_algos
     assert result["score"] is not None
-    assert np.isfinite(result["score"]), f"score не конечен: {result['score']}"
+    assert np.isfinite(result["score"]), f"score is not finite: {result['score']}"
     assert result["score"] != float("-inf")
     assert isinstance(result["params"], dict) and result["params"]
     assert Path(result["model_path"]).exists()
 
 
 def test_train_best_model_on_categorical_data(tmp_path: Path) -> None:
-    """Полный цикл обучения на данных с категориальными признаками."""
+    """Full training pipeline on data with categorical features."""
     df = _make_regression_df()
     model_path = tmp_path / "models" / "best.pkl"
     config = _make_config(model_path, n_trials=2)
@@ -134,7 +134,7 @@ def test_train_best_model_on_categorical_data(tmp_path: Path) -> None:
 
     _assert_valid_result(result, {"elasticnet", "random_forest"})
 
-    # Загружаем модель и проверяем предсказание на новых данных
+    # Load the model and check predictions on new data
     loaded = ModelTrainer.load(str(result["model_path"]))
     assert loaded.pipeline is not None
 
@@ -145,7 +145,7 @@ def test_train_best_model_on_categorical_data(tmp_path: Path) -> None:
 
 
 def test_train_best_model_categorical_with_smote_oversampling(tmp_path: Path) -> None:
-    """Совместная работа one-hot кодирования и SMOTE-оверсэмплинга."""
+    """One-hot encoding works together with SMOTE oversampling."""
     df = _make_binary_df()
     model_path = tmp_path / "models" / "smote.pkl"
     config = _make_config(
@@ -162,8 +162,8 @@ def test_train_best_model_categorical_with_smote_oversampling(tmp_path: Path) ->
 
 
 def test_tuner_optimize_categorical_not_pruned() -> None:
-    """tuner.optimize на категориальном DataFrame не даёт pruned-испытаний
-    и возвращает обученную модель (не None)."""
+    """tuner.optimize on a categorical DataFrame produces no pruned trials
+    and returns a trained model (not None)."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 

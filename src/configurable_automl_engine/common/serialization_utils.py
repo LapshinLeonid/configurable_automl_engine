@@ -9,9 +9,9 @@ from configurable_automl_engine.common.definitions import SerializationFormat
 
 logger = logging.getLogger(__name__)
 
-#: Ожидаемые расширения файлов для каждого формата сериализации.
-#: При добавлении нового значения в SerializationFormat справочник
-#: необходимо дополнить соответствующими расширениями.
+#: Expected file extensions for each serialization format.
+#: When a new value is added to SerializationFormat, this reference
+#: must be extended with the corresponding extensions.
 _FORMAT_EXTENSIONS: dict[SerializationFormat, tuple[str, ...]] = {
     SerializationFormat.pickle: (".pkl", ".pickle"),
     SerializationFormat.joblib: (".joblib",),
@@ -19,20 +19,19 @@ _FORMAT_EXTENSIONS: dict[SerializationFormat, tuple[str, ...]] = {
 
 
 def _warn_on_extension_mismatch(path: Path, fmt: SerializationFormat) -> None:
-    """Логирует предупреждение, если расширение файла не соответствует формату.
+    """Log a warning if the file extension does not match the format.
 
-    Расширение файла является лишь соглашением и не влияет на фактический
-    способ сериализации: например, артефакт ``model.joblib`` при
-    ``fmt=pickle`` будет записан через ``pickle.dump``. Это вводит в
-    заблуждение и может привести к ошибке загрузки у пользователя, поэтому
-    при несоответствии расширения формату выдаётся предупреждение. Если
-    формат отсутствует в справочнике расширений, предупреждение не
-    выдаётся — корректность формата проверяется в ``save_artifact``
-    и ``load_artifact``.
+    The file extension is merely a convention and does not affect the actual
+    serialization method: for example, the artifact ``model.joblib`` with
+    ``fmt=pickle`` will be written via ``pickle.dump``. This is misleading
+    and may cause the user to fail when loading, so a warning is emitted
+    when the extension does not match the format. If the format is missing
+    from the extension reference, no warning is emitted — format correctness
+    is validated in ``save_artifact`` and ``load_artifact``.
 
     Args:
-        path: Путь к артефакту.
-        fmt: Запрошенный формат сериализации.
+        path: Path to the artifact.
+        fmt: Requested serialization format.
     """
     expected_extensions = _FORMAT_EXTENSIONS.get(fmt)
     if expected_extensions and path.suffix.lower() not in expected_extensions:
@@ -48,7 +47,7 @@ def _warn_on_extension_mismatch(path: Path, fmt: SerializationFormat) -> None:
 
 def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
     """
-    Сохраняет объект на диск в выбранном формате.
+    Save an object to disk in the chosen format.
     """
     path = Path(path)
     _warn_on_extension_mismatch(path, fmt)
@@ -62,7 +61,7 @@ def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
 
 def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
     """
-    Загружает объект с диска в выбранном формате.
+    Load an object from disk in the chosen format.
     """
     path = Path(path)
     if not path.exists():

@@ -1,14 +1,14 @@
-"""Tests for the ``additional_metrics`` feature (issue #19).
+"""Tests for the ``additional_metrics`` feature.
 
-Покрытие:
-    1. Конфигурация: новый опциональный параметр ``general.additional_metrics``,
-       дедупликация, исключение основной метрики сравнения, ошибка валидации
-       для неизвестной метрики.
-    2. ModelTrainer: расчёт дополнительных метрик для обученной модели тем же
-       способом, что и основная метрика; нечисловые значения (inf/NaN);
-       сбой отдельной метрики не влияет на обучение.
-    3. train_best_model: возврат ``additional_metrics`` в результатах,
-       обратная совместимость, отсутствие влияния на выбор победителя.
+Coverage:
+    1. Configuration: the new optional ``general.additional_metrics`` parameter,
+       deduplication, exclusion of the main comparison metric, and a validation
+       error for an unknown metric.
+    2. ModelTrainer: computing additional metrics for the trained model the same
+       way as the main metric; non-numeric values (inf/NaN); a single metric
+       failure does not affect training.
+    3. train_best_model: returning ``additional_metrics`` in the results,
+       backward compatibility, no impact on winner selection.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  1. Валидация конфигурации
+#  1. Configuration validation
 # ──────────────────────────────────────────────────────────────────────────────
 
 BASE = {
@@ -65,49 +65,49 @@ def _with_additional(metrics: list[str]) -> dict:
 
 
 def test_additional_metrics_default_empty():
-    """Параметр не задан — список пуст (обратная совместимость)."""
+    """Parameter not set — the list is empty (backward compatibility)."""
     cfg = Config.model_validate(BASE)
     assert cfg.general.additional_metrics == []
 
 
 def test_additional_metrics_explicit_empty_list():
-    """Пустой список допустим и эквивалентен отсутствию параметра."""
+    """An empty list is allowed and equivalent to the parameter being absent."""
     cfg = Config.model_validate(_with_additional([]))
     assert cfg.general.additional_metrics == []
 
 
 def test_additional_metrics_valid_list_accepted():
-    """Корректный список метрик из поддерживаемого набора принимается."""
+    """A valid list of metrics from the supported set is accepted."""
     cfg = Config.model_validate(_with_additional(["r2", "mae", "mse"]))
     assert cfg.general.additional_metrics == ["r2", "mae", "mse"]
 
 
 def test_additional_metrics_unknown_metric_rejected():
-    """Неизвестная метрика → ошибка валидации до запуска обучения."""
+    """Unknown metric -> validation error before training starts."""
     with pytest.raises(ValidationError) as exc_info:
         Config.model_validate(_with_additional(["r2", "bogus_metric"]))
     msg = str(exc_info.value)
     assert "additional_metrics" in msg
     assert "bogus_metric" in msg
-    # Сообщение перечисляет допустимые значения
+    # The message lists the allowed values
     for allowed in ("nrmse", "rmse", "mae", "mse", "r2"):
         assert allowed in msg
 
 
 def test_additional_metrics_duplicates_deduplicated():
-    """Дубликаты в списке считаются один раз (порядок первого вхождения)."""
+    """Duplicates in the list are counted once (first-occurrence order)."""
     cfg = Config.model_validate(_with_additional(["r2", "mae", "r2", "mae"]))
     assert cfg.general.additional_metrics == ["r2", "mae"]
 
 
 def test_additional_metrics_comparison_metric_excluded():
-    """Совпадение с основной метрикой сравнения исключается из результатов."""
+    """A match with the main comparison metric is excluded from the results."""
     cfg = Config.model_validate(_with_additional(["r2", "rmse", "mae"]))
     assert cfg.general.additional_metrics == ["r2", "mae"]
 
 
 def test_additional_metrics_alias_of_comparison_excluded(caplog):
-    """Алиас основной метрики (rmse ↔ neg_root_mean_squared_error) исключается."""
+    """An alias of the main metric (rmse ↔ neg_root_mean_squared_error) is excluded."""
     data = {
         **BASE,
         "general": {
@@ -122,17 +122,17 @@ def test_additional_metrics_alias_of_comparison_excluded(caplog):
 
 
 def test_additional_metrics_all_filtered_to_empty():
-    """Если все метрики совпадают с основной — результат пуст (без дублей)."""
+    """If all metrics match the main one — the result is empty (no duplicates)."""
     cfg = Config.model_validate(_with_additional(["rmse"]))
     assert cfg.general.additional_metrics == []
 
 
 def test_additional_metrics_non_string_element_rejected():
-    """Нестроковый элемент даёт ValidationError, а не AttributeError.
+    """A non-string element gives a ValidationError, not an AttributeError.
 
-    Валидатор ``_deduplicate_additional_metrics`` типизирован как
-    ``list[ComparisonMetric]``: элементы списка обязаны быть строками из
-    допустимого набора, и проверка типа выполняется до вызова ``.lower()``.
+    The ``_deduplicate_additional_metrics`` validator is typed as
+    ``list[ComparisonMetric]``: the list elements must be strings from the
+    allowed set, and the type check runs before ``.lower()`` is called.
     """
     with pytest.raises(ValidationError) as exc_info:
         Config.model_validate(_with_additional(["r2", 123]))
@@ -142,7 +142,7 @@ def test_additional_metrics_non_string_element_rejected():
 
 
 def test_additional_metrics_tuple_input_accepted():
-    """Кортеж метрик (не только список) принимается и приводится к списку."""
+    """A tuple of metrics (not only a list) is accepted and converted to a list."""
     data = {
         **BASE,
         "general": {**BASE["general"], "additional_metrics": ("r2", "mae")},
@@ -152,24 +152,24 @@ def test_additional_metrics_tuple_input_accepted():
 
 
 def test_additional_metrics_post_validation_list_may_differ(caplog):
-    """Итоговый список после валидации отличается от введённого пользователем.
+    """The final list after validation may differ from the user-provided one.
 
-    Задокументированное поведение: дедупликация и исключение основной метрики
-    сравнения выполняются на этапе валидации конфигурации, поэтому
-    ``cfg.general.additional_metrics`` может не совпадать с исходным списком.
+    Documented behavior: deduplication and exclusion of the main comparison
+    metric happen during configuration validation, so
+    ``cfg.general.additional_metrics`` may not match the original list.
     """
     with caplog.at_level(logging.WARNING):
         cfg = Config.model_validate(
             _with_additional(["rmse", "mae", "mae", "neg_root_mean_squared_error"])
         )
-    # Основная метрика ('rmse' и её алиас) исключена, дубликат 'mae' устранён
+    # The main metric ('rmse' and its alias) is excluded, the 'mae' duplicate is removed
     assert cfg.general.additional_metrics == ["mae"]
     assert len(caplog.text) > 0
     assert "comparison metric" in caplog.text
 
 
 def test_additional_metrics_works_with_default_comparison():
-    """Дефолтная comparison_metric='r2' также исключается из additional_metrics."""
+    """The default comparison_metric='r2' is also excluded from additional_metrics."""
     data = {
         "general": {
             "phases": [
@@ -191,13 +191,13 @@ def test_additional_metrics_works_with_default_comparison():
 
 
 def test_general_cfg_additional_metrics_field():
-    """Поле существует в GeneralCfg и по умолчанию пусто."""
+    """The field exists in GeneralCfg and is empty by default."""
     cfg = GeneralCfg(phases=[])
     assert cfg.additional_metrics == []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  2. ModelTrainer: расчёт дополнительных метрик
+#  2. ModelTrainer: computing additional metrics
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -211,7 +211,7 @@ def simple_regression_data() -> tuple[pd.DataFrame, pd.Series]:
 
 
 def test_trainer_computes_additional_scores(simple_regression_data):
-    """Дополнительные метрики считаются для финальной модели."""
+    """Additional metrics are computed for the final model."""
     X, y = simple_regression_data
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -221,7 +221,7 @@ def test_trainer_computes_additional_scores(simple_regression_data):
     trainer.fit(X, y)
 
     assert set(trainer.additional_scores.keys()) == {"rmse", "mae", "mse"}
-    # Метрики-ошибки возвращаются положительными «честными» значениями
+    # Error metrics are returned as positive "honest" values
     assert trainer.additional_scores["rmse"] >= 0
     assert trainer.additional_scores["mae"] >= 0
     assert trainer.additional_scores["mse"] >= 0
@@ -231,7 +231,7 @@ def test_trainer_computes_additional_scores(simple_regression_data):
 def test_trainer_additional_scores_match_main_metric_when_same(
     simple_regression_data,
 ):
-    """Для одной и той же метрики значение совпадает с основной (r2)."""
+    """For the same metric the value matches the main one (r2)."""
     X, y = simple_regression_data
     trainer = ModelTrainer(algorithm="ridge", metric="r2", additional_metrics=["r2"])
     trainer.fit(X, y)
@@ -239,7 +239,7 @@ def test_trainer_additional_scores_match_main_metric_when_same(
 
 
 def test_trainer_error_metric_additional_values(simple_regression_data):
-    """Ошибки (rmse) в дополнительных метриках возвращаются без знака, как val_score."""
+    """Errors (rmse) in additional metrics are returned unsigned, like val_score."""
     X, y = simple_regression_data
     trainer = ModelTrainer(
         algorithm="ridge", metric="rmse", additional_metrics=["r2", "nrmse"]
@@ -251,7 +251,7 @@ def test_trainer_error_metric_additional_values(simple_regression_data):
 
 
 def test_trainer_non_finite_additional_value_kept():
-    """inf (например, NRMSE при константном таргете) возвращается как есть."""
+    """inf (e.g. NRMSE with a constant target) is returned as is."""
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
     y = pd.Series([5.0, 5.0, 5.0])
     trainer = ModelTrainer(
@@ -259,11 +259,11 @@ def test_trainer_non_finite_additional_value_kept():
     )
     trainer.fit(X, y)
     assert trainer.additional_scores["nrmse"] == float("inf")
-    assert trainer.val_score is not None  # обучение завершилось штатно
+    assert trainer.val_score is not None  # training finished normally
 
 
 def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
-    """Сбой одной дополнительной метрики не прерывает обучение."""
+    """A failure of a single additional metric does not interrupt training."""
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     y = pd.Series([1.0, 2.0, 3.0])
 
@@ -289,13 +289,13 @@ def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
         trainer.fit(X, y)
 
     assert trainer.val_score is not None
-    assert "rmse" in trainer.additional_scores  # успешная метрика посчитана
-    assert "mae" not in trainer.additional_scores  # упавшая пропущена
+    assert "rmse" in trainer.additional_scores  # the successful metric was computed
+    assert "mae" not in trainer.additional_scores  # the failed one was skipped
     assert "could not be computed" in caplog.text
 
 
 def test_trainer_additional_metric_none_skipped_with_warning(caplog):
-    """Скорер, вернувший None для дополнительной метрики, пропускается с логом."""
+    """A scorer that returns None for an additional metric is skipped with a log."""
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     y = pd.Series([1.0, 2.0, 3.0])
 
@@ -327,7 +327,7 @@ def test_trainer_additional_metric_none_skipped_with_warning(caplog):
 
 
 def test_trainer_no_additional_metrics_by_default(simple_regression_data):
-    """Без параметра additional_scores пуст, поведение не меняется."""
+    """Without the parameter additional_scores is empty and behavior is unchanged."""
     X, y = simple_regression_data
     trainer = ModelTrainer(algorithm="ridge", metric="r2")
     trainer.fit(X, y)
@@ -340,11 +340,11 @@ def test_trainer_no_additional_metrics_by_default(simple_regression_data):
     ["r2", b"r2", {"r2": 1}, [1, 2], [None], ("r2", 1), {1, 2}, [1.5]],
 )
 def test_trainer_invalid_additional_metrics_type_rejected(bad_value):
-    """Некорректный тип additional_metrics отклоняется в конструкторе.
+    """An invalid additional_metrics type is rejected in the constructor.
 
-    Отклоняются строки-скаляры (символьный разбор недопустим), отображения
-    (итерация по ключам неявна) и любые итерируемые объекты, содержащие
-    элементы нестрокового типа.
+    Scalar strings are rejected (character-wise parsing is not allowed), as are
+    mappings (iteration over keys is implicit) and any iterables containing
+    non-string elements.
     """
     with pytest.raises(
         TrainingError, match="additional_metrics must be an iterable of strings"
@@ -353,7 +353,7 @@ def test_trainer_invalid_additional_metrics_type_rejected(bad_value):
 
 
 def test_trainer_additional_metrics_accepts_tuple(simple_regression_data):
-    """Кортеж строк принимается и нормализуется так же, как список."""
+    """A tuple of strings is accepted and normalized like a list."""
     X, y = simple_regression_data
     trainer = ModelTrainer(algorithm="ridge", additional_metrics=("R2", "mae"))
     assert trainer.additional_metrics == ["r2", "mae"]
@@ -362,7 +362,7 @@ def test_trainer_additional_metrics_accepts_tuple(simple_regression_data):
 
 
 def test_trainer_additional_metrics_accepts_set(simple_regression_data):
-    """Множество строк принимается (порядок не имеет значения)."""
+    """A set of strings is accepted (order does not matter)."""
     X, y = simple_regression_data
     trainer = ModelTrainer(algorithm="ridge", additional_metrics={"rmse", "mse"})
     assert sorted(trainer.additional_metrics) == ["mse", "rmse"]
@@ -371,7 +371,7 @@ def test_trainer_additional_metrics_accepts_set(simple_regression_data):
 
 
 def test_trainer_additional_metrics_accepts_generator(simple_regression_data):
-    """Генератор строк принимается и материализуется в список."""
+    """A generator of strings is accepted and materialized into a list."""
     X, y = simple_regression_data
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -383,14 +383,14 @@ def test_trainer_additional_metrics_accepts_generator(simple_regression_data):
 
 
 def test_trainer_additional_metrics_accepts_empty_tuple():
-    """Пустой кортеж эквивалентен отсутствию метрик."""
+    """An empty tuple is equivalent to no metrics."""
     trainer = ModelTrainer(additional_metrics=())
     assert trainer.additional_metrics == []
     assert trainer.additional_scores == {}
 
 
 def test_trainer_additional_metrics_lowercased(simple_regression_data):
-    """Имена дополнительных метрик нормализуются к нижнему регистру."""
+    """Additional metric names are normalized to lowercase."""
     X, y = simple_regression_data
     trainer = ModelTrainer(algorithm="ridge", additional_metrics=["R2", "MAE"])
     assert trainer.additional_metrics == ["r2", "mae"]
@@ -440,13 +440,13 @@ def tiny_df() -> pd.DataFrame:
 
 
 def test_train_best_model_returns_additional_metrics(tiny_df):
-    """Результат обучения дополняется значениями дополнительных метрик."""
+    """The training result is enriched with additional metric values."""
     fake_trainer = SimpleNamespace(additional_scores={"r2": 0.87, "mae": 0.12})
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            # comparison_metric='rmse': «сырое» значение скорера -RMSE,
-            # result["score"] — положительный RMSE (issue #26)
+            # comparison_metric='rmse': "raw" scorer value -RMSE,
+            # result["score"] is the positive RMSE
             return_value=(-0.9, {"alpha": 0.1}),
         ),
         patch(
@@ -464,13 +464,13 @@ def test_train_best_model_returns_additional_metrics(tiny_df):
     assert result["score"] == 0.9
     assert result["metric"] == "rmse"
     mock_save.assert_called_once()
-    # Дополнительные метрики проброшены из конфига в финальное обучение
+    # Additional metrics are forwarded from the config to the final training
     cfg_passed = mock_save.call_args.args[6]
     assert cfg_passed.general.additional_metrics == ["r2", "mae"]
 
 
 def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
-    """Без параметра результаты идентичны текущему поведению (без ключа)."""
+    """Without the parameter the results match the current behavior (no key)."""
     fake_trainer = SimpleNamespace(additional_scores={})
     with (
         patch(
@@ -497,7 +497,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
 
 
 def test_train_best_model_no_key_when_additional_empty(tiny_df):
-    """Пустой список дополнительных метрик — поведение как сейчас."""
+    """An empty additional metrics list — behavior stays as it is now."""
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
@@ -515,7 +515,7 @@ def test_train_best_model_no_key_when_additional_empty(tiny_df):
 
 
 def test_train_best_model_comparison_only_not_duplicated(tiny_df):
-    """Метрика, совпадающая с основной, в results не дублируется."""
+    """A metric matching the main one is not duplicated in results."""
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
@@ -529,13 +529,13 @@ def test_train_best_model_comparison_only_not_duplicated(tiny_df):
         result = train_best_model(
             config=_component_config(additional=["rmse"]), df=tiny_df, target="target"
         )
-    # Значение rmse присутствует ровно один раз — как score
+    # The rmse value is present exactly once — as score
     assert result["score"] == 0.9
     assert "additional_metrics" not in result
 
 
 def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
-    """Победитель определяется только по основной метрике сравнения."""
+    """The winner is determined only by the main comparison metric."""
     cfg = _component_config(additional=["r2", "mae"])
     cfg["algorithms"] = {
         "elasticnet": {
@@ -551,9 +551,9 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
     }
 
     def hpo_side_effect(**kwargs):
-        # ridge даёт лучший MAE (0.60) — он и должен победить.
-        # «Сырые» значения скорера отрицательные (-MAE): максимизация
-        # выбирает большее (-0.60 > -0.95).
+        # ridge gives the best MAE (0.60) — it must win.
+        # "Raw" scorer values are negative (-MAE): maximization
+        # picks the larger one (-0.60 > -0.95).
         if kwargs["algo_name"] == "ridge":
             return -0.60, {"alpha": 0.5}
         return -0.95, {"alpha": 0.1}
@@ -576,7 +576,7 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
 
 
 def test_fit_and_save_forwards_additional_metrics(tmp_path, tiny_df):
-    """_fit_and_save передаёт additional_metrics в ModelTrainer."""
+    """_fit_and_save forwards additional_metrics to ModelTrainer."""
 
     class FakeTrainer:
         def __init__(self, **kwargs):
@@ -613,7 +613,7 @@ def test_fit_and_save_forwards_additional_metrics(tmp_path, tiny_df):
 
 
 def test_fit_and_save_forwards_empty_additional_metrics(tmp_path, tiny_df):
-    """При отсутствии дополнительных метрик передаётся пустой список."""
+    """When no additional metrics are set, an empty list is passed."""
 
     class FakeTrainer:
         def __init__(self, **kwargs):
@@ -648,12 +648,12 @@ def test_fit_and_save_forwards_empty_additional_metrics(tmp_path, tiny_df):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  4. Сквозной тест с реальным обучением
+#  4. End-to-end test with real training
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_e2e_train_best_model_with_additional_metrics(tmp_path):
-    """Сквозной сценарий: дополнительные метрики возвращаются для финальной модели."""
+    """End-to-end scenario: additional metrics are returned for the final model."""
     rng = np.random.RandomState(42)
     df = pd.DataFrame(
         {

@@ -26,9 +26,9 @@ from configurable_automl_engine.training_engine.thread_pool import (
 MODULE_PATH = "configurable_automl_engine.training_engine.thread_pool"
 
 
-# --- Тестовые функции ---
+# --- Test functions ---
 def cpu_bound_task(n: int) -> str:
-    """Имитация задачи, нагружающей CPU (вычисление хеша)."""
+    """Simulates a CPU-bound task (computing a hash)."""
     data = str(n).encode()
     for _ in range(100_000):
         data = hashlib.sha256(data).hexdigest().encode()
@@ -36,24 +36,24 @@ def cpu_bound_task(n: int) -> str:
 
 
 def simple_task(x: int, y: int = 0) -> int:
-    """Простая задача для проверки аргументов."""
+    """A simple task for testing arguments."""
     return x + y
 
 
 def slow_task(seconds: float):
-    """Задача для проверки таймаута."""
+    """A task for testing timeouts."""
     time.sleep(seconds)
     return "done"
 
 
 def failing_task():
-    """Задача для проверки обработки исключений."""
+    """A task for testing exception handling."""
     raise ValueError("Intentional failure")
 
 
-# --- Тесты ---
+# --- Tests ---
 def test_run_parallel_threads_basic():
-    """1. Проверка работы в режиме потоков (Threads)."""
+    """1. Check operation in threads mode."""
     args = [(1, 2), (3, 4), (5, 6)]
     results = run_parallel(simple_task, args_seq=args, mode="threads")
 
@@ -61,8 +61,8 @@ def test_run_parallel_threads_basic():
 
 
 def test_run_parallel_processes_cpu_bound():
-    """2. Проверка работы в режиме процессов (Processes)."""
-    # Используем небольшое количество задач для теста
+    """2. Check operation in processes mode."""
+    # Use a small number of tasks for the test
     args = [(i,) for i in range(3)]
     results = run_parallel(cpu_bound_task, args_seq=args, mode="processes")
 
@@ -71,7 +71,7 @@ def test_run_parallel_processes_cpu_bound():
 
 
 def test_run_parallel_fallback_mechanism(caplog):
-    """Актуализировано: проверка отката при сбое инициализации."""
+    """Updated: check the fallback when initialization fails."""
     args = [(1, 10)]
     with patch(
         "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor",
@@ -81,24 +81,24 @@ def test_run_parallel_fallback_mechanism(caplog):
             results = run_parallel(simple_task, args_seq=args, mode="processes")
 
     assert results == [11]
-    # Код пишет: "Error in process pool, falling back to threads: OS Error"
+    # The code logs: "Error in process pool, falling back to threads: OS Error"
     assert "falling back to threads" in caplog.text
     assert "OS Error" in caplog.text
 
 
 def test_run_parallel_error_propagation(caplog):
-    """Актуализировано: проверка лога при ошибке задачи (формат 'Task 0 failed')."""
+    """Updated: check the log on a task error (format 'Task 0 failed')."""
     with caplog.at_level(logging.ERROR):
         results = run_parallel(failing_task, args_seq=[()], mode="threads")
 
     assert results == [None]
-    # В актуальном коде: logger.error(f"Task {idx} failed: {e}")
+    # In the real code: logger.error(f"Task {idx} failed: {e}")
     assert "Task 0 failed" in caplog.text
     assert "Intentional failure" in caplog.text
 
 
 def test_run_parallel_empty_args():
-    """Дополнительно: проверка запуска без аргументов (ровно один раз)."""
+    """Additional: check running with no arguments (exactly once)."""
 
     def get_one():
         return 1
@@ -108,21 +108,22 @@ def test_run_parallel_empty_args():
 
 
 def test_run_parallel_validation_error():
-    """Дополнительно: проверка несовпадения длины аргументов."""
+    """Additional: check mismatched argument lengths."""
     with pytest.raises(ValueError, match="must be of equal length"):
         run_parallel(
             simple_task,
             args_seq=[(1,)],
-            kwargs_seq=[{}, {}],  # Разная длина
+            kwargs_seq=[{}, {}],  # Different lengths
         )
 
 
 def test_run_parallel_threads_timeout_ignored_with_warning(caplog):
-    """Прямой вызов run_parallel c mode='threads' и timeout — игнорируется с warning (issue #101).
+    """Direct run_parallel call with mode='threads' and a timeout — ignored with a warning.
 
-    Конфиг-валидация запрещает таймауты в threads-режиме, но она не защищает
-    прямые вызовы run_parallel: здесь timeout игнорируется, о чём выдаётся
-    warning, чтобы пользователь был осведомлён, и результат не выбрасывается.
+    Config validation forbids timeouts in threads mode, but it does not
+    protect direct run_parallel calls: here the timeout is ignored and a
+    warning is emitted so that the user is aware, and the result is not
+    discarded.
     """
     with caplog.at_level(logging.WARNING):
         results = run_parallel(
@@ -133,7 +134,7 @@ def test_run_parallel_threads_timeout_ignored_with_warning(caplog):
 
 
 def test_run_parallel_threads_without_timeout_no_warning(caplog):
-    """Без таймаутов threads-запуск работает и не выдаёт warning."""
+    """Without timeouts a threads run works and emits no warning."""
     with caplog.at_level(logging.WARNING):
         results = run_parallel(simple_task, args_seq=[(1, 2)], mode="threads")
     assert results == [3]
@@ -145,8 +146,8 @@ def raise_invalid():
 
 
 def test_run_parallel_invalid_algorithm_error_is_not_fatal(caplog):
-    """InvalidAlgorithmError — обычный отказ задачи: результат None,
-    а не прерывание всего батча (issue #12)."""
+    """InvalidAlgorithmError — an ordinary task failure: the result is None,
+    not an interruption of the whole batch."""
     with caplog.at_level(logging.ERROR):
         results = run_parallel(raise_invalid, args_seq=[()])
 
@@ -160,7 +161,7 @@ def raise_keyboard_interrupt():
 
 
 def test_run_parallel_keyboard_interrupt_propagates(caplog):
-    """Исправлено: проверка новой строки лога при прерывании."""
+    """Fixed: check the new log line on interruption."""
 
     def raise_ki():
         raise KeyboardInterrupt()
@@ -169,7 +170,7 @@ def test_run_parallel_keyboard_interrupt_propagates(caplog):
         with pytest.raises(KeyboardInterrupt):
             run_parallel(raise_ki, args_seq=[()])
 
-    # В обновленном коде строка: "Interrupted by user"
+    # In the updated code the line is: "Interrupted by user"
     assert "Interrupted by user" in caplog.text
 
 
@@ -178,7 +179,7 @@ def raise_value_error():
 
 
 def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
-    """Актуализировано: проверка лога для произвольного исключения."""
+    """Updated: check the log for an arbitrary exception."""
 
     def boom():
         raise ValueError("boom")
@@ -187,14 +188,14 @@ def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
         results = run_parallel(boom, args_seq=[()])
 
     assert results == [None]
-    # В актуальном коде: "Task 0 failed: boom"
+    # In the real code: "Task 0 failed: boom"
     assert "Task 0 failed" in caplog.text
     assert "boom" in caplog.text
 
 
 class FailingExecutor:
     def __init__(self, *args, **kwargs):
-        # Важно: этот текст должен совпадать с тем, что мы ищем в логах
+        # Important: this text must match what we look for in the logs
         raise RuntimeError("init failed")
 
     def __enter__(self):
@@ -205,8 +206,8 @@ class FailingExecutor:
 
 
 def test_run_parallel_init_section_coverage(monkeypatch, caplog):
-    """Актуализировано: проверка при отсутствии ProcessPoolExecutor в пространстве имен."""
-    # Удаляем атрибут, чтобы спровоцировать ошибку импорта/инициализации
+    """Updated: check when ProcessPoolExecutor is missing from the namespace."""
+    # Remove the attribute to provoke an import/initialization error
     monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
 
     with caplog.at_level(logging.ERROR):
@@ -220,24 +221,24 @@ def test_run_parallel_init_section_coverage(monkeypatch, caplog):
 
 
 def test_run_parallel_init_section_coverage(monkeypatch, caplog):
-    """Исправлено: проверка лога при отсутствии ProcessPoolExecutor в модуле."""
+    """Fixed: check the log when ProcessPoolExecutor is missing from the module."""
     monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
 
     with caplog.at_level(logging.ERROR):
         results = run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
 
     assert results == [5]
-    # В коде: "Could not initialize ProcessPoolExecutor"
+    # In the code: "Could not initialize ProcessPoolExecutor"
     assert "Could not initialize ProcessPoolExecutor" in caplog.text
 
 
-# Вспомогательная функция для тестов
+# Helper function for tests
 def process_df_task(df, multiplier):
     return df.sum().sum() * multiplier
 
 
 def test_shared_dataframe_manual():
-    """Тест базовой функциональности SharedDataFrame вне run_parallel."""
+    """Test the basic functionality of SharedDataFrame outside run_parallel."""
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     shm_wrapper = SharedDataFrame(df=df)
 
@@ -251,7 +252,7 @@ def test_shared_dataframe_manual():
 
 
 def test_disk_persistence_manager_manual():
-    """Тест базовой функциональности DiskPersistenceManager."""
+    """Test the basic functionality of DiskPersistenceManager."""
     df = pd.DataFrame({"a": range(10)})
     manager = DiskPersistenceManager(use_shm=False)
     path = None
@@ -268,9 +269,9 @@ def test_disk_persistence_manager_manual():
 
 
 def test_run_parallel_with_shared_memory():
-    """Тест Task 1.1 и 1.2: Передача данных через Shared Memory в процессах."""
+    """Test Tasks 1.1 and 1.2: Passing data through Shared Memory in processes."""
     df = pd.DataFrame({"val": [10, 20, 30]})
-    # Ожидаемый результат: (10+20+30) * 1 = 60 и (10+20+30) * 2 = 120
+    # Expected result: (10+20+30) * 1 = 60 and (10+20+30) * 2 = 120
     args = [(df, 1), (df, 2)]
 
     results = run_parallel(
@@ -281,7 +282,7 @@ def test_run_parallel_with_shared_memory():
 
 
 def test_run_parallel_with_disk_persistence():
-    """Тест Phase 2: Передача данных через Disk (Parquet) в процессах."""
+    """Test Phase 2: Passing data through Disk (Parquet) in processes."""
     df = pd.DataFrame({"val": [1, 2, 3]})
     args = [(df, 10)]
 
@@ -293,27 +294,27 @@ def test_run_parallel_with_disk_persistence():
 
 
 def test_run_parallel_shm_cleanup_on_error():
-    """Проверка, что очистка ресурсов вызывается даже при ошибке в задаче."""
+    """Check that resource cleanup is called even when a task fails."""
     df = pd.DataFrame({"a": [1]})
 
     def error_task(df):
         raise ValueError("Intentional error")
 
-    # Вызываем и игнорируем ошибку (она залогируется как Task Failed)
+    # Call and ignore the error (it will be logged as Task Failed)
     results = run_parallel(
         error_task, args_seq=[(df,)], mode="processes", shared_args_indices=[0]
     )
     assert results == [None]
-    # Если здесь не упало и память не потекла (проверяется вручную или инструментами мониторинга)
-    # то блок finally отработал.
+    # If nothing crashed here and no memory leaked (checked manually or with monitoring tools),
+    # the finally block executed.
 
 
 def test_shared_dataframe_reconstruction():
-    """Покрытие случая восстановления SharedDataFrame без передачи df (сторона воркера)."""
+    """Cover the reconstruction of SharedDataFrame without passing df (worker side)."""
     df = pd.DataFrame({"x": [100]})
     original = SharedDataFrame(df=df)
 
-    # Имитируем то, что делает прокси: создаем объект по имени и метаданным
+    # Simulate what the proxy does: create the object by name and metadata
     reconstructed = SharedDataFrame(
         name=original.name,
         shape=original.shape,
@@ -327,17 +328,17 @@ def test_shared_dataframe_reconstruction():
     original.unlink()
 
 
-# 1. Выносим функцию на уровень модуля
+# 1. Move the function to the module level
 def mixed_task_global(d1, d2):
     return int(d1.iloc[0, 0] + d2.iloc[0, 0])
 
 
 def test_run_parallel_mixed_shm_and_disk():
-    """Тест одновременного использования обоих механизмов."""
+    """Test the simultaneous use of both mechanisms."""
     df_shm = pd.DataFrame({"a": [1]})
     df_disk = pd.DataFrame({"b": [2]})
 
-    # 2. Передаем глобальную функцию
+    # 2. Pass the global function
     results = run_parallel(
         mixed_task_global,
         args_seq=[(df_shm, df_disk)],
@@ -350,30 +351,30 @@ def test_run_parallel_mixed_shm_and_disk():
 
 def test_disk_persistence_manager_cleanup_exception(caplog):
     """
-    Тест покрывает случай, когда файл существует, но os.remove выбрасывает ошибку.
-    Проверяет логирование logger.warning в блоке except.
+    The test covers the case when the file exists but os.remove raises an error.
+    It checks that logger.warning is logged in the except block.
     """
-    # 1. Готовим данные
+    # 1. Prepare the data
     df = pd.DataFrame({"a": [1]})
     manager = DiskPersistenceManager(use_shm=False)
 
-    # Сохраняем реальный файл, чтобы получить валидный путь в списке created_files
+    # Save a real file to get a valid path in the created_files list
     path = manager.save_df(df)
 
-    # 2. Имитируем ошибку при удалении
-    # Настраиваем перехват логов на уровне WARNING
+    # 2. Simulate an error when deleting
+    # Set up log capture at the WARNING level
     with caplog.at_level(logging.WARNING):
-        # Патчим os.remove, чтобы он выбрасывал PermissionError при вызове
+        # Patch os.remove so that it raises PermissionError when called
         with patch("os.remove", side_effect=OSError("Access Denied")):
-            # Вызываем очистку. Она не должна прерываться исключением (оно ловится внутри)
+            # Call cleanup. It must not be interrupted by an exception (it is caught inside)
             manager.cleanup()
 
-    # 3. Проверки
-    # Проверяем, что в логах появилось наше сообщение
+    # 3. Checks
+    # Check that our message appears in the logs
     assert "Failed to delete temp file" in caplog.text
     assert "Access Denied" in caplog.text
 
-    # Вручную удаляем файл после теста, так как mock помешал менеджеру это сделать
+    # Manually delete the file after the test since the mock prevented the manager from doing so
     try:
         import os
 
@@ -385,42 +386,42 @@ def test_disk_persistence_manager_cleanup_exception(caplog):
 
 def test_disk_persistence_manager_cleanup_file_not_found():
     """
-    Дополнительный тест: если файла уже нет (os.path.exists = False),
-    ошибка не должна возникать и logger.warning не должен вызываться.
+    Additional test: if the file is already gone (os.path.exists = False),
+    no error should occur and logger.warning must not be called.
     """
     manager = DiskPersistenceManager(use_shm=False)
     manager.created_files.append("non_existent_file.parquet")
 
-    # Это не должно вызвать ни исключения, ни предупреждения в логах
-    # так как сработает проверка if os.path.exists(path)
+    # This must not raise an exception or produce a warning in the logs,
+    # because the if os.path.exists(path) check will trip.
     manager.cleanup()
 
 
-# 1. Объявляем функцию на уровне модуля, чтобы pickle мог её найти
+# 1. Declare the function at the module level so pickle can find it
 def worker_sum_func(df):
     return df["val"].sum()
 
 
 def test_worker_proxy_integration():
     """
-    Интеграционный тест для проверки _worker_proxy и Shared Memory.
-    Этот тест покроет строки с восстановлением данных из SHM в воркере.
+    Integration test for _worker_proxy and Shared Memory.
+    This test covers the lines that reconstruct data from SHM in the worker.
     """
     df = pd.DataFrame({"val": [1, 2, 3]})
 
-    # 2. Вызываем run_parallel с функцией, доступной для импорта
+    # 2. Call run_parallel with a function that can be imported
     results = run_parallel(
-        func=worker_sum_func,  # Передаем обычную функцию вместо лямбды
+        func=worker_sum_func,  # Pass a regular function instead of a lambda
         args_seq=[(df,)],
         mode="processes",
         shared_args_indices=[0],
     )
 
-    # 3. Проверяем результат
+    # 3. Check the result
     assert results is not None, (
-        "Результат не должен быть None (проверьте логи на ошибки pickle)"
+        "the result must not be None (check the logs for pickle errors)"
     )
-    assert results[0] == 6, f"Ожидалось 6, получено {results[0]}"
+    assert results[0] == 6, f"expected 6, got {results[0]}"
 
 
 def test_worker_proxy_disk_integration(tmp_path):
@@ -430,16 +431,16 @@ def test_worker_proxy_disk_integration(tmp_path):
     path = str(tmp_path / "test.parquet")
     df.to_parquet(path)
 
-    # Прямой вызов прокси, как это делает воркер
+    # Direct proxy call, as the worker does
     result = _worker_proxy(lambda x: x["val"].iloc[0], (path,), {}, [0], [])
     assert result == 30
 
 
 def test_worker_proxy_logic_direct_coverage():
-    # 1. Данные для восстановления
+    # 1. Data for reconstruction
     meta = ("test_shm_name", (1, 1), np.float64, ["a"])
 
-    # Патчим SharedDataFrame, чтобы он не лез в реальную память ОС
+    # Patch SharedDataFrame so it does not touch real OS memory
     with patch(
         "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame"
     ) as mock_class:
@@ -451,13 +452,13 @@ def test_worker_proxy_logic_direct_coverage():
 
         result = _worker_proxy(
             func=simple_func,
-            args=(None,),  # В args теперь None на месте SHM
+            args=(None,),  # In args, None now occupies the SHM slot
             kwargs={},
             disk_indices=None,
-            shm_info={0: meta},  # Передаем через shm_info
+            shm_info={0: meta},  # Pass it through shm_info
         )
         assert result.iloc[0]["a"] == 1.0
-        # Проверяем, что конструктор вызвался с нашими метаданными
+        # Check that the constructor was called with our metadata
         mock_class.assert_called_with(
             name=meta[0], shape=meta[1], dtype=meta[2], columns=meta[3]
         )
@@ -465,56 +466,56 @@ def test_worker_proxy_logic_direct_coverage():
 
 def test_coverage_unlink_file_not_found():
     """
-    Тест для принудительного покрытия веток обработки исключений в методе unlink.
-    Использует мок, чтобы имитировать отсутствие сегмента в ОС.
+    Test to forcefully cover the exception handling branches in the unlink method.
+    Uses a mock to simulate the absence of a segment in the OS.
     """
-    # 1. Создаем минимальный DataFrame
+    # 1. Create a minimal DataFrame
     df = pd.DataFrame({"test": [1, 2, 3]})
 
-    # 2. Инициализируем SharedDataFrame (он создаст реальный сегмент в памяти)
+    # 2. Initialize SharedDataFrame (it creates a real in-memory segment)
     shm_df = SharedDataFrame(df=df)
 
-    # 3. Подменяем метод unlink объекта shm на мок, который всегда выбрасывает FileNotFoundError
-    # Это имитирует ситуацию, когда сегмент уже был удален кем-то другим
-    shm_df.shm.unlink = MagicMock(side_effect=FileNotFoundError("Уже удалено"))
+    # 3. Replace the unlink method of the shm object with a mock that always raises FileNotFoundError
+    # This simulates a situation where the segment was already removed by someone else
+    shm_df.shm.unlink = MagicMock(side_effect=FileNotFoundError("Already deleted"))
 
-    # 4. Вызываем метод unlink.
-    # Благодаря вашему блоку try-except, ошибка будет поймана, и выполнится строка 'pass'
+    # 4. Call the unlink method.
+    # Thanks to the try-except block, the error will be caught and the 'pass' line will run
     try:
         shm_df.unlink()
     except FileNotFoundError:
         import pytest
 
         pytest.fail(
-            "SharedDataFrame.unlink не перехватил FileNotFoundError, покрытие не сработало!"
+            "SharedDataFrame.unlink did not catch FileNotFoundError, coverage did not trigger!"
         )
 
-    # 5. Очистка (закрываем дескрипторы)
+    # 5. Cleanup (close the descriptors)
     shm_df.close()
 
-    # Проверяем, что мок действительно вызывался
+    # Check that the mock was actually called
     assert shm_df.shm.unlink.called
 
 
-# 1. Тестирование SharedDataFrame.is_compatible (dtypes и Index)
+# 1. Testing SharedDataFrame.is_compatible (dtypes and Index)
 def test_shared_data_frame_is_compatible_coverage():
-    """Покрывает строки:
+    """Covers the lines:
     - if not all(dt.kind in allowed_kinds for dt in df.dtypes): return False
     - if not isinstance(df.index, pd.RangeIndex): return False
     """
-    # А. Тест на недопустимый тип (Object/String)
+    # A. Test for an invalid type (Object/String)
     df_obj = pd.DataFrame({"col": ["a", "b", "c"]})
     assert SharedDataFrame.is_compatible(df_obj) is False
 
-    # Б. Тест на недопустимый индекс (не RangeIndex)
+    # B. Test for an invalid index (not RangeIndex)
     df_custom_index = pd.DataFrame({"col": [1, 2, 3]}, index=pd.Index([10, 20, 30]))
     assert SharedDataFrame.is_compatible(df_custom_index) is False
-    # В. Тест на валидный DataFrame (int/float + RangeIndex)
+    # C. Test for a valid DataFrame (int/float + RangeIndex)
     df_valid = pd.DataFrame({"col": [1.5, 2.0, 3.1]})
     assert SharedDataFrame.is_compatible(df_valid) is True
 
 
-# 2. Тестирование исключения в _worker_proxy
+# 2. Testing the exception in _worker_proxy
 def test_worker_proxy_close_exception():
     meta = ("name", (1, 2), np.int64, ["a", "b"])
 
@@ -528,7 +529,7 @@ def test_worker_proxy_close_exception():
         def dummy_func(df):
             return len(df.columns)
 
-        # Передаем shm_info, чтобы прокси создал воркер-враппер
+        # Pass shm_info so the proxy creates a worker wrapper
         result = _worker_proxy(
             func=dummy_func,
             args=(None,),
@@ -539,63 +540,63 @@ def test_worker_proxy_close_exception():
         assert result == 2
         assert mock_instance.close.called
 
-    # Проверяем, что метод close был вызван
+    # Check that the close method was called
     mock_instance.close.assert_called_once()
 
 
 def test_perform_cleanup_all_exceptions():
-    # Объект, у которого close() падает, но unlink() должен быть вызван
+    # An object whose close() fails, but unlink() must still be called
     ref_fail = MagicMock()
     ref_fail.close.side_effect = Exception("Close error")
 
     mock_pm = MagicMock()
     mock_pm.cleanup.side_effect = Exception("PM error")
 
-    # Функция не должна выбрасывать исключение (Phase 3 resilience)
+    # The function must not raise an exception (Phase 3 resilience)
     try:
         _perform_cleanup(shm_refs=[ref_fail], persistence_manager=mock_pm)
     except Exception as e:
         pytest.fail(f"_perform_cleanup leaked an exception: {e}")
 
     assert ref_fail.close.called
-    # unlink должен вызываться всегда для очистки ОС, даже если дескриптор не закрылся
+    # unlink must always be called for OS cleanup, even if the descriptor did not close
     assert ref_fail.unlink.called
     assert mock_pm.cleanup.called
 
 
-# 4. Проверка поведения при пустом persistence_manager
+# 4. Check behavior with an empty persistence_manager
 def test_perform_cleanup_none_pm():
-    """Проверка ветки if persistence_manager: False"""
+    """Check the if persistence_manager: False branch"""
     mock_shm_ref = MagicMock()
     _perform_cleanup(shm_refs=[mock_shm_ref], persistence_manager=None)
     mock_shm_ref.close.assert_called_once()
 
 
 def test_is_shared_array_robust():
-    """Тест для SharedDataFrame.is_shared_array с учетом особенностей атрибута .base"""
+    """Test for SharedDataFrame.is_shared_array taking into account the specifics of the .base attribute"""
 
-    # 1. Покрытие: return False (не ndarray)
+    # 1. Coverage: return False (not an ndarray)
     assert SharedDataFrame.is_shared_array("not an array") is False
 
-    # 2. Покрытие: return False (ndarray без base или base не memoryview)
+    # 2. Coverage: return False (ndarray without base or base not a memoryview)
     normal_arr = np.array([1, 2, 3])
     assert SharedDataFrame.is_shared_array(normal_arr) is False
-    # 3. Покрытие: return True
-    # Используем memoryview напрямую, чтобы гарантировать тип .base
+    # 3. Coverage: return True
+    # Use memoryview directly to guarantee the .base type
     raw_data = bytearray(b"\x00" * 24)
     m_view = memoryview(raw_data)
-    # Создаем массив из buffer — в большинстве окружений это установит .base в memoryview
+    # Create an array from the buffer — in most environments this sets .base to a memoryview
     shared_arr = np.frombuffer(m_view, dtype=np.float64)
 
-    # Если на вашей платформе numpy все равно разворачивает base,
-    # мы можем проверить это и принудительно создать ситуацию для покрытия строки
+    # If on your platform numpy still unwraps base,
+    # we can detect that and forcibly create a situation to cover the line
     if not isinstance(shared_arr.base, memoryview):
-        # Принудительное создание объекта, удовлетворяющего условию (для покрытия)
+        # Force creation of an object that satisfies the condition (for coverage)
         class MockArray(np.ndarray):
             pass
 
         mock_arr = np.array([1.0, 2.0]).view(MockArray)
-        # Вручную подменяем base для теста логики
+        # Manually replace base to test the logic
         mock_arr.base = m_view
         assert SharedDataFrame.is_shared_array(mock_arr) is True
     else:
@@ -603,13 +604,13 @@ def test_is_shared_array_robust():
 
 
 def test_get_data_info():
-    # 1. Ветка: pandas.DataFrame
+    # 1. Branch: pandas.DataFrame
     df = pd.DataFrame({"a": [1], "b": [2]})
     count, names = SharedDataFrame.get_data_info(df)
     assert count == 2
     assert names == ["a", "b"]
 
-    # 2. Ветка: SharedDataFrame
+    # 2. Branch: SharedDataFrame
     sdf = SharedDataFrame(df)
     try:
         count, names = SharedDataFrame.get_data_info(sdf)
@@ -619,52 +620,52 @@ def test_get_data_info():
         sdf.unlink()
         sdf.close()
 
-    # 3. Ветка: np.ndarray (ndim > 1)
+    # 3. Branch: np.ndarray (ndim > 1)
     arr_2d = np.zeros((5, 3))
     count, names = SharedDataFrame.get_data_info(arr_2d)
     assert count == 3
     assert names == [0, 1, 2]
 
-    # 4. Ветка: np.ndarray (ndim == 1)
+    # 4. Branch: np.ndarray (ndim == 1)
     arr_1d = np.array([1, 2, 3])
     count, names = SharedDataFrame.get_data_info(arr_1d)
     assert count == 1
     assert names == [0]
 
-    # 5. Ветка: Другой тип (else)
+    # 5. Branch: Other type (else)
     count, names = SharedDataFrame.get_data_info("not_a_df")
     assert count == 0
     assert names == []
 
 
 def test_is_compatible_all_branches():
-    """Тест для SharedDataFrame.is_compatible — покрытие проверок типов и индексов"""
+    """Test for SharedDataFrame.is_compatible — covers type and index checks"""
 
-    # 1. Покрытие: is_shared_array(df) -> True
-    # (Используем трюк с подменой base, если обычный SHM не срабатывает как memoryview)
+    # 1. Coverage: is_shared_array(df) -> True
+    # (Use the base-replacement trick if regular SHM does not act as a memoryview)
     data = bytearray(b"\x00" * 8)
     mv = memoryview(data)
     fake_shared = np.frombuffer(mv, dtype=np.int64)
     if not isinstance(fake_shared.base, memoryview):
-        # Если numpy проигнорировал memoryview в base, пропускаем эту ветку
-        # или используем мок, так как логика зависит от окружения
+        # If numpy ignored the memoryview in base, skip this branch
+        # or use a mock, since the logic depends on the environment
         pass
     else:
         assert SharedDataFrame.is_compatible(fake_shared) is True
-    # 2. Покрытие: isinstance(df, pd.DataFrame) -> False
+    # 2. Coverage: isinstance(df, pd.DataFrame) -> False
     assert SharedDataFrame.is_compatible("not a dataframe") is False
 
-    # 3. Покрытие: проверка типов (dtypes)
-    # Только разрешенные типы (int, float, bool)
+    # 3. Coverage: type check (dtypes)
+    # Only allowed types (int, float, bool)
     df_valid = pd.DataFrame({"a": [1], "b": [1.5]}, index=pd.RangeIndex(0, 1))
     assert SharedDataFrame.is_compatible(df_valid) is True
 
-    # Запрещенный тип (object/string)
+    # Disallowed type (object/string)
     df_invalid_type = pd.DataFrame({"a": ["text"]})
     assert SharedDataFrame.is_compatible(df_invalid_type) is False
 
-    # 4. Покрытие: проверка индекса (не RangeIndex)
-    df_invalid_index = pd.DataFrame({"a": [1]}, index=[10])  # Int64Index, не RangeIndex
+    # 4. Coverage: index check (not RangeIndex)
+    df_invalid_index = pd.DataFrame({"a": [1]}, index=[10])  # Int64Index, not RangeIndex
     assert SharedDataFrame.is_compatible(df_invalid_index) is False
 
 
@@ -672,21 +673,21 @@ def test_get_view():
     df = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
     sdf = SharedDataFrame(df)
 
-    # Для теста временно добавим _df, как того ожидает метод get_view в коде
+    # For the test, temporarily add _df, as the get_view method expects it in the code
     sdf._df = df
 
     try:
-        # 1. Ветка: columns is None
+        # 1. Branch: columns is None
         view_all = sdf.get_view(None)
         pd.testing.assert_frame_equal(view_all, df)
 
-        # 2. Ветка: переданы конкретные колонки
+        # 2. Branch: specific columns are passed
         view_subset = sdf.get_view(["A"])
         assert view_subset.columns.tolist() == ["A"]
         assert view_subset.shape == (2, 1)
-        # Проверка, что это view (изменение оригинала влияет на view)
-        # Примечание: .loc[:, cols] для списка колонок в pandas может создавать копию
-        # или view в зависимости от версии, но тест покроет строку кода.
+        # Check that this is a view (changing the original affects the view)
+        # Note: .loc[:, cols] for a list of columns in pandas may create a copy
+        # or a view depending on the version, but the test will cover the code line.
     finally:
         sdf.unlink()
         sdf.close()
@@ -697,15 +698,15 @@ def global_long_sleep_task(*args, **kwargs):
 
 
 def _raise_timeout_at_iteration(*args, **kwargs):
-    """Функция-генератор: TimeoutError выбрасывается при итерации (for fut in ...),
-    а не при вызове as_completed(...). Это корректная симуляция поведения
-    настоящего as_completed-генератора."""
+    """Generator function: TimeoutError is raised during iteration (for fut in ...),
+    not when as_completed(...) is called. This is a correct simulation of the
+    behavior of a real as_completed generator."""
     raise concurrent.futures.TimeoutError()
     yield  # pragma: no cover
 
 
 def test_run_parallel_worker_hard_kill():
-    """Проверяет, что при истечении глобального таймаута задачи помечаются как timed out."""
+    """Checks that tasks are marked as timed out when the global timeout expires."""
     with patch(
         "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor"
     ) as mock_executor_cls:
@@ -715,7 +716,7 @@ def test_run_parallel_worker_hard_kill():
         mock_future = MagicMock()
         mock_pool.submit.return_value = mock_future
 
-        # as_completed при каждой итерации выбрасывает TimeoutError
+        # as_completed raises TimeoutError on every iteration
         with patch(
             "configurable_automl_engine.training_engine.thread_pool.as_completed",
             side_effect=_raise_timeout_at_iteration,
@@ -727,23 +728,23 @@ def test_run_parallel_worker_hard_kill():
                     lambda: None,
                     args_seq=[()],
                     mode="processes",
-                    timeout=0.1,  # маленький таймаут — глобальный лимит истечёт
+                    timeout=0.1,  # small timeout — the global limit will expire
                 )
 
     assert results == [None]
-    # Проверяем, что logger.error был вызван с сообщением о таймауте
+    # Check that logger.error was called with a timeout message
     error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
     assert any("Task 0 timed out" in msg for msg in error_messages)
 
 
 def test_run_parallel_threads_global_timeout_ignored(caplog):
-    """В threads-режиме глобальный timeout игнорируется с warning (issue #101).
+    """In threads mode the global timeout is ignored with a warning.
 
-    Ранее задача, не успевшая за timeout, помечалась как timed out и её
-    результат выбрасывался (None), но фаза всё равно ждала shutdown(wait=True)
-    завершения всех алгоритмов — мягкий таймаут не экономил время. Теперь
-    timeout в mode='threads' игнорируется с warning, задача выполняется до
-    конца и возвращает результат.
+    Previously a task that did not finish within the timeout was marked as
+    timed out and its result was discarded (None), but the phase still
+    waited for shutdown(wait=True) completion of all algorithms — the soft
+    timeout did not save time. Now the timeout in mode='threads' is ignored
+    with a warning, the task runs to completion and returns its result.
     """
     with caplog.at_level(logging.WARNING):
         results = run_parallel(
@@ -762,7 +763,7 @@ def task_with_kwargs(df, multiplier=1, add=0):
 
 def test_run_parallel_processes_with_kwargs():
     df = pd.DataFrame({"a": [1, 1]})
-    # Передаем и args, и kwargs
+    # Pass both args and kwargs
     results = run_parallel(
         task_with_kwargs,
         args_seq=[(df,)],
@@ -773,7 +774,7 @@ def test_run_parallel_processes_with_kwargs():
     assert results == [9]  # (2 * 2) + 5
 
 
-# В файле test_parallel.py (исправление самого теста)
+# In test_parallel.py (fix of the test itself)
 def global_identity_func(x):
     return x.iloc[0, 0]
 
@@ -781,7 +782,7 @@ def global_identity_func(x):
 def test_run_parallel_duplicate_indices_handling():
     df = pd.DataFrame({"a": [1]})
     results = run_parallel(
-        global_identity_func,  # Вместо lambda
+        global_identity_func,  # Instead of a lambda
         args_seq=[(df,)],
         mode="processes",
         shared_args_indices=[0],
@@ -794,7 +795,7 @@ def test_get_view_new():
     df = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
     sdf = SharedDataFrame(df)
     try:
-        # Проверяем, что get_view корректно работает через to_df()
+        # Check that get_view works correctly through to_df()
         view_subset = sdf.get_view(["A"])
         assert isinstance(view_subset, pd.DataFrame)
         assert view_subset.columns.tolist() == ["A"]
@@ -805,15 +806,15 @@ def test_get_view_new():
 
 
 class TestParallelErrorHandling(unittest.TestCase):
-    # --- ТЕСТЫ ДЛЯ _perform_cleanup ---
+    # --- TESTS FOR _perform_cleanup ---
 
     def test_shm_unlink_oserror_pass(self):
-        """Покрытие: except (FileNotFoundError, OSError): pass в SHM unlink"""
+        """Coverage: except (FileNotFoundError, OSError): pass in SHM unlink"""
         shm_mock = MagicMock(spec=SharedDataFrame)
-        # Имитируем FileNotFoundError при попытке удалить сегмент
+        # Simulate FileNotFoundError when trying to delete the segment
         shm_mock.unlink.side_effect = FileNotFoundError("Already gone")
 
-        # Функция не должна упасть
+        # The function must not crash
         try:
             _perform_cleanup([shm_mock], None)
         except Exception as e:
@@ -822,7 +823,7 @@ class TestParallelErrorHandling(unittest.TestCase):
         shm_mock.unlink.assert_called_once()
 
     def test_shm_unlink_generic_exception_warning(self):
-        """Покрытие: except Exception as e: logger.warning(...) в SHM unlink"""
+        """Coverage: except Exception as e: logger.warning(...) in SHM unlink"""
         shm_mock = MagicMock(spec=SharedDataFrame)
         shm_mock.unlink.side_effect = ValueError("Fatal SHM error")
 
@@ -834,7 +835,7 @@ class TestParallelErrorHandling(unittest.TestCase):
         )
 
     def test_persistence_cleanup_permission_error(self):
-        """Покрытие: except (PermissionError, OSError) в persistence_manager.cleanup"""
+        """Coverage: except (PermissionError, OSError) in persistence_manager.cleanup"""
         pm_mock = MagicMock(spec=DiskPersistenceManager)
         pm_mock.cleanup.side_effect = PermissionError("File locked")
 
@@ -848,11 +849,11 @@ class TestParallelErrorHandling(unittest.TestCase):
             )
         )
 
-    # --- ТЕСТЫ ДЛЯ run_parallel (Цикл ожидания) ---
+    # --- TESTS FOR run_parallel (Waiting loop) ---
 
     @patch(f"{MODULE_PATH}.ThreadPoolExecutor")
     def test_run_parallel_wait_loop_exception(self, mock_executor_cls):
-        """Покрытие: except Exception as e: logger.error(Error while waiting for tasks)"""
+        """Coverage: except Exception as e: logger.error(Error while waiting for tasks)"""
         mock_pool = MagicMock()
         mock_executor_cls.return_value = mock_pool
 
@@ -872,34 +873,34 @@ class TestParallelErrorHandling(unittest.TestCase):
             any("Error while waiting for tasks" in log for log in cm.output)
         )
 
-    # --- ТЕСТЫ ДЛЯ run_parallel (Принудительное завершение воркеров) ---
+    # --- TESTS FOR run_parallel (Forced worker termination) ---
 
     @patch(f"{MODULE_PATH}.ProcessPoolExecutor")
     @patch(f"{MODULE_PATH}.time.sleep")
     def test_worker_terminate_and_kill_exceptions(self, mock_sleep, mock_executor_cls):
         """
-        Покрытие блоков:
-        - except Exception: pass при w.terminate()
-        - except Exception: pass при w.kill()
+        Covers the blocks:
+        - except Exception: pass on w.terminate()
+        - except Exception: pass on w.kill()
 
-        Теперь watchdog удалён, поэтому проверяем, что _force_shutdown_processes
-        вызывается в finally-блоке для ProcessPoolExecutor.
+        The watchdog has been removed, so we check that _force_shutdown_processes
+        is called in the finally block for ProcessPoolExecutor.
         """
         mock_executor = mock_executor_cls.return_value
 
-        # Создаем воркера, который не хочет умирать
+        # Create a worker that does not want to die
         mock_worker = MagicMock()
         mock_worker.is_alive.return_value = True
         mock_worker.pid = 777
 
-        # Настраиваем ошибки на системные вызовы уничтожения
+        # Configure errors on the termination system calls
         mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
         mock_worker.kill.side_effect = RuntimeError("Kill blocked")
 
-        # Подменяем список процессов внутри Executor
+        # Replace the process list inside the Executor
         mock_executor._processes = {0: mock_worker}
 
-        # Имитируем ситуацию, когда задачи не завершились вовремя
+        # Simulate a situation where tasks did not finish in time
         with patch(f"{MODULE_PATH}.as_completed") as mock_as_completed:
             mock_as_completed.side_effect = _raise_timeout_at_iteration
 
@@ -912,21 +913,21 @@ class TestParallelErrorHandling(unittest.TestCase):
                     shutdown_grace_period=0.01,
                 )
 
-            # Проверяем, что логи содержат сообщение о таймауте
+            # Check that the logs contain the timeout message
             self.assertTrue(any("Task 0 timed out" in log for log in cm.output))
 
-        # Проверяем, что методы вызывались (в finally-блоке _force_shutdown_processes)
+        # Check that the methods were called (in the finally block of _force_shutdown_processes)
         self.assertTrue(mock_worker.terminate.called)
         self.assertTrue(mock_worker.kill.called)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Тесты as_completed + watchdog (deadlock prevention)
+#  Tests for as_completed + watchdog (deadlock prevention)
 # ═══════════════════════════════════════════════════════════════
 
 
 def test_as_completed_normal_completion():
-    """Проверка, что as_completed корректно собирает результаты."""
+    """Check that as_completed correctly collects results."""
     results = run_parallel(
         simple_task, args_seq=[(1, 2), (3, 4), (5, 6)], mode="threads"
     )
@@ -934,12 +935,12 @@ def test_as_completed_normal_completion():
 
 
 def test_run_parallel_threads_task_timeout_ignored(caplog):
-    """В threads-режиме task_timeout игнорируется с warning (issue #101).
+    """In threads mode task_timeout is ignored with a warning.
 
-    Раньше deadline отсчитывался от момента submit, из-за чего задача,
-    простоявшая в очереди (например, при max_workers=1), «истекала», ещё не
-    начавшись. Теперь task_timeout в mode='threads' игнорируется с warning,
-    задача выполняется до завершения и возвращает результат.
+    Previously the deadline was counted from the moment of submit, so a task
+    waiting in the queue (e.g. with max_workers=1) could "expire" before even
+    starting. Now task_timeout in mode='threads' is ignored with a warning,
+    the task runs to completion and returns its result.
     """
     with caplog.at_level(logging.WARNING):
         results = run_parallel(
@@ -953,24 +954,24 @@ def test_run_parallel_threads_task_timeout_ignored(caplog):
 
 
 def hang_task(seconds):
-    """Задача, которая «зависает» (не завершается в пределах ожидания теста)."""
+    """Task that "hangs" (does not finish within the test's wait window)."""
     time.sleep(seconds)
     return "hung-ended"
 
 
 def test_run_parallel_processes_queued_tasks_get_full_budget():
-    """В processes-режиме очередь не «съедает» исполненный бюджет задачи.
+    """In processes mode the queue does not "consume" a task's execution budget.
 
-    Исправление (issue #110): раньше deadline каждого алгоритма считался от
-    момента submit, поэтому при большем числе задач, чем max_workers, часть из
-    них «истекала», ещё не начавшись. Теперь deadline привязан к фактическому
-    старту задачи в воркере (side-channel), поэтому каждая задача, чьё реальное
-    исполнение укладывается в task_timeout, успевает завершиться, даже если она
-    долго простояла в очереди. Покрывает случай «задач > max_workers+1».
+    Previously the deadline of each algorithm was counted from the moment of
+    submit, so with more tasks than max_workers, some of them "expired"
+    before even starting. Now the deadline is bound to the task's actual
+    start in the worker (side-channel), so each task whose real execution
+    fits into task_timeout completes successfully even if it spent a long
+    time in the queue. Covers the "tasks > max_workers+1" case.
     """
-    # 10 задач по 0.2с при max_workers=2: последние задачи стартуют только через
-    # ~0.8-1.0с после submit (значительно позже task_timeout=0.8 от submit), но
-    # каждое реальное исполнение (0.2с) с запасом укладывается в 0.8с.
+    # 10 tasks of 0.2s with max_workers=2: the last tasks start only
+    # ~0.8-1.0s after submit (significantly later than task_timeout=0.8 from
+    # submit), but each real execution (0.2s) fits into 0.8s with margin.
     results = run_parallel(
         slow_task,
         args_seq=[(0.2,)] * 10,
@@ -983,11 +984,10 @@ def test_run_parallel_processes_queued_tasks_get_full_budget():
 
 
 def test_run_parallel_processes_task_timeout_still_enforced():
-    """В processes-режиме task_timeout по-прежнему жёстко ограничивает исполнение.
+    """In processes mode task_timeout still strictly limits the execution.
 
-    После того как задача реально стартовала, она обязана уложиться в
-    task_timeout секунд исполнения — иначе принудительно помечается как
-    timed out (результат None).
+    After a task has really started, it must fit into task_timeout seconds of
+    execution — otherwise it is forcibly marked as timed out (result None).
     """
     results = run_parallel(
         slow_task,
@@ -1001,12 +1001,13 @@ def test_run_parallel_processes_task_timeout_still_enforced():
 
 
 def test_run_parallel_never_starting_task_is_bounded():
-    """Задача, которая так и не стартует, не «зависает» навсегда (issue #110).
+    """A task that never starts does not hang forever.
 
-    Первый воркер зависает на task0 (sleep 60с); task1 остаётся в очереди и не
-    стартует. Даже при timeout=None deadline очереди фиксирован сверху
-    (submit + task_timeout + queue_budget), поэтому run_parallel завершается за
-    ограниченное время, а не ждёт вечно (раньше rolling-дедлайн не истекал).
+    The first worker hangs on task0 (sleep 60s); task1 stays in the queue and
+    never starts. Even with timeout=None, the queue deadline is bounded from
+    above (submit + task_timeout + queue_budget), so run_parallel finishes in
+    a bounded time instead of waiting forever (previously the rolling
+    deadline never expired).
     """
     started = time.time()
     results = run_parallel(
@@ -1019,29 +1020,29 @@ def test_run_parallel_never_starting_task_is_bounded():
     )
     elapsed = time.time() - started
     assert results == [None, None]
-    assert elapsed < 15  # завершились за ~2*task_timeout + grace, а не зависли
+    assert elapsed < 15  # finished in ~2*task_timeout + grace, not hung forever
 
 
 def test_watchdog_not_triggered_on_slow_but_alive_tasks():
-    """Проверка, что watchdog НЕ срабатывает на медленных, но живых задачах.
+    """Check that the watchdog does NOT trigger on slow but alive tasks.
 
-    as_completed блокируется и ждёт завершения задачи. Если задача просто
-    долгая — watchdog не увеличивает stale-счётчик.
+    as_completed blocks and waits for the task to finish. If a task is simply
+    long — the watchdog does not increment the stale counter.
     """
     results = run_parallel(
         slow_task,
-        args_seq=[(2.0,)],  # задача на 2 секунды
+        args_seq=[(2.0,)],  # a 2-second task
         mode="threads",
     )
-    assert results == ["done"]  # задача должна завершиться нормально
+    assert results == ["done"]  # the task must complete normally
 
 
 @patch("configurable_automl_engine.training_engine.thread_pool.as_completed")
 def test_watchdog_triggers_on_c_level_crash(mock_as_completed):
-    """Проверка, что при истечении глобального таймаута задачи помечаются как timed out.
+    """Check that tasks are marked as timed out when the global timeout expires.
 
-    Мокаем as_completed, чтобы он при каждой итерации выбрасывал TimeoutError,
-    имитируя зависший процесс. Глобальный таймаут в 0.1с заставит цикл выйти.
+    We mock as_completed to raise TimeoutError on every iteration,
+    simulating a hung process. A 0.1s global timeout will force the loop to exit.
     """
     mock_as_completed.side_effect = _raise_timeout_at_iteration
 
@@ -1052,7 +1053,7 @@ def test_watchdog_triggers_on_c_level_crash(mock_as_completed):
             lambda: None,
             args_seq=[()],
             mode="processes",
-            timeout=0.1,  # маленький таймаут — глобальный лимит истечёт
+            timeout=0.1,  # small timeout — the global limit will expire
         )
 
     assert results == [None]
@@ -1062,12 +1063,12 @@ def test_watchdog_triggers_on_c_level_crash(mock_as_completed):
 
 @patch("configurable_automl_engine.training_engine.thread_pool.as_completed")
 def test_watchdog_not_triggered_when_global_timeout_expires(mock_as_completed):
-    """Проверка, что watchdog НЕ срабатывает, если истёк глобальный таймаут.
+    """Check that the watchdog does NOT trigger when the global timeout has expired.
 
-    Даже если as_completed выбрасывает TimeoutError, но remaining_global <= 0,
-    stale-счётчик не увеличивается — происходит штатный выход по таймауту.
-    Используем функцию-генератор, чтобы TimeoutError выбрасывался
-    при итерации (for fut in ...), а не при вызове.
+    Even if as_completed raises TimeoutError, but remaining_global <= 0,
+    the stale counter is not incremented — a normal timeout exit happens.
+    We use a generator function so that TimeoutError is raised
+    during iteration (for fut in ...), not when it is called.
     """
     mock_as_completed.side_effect = _raise_timeout_at_iteration
 
@@ -1081,17 +1082,17 @@ def test_watchdog_not_triggered_when_global_timeout_expires(mock_as_completed):
                 lambda: None,
                 args_seq=[()],
                 mode="processes",
-                timeout=0.1,  # маленький глобальный таймаут
+                timeout=0.1,  # small global timeout
             )
 
     assert results == [None]
     error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert not any("WATCHDOG" in msg for msg in error_messages)  # watchdog не сработал
-    assert any("Task 0 timed out" in msg for msg in error_messages)  # штатный таймаут
+    assert not any("WATCHDOG" in msg for msg in error_messages)  # the watchdog did not trigger
+    assert any("Task 0 timed out" in msg for msg in error_messages)  # normal timeout
 
 
 def test_force_shutdown_processes_terminate_and_kill():
-    """Проверка, что _force_shutdown_processes корректно завершает процессы."""
+    """Check that _force_shutdown_processes correctly terminates processes."""
     mock_worker = MagicMock()
     mock_worker.is_alive.return_value = True
     mock_worker.pid = 9999
@@ -1107,7 +1108,7 @@ def test_force_shutdown_processes_terminate_and_kill():
 
 
 def test_run_parallel_generic_exception_no_timeout(caplog):
-    """Покрытие except Exception в else-ветке (timeout_for_ac is None)."""
+    """Cover the except Exception in the else branch (timeout_for_ac is None)."""
 
     def failing_task():
         raise ValueError("No-timeout failure")
@@ -1117,7 +1118,7 @@ def test_run_parallel_generic_exception_no_timeout(caplog):
             failing_task,
             args_seq=[()],
             mode="threads",
-            timeout=None,  # отключаем глобальный таймаут
+            timeout=None,  # disable the global timeout
         )
 
     assert results == [None]
@@ -1130,8 +1131,8 @@ def raise_invalid_no_timeout():
 
 
 def test_run_parallel_invalid_algorithm_error_is_not_fatal_no_timeout(caplog):
-    """Покрытие else-ветки (timeout_for_ac is None): InvalidAlgorithmError
-    обрабатывается как обычный отказ задачи (issue #12)."""
+    """Cover the else branch (timeout_for_ac is None): InvalidAlgorithmError
+    is handled as an ordinary task failure."""
     with caplog.at_level(logging.ERROR):
         results = run_parallel(
             raise_invalid_no_timeout, args_seq=[()], timeout=None
@@ -1147,7 +1148,7 @@ def raise_keyboard_interrupt_no_timeout():
 
 
 def test_run_parallel_keyboard_interrupt_propagates_no_timeout(caplog):
-    """Покрытие строки 625: re-raise KeyboardInterrupt в else-ветке (timeout_for_ac is None)."""
+    """Cover line 625: re-raise KeyboardInterrupt in the else branch (timeout_for_ac is None)."""
 
     with caplog.at_level(logging.ERROR):
         with pytest.raises(KeyboardInterrupt):

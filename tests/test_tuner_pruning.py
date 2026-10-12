@@ -1,19 +1,19 @@
 """
-Тесты ранней остановки (pruning) в configurable_automl_engine.tuner.
+Tests of early stopping (pruning) in configurable_automl_engine.tuner.
 
-Покрывают ключевые сценарии фичи:
-• AC-1 — публикация промежуточных результатов и отсечение безнадёжных триалов.
-• AC-2 — реальный MedianPruner/HyperbandPruner отсекает часть триалов,
-  и это фиксируется в логах.
-• AC-3 — best_model/best_params/best_score выбираются только по завершённым
-  триалам (правило максимизации метрики).
-• AC-4 — при выключенном pruning поведение идентично текущему
-  (trial.report не вызывается, cross_val_score не меняется).
-• AC-5/AC-6 — отсечённые триалы не считаются фатальными сбоями; при
-  отсечении всех триалов сохраняется сценарий «нет результатов».
-• AC-7 — hold-out (train_test_split) без естественных шагов: прайнер
-  не применяется, поведение безопасно.
-• AC-9 — в логах фиксируется факт/количество отсечённых триалов.
+They cover the key scenarios of the feature:
+• publishing intermediate results and pruning hopeless trials;
+• a real MedianPruner/HyperbandPruner prunes some trials, which is recorded
+  in the logs;
+• best_model/best_params/best_score are selected only from completed trials
+  (the metric maximization rule);
+• with pruning disabled the behavior is identical to the current one
+  (trial.report is not called, cross_val_score is unchanged);
+• pruned trials are not treated as fatal failures; when all trials are
+  pruned, the "no results" scenario is preserved;
+• hold-out (train_test_split) without natural steps: the pruner is not
+  applied and the behavior is safe;
+• the fact/count of pruned trials is recorded in the logs.
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ from configurable_automl_engine.tuner import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Вспомогательные объекты: детерминированная «модель» и «скорер»
+# Helper objects: a deterministic "model" and "scorer"
 # ──────────────────────────────────────────────────────────────────────────────
 class FakeQualityModel(BaseEstimator, RegressorMixin):
-    """Модель, чей predict возвращает константу из гиперпараметра ``quality``.
+    """Model whose predict returns the constant from the ``quality`` hyperparameter.
 
-    Позволяет детерминированно управлять качеством триала: оценка каждого
-    фолда равна ``quality``, поэтому «плохие» триалы гарантированно хуже
-    «хороших» на каждом промежуточном шаге.
+    Allows deterministic control over trial quality: the score of each fold
+    equals ``quality``, so "bad" trials are guaranteed to be worse than "good"
+    ones at every intermediate step.
     """
 
     def __init__(self, quality: float = 0.5, **kwargs: object) -> None:
@@ -65,13 +65,13 @@ class FakeQualityModel(BaseEstimator, RegressorMixin):
 
 
 def _quality_scorer_factory(name: str):
-    """Фабрика скорера: возвращает среднее предсказание модели."""
+    """Scorer factory: returns the model's mean prediction."""
     del name
     return lambda est, X, y: float(np.mean(est.predict(X)))
 
 
 def _make_quality_space(good: float = 0.9, bad: float = 0.05):
-    """Пространство поиска: чётные триалы — хорошие, нечётные — заведомо плохие."""
+    """Search space: even trials are good, odd trials are deliberately bad."""
 
     def space_fn(trial):
         trial.suggest_float("quality", 0.0, 1.0)
@@ -90,17 +90,17 @@ def toy_data() -> tuple[pd.DataFrame, pd.Series]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Юнит-тесты помощников
+# Unit tests of the helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def test_normalize_pruning_config_disabled():
-    """enable=False или None → конфигурация прайнера отсутствует (AC-4)."""
+    """enable=False or None → no pruner configuration."""
     assert _normalize_pruning_config(None) is None
     assert _normalize_pruning_config({}) is None
     assert _normalize_pruning_config({"enable": False}) is None
 
 
 def test_normalize_pruning_config_defaults():
-    """Недостающие поля заполняются значениями по умолчанию."""
+    """Missing fields are filled with default values."""
     cfg = _normalize_pruning_config({"enable": True})
     assert cfg == {
         "strategy": "median",
@@ -147,7 +147,7 @@ def test_build_pruner_invalid_reduction_factor_raises():
 
 
 def test_evaluate_with_intermediate_reports_publishes_and_prunes():
-    """Публикуются промежуточные результаты; should_prune=True → TrialPruned (AC-1)."""
+    """Intermediate results are published; should_prune=True → TrialPruned."""
     trial = MagicMock()
     trial.number = 0
     trial.report = MagicMock()
@@ -172,7 +172,7 @@ def test_evaluate_with_intermediate_reports_publishes_and_prunes():
             scorer=scorer,
         )
 
-    # На каждом фолде публикуется кумулятивное среднее (шаги с 1).
+    # The cumulative mean is published on each fold (steps starting from 1).
     assert trial.report.call_count == 2
     steps = [call.kwargs["step"] for call in trial.report.call_args_list]
     assert steps == [1, 2]
@@ -181,7 +181,7 @@ def test_evaluate_with_intermediate_reports_publishes_and_prunes():
 
 
 def test_evaluate_with_intermediate_reports_returns_mean():
-    """Без отсечения возвращается среднее значение по всем фолдам."""
+    """Without pruning, the mean over all folds is returned."""
     trial = MagicMock()
     trial.number = 0
     trial.should_prune = MagicMock(return_value=False)
@@ -208,11 +208,11 @@ def test_evaluate_with_intermediate_reports_returns_mean():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Сквозные тесты optimize() с реальными прайнерами Optuna
+# End-to-end tests of optimize() with real Optuna pruners
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def quality_patches():
-    """Патчи активны на время теста: детерминированная модель и скорер."""
+    """Patches are active for the duration of the test: a deterministic model and scorer."""
     with (
         patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
@@ -223,12 +223,12 @@ def quality_patches():
 def test_optimize_pruning_median_prunes_bad_trials(
     toy_data, quality_patches, caplog
 ):
-    """MedianPruner отсекает заведомо плохие триалы до завершения всех фолдов (AC-2).
+    """MedianPruner prunes the deliberately bad trials before all folds complete.
 
-    Чётные триалы хорошие (quality=0.9), нечётные — заведомо плохие (0.05).
-    После первого завершённого триала каждый плохой триал отсекается на первом
-    же фолде. Лучший результат выбирается только из завершённых триалов (AC-3),
-    а факт отсечений фиксируется в логах (AC-9).
+    Even trials are good (quality=0.9), odd trials are deliberately bad (0.05).
+    After the first completed trial, every bad trial is pruned on the very first
+    fold. The best result is selected only from completed trials, and the fact
+    of pruning is recorded in the logs.
     """
     X, y = toy_data
 
@@ -250,12 +250,12 @@ def test_optimize_pruning_median_prunes_bad_trials(
             },
         )
 
-    # Лучший триал завершён полностью и имеет максимальное качество.
+    # The best trial completed fully and has maximum quality.
     assert score == pytest.approx(0.9)
     assert params is not None
     assert model is not None
 
-    # Факт и количество отсечений зафиксированы в логах.
+    # The fact and the count of prunings are recorded in the logs.
     assert "Early stopping: pruned 2 of 4 trials" in caplog.text
     assert "Early stopping enabled: strategy=median" in caplog.text
 
@@ -263,7 +263,7 @@ def test_optimize_pruning_median_prunes_bad_trials(
 def test_optimize_pruning_hyperband_prunes_bad_trials(
     toy_data, quality_patches, caplog
 ):
-    """HyperbandPruner также отсекает часть триалов (AC-2, AC-3)."""
+    """HyperbandPruner also prunes some of the trials."""
     X, y = toy_data
 
     with caplog.at_level(logging.INFO):
@@ -294,19 +294,19 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
 def test_optimize_pruning_all_trials_pruned_returns_no_results(
     toy_data, quality_patches, mocker, caplog
 ):
-    """Все триалы отсечены → сценарий «нет результатов» (AC-6, issue #13).
+    """All trials are pruned → the "no results" scenario.
 
-    Раньше optimize() возвращал «магическую» константу -3.4028235e38,
-    которая выглядела как валидный результат для оркестратора. Теперь
-    полный провал сигнализируется сплошным None.
+    Previously optimize() returned a "magic" constant -3.4028235e38, which
+    looked like a valid result to the orchestrator. Now a complete failure is
+    signaled by returning None throughout.
 
-    Дополнительно (issue #32): решение принимается явным подсчётом состояний
-    триалов (n_completed == 0), а не перехватом ValueError от study.best_params;
-    счётчики состояний логируются для наблюдаемости.
+    In addition, the decision is made by explicitly counting the trial states
+    (n_completed == 0) rather than by catching a ValueError from
+    study.best_params; the state counters are logged for observability.
     """
     X, y = toy_data
 
-    # Принудительно отсекаем каждый триал на первом же шаге.
+    # Force every trial to be pruned at the very first step.
     mocker.patch.object(
         tuner.optuna.trial.Trial, "should_prune", return_value=True
     )
@@ -332,7 +332,7 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
     assert model is None
     assert params is None
     assert score is None
-    # Лог со счётчиками состояний: 4 отсечено, 0 завершено, 0 упало.
+    # The state-counter log: 4 pruned, 0 completed, 0 failed.
     assert "Trial states for algorithm 'ridge'" in caplog.text
     assert "completed=0, pruned=4, failed=0" in caplog.text
     assert "no completed trials" in caplog.text
@@ -341,9 +341,9 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
 def test_optimize_pruning_single_trial_pruned_returns_no_results(
     toy_data, quality_patches, mocker
 ):
-    """B1 (issue #32): n_trials=1 и единственный триал отсечён → (None, None, None).
+    """n_trials=1 and the single trial is pruned → (None, None, None).
 
-    Граничный случай «все pruned» при минимально возможном числе триалов.
+    The "all pruned" edge case with the minimum possible number of trials.
     """
     X, y = toy_data
 
@@ -376,13 +376,13 @@ def test_optimize_pruning_single_trial_pruned_returns_no_results(
 def _make_study_with_states(
     states: list[optuna.trial.TrialState],
 ) -> optuna.Study:
-    """Собрать реальный study Optuna с триалами в заданных состояниях.
+    """Build a real Optuna study with trials in the given states.
 
-    Опция ``catch`` в ``study.optimize`` не используется тюнером, поэтому
-    «живые» FAIL-триалы (исключение из objective) пробрасываются наружу и
-    прерывают запуск. Чтобы проверить явный подсчёт состояний (issue #32),
-    наполняем настоящий study заранее созданными триалами и подменяем
-    ``study.optimize`` на no-op — get_trials() вернёт именно эти состояния.
+    The ``catch`` option in ``study.optimize`` is not used by the tuner, so
+    "live" FAIL trials (an exception from the objective) propagate outward and
+    interrupt the run. To verify the explicit state counting, we fill a real
+    study with pre-created trials and replace ``study.optimize`` with a no-op —
+    get_trials() will return exactly these states.
     """
     study = optuna.create_study(direction="maximize")
     for state in states:
@@ -395,12 +395,12 @@ def _make_study_with_states(
 def test_optimize_all_trials_failed_returns_no_results(
     toy_data, quality_patches, mocker
 ):
-    """N2 (issue #32): все триалы FAILED → (None, None, None).
+    """All trials FAILED → (None, None, None).
 
-    Триалы в состоянии FAILED появляются у Optuna при падении objective с
-    исключением, не превращённым в optuna.TrialPruned. Явный подсчёт
-    состояний (n_completed == 0) обязан исключить алгоритм и в этом случае,
-    не полагаясь на ValueError от study.best_params.
+    Trials in the FAILED state appear in Optuna when the objective raises an
+    exception that was not converted into optuna.TrialPruned. The explicit
+    state counting (n_completed == 0) must disqualify the algorithm in this
+    case too, without relying on a ValueError from study.best_params.
     """
     X, y = toy_data
     study = _make_study_with_states([optuna.trial.TrialState.FAIL] * 3)
@@ -432,10 +432,10 @@ def test_optimize_all_trials_failed_returns_no_results(
 def test_optimize_pruned_and_failed_mix_returns_no_results(
     toy_data, quality_patches, mocker
 ):
-    """N3 (issue #32): mix PRUNED + FAILED без COMPLETED → (None, None, None).
+    """A mix of PRUNED + FAILED without COMPLETED → (None, None, None).
 
-    Завершённых триалов нет ни одного — алгоритм исключается, даже если
-    часть триалов отсечена прайнером, а часть упала.
+    There are no completed trials at all — the algorithm is disqualified even
+    if some trials were pruned by the pruner and some failed.
     """
     X, y = toy_data
     study = _make_study_with_states(
@@ -474,13 +474,13 @@ def test_optimize_pruned_and_failed_mix_returns_no_results(
 def test_optimize_pruning_nonfinite_score_uses_worst_score(
     toy_data, quality_patches
 ):
-    """Нефинитный avg_score в pruning-ветке → триал получает HPO_WORST_SCORE.
+    """A non-finite avg_score in the pruning branch → the trial gets HPO_WORST_SCORE.
 
-    Покрывает ветку ``if not np.isfinite(avg_score)`` внутри
-    ``_evaluate_with_intermediate_reports``-пути (issue #13): все триалы
-    завершаются с «худшим скором», но не отсекаются, поэтому optimize()
-    возвращает HPO_WORST_SCORE с валидными параметрами — а отбрасывает такой
-    результат уже фильтр valid_results в оркестраторе.
+    Covers the ``if not np.isfinite(avg_score)`` branch inside the
+    ``_evaluate_with_intermediate_reports`` path: all trials complete with the
+    "worst score" but are not pruned, so optimize() returns HPO_WORST_SCORE
+    with valid parameters — and it is the valid_results filter in the
+    orchestrator that discards such a result.
     """
     X, y = toy_data
 
@@ -516,7 +516,7 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
 def test_optimize_pruning_not_applied_for_train_test_split(
     toy_data, quality_patches, caplog
 ):
-    """Hold-out без шагов: прайнер не применяется, все триалы выполняются (AC-7, AC-4)."""
+    """Hold-out without steps: the pruner is not applied, all trials complete."""
     X, y = toy_data
 
     with caplog.at_level(logging.WARNING):
@@ -536,14 +536,14 @@ def test_optimize_pruning_not_applied_for_train_test_split(
             },
         )
 
-    # Все триалы завершились — лучший найден обычным правилом максимизации.
+    # All trials completed — the best one was found by the usual maximization rule.
     assert score == pytest.approx(0.9)
     assert params is not None
     assert "has no intermediate steps — pruning will not be applied" in caplog.text
 
 
 def test_optimize_pruning_loo_works(toy_data, quality_patches):
-    """LOO как стратегия с естественными шагами работает с pruning (AC-7)."""
+    """LOO, as a strategy with natural steps, works with pruning."""
     X, y = toy_data
 
     model, params, score = optimize(
@@ -570,7 +570,7 @@ def test_optimize_pruning_loo_works(toy_data, quality_patches):
 def test_optimize_pruning_with_initial_params_refine(
     toy_data, quality_patches
 ):
-    """refine (initial_params + enqueue_trial) совместим с pruning."""
+    """refine (initial_params + enqueue_trial) is compatible with pruning."""
     X, y = toy_data
 
     _model, params, score = optimize(
@@ -596,7 +596,7 @@ def test_optimize_pruning_with_initial_params_refine(
 
 
 def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
-    """Малое число фолдов (2) работает с pruning (граничный сценарий)."""
+    """A small number of folds (2) works with pruning (edge scenario)."""
     X, y = toy_data
 
     model, params, score = optimize(
@@ -622,15 +622,15 @@ def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Обратная совместимость (AC-4)
+# Backward compatibility
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_without_pruning_never_reports(toy_data):
-    """Без блока pruning промежуточные результаты не публикуются — поведение
-    идентично текущему (каждый триал выполняется полностью)."""
+    """Without the pruning block, no intermediate results are published — the
+    behavior is identical to the current one (every trial runs to completion)."""
     X, y = toy_data
 
-    # Мокаем окружение так, чтобы гарантированно попасть в ветку
-    # cross_val_score (как в старом коде), и контролируем вызовы trial.report.
+    # Mock the environment so we reliably hit the cross_val_score branch
+    # (as in the old code), and control the trial.report calls.
     report_mock = MagicMock()
     with (
         patch.object(
@@ -659,8 +659,8 @@ def test_optimize_without_pruning_never_reports(toy_data):
 
 
 def test_optimize_disabled_pruning_uses_nop_pruner(toy_data):
-    """При выключенном pruning study создаётся с NopPruner — полное выполнение
-    триалов гарантировано даже при случайных вызовах report()."""
+    """With pruning disabled the study is created with NopPruner — full trial
+    execution is guaranteed even with random report() calls."""
     X, y = toy_data
 
     with (
@@ -687,7 +687,7 @@ def test_optimize_disabled_pruning_uses_nop_pruner(toy_data):
 
 
 def test_optimize_enabled_pruning_uses_configured_pruner(toy_data):
-    """При включённом pruning в study подключается настроенный прайнер."""
+    """With pruning enabled, the configured pruner is attached to the study."""
     X, y = toy_data
 
     with (
@@ -722,9 +722,9 @@ def test_optimize_enabled_pruning_uses_configured_pruner(toy_data):
 
 
 def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
-    """Отсечённые триалы не увеличивают счётчик фатальных сбоев (AC-5).
+    """Pruned trials do not increase the fatal-failure counter.
 
-    Много подряд отсечённых триалов не приводит к дисквалификации алгоритма.
+    Many consecutively pruned trials do not disqualify the algorithm.
     """
     X, y = toy_data
     n_trials = 12
@@ -746,17 +746,17 @@ def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
         },
     )
 
-    # Оптимизация завершилась без InvalidAlgorithmError.
+    # The optimization completed without InvalidAlgorithmError.
     assert score == pytest.approx(0.9)
     assert "disqualified" not in caplog.text
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Сквозной сценарий через training_engine (конфиг → train_best_model)
+# End-to-end scenario through training_engine (config -> train_best_model)
 # ──────────────────────────────────────────────────────────────────────────────
 def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
-    """Сквозной сценарий: конфиг с general.pruning.enable=true проходит через
-    train_best_model без ошибок (AC-1, AC-3, AC-9)."""
+    """End-to-end scenario: a config with general.pruning.enable=true goes
+    through train_best_model without errors."""
     from pathlib import Path as _Path
 
     from sklearn.datasets import make_regression
@@ -805,15 +805,16 @@ def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# auto + pruning: синхронизация числа фолдов (issue #6)
+# auto + pruning: fold-count synchronization
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_auto_kfold_pruning_passes_resolved_k():
-    """auto→kfold (k=10) + pruning: в _evaluate_with_intermediate_reports
-    передаётся вычисленное k, а не исходный n_folds.
+    """auto→kfold (k=10) + pruning: the resolved k is passed to
+    _evaluate_with_intermediate_reports, not the original n_folds.
 
-    Красный тест на старом коде: до фикса ветка ранней остановки получала
-    n_folds=5 (дефолт) вместо auto_decision['k']=10, и iter_splits откатывался
-    на дефолтное число фолдов (рассинхронизация с cross_val_score(cv=cv_obj)).
+    This test fails on the old code: before the fix, the early-stopping branch
+    received n_folds=5 (the default) instead of auto_decision['k']=10, and
+    iter_splits fell back to the default fold count (desynchronized from
+    cross_val_score(cv=cv_obj)).
     """
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((400, 5)))
@@ -824,7 +825,7 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
     def fake_make_cv(
         n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
     ):
-        # auto резолвится в kfold c k=10 (решение вернул make_cv).
+        # auto resolves to kfold with k=10 (the decision returned by make_cv).
         return (
             "k_fold",
             KFold(n_splits=10, shuffle=True, random_state=random_state),
@@ -867,17 +868,18 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
 
 
 def test_optimize_auto_kfold_pruning_integration_seven_reports():
-    """Интеграция: N=150/P=5 → auto резолвится в k=7; pruning-ветка выполняет
-    ровно 7 фолдов и публикует 7 промежуточных шагов (AC-1).
+    """Integration: N=150/P=5 → auto resolves to k=7; the pruning branch runs
+    exactly 7 folds and publishes 7 intermediate steps.
 
-    На старом коде здесь было бы 5 шагов (дефолтный n_folds), т.е. оценка
-    расходилась бы с non-pruning веткой cross_val_score(cv=KFold(7)).
+    On the old code there would be 5 steps (the default n_folds), i.e. the
+    score would diverge from the non-pruning cross_val_score(cv=KFold(7))
+    branch.
     """
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((150, 5)))
     y = pd.Series(rng.random(150))
 
-    # Эвристика для этих данных обязана выбрать k-fold c k=7.
+    # The heuristic for this data must select k-fold with k=7.
     from configurable_automl_engine.common.validation_utils import (
         choose_validation_method,
     )
@@ -914,13 +916,13 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
 
     assert score == pytest.approx(0.9)
     assert params is not None
-    # Ровно k=7 промежуточных отчётов (шаги 1..7) — по одному на фолд.
+    # Exactly k=7 intermediate reports (steps 1..7) — one per fold.
     assert report_steps == list(range(1, 8))
 
 
 def test_optimize_auto_pruning_parity_with_cross_val():
-    """Parity: auto→kfold использует одно и то же число фолдов (k) и с pruning,
-    и без него — оценки не расходятся между ветками."""
+    """Parity: auto→kfold uses the same fold count (k) with and without
+    pruning — the scores do not diverge between the branches."""
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((150, 5)))  # auto -> k=7
     y = pd.Series(rng.random(150))
@@ -943,7 +945,7 @@ def test_optimize_auto_pruning_parity_with_cross_val():
         patch.object(tuner.model_selection, "cross_val_score", spy_cross_val),
         patch.object(tuner, "iter_splits", spy_iter_splits),
     ):
-        # Без pruning: оценка через cross_val_score(cv=cv_obj из make_cv).
+        # Without pruning: evaluation via cross_val_score(cv=cv_obj from make_cv).
         optimize(
             "ridge",
             X,
@@ -954,7 +956,7 @@ def test_optimize_auto_pruning_parity_with_cross_val():
             random_state=42,
             space_overrides={"ridge": _make_quality_space()},
         )
-        # С pruning: оценка через iter_splits(method='k_fold', n_folds=k).
+        # With pruning: evaluation via iter_splits(method='k_fold', n_folds=k).
         optimize(
             "ridge",
             X,
@@ -977,13 +979,13 @@ def test_optimize_auto_pruning_parity_with_cross_val():
 
 
 def test_optimize_auto_no_features_fallback_clamps_n_folds():
-    """Негативный сценарий: auto без P (fallback, decision=None) с n_folds=1.
+    """Negative scenario: auto without P (fallback, decision=None) with n_folds=1.
 
-    make_cv клампит k = max(2, n_folds) через resolve_auto_no_features_fallback;
-    pruning-ветка обязана повторить тот же клампинг, иначе KFold(n_splits=1)
-    внутри iter_splits упал бы (латентный крах).
+    make_cv clamps k = max(2, n_folds) via resolve_auto_no_features_fallback;
+    the pruning branch must repeat the same clamping, otherwise
+    KFold(n_splits=1) inside iter_splits would crash (a latent failure).
     """
-    # Ноль признаков — P недоступен, включается fallback-ветка make_cv.
+    # Zero features — P is unavailable, the make_cv fallback branch kicks in.
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((400, 0)))
     y = pd.Series(rng.random(400))
@@ -1019,14 +1021,14 @@ def test_optimize_auto_no_features_fallback_clamps_n_folds():
             },
         )
 
-    # Fallback: method='k_fold' (N достаточно), число фолдов клампится до 2.
+    # Fallback: method='k_fold' (N is enough), the fold count is clamped to 2.
     assert captured["method"] == "k_fold"
     assert captured["n_folds"] == 2
 
 
 def test_optimize_auto_kfold_low_confidence_k2():
-    """Граничный сценарий: auto→kfold с k=2 (low confidence) — k передаётся
-    как есть (клампинг max(2, k) не изменяет значение)."""
+    """Edge scenario: auto→kfold with k=2 (low confidence) — k is passed
+    as is (the max(2, k) clamping does not change the value)."""
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((31, 16)))  # auto -> kfold k=2
     y = pd.Series(rng.random(31))
@@ -1076,8 +1078,8 @@ def test_optimize_auto_kfold_low_confidence_k2():
 
 
 def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
-    """Явный k_fold без регрессии: pruning-ветка получает исходный n_folds
-    без изменений (эффективный клампинг не применяется)."""
+    """Explicit k_fold without regression: the pruning branch receives the
+    original n_folds unchanged (no effective clamping is applied)."""
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((120, 5)))
     y = pd.Series(rng.random(120))
@@ -1118,8 +1120,8 @@ def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
 
 
 def test_optimize_auto_loo_with_pruning_works():
-    """auto→LOO (N=10/P=3) + pruning: стратегия с естественными шагами работает;
-    число фолдов для k-fold не используется."""
+    """auto→LOO (N=10/P=3) + pruning: a strategy with natural steps works;
+    the fold count for k-fold is not used."""
     X = pd.DataFrame(np.random.rand(10, 3))
     y = pd.Series(np.random.rand(10))
 
@@ -1152,17 +1154,18 @@ def test_optimize_auto_loo_with_pruning_works():
 
     assert score == pytest.approx(0.9)
     assert params is not None
-    # LOO: по одному шагу на объект (10 объектов → 10 отчётов).
+    # LOO: one step per object (10 objects → 10 reports).
     assert report_steps == list(range(1, 11))
 
 
 def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
-    """auto→train_test_split: естественных шагов нет — прайнер не применяется,
-    все триалы выполняются полностью (поведение задокументировано).
+    """auto→train_test_split: there are no natural steps — the pruner is not
+    applied and all trials run to completion (documented behavior).
 
-    По issue #99 auto резолвится в train_test_split только на больших данных
-    (N >= 50000). Чтобы не создавать DataFrame на 50k строк, make_cv замокан
-    на train_test_split-решение (сама эвристика покрыта в test_validation_auto).
+    auto resolves to train_test_split only on large data (N >= 50000).
+    To avoid building a 50k-row DataFrame, make_cv is patched with the
+    train_test_split decision (the heuristic itself is covered in
+    test_validation_auto).
     """
     rng = np.random.default_rng(42)
     X = pd.DataFrame(rng.random((1000, 5)))
@@ -1171,7 +1174,7 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
     def fake_make_cv(
         n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
     ):
-        # Реальная эвристика вернула бы это решение при N >= 50000.
+        # The real heuristic would make this decision at N >= 50000.
         return (
             "train_test_split",
             None,
@@ -1212,9 +1215,9 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
 
 
 def test_train_best_model_auto_pruning_e2e(tmp_path: Path) -> None:
-    """Сквозной сценарий: validation_strategy='auto' + pruning.enable=true
-    проходит через train_best_model; число фолдов берётся из auto-решения
-    (N=150/P=5 → k=7), а не из дефолтного n_folds=5."""
+    """End-to-end scenario: validation_strategy='auto' + pruning.enable=true
+    goes through train_best_model; the fold count comes from the auto decision
+    (N=150/P=5 → k=7), not from the default n_folds=5."""
     from pathlib import Path as _Path
 
     from sklearn.datasets import make_regression

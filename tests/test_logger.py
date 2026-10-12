@@ -10,7 +10,7 @@ from configurable_automl_engine.training_engine.logger import get_logger, setup_
 
 @pytest.fixture
 def clean_logger():
-    """Фикстура для очистки обработчиков логгера перед и после теста."""
+    """Fixture that clears the logger handlers before and after the test."""
     logger = logging.getLogger("configurable_automl_engine")
     original_handlers = logger.handlers[:]
     logger.handlers = []
@@ -19,7 +19,7 @@ def clean_logger():
 
 
 def test_get_logger():
-    """Тестирует получение логгера по имени (строка 12)."""
+    """Tests obtaining a logger by name (line 12)."""
     logger_name = "test_module"
     logger = get_logger(logger_name)
 
@@ -29,19 +29,19 @@ def test_get_logger():
 
 def test_setup_logging_creates_directory(tmp_path, clean_logger):
     """
-    Тестирует создание директории и файла лога, а также инициализацию (строки 19-33).
+    Tests the creation of the log directory and file, as well as the initialization (lines 19-33).
     """
     log_dir = tmp_path / "subdir"
     logfile = log_dir / "test.log"
 
-    # Вызываем функцию
+    # Call the function
     setup_logging(logfile)
 
-    # Проверяем создание директории и файла
+    # Check that the directory and file were created
     assert log_dir.exists()
     assert log_dir.is_dir()
 
-    # Проверяем, что FileHandler добавлен
+    # Check that the FileHandler was added
     assert len(clean_logger.handlers) == 1
     assert isinstance(clean_logger.handlers[0], logging.FileHandler)
     assert Path(clean_logger.handlers[0].baseFilename).resolve() == logfile.resolve()
@@ -49,112 +49,112 @@ def test_setup_logging_creates_directory(tmp_path, clean_logger):
 
 def test_setup_logging_idempotency(tmp_path, clean_logger):
     """
-    Проверяет, что повторный вызов setup_logging не добавляет дублирующие хендлеры (строка 31).
+    Checks that calling setup_logging again does not add duplicate handlers (line 31).
     """
     logfile = tmp_path / "first.log"
     second_logfile = tmp_path / "second.log"
 
-    # Первый вызов
+    # First call
     setup_logging(logfile)
     assert len(clean_logger.handlers) == 1
 
-    # Второй вызов (не должен добавить новый FileHandler)
+    # Second call (must not add a new FileHandler)
     setup_logging(second_logfile)
     assert len(clean_logger.handlers) == 1
 
-    # Проверяем, что остался первый путь
+    # Check that the first path is kept
     assert Path(clean_logger.handlers[0].baseFilename).resolve() == logfile.resolve()
 
 
 def test_setup_logging_format_and_level(tmp_path, clean_logger):
-    """Проверяет корректность настройки уровня логирования и формата."""
+    """Checks the correctness of the log level and format setup."""
     logfile = tmp_path / "format_test.log"
 
     setup_logging(logfile)
     handler = clean_logger.handlers[0]
 
     assert handler.level == logging.DEBUG
-    # Проверка формата через доступ к приватному атрибуту или проверку вывода
+    # Format check via the private attribute or output inspection
     assert "%(levelname)-8s" in handler.formatter._fmt
 
 
 def test_setup_logging_creates_directory(tmp_path, clean_logger):
     """
-    Тестирует создание директории и файла лога.
+    Tests the creation of the log directory and file.
     """
     log_dir = tmp_path / "subdir"
     logfile = log_dir / "test.log"
 
-    # Вызываем функцию (по умолчанию log_to_console=True)
+    # Call the function (log_to_console=True by default)
     configurable_automl_engine.training_engine.logger.setup_logging(logfile)
 
-    # Проверяем файловую систему
+    # Check the filesystem
     assert log_dir.exists()
     assert logfile.exists()
 
-    # Ожидаем 2 хендлера: ConcurrentRotatingFileHandler + StreamHandler
+    # Expect 2 handlers: ConcurrentRotatingFileHandler + StreamHandler
     assert len(clean_logger.handlers) == 2
 
 
 def test_setup_logging_idempotency(tmp_path, clean_logger):
     """
-    Проверяет идемпотентность (отсутствие дубликатов при повторном вызове).
+    Checks idempotency (no duplicates on repeated calls).
     """
     logfile = tmp_path / "first.log"
 
-    # Первый вызов
+    # First call
     configurable_automl_engine.training_engine.logger.setup_logging(logfile)
     assert len(clean_logger.handlers) == 2
 
-    # Второй вызов
+    # Second call
     configurable_automl_engine.training_engine.logger.setup_logging(logfile)
 
-    # ИСПРАВЛЕНИЕ: Количество не должно увеличиться, должно остаться 2.
+    # FIX: the count must not grow, it must stay 2.
     assert len(clean_logger.handlers) == 2
 
 
 def test_setup_logging_import_fallback(tmp_path):
     """
-    Покрывает ветку 'except ImportError'.
-    Проверяет, что при отсутствии библиотеки используется стандартный RotatingFileHandler.
+    Covers the 'except ImportError' branch.
+    Checks that the standard RotatingFileHandler is used when the library is missing.
     """
-    # Имитируем отсутствие библиотеки через блокировку в sys.modules
+    # Simulate the missing library by blocking it in sys.modules
     with patch.dict(sys.modules, {"concurrent_log_handler": None}):
-        # Перезагружаем модуль logger, чтобы отработал блок try-except
+        # Reload the logger module so the try-except block is exercised
         importlib.reload(configurable_automl_engine.training_engine.logger)
 
-        # Берем HandlerClass (новое имя из вашего кода)
-        # Если вы все же оставили имя ConcurrentRotatingFileHandler, используйте его
-        # Но судя по ошибке, вы назвали его иначе или импорт не обновился
+        # Take HandlerClass (the new name from your code)
+        # If you kept the name ConcurrentRotatingFileHandler, use it
+        # But judging by the error, you named it differently or the import did not refresh
         handler_class = getattr(
             configurable_automl_engine.training_engine.logger, "HandlerClass"
         )
 
-        # Проверяем, что теперь это стандартный класс из logging.handlers
+        # Check that it is now the standard class from logging.handlers
         assert handler_class is logging.handlers.RotatingFileHandler
-    # ВАЖНО: После теста возвращаем всё как было, чтобы другие тесты не упали
+    # IMPORTANT: restore everything after the test so other tests do not fail
     importlib.reload(configurable_automl_engine.training_engine.logger)
 
 
 def test_setup_logging_stream_handler_logic_coverage(tmp_path, clean_logger):
     """
-    Специфический тест для покрытия логики if не any(type(h) is StreamHandler).
+    Specific test covering the logic of `if not any(type(h) is StreamHandler)`.
     """
     logfile = tmp_path / "test.log"
 
-    # 1. Вызываем без консоли
+    # 1. Call without console
     configurable_automl_engine.training_engine.logger.setup_logging(
         logfile, log_to_console=False
     )
     assert len(clean_logger.handlers) == 1
 
-    # 2. Вызываем с консолью (заходим в покрываемую ветку)
+    # 2. Call with console (enter the covered branch)
     configurable_automl_engine.training_engine.logger.setup_logging(
         logfile, log_to_console=True
     )
     assert len(clean_logger.handlers) == 2
 
-    # 3. Вызываем снова с консолью (проверяем, что ветка пропускается)
+    # 3. Call with console again (check that the branch is skipped)
     configurable_automl_engine.training_engine.logger.setup_logging(
         logfile, log_to_console=True
     )

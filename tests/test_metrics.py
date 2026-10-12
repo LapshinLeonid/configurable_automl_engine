@@ -26,7 +26,7 @@ def test_nrmse():
     nrmse = get_metric("nrmse")
     val = nrmse(y_true, y_pred)
 
-    # ручная проверка
+    # manual check
     rmse = np.sqrt(((y_true - y_pred) ** 2).mean())
     expected = rmse / (y_true.max() - y_true.min())
 
@@ -34,7 +34,7 @@ def test_nrmse():
     assert not is_greater_better("nrmse")
 
 
-# Тестируем RMSE
+# Test RMSE
 def test_rmse_calculation():
     y_true = np.array([3, -0.5, 2, 7])
     y_pred = np.array([2.5, 0.0, 2, 8])
@@ -55,31 +55,31 @@ def test_nrmse_normal_case():
 
 
 def test_nrmse_zero_range_coverage():
-    """Покрывает строки 35 (Error class) и 53-57 (denom < 1e-6)"""
-    y_true = np.array([1, 1, 1])  # Константный таргет, range = 0
+    """Covers lines 35 (Error class) and 53-57 (denom < 1e-6)"""
+    y_true = np.array([1, 1, 1])  # Constant target, range = 0
     y_pred = np.array([1, 2, 3])
 
-    # 1. Проверяем логику обработки нулевого диапазона (строки 53-57)
-    # Код возвращает float('inf'), а не выбрасывает исключение
+    # 1. Check the zero-range handling logic (lines 53-57)
+    # The code returns float('inf') instead of raising an exception
     result = _nrmse(y_true, y_pred)
     assert result == float("inf")
 
-    # 2. Покрываем объявление класса NRMSEZeroRangeError (строка 35)
-    # Просто создаем экземпляр, чтобы анализатор зачел выполнение строки
+    # 2. Cover the NRMSEZeroRangeError class declaration (line 35)
+    # Just instantiate it so coverage tools count the line as executed
     err = NRMSEZeroRangeError("Target range is too small")
     assert isinstance(err, ValueError)
     assert str(err) == "Target range is too small"
 
 
-# Тестируем реестры и хелперы
+# Test registries and helpers
 
 
 def test_get_metric():
-    # Проверка корректного получения
+    # Check correct retrieval
     assert get_metric("rmse") == _rmse
     assert get_metric("NRMSE") == _nrmse
 
-    # Проверка исключения KeyError
+    # Check the KeyError exception
     with pytest.raises(KeyError, match="Metric 'unknown' not implemented"):
         get_metric("unknown")
 
@@ -87,17 +87,17 @@ def test_get_metric():
 @pytest.mark.parametrize(
     "metric_name, expected",
     [
-        # 1. Собственный реестр: направление хранится явно рядом со скорером
+        # 1. Custom registry: the direction is stored explicitly next to the scorer
         ("r2", True),
         ("R2", True),
         ("rmse", False),
         ("mae", False),
         ("mse", False),
         ("nrmse", False),
-        # neg_-метрика реестра: инвертированная ошибка → максимизация
+        # neg_ registry metric: inverted error -> maximization
         ("neg_root_mean_squared_error", True),
-        # 2. sklearn-скореры: большее значение всегда лучше — метрики-ошибки
-        # уже инвертированы в neg_-скореры, score-метрики возвращаются как есть
+        # 2. sklearn scorers: a larger value is always better — error metrics
+        # are already inverted into neg_ scorers, score metrics are returned as is
         ("accuracy", True),
         ("explained_variance", True),
         ("neg_log_loss", True),
@@ -111,37 +111,38 @@ def test_is_greater_better(metric_name, expected):
 
 
 def test_is_greater_better_contract_from_issue():
-    """Контракт из issue #26: направление определяется объектом-скорером."""
+    """Contract: the direction is determined by the scorer object."""
     assert is_greater_better("neg_root_mean_squared_error") is True
     assert is_greater_better("r2") is True
     assert is_greater_better("mae") is False
 
 
 def test_is_greater_better_unknown_metric_raises():
-    """Неизвестная метрика не имеет направления — понятный ValueError.
+    """An unknown metric has no direction — a clear ValueError.
 
-    Сообщение об ошибке объясняет, как исправить (реестр или sklearn),
-    аналогично get_metric (ревью PR #18).
+    The error message explains how to fix it (registry or sklearn),
+    similarly to get_metric.
     """
     with pytest.raises(ValueError, match="not implemented"):
         is_greater_better("unknown_custom_metric")
 
 
 def test_is_greater_better_global_nrmse():
-    """global_nrmse — динамическая ошибка: «меньше — лучше».
+    """global_nrmse is a dynamic error: "lower is better".
 
-    Регрессия ревью PR #18: до фикса is_greater_better('global_nrmse')
-    падал с ValueError (sklearn не знает такого скорера), что роняло
-    ModelTrainer.fit() с metric='global_nrmse' (вызов из debug-лога).
+    Regression: before the fix,
+    is_greater_better('global_nrmse') raised ValueError (sklearn does not
+    know such a scorer), which crashed ModelTrainer.fit() with
+    metric='global_nrmse' (called from the debug log).
     """
     assert is_greater_better("global_nrmse") is False
 
 
 def test_is_error_metric_user_presentation():
-    """is_error_metric отражает пользовательское представление метрики.
+    """is_error_metric reflects the user-facing representation of a metric.
 
-    Инвертированные скореры ошибок (в т.ч. neg_-метрики) помечаются как
-    ошибки, score-метрики — нет (ревью PR #18: лейбл в логе train_model).
+    Inverted error scorers (incl. neg_ metrics) are marked as errors,
+    score metrics are not (the label in the train_model log).
     """
     assert is_error_metric("global_nrmse") is True
     assert is_error_metric("rmse") is True
@@ -157,10 +158,10 @@ def test_is_error_metric_user_presentation():
 
 
 def test_to_user_value_natural_semantics():
-    """«Сырые» значения скореров приводятся к пользовательской семантике.
+    """"Raw" scorer values are converted to user-facing semantics.
 
-    RMSE/MAE/MSE/NRMSE и все neg_-метрики возвращаются положительными,
-    score-метрики (R², accuracy) — как есть.
+    RMSE/MAE/MSE/NRMSE and all neg_ metrics are returned positive,
+    score metrics (R², accuracy) — as is.
     """
     assert to_user_value("rmse", -0.123) == pytest.approx(0.123)
     assert to_user_value("neg_root_mean_squared_error", -0.123) == pytest.approx(0.123)
@@ -174,15 +175,15 @@ def test_to_user_value_natural_semantics():
 
 
 def test_to_user_value_global_nrmse():
-    """global_nrmse — динамическая ошибка: значение инвертируется."""
+    """global_nrmse is a dynamic error: the value is inverted."""
     assert to_user_value("global_nrmse", -0.25) == pytest.approx(0.25)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# user_direction: направление метрики в пользовательской семантике (issue #54)
+# user_direction: metric direction in the user-facing semantics
 # ──────────────────────────────────────────────────────────────────────────────
 def test_user_direction_minimize_for_errors():
-    """Метрики-ошибки в пользовательской семантике — «меньше лучше»."""
+    """Error metrics in user-facing semantics — "lower is better"."""
     assert user_direction("rmse") == "minimize"
     assert user_direction("mae") == "minimize"
     assert user_direction("mse") == "minimize"
@@ -195,7 +196,7 @@ def test_user_direction_minimize_for_errors():
 
 
 def test_user_direction_maximize_for_score_metrics():
-    """Score-метрики (R², accuracy и т.п.) — «больше лучше»."""
+    """Score metrics (R², accuracy, etc.) — "higher is better"."""
     assert user_direction("r2") == "maximize"
     assert user_direction("R2") == "maximize"
     assert user_direction("accuracy") == "maximize"
@@ -203,23 +204,22 @@ def test_user_direction_maximize_for_score_metrics():
 
 
 def test_user_direction_contrast_with_greater_is_better():
-    """Контраст с семантикой оптимизатора (issue #54, зависимость T3).
+    """Contrast with the optimizer semantics.
 
-    neg_-метрики оптимизатор максимизирует (is_greater_better=True), но в
-    пользовательской семантике это ошибки — «меньше лучше». Формула коридора
-    пула финалистов обязана использовать user_direction, а не
-    greater_is_better.
+    The optimizer maximizes neg_ metrics (is_greater_better=True), but in
+    user-facing semantics these are errors — "lower is better". The finalist
+    pool corridor formula must use user_direction, not greater_is_better.
     """
     assert is_greater_better("neg_root_mean_squared_error") is True
     assert user_direction("neg_root_mean_squared_error") == "minimize"
 
 
 def test_direction_label_for_logs():
-    """Направление метрик для логов (T6, issue #54): «min/max better».
+    """Metric direction for logs: "min/max better".
 
-    Пользовательские значения в логах сопровождаются направлением из
-    user_direction; для neg_-метрик это «min better», хотя оптимизатор их
-    максимизирует (greater_is_better не применяется).
+    User-facing values in logs are accompanied by the direction from
+    user_direction; for neg_ metrics this is "min better", although the
+    optimizer maximizes them (greater_is_better is not used).
     """
     assert direction_label("rmse") == "min better"
     assert direction_label("mae") == "min better"
@@ -231,16 +231,16 @@ def test_direction_label_for_logs():
 
 
 def test_user_direction_unknown_metric_raises():
-    """Неизвестная метрика не имеет направления — понятный ValueError."""
+    """An unknown metric has no direction — a clear ValueError."""
     with pytest.raises(ValueError, match="not implemented"):
         user_direction("unknown_custom_metric")
 
 
 def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
-    """Скорер без атрибута _sign: консервативный фолбэк True.
+    """A scorer without a _sign attribute: conservative fallback True.
 
-    Покрывает защитную ветку для гипотетических кастомных скореров,
-    у которых направление не экспонировано.
+    Covers the defensive branch for hypothetical custom scorers whose
+    direction is not exposed.
     """
     import configurable_automl_engine.training_engine.metrics as metrics_mod
 
@@ -254,11 +254,11 @@ def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
 
 
 def test_is_greater_better_reflects_registry_mutation():
-    """Мутация реестра _SCORER_OBJECTS видна сразу, без устаревшего кэша.
+    """Mutation of the _SCORER_OBJECTS registry is visible immediately, no stale cache.
 
-    Регрессия ревью PR #18: направление из собственного реестра читается
-    без кэширования, поэтому изменение реестра в рантайме (регистрация
-    кастомной метрики, смена направления) подхватывается немедленно.
+    Regression: the direction from the custom registry is
+    read without caching, so runtime registry changes (registering a custom
+    metric, changing its direction) are picked up immediately.
     """
     from sklearn.metrics import make_scorer, mean_squared_error
 
@@ -267,19 +267,19 @@ def test_is_greater_better_reflects_registry_mutation():
     custom_name = "dyn_registry_metric"
     assert custom_name not in metrics_mod._SCORER_OBJECTS
 
-    # До регистрации метрика неизвестна → ValueError.
+    # Before registration the metric is unknown -> ValueError.
     with pytest.raises(ValueError):
         is_greater_better(custom_name)
 
-    # Регистрируем «ошибку» (меньше — лучше) и проверяем направление.
+    # Register an "error" (lower is better) and check the direction.
     metrics_mod._SCORER_OBJECTS[custom_name] = (
         make_scorer(mean_squared_error, greater_is_better=False),
         False,
     )
     try:
         assert is_greater_better(custom_name) is False
-        # Меняем направление в реестре — результат обязан обновиться,
-        # несмотря на предшествующие вызовы (кэш реестра отсутствует).
+        # Change the direction in the registry — the result must update,
+        # despite preceding calls (there is no registry cache).
         scorer, _ = metrics_mod._SCORER_OBJECTS[custom_name]
         metrics_mod._SCORER_OBJECTS[custom_name] = (scorer, True)
         assert is_greater_better(custom_name) is True
@@ -288,59 +288,59 @@ def test_is_greater_better_reflects_registry_mutation():
 
 
 def test_get_scorer_object():
-    # Проверка кастомных объектов (включая лямбды в _SCORER_OBJECTS)
+    # Check custom objects (including lambdas in _SCORER_OBJECTS)
     scorer = get_scorer_object("rmse")
     assert callable(scorer)
 
-    # Проверка nrmse
+    # Check nrmse
     nrmse_scorer = get_scorer_object("nrmse")
     assert callable(nrmse_scorer)
-    # Проверка стандартных метрик sklearn (вызов sklearn_get_scorer)
+    # Check standard sklearn metrics (sklearn_get_scorer call)
     std_scorer = get_scorer_object("explained_variance")
     assert hasattr(std_scorer, "_score_func")
 
 
-# Тестируем покрытие строки 107 (to_sklearn_name)
+# Cover line 107 (to_sklearn_name)
 def test_to_sklearn_name():
-    # Случай из словаря
+    # Dictionary case
     assert to_sklearn_name("rmse") == "neg_root_mean_squared_error"
-    # Случай default (строка 107: возврат как есть в lower-case)
+    # Default case (line 107: returned as is in lower case)
     assert to_sklearn_name("R2") == "r2"
     assert to_sklearn_name("Unknown_Metric") == "unknown_metric"
 
 
-# Тестируем лямбда-функции в реестрах (дополнительное покрытие)
+# Test the lambda functions in the registries (additional coverage)
 def test_neg_rmse_lambda():
-    # Покрываем лямбду в _METRICS["neg_root_mean_squared_error"]
+    # Cover the lambda in _METRICS["neg_root_mean_squared_error"]
     neg_rmse_func = get_metric("neg_root_mean_squared_error")
     y_true = np.array([0, 2])
     y_pred = np.array([0, 0])
-    # Ожидаемое значение: -sqrt((0^2 + 2^2)/2) = -sqrt(2) ≈ -1.414
+    # Expected value: -sqrt((0^2 + 2^2)/2) = -sqrt(2) ≈ -1.414
     assert neg_rmse_func(y_true, y_pred) == pytest.approx(-np.sqrt(2.0))
 
 
 def test_global_nrmse_coverage(caplog):
     """
-    Тест покрывает:
-    1. Исключение ValueError в get_scorer_object, если global_y не передан.
-    2. Успешное создание скорера через get_global_nrmse_scorer.
-    3. Ветку target_range < 1e-6 в _global_nrmse (защита от деления на ноль).
-    4. Стандартный расчет _global_nrmse.
+    The test covers:
+    1. ValueError raised in get_scorer_object when global_y is not passed.
+    2. Successful scorer creation via get_global_nrmse_scorer.
+    3. The target_range < 1e-6 branch in _global_nrmse (protection against division by zero).
+    4. The standard _global_nrmse computation.
     """
 
-    # 1. Проверка исключения: global_nrmse вызван без global_y
+    # 1. Check the exception: global_nrmse called without global_y
     with pytest.raises(
         ValueError, match="For 'global_nrmse', 'global_y' must be passed"
     ):
         get_scorer_object("global_nrmse", global_y=None)
-    # 2. Проверка успешного создания скорера
+    # 2. Check successful scorer creation
     y_full = np.array([10.0, 20.0, 30.0])  # range = 20.0
     scorer = get_scorer_object("global_nrmse", global_y=y_full)
 
-    # Проверяем, что это объект-скорер (Callable)
+    # Verify it is a scorer object (Callable)
     assert callable(scorer)
-    # 3. Проверка ветки target_range < 1e-6 в _global_nrmse
-    # Напрямую вызываем функцию с критически малым диапазоном
+    # 3. Check the target_range < 1e-6 branch in _global_nrmse
+    # Call the function directly with a critically small range
     y_true = np.array([1.0, 2.0])
     y_pred = np.array([1.1, 1.9])
 
@@ -348,13 +348,13 @@ def test_global_nrmse_coverage(caplog):
         res_inf = _global_nrmse(y_true, y_pred, target_range=1e-7)
         assert res_inf == float("inf")
         assert "Global target_range is too small" in caplog.text
-    # 4. Проверка стандартного расчета (основная ветка возврата)
-    # RMSE для (1,2) и (1,2) = 0. Range = 10. Result = 0/10 = 0.0
+    # 4. Check the standard computation (main return branch)
+    # RMSE for (1,2) and (1,2) = 0. Range = 10. Result = 0/10 = 0.0
     res_zero = _global_nrmse(
         np.array([1.0, 2.0]), np.array([1.0, 2.0]), target_range=10.0
     )
     assert res_zero == 0.0
-    # Расчет с конкретными значениями:
+    # Computation with concrete values:
     # y_true=[0, 2], y_pred=[0, 0] -> MSE = (0^2 + 2^2)/2 = 2 -> RMSE = sqrt(2) ≈ 1.4142
     # target_range = 2
     # Result = 1.4142 / 2 = 0.7071...

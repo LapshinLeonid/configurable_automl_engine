@@ -1,6 +1,6 @@
 """
-Фабрика регрессионных моделей.
-Добавлены короткие алиасы (dt, rf и т.д.) и новые алгоритмы.
+Factory for regression models.
+Added short aliases (dt, rf, etc.) and new algorithms.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ Algorithm = str
 logger = logging.getLogger("configurable_automl_engine.models")
 
 # ----------------------------------------------------------------------------- #
-#                       Карта алгоритмов (длинные ключи)                       #
+#                           Algorithm map (long keys)                           #
 # ----------------------------------------------------------------------------- #
 
 
@@ -100,13 +100,13 @@ AVAILABLE_ALGORITHMS = [
 _FACTORY = _get_factory()
 
 # ----------------------------------------------------------------------------- #
-#               Sparse-совместимость алгоритмов                                #
+#                      Sparse compatibility of algorithms                       #
 # ----------------------------------------------------------------------------- #
-# Алгоритмы, которые отвергают разреженные входные матрицы (sklearn
-# вызывает check_array с accept_sparse=False): GaussianProcessRegressor,
-# IsotonicRegression и ARDRegression требуют плотные данные. При hashing-
-# кодировании (разреженный выход) для этих алгоритмов препроцессор обязан
-# вернуть плотную матрицу (force_dense_output).
+# Algorithms that reject sparse input matrices (sklearn calls check_array
+# with accept_sparse=False): GaussianProcessRegressor, IsotonicRegression,
+# and ARDRegression require dense data. With hashing encoding (sparse
+# output), the preprocessor must return a dense matrix (force_dense_output)
+# for these algorithms.
 SPARSE_UNSUPPORTED_ALGORITHMS: frozenset[str] = frozenset(
     {
         "gaussian_process_regression",
@@ -117,20 +117,20 @@ SPARSE_UNSUPPORTED_ALGORITHMS: frozenset[str] = frozenset(
 
 
 def requires_dense_input(algorithm: str) -> bool:
-    """Вернуть ``True``, если алгоритм не поддерживает разреженный вход.
+    """Return ``True`` if the algorithm does not support sparse input.
 
-    Используется при построении препроцессора (``build_preprocessor``):
-    для алгоритмов, отвергающих ``scipy.sparse``, включается
-    ``force_dense_output``, чтобы hashing-кодирование отдавало плотную
-    матрицу (GPR/Isotonic/ARD физически не могут работать со sparse).
+    Used when building the preprocessor (``build_preprocessor``): for
+    algorithms that reject ``scipy.sparse``, ``force_dense_output`` is
+    enabled so that hashing encoding returns a dense matrix
+    (GPR/Isotonic/ARD physically cannot work with sparse data).
 
     Args:
-        algorithm: Имя алгоритма или алиас (например, ``'gpr'``,
+        algorithm: Algorithm name or alias (e.g. ``'gpr'``,
             ``'isotonic'``, ``'ard'``).
 
     Returns:
-        ``True`` — модели требуется плотный вход; ``False`` — поддерживает
-        разреженные матрицы (csr).
+        ``True`` — the model requires dense input; ``False`` — sparse
+        matrices (csr) are supported.
     """
     return resolve_algorithm_name(algorithm) in SPARSE_UNSUPPORTED_ALGORITHMS
 
@@ -144,7 +144,7 @@ LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
 }
 
 # ----------------------------------------------------------------------------- #
-#                       Короткие псевдонимы (алиасы)                            #
+#                                 Short aliases                                 #
 # ----------------------------------------------------------------------------- #
 _ALIASES: dict[str, str] = {
     "dt": "decision_tree",
@@ -307,14 +307,14 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
 
 
 def resolve_algorithm_name(algorithm: str) -> str:
-    """Нормализовать имя алгоритма: lowercase + раскрытие алиасов.
+    """Normalize an algorithm name: lowercase + alias expansion.
 
     Args:
-        algorithm: Имя алгоритма или алиас (например, ``'RF'``, ``'xgboost'``).
+        algorithm: Algorithm name or alias (e.g. ``'RF'``, ``'xgboost'``).
 
     Returns:
-        Каноническое имя алгоритма для поиска в реестре поддерживаемых
-        алгоритмов (:data:`AVAILABLE_ALGORITHMS`).
+        Canonical algorithm name for lookup in the registry of supported
+        algorithms (:data:`AVAILABLE_ALGORITHMS`).
     """
     algo_key = algorithm.lower()
     return _ALIASES.get(algo_key, algo_key)
@@ -324,35 +324,33 @@ def create_model(
     algorithm: Algorithm = "elasticnet", **hyperparams: Any
 ) -> RegressorMixin:
     """
-    Возвращает экземпляр выбранного регрессора.
-    Алгоритм задаётся строкой, не зависит от регистра. Поддерживаются алиасы.
-    Если алгоритм не найден или требует отсутствующий пакет,
-    бросает ValueError/ImportError.
+    Returns an instance of the selected regressor.
+    The algorithm is given as a string and is case-insensitive. Aliases are
+    supported. If the algorithm is not found or requires a missing package,
+    raises ValueError/ImportError.
     """
     if not isinstance(algorithm, str):
-        raise TypeError(
-            f"Алгоритм должен быть строкой, получено: {type(algorithm).__name__}"
-        )
+        raise TypeError(f"Algorithm must be a string, got: {type(algorithm).__name__}")
 
     algo_key = resolve_algorithm_name(algorithm)
 
     if algo_key not in _FACTORY:
-        raise ValueError(f"Неизвестный алгоритм: {algorithm!r}")
+        raise ValueError(f"Unknown algorithm: {algorithm!r}")
 
     estimator_cls = _FACTORY[algo_key]
     if estimator_cls is None:
-        # Например, XGBoost может быть None, если библиотека не установлена
+        # For example, XGBoost can be None if the library is not installed
         raise ImportError(
-            f"Алгоритм '{algo_key}' требует дополнительного пакета. "
-            "Установите его или исключите из списка."
+            f"Algorithm '{algo_key}' requires an additional package. "
+            "Install it or exclude it from the list."
         )
 
-    # Для GaussianProcessRegressor (gpr) по умолчанию ставим ядро RBF(1.0)
+    # For GaussianProcessRegressor (gpr), set the RBF(1.0) kernel by default
     if algo_key == "gaussian_process_regression" and "kernel" not in hyperparams:
         hyperparams["kernel"] = RBF(1.0)
 
-    # Если max_iter не задан, ставим ограничение (например, 10 000 итераций),
-    # чтобы C-код LibSVM сам выходил из цикла при заклинивании
+    # If max_iter is not set, add a cap (e.g. 10,000 iterations) so that the
+    # LibSVM C-code exits the loop by itself if it hangs
     if algo_key == "svr" and "max_iter" not in hyperparams:
         hyperparams["max_iter"] = 10000
 

@@ -1,6 +1,6 @@
 """
-Интеграционный тест: проверяем, что training-pipeline
-работает при дробном multiplier oversampling (1.25).
+Integration test: verifies that the training pipeline
+works with a fractional oversampling multiplier (1.25).
 """
 
 from math import ceil
@@ -13,7 +13,7 @@ import pytest
 
 
 def test_pipeline_with_fractional_os(tmp_path: Path):
-    # ── 1. Мини-датасет (50/50 классы) ──────────────────────────────── #
+    # ── 1. Mini-dataset (50/50 classes) ───────────────────────────────── #
     df = pd.DataFrame(
         {
             "feat": range(100),
@@ -21,7 +21,7 @@ def test_pipeline_with_fractional_os(tmp_path: Path):
         }
     )
 
-    # ── 2. Временный YAML-конфиг ─────────────────────────────────────── #
+    # ── 2. Temporary YAML config ──────────────────────────────────────── #
     cfg_path = tmp_path / "cfg.yml"
     cfg_path.write_text(
         f"""
@@ -49,21 +49,21 @@ algorithms:
         encoding="utf-8",
     )
 
-    # ── 3. Запускаем pipeline ───────────────────────────────────────── #
+    # ── 3. Run the pipeline ───────────────────────────────────────────── #
     res = train_best_model(cfg_path, df, target="target")
 
-    # ── 4. Базовые проверки ─────────────────────────────────────────── #
-    # 4.1. Модель обучилась и посчитала метрику
+    # ── 4. Basic checks ───────────────────────────────────────────────── #
+    # 4.1. The model was trained and the metric was computed
     assert res["score"] is not None
 
-    # 4.2. Пикл с моделью читается
+    # 4.2. The model pickle is readable
     model_obj = pd.read_pickle(res["model_path"])
     assert model_obj is not None
 
-    # 4.3. Oversampling точно сработал: итоговых строк ≥ исходных
-    #     (точное число зависит от внутренней реализации, поэтому >=)
+    # 4.3. Oversampling really kicked in: resulting rows >= original rows
+    #     (the exact number depends on the internal implementation, hence >=)
     if hasattr(model_obj, "__dict__"):
-        # пробуем достать сохранённый X, если обёртка его хранит
+        # try to get the saved X if the wrapper stores it
         for attr in ("X_", "_X", "X", "train_X", "X_train_"):
             if hasattr(model_obj, attr):
                 assert getattr(model_obj, attr).shape[0] >= ceil(len(df) * 1.25)

@@ -1,6 +1,6 @@
 name: Publish to PyPI
 
-# Запускается ТОЛЬКО когда вы публикуете релиз через интерфейс GitHub
+# Runs ONLY when you publish a release through the GitHub interface
 on:
   release:
     types: [published]
@@ -10,7 +10,7 @@ jobs:
     name: Build and Publish Python Package
     runs-on: ubuntu-latest
     
-    # Права для безопасной OIDC-аутентификации (Trusted Publishers)
+    # Permissions for secure OIDC authentication (Trusted Publishers)
     permissions:
       id-token: write
       contents: read

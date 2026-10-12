@@ -1,24 +1,24 @@
 """Hyperparameter Optimisation Module:
-Двигатель автоматизированного поиска параметров.
+An engine for automated hyperparameter search.
 
-Модуль обеспечивает высокоуровневую обертку над Optuna для
-автоматического подбора конфигураций моделей с поддержкой
-динамических пространств поиска, кросс-валидации и интегрированного оверсэмплинга.
+The module provides a high-level wrapper around Optuna for automatic model
+configuration tuning with support for dynamic search spaces, cross-validation
+and integrated oversampling.
 
-Ключевые возможности:
-    1. Hybrid Model Zoo: Полная поддержка базового пула моделей AutoML-движка
-       с расширением за счет SGD, GaussianProcess, Isotonic и GLM-семейства.
-    2. Neural Filter: Автоматическая детекция и исключение нейросетевых архитектур
-       (alias "nn") для оптимизации ресурсов в классическом ML-пайплайне.
-    3. Adaptive Validation: Интеллектуальное переключение между k-fold,
-       Leave-One-Out и Train-Test Split (80/20) в зависимости от объема выборки
-       (fallback при n_samples < 2k).
-    4. Integrated Oversampling: Бесшовная интеграция балансировки классов через
-       Imbalance-Pipeline прямо внутри процесса оптимизации.
-    5. Dynamic Search Spaces: Поддержка как жестко заданных пространств (например,
-       адаптивный KNN-space), так и внешних конфигураций через YAML/SearchSpaceEntry.
-    6. Metric Agnostic: Возможность оптимизации по любой стандартной или
-       кастомной метрике Sklearn (по умолчанию R²).
+Key features:
+    1. Hybrid Model Zoo: Full support for the AutoML engine's base model pool
+       with extensions for the SGD, GaussianProcess, Isotonic and GLM families.
+    2. Neural Filter: Automatic detection and exclusion of neural network
+       architectures (alias "nn") to save resources in a classical ML pipeline.
+    3. Adaptive Validation: Intelligent switching between k-fold,
+       Leave-One-Out and Train-Test Split (80/20) depending on the sample size
+       (fallback when n_samples < 2k).
+    4. Integrated Oversampling: Seamless class-balancing integration through an
+       Imbalance-Pipeline right inside the optimisation process.
+    5. Dynamic Search Spaces: Support for both hard-coded spaces (e.g. the
+       adaptive KNN space) and external configurations via YAML/SearchSpaceEntry.
+    6. Metric Agnostic: Optimisation against any standard or custom Sklearn
+       metric (R² by default).
 """
 
 from __future__ import annotations
@@ -81,15 +81,15 @@ logging = _logging  # alias
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
 class HyperoptError(Exception):
-    """Базовая ошибка модуля гиперпараметрической оптимизации."""
+    """Base error of the hyperparameter optimisation module."""
 
 
 class InvalidAlgorithmError(HyperoptError):
-    """Ошибка, возникающая, если алгоритм не найден или помечен как неиспользуемый."""
+    """Error raised when an algorithm is not found or is marked as unused."""
 
 
 class InvalidDataError(HyperoptError):
-    """Ошибка, возникающая при передаче некорректных структур данных X или y."""
+    """Error raised when invalid X or y data structures are passed."""
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
@@ -108,13 +108,13 @@ log = logging.getLogger(__name__)
 # 2. On the orchestrator side: the `valid_results` filter in
 #    `training_engine/component.py` drops results whose score belongs to the
 #    worst-score sentinel class — any score at or below WORST_SCORE_THRESHOLD —
-#    treating the algorithm as failed (issues #13, #32).
+#    treating the algorithm as failed.
 HPO_WORST_SCORE = -3.4028235e38
 
 # The lower bound of the "worst-score sentinel" class: the exact float32
 # minimum. Any score <= this bound is treated as a sentinel — real metrics of
-# such magnitude are practically impossible (documented threshold decision,
-# issue #32). Comparing against this bound (instead of the exact
+# such magnitude are practically impossible (documented threshold decision).
+# Comparing against this bound (instead of the exact
 # HPO_WORST_SCORE via math.isclose) also catches the raw
 # float(np.finfo(np.float32).min) value that numpy-cast metrics or custom
 # tuners may return: its relative difference from HPO_WORST_SCORE is
@@ -124,13 +124,13 @@ WORST_SCORE_THRESHOLD = float(np.finfo(np.float32).min)
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
 
-# ══════════ KNN-space зависит от размера выборки ══════════
+# ══════════ KNN-space depends on the sample size ══════════
 def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
-    """Создать генератор пространства поиска для алгоритма KNN."""
+    """Create a search space generator for the KNN algorithm."""
 
     def _space(t: Trial) -> dict[str, Any]:
-        # Ограничение n_neighbors физическим пределом обучающей выборки (N_eff - 1).
-        # Используем n_samples_eff вместо общего количества строк в датасете.
+        # Cap n_neighbors by the physical limit of the training set (N_eff - 1).
+        # Use n_samples_eff instead of the total number of rows in the dataset.
         physical_limit = max(1, n_samples - 1)
         max_k = int(min(30, physical_limit))
 
@@ -143,19 +143,19 @@ def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
     return _space
 
 
-# ══════════ SVR-space: epsilon зависит от разброса y ══════════
+# ══════════ SVR space: epsilon depends on the spread of y ══════════
 def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
-    """Построить SearchSpaceEntry для epsilon SVR с границами, масштабированными y.
+    """Build a SearchSpaceEntry for SVR epsilon with bounds scaled by y.
 
-    Границы считаются от разброса ``y`` (по умолчанию σ(y)) ОДИН раз — до
-    цикла Optuna (вызывается из ``resolve_search_space``, а не из
-    ``space_fn``): иначе у каждого триала были бы свои границы и
-    TPE-сэмплер терял бы детерминизм (issue #55).
+    The bounds are computed from the spread of ``y`` (σ(y) by default) ONCE —
+    before the Optuna loop (called from ``resolve_search_space``, not from
+    ``space_fn``): otherwise every trial would have its own bounds and the
+    TPE sampler would lose determinism.
 
     Args:
-        y (Any): Вектор целевой переменной.
+        y (Any): Target variable vector.
     Returns:
-        SearchSpaceEntry: float_log-распределение epsilon в адаптивных границах.
+        SearchSpaceEntry: float_log distribution of epsilon within adaptive bounds.
     """
     low, high = compute_svr_epsilon_bounds(y)
     log.info("SVR adaptive epsilon bounds: [%.6g, %.6g] (from y spread)", low, high)
@@ -163,40 +163,41 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
 
 
 def _make_svr_space(y: Any) -> Callable[[Trial], dict[str, Any]]:
-    """Создать генератор пространства поиска SVR с адаптивным epsilon.
+    """Create an SVR search space generator with adaptive epsilon.
 
-    Используется, когда пользователь не переопределил пространство поиска
-    (в т.ч. прямой вызов ``optimize("svr", X, y)`` без ``space_overrides``):
-    дефолтное пространство берётся из ``DEFAULT_SPACES["svr"]``, а epsilon
-    заменяется на float_log-распределение в границах, производных от
-    разброса ``y_train``.
+    Used when the user has not overridden the search space (including a direct
+    ``optimize("svr", X, y)`` call without ``space_overrides``): the default
+    space is taken from ``DEFAULT_SPACES["svr"]``, and epsilon is replaced by
+    a float_log distribution within bounds derived from the spread of
+    ``y_train``.
 
     Args:
-        y (Any): Вектор целевой переменной.
+        y (Any): Target variable vector.
     Returns:
-        Callable[[Trial], dict[str, Any]]: Функция-генератор параметров триала.
+        Callable[[Trial], dict[str, Any]]: A trial parameter generator function.
     """
     space = DEFAULT_SPACES["svr"].copy()
     space["epsilon"] = _svr_adaptive_epsilon_entry(y)
     return partial(_apply_dynamic_space, space_dict=space)
 
 
-# ═════════════════════════════ helper-utilities ═════════════════════════════
+# ═════════════════════════════ helper utilities ═════════════════════════════
 
 
 def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
-    """Преобразовать конфигурационный словарь в параметры модели через методы Optuna.
+    """Convert a configuration dict into model parameters via Optuna methods.
+
     Args:
-        trial (Trial): Объект текущей итерации Optuna.
-        space_dict (dict[str, Any]): Словарь, содержащий объекты SearchSpaceEntry
-            (с границами и типами распределений) или константные значения.
+        trial (Trial): The current Optuna trial object.
+        space_dict (dict[str, Any]): A dict of SearchSpaceEntry objects
+            (with bounds and distribution types) or constant values.
     Returns:
-        dict[str, Any]: Словарь конкретных значений гиперпараметров для данной итерации.
+        dict[str, Any]: The concrete hyperparameter values for this iteration.
     """
     params: dict[str, Any] = {}
     for key, value in space_dict.items():
-        # Если это SearchSpaceEntry
-        # (используем свойства low, high, dist_type, step)
+        # If this is a SearchSpaceEntry
+        # (use the low, high, dist_type, step properties)
         if hasattr(value, "dist_type"):
             low, high = value.low, value.high
             dist_type = value.dist_type
@@ -219,31 +220,32 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     key, float(low), float(high), log=True
                 )
             elif dist_type == "categorical":
-                # Извлекаем список опций из атрибута options или из вложенного config
+                # Extract the options list from the options attribute or nested config
                 options = getattr(value, "options", None)
                 if options is None and hasattr(value, "config"):
                     options = getattr(value.config, "options", None)
 
-                # Если всё еще None, откатываемся к low (для совместимости)
+                # If still None, fall back to low (for compatibility)
                 if options is None:
                     options = low
 
                 params[key] = trial.suggest_categorical(key, options)
         else:
-            # Если это просто значение (константа), используем как есть
+            # If it is a plain value (constant), use it as is
             params[key] = value
     return params
 
 
 def _validate_data(X: Any, y: Any) -> None:
-    """Проверить типы и размеры входных данных X и y.
+    """Validate the types and sizes of the input data X and y.
+
     Args:
-        X (Any): Признаковое описание (ожидается np.ndarray или pd.DataFrame).
-        y (Any): Вектор целевой переменной
-            (ожидается np.ndarray, pd.Series или pd.DataFrame).
+        X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
+        y (Any): Target variable vector
+            (expected np.ndarray, pd.Series or pd.DataFrame).
     Raises:
-        InvalidDataError: Если типы данных не поддерживаются
-            или размеры X и y не совпадают.
+        InvalidDataError: If the data types are not supported
+            or the sizes of X and y do not match.
     """
     ok_types = (np.ndarray, pd.DataFrame)
     if not isinstance(X, ok_types):
@@ -257,79 +259,82 @@ def _validate_data(X: Any, y: Any) -> None:
 
 
 def _get_estimator(algo: str) -> Any:
-    """Проверить доступность и валидность указанного алгоритма.
+    """Check the availability and validity of the given algorithm.
+
     Args:
-        algo (str): Название (alias) алгоритма.
+        algo (str): Algorithm name (alias).
     Returns:
-        Any: Возвращает True, если модель успешно создается базовой фабрикой.
+        Any: Returns True if the model is created successfully by the base factory.
     Raises:
-        InvalidAlgorithmError: Если алгоритм не поддерживается или отсутствует
-            необходимая зависимость (библиотека).
+        InvalidAlgorithmError: If the algorithm is not supported or a required
+            dependency (library) is missing.
     """
     try:
-        # Пробуем создать модель с минимальными параметрами для проверки существования
+        # Try to create a model with minimal parameters to check existence
         create_model(algo)
         return True
     except (ValueError, ImportError) as err:
-        # Если в models.py алгоритм не найден или не установлен пакет
-        #  (например, XGBoost)
+        # If the algorithm is not found in models.py or the package is not
+        #  installed (e.g. XGBoost)
         raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
 
 
 def _missing_indicator_enabled(algorithm: str | None) -> bool:
-    """Безопасно определить необходимость индикаторов пропусков (issue #56).
+    """Safely determine whether missing-value indicators are needed.
 
-    Строго одномерные алгоритмы (``isotonic_regression``) несовместимы с
-    колонками-индикаторами пропусков (входной контракт — ровно один признак),
-    поэтому для них возвращается ``False``. Пустое имя алгоритма либо
-    некорректное имя (неизвестный алгоритм) не должны ронять фазу HPO —
-    в этом случае возвращается безопасное значение по умолчанию ``True``.
+    Strictly univariate algorithms (``isotonic_regression``) are incompatible
+    with missing-indicator columns (their input contract is exactly one
+    feature), so ``False`` is returned for them. An empty algorithm name or an
+    invalid name (unknown algorithm) must not crash the HPO phase — in that
+    case the safe default ``True`` is returned.
 
     Args:
-        algorithm: Имя регрессионного алгоритма (или алиас), может быть
-            ``None``/пустой строкой до валидации имени.
+        algorithm: Regression algorithm name (or alias); it may be
+            ``None``/an empty string before name validation.
 
     Returns:
-        ``True`` — индикаторы пропусков включаются; ``False`` — алгоритм
-        строго одномерный.
+        ``True`` — missing indicators are enabled; ``False`` — the algorithm
+        is strictly univariate.
     """
     if not algorithm:
         return True
     try:
         return requires_missing_indicator(algorithm)
     except ValueError:
-        # Неизвестное имя алгоритма: не маскируем ошибку конфигурации, но
-        # не даём ей упасть в необработанное исключение на этапе сборки
-        # препроцессора — валидация имени выполняется отдельным шагом.
+        # Unknown algorithm name: do not mask the config error, but do not
+        # let it surface as an unhandled exception during preprocessor
+        # assembly — name validation is a separate step.
         return True
 
 
 def _build_scorer(name: str) -> Any:
-    """Создать объект метрики (scorer) по названию.
+    """Create a scorer object from a metric name.
+
     Args:
-        name (str): Строковое название метрики
-            (например, 'r2' или 'neg_mean_squared_error').
+        name (str): String metric name
+            (e.g. 'r2' or 'neg_mean_squared_error').
     Returns:
-        Any: Объект метрики, совместимый с API sklearn.
+        Any: A metric object compatible with the sklearn API.
     Raises:
-        HyperoptError: Если указано неизвестное название метрики.
+        HyperoptError: If an unknown metric name is given.
     """
     try:
-        # Используем новый API, который возвращает либо объект make_scorer, либо строку
+        # Use the new API, which returns either a make_scorer object or a string
         return get_scorer_object(name)
     except Exception as err:
         raise HyperoptError(f"Unknown metric name: '{name}'") from err
 
 
 def _can_stratify(y: Any) -> bool:
-    """Определить возможность применения стратификации для вектора y.
+    """Determine whether stratification is possible for the y vector.
+
     Args:
-        y (Any): Вектор целевой переменной.
+        y (Any): Target variable vector.
     Returns:
-        bool: True, если данные дискретны (целые числа/bool) и количество уникальных
-            классов не превышает 15. В противном случае — False.
+        bool: True if the data is discrete (integers/bool) and the number of
+            unique classes does not exceed 15. Otherwise — False.
     """
-    # np.asarray гарантирует чистый np.ndarray и np.dtype для mypy (без ExtensionArray/Dtype)
+    # np.asarray guarantees a plain np.ndarray and np.dtype for mypy (no ExtensionArray/Dtype)
     arr = np.asarray(y)
 
     if arr.ndim != 1:
@@ -344,14 +349,15 @@ def _can_stratify(y: Any) -> bool:
 def _split_train_test(
     X: Any, y: Any, *, test_size: float = 0.2, random_state: int | None = 42
 ) -> tuple[Any, Any, Any, Any]:
-    """Разбить данные на обучающую и тестовую выборки с автоматической стратификацией.
+    """Split data into train and test sets with automatic stratification.
+
     Args:
-        X (Any): Матрица признаков.
-        y (Any): Вектор ответов.
-        test_size (float): Доля тестовой выборки. По умолчанию 0.2.
-        random_state (int | None): Зерно генератора случайных чисел. По умолчанию 42.
+        X (Any): Feature matrix.
+        y (Any): Target vector.
+        test_size (float): Test set fraction. Defaults to 0.2.
+        random_state (int | None): Random number generator seed. Defaults to 42.
     Returns:
-        tuple[Any, Any, Any, Any]: Кортеж из (X_train, X_test, y_train, y_test).
+        tuple[Any, Any, Any, Any]: Tuple of (X_train, X_test, y_train, y_test).
     """
     strat = y if _can_stratify(y) else None
     try:
@@ -388,17 +394,17 @@ _DEFAULT_PRUNING_CONFIG: dict[str, Any] = {
 def _normalize_pruning_config(
     pruning: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Нормализовать конфигурацию ранней остановки в словарь с валидными полями.
+    """Normalize the early stopping configuration into a dict with valid fields.
 
-    Принимает dict из настроек (например, прокинутый из ``training_engine``)
-    или None. Возвращает ``None``, если ранняя остановка выключена или
-    конфиг не передан — в этом случае поведение тюнера идентично текущему.
+    Accepts a settings dict (e.g. forwarded from ``training_engine``) or
+    None. Returns ``None`` if early stopping is disabled or the config is not
+    provided — in that case the tuner behaves identically to the current one.
 
     Args:
-        pruning (dict[str, Any] | None): Словарь с ключами enable, strategy,
-            min_steps, n_startup_trials, reduction_factor (или их подмножеством).
+        pruning (dict[str, Any] | None): A dict with enable, strategy,
+            min_steps, n_startup_trials, reduction_factor keys (or a subset).
     Returns:
-        dict[str, Any] | None: Нормализованная конфигурация прайнера или None.
+        dict[str, Any] | None: The normalized pruner configuration, or None.
     """
     if not pruning:
         return None
@@ -420,16 +426,16 @@ def _normalize_pruning_config(
 
 
 def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
-    """Создать объект прайнера Optuna по нормализованной конфигурации.
+    """Create an Optuna pruner object from a normalized configuration.
 
     Args:
-        cfg (dict[str, Any]): Нормализованная конфигурация ранней остановки
-            (результат ``_normalize_pruning_config``).
+        cfg (dict[str, Any]): Normalized early stopping configuration
+            (the result of ``_normalize_pruning_config``).
     Returns:
-        optuna.pruners.BasePruner: Настроенный прайнер Optuna.
+        optuna.pruners.BasePruner: A configured Optuna pruner.
     Raises:
-        HyperoptError: Если указана неизвестная стратегия отсечения или
-            недопустимые значения параметров.
+        HyperoptError: If an unknown pruning strategy is given or the
+            parameter values are invalid.
     """
     strategy = cfg["strategy"]
     min_steps = cfg["min_steps"]
@@ -444,8 +450,8 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
                 "pruning.n_startup_trials must be a positive integer, "
                 f"got {n_startup_trials}"
             )
-        # n_warmup_steps=min_steps: шаги нумеруются с 1, поэтому первое
-        # решение об отсечении возможно ровно после min_steps отчётов.
+        # n_warmup_steps=min_steps: steps are numbered from 1, so the first
+        # pruning decision is possible exactly after min_steps reports.
         return optuna.pruners.MedianPruner(
             n_startup_trials=n_startup_trials,
             n_warmup_steps=min_steps,
@@ -478,29 +484,28 @@ def _evaluate_with_intermediate_reports(
     random_state: int | None,
     scorer: Any,
 ) -> float:
-    """Оценить estimator пофолдово с публикацией промежуточных результатов.
+    """Evaluate the estimator fold by fold, publishing intermediate results.
 
-    Является «энейблером» ранней остановки: после каждого фолда
-    публикуется кумулятивное среднее значение метрики через
-    ``trial.report``, после чего вызывается ``trial.should_prune()``.
-    Безнадёжный триал прерывается исключением ``optuna.TrialPruned`` до
-    завершения полного объёма оценки.
+    Serves as the early stopping enabler: after each fold the cumulative mean
+    of the metric is published via ``trial.report``, followed by a call to
+    ``trial.should_prune()``. A hopeless trial is interrupted by an
+    ``optuna.TrialPruned`` exception before the full evaluation completes.
 
     Args:
-        trial (Trial): Текущий триал Optuna.
-        estimator (Any): Оценщик (возможно, пайплайн) для оценки.
-        X (Any): Матрица признаков.
-        y (Any): Вектор целевой переменной.
-        method (str): Стратегия разбиения ('k_fold' или 'loo').
-        n_folds (int): Количество фолдов для k_fold.
-        test_size (float): Доля теста (не используется для k_fold/loo,
-            передаётся для унификации вызова iter_splits).
-        random_state (int | None): Зерно случайности.
-        scorer (Any): Объект метрики sklearn.
+        trial (Trial): The current Optuna trial.
+        estimator (Any): The estimator (possibly a pipeline) to evaluate.
+        X (Any): Feature matrix.
+        y (Any): Target variable vector.
+        method (str): Split strategy ('k_fold' or 'loo').
+        n_folds (int): Number of folds for k_fold.
+        test_size (float): Test fraction (unused for k_fold/loo; passed to
+            keep a uniform iter_splits call).
+        random_state (int | None): Randomness seed.
+        scorer (Any): sklearn metric object.
     Returns:
-        float: Среднее значение метрики по всем фолдам.
+        float: The mean metric value across all folds.
     Raises:
-        optuna.TrialPruned: Если прайнер решил отсечь триал.
+        optuna.TrialPruned: If the pruner decides to prune the trial.
     """
     fold_scores: list[float] = []
     for fold_idx, (X_tr, X_te, y_tr, y_te) in enumerate(
@@ -514,14 +519,14 @@ def _evaluate_with_intermediate_reports(
         ),
         start=1,
     ):
-        # Клонируем оценщик на каждый фолд (как это делает cross_val_score),
-        # чтобы избежать накопления состояния между фолдами.
+        # Clone the estimator for every fold (as cross_val_score does) to
+        # avoid state accumulating between folds.
         fold_estimator = clone(estimator)
         fold_estimator.fit(X_tr, y_tr)
         fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
         running_mean = float(np.mean(fold_scores))
-        # Публикуем промежуточный результат: кумулятивное среднее точнее
-        # оценивает финальную метрику (среднее по фолдам), чем одиночный фолд.
+        # Publish the intermediate result: the cumulative mean estimates the
+        # final metric (the fold mean) more accurately than a single fold.
         trial.report(running_mean, step=fold_idx)
         if trial.should_prune():
             log.debug(
@@ -535,28 +540,28 @@ def _evaluate_with_intermediate_reports(
 
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
 class _OptimizeRunner:
-    """Один прогон гиперпараметрической оптимизации, разбитый на шаги.
+    """A single hyperparameter optimisation run, split into steps.
 
-    ``optimize()`` остаётся публичной точкой входа с прежней сигнатурой и
-    делегирует всю работу этому классу (issue #30). Монолитная логика
-    исходной функции разнесена по изолированным шагам:
+    ``optimize()`` remains the public entry point with its original signature
+    and delegates all the work to this class. The monolithic logic of the
+    original function is split into isolated steps:
 
         run()
          ├─ resolve_validation()
          ├─ resolve_search_space()
          ├─ build_trial_pipeline()
          ├─ handle_pruning()
-         ├─ evaluate_trial() / handle_failure()  (в цикле Optuna)
+         ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
          ├─ select_best_trial()
          └─ fit_best_model()
 
-    Состояние прогона хранится в атрибутах экземпляра: каждый шаг заполняет
-    свои поля, а последующие шаги (и целевая функция Optuna) читают их без
-    длинных цепочек аргументов.
+    The run state is stored in instance attributes: each step fills in its own
+    fields, and subsequent steps (as well as the Optuna objective) read them
+    without long argument chains.
     """
 
     MAX_FATAL_FAILURES = 5
-    """Лимит подряд идущих фатальных сбоев до дисквалификации алгоритма."""
+    """Limit of consecutive fatal failures before the algorithm is disqualified."""
 
     def __init__(
         self,
@@ -589,11 +594,11 @@ class _OptimizeRunner:
         target_encoding_fallback: float | None,
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
     ) -> None:
-        """Сохранить параметры одного прогона оптимизации.
+        """Store the parameters of a single optimisation run.
 
         Args:
-            Все аргументы повторяют одноимённые параметры ``optimize()`` —
-            см. её docstring за описанием семантики.
+            All arguments mirror the identically named ``optimize()``
+            parameters — see its docstring for the semantics.
         """
         self.algo_name = algo_name
         self.X = X
@@ -620,12 +625,11 @@ class _OptimizeRunner:
         self.target_encoding_fallback = target_encoding_fallback
         self.feature_selection_cfg = feature_selection_cfg
 
-        # Имена колонок, удалённых очисткой неинформативных признаков
-        # (issue #57). Заполняется в build_trial_pipeline для диагностики;
-        # пустой список по умолчанию.
+        # Names of columns dropped by cleaning uninformative features.
+        # Filled in build_trial_pipeline for diagnostics; empty by default.
         self.dropped_features_: list[str] = []
 
-        # Конфиг оверсэмплинга для сборки пайплайна (единая точка).
+        # Oversampling config for pipeline assembly (single point of truth).
         self.oversampling_config: dict[str, Any] = {
             "active": data_oversampling,
             "params": {
@@ -634,7 +638,7 @@ class _OptimizeRunner:
             },
         }
 
-        # ── Поля, заполняемые шагами run() ────────────────────────────────
+        # ── Fields populated by the run() steps ───────────────────────────────
         self.algo: str = ""
         self.fs_cfg = FeatureSelectionCfg()
         self.fs_mode = self.fs_cfg.mode
@@ -645,9 +649,9 @@ class _OptimizeRunner:
         self.auto_decision: dict[str, Any] | None = None
         self.resolved_via_auto = False
         self.effective_n_folds = self.n_folds
-        # Заглушка до разрешения пространства поиска (шаг 2): заменяется в
-        # resolve_search_space(). run() всегда вызывает resolve_search_space
-        # до цикла Optuna, поэтому реальный вызов заглушки невозможен.
+        # A placeholder until the search space is resolved (step 2); replaced
+        # in resolve_search_space(). run() always calls resolve_search_space
+        # before the Optuna loop, so the real placeholder call is impossible.
         self.space_fn: Callable[[Trial], dict[str, Any]] = lambda trial: {}
         self.scorer: Any = None
         self.pruner: optuna.pruners.BasePruner | None = None
@@ -660,7 +664,7 @@ class _OptimizeRunner:
         self.best_apply_fs: bool
 
     def run(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
-        """Выполнить полный цикл оптимизации, разбитый на шаги (issue #30)."""
+        """Run the full optimisation cycle, split into steps."""
         if not self._validate_n_trials():
             return None, None, None
 
@@ -669,14 +673,14 @@ class _OptimizeRunner:
         self.build_trial_pipeline()
         self.handle_pruning()
 
-        # Если ранняя остановка выключена — явно отключаем любой прайнер
-        # (NopPruner), чтобы триалы гарантированно выполнялись полностью.
+        # If early stopping is disabled, explicitly disable any pruner
+        # (NopPruner) so that trials are guaranteed to run to completion.
         self.study = optuna.create_study(
             direction="maximize",
             sampler=optuna.samplers.TPESampler(seed=self.random_state),
             pruner=self.pruner if self.pruning_active else optuna.pruners.NopPruner(),
         )
-        # Если есть параметры из предыдущей фазы — enqueue как первый trial
+        # If there are parameters from the previous phase, enqueue them as the first trial
         if self.initial_params is not None:
             self.study.enqueue_trial(self.initial_params)
             log.info(
@@ -696,17 +700,17 @@ class _OptimizeRunner:
             return None, None, None
         return self.fit_best_model()
 
-    # ─────────────────── шаги прогона (issue #30) ──────────────────────────
+    # ─────────────────── run steps ─────────────────────────────────────────
 
     def resolve_validation(self) -> None:
-        """Разрешить стратегию валидации и связанные с ней величины (шаг 1).
+        """Resolve the validation strategy and related quantities (step 1).
 
-        Выполняет нормализацию входа (alias ``validation_strategy``), проверку
-        данных и доступности алгоритма, нормализацию конфигурации отбора
-        признаков (issue #11) и выбор CV-стратегии через ``make_cv``. Результаты
-        сохраняются в атрибутах экземпляра для последующих шагов.
+        Performs input normalization (the ``validation_strategy`` alias), data
+        and algorithm availability checks, normalization of the feature
+        selection configuration, and picks the CV strategy via ``make_cv``.
+        The results are stored in instance attributes for later steps.
         """
-        # alias имеет приоритет
+        # the alias takes precedence
         if self.validation_strategy is not None:
             self.val_method = self.validation_strategy
 
@@ -715,12 +719,11 @@ class _OptimizeRunner:
 
         _get_estimator(self.algo)
 
-        # Нормализуем конфигурацию отбора признаков: None -> дефолт
-        # (mode='disabled'), dict -> FeatureSelectionCfg (валидация на этапе
-        # запуска), объект FeatureSelectionCfg -> как есть. Изотоническая
-        # регрессия строго одномерная и использует собственный
-        # IsotonicDataTransformer, поэтому для неё отбор принудительно
-        # отключается независимо от режима.
+        # Normalize the feature selection configuration: None -> default
+        # (mode='disabled'), dict -> FeatureSelectionCfg (validated at run
+        # time), FeatureSelectionCfg object -> as is. Isotonic regression is
+        # strictly univariate and uses its own IsotonicDataTransformer, so
+        # selection is forcibly disabled for it regardless of the mode.
         fs_cfg = self.feature_selection_cfg
         if fs_cfg is None:
             self.fs_cfg = FeatureSelectionCfg()
@@ -744,8 +747,8 @@ class _OptimizeRunner:
             self.fs_mode.value,
         )
 
-        # Определяем, сколько строк реально "увидит" модель при обучении
-        # внутри CV/Split, и разрешаем стратегию валидации (в т.ч. 'auto').
+        # Determine how many rows the model actually "sees" during training
+        # inside CV/Split, and resolve the validation strategy (incl. 'auto').
         n_samples = len(self.y)
         n_features = self.X.shape[1]
         self.n_samples_eff = get_effective_train_size(
@@ -763,61 +766,63 @@ class _OptimizeRunner:
             test_size=self.train_test_split_test_size,
             n_features=n_features,
         )
-        # 'auto' разрешается ровно один раз (здесь, в make_cv). Полученное
-        # решение передаётся в iter_splits, чтобы test-size не пересчитывался
-        # повторно и не мог разойтись между n_samples_eff и фактическим
-        # разбиением.
+        # 'auto' is resolved exactly once (here, in make_cv). The resulting
+        # decision is passed to iter_splits so that the test size is not
+        # recomputed and cannot diverge between n_samples_eff and the actual
+        # split.
         self.resolved_via_auto = norm_val_method(self.val_method) == "auto"
 
-        # Единое число фолдов для ветки ранней остановки (k_fold). Стратегия
-        # 'auto' могла разрешиться в kfold с числом фолдов k, отличным от
-        # исходного n_folds: в этом случае pruning-ветка обязана использовать
-        # вычисленное k, иначе iter_splits внутри
-        # _evaluate_with_intermediate_reports откатится на дефолтный n_folds и
-        # оценка разойдётся с cross_val_score(cv=cv_obj).
+        # A single fold count for the early stopping branch (k_fold). The
+        # 'auto' strategy could resolve to kfold with a number of folds k that
+        # differs from the original n_folds: in that case the pruning branch
+        # must use the computed k, otherwise iter_splits inside
+        # _evaluate_with_intermediate_reports would fall back to the default
+        # n_folds and the evaluation would diverge from
+        # cross_val_score(cv=cv_obj).
         if self.val_method_eff == "k_fold":
-            # Число фолдов берём из готового cv_obj (для k_fold он
-            # гарантированно не None — make_cv всегда создаёт KFold в этой
-            # ветке). Одна формула покрывает auto→kfold (k из решения),
-            # fallback 'auto' без P (клампинг до max(2, k)) и явный k_fold.
+            # Take the fold count from the ready cv_obj (for k_fold it is
+            # guaranteed to be non-None — make_cv always creates a KFold in
+            # this branch). One formula covers auto→kfold (k from the
+            # decision), the 'auto' fallback without P (clamped to max(2, k)),
+            # and an explicit k_fold.
             assert self.cv_obj is not None
             self.effective_n_folds = int(self.cv_obj.get_n_splits())
         else:
-            # Явный loo / train_test_split: число фолдов не используется.
+            # Explicit loo / train_test_split: the fold count is not used.
             self.effective_n_folds = self.n_folds
 
     def resolve_search_space(self) -> None:
-        """Разрешить пространство поиска гиперпараметров и скорер (шаг 2).
+        """Resolve the hyperparameter search space and the scorer (step 2).
 
-        Поддерживает динамическое пространство KNN (зависит от эффективного
-        размера выборки), адаптивный epsilon для SVR (границы масштабируются
-        разбросом ``y_train``, issue #55), прямые переопределения-функции и
-        словарные конфигурации YAML (SearchSpaceEntry). Сохраняет
-        ``space_fn`` и ``scorer`` в атрибутах экземпляра.
+        Supports the dynamic KNN space (depends on the effective sample
+        size), adaptive SVR epsilon (bounds scaled by the spread of
+        ``y_train``), direct function overrides, and dict-based YAML
+        configurations (SearchSpaceEntry). Stores ``space_fn`` and ``scorer``
+        in instance attributes.
 
         Raises:
-            HyperoptError: Если для выбранного алгоритма не определено
-                пространство поиска.
+            HyperoptError: If no search space is defined for the selected
+                algorithm.
         """
         base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
         if self.algo == "knn":
             base_space_fn = _make_knn_space(self.n_samples_eff)
 
-        # Приоритет 1: Прямые переопределения (функции)
-        # Приоритет 2: Динамический конфиг из YAML (dict с SearchSpaceEntry)
+        # Priority 1: Direct overrides (functions)
+        # Priority 2: Dynamic config from YAML (dict with SearchSpaceEntry)
         external_config = (self.space_overrides or {}).get(self.algo)
 
-        # Если пришла функция (старый механизм) — используем её
+        # If a function was passed (the old mechanism), use it
         if callable(external_config):
             space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
-        # Если пришел словарь (новый механизм из YAML) — создаем обертку
+        # If a dict was passed (new YAML mechanism), create a wrapper
         elif isinstance(external_config, dict):
             space_dict = external_config
-            # SVR: адаптивные границы epsilon по разбросу y_train, если
-            # пользователь не задал epsilon явно (prepare_search_space
-            # опускает дефолтный epsilon из DEFAULT_SPACES, поэтому его
-            # отсутствие в словаре означает «не переопределён»). Границы
-            # вычисляются один раз ДО цикла Optuna (issue #55).
+            # SVR: adaptive epsilon bounds from the y_train spread, if the
+            # user did not set epsilon explicitly (prepare_search_space omits
+            # the default epsilon from DEFAULT_SPACES, so its absence in the
+            # dict means "not overridden"). The bounds are computed once
+            # BEFORE the Optuna loop.
             if self.algo == "svr" and "epsilon" not in space_dict:
                 space_dict = {
                     **space_dict,
@@ -826,36 +831,37 @@ class _OptimizeRunner:
             clipped_config = clip_search_space(space_dict, self.n_samples_eff)
             space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
         else:
-            # SVR без внешнего конфига (в т.ч. прямой optimize("svr", X, y)):
-            # дефолтное пространство с адаптивным epsilon вместо слепого
-            # диапазона [1e-3, 1.0] из DEFAULT_SPACES.
+            # SVR without an external config (including a direct
+            # optimize("svr", X, y) call): the default space with adaptive
+            # epsilon instead of the blind [1e-3, 1.0] range from
+            # DEFAULT_SPACES.
             if self.algo == "svr":
                 base_space_fn = _make_svr_space(self.y)
             space_fn = base_space_fn
         if space_fn is None:
-            raise HyperoptError(f"Для «{self.algo}» нет search-space")
+            raise HyperoptError(f"No search space for algorithm '{self.algo}'")
 
         self.space_fn = space_fn
         self.scorer = _build_scorer(self.metric)
 
     def build_trial_pipeline(self) -> None:
-        """Построить препроцессор для фазы HPO (шаг 3).
+        """Build the preprocessor for the HPO phase (step 3).
 
-        Единая точка построения препроцессора: категории -> one-hot (или
-        ordinal, если задан encoding), числа -> пресет предобработки, выбранный
-        автоматически по алгоритму (FR-1). Используется та же логика, что и в
-        финальном обучении (trainer.ModelTrainer), поэтому HPO и финальный fit
-        согласованы (AC-6). Готовая фабрика пайплайна — ``assemble_estimator``.
+        A single point of preprocessor assembly: categories -> one-hot (or
+        ordinal if encoding is set), numerics -> the preprocessing preset
+        selected automatically for the algorithm. The same logic is used in
+        the final training (trainer.ModelTrainer), so HPO and the final fit
+        stay consistent. The ready pipeline factory is ``assemble_estimator``.
 
-        Очистка неинформативных признаков (issue #57) применяется здесь же —
-        в той точке, где выполняется ``detect_feature_types``, до HPO-фолдов
-        и до финального обучения, чтобы обе фазы использовали согласованный
-        набор признаков. Очистка выполняется только в автономной ветке
-        (``self.preprocessor is None``): если пользователь передал готовый
-        препроцессор, он уже зафиксировал свой набор признаков, и молча
-        менять ``self.X`` нельзя. Для ``np.ndarray`` без имён колонок очистка
-        не выполняется (ограничение, как у ``detect_feature_types``); список
-        удалённых колонок сохраняется в ``self.dropped_features_``.
+        Cleaning of uninformative features is applied here too — at the point
+        where ``detect_feature_types`` runs, before the HPO folds and before
+        the final training, so that both phases use a consistent feature set.
+        Cleaning runs only in the standalone branch (``self.preprocessor is
+        None``): if the user passed a ready preprocessor, it has already fixed
+        its feature set, and ``self.X`` must not be silently changed. For
+        ``np.ndarray`` without column names, cleaning is skipped (a
+        limitation shared with ``detect_feature_types``); the list of dropped
+        columns is stored in ``self.dropped_features_``.
         """
         self.dropped_features_ = []
         if self.preprocessor is None and isinstance(self.X, pd.DataFrame):
@@ -865,9 +871,9 @@ class _OptimizeRunner:
             ]
             if self.dropped_features_:
                 self.X = cleaned
-                # Явно переданные списки колонок согласуются с очищенным
-                # набором признаков: иначе build_preprocessor упадёт на
-                # отсутствующих колонках (Unknown feature name).
+                # Explicitly passed column lists are reconciled with the
+                # cleaned feature set: otherwise build_preprocessor would fail
+                # on missing columns (Unknown feature name).
                 if self.categorical_features is not None:
                     self.categorical_features = [
                         col
@@ -880,9 +886,9 @@ class _OptimizeRunner:
                     ]
         if self.preprocessor is None:
             encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
-            # Автоматический выбор пресета + применение явного override (FR-5).
-            # Пресет разрешается один раз до обучения (производительность)
-            # и логируется для наблюдаемости (AC-9).
+            # Automatic preset selection + application of an explicit override.
+            # The preset is resolved once before training (performance) and
+            # logged for observability.
             preset = resolve_preprocessing_preset(
                 self.algo, self.preprocessing_override
             )
@@ -895,7 +901,7 @@ class _OptimizeRunner:
                 self.categorical_features is not None
                 or self.numerical_features is not None
             ):
-                # Явно переданные списки колонок (основной путь из
+                # Explicitly passed column lists (the main path from
                 # training_engine)
                 if isinstance(self.X, pd.DataFrame):
                     self.preprocessor = build_preprocessor(
@@ -920,11 +926,11 @@ class _OptimizeRunner:
                         "pandas.DataFrame — skipping automatic preprocessor."
                     )
             elif isinstance(self.X, pd.DataFrame):
-                # Автодетекция категорий (default-поведение при вызове вне
-                # движка). Препроцессор строится при наличии ЛЮБЫХ признаков
-                # (и категориальных, и числовых): это гарантирует, что на чисто
-                # числовом DataFrame в фазе HPO применяется скалирование так же,
-                # как в финальном ModelTrainer.
+                # Autodetect categories (default behavior when called outside
+                # the engine). The preprocessor is built when ANY features
+                # (categorical or numerical) are present: this guarantees that
+                # on a purely numerical DataFrame the HPO phase applies
+                # scaling just like the final ModelTrainer.
                 cats, nums = detect_feature_types(self.X)
                 if cats or nums:
                     self.preprocessor = build_preprocessor(
@@ -951,23 +957,23 @@ class _OptimizeRunner:
                 )
 
     def assemble_estimator(self, model_impl: Any, apply_fs: bool = False) -> Any:
-        """Собрать пайплайн в порядке preprocessor -> [selector] -> [sampler] -> model.
+        """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
-        Оверсэмплинг получает уже закодированные числовые признаки (one-hot),
-        поэтому SMOTE/ADASYN всегда работают с числовыми данными. Отбор
-        признаков активируется строго между препроцессором и оверсэмплером:
-        синтетические строки генерируются только для информативных признаков
-        (порядок согласован с ModelTrainer, issue #11).
+        Oversampling receives already-encoded numerical features (one-hot), so
+        SMOTE/ADASYN always work with numerical data. Feature selection is
+        activated strictly between the preprocessor and the oversampler:
+        synthetic rows are generated only for informative features (the order
+        is consistent with ModelTrainer).
 
         Args:
-            model_impl: Базовый регрессор.
-            apply_fs: Флаг включения шага ``feature_selector``.
+            model_impl: The base regressor.
+            apply_fs: Flag to enable the ``feature_selector`` step.
         """
         steps: list[tuple[str, Any]] = []
         if self.preprocessor is not None:
             steps.append(("preprocessor", self.preprocessor))
-        # Новый шаг: отбор признаков активируется строго между preprocessor
-        # и oversampler (issue #11).
+        # New step: feature selection is activated strictly between the
+        # preprocessor and the oversampler.
         if apply_fs:
             steps.append(("feature_selector", self._fs_transformer_factory()))
         if self.oversampling_config["active"]:
@@ -980,20 +986,20 @@ class _OptimizeRunner:
         return ImbPipeline(steps)
 
     def _resolve_apply_fs(self, trial: Trial) -> bool:
-        """Определить необходимость отбора признаков для текущего испытания.
+        """Determine whether feature selection is needed for the current trial.
 
-        В режиме 'auto' Optuna сама исследует пространство решений (выгодно
-        ли сокращать признаки), в 'always'/'disabled' решение жёстко следует
-        конфигурации. Для isotonic_regression категория use_feature_selection
-        не предлагается даже в режиме 'auto': отбор принудительно выключен
-        (одномерный алгоритм со своим IsotonicDataTransformer), поэтому
-        предложение было бы бессмысленным, а служебный ключ не должен попадать
-        в best_params.
+        In 'auto' mode Optuna itself explores the decision space (whether
+        reducing features is beneficial); in 'always'/'disabled' the decision
+        strictly follows the configuration. For isotonic_regression the
+        use_feature_selection category is not offered even in 'auto' mode:
+        selection is forcibly disabled (a univariate algorithm with its own
+        IsotonicDataTransformer), so the suggestion would be meaningless and
+        the auxiliary key must not leak into best_params.
 
         Args:
-            trial (Trial): Объект текущего испытания Optuna.
+            trial (Trial): The current Optuna trial object.
         Returns:
-            bool: Нужно ли включать шаг ``feature_selector`` в пайплайн.
+            bool: Whether the ``feature_selector`` step should be added to the pipeline.
         """
         if self.fs_mode == FeatureSelectionMode.auto and not self.is_isotonic:
             apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
@@ -1001,46 +1007,46 @@ class _OptimizeRunner:
             apply_fs = True
         else:
             apply_fs = False
-        # Изотоническая регрессия требует ровно один признак и использует
-        # собственный IsotonicDataTransformer — отбор принудительно выключен
-        # (в т.ч. если 'always' или enqueued initial_params пронесли флаг).
+        # Isotonic regression requires exactly one feature and uses its own
+        # IsotonicDataTransformer — selection is forcibly disabled (including
+        # when 'always' or enqueued initial_params carried the flag).
         if self.is_isotonic:
             apply_fs = False
         return apply_fs
 
     def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
-        """Оценить собранный пайплайн триала и вернуть целевую метрику (шаг 4).
+        """Evaluate the assembled trial pipeline and return the target metric (step 4).
 
-        Оценивает ``current_estimator`` по выбранной стратегии валидации.
-        Нефинитный результат (+inf при ошибке nrmse или NaN) заменяется на
-        ``HPO_WORST_SCORE`` — сентинел «худшего» исхода. Генерация
-        гиперпараметров и сборка пайплайна выполняются в ``_objective`` ДО
-        вызова этого метода и вне try/except: ошибки пользовательской
-        space-функции или конструктора модели обязаны пробрасываться наружу
-        (триал FAIL), а не превращаться в pruned/дисквалификацию.
+        Evaluates ``current_estimator`` with the selected validation strategy.
+        A non-finite result (+inf on an nrmse error or NaN) is replaced with
+        ``HPO_WORST_SCORE`` — the "worst outcome" sentinel. Hyperparameter
+        generation and pipeline assembly happen in ``_objective`` BEFORE this
+        method is invoked and outside try/except: errors from a user space
+        function or the model constructor must propagate (trial FAIL) rather
+        than turn into pruning/disqualification.
 
         Args:
-            trial (Trial): Объект текущего испытания Optuna.
-            current_estimator (Any): Пайплайн/модель текущего испытания.
+            trial (Trial): The current Optuna trial object.
+            current_estimator (Any): The pipeline/model of the current trial.
         Returns:
-            float: Значение целевой метрики на текущем наборе параметров.
+            float: The target metric value for the current parameter set.
         Raises:
-            ValueError: Нефатальная ошибка оценки (триал отсекается).
-            MemoryError, RuntimeError, InvalidDataError: Фатальные сбои —
-                учитываются в счётчике ``handle_failure``.
-            optuna.TrialPruned: Отсечение прунером ранней остановки.
+            ValueError: Non-fatal evaluation error (the trial is pruned).
+            MemoryError, RuntimeError, InvalidDataError: Fatal failures —
+                counted in the ``handle_failure`` counter.
+            optuna.TrialPruned: Pruning by the early stopping pruner.
         """
-        # 1. оценка по стратегии валидации
+        # 1. evaluation according to the validation strategy
         if self.val_method_eff == "train_test_split":
-            # Если 'auto' было разрешено в make_cv — используем уже вычисленный
-            # (dataset-зависимый) целочисленный test_size, чтобы iter_splits
-            # не пересчитывал решение повторно. Иначе — фиксированная доля.
+            # If 'auto' was resolved in make_cv, use the already computed
+            # (dataset-dependent) integer test_size so that iter_splits does
+            # not recompute the decision. Otherwise — the fixed fraction.
             if self.resolved_via_auto and self.auto_decision is not None:
                 split_test_size: float | int = int(self.auto_decision["test_size"])
             else:
                 split_test_size = self.train_test_split_test_size
-            # Используем iter_splits для унификации; так как это генератор,
-            # берём next()
+            # Use iter_splits for uniformity; since it is a generator, take
+            # next()
             X_tr, X_te, y_tr, y_te = next(
                 iter_splits(
                     self.X,
@@ -1053,8 +1059,8 @@ class _OptimizeRunner:
             current_estimator.fit(X_tr, y_tr)
             return float(self.scorer(current_estimator, X_te, y_te))
         if self.pruning_active:
-            # Ранняя остановка: оцениваем пофолдово и публикуем промежуточные
-            # результаты для прайнера Optuna.
+            # Early stopping: evaluate fold by fold and publish intermediate
+            # results for the Optuna pruner.
             avg_score = _evaluate_with_intermediate_reports(
                 trial,
                 current_estimator,
@@ -1066,13 +1072,14 @@ class _OptimizeRunner:
                 random_state=self.random_state,
                 scorer=self.scorer,
             )
-            # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший
-            # float (аналог минимального float32 или float('-inf')).
+            # If we got +inf (an nrmse error) or NaN, return the worst float
+            # (analog of the float32 minimum or float('-inf')).
             if not np.isfinite(avg_score):
                 return HPO_WORST_SCORE
             return avg_score
-        # cv_obj здесь гарантированно не None: ветка не-train_test_split и
-        # не-pruning означает k_fold/loo, где make_cv всегда создаёт cv-объект.
+        # cv_obj is guaranteed non-None here: a non-train_test_split and
+        # non-pruning branch means k_fold/loo, where make_cv always creates
+        # a cv object.
         scores = model_selection.cross_val_score(
             current_estimator,
             self.X,
@@ -1082,20 +1089,20 @@ class _OptimizeRunner:
             n_jobs=1,
         )
         avg_score = float(np.mean(scores))
-        # Если получили +inf (ошибка в nrmse) или NaN, возвращаем худший float
-        # (аналог минимального float32 или float('-inf')).
+        # If we got +inf (an nrmse error) or NaN, return the worst float
+        # (analog of the float32 minimum or float('-inf')).
         if not np.isfinite(avg_score):
             return HPO_WORST_SCORE
         return avg_score
 
     def handle_pruning(self) -> None:
-        """Настроить раннюю остановку (pruning) под выбранную валидацию (шаг 5).
+        """Configure early stopping (pruning) for the selected validation (step 5).
 
-        Нормализует конфигурацию ранней остановки и строит прайнер Optuna.
-        Прайнинг применяется только когда есть естественные шаги оценки
-        (k_fold / loo); для hold-out (train_test_split) промежуточных шагов
-        нет, поэтому ранняя остановка не применяется (поведение
-        задокументировано).
+        Normalizes the early stopping configuration and builds an Optuna
+        pruner. Pruning applies only when there are natural evaluation steps
+        (k_fold / loo); for hold-out (train_test_split) there are no
+        intermediate steps, so early stopping is not applied (documented
+        behavior).
         """
         pruning_cfg = _normalize_pruning_config(self.pruning)
         self.pruner = None
@@ -1120,29 +1127,30 @@ class _OptimizeRunner:
             )
 
     def _objective(self, trial: Trial) -> float:
-        """Целевая функция Optuna: evaluate_trial + handle_failure (issue #30).
+        """Optuna objective function: evaluate_trial + handle_failure.
 
-        Разделяет оценку триала (``evaluate_trial``) и обработку его сбоя
-        (``handle_failure``) на отдельные шаги. Генерация гиперпараметров и
-        сборка пайплайна выполняются ВНЕ try/except — как в исходной
-        реализации: ошибки пользовательской space-функции или конструктора
-        модели должны пробрасываться наружу (триал FAIL и исключение из
-        ``study.optimize``), а не превращаться в тихий pruned/дисквалификацию.
-        Счётчик подряд идущих фатальных сбоев сбрасывается при любом
-        нефатальном исходе: успехе, отсечении прунером (optuna.TrialPruned из
-        ``_evaluate_with_intermediate_reports``) или нефатальном ValueError.
+        Splits trial evaluation (``evaluate_trial``) and its failure handling
+        (``handle_failure``) into separate steps. Hyperparameter generation and
+        pipeline assembly run OUTSIDE try/except — as in the original
+        implementation: errors from a user space function or the model
+        constructor must propagate (trial FAIL and an exception from
+        ``study.optimize``) rather than silently become pruning /
+        disqualification. The consecutive fatal failure counter is reset on
+        any non-fatal outcome: success, pruner pruning (optuna.TrialPruned
+        from ``_evaluate_with_intermediate_reports``), or a non-fatal
+        ValueError.
 
         Args:
-            trial (Trial): Объект текущего испытания Optuna.
+            trial (Trial): The current Optuna trial object.
         Returns:
-            float: Значение целевой метрики на текущем наборе параметров.
+            float: The target metric value for the current parameter set.
         Raises:
-            optuna.TrialPruned: Если триал отсечён (ошибкой или прайнером).
-            InvalidAlgorithmError: При превышении лимита фатальных ошибок.
+            optuna.TrialPruned: If the trial is pruned (by an error or the pruner).
+            InvalidAlgorithmError: When the fatal failure limit is exceeded.
         """
-        # 1. гиперпараметры, модель и сборка пайплайна — вне try/except
-        #    (контракт исходного кода: их ошибки не относятся к фатальным
-        #    сбоям оценки и не учитываются circuit breaker'ом).
+        # 1. hyperparameters, model and pipeline assembly — outside try/except
+        #    (contract of the original code: their errors are not fatal
+        #    evaluation failures and are not counted by the circuit breaker).
         params = self.space_fn(trial)
         model = create_model(self.algo, **params)
         current_estimator = self.assemble_estimator(
@@ -1155,33 +1163,34 @@ class _OptimizeRunner:
         except (ValueError, MemoryError, RuntimeError, InvalidDataError) as err:
             fatal_failure = not isinstance(err, ValueError)
             self.handle_failure(trial, err)
-            # Недостижимо: handle_failure всегда бросает (NoReturn). Заглушка
-            # нужна только статическому анализу, чтобы except-ветка имела
-            # возвращаемое значение.
+            # Unreachable: handle_failure always raises (NoReturn). The stub
+            # is only needed by static analysis so the except branch has a
+            # return value.
             return 0.0  # pragma: no cover
         finally:
-            # Любой нефатальный исход триала прерывает последовательность
-            # фатальных сбоев: успешный возврат _score, отсечение прунером
-            # (optuna.TrialPruned) или нефатальный ValueError. Без этого
-            # сброса счётчик накапливал бы ошибки, разделённые штатными
-            # триалами, и ложно дисквалифицировал алгоритм.
+            # Any non-fatal trial outcome breaks the sequence of fatal
+            # failures: a successful _score return, pruner pruning
+            # (optuna.TrialPruned), or a non-fatal ValueError. Without this
+            # reset, the counter would accumulate errors separated by normal
+            # trials and falsely disqualify the algorithm.
             if not fatal_failure:
                 self.consecutive_fatal_failures = 0
 
     def handle_failure(self, trial: Trial, err: Exception) -> NoReturn:
-        """Обработать сбой оценки триала по контракту исходов (шаг 6).
+        """Handle a trial evaluation failure according to the outcome contract (step 6).
 
-        Нефатальный ``ValueError`` просто отсекает триал (``optuna.TrialPruned``)
-        без учёта в счётчике. ``MemoryError``/``RuntimeError``/``InvalidDataError``
-        считаются фатальными: инкрементируют счётчик подряд идущих сбоев и при
-        достижении лимита дисквалифицируют алгоритм (``InvalidAlgorithmError``).
+        A non-fatal ``ValueError`` simply prunes the trial
+        (``optuna.TrialPruned``) without counting it. ``MemoryError`` /
+        ``RuntimeError`` / ``InvalidDataError`` are considered fatal: they
+        increment the consecutive failure counter and disqualify the algorithm
+        once the limit is reached (``InvalidAlgorithmError``).
 
         Args:
-            trial (Trial): Текущий триал Optuna (для user_attr "fail_reason").
-            err (Exception): Пойманное исключение оценки.
+            trial (Trial): The current Optuna trial (for the user_attr "fail_reason").
+            err (Exception): The caught evaluation exception.
         Raises:
-            optuna.TrialPruned: Всегда (нефатальный или фатальный сбой).
-            InvalidAlgorithmError: Если достигнут лимит фатальных сбоев.
+            optuna.TrialPruned: Always (non-fatal or fatal failure).
+            InvalidAlgorithmError: If the fatal failure limit is reached.
         """
         trial.set_user_attr("fail_reason", str(err))
         if isinstance(err, ValueError):
@@ -1195,19 +1204,18 @@ class _OptimizeRunner:
         raise optuna.TrialPruned() from err
 
     def select_best_trial(self) -> bool:
-        """Выбрать лучший завершённый триал (шаг 7).
+        """Select the best completed trial (step 7).
 
-        Явный подсчёт состояний триалов (issue #32): наличие валидного
-        результата определяется по числу завершённых (COMPLETED) триалов, а не
-        по внутреннему поведению ``study.best_params`` (ValueError при
-        отсутствии завершённых триалов — деталь реализации Optuna, на которую
-        нельзя опираться). Счётчики логируются для наблюдаемости («нет
-        валидного результата» должно быть объяснимо по логам).
+        Explicit trial state counting: the presence of a valid result is
+        determined by the number of completed (COMPLETED) trials rather than
+        by the internal behavior of ``study.best_params`` (a ValueError when
+        there are no completed trials — an Optuna implementation detail that
+        must not be relied upon). Counters are logged for observability ("no
+        valid result" must be explainable from the logs).
 
         Returns:
-            bool: True при наличии завершённого триала; False — контракт
-                «нет валидного результата» (все триалы PRUNED/FAILED или
-                список пуст).
+            bool: True if there is a completed trial; False — the "no valid
+                result" contract (all trials PRUNED/FAILED or an empty list).
         """
         trials = self.study.get_trials(deepcopy=False)
         n_completed = sum(
@@ -1230,12 +1238,11 @@ class _OptimizeRunner:
             n_failed,
         )
         if n_completed == 0:
-            # Контракт «нет валидного результата» (issues #13, #32): все
-            # триалы отсечены (PRUNED), упали (FAILED) или список триалов
-            # пуст. Возвращаем сплошной None вместо «магической» константы
-            # HPO_WORST_SCORE, чтобы вызывающий код (_run_hpo) мог отличить
-            # провал от валидного результата и исключить алгоритм из
-            # кандидатов.
+            # The "no valid result" contract: all trials are pruned (PRUNED),
+            # failed (FAILED), or the trial list is empty. Return a plain None
+            # instead of the "magic" HPO_WORST_SCORE constant so the caller
+            # (_run_hpo) can tell a failure from a valid result and exclude
+            # the algorithm from the candidates.
             log.warning(
                 "Algorithm '%s' produced no completed trials "
                 "(completed=%d, pruned=%d, failed=%d); returning no result",
@@ -1249,10 +1256,10 @@ class _OptimizeRunner:
         best_params = self.study.best_params
         self.best_score = self.study.best_value
 
-        # Решение по отбору признаков берётся из study.best_params (mode='auto':
-        # ключ "use_feature_selection" уже зафиксирован Optuna) либо из режима
-        # конфигурации ('always' -> True, 'disabled' -> False). Для
-        # isotonic_regression отбор принудительно игнорируется.
+        # The feature selection decision comes from study.best_params
+        # (mode='auto': the "use_feature_selection" key is already fixed by
+        # Optuna) or from the configuration mode ('always' -> True, 'disabled'
+        # -> False). For isotonic_regression selection is forcibly ignored.
         best_apply_fs = bool(
             best_params.get(
                 "use_feature_selection", self.fs_mode == FeatureSelectionMode.always
@@ -1260,34 +1267,36 @@ class _OptimizeRunner:
         )
         if self.is_isotonic:
             best_apply_fs = False
-            # Для isotonic_regression служебный ключ исключается и из
-            # возвращаемого best_params (защита от initial_params, пронесённых
-            # через enqueue_trial из предыдущей фазы с ключом
-            # use_feature_selection).
+            # For isotonic_regression, the auxiliary key is also excluded from
+            # the returned best_params (a guard against initial_params carried
+            # through enqueue_trial from the previous phase with the
+            # use_feature_selection key).
             best_params = {
                 k: v for k, v in best_params.items() if k != "use_feature_selection"
             }
         self.best_params = best_params
-        # Параметры для конструктора базовой модели очищаются от служебного
-        # ключа тюнера ("use_feature_selection" не является гиперпараметром
-        # модели). Строим их из уже отфильтрованного self.best_params (для
-        # isotonic_regression ключ исключён выше), чтобы источник был единым;
-        # исходный study.best_params не мутируется, а ключ гарантированно не
-        # попадает в конструктор модели (issue #11).
+        # The base model constructor parameters are cleaned of the tuner's
+        # auxiliary key ("use_feature_selection" is not a model
+        # hyperparameter). They are built from the already filtered
+        # self.best_params (for isotonic_regression the key was excluded
+        # above) so the source is single; the original study.best_params is
+        # not mutated and the key is guaranteed not to reach the model
+        # constructor.
         self.clean_model_params = dict(self.best_params)
         self.clean_model_params.pop("use_feature_selection", None)
         self.best_apply_fs = best_apply_fs
         return True
 
     def fit_best_model(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
-        """Обучить финальную модель на всех предоставленных данных (шаг 8).
+        """Train the final model on all provided data (step 8).
 
-        Собирает пайплайн с лучшими параметрами (с учётом решения по отбору
-        признаков из ``select_best_trial``) и обучает его на полном датасете.
-        Если оверсэмплинг был включён, финальная модель тоже проходит его.
+        Assembles the pipeline with the best parameters (taking the feature
+        selection decision from ``select_best_trial`` into account) and trains
+        it on the full dataset. If oversampling was enabled, the final model
+        goes through it as well.
 
         Returns:
-            tuple[Any | None, dict[str, Any] | None, float | None]: Кортеж
+            tuple[Any | None, dict[str, Any] | None, float | None]: A tuple
                 (best_model, best_params, best_score).
         """
         best_model = self.assemble_estimator(
@@ -1305,25 +1314,25 @@ class _OptimizeRunner:
         )
         return best_model, self.best_params, self.best_score
 
-    # ─────────────────── приватные помощники ────────────────────────────────
+    # ─────────────────── private helpers ───────────────────────────────────
 
     def _validate_n_trials(self) -> bool:
-        """Проверить корректность ``n_trials`` и контракт «нет валидного результата».
+        """Validate ``n_trials`` and the "no valid result" contract.
 
         Returns:
-            bool: True, если нужно запускать Optuna; False — вернуть
-                ``(None, None, None)`` без запуска.
+            bool: True if Optuna should run; False — return
+                ``(None, None, None)`` without running.
         Raises:
-            ValueError: Если ``n_trials`` отрицателен или не является целым.
+            ValueError: If ``n_trials`` is negative or not an integer.
         """
         if not isinstance(self.n_trials, int) or self.n_trials < 0:
             raise ValueError(
                 f"n_trials must be a non-negative integer, got {self.n_trials}"
             )
         if self.n_trials == 0:
-            # Пустой список триалов — контракт «нет валидного результата»
-            # (issue #32): возвращаем сплошной None без запуска Optuna и без
-            # исключений (в т.ч. для алгоритмов без search-space).
+            # Empty trial list — the "no valid result" contract: return a
+            # plain None without running Optuna and without exceptions
+            # (including for algorithms without a search space).
             log.warning(
                 "Algorithm '%s' requested with n_trials=0; no trials to run — "
                 "returning no result",
@@ -1333,15 +1342,15 @@ class _OptimizeRunner:
         return True
 
     def _fs_transformer_factory(self) -> FeatureSelector:
-        """Создать свежий экземпляр селектора признаков для шага пайплайна.
+        """Create a fresh feature selector instance for a pipeline step.
 
-        Каждый вызов возвращает новый ``FeatureSelector`` с детерминированным
-        ``random_state`` (согласован с финальным обучением ModelTrainer),
-        что гарантирует воспроизводимость отбора между триалами и потоками.
-        При ``random_state=None`` (полностью недетерминированный запуск Optuna)
-        отбор всё равно использует фиксированный seed 42: иначе каждый вызов
-        фабрики создавал бы селектор с новым случайным зерном, и отбор был бы
-        невоспроизводим даже при детерминированных остальных этапах пайплайна.
+        Each call returns a new ``FeatureSelector`` with a deterministic
+        ``random_state`` (consistent with the final ModelTrainer training),
+        which guarantees reproducible selection across trials and threads.
+        With ``random_state=None`` (a fully non-deterministic Optuna run),
+        selection still uses the fixed seed 42: otherwise each factory call
+        would create a selector with a new random seed and selection would be
+        irreproducible even with all other pipeline stages deterministic.
         """
         return FeatureSelector(
             method=self.fs_cfg.method.value,
@@ -1362,9 +1371,9 @@ def optimize(
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
     metric: str = "r2",
-    # старый аргумент оставляем-для-совместимости
+    # keep the old argument for backward compatibility
     val_method: ValidationStrategy | str = "k_fold",
-    # alias, который шлёт training_engine.component
+    # alias sent by training_engine.component
     validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int = 5,
     n_trials: int = 50,
@@ -1385,93 +1394,96 @@ def optimize(
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any] | None, float | None]:
-    """Запустить процесс оптимизации гиперпараметров модели с использованием Optuna.
+    """Run the model hyperparameter optimisation process using Optuna.
 
-    Функция автоматически выбирает стратегию валидации, настраивает пространство
-    поиска параметров и обучает финальную модель на всех предоставленных данных.
+    The function automatically selects the validation strategy, sets up the
+    parameter search space and trains the final model on all provided data.
 
     Args:
-        algo_name (str): Название алгоритма для оптимизации.
-        X (Any): Входные признаки.
-        y (Any): Целевая переменная.
-        data_oversampling (bool): Флаг включения балансировки классов.
-            По умолчанию False.
-        data_oversampling_multiplier (float): Коэффициент масштабирования
-            (для оверсэмплинга).
-        data_oversampling_algorithm (str): Название алгоритма балансировки
-            (например, 'random', 'smote').
-        metric (str): Название метрики для максимизации. По умолчанию 'r2'.
-        val_method (ValidationStrategy | str): Метод валидации
+        algo_name (str): Algorithm name to optimise.
+        X (Any): Input features.
+        y (Any): Target variable.
+        data_oversampling (bool): Flag to enable class balancing.
+            Defaults to False.
+        data_oversampling_multiplier (float): Scaling factor
+            (for oversampling).
+        data_oversampling_algorithm (str): Balancing algorithm name
+            (e.g. 'random', 'smote').
+        metric (str): Metric name to maximise. Defaults to 'r2'.
+        val_method (ValidationStrategy | str): Validation method
             ('k_fold', 'leave_one_out', 'train_test_split').
-        validation_strategy (ValidationStrategy | str | None): Алиас для
-            ``val_method`` (имеет приоритет).
-        n_folds (int): Количество фолдов для кросс-валидации. По умолчанию 5.
-        n_trials (int): Количество итераций поиска (испытаний). По умолчанию 50.
-        random_state (int | None): Состояние случайности для воспроизводимости.
-            По умолчанию 42. При ``None`` случайность Optuna (TPE-сэмплер,
-            разбиения) не фиксируется, однако шаг отбора признаков
-            (``FeatureSelector``) всегда использует фиксированный seed 42,
-            чтобы отбор оставался воспроизводимым между запусками.
-        train_test_split_test_size (float): Размер теста для валидации через split.
-            По умолчанию 0.2.
-        space_overrides (dict | None): Словарь для переопределения пространств поиска.
-        initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы
-            для enqueue_trial. Позволяет сохранить монотонность улучшения между фазами HPO.
-        preprocessor (Any | None): Готовый ``ColumnTransformer`` для предобработки
-            признаков (категории -> one-hot, числа -> StandardScaler). Если передан,
-            имеет приоритет над ``categorical_features``/``numerical_features``.
-        categorical_features (list[str] | None): Имена категориальных колонок.
-            Если ``preprocessor`` не передан, по ним строится препроцессор.
-        numerical_features (list[str] | None): Имена числовых колонок.
-            Используется вместе с ``categorical_features``.
-        encoding (EncodingStrategy | None): Стратегия кодирования категорий
-            ('one_hot', 'ordinal', 'target', 'frequency' или 'hashing').
-            По умолчанию ``None`` — используется 'one_hot'. Применяется при
-            построении препроцессора, когда ``preprocessor`` не передан.
-        preprocessing_override (PreprocessingOverride | dict | None): Явное
-            переопределение пресета предобработки признаков (FR-5). Задаётся
-            частично или полностью; имеет приоритет над автоматическим выбором
-            и применяется согласованно с финальным обучением (AC-6, AC-7).
-        pruning (dict[str, Any] | None): Настройки ранней остановки (pruning).
-            Словарь с полями: ``enable`` (bool, False по умолчанию),
-            ``strategy`` ('median' | 'hyperband', 'median' по умолчанию),
-            ``min_steps`` (int >= 1, 1 по умолчанию), ``n_startup_trials``
-            (int >= 1, только для 'median', 5 по умолчанию),
-            ``reduction_factor`` (int >= 2, только для 'hyperband', 3 по
-            умолчанию). При ``enable=False`` или ``None`` поведение идентично
-            текущему: каждый триал выполняется полностью. Для стратегий
-            валидации без естественных шагов (train_test_split) прайнер не
-            применяется.
-        high_cardinality_threshold (int | None): Порог кардинальности для
-            автоматического режима (>= 0). Колонки с числом уникальных значений
-            строго больше порога кодируются ``high_cardinality_encoding``,
-            остальные — ``encoding``. ``None`` — режим отключён.
-        high_cardinality_encoding (EncodingStrategy | None): Стратегия
-            кодирования high-cardinality колонок. Задаётся вместе с
+        validation_strategy (ValidationStrategy | str | None): Alias for
+            ``val_method`` (takes precedence).
+        n_folds (int): Number of cross-validation folds. Defaults to 5.
+        n_trials (int): Number of search iterations (trials). Defaults to 50.
+        random_state (int | None): Randomness state for reproducibility.
+            Defaults to 42. With ``None``, the Optuna randomness (TPE sampler,
+            splits) is not fixed; however, the feature selection step
+            (``FeatureSelector``) always uses the fixed seed 42 so that
+            selection stays reproducible across runs.
+        train_test_split_test_size (float): Test size for split validation.
+            Defaults to 0.2.
+        space_overrides (dict | None): Dict for overriding search spaces.
+        initial_params (dict[str, Any] | None): Hyperparameters from the
+            previous phase for enqueue_trial. Keeps the improvement monotonic
+            between HPO phases.
+        preprocessor (Any | None): A ready ``ColumnTransformer`` for feature
+            preprocessing (categories -> one-hot, numerics -> StandardScaler).
+            If passed, it takes precedence over
+            ``categorical_features``/``numerical_features``.
+        categorical_features (list[str] | None): Names of categorical columns.
+            If ``preprocessor`` is not passed, a preprocessor is built from them.
+        numerical_features (list[str] | None): Names of numerical columns.
+            Used together with ``categorical_features``.
+        encoding (EncodingStrategy | None): Category encoding strategy
+            ('one_hot', 'ordinal', 'target', 'frequency' or 'hashing').
+            Defaults to ``None`` — 'one_hot' is used. Applied when building
+            the preprocessor if ``preprocessor`` is not passed.
+        preprocessing_override (PreprocessingOverride | dict | None): Explicit
+            override of the feature preprocessing preset. Set partially or
+            fully; takes precedence over the automatic selection and is
+            applied consistently with the final training.
+        pruning (dict[str, Any] | None): Early stopping (pruning) settings.
+            A dict with fields: ``enable`` (bool, False by default),
+            ``strategy`` ('median' | 'hyperband', 'median' by default),
+            ``min_steps`` (int >= 1, 1 by default), ``n_startup_trials``
+            (int >= 1, only for 'median', 5 by default), ``reduction_factor``
+            (int >= 2, only for 'hyperband', 3 by default). With
+            ``enable=False`` or ``None`` the behavior is identical to the
+            current one: every trial runs to completion. For validation
+            strategies without natural steps (train_test_split) the pruner is
+            not applied.
+        high_cardinality_threshold (int | None): Cardinality threshold for the
+            automatic mode (>= 0). Columns whose number of unique values is
+            strictly greater than the threshold are encoded with
+            ``high_cardinality_encoding``, the rest with ``encoding``.
+            ``None`` — the mode is disabled.
+        high_cardinality_encoding (EncodingStrategy | None): Encoding strategy
+            for high-cardinality columns. Set together with
             ``high_cardinality_threshold``.
-        hashing_n_components (int): Число бинарных колонок на категориальную
-            колонку при кодировании 'hashing' (>= 1).
-        target_encoding_smoothing (float): Параметр сглаживания target encoding
-            (>= 0).
-        target_encoding_fallback (float | None): Fallback-значение target
-            encoding для неизвестных категорий (None — глобальное среднее).
-        feature_selection_cfg (FeatureSelectionCfg | dict | None): Настройки
-            отбора признаков (issue #11). ``None`` — режим ``'disabled'``
-            (отбор не применяется, поведение по умолчанию). В режиме
-            ``'always'`` шаг ``feature_selector`` присутствует в каждом
-            пайплайне триала; в режиме ``'disabled'`` — отсутствует; в
-            режиме ``'auto'`` Optuna сама выбирает ``use_feature_selection``
-            (True/False) на валидационных сплитах в конкуренции с
-            гиперпараметрами моделей. Для ``isotonic_regression`` отбор
-            принудительно отключается (одномерный алгоритм).
+        hashing_n_components (int): Number of binary columns per categorical
+            column with 'hashing' encoding (>= 1).
+        target_encoding_smoothing (float): Smoothing parameter of the target
+            encoding (>= 0).
+        target_encoding_fallback (float | None): Fallback value of target
+            encoding for unknown categories (None — the global mean).
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
+            selection settings. ``None`` — the ``'disabled'`` mode (selection
+            is not applied, the default behavior). In ``'always'`` mode the
+            ``feature_selector`` step is present in every trial pipeline; in
+            ``'disabled'`` mode it is absent; in ``'auto'`` mode Optuna itself
+            chooses ``use_feature_selection`` (True/False) on validation
+            splits in competition with model hyperparameters. For
+            ``isotonic_regression`` selection is forcibly disabled (a
+            univariate algorithm).
 
     Returns:
-        tuple[Any, dict[str, Any], float]: Кортеж, содержащий:
-            - best_model: Обученная модель с лучшими параметрами.
-            - best_params: Словарь найденных оптимальных гиперпараметров
-              (в режиме ``'auto'`` содержит служебный ключ
-              ``use_feature_selection`` с решением по отбору).
-            - best_score: Лучшее значение метрики на валидации.
+        tuple[Any, dict[str, Any], float]: A tuple containing:
+            - best_model: The trained model with the best parameters.
+            - best_params: Dict of the found optimal hyperparameters
+              (in ``'auto'`` mode it contains the auxiliary
+              ``use_feature_selection`` key with the selection decision).
+            - best_score: The best metric value on validation.
             If no trial finished with a valid result (e.g., every trial was
             turned into ``optuna.TrialPruned`` by a non-fatal error, every
             trial failed, or ``n_trials`` is 0 — an empty trial list),
@@ -1479,14 +1491,14 @@ def optimize(
             caller (the algorithm is excluded from candidates).
 
     Raises:
-        ValueError: Если ``n_trials`` является отрицательным целым числом
-            (не целым числом). Значение ``n_trials=0`` допустимо и приводит
-            к пустому списку триалов → ``(None, None, None)`` (issue #32).
-        HyperoptError: Если для выбранного алгоритма не определено пространство
-            поиска или передан невалидный ``feature_selection_cfg``.
+        ValueError: If ``n_trials`` is a negative integer (or not an
+            integer). The value ``n_trials=0`` is allowed and leads to an
+            empty trial list → ``(None, None, None)``.
+        HyperoptError: If no search space is defined for the selected
+            algorithm, or an invalid ``feature_selection_cfg`` is passed.
     """
-    # Тонкая обёртка: вся логика прогона вынесена в шаги _OptimizeRunner
-    # (issue #30), чтобы optimize() оставалась читаемой точкой входа.
+    # Thin wrapper: all run logic is moved into the _OptimizeRunner steps so
+    # that optimize() stays a readable entry point.
     return _OptimizeRunner(
         algo_name=algo_name,
         X=X,

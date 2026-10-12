@@ -1,17 +1,17 @@
 """
-Centralized Logging Engine: Интеллектуальный менеджер потоков событий.
-Модуль обеспечивает унифицированное логирование для всей библиотеки с поддержкой
-безопасной многопроцессной записи и иерархической фильтрации.
-Ключевые возможности:
-    1. Process-Safe Rolling: Интеграция `ConcurrentRotatingFileHandler` для
-       предотвращения повреждения логов
-       при одновременной записи из разных процессов.
-    2. Seamless Fallback: Автоматический откат на стандартный `RotatingFileHandler`
-       при отсутствии сторонних зависимостей, обеспечивающий стабильность системы.
-    3. Singleton-Like Hierarchy: Централизованная настройка базового логгера
-       через `setup_logging`, исключающая дублирование сообщений в дочерних модулях.
-    4. Atomic Initialization: Механизмы проверки существующих обработчиков
-       предотвращают повторную инициализацию и "засорение" вывода (Log Duplication).
+Centralized Logging Engine: an intelligent event stream manager.
+The module provides unified logging for the entire library with support for
+safe multi-process writing and hierarchical filtering.
+Key features:
+    1. Process-Safe Rolling: `ConcurrentRotatingFileHandler` integration to
+       prevent log corruption
+       when writing concurrently from different processes.
+    2. Seamless Fallback: Automatic rollback to the standard `RotatingFileHandler`
+       when third-party dependencies are absent, ensuring system stability.
+    3. Singleton-Like Hierarchy: Centralized configuration of the base logger
+       via `setup_logging`, preventing message duplication in child modules.
+    4. Atomic Initialization: existing-handler checks
+       prevent re-initialization and "cluttering" of the output (Log Duplication).
 """
 
 import logging
@@ -20,32 +20,32 @@ from typing import Any
 
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
-# Используем Any для динамического хендлера, чтобы избежать конфликта типов в mypy
+# Use Any for the dynamic handler to avoid a type conflict in mypy
 HandlerClass: Any
 
 
-# Импортируем специальный обработчик
+# Import the special handler
 try:
     from concurrent_log_handler import ConcurrentRotatingFileHandler
 
     HandlerClass = ConcurrentRotatingFileHandler
 except ImportError:
-    # Фолбэк на стандартный обработчик,
-    # если библиотека не установлена
+    # Fall back to the standard handler
+    # if the library is not installed
     from logging.handlers import RotatingFileHandler
 
     HandlerClass = RotatingFileHandler
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Получить именованный логгер в рамках иерархии библиотеки.
-    Обеспечивает получение объекта логгера, который автоматически наследует
-    конфигурацию от базового узла 'configurable_automl_engine'.
+    """Get a named logger within the library hierarchy.
+    Returns a logger object that automatically inherits its configuration
+    from the base node 'configurable_automl_engine'.
 
     Args:
-        name (str): Уникальное имя логгера (обычно __name__ модуля).
+        name (str): Unique logger name (usually the module's __name__).
     Returns:
-        logging.Logger: Настроенный экземпляр логгера.
+        logging.Logger: A configured logger instance.
     """
     return logging.getLogger(name)
 
@@ -57,30 +57,30 @@ def setup_logging(
     console_level: int = logging.INFO,
     log_format: str = DEFAULT_FORMAT,
     max_bytes: int = 10 * 1024 * 1024,  # 10 MB
-    backup_count: int = 5,  # Хранить 5 старых файлов
+    backup_count: int = 5,  # Keep 5 old files
 ) -> None:
-    """Глобальная инициализация системы логирования.
-    Создает инфраструктуру для записи событий: формирует файловую структуру,
-    настраивает ротацию логов и предотвращает дублирование обработчиков.
-    Использует защищенный механизм записи для многопроцессных сред.
+    """Global initialization of the logging system.
+    Creates the infrastructure for writing events: builds the file layout,
+    configures log rotation and prevents handler duplication.
+    Uses a protected writing mechanism for multi-process environments.
     Args:
-        logfile (Path): Путь к целевому файлу лога.
-        log_to_console (bool): Флаг активации вывода в StreamHandler (STDOUT).
-        level (int): Общий порог фильтрации и уровень для файлового вывода.
-        console_level (int): Индивидуальный порог фильтрации для консоли.
-        log_format (str): Шаблон форматирования строки сообщения.
-        max_bytes (int): Лимит размера одного файла перед ротацией (в байтах).
-        backup_count (int): Количество архивных файлов, хранящихся на диске.
+        logfile (Path): Path to the target log file.
+        log_to_console (bool): Whether to enable output via a StreamHandler (STDOUT).
+        level (int): Global filtering threshold and file output level.
+        console_level (int): Individual console filtering threshold.
+        log_format (str): Message string formatting template.
+        max_bytes (int): Maximum size of a single file before rotation (in bytes).
+        backup_count (int): Number of archived files kept on disk.
     """
     base_logger = logging.getLogger("configurable_automl_engine")
 
-    # Устанавливаем общий уровень доступа "снизу"
+    # Set the overall level on the base logger
     base_logger.setLevel(level)
 
-    # Создаем директорию, если она не существует
+    # Create the directory if it does not exist
     logfile.parent.mkdir(parents=True, exist_ok=True)
 
-    # Настраиваем обработчик файла
+    # Configure the file handler
     fh = HandlerClass(
         filename=str(logfile),
         mode="a",
@@ -92,12 +92,12 @@ def setup_logging(
     formatter = logging.Formatter(log_format)
     fh.setFormatter(formatter)
 
-    # Добавляем обработчик, если такой еще не добавлен
+    # Add the handler if one is not already present
     if not any(isinstance(h, logging.FileHandler) for h in base_logger.handlers):
         base_logger.addHandler(fh)
-        base_logger.info(f"Логирование в файл инициализировано: {logfile}")
+        base_logger.info(f"File logging initialized: {logfile}")
 
-    # Проверяем, нет ли уже консольного обработчика
+    # Check whether a console handler is already present
     if log_to_console and not any(
         type(h) is logging.StreamHandler for h in base_logger.handlers
     ):

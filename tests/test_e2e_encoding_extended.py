@@ -1,9 +1,9 @@
-"""E2E-тесты новых стратегий кодирования категориальных признаков (issue #20).
+"""E2E tests of the new categorical encoding strategies.
 
-Проверяют полный цикл: обучение ``ModelTrainer`` и ``train_best_model``
-с target/frequency/hashing кодированием, предсказание на новых данных с
-неизвестными категориями, сохранение/загрузку модели, совместную работу
-с оверсэмплингом, high-cardinality режим и единообразие HPO/финального обучения.
+Cover the full cycle: training via ``ModelTrainer`` and ``train_best_model``
+with target/frequency/hashing encoding, prediction on new data with unknown
+categories, model save/load, interoperability with oversampling, the
+high-cardinality mode, and consistency between HPO and final training.
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 
 
 def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
-    """Синтетический датасет регрессии с категориальными признаками
-    (включая колонку высокой кардинальности)."""
+    """Synthetic regression dataset with categorical features
+    (including a high-cardinality column)."""
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
-    high_card = [f"city_{i % 40}" for i in range(n)]  # высокая кардинальность
+    high_card = [f"city_{i % 40}" for i in range(n)]  # high cardinality
     num = rng.normal(size=n)
 
     target = (
@@ -49,7 +49,7 @@ def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
 
 
 def _make_binary_df(n: int = 200, seed: int = 7) -> pd.DataFrame:
-    """Синтетический датасет с бинарным таргетом (для оверсэмплинга SMOTE)."""
+    """Synthetic dataset with a binary target (for SMOTE oversampling)."""
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
@@ -80,7 +80,7 @@ def _make_config(
     high_cardinality_encoding: str | None = None,
     hashing_n_components: int = 16,
 ) -> dict[str, Any]:
-    """Собрать конфигурацию для train_best_model."""
+    """Build a configuration for train_best_model."""
     general: dict[str, Any] = {
         "comparison_metric": "r2",
         "path_to_model": str(model_path),
@@ -119,10 +119,10 @@ def _make_config(
 
 
 def _assert_valid_result(result: dict[str, Any]) -> None:
-    """Общие проверки структуры результата train_best_model."""
+    """Common structural checks for the train_best_model result."""
     assert isinstance(result, dict)
     assert result["score"] is not None
-    assert np.isfinite(result["score"]), f"score не конечен: {result['score']}"
+    assert np.isfinite(result["score"]), f"score is not finite: {result['score']}"
     assert isinstance(result["params"], dict) and result["params"]
     assert Path(result["model_path"]).exists()
 
@@ -131,7 +131,7 @@ def _assert_valid_result(result: dict[str, Any]) -> None:
 def test_model_trainer_new_strategies_train_and_predict(
     tmp_path: Path, encoding: str
 ) -> None:
-    """ModelTrainer обучается с каждой новой стратегией и предсказывает."""
+    """ModelTrainer trains with each new strategy and predicts."""
     df = _make_regression_df(n=120, seed=3)
     trainer = ModelTrainer(
         algorithm="elasticnet",
@@ -150,7 +150,7 @@ def test_model_trainer_new_strategies_train_and_predict(
 
 @pytest.mark.parametrize("encoding", ["target", "frequency", "hashing", "ordinal"])
 def test_model_trainer_predict_unknown_categories(encoding: str) -> None:
-    """Неизвестные категории на предсказании не роняют модель."""
+    """Unknown categories at prediction time do not crash the model."""
     df = _make_regression_df(n=100, seed=5)
     trainer = ModelTrainer(
         algorithm="decision_tree",
@@ -173,7 +173,7 @@ def test_model_trainer_predict_unknown_categories(encoding: str) -> None:
 
 @pytest.mark.parametrize("encoding", ["target", "frequency", "hashing"])
 def test_model_trainer_save_load_roundtrip(tmp_path: Path, encoding: str) -> None:
-    """После сохранения/загрузки предсказания совпадают (та же стратегия)."""
+    """After save/load, predictions match (the same strategy)."""
     df = _make_regression_df(n=100, seed=6)
     X = df.drop(columns=["target"])
     y = df["target"]
@@ -197,7 +197,7 @@ def test_model_trainer_save_load_roundtrip(tmp_path: Path, encoding: str) -> Non
 
 
 def test_model_trainer_high_cardinality_mode() -> None:
-    """Автоматический HC-режим в ModelTrainer: обучение и предсказание."""
+    """Automatic HC mode in ModelTrainer: training and prediction."""
     df = _make_regression_df(n=150, seed=9)
     trainer = ModelTrainer(
         algorithm="random_forest",
@@ -236,14 +236,14 @@ def test_model_trainer_high_cardinality_mode() -> None:
 def test_model_trainer_invalid_encoding_params(
     kwargs: dict[str, Any], match: str
 ) -> None:
-    """Некорректные параметры кодирования отклоняются при инициализации."""
+    """Invalid encoding parameters are rejected at initialization."""
     with pytest.raises(TrainingError, match=match):
         ModelTrainer(algorithm="elasticnet", **kwargs)
 
 
 def test_tuner_optimize_numpy_without_features_warns() -> None:
-    """tuner.optimize на numpy без категориальных признаков не падает
-    (модель используется без препроцессора)."""
+    """tuner.optimize on numpy without categorical features does not fail
+    (the model is used without a preprocessor)."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
@@ -266,7 +266,7 @@ def test_tuner_optimize_numpy_without_features_warns() -> None:
 
 
 def test_tuner_optimize_numpy_with_features_warns(caplog) -> None:
-    """Явно переданные категориальные признаки с numpy X -> предупреждение."""
+    """Explicitly passed categorical features with numpy X -> a warning."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
@@ -292,7 +292,7 @@ def test_tuner_optimize_numpy_with_features_warns(caplog) -> None:
 
 @pytest.mark.parametrize("encoding", ["target", "frequency", "hashing"])
 def test_model_trainer_with_oversampling(tmp_path: Path, encoding: str) -> None:
-    """Совместная работа новых стратегий с оверсэмплингом (кодирование до синтеза)."""
+    """New strategies work together with oversampling (encoding before synthesis)."""
     df = _make_binary_df()
     trainer = ModelTrainer(
         algorithm="random_forest",
@@ -316,7 +316,7 @@ def test_model_trainer_with_oversampling(tmp_path: Path, encoding: str) -> None:
 
 @pytest.mark.parametrize("encoding", ["target", "frequency", "hashing"])
 def test_train_best_model_new_strategies(tmp_path: Path, encoding: str) -> None:
-    """Полный цикл train_best_model с новой стратегией."""
+    """Full train_best_model pipeline with the new strategy."""
     df = _make_regression_df()
     model_path = tmp_path / "models" / f"{encoding}.pkl"
     config = _make_config(model_path, encoding=encoding, n_trials=2)
@@ -330,7 +330,7 @@ def test_train_best_model_new_strategies(tmp_path: Path, encoding: str) -> None:
 
 
 def test_train_best_model_high_cardinality_auto_mode(tmp_path: Path) -> None:
-    """Автоматический HC-режим через конфигурацию эксперимента."""
+    """Automatic HC mode via experiment configuration."""
     df = _make_regression_df()
     model_path = tmp_path / "models" / "hc.pkl"
     config = _make_config(
@@ -350,7 +350,7 @@ def test_train_best_model_high_cardinality_auto_mode(tmp_path: Path) -> None:
 
 
 def test_train_best_model_hashing_with_oversampling(tmp_path: Path) -> None:
-    """Hashing + оверсэмплинг: пайплайн обучается без ошибок."""
+    """Hashing + oversampling: the pipeline trains without errors."""
     df = _make_binary_df()
     model_path = tmp_path / "models" / "hash_os.pkl"
     config = _make_config(
@@ -370,7 +370,7 @@ def test_train_best_model_hashing_with_oversampling(tmp_path: Path) -> None:
 
 
 def test_tuner_optimize_new_encoding_strategies() -> None:
-    """tuner.optimize работает с новыми стратегиями (единая логика с фит.обучением)."""
+    """tuner.optimize works with the new strategies (the same logic as the final fit)."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
@@ -396,7 +396,7 @@ def test_tuner_optimize_new_encoding_strategies() -> None:
 
 
 def test_tuner_optimize_high_cardinality_mode() -> None:
-    """tuner.optimize с HC-режимом возвращает модель."""
+    """tuner.optimize with HC mode returns a model."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
@@ -422,7 +422,7 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
     assert np.isfinite(score)
 
 
-# ───────────────── Sparse-выход hashing (issue #4) ─────────────────
+# ───────────────── Sparse hashing output ─────────────────
 
 
 @pytest.mark.parametrize(
@@ -435,8 +435,8 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
 def test_model_trainer_sparse_rejecting_algos_with_hashing(
     algorithm: str, hyperparams: dict[str, Any]
 ) -> None:
-    """GPR/ARD отвергают scipy.sparse: для них автоматически активируется
-    force_dense_output, поэтому обучение с hashing-кодированием не падает."""
+    """GPR/ARD reject scipy.sparse: force_dense_output is automatically enabled
+    for them, so training with hashing encoding does not fail."""
     df = _make_regression_df(n=60, seed=17)
     trainer = ModelTrainer(
         algorithm=algorithm,
@@ -453,9 +453,9 @@ def test_model_trainer_sparse_rejecting_algos_with_hashing(
 
 
 def test_model_trainer_isotonic_hashing_single_feature() -> None:
-    """Isotonic требует один признак и отвергает sparse: одна категориальная
-    колонка с hashing_n_components=1 даёт ровно одну колонку, а
-    force_dense_output активируется по флагу алгоритма."""
+    """Isotonic requires a single feature and rejects sparse: one categorical
+    column with hashing_n_components=1 yields exactly one column, and
+    force_dense_output is activated via the algorithm flag."""
     df = _make_regression_df(n=60, seed=19)[["color", "target"]]
     trainer = ModelTrainer(
         algorithm="isotonic_regression",
@@ -473,8 +473,8 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
 
 
 def test_hashing_preprocessor_output_is_sparse() -> None:
-    """Сквозная проверка OOM-фикса: препроцессор с hashing отдаёт csr_matrix
-    (а не плотную float64-матрицу), экономя память на больших таблицах."""
+    """End-to-end check of the OOM fix: the preprocessor with hashing returns a
+    csr_matrix (not a dense float64 matrix), saving memory on large tables."""
     from scipy import sparse
 
     from configurable_automl_engine.preprocessing import build_preprocessor
@@ -491,7 +491,7 @@ def test_hashing_preprocessor_output_is_sparse() -> None:
     out = pre.fit_transform(X, df["target"])
     assert sparse.issparse(out)
     assert out.format == "csr"
-    # nnz = n_rows * (n_cat_cols + n_num_cols): одна единица на строку на
-    # hashing-колонку плюс плотная числовая часть — а не n_rows * 48
+    # nnz = n_rows * (n_cat_cols + n_num_cols): one unit per row per
+    # hashing column plus the dense numeric part — not n_rows * 48
     assert out.nnz == len(df) * 4
     assert out.shape[1] == 3 * 16 + 1

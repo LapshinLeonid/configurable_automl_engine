@@ -6,72 +6,72 @@ import pandas as pd
 
 def create_mock_df(rows=100, cols=5, target="target"):
     """
-    Генерирует синтетический DataFrame для тестирования.
+    Generates a synthetic DataFrame for testing.
 
-    Параметры:
+    Parameters:
     ----------
     rows : int
-        Количество строк в генерируемом наборе данных.
+        Number of rows in the generated dataset.
     cols : int
-        Количество признаков (колонок с префиксом 'feature_').
+        Number of features (columns prefixed with 'feature_').
     target : str
-        Название целевой переменной.
+        Name of the target variable.
 
-    Возвращает:
+    Returns:
     -----------
     pd.DataFrame
-        Объект DataFrame, содержащий случайные числа с плавающей точкой.
+        DataFrame object containing random floating-point numbers.
     """
 
-    # Фиксируем seed для воспроизводимости тестов
+    # Fix the seed for test reproducibility
     np.random.seed(42)
 
-    # Генерация названий колонок: feature_0, feature_1, ...
+    # Generate column names: feature_0, feature_1, ...
     column_names = [f"feature_{i}" for i in range(cols)]
 
-    # Генерация матрицы признаков (нормальное распределение)
+    # Generate the feature matrix (normal distribution)
     data = np.random.randn(rows, cols)
 
-    # Создание DataFrame
+    # Create the DataFrame
     df = pd.DataFrame(data, columns=column_names)
 
-    # Генерация целевой переменной (бинарная классификация или регрессия)
-    # В данном случае создаем случайную непрерывную величину
+    # Generate the target variable (binary classification or regression)
+    # In this case, generate a random continuous value
     df[target] = np.random.rand(rows)
 
     return df
 
 
 if __name__ == "__main__":
-    # Пример использования для проверки
+    # Usage example for verification
     test_df = create_mock_df(rows=10, cols=3)
-    print("Сгенерированный DataFrame:")
+    print("Generated DataFrame:")
     print(test_df.head())
-    print(f"\nФормат данных: {test_df.shape}")
+    print(f"\nData format: {test_df.shape}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  T9 (issue #70): эталонные и вырожденные датасеты регрессионного бенчмарка
-#  «до/после» Sanity Gate. Все генераторы используют фиксированные seed'ы —
-#  воспроизводимость прогона гарантирована (чувствительные реальные данные
-#  в git не добавляются, как в issue #60).
+#  Reference and degenerate datasets for the regression
+#  benchmark "before/after" the Sanity Gate. All generators use fixed seeds,
+#  so run reproducibility is guaranteed (sensitive real data is not added to
+#  git).
 #
-#  Возвращаемый формат: (X: np.ndarray (n, p), y: np.ndarray (n,)).
+#  Returned format: (X: np.ndarray (n, p), y: np.ndarray (n,)).
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def make_reference_noisy_r2_03(n: int = 300, p: int = 8, seed: int = 42):
-    """Эталонный зашумлённый датасет с теоретическим R²≈0.3.
+    """Reference noisy dataset with a theoretical R²≈0.3.
 
-    Линейный сигнал (сумма первых 4 признаков) + шум, подобранный так, чтобы
-    R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3 ровно. Честные линейные
-    модели (ridge/lasso/elasticnet) обязаны проходить все контуры гейта:
+    Linear signal (sum of the first 4 features) plus noise tuned so that
+    R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3 exactly. Honest linear
+    models (ridge/lasso/elasticnet) must pass all the gate contours:
     diversity ≈ R² ≈ 0.3 > 0.15, gap ≤ 1.5.
 
     Args:
-        n: Число строк.
-        p: Число признаков.
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -87,19 +87,19 @@ def make_reference_noisy_r2_03(n: int = 300, p: int = 8, seed: int = 42):
 def make_reference_wide(
     n: int = 300, p: int = 200, k: int = 10, w: float = 0.6, seed: int = 42
 ):
-    """Эталонный широкий датасет: сотни признаков, мало информативных.
+    """Reference wide dataset: hundreds of features, few informative ones.
 
-    Слабая линейная связь через ``k`` информативных признаков на фоне p−k
-    шумовых колонок. Sparse-линейные модели (lasso/elasticnet) честно
-    выигрывают; ridge с дефолтным пространством поиска заметно хуже и не
-    попадает в пул финалистов. Гейт не должен срабатывать.
+    Weak linear relationship through ``k`` informative features against p−k
+    noise columns. Sparse-linear models (lasso/elasticnet) honestly win;
+    ridge with the default search space is noticeably worse and does not
+    make it into the finalist pool. The gate must not fire.
 
     Args:
-        n: Число строк.
-        p: Число признаков (сотни).
-        k: Число информативных признаков.
-        w: Вес информативных признаков.
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features (hundreds).
+        k: Number of informative features.
+        w: Weight of informative features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -111,16 +111,16 @@ def make_reference_wide(
 
 
 def make_reference_small_n(n: int = 80, p: int = 6, seed: int = 42):
-    """Эталонный датасет малого объёма N (малые выборки, T9).
+    """Reference small-N dataset (small samples).
 
-    Чистый линейный сигнал с умеренным шумом: на N=80 честные линейные
-    модели стабильно проходят гейт (diversity ≫ 0.15, gap ≤ 1.5), разброс
-    результатов подавлен фиксированным seed.
+    Clean linear signal with moderate noise: at N=80 honest linear models
+    stably pass the gate (diversity ≫ 0.15, gap ≤ 1.5), and the scatter
+    of results is suppressed by the fixed seed.
 
     Args:
-        n: Число строк (малое N).
-        p: Число признаков.
-        seed: Зерно генератора.
+        n: Number of rows (small N).
+        p: Number of features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -134,19 +134,19 @@ def make_reference_small_n(n: int = 80, p: int = 6, seed: int = 42):
 def make_reference_boundary_diversity(
     n: int = 400, p: int = 4, signal: float = 0.46, seed: int = 42
 ):
-    """Эталонный граничный датасет: diversity честной модели у порога 0.15.
+    """Reference boundary dataset: diversity of an honest model near 0.15.
 
-    Слабый сигнал: OOF-diversity обученного Ridge ≈ 0.155 при пороге
-    ``min_prediction_diversity=0.15`` (запас < 5%). Документированный порог
-    допуска «ухудшение ≤ ε»: модель, находящаяся на границе порога, НЕ должна
-    дисквалифицироваться (равенство/строгий недобор — единственная точка
-    провала), и победитель не должен меняться.
+    Weak signal: OOF diversity of a trained Ridge ≈ 0.155 with the threshold
+    ``min_prediction_diversity=0.15`` (margin < 5%). Documented tolerance for
+    "deterioration ≤ ε": a model sitting at the threshold boundary must NOT be
+    disqualified (equality/strict shortfall is the only failure point), and
+    the winner must not change.
 
     Args:
-        n: Число строк.
-        p: Число признаков.
-        signal: Амплитуда сигнала (определяет diversity ≈ signal²/(signal²+1)).
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features.
+        signal: Signal amplitude (defines diversity ≈ signal²/(signal²+1)).
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -158,16 +158,16 @@ def make_reference_boundary_diversity(
 
 
 def make_degenerate_flat_shelf(n: int = 150, p: int = 10, seed: int = 42):
-    """Вырожденный датасет «полка»: сильная регуляризация зануляет веса.
+    """Degenerate "shelf" dataset: strong regularization zeroes the weights.
 
-    Слабая линейная связь: ElasticNet с alpha=500 обнуляет ВСЕ коэффициенты
-    (``coef_ == 0``) и выдаёт плоские (константные) OOF-предсказания — гейт
-    обязан сработать (контуры А/Б/В). Честный Ridge на тех же данных проходит.
+    Weak linear relationship: ElasticNet with alpha=500 zeroes ALL coefficients
+    (``coef_ == 0``) and produces flat (constant) OOF predictions — the gate
+    must fire (contours A/B/C). An honest Ridge on the same data passes.
 
     Args:
-        n: Число строк.
-        p: Число признаков.
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -179,16 +179,16 @@ def make_degenerate_flat_shelf(n: int = 150, p: int = 10, seed: int = 42):
 
 
 def make_degenerate_tanh_plateau(n: int = 200, p: int = 6, seed: int = 42):
-    """Вырожденный датасет «плато tanh»: SVR-sigmoid упирается в плато.
+    """Degenerate "tanh plateau" dataset: SVR-sigmoid hits a plateau.
 
-    Линейный сигнал с шумом: SVR(kernel='sigmoid', gamma=0.001, coef0=0.0)
-    выдаёт почти константные предсказания (разброс ≪ разброса y) — гейт
-    обязан сработать (контур А). Честный SVR-RBF (C=1.0) проходит.
+    Linear signal with noise: SVR(kernel='sigmoid', gamma=0.001, coef0=0.0)
+    produces almost constant predictions (scatter ≪ scatter of y) — the gate
+    must fire (contour A). An honest SVR-RBF (C=1.0) passes.
 
     Args:
-        n: Число строк.
-        p: Число признаков.
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).
@@ -200,16 +200,16 @@ def make_degenerate_tanh_plateau(n: int = 200, p: int = 6, seed: int = 42):
 
 
 def make_degenerate_overfit(n: int = 120, p: int = 6, seed: int = 42):
-    """Вырожденный датасет «переобучение»: дерево с RMSE_train≈0.
+    """Degenerate "overfit" dataset: a tree with RMSE_train≈0.
 
-    Линейный сигнал с шумом: DecisionTreeRegressor(max_depth=20) идеально
-    обучается на train (RMSE_full≈0) — гейт обязан сработать (контур Г,
-    деление на ноль). Честный Ridge проходит.
+    Linear signal with noise: DecisionTreeRegressor(max_depth=20) learns the
+    train set perfectly (RMSE_full≈0) — the gate must fire (contour D,
+    division by zero). An honest Ridge passes.
 
     Args:
-        n: Число строк.
-        p: Число признаков.
-        seed: Зерно генератора.
+        n: Number of rows.
+        p: Number of features.
+        seed: Random generator seed.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: (X, y).

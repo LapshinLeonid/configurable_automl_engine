@@ -5,8 +5,8 @@ import configurable_automl_engine as caml
 data = load_diabetes(as_frame=True)
 df = data.frame
 
-# NOTE (epic #74): the config below uses the target pipeline schema — explicit
-# `select` and `refine` steps (tasks R2/R3). The pipeline runs end-to-end:
+# NOTE: the config below uses the target pipeline schema — explicit
+# `select` and `refine` steps. The pipeline runs end-to-end:
 # coarse HPO -> Sanity Gate keeps the top-3 candidates -> warm-started refine
 # -> terminal Sanity Gate re-audits the refined models and picks the winner.
 
@@ -67,7 +67,7 @@ results = caml.train_best_model(config=config, df=df, target="target")
 print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 print(f"Metric: {results['metric']}, Model: {results['model_path']}")
 
-# Report (T6, epic #74): every `select` step with `strategy: sanity_gate`
+# Report: every `select` step with `strategy: sanity_gate`
 # adds its own section to `result["sanity_gate"]` keyed by the phase name.
 for phase_name, section in results.get("sanity_gate", {}).items():
     print(f"\nSanity Gate report — phase '{phase_name}'")

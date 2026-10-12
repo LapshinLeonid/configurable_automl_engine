@@ -1,62 +1,62 @@
-"""Preprocessing: единая точка построения препроцессора признаков.
+"""Preprocessing: a single entry point for building the feature preprocessor.
 
-Модуль инкапсулирует низкоуровневые кирпичи подготовки данных:
+The module encapsulates the low-level data preparation building blocks:
 
-    1. :func:`_clean_uninformative_features` — удаление неинформативных
-       колонок (полностью пустых и строго константных) до определения типов
-       признаков и сборки препроцессора (issue #57). Применяется одинаково
-       в фазе HPO (``tuner.optimize``) и финальном обучении
-       (``trainer.ModelTrainer``), чтобы обе фазы работали с согласованным
-       набором признаков.
-    2. :func:`detect_feature_types` — автоопределение категориальных и
-       числовых колонок по ``pd.DataFrame``.
-    3. :func:`build_preprocessor` — сборка ``sklearn.ColumnTransformer``
-       с предобработкой категорий (импутация ``most_frequent`` + выбранная
-       стратегия кодирования) и скалированием для числовых признаков.
-       Стратегия обработки числовых признаков (стратегия импутации и тип
-       масштабирования) задаётся параметрами
-       ``imputation_strategy``/``scaling`` и обычно берётся из адаптивного
-       пресета предобработки (:mod:`preprocessing_presets`), который
-       автоматически выбирается по регрессионному алгоритму. Числовая
-       импутация выполняется с ``add_indicator=True`` (по умолчанию): для
-       признаков с пропусками в обучающей выборке добавляются бинарные
-       колонки-индикаторы пропусков (issue #56).
+    1. :func:`_clean_uninformative_features` — removal of uninformative
+       columns (fully empty and strictly constant) before feature type
+       detection and preprocessor assembly. It is applied identically in the
+       HPO phase (``tuner.optimize``) and in final training
+       (``trainer.ModelTrainer``), so that both phases work with a consistent
+       set of features.
+    2. :func:`detect_feature_types` — automatic detection of categorical and
+       numerical columns from a ``pd.DataFrame``.
+    3. :func:`build_preprocessor` — assembly of an ``sklearn.ColumnTransformer``
+       with categorical preprocessing (``most_frequent`` imputation + the
+       selected encoding strategy) and scaling for numerical features.
+       The numerical feature handling strategy (imputation strategy and
+       scaling type) is set via the ``imputation_strategy``/``scaling``
+       parameters and is usually taken from the adaptive preprocessing preset
+       (:mod:`preprocessing_presets`), which is selected automatically based
+       on the regression algorithm. Numerical imputation is performed with
+       ``add_indicator=True`` (the default): for features with missing values
+       in the training set, binary missing-value indicator columns are added.
 
-Поддерживаемые стратегии кодирования категориальных признаков (issue #20):
+Supported categorical encoding strategies:
 
-    * **one_hot** (по умолчанию) — ``OneHotEncoder``: каждая категория
-      становится бинарной колонкой; неизвестные категории игнорируются.
-    * **ordinal** — ``OrdinalEncoder``: одна числовая колонка на категорию;
-      неизвестные категории отображаются в ``-1``.
-    * **target** — :class:`TargetEncodingTransformer`: среднее целевой
-      переменной по категории со сглаживанием; статистики считаются только
-      по обучающей части (в ``fit``), fallback для неизвестных категорий —
-      глобальное среднее (или настраиваемое значение). :meth:`~TargetEncodingTransformer.fit_transform`
-      выполняет кросс-фиттинг (issue #112): каждая обучающая строка
-      кодируется средними без собственного ``y``, что исключает утечку
-      «строка в свой признак» на высококардинальных колонках.
-    * **frequency** — :class:`FrequencyEncodingTransformer`: относительная
-      частота категории в обучающей выборке; неизвестные категории -> ``0.0``.
-    * **hashing** — :class:`HashingEncodingTransformer`: детерминированное
-      хеширование категорий в фиксированное число бинарных колонок
-      (``n_components``); неизвестные категории хешируются тем же способом.
-      Выход разреженный (``scipy.sparse.csr_matrix``), как у стандартного
-      ``FeatureHasher`` из sklearn, — это исключает OOM на колонках высокой
-      кардинальности больших датасетов. Для алгоритмов, отвергающих sparse
-      (GPR/Isotonic/ARD), ``build_preprocessor`` принудительно возвращает
-      плотную матрицу (``force_dense_output``).
+* **one_hot** (default) — ``OneHotEncoder``: each category becomes a
+      binary column; unknown categories are ignored.
+    * **ordinal** — ``OrdinalEncoder``: one numerical column per category;
+      unknown categories are mapped to ``-1``.
+    * **target** — :class:`TargetEncodingTransformer`: mean of the target
+      variable per category with smoothing; statistics are computed only on
+      the training part (in ``fit``), the fallback for unknown categories is
+      the global mean (or a configurable value).
+      :meth:`~TargetEncodingTransformer.fit_transform` performs
+      cross-fitting: each training row is encoded with means that exclude its
+      own ``y``, which removes the "row into its own feature" leakage on
+      high-cardinality columns.
+    * **frequency** — :class:`FrequencyEncodingTransformer`: relative
+      frequency of a category in the training set; unknown categories -> ``0.0``.
+    * **hashing** — :class:`HashingEncodingTransformer`: deterministic
+      hashing of categories into a fixed number of binary columns
+      (``n_components``); unknown categories are hashed the same way.
+      The output is sparse (``scipy.sparse.csr_matrix``), like the standard
+      sklearn ``FeatureHasher``, which avoids OOM on high-cardinality columns
+      of large datasets. For algorithms that reject sparse input
+      (GPR/Isotonic/ARD), ``build_preprocessor`` forcibly returns a dense
+      matrix (``force_dense_output``).
 
-Для колонок высокой кардинальности поддерживается автоматический режим:
-колонки, число уникальных значений которых превышает
-``high_cardinality_threshold``, кодируются стратегией
-``high_cardinality_encoding``, остальные — стратегией ``encoding``.
-Разделение вычисляется в :meth:`SplitCategoricalEncoder.fit` по фактическим
-данным (обучающей части), поэтому решение не зависит от валидационных данных.
+An automatic mode is supported for high-cardinality columns: columns whose
+number of unique values exceeds ``high_cardinality_threshold`` are encoded
+with the ``high_cardinality_encoding`` strategy, and the rest with the
+``encoding`` strategy. The split is computed in :meth:`SplitCategoricalEncoder.fit`
+from the actual (training) data, so the decision does not depend on the
+validation data.
 
-Единая точка построения препроцессора используется в ОБОИХ местах обучения —
-фазе подбора гиперпараметров (``tuner.optimize``) и финальном обучении
-(``trainer.ModelTrainer``), что исключает рассинхрон логики предобработки
-между этапами (FR-4).
+The single preprocessor entry point is used in BOTH training locations — the
+hyperparameter tuning phase (``tuner.optimize``) and final training
+(``trainer.ModelTrainer``) — which prevents preprocessing logic from drifting
+between the stages.
 """
 
 from __future__ import annotations
@@ -101,17 +101,17 @@ _VALID_ENCODING_STRATEGIES = (
 
 
 def _to_string_array(X: Any) -> np.ndarray:
-    """Привести категориальную матрицу к строковому объектному массиву.
+    """Convert a categorical matrix to a string object array.
 
-    ``np.ndarray.astype(str)`` даёт fixed-width unicode (``<U``), а
-    ``SimpleImputer`` принимает только ``object``-массивы, поэтому после
-    преобразования в строки выполняется повторный каст в ``object`` dtype.
+    ``np.ndarray.astype(str)`` produces fixed-width unicode (``<U``), while
+    ``SimpleImputer`` only accepts ``object`` arrays, so after converting to
+    strings the result is cast back to the ``object`` dtype.
     """
     return np.asarray(X).astype(str).astype(object)
 
 
 def _as_2d(X: Any) -> np.ndarray:
-    """Привести вход трансформера к двумерному массиву (n_samples, n_cols)."""
+    """Reduce the transformer input to a two-dimensional array (n_samples, n_cols)."""
     arr = np.asarray(X)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
@@ -119,24 +119,24 @@ def _as_2d(X: Any) -> np.ndarray:
 
 
 def _validate_target(X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Подготовить (X, y) для target encoding.
+    """Prepare (X, y) for target encoding.
 
-    Возвращает двумерный категориальный массив ``X_arr`` и числовой
-    вещественный ``y_float`` (``ndarray`` формы ``(n_samples,)``). Проверки
-    общие для :meth:`TargetEncodingTransformer.fit` и
-    :meth:`TargetEncodingTransformer.fit_transform`, чтобы оба пути обучения
-    отклоняли некорректный таргет одинаковым образом.
+    Returns a two-dimensional categorical array ``X_arr`` and a numeric
+    float ``y_float`` (an ``ndarray`` of shape ``(n_samples,)``). The checks
+    are shared by :meth:`TargetEncodingTransformer.fit` and
+    :meth:`TargetEncodingTransformer.fit_transform`, so that both training
+    paths reject an invalid target the same way.
 
     Args:
-        X: Матрица категориальных признаков.
-        y: Целевая переменная. Обязательна — без неё кодирование невозможно.
+        X: Matrix of categorical features.
+        y: Target variable. Required — without it, encoding is impossible.
 
     Returns:
-        Кортеж ``(X_arr, y_float)``.
+        The ``(X_arr, y_float)`` tuple.
 
     Raises:
-        ValueError: Если ``y`` не передан, нечисловой либо содержит
-            нефинитные значения.
+        ValueError: If ``y`` is not passed, is non-numeric or contains
+            non-finite values.
     """
     if y is None:
         raise ValueError("TargetEncodingTransformer requires y during fit().")
@@ -156,56 +156,57 @@ def _validate_target(X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 # --------------------------------------------------------------------------- #
-#                       Кастомные энкодеры категорий                          #
+#                       Custom categorical encoders                           #
 # --------------------------------------------------------------------------- #
 
 
 class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
-    """Target encoding (mean encoding) со сглаживанием и fallback-значением.
+    """Target encoding (mean encoding) with smoothing and a fallback value.
 
-    Для каждой категориальной колонки среднее целевой переменной по категории
-    смешивается с глобальным средним через параметр сглаживания ``m``:
+    For each categorical column, the mean of the target variable per category
+    is blended with the global mean through the smoothing parameter ``m``:
 
         encoded(cat) = (n_cat * mean_cat + m * global_mean) / (n_cat + m)
 
-    Все статистики вычисляются **только** из переданного ``y``, поэтому
-    информация из валидационной/тестовой части не влияет на кодирование
-    (нет утечки train/test). Категории, отсутствовавшие в обучающей выборке,
-    отображаются в fallback-значение (глобальное среднее либо настраиваемое
-    через ``fallback``).
+    All statistics are computed **only** from the provided ``y``,
+    so information from the validation/test part does not affect the encoding
+    (no train/test leakage). Categories absent from the training set are
+    mapped to the fallback value (the global mean or a configurable value
+    via ``fallback``).
 
-    :meth:`fit_transform` дополнительно выполняет кросс-фиттинг (issue #112):
-    каждая обучающая строка кодируется средними, посчитанными по фолду без
-    неё самой, поэтому собственное значение ``y`` строки не участвует в её
-    же кодировании (нет утечки «строка в свой признак», которая завышает
-    корреляцию признака с ответом на обучении). Полные статистики по всей
-    выборке при этом фиксируются на самом энкодере, и последующий
-    :meth:`transform` (в т.ч. на новых данных) использует именно их.
+    :meth:`fit_transform` additionally performs cross-fitting: each training
+    row is encoded with means computed on a fold that excludes the row
+    itself, so the row's own ``y`` value does not participate in its own
+    encoding (no "row into its own feature" leakage that inflates the
+    feature-response correlation on training). The full-sample statistics are
+    stored on the encoder itself, and the subsequent :meth:`transform`
+    (including on new data) uses exactly those.
 
     Args:
-        smoothing: Параметр сглаживания ``m`` (``>= 0``). При ``m=0``
-            используется чистое среднее по категории; при больших ``m``
-            редкие категории приближаются к глобальному среднему.
-        fallback: Значение для категорий, отсутствующих в обучающей выборке.
-            ``None`` — использовать глобальное среднее целевой переменной.
-        cv: Число фолдов кросс-фиттинга в :meth:`fit_transform` (``>= 2``).
-            При числе строк меньше ``cv`` число фолдов уменьшается до числа
-            строк (leave-one-out), чтобы маленькие выборки не падали.
-        random_state: Зерно для перемешивания фолдов в :meth:`fit_transform`
-            (детерминизм кросс-фиттинга).
+        smoothing: Smoothing parameter ``m`` (``>= 0``). With ``m=0`` the
+            pure per-category mean is used; with larger ``m``, rare categories
+            approach the global mean.
+        fallback: Value for categories absent from the training set.
+            ``None`` — use the global mean of the target variable.
+        cv: Number of cross-fitting folds in :meth:`fit_transform` (``>= 2``).
+            When the number of rows is smaller than ``cv``, the number of
+            folds is reduced to the number of rows (leave-one-out), so that
+            small samples do not fail.
+        random_state: Seed for shuffling the folds in :meth:`fit_transform`
+            (determinism of the cross-fitting).
 
     Note:
-        Ключи статистик сохраняют исходные типы категорий (как и в
-        :class:`FrequencyEncodingTransformer`): standalone-вызовы с числовыми
-        категориями (``int``-коды, ``float``, ``bool``) корректно находят
-        соответствия в :meth:`transform`. Соответствие подбирается pandas по
-        совместимости dtype: ``int`` и ``float`` взаимозаменяемы, а ``bool`` —
-        отдельный dtype. Из-за стандартной Python-семантики равенства
-        (``True == 1``) при смешивании ``bool`` и ``int`` ``0/1`` возможны
-        неочевидные результаты, поэтому категории одного признака должны
-        сохранять один dtype в ``fit`` и ``transform``. При использовании через
-        :func:`build_preprocessor` категории заранее приводятся к строкам
-        (шаг ``to_string``), что исключает рассинхрон типов.
+        The statistic keys keep the original category types (as in
+        :class:`FrequencyEncodingTransformer`): standalone calls with numeric
+        categories (``int`` codes, ``float``, ``bool``) correctly find their
+        matches in :meth:`transform`. The matching is performed by pandas by
+        dtype compatibility: ``int`` and ``float`` are interchangeable, while
+        ``bool`` is a separate dtype. Due to the standard Python equality
+        semantics (``True == 1``), mixing ``bool`` and ``int`` ``0/1`` can
+        produce surprising results, so the categories of a single feature must
+        keep one dtype in ``fit`` and ``transform``. When used through
+        :func:`build_preprocessor`, categories are converted to strings in
+        advance (the ``to_string`` step), which rules out dtype mismatches.
     """
 
     def __init__(
@@ -221,25 +222,24 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         self.random_state = random_state
 
     def fit(self, X: Any, y: Any = None) -> TargetEncodingTransformer:
-        """Вычислить target-статистики по обучающим данным.
+        """Compute target statistics from the training data.
 
-        Статистики считаются по всей переданной выборке; полученный энкодер
-        применяется к новым данным через :meth:`transform`. Для обучения без
-        утечки «строка в свой признак» используйте :meth:`fit_transform`
-        (кросс-фиттинг).
+        The statistics are computed over the whole provided sample; the
+        resulting encoder is applied to new data through :meth:`transform`.
+        For training without the "row into its own feature" leakage, use
+        :meth:`fit_transform` (cross-fitting).
 
         Args:
-            X: Матрица категориальных признаков (строки после импутации).
-            y: Целевая переменная. Обязательна — без неё кодирование
-                невозможно.
+            X: Matrix of categorical features (rows after imputation).
+            y: Target variable. Required — without it, encoding is impossible.
 
         Returns:
-            Обученный трансформер. Статистики для каждой колонки хранятся в
-            ``statistics_`` как ``dict[Any, float]``: ключи повторяют исходные
-            значения категорий (типы не нормализуются к строкам).
+            Fitted transformer. Statistics for each column are stored in
+            ``statistics_`` as ``dict[Any, float]``: keys mirror the original
+            category values (types are not normalized to strings).
 
         Raises:
-            ValueError: Если ``y`` не передан либо содержит NaN.
+            ValueError: If ``y`` is not passed or contains NaN.
         """
         X_arr, y_float = _validate_target(X, y)
 
@@ -262,54 +262,54 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         return self
 
     def fit_transform(self, X: Any, y: Any = None, **fit_params: Any) -> np.ndarray:
-        """Закодировать обучающие строки кросс-фиттингом (issue #112).
+        """Encode training rows with cross-fitting.
 
-        Каждая строка кодируется статистиками, посчитанными по фолду, в
-        который она **не входит** (``KFold(cv, shuffle=True)``): собственное
-        значение ``y`` строки не участвует в её же кодировании, поэтому
-        закодированный признак не коррелирует с ответом на обучающей выборке
-        из-за утечки (критично для высококардинальных колонок с редкими
-        категориями). Для несмещённого :meth:`transform` на новых данных
-        полные статистики по всей выборке фиксируются на самом энкодере.
+        Each row is encoded with statistics computed on the fold it is **not**
+        in (``KFold(cv, shuffle=True)``): the row's own ``y`` value does not
+        participate in its own encoding, so the encoded feature does not
+        correlate with the response on the training set because of leakage
+        (critical for high-cardinality columns with rare categories). For an
+        unbiased :meth:`transform` on new data, the full-sample statistics are
+        stored on the encoder itself.
 
-        При числе строк меньше ``cv`` число фолдов уменьшается до числа строк
-        (leave-one-out); единственная строка кодируется полными статистиками
-        (кросс-фиттинг невозможен, значение совпадает в любом случае).
+        When the number of rows is smaller than ``cv``, the number of folds is
+        reduced to the number of rows (leave-one-out); a single row is encoded
+        with the full statistics (cross-fitting is impossible; the value
+        coincides with the own-row contribution in any case).
 
         Args:
-            X: Матрица категориальных признаков.
-            y: Целевая переменная. Обязательна.
-            **fit_params: Не используются (принимаются для совместимости
-                с пайплайнами sklearn).
+            X: Matrix of categorical features.
+            y: Target variable. Required.
+            **fit_params: Not used (accepted for compatibility with sklearn
+                pipelines).
 
         Returns:
-            Числовая матрица той же размерности, что и ``X``: закодированные
-            значения без вклада собственного ``y`` строки.
+            Numeric matrix of the same shape as ``X``: encoded values without
+            the contribution of the row's own ``y``.
 
         Raises:
-            ValueError: Если ``y`` не передан, нечисловой либо содержит
-                нефинитные значения, или ``cv < 2``.
+            ValueError: If ``y`` is not passed, is non-numeric or contains
+                non-finite values, or ``cv < 2``.
         """
         X_arr, y_float = _validate_target(X, y)
         if self.cv < 2:
             raise ValueError(f"cv must be >= 2, got {self.cv}.")
-        # Полные статистики — для последующего transform() на новых данных.
+        # The full statistics — for the subsequent transform() on new data.
         self.fit(X_arr, y_float)
 
         n_samples = X_arr.shape[0]
         if n_samples < 2:
-            # Кросс-фиттинг с исключением строки невозможен: единственную
-            # строку кодируем полными статистиками. Они уже зафиксированы
-            # вызовом self.fit(X_arr, y_float) выше; защитно подтверждаем
-            # их наличие явной проверкой check_is_fitted, чтобы transform()
-            # не полагался на неявный порядок вызовов (значение в любом
-            # случае совпадает с собственным y строки при m=0 и близко к
-            # нему при m>0).
+            # Cross-fitting with row exclusion is impossible: encode the single
+            # row with the full statistics. They are already fixed by the
+            # self.fit(X_arr, y_float) call above; defensively confirm their
+            # presence with an explicit check_is_fitted so that transform()
+            # does not rely on the implicit call order (the value in any case
+            # coincides with the row's own y at m=0 and is close to it at m>0).
             check_is_fitted(self, attributes=["statistics_"])
             return self.transform(X_arr)
 
-        # Число фолдов не может превышать число строк (KFold падает при
-        # n_splits > n_samples): для маленьких выборок уменьшаем до LOO.
+        # The number of folds cannot exceed the number of rows (KFold fails at
+        # n_splits > n_samples): for small samples reduce it to LOO.
         n_splits = min(self.cv, n_samples)
         out = np.empty(X_arr.shape, dtype=np.float64)
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=self.random_state)
@@ -319,16 +319,16 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         return out
 
     def transform(self, X: Any) -> np.ndarray:
-        """Заменить категории их target-значениями.
+        """Replace categories with their target values.
 
         Args:
-            X: Матрица категориальных признаков.
+            X: Matrix of categorical features.
 
         Returns:
-            Числовая матрица той же размерности (1 колонка на входную колонку).
-            Неизвестные категории отображаются в fallback-значение. Соответствия
-            ищутся по dtype-совместимым ключам (см. docstring класса): числовые
-            категории в ``X`` должны иметь тот же dtype, что и в обучающей выборке.
+            Numeric matrix of the same shape (1 column per input column).
+            Unknown categories are mapped to the fallback value. Matches are
+            looked up by dtype-compatible keys (see the class docstring): numeric
+            categories in ``X`` must have the same dtype as in the training set.
         """
         check_is_fitted(self, attributes=["statistics_"])
         X_arr = _as_2d(X)
@@ -339,29 +339,29 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         return out
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
-        """Вернуть имена выходных признаков (1 колонка на входную)."""
+        """Return output feature names (1 column per input column)."""
         check_is_fitted(self, attributes=["statistics_"])
         names = _feature_names(input_features, len(self.statistics_))
         return np.asarray(names, dtype=object)
 
 
 class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
-    """Frequency encoding: относительная частота категории в обучающей выборке.
+    """Frequency encoding: relative frequency of a category in the training set.
 
-    Детерминированное кодирование, не требующее ``y``. Неизвестные категории
-    на этапе предсказания отображаются в ``0.0`` (задокументированный
-    fallback). Частоты вычисляются только по обучающей части в :meth:`fit`.
+    Deterministic encoding that does not require ``y``. Unknown categories at
+    prediction time are mapped to ``0.0`` (documented fallback). Frequencies
+    are computed only from the training part in :meth:`fit`.
     """
 
     def fit(self, X: Any, y: Any = None) -> FrequencyEncodingTransformer:
-        """Вычислить частоты категорий по обучающим данным.
+        """Compute category frequencies from the training data.
 
         Args:
-            X: Матрица категориальных признаков.
-            y: Не используется (принимается для совместимости с API sklearn).
+            X: Matrix of categorical features.
+            y: Not used (accepted for sklearn API compatibility).
 
         Returns:
-            Обученный трансформер.
+            Fitted transformer.
         """
         X_arr = _as_2d(X)
         n_rows = X_arr.shape[0]
@@ -373,13 +373,13 @@ class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ig
         return self
 
     def transform(self, X: Any) -> np.ndarray:
-        """Заменить категории их частотами.
+        """Replace categories with their frequencies.
 
         Args:
-            X: Матрица категориальных признаков.
+            X: Matrix of categorical features.
 
         Returns:
-            Числовая матрица той же размерности. Неизвестные категории -> ``0.0``.
+            Numeric matrix of the same shape. Unknown categories -> ``0.0``.
         """
         check_is_fitted(self, attributes=["frequencies_"])
         X_arr = _as_2d(X)
@@ -390,35 +390,35 @@ class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ig
         return out
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
-        """Вернуть имена выходных признаков (1 колонка на входную)."""
+        """Return output feature names (1 column per input column)."""
         check_is_fitted(self, attributes=["frequencies_"])
         names = _feature_names(input_features, self.n_columns_)
         return np.asarray(names, dtype=object)
 
 
 class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
-    """Feature hashing: детерминированное кодирование категорий хешем.
+    """Feature hashing: deterministic encoding of categories by hash.
 
-    Каждая категория хешируется в индекс ``[0, n_components)`` с помощью
-    ``hashlib.blake2b`` (соль зависит от ``random_state``), после чего
-    выставляется бинарная колонка. Число выходных признаков фиксировано
-    (``n_components`` на входную колонку) и управляется конфигурацией — рост
-    размерности не зависит от кардинальности колонки.
+    Each category is hashed to an index in ``[0, n_components)`` using
+    ``hashlib.blake2b`` (the salt depends on ``random_state``), after which a
+    binary column is set. The number of output features is fixed
+    (``n_components`` per input column) and controlled by configuration — the
+    dimensionality does not depend on the column cardinality.
 
-    Выход :meth:`transform` — разреженная матрица ``scipy.sparse.csr_matrix``
-    (nnz = n_rows · n_cols), как у стандартного ``FeatureHasher``: плотная
-    ``float64``-матрица размерности ``(n_rows, n_cols · n_components)``
-    вызвала бы OOM на реальных таблицах с колонками высокой кардинальности.
+    The output of :meth:`transform` is a sparse matrix ``scipy.sparse.csr_matrix``
+    (nnz = n_rows · n_cols), like the standard ``FeatureHasher``: a dense
+    ``float64`` matrix of shape ``(n_rows, n_cols · n_components)``
+    would cause OOM on real tables with high-cardinality columns.
 
-    Хеширование полностью детерминировано при фиксированных настройках и
-    ``random_state``: неизвестные категории на этапе предсказания хешируются
-    тем же способом, поэтому падений не возникает. Возможны коллизии хеша
-    (разные категории -> одна колонка) — задокументированное ограничение.
+    Hashing is fully deterministic given fixed settings and ``random_state``:
+    unknown categories at prediction time are hashed the same way, so no
+    failures occur. Hash collisions are possible (different categories -> one
+    column) — a documented limitation.
 
     Args:
-        n_components: Число бинарных колонок на одну входную категориальную
-            колонку (``>= 1``).
-        random_state: Зерно для соли хеширования (воспроизводимость).
+        n_components: Number of binary columns per input categorical column
+            (``>= 1``).
+        random_state: Seed for the hashing salt (reproducibility).
     """
 
     def __init__(self, n_components: int = 16, random_state: int | None = 42):
@@ -426,11 +426,12 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         self.random_state = random_state
 
     def _hash_token(self, token: Any, salt: str) -> int:
-        """Детерминированно захешировать категорию в ``[0, n_components)``.
+        """Deterministically hash a category into ``[0, n_components)``.
 
-        Соль включается в начало сообщения (а не в параметр ``salt`` blake2b,
-        который ограничен 16 байтами), поэтому длина соли ничем не ограничена
-        и разные ``random_state`` гарантированно дают разные проекции.
+        The salt is prepended to the message (rather than passed as the blake2b
+        ``salt`` parameter, which is limited to 16 bytes), so the salt length is
+        unrestricted and different ``random_state`` values are guaranteed to
+        produce different projections.
         """
         digest = hashlib.blake2b(digest_size=8)
         digest.update(salt.encode("utf-8"))
@@ -439,14 +440,14 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         return int.from_bytes(digest.digest(), byteorder="little") % self.n_components
 
     def fit(self, X: Any, y: Any = None) -> HashingEncodingTransformer:
-        """Подготовить соли для каждой колонки.
+        """Prepare salts for each column.
 
         Args:
-            X: Матрица категориальных признаков.
-            y: Не используется (принимается для совместимости с API sklearn).
+            X: Matrix of categorical features.
+            y: Not used (accepted for sklearn API compatibility).
 
         Returns:
-            Обученный трансформер.
+            Fitted transformer.
         """
         X_arr = _as_2d(X)
         self.n_columns_ = X_arr.shape[1]
@@ -456,30 +457,29 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         return self
 
     def transform(self, X: Any) -> sp.csr_matrix:
-        """Закодировать категории бинарными хеш-колонками.
+        """Encode categories as binary hash columns.
 
-        Возвращает разреженную матрицу ``scipy.sparse.csr_matrix``
-        (COO → CSR, ``nnz = n_samples * n_columns``, значения ``1.0``),
-        а не плотный массив: hashing предназначен для колонок с очень
-        высокой кардинальностью на больших датасетах, и плотная
-        ``float64``-матрица размерности ``(n_rows, n_cols * n_components)``
-        вызвала бы OOM. Формат соответствует стандартному
-        ``sklearn.feature_extraction.FeatureHasher``.
+        Returns a sparse matrix ``scipy.sparse.csr_matrix``
+        (COO → CSR, ``nnz = n_samples * n_columns``, values ``1.0``),
+        not a dense array: hashing is intended for very high-cardinality
+        columns on large datasets, and a dense ``float64`` matrix of shape
+        ``(n_rows, n_cols * n_components)`` would cause OOM. The format matches
+        the standard ``sklearn.feature_extraction.FeatureHasher``.
 
         Args:
-            X: Матрица категориальных признаков.
+            X: Matrix of categorical features.
 
         Returns:
-            Разреженная бинарная матрица размерности
+            Sparse binary matrix of shape
             ``(n_samples, n_columns * n_components)``.
         """
         check_is_fitted(self, attributes=["salts_"])
         X_arr = _as_2d(X)
         n_rows, n_cols = X_arr.shape
-        # Каждая строка каждой колонки даёт ровно один ненулевой элемент,
-        # поэтому nnz = n_rows * n_cols. Коллизии хеша в рамках одной колонки
-        # невозможны для одной строки (одна категория на строку), дубликатов
-        # в COO не возникает, сумма по строкам всегда равна n_cols (бинарность).
+        # Each row of each column contributes exactly one non-zero element,
+        # so nnz = n_rows * n_cols. Hash collisions within a single column are
+        # impossible for one row (one category per row), so no duplicates arise
+        # in COO, and the sum over rows is always n_cols (binarity).
         col_blocks: list[np.ndarray] = []
         for col in range(n_cols):
             uniq, inverse = np.unique(X_arr[:, col], return_inverse=True)
@@ -499,7 +499,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         return out.tocsr()
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
-        """Вернуть имена выходных признаков (``n_components`` на входную)."""
+        """Return output feature names (``n_components`` per input column)."""
         check_is_fitted(self, attributes=["salts_"])
         base = _feature_names(input_features, self.n_columns_)
         names = [
@@ -511,7 +511,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
 
 
 def _feature_names(input_features: Any, n_columns: int) -> list[str]:
-    """Сформировать список имён для ``n_columns`` входных признаков."""
+    """Build a list of names for ``n_columns`` input features."""
     if input_features is None:
         return [f"cat_{i}" for i in range(n_columns)]
     features = list(input_features)
@@ -523,37 +523,36 @@ def _feature_names(input_features: Any, n_columns: int) -> list[str]:
 
 
 class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[misc]
-    """По-колоночный категориальный энкодер с опциональным high-cardinality режимом.
+    """Per-column categorical encoder with an optional high-cardinality mode.
 
-    На этапе :meth:`fit`/:meth:`fit_transform` по фактическим данным
-    вычисляется кардинальность каждой колонки. Колонки, чья кардинальность
-    превышает ``high_cardinality_threshold``, кодируются стратегией
-    ``high_cardinality_encoding``; остальные — стратегией ``encoding``.
-    Если порог не задан (``None``), все колонки кодируются стратегией
-    ``encoding`` (поведение по умолчанию).
+    At :meth:`fit`/:meth:`fit_transform` time the cardinality of each column is
+        computed from the actual data. Columns whose cardinality exceeds
+        ``high_cardinality_threshold`` are encoded with the
+        ``high_cardinality_encoding`` strategy; the rest — with the ``encoding``
+        strategy. If the threshold is not set (``None``), all columns are encoded
+        with the ``encoding`` strategy (default behavior).
 
-    Выходы энкодеров конкатенируются горизонтально в порядке «default-колонки,
-    затем high-cardinality колонки». Разделение зависит только от обучающих
-    данных, поэтому решение о стратегии не «подглядывает» в валидацию.
+        Encoder outputs are concatenated horizontally in the order "default columns
+        first, then high-cardinality columns". The split depends only on the
+        training data, so the strategy decision does not "peek" into validation.
 
-    :meth:`fit_transform` делегирует внутренним энкодерам их собственный
-    ``fit_transform`` (issue #112): для target encoding это включает
-    кросс-фиттинг, поэтому обучающие строки кодируются без собственного
-    ``y``, а полные статистики фиксируются на внутреннем энкодере для
-    последующего :meth:`transform`.
+        :meth:`fit_transform` delegates to the internal encoders' own
+        ``fit_transform``: for target encoding this includes cross-fitting, so the
+        training rows are encoded without their own ``y``, and the full statistics
+        are stored on the internal encoder for the subsequent :meth:`transform`.
 
-    Args:
-        encoding: Стратегия кодирования для обычных колонок.
-        high_cardinality_threshold: Порог кардинальности (``>= 0``); колонки с
-            числом уникальных значений строго больше порога считаются
-            high-cardinality. ``None`` — режим отключён.
-        high_cardinality_encoding: Стратегия для high-cardinality колонок.
-            Должна быть задана вместе с ``high_cardinality_threshold``.
-        hashing_n_components: Число бинарных колонок для hashing-кодирования.
-        target_encoding_smoothing: Параметр сглаживания target encoding.
-        target_encoding_fallback: Fallback-значение target encoding
-            (``None`` — глобальное среднее).
-        random_state: Зерно для детерминированного hashing-кодирования.
+        Args:
+            encoding: Encoding strategy for regular columns.
+            high_cardinality_threshold: Cardinality threshold (``>= 0``); columns
+                whose number of unique values is strictly greater than the threshold
+                are considered high-cardinality. ``None`` — mode disabled.
+            high_cardinality_encoding: Strategy for high-cardinality columns.
+                Must be set together with ``high_cardinality_threshold``.
+            hashing_n_components: Number of binary columns for hashing encoding.
+            target_encoding_smoothing: Smoothing parameter of target encoding.
+            target_encoding_fallback: Fallback value of target encoding
+                (``None`` — global mean).
+            random_state: Seed for deterministic hashing encoding.
     """
 
     def __init__(
@@ -575,11 +574,11 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         self.random_state = random_state
 
     def _make_encoder(self, strategy: EncodingStrategy) -> BaseEstimator:
-        """Создать энкодер по имени стратегии.
+        """Create an encoder by strategy name.
 
-        Ветки покрывают все допустимые значения ``EncodingStrategy``;
-        валидация стратегии выполняется в :meth:`fit`, поэтому эта ветка
-        недостижима для корректных вызовов.
+        The branches cover all valid values of ``EncodingStrategy``;
+        strategy validation is performed in :meth:`fit`, so this branch is
+        unreachable for correct calls.
         """
         if strategy == "one_hot":
             return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
@@ -607,22 +606,22 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         )
 
     def _prepare(self, X: Any) -> np.ndarray:
-        """Провалидировать параметры, разделить колонки и создать энкодеры.
+        """Validate parameters, split columns, and create the encoders.
 
-        Общая часть :meth:`fit` и :meth:`fit_transform`: валидация стратегий,
-        вычисление кардинальностей, разделение колонок на default/HC и
-        создание внутренних энкодеров (без обучения — их обучает вызывающий
-        метод через ``fit``/``fit_transform``).
+        The shared part of :meth:`fit` and :meth:`fit_transform`: strategy
+        validation, cardinality computation, the default/HC column split, and
+        the creation of the internal encoders (without training — the calling
+        method trains them through ``fit``/``fit_transform``).
 
         Args:
-            X: Матрица категориальных признаков.
+            X: Matrix of categorical features.
 
         Returns:
-            Двумерный числовой массив ``X`` (после ``_as_2d``).
+            The two-dimensional numeric ``X`` array (after ``_as_2d``).
 
         Raises:
-            ValueError: Если задана неизвестная стратегия кодирования либо
-                high-cardinality режим настроен некорректно.
+            ValueError: If an unknown encoding strategy is set or the
+                high-cardinality mode is misconfigured.
         """
         if self.encoding not in _VALID_ENCODING_STRATEGIES:
             raise ValueError(
@@ -666,11 +665,11 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         self.default_columns_ = default_columns
         self.hc_columns_ = hc_columns
 
-        # Внутренние энкодеры создаются здесь, в fit()/fit_transform(),
-        # безусловно — в том числе при пустом наборе колонок (n_columns=0):
-        # атрибуты default_encoder_/hc_encoder_ гарантированно существуют
-        # после обучения. Обучаются/применяются они только для непустых
-        # default_columns_/hc_columns_ (см. fit/fit_transform).
+        # The internal encoders are created here, in fit()/fit_transform(),
+        # unconditionally — including for an empty column set (n_columns=0):
+        # the default_encoder_/hc_encoder_ attributes are guaranteed to exist
+        # after training. They are trained/applied only for the non-empty
+        # default_columns_/hc_columns_ (see fit/fit_transform).
         self.default_encoder_ = self._make_encoder(self.encoding)
         self.hc_encoder_: BaseEstimator | None = (
             self._make_encoder(self.high_cardinality_encoding)
@@ -692,57 +691,57 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
     def _concat_parts(
         parts: list[np.ndarray | sp.spmatrix], n_rows: int
     ) -> np.ndarray | sp.spmatrix:
-        """Склеить выходы default- и HC-энкодеров в одну матрицу.
+        """Concatenate the default- and HC-encoder outputs into one matrix.
 
-        Если хотя бы одна часть разреженная (hashing-кодирование), части
-        склеиваются через ``sp.hstack`` (CSR); иначе — через ``np.hstack``.
+        If at least one part is sparse (hashing encoding), the parts are
+        concatenated via ``sp.hstack`` (CSR); otherwise — via ``np.hstack``.
 
         Args:
-            parts: Выходы внутренних энкодеров в порядке конкатенации.
-            n_rows: Число строк входной матрицы (для пустого результата).
+            parts: Encoder outputs in concatenation order.
+            n_rows: Number of rows of the input matrix (for an empty result).
 
         Returns:
-            Числовая матрица (плотная или разреженная).
+            A numeric matrix (dense or sparse).
         """
         if not parts:
             return np.empty((n_rows, 0), dtype=np.float64)
         if any(sp.issparse(part) for part in parts):
-            # scipy-stubs не описывают гетерогенные последовательности
-            # (ndarray | spmatrix) для hstack: приводим блоки к общему типу.
+            # scipy-stubs do not describe heterogeneous sequences
+            # (ndarray | spmatrix) for hstack: cast the blocks to a common type.
             sparse_blocks = cast(list[sp.spmatrix], parts)
             return sp.hstack(sparse_blocks).tocsr()
-        # Все части плотные (sparse-ветка выше) — обычный np.hstack.
+        # All parts are dense (the sparse branch above) — a plain np.hstack.
         dense_blocks = cast(list[np.ndarray], parts)
         return np.hstack(dense_blocks)
 
     def fit(self, X: Any, y: Any = None) -> SplitCategoricalEncoder:
-        """Разделить колонки по кардинальности и обучить энкодеры.
+        """Split columns by cardinality and fit the encoders.
 
-        Внутренние энкодеры (``default_encoder_``/``hc_encoder_``) создаются
-        только в :meth:`fit`/:meth:`fit_transform`: атрибуты с завершающим
-        подчёркиванием хранят обученное состояние, поэтому конструктор лишь
-        сохраняет параметры, а ``clone()``/``set_params()``/``get_params()``
-        работают через базовую реализацию ``BaseEstimator`` без
-        переопределений.
+        The internal encoders (``default_encoder_``/``hc_encoder_``) are created
+        only in :meth:`fit`/:meth:`fit_transform`: attributes with a trailing
+        underscore store the fitted state, so the constructor only saves the
+        parameters, while ``clone()``/``set_params()``/``get_params()`` work
+        through the base ``BaseEstimator`` implementation without overrides.
 
         Args:
-            X: Матрица категориальных признаков (строки после импутации).
-            y: Целевая переменная (требуется только для target encoding).
+            X: Matrix of categorical features (rows after imputation).
+            y: Target variable (required only for target encoding).
 
         Returns:
-            Обученный энкодер.
+            Fitted encoder.
 
         Raises:
-            ValueError: Если задана неизвестная стратегия кодирования либо
-                high-cardinality режим настроен некорректно.
+            ValueError: If an unknown encoding strategy is set or the
+                high-cardinality mode is misconfigured.
         """
         X_arr = self._prepare(X)
         if self.default_columns_:
             self.default_encoder_.fit(X_arr[:, self.default_columns_], y)
 
         if self.hc_columns_:
-            # Инвариант гарантирован валидацией выше: при заданном пороге
-            # HC-стратегия обязана быть указана, значит hc_encoder_ создан.
+            # The invariant is guaranteed by the validation in _prepare: when
+            # the threshold is set the HC strategy must be given, so
+            # hc_encoder_ was created.
             assert self.hc_encoder_ is not None
             self.hc_encoder_.fit(X_arr[:, self.hc_columns_], y)
         return self
@@ -750,32 +749,33 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
     def fit_transform(
         self, X: Any, y: Any = None, **fit_params: Any
     ) -> np.ndarray | sp.spmatrix:
-        """Закодировать колонки через ``fit_transform`` внутренних энкодеров.
+        """Encode columns through the ``fit_transform`` of the internal encoders.
 
-        Делегирует :meth:`TargetEncodingTransformer.fit_transform` (кросс-
-        фиттинг, issue #112) для target encoding, остальным стратегиям —
-        стандартный ``fit_transform`` (эквивалентен ``fit`` + ``transform``).
-        Внутренние энкодеры остаются обученными на полных данных, поэтому
-        последующий :meth:`transform` (новые данные) работает обычным образом.
+        Delegates to :meth:`TargetEncodingTransformer.fit_transform`
+        (cross-fitting) for target encoding; for the other strategies, the
+        standard ``fit_transform`` (equivalent to ``fit`` + ``transform``).
+        The internal encoders stay fitted on the full data, so the subsequent
+        :meth:`transform` (new data) works in the usual way.
 
         Args:
-            X: Матрица категориальных признаков.
-            y: Целевая переменная (требуется для target encoding).
-            **fit_params: Не используются (принимаются для совместимости
-                с пайплайнами sklearn).
+            X: Matrix of categorical features.
+            y: Target variable (required for target encoding).
+            **fit_params: Not used (accepted for compatibility with sklearn
+                pipelines).
 
         Returns:
-            Числовая матрица (плотная или разреженная), объединяющая
-            выходы default- и high-cardinality энкодеров.
+            A numeric matrix (dense or sparse) combining the outputs of the
+            default and high-cardinality encoders.
 
         Raises:
-            ValueError: Если задана неизвестная стратегия кодирования либо
-                high-cardinality режим настроен некорректно.
+            ValueError: If an unknown encoding strategy is set or the
+                high-cardinality mode is misconfigured.
         """
         X_arr = self._prepare(X)
-        # Пустой набор колонок (n_columns=0): энкодеры уже созданы в _prepare
-        # (инвариант выше), но обучать/применять нечего — возвращаем пустую
-        # матрицу (n_rows, 0), не обращаясь к энкодерам.
+        # An empty column set (n_columns=0): the encoders are already created
+        # in _prepare (the invariant above), but there is nothing to
+        # train/apply — return an empty (n_rows, 0) matrix without touching
+        # the encoders.
         if not self.default_columns_ and not self.hc_columns_:
             return np.empty((X_arr.shape[0], 0), dtype=np.float64)
         parts: list[np.ndarray | sp.spmatrix] = []
@@ -784,25 +784,26 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
                 self.default_encoder_.fit_transform(X_arr[:, self.default_columns_], y)
             )
         if self.hc_columns_:
-            # Инвариант гарантирован валидацией в _prepare: при заданном
-            # пороге HC-стратегия обязана быть указана, значит hc_encoder_ создан.
+            # The invariant is guaranteed by the validation in _prepare: when
+            # the threshold is set the HC strategy must be given, so
+            # hc_encoder_ was created.
             assert self.hc_encoder_ is not None
             parts.append(self.hc_encoder_.fit_transform(X_arr[:, self.hc_columns_], y))
         return self._concat_parts(parts, X_arr.shape[0])
 
     def transform(self, X: Any) -> np.ndarray | sp.spmatrix:
-        """Закодировать колонки выбранными стратегиями и склеить результат.
+        """Encode columns with the selected strategies and concatenate the result.
 
-        Использует статистики, зафиксированные на внутренних энкодерах при
-        ``fit``/``fit_transform`` (для target encoding — полные статистики по
-        обучающей выборке, без кросс-фиттинга).
+        Uses the statistics stored on the internal encoders during
+        ``fit``/``fit_transform`` (for target encoding — the full-sample
+        statistics, without cross-fitting).
 
         Args:
-            X: Матрица категориальных признаков.
+            X: Matrix of categorical features.
 
         Returns:
-            Числовая матрица (плотная или разреженная), объединяющая
-            выходы default- и high-cardinality энкодеров.
+            Numeric matrix (dense or sparse) combining the outputs of the
+            default and high-cardinality encoders.
         """
         check_is_fitted(self, attributes=["default_columns_"])
         X_arr = _as_2d(X)
@@ -816,7 +817,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         return self._concat_parts(parts, X_arr.shape[0])
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
-        """Вернуть имена выходных признаков в порядке конкатенации."""
+        """Return output feature names in concatenation order."""
         check_is_fitted(self, attributes=["default_columns_"])
         n_columns = len(self.default_columns_) + len(self.hc_columns_)
         base = _feature_names(input_features, n_columns)
@@ -837,33 +838,33 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
 
 
 class ColumnNameSelector:
-    """Сериализуемый селектор колонок по именам для ``ColumnTransformer``.
+    """Serializable column selector by names for ``ColumnTransformer``.
 
-    Заменяет списки позиционных индексов при сборке препроцессора (issue #2):
-    ``ColumnTransformer`` трактует список ``int`` как срез по позициям и
-    игнорирует имена колонок ``pd.DataFrame``, из-за чего предсказание на
-    переупорядоченном DataFrame молча применяет энкодер к числовым колонкам,
-    а скалер — к категориальным.
+    Replaces positional index lists when assembling the preprocessor:
+    ``ColumnTransformer`` treats a list of ``int`` as a positional slice and
+    ignores the ``pd.DataFrame`` column names, so prediction on a reordered
+    DataFrame silently applies the encoder to numerical columns and the scaler
+    to categorical ones.
 
-    Селектор — picklable-объект (обычный класс с простыми атрибутами, не
-    замыкание), поэтому он корректно переживает ``trainer.save()``/pickle.
-    На каждом вызове (sklearn резолвит callable-селекторы на этапе
-    ``fit_transform``/``transform``) имена сопоставляются с позициями по
-    фактическому входу ``X``:
+    The selector is a picklable object (an ordinary class with plain attributes,
+    not a closure), so it survives ``trainer.save()``/pickle correctly.
+    On each call (sklearn resolves callable selectors at the
+    ``fit_transform``/``transform`` stage) the names are mapped to positions
+    against the actual input ``X``:
 
-    * ``pd.DataFrame`` — сопоставление по имени колонки; порядок колонок не
-      важен, отсутствующие или дублирующиеся колонки дают явную ошибку;
-    * любые другие входы (``np.ndarray``, ``pd.Series`` и т.п.) — позиционный
-      fallback по обучающему порядку (``feature_names``).
+    * ``pd.DataFrame`` — mapping by column name; column order does not
+      matter, missing or duplicated columns raise an explicit error;
+    * any other inputs (``np.ndarray``, ``pd.Series``, etc.) — positional
+      fallback by training order (``feature_names``).
 
     Args:
-        feature_names: Полный список имён признаков в обучающем порядке.
-        column_names: Имена колонок, которые должен выбирать этот селектор.
+        feature_names: Full list of feature names in training order.
+        column_names: Column names that this selector must select.
 
     Raises:
-        ValueError: Если для ``pd.DataFrame`` часть ``column_names``
-            отсутствует либо встречается более одного раза, или имя не
-            разрешается в обучающем порядке для не-DataFrame входов.
+        ValueError: If for a ``pd.DataFrame`` some of the ``column_names`` are
+            missing or occur more than once, or a name cannot be resolved
+            against the training order for non-DataFrame inputs.
     """
 
     def __init__(self, feature_names: list[str], column_names: list[str]) -> None:
@@ -879,18 +880,18 @@ class ColumnNameSelector:
 def _resolve_column_positions_by_name(
     X: pd.DataFrame, column_names: list[str]
 ) -> list[int]:
-    """Сопоставить имена колонок с позициями в фактическом DataFrame.
+    """Map column names to positions in the actual DataFrame.
 
     Args:
-        X: Входной DataFrame, против которого выполняется сопоставление.
-        column_names: Имена колонок для выбора.
+        X: Input DataFrame against which the mapping is performed.
+        column_names: Column names to select.
 
     Returns:
-        Список позиций выбранных колонок в порядке ``column_names``.
+        List of positions of the selected columns in ``column_names`` order.
 
     Raises:
-        ValueError: Если часть имён отсутствует в ``X`` либо встречается
-            в ``X`` более одного раза (неоднозначный выбор по имени).
+        ValueError: If some of the names are missing from ``X`` or occur more
+            than once in ``X`` (ambiguous selection by name).
     """
     missing = [name for name in column_names if name not in X.columns]
     if missing:
@@ -904,28 +905,28 @@ def _resolve_column_positions_by_name(
             f"Column(s) {duplicated} appear more than once in the input "
             "DataFrame; ambiguous selection by name is not supported."
         )
-    # После проверки уникальности index() даёт точную позицию колонки
-    # (pandas-stubs: get_loc может вернуть slice/маску для дубликатов).
+    # After the uniqueness check, index() gives the exact column position
+    # (pandas-stubs: get_loc may return a slice/mask for duplicates).
     return [list(X.columns).index(name) for name in column_names]
 
 
 def _resolve_column_positions_by_order(
     feature_names: list[str], column_names: list[str]
 ) -> list[int]:
-    """Сопоставить имена колонок с позициями по обучающему порядку.
+    """Map column names to positions by training order.
 
-    Используется как fallback для входов без имён колонок (``np.ndarray``):
-    позиция имени определяется его положением в ``feature_names``.
+    Used as a fallback for inputs without column names (``np.ndarray``):
+    the position of a name is determined by its place in ``feature_names``.
 
     Args:
-        feature_names: Полный список имён признаков в обучающем порядке.
-        column_names: Имена колонок для выбора.
+        feature_names: Full list of feature names in training order.
+        column_names: Column names to select.
 
     Returns:
-        Список позиций выбранных колонок в порядке ``column_names``.
+        List of positions of the selected columns in ``column_names`` order.
 
     Raises:
-        ValueError: Если имя не встречается в ``feature_names`` ровно один раз.
+        ValueError: If a name does not occur in ``feature_names`` exactly once.
     """
     positions: list[int] = []
     for name in column_names:
@@ -940,29 +941,29 @@ def _resolve_column_positions_by_order(
 
 
 def detect_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """Автоматически классифицировать колонки на числовые и категориальные.
+    """Automatically classify columns into numerical and categorical.
 
-    Категориальными считаются колонки с dtype ``object``, ``category`` и
-    ``bool``; числовыми — колонки с dtype из семейства ``number``.
+    Columns with dtype ``object``, ``category`` and ``bool`` are considered
+    categorical; numerical columns have a dtype from the ``number`` family.
 
     Args:
-        X: DataFrame признаков (без целевой переменной).
+        X: Feature DataFrame (without the target variable).
 
     Returns:
-        Кортеж ``(categorical_features, numerical_features)`` — списки имён
-        колонок каждого типа.
+        A tuple ``(categorical_features, numerical_features)`` — lists of
+        column names of each type.
 
     Note:
-        Функция ожидает именно ``pd.DataFrame``; для ``np.ndarray`` без имён
-        колонок автоопределение невозможно (задокументированное ограничение).
+        The function expects exactly ``pd.DataFrame``; for ``np.ndarray``
+        without column names auto-detection is impossible (documented limitation).
 
     Note:
-        Классификация основана на ``dtype`` колонок. Это осознанно отличается от
-        value-based-детекции в ``oversampling._is_categorical_col``: здесь
-        препроцессор обрабатывает данные до оверсэмплинга, поэтому ``bool`` и
-        'числовые строки' (``'10','20'``) рассматриваются как категории (one-hot).
-        Оверсэмплер же получает уже закодированные числовые признаки и применяет
-        собственную value-based-логику для standalone-вызовов.
+        Classification is based on the column ``dtype``. This intentionally
+        differs from the value-based detection in ``oversampling._is_categorical_col``:
+        here the preprocessor handles data before oversampling, so ``bool`` and
+        'numeric strings' (``'10','20'``) are treated as categories (one-hot).
+        The oversampler receives already encoded numerical features and applies
+        its own value-based logic for standalone calls.
     """
     categorical = X.select_dtypes(
         include=["object", "str", "category", "bool"]
@@ -976,62 +977,63 @@ def _clean_uninformative_features(
     max_nan_ratio: float = 0.95,
     min_unique: int = 2,
 ) -> pd.DataFrame:
-    """Удалить неинформативные колонки: пустые и строго константные.
+    """Drop uninformative columns: empty and strictly constant ones.
 
-    Колонка считается неинформативной, если выполняется хотя бы одно из
-    условий:
+    A column is considered uninformative if at least one of the following
+    conditions holds:
 
-    1. Доля пропусков ``>= max_nan_ratio`` (по умолчанию 0.95): импутация
-       средним/медианой заменяет почти все значения одной константой, после
-       скалирования колонка либо не несёт информации (нулевой вклад в
-       расстояния), либо вносит смещение в матрицу расстояний метрических
-       моделей (SVR/KNN/Ridge).
-    2. Число уникальных значений без учёта NaN ``< min_unique`` (по
-       умолчанию 2): строго константная колонка после импутации и
-       масштабирования имеет нулевую дисперсию; для ``RobustScaler`` деление
-       на нулевой IQR (``q75 == q25``) даёт NaN/±inf, что ломает обучение.
-       Константная категориальная колонка бесполезна и после one-hot
-       кодирования (константный бинарный столбец), поэтому тоже удаляется.
+    1. Missing ratio ``>= max_nan_ratio`` (0.95 by default): imputation with
+       mean/median replaces almost all values with a single constant; after
+       scaling the column either carries no information (zero contribution to
+       distances) or biases the distance matrix of metric models
+       (SVR/KNN/Ridge).
+    2. Number of unique values excluding NaN ``< min_unique`` (2 by default):
+       a strictly constant column has zero variance after imputation and
+       scaling; for ``RobustScaler`` division by a zero IQR (``q75 == q25``)
+       yields NaN/±inf, which breaks training. A constant categorical column
+       is useless even after one-hot encoding (a constant binary column), so
+       it is also dropped.
 
-    Решение принимается **только по обучающим данным** (no leakage) и
-    фиксируется на этапе обучения: колонка, пустая на train, но
-    информативная на инференсе, будет отброшена и на проде
-    (задокументированное поведение). Это консистентно с ``detect_feature_types``,
-    который также вычисляется по полным данным. Функция идемпотентна: повторный
-    вызов на уже очищенных данных не меняет результат.
+    The decision is made **only from the training data** (no leakage) and is
+    fixed at the fitting stage: a column that is empty on train but
+    informative at inference will be dropped in production too (documented
+    behavior). This is consistent with ``detect_feature_types``, which is also
+    computed on the full data. The function is idempotent: a repeated call on
+    already cleaned data does not change the result.
 
-    Защитные правила (guard):
+    Guard rules:
 
-    * DataFrame без колонок (``X.shape[1] == 0``) или без строк
-      (``X.shape[0] == 0``) возвращается без изменений — очистка не падает.
-    * Единственная колонка никогда не удаляется, даже если константна или
-      пуста: иначе получилась бы пустая матрица признаков.
-    * Если под удаление попадают **все** колонки (при ``P >= 2``) — бросается
-      :class:`ValueError`: пустой набор признаков недопустим. Это аналог
-      ``FeatureSelector.min_features_guard`` (``feature_selection.py``), но на
-      этапе подготовки данных ошибка явная, а не молчаливый passthrough.
+    * A DataFrame without columns (``X.shape[1] == 0``) or without rows
+      (``X.shape[0] == 0``) is returned unchanged — cleaning does not fail.
+    * The single column is never dropped, even if it is constant or empty:
+      otherwise an empty feature matrix would remain.
+    * If **all** columns fall under removal (with ``P >= 2``), a
+      :class:`ValueError` is raised: an empty feature set is not allowed. This
+      is analogous to ``FeatureSelector.min_features_guard``
+      (``feature_selection.py``), but at the data preparation stage the error
+      is explicit rather than a silent passthrough.
 
     Args:
-        X: DataFrame признаков (без целевой переменной).
-        max_nan_ratio: Порог доли пропусков в ``(0, 1]``: колонки с долей NaN
-            ``>=`` порога удаляются. ``1.0`` — удаляются только полностью
-            пустые колонки.
-        min_unique: Минимальное число уникальных значений без учёта NaN
-            (``>= 1``), при котором колонка считается информативной. Значение
-            ``2`` (по умолчанию) удаляет строго константные колонки;
-            значение ``1`` оставляет их (полезно только вместе с правилом
-            пропусков).
+        X: Feature DataFrame (without the target variable).
+        max_nan_ratio: Missing ratio threshold in ``(0, 1]``: columns with a
+            NaN ratio ``>=`` the threshold are dropped. ``1.0`` — only fully
+            empty columns are dropped.
+        min_unique: Minimum number of unique values excluding NaN (``>= 1``)
+            at which a column is considered informative. The value ``2``
+            (default) drops strictly constant columns; the value ``1`` keeps
+            them (useful only together with the missing-ratio rule).
 
     Returns:
-        Копия ``X`` без неинформативных колонок (исходный объект не
-        мутируется). Если удалять нечего — возвращается исходный ``X``.
+        A copy of ``X`` without the uninformative columns (the original object
+        is not mutated). If there is nothing to drop, the original ``X`` is
+        returned.
 
     Raises:
-        TypeError: Если ``X`` не является ``pd.DataFrame``. Для ``np.ndarray``
-            без имён колонок очистка невозможна (задокументированное
-            ограничение, как у :func:`detect_feature_types`).
-        ValueError: Если пороги некорректны либо под удаление попадают все
-            колонки (пустой набор признаков).
+        TypeError: If ``X`` is not a ``pd.DataFrame``. For ``np.ndarray``
+            without column names, cleaning is impossible (documented
+            limitation, as with :func:`detect_feature_types`).
+        ValueError: If the thresholds are invalid or all columns fall under
+            removal (an empty feature set).
     """
     if not isinstance(X, pd.DataFrame):
         raise TypeError(
@@ -1045,22 +1047,22 @@ def _clean_uninformative_features(
         raise ValueError(f"min_unique must be >= 1, got {min_unique!r}.")
 
     n_cols = X.shape[1]
-    # Пустой DataFrame (0 строк / 0 колонок) — корректная обработка без
-    # падений: очищать нечего.
+    # An empty DataFrame (0 rows / 0 columns) is handled gracefully without
+    # failures: there is nothing to clean.
     if n_cols == 0 or X.shape[0] == 0:
         return X
-    # Единственная колонка сохраняется всегда, даже если константна или
-    # пуста: иначе останется пустая матрица признаков.
+    # The single column is always kept, even if it is constant or empty:
+    # otherwise an empty feature matrix would remain.
     if n_cols == 1:
         return X
 
-    # 1. Колонки с долей пропусков >= max_nan_ratio (в т.ч. полностью пустые).
+    # 1. Columns with a missing ratio >= max_nan_ratio (including fully empty ones).
     nan_ratios = X.isna().mean()
     drop_cols = list(nan_ratios[nan_ratios >= max_nan_ratio].index)
 
-    # 2. Строго константные колонки: ровно одно уникальное значение без учёта
-    # NaN (для полностью пустой колонки nunique() == 0, но такие колонки уже
-    # покрыты правилом пропусков при max_nan_ratio <= 1.0).
+    # 2. Strictly constant columns: exactly one unique value excluding NaN (for a
+    # fully empty column nunique() == 0, but such columns are already covered
+    # by the missing-ratio rule at max_nan_ratio <= 1.0).
     for col in X.columns:
         if col not in drop_cols and X[col].dropna().nunique() < min_unique:
             drop_cols.append(col)
@@ -1107,139 +1109,141 @@ def build_preprocessor(
     force_dense_output: bool = False,
     add_indicator: bool = True,
 ) -> ColumnTransformer:
-    """Сконструировать ColumnTransformer для раздельной обработки типов данных.
+    """Build a ColumnTransformer for separate processing of data types.
 
-    Для категориальных признаков поддерживаются стратегии (issue #20):
+        The following strategies are supported for categorical features:
 
-    * ``'one_hot'`` (по умолчанию) — ``OneHotEncoder``;
-    * ``'ordinal'`` — ``OrdinalEncoder`` (1 выходной столбец на колонку);
-    * ``'target'`` — target encoding со сглаживанием
-      (:class:`TargetEncodingTransformer`);
-    * ``'frequency'`` — frequency encoding
-      (:class:`FrequencyEncodingTransformer`);
-    * ``'hashing'`` — детерминированное хеширование в фиксированное число
-      колонок (:class:`HashingEncodingTransformer`).
+        * ``'one_hot'`` (default) — ``OneHotEncoder``;
+        * ``'ordinal'`` — ``OrdinalEncoder`` (1 output column per column);
+        * ``'target'`` — target encoding with smoothing
+          (:class:`TargetEncodingTransformer`);
+        * ``'frequency'`` — frequency encoding
+          (:class:`FrequencyEncodingTransformer`);
+        * ``'hashing'`` — deterministic hashing into a fixed number of columns
+          (:class:`HashingEncodingTransformer`).
 
-    При заданных ``high_cardinality_threshold`` и ``high_cardinality_encoding``
-    включается автоматический режим: колонки с числом уникальных значений
-    строго больше порога кодируются high-cardinality стратегией, остальные —
-    стратегией ``encoding``. Разделение вычисляется по обучающим данным внутри
-    :class:`SplitCategoricalEncoder`, поэтому единая логика применяется и в HPO,
-    и в финальном обучении, и при предсказании.
+        When ``high_cardinality_threshold`` and ``high_cardinality_encoding`` are
+        given, the automatic mode is enabled: columns whose number of unique values
+        is strictly greater than the threshold are encoded with the high-cardinality
+        strategy, and the rest — with the ``encoding`` strategy. The split is
+        computed from the training data inside :class:`SplitCategoricalEncoder`, so
+        the same logic applies both in HPO and in final training and prediction.
 
-    Статистики target/frequency-кодирования вычисляются только по обучающей
-    части, что исключает утечку данных (data leakage) между train и
-    валидацией: на каждом фолде CV препроцессор переобучается на обучающей
-    части фолда. Дополнительно target encoding в :meth:`TargetEncodingTransformer.fit_transform`
-    выполняет кросс-фиттинг (issue #112): каждая обучающая строка кодируется
-    средними по фолду без неё самой, поэтому собственное ``y`` строки не
-    попадает в её же закодированный признак (устраняет завышенную корреляцию
-    признака с ответом на обучении для высококардинальных колонок).
+    Target/frequency-encoding statistics are computed only from the training
+        part, which prevents data leakage between train and validation: on each CV
+        fold the preprocessor is refitted on the training part of the fold.
+        Additionally, target encoding in :meth:`TargetEncodingTransformer.fit_transform`
+        performs cross-fitting: each training row is encoded with means computed
+        on a fold that excludes the row itself, so the row's own ``y`` does not
+        leak into its own encoded feature (removes the inflated feature-response
+        correlation on training for high-cardinality columns).
 
-    Стратегия предобработки числовых признаков задаётся параметрами
-    ``imputation_strategy`` и ``scaling`` и обычно берётся из адаптивного
-    пресета предобработки (:mod:`preprocessing_presets`).
+        The numerical feature preprocessing strategy is set by the
+        ``imputation_strategy`` and ``scaling`` parameters and is usually taken
+        from the adaptive preprocessing preset (:mod:`preprocessing_presets`).
 
-    Числовая импутация по умолчанию выполняется с ``add_indicator=True``
-    (отключается параметром ``add_indicator=False`` для строго одномерных
-    алгоритмов): для каждого числового признака, в котором на обучающей
-    выборке были пропуски, добавляется бинарная колонка-индикатор
-    (1 — значение отсутствовало, 0 — присутствовало). Модель получает
-    возможность разделять «реально измеренное значение» и «значение
-    восстановлено импутацией» (например, для биопроцессов, где пропуск pH
-    означает, что pH не контролировался).
+        Numerical imputation is performed with ``add_indicator=True`` by default
+        (disabled via ``add_indicator=False`` for strictly one-dimensional
+        algorithms): for each numerical feature that had missing values in the
+        training set, a binary indicator column is added
+        (1 — the value was missing, 0 — it was present). The model gets the
+        ability to tell apart "actually measured value" and "value restored by
+        imputation" (for example, in bioprocesses where a missing pH means that
+        pH was not controlled).
 
-    Args:
-        feature_names: Полный список имён признаков в порядке следования колонок.
-        categorical_features: Имена колонок, кодируемых выбранной стратегией.
-        numerical_features: Имена колонок, подлежащих импутации и скалированию.
-        encoding: Стратегия кодирования категорий: ``'one_hot'`` (по умолчанию),
-            ``'ordinal'``, ``'target'``, ``'frequency'`` или ``'hashing'``.
-        imputation_strategy: Стратегия заполнения пропусков для числовых
-            признаков: ``'mean'`` (по умолчанию) или ``'median'`` (устойчива
-            к выбросам, учитывает скошенность распределений). Импутация
-            выполняется с ``add_indicator=True`` — бинарные индикаторы
-            пропусков добавляются для признаков с пропусками в обучающей
-            выборке.
-        scaling: Масштабирование числовых признаков: ``'standard'``
-            (``StandardScaler``, по умолчанию), ``'robust'`` (``RobustScaler``,
-            устойчив к выбросам) или ``'none'`` (масштабирование не
-            применяется — данные передаются в модель без него).
-        high_cardinality_threshold: Порог кардинальности (``>= 0``). Колонки с
-            числом уникальных значений строго больше порога считаются
-            high-cardinality и кодируются стратегией ``high_cardinality_encoding``.
-            ``None`` (по умолчанию) — автоматический режим отключён.
-        high_cardinality_encoding: Стратегия кодирования high-cardinality колонок.
-            Задаётся вместе с ``high_cardinality_threshold``.
-        hashing_n_components: Число бинарных колонок на одну категориальную
-            колонку при ``encoding='hashing'`` (``>= 1``).
-        target_encoding_smoothing: Параметр сглаживания target encoding
-            (``>= 0``); при ``m=0`` используется чистое среднее по категории.
-        target_encoding_fallback: Fallback-значение target encoding для
-            неизвестных категорий. ``None`` — глобальное среднее целевой
-            переменной.
-        random_state: Зерно для детерминированного hashing-кодирования.
-        force_dense_output: Принудительно вернуть плотную матрицу вместо
-            разреженной. Включается для алгоритмов, отвергающих
-            ``scipy.sparse`` (GPR/Isotonic/ARD, см.
-            :func:`~configurable_automl_engine.models.requires_dense_input`):
-            с ``sparse_threshold=0.0`` ``ColumnTransformer`` конвертирует
-            разреженные части в плотные. По умолчанию ``False`` — выход
-            остаётся разреженным при hashing-кодировании (экономия памяти).
-        add_indicator: Добавлять ли бинарные индикаторы пропусков числовых
-            признаков (``SimpleImputer(add_indicator=...)``). ``True`` по
-            умолчанию; отключается для строго одномерных алгоритмов
-            (``isotonic_regression``), входной контракт которых допускает
-            ровно один признак (см.
-            :func:`~configurable_automl_engine.preprocessing_presets.requires_missing_indicator`).
+        Args:
+            feature_names: Full list of feature names in column order.
+            categorical_features: Names of the columns encoded with the selected strategy.
+            numerical_features: Names of the columns subject to imputation and scaling.
+            encoding: Categorical encoding strategy: ``'one_hot'`` (default),
+                ``'ordinal'``, ``'target'``, ``'frequency'`` or ``'hashing'``.
+            imputation_strategy: Missing-value imputation strategy for numerical
+                features: ``'mean'`` (default) or ``'median'`` (robust to outliers,
+                accounts for skewed distributions). Imputation is performed with
+                ``add_indicator=True`` — binary missing-value indicators are added
+                for features with missing values in the training set.
+            scaling: Scaling of numerical features: ``'standard'`` (``StandardScaler``,
+                default), ``'robust'`` (``RobustScaler``, robust to outliers) or
+                ``'none'`` (no scaling is applied — the data is passed to the model
+                as is).
+            high_cardinality_threshold: Cardinality threshold (``>= 0``). Columns
+                with a number of unique values strictly greater than the threshold
+                are high-cardinality and encoded with the
+                ``high_cardinality_encoding`` strategy. ``None`` (default) —
+                automatic mode disabled.
+            high_cardinality_encoding: Encoding strategy for high-cardinality columns.
+                Must be set together with ``high_cardinality_threshold``.
+            hashing_n_components: Number of binary columns per categorical column
+                for ``encoding='hashing'`` (``>= 1``).
+            target_encoding_smoothing: Smoothing parameter of target encoding
+                (``>= 0``); with ``m=0`` the pure per-category mean is used.
+            target_encoding_fallback: Fallback value of target encoding for unknown
+                categories. ``None`` — the global mean of the target variable.
+            random_state: Seed for deterministic hashing encoding.
+            force_dense_output: Forcibly return a dense matrix instead of a sparse
+                one. Enabled for algorithms that reject ``scipy.sparse``
+                (GPR/Isotonic/ARD; see
+                :func:`~configurable_automl_engine.models.requires_dense_input`):
+                with ``sparse_threshold=0.0`` ``ColumnTransformer`` converts sparse
+                parts to dense. ``False`` by default — the output stays sparse for
+                hashing encoding (memory savings).
+            add_indicator: Whether to add binary missing-value indicators for
+                numerical features (``SimpleImputer(add_indicator=...)``). ``True``
+                by default; disabled for strictly one-dimensional algorithms
+                (``isotonic_regression``), whose input contract allows exactly one
+                feature (see
+                :func:`~configurable_automl_engine.preprocessing_presets.requires_missing_indicator`).
 
-    Returns:
-        ``ColumnTransformer``, преобразующий исходный DataFrame в числовую
-        матрицу, готовую к подаче в модель. Если ни одна колонка не совпала,
-        возвращается passthrough-трансформер (поведение сохранено из тренера).
+        Returns:
+            A ``ColumnTransformer`` that converts the input DataFrame into a numerical
+            matrix ready to be fed to the model. If no column matched, a
+            passthrough transformer is returned (behavior preserved from the
+            trainer).
 
-    Note:
-        Категориальные колонки приводятся к строковому объектному массиву перед
-        импутацией и кодированием, поэтому ``bool``-колонки обрабатываются
-        корректно (без падения ``SimpleImputer`` на dtype bool).
+        Note:
+            Categorical columns are converted to a string object array before
+            imputation and encoding, so ``bool`` columns are handled correctly
+            (without ``SimpleImputer`` failing on the bool dtype).
 
-    Note:
-        Индикаторы пропусков числовых признаков (``add_indicator=True``,
-        ``MissingIndicator(features='missing-only')``) создаются только для
-        признаков с пропусками в обучающей выборке: полностью заполненный
-        признак индикатора не даёт, поэтому число выходных колонок зависит от
-        данных. Если на инференсе пропуск появляется в признаке без пропусков
-        на train, значение импутируется, но индикатор не создаётся. При
-        ``scaling != 'none'`` индикаторные колонки стандартизируются скалером
-        вместе с числовыми (для деревьев при ``scaling='none'`` шаг
-        отсутствует) — для линейных моделей стандартизация бинарного флага
-        допустима. Индикаторы отключаются параметром ``add_indicator=False``
-        для строго одномерных алгоритмов (``isotonic_regression``), входной
-        контракт которых допускает ровно один признак. Категориальный пайплайн
-        индикаторов не добавляет: ``SimpleImputer(strategy="most_frequent")``
-        работает без ``add_indicator``.
+        Note:
+            Missing-value indicators for numerical features (``add_indicator=True``,
+            ``MissingIndicator(features='missing-only')``) are created only for
+            features with missing values in the training set: a fully populated
+            feature does not produce an indicator, so the number of output columns
+            depends on the data. If at inference a missing value appears in a
+            feature without missing values on train, the value is imputed but no
+            indicator is created. With ``scaling != 'none'`` the indicator columns
+            are standardized by the scaler together with the numerical ones (for
+            trees the step is absent when ``scaling='none'``) — for linear models
+            standardizing a binary flag is acceptable. The indicators are disabled
+            via ``add_indicator=False`` for strictly one-dimensional algorithms
+            (``isotonic_regression``), whose input contract allows exactly one
+            feature. The categorical pipeline does not add indicators:
+            ``SimpleImputer(strategy="most_frequent")`` works without
+            ``add_indicator``.
 
-    Note:
-        Колонки выбираются по имени через :class:`ColumnNameSelector` (issue #2):
-        для ``pd.DataFrame`` порядок колонок на ``fit``/``transform`` не важен —
-        энкодер всегда применяется к категориальным колонкам, а скалер — к
-        числовым; отсутствующие/дублирующиеся колонки дают явную ошибку. Для
-        входов без имён (``np.ndarray``) используется позиционный fallback по
-        обучающему порядку ``feature_names``.
+        Note:
+            Columns are selected by name via :class:`ColumnNameSelector`: for
+            ``pd.DataFrame`` the column order in ``fit``/``transform`` does not
+            matter — the encoder is always applied to categorical columns and the
+            scaler to numerical ones; missing/duplicated columns raise an explicit
+            error. For inputs without names (``np.ndarray``), a positional fallback
+            by the training order of ``feature_names`` is used.
 
-    Note:
-        При ``encoding='ordinal'`` категории кодируются целочисленными кодами,
-        которые НЕ масштабируются (в отличие от числовых колонок, проходящих
-        через скалер). Для линейных моделей (например, ``elasticnet``)
-        несопоставимый масштаб кодов с категориями высокого порядка может
-        доминировать над числовыми признаками.
+        Note:
+            With ``encoding='ordinal'``, categories are encoded with integer codes
+            that are NOT scaled (unlike numerical columns that go through the
+            scaler). For linear models (e.g., ``elasticnet``), the incomparable
+            scale of codes for high-cardinality categories can dominate the
+            numerical features.
 
-    Raises:
-        ValueError: Если имя колонки из ``categorical_features``/
-            ``numerical_features`` отсутствует в ``feature_names`` либо передано
-            невалидное значение ``encoding``, ``imputation_strategy``,
-            ``scaling``, нарушена согласованность high-cardinality параметров
-            или некорректны ``hashing_n_components``/``target_encoding_smoothing``.
+        Raises:
+            ValueError: If a column name from ``categorical_features``/
+                ``numerical_features`` is missing in ``feature_names``, or an
+                invalid value of ``encoding``, ``imputation_strategy`` or
+                ``scaling`` is passed, the high-cardinality parameters are
+                inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
+                are invalid.
     """
     if encoding not in _VALID_ENCODING_STRATEGIES:
         raise ValueError(
@@ -1283,9 +1287,10 @@ def build_preprocessor(
             "Expected one of ('standard', 'robust', 'none')."
         )
 
-    # Валидируем, что все запрошенные имена колонок присутствуют в обучающем
-    # наборе (feature_names). Раньше отсутствующие имена молча пропускались;
-    # теперь это явная ошибка — селектор по именам не сможет их разрешить.
+    # Validate that all requested column names are present in the training set
+    # (feature_names). Previously, missing names were silently skipped; now
+    # this is an explicit error — the name-based selector will not be able to
+    # resolve them.
     specified_features = list(categorical_features) + list(numerical_features)
     missing_features = [col for col in specified_features if col not in feature_names]
     if missing_features:
@@ -1294,10 +1299,10 @@ def build_preprocessor(
             f"Expected columns: {feature_names}."
         )
 
-    # Селекторы по именам (issue #2): для pd.DataFrame колонки выбираются по
-    # имени на каждом fit/transform (порядок колонок не важен), для входов без
-    # имён (np.ndarray) используется позиционный fallback по обучающему порядку.
-    # Селекторы — picklable-классы, поэтому trainer.save()/pickle работают.
+    # Name-based selectors: for pd.DataFrame the columns are selected by name on
+    # each fit/transform (column order does not matter); for inputs without
+    # names (np.ndarray), a positional fallback by training order is used.
+    # The selectors are picklable classes, so trainer.save()/pickle work.
     cat_selector = ColumnNameSelector(feature_names, list(categorical_features))
     num_selector = ColumnNameSelector(feature_names, list(numerical_features))
 
@@ -1311,13 +1316,12 @@ def build_preprocessor(
             sparse_threshold=0.0 if force_dense_output else 0.3,
         )
 
-    # Пайплайн трансформации числовых признаков: импутация + (опционально) скалер.
-    # add_indicator=True добавляет бинарный флаг пропуска для каждого числового
-    # признака, в котором пропуски встречались в обучающей выборке (issue #56):
-    # модель получает возможность отличать «реально измеренное значение» от
-    # «значение восстановлено импутацией». При scaling='none' шаг
-    # масштабирования отсутствует — данные передаются в модель без него
-    # (AC-3 для деревьев и ансамблей).
+    # Numerical feature transformation pipeline: imputation + (optionally) a scaler.
+    # add_indicator=True adds a binary missing-value flag for each numerical
+    # feature that had missing values in the training set: the model gets the
+    # ability to tell apart "actually measured value" from "value restored by
+    # imputation". With scaling='none' the scaling step is absent — the data
+    # is passed to the model without it (for trees and ensembles).
     num_steps: list[tuple[str, object]] = [
         (
             "imputer",
@@ -1331,11 +1335,11 @@ def build_preprocessor(
 
     cat_transformer = Pipeline(
         steps=[
-            # Приводим категориальные колонки к строковому объектному массиву.
-            # Это делает пайплайн устойчивым к bool-колонкам: SimpleImputer со
-            # strategy="most_frequent" падает на numpy-bool ("SimpleImputer does
-            # not support data with dtype bool"), поэтому bool-признаки приводятся
-            # к строкам ("True"/"False") и кодируются как обычные категории.
+            # Convert categorical columns to a string object array. This makes the
+            # pipeline robust to bool columns: SimpleImputer with
+            # strategy="most_frequent" fails on numpy-bool ("SimpleImputer does
+            # not support data with dtype bool"), so bool features are converted
+            # to strings ("True"/"False") and encoded as regular categories.
             ("to_string", FunctionTransformer(_to_string_array)),
             ("imputer", SimpleImputer(strategy="most_frequent")),
             (
@@ -1362,8 +1366,8 @@ def build_preprocessor(
     return ColumnTransformer(
         transformers=(transformers if transformers else [("pass", "passthrough", [0])]),
         remainder="drop",
-        # При force_dense_output всегда возвращаем плотную матрицу:
-        # разреженные части (hashing) конвертируются в ndarray, иначе —
-        # стандартный sparse_threshold=0.3 (csr при любой sparse-части).
+        # With force_dense_output we always return a dense matrix: sparse parts
+        # (hashing) are converted to ndarray; otherwise the standard
+        # sparse_threshold=0.3 applies (csr for any sparse part).
         sparse_threshold=0.0 if force_dense_output else 0.3,
     )

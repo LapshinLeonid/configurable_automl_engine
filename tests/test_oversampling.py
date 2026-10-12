@@ -10,7 +10,7 @@ from math import ceil
 
 from pandas.api.types import is_numeric_dtype
 
-# Импорты согласно вашей структуре
+# Imports according to your project structure
 from configurable_automl_engine.oversampling import (
     DataOversampler,
     _is_categorical_col,
@@ -20,11 +20,11 @@ from configurable_automl_engine.oversampling import (
 
 
 class TestDataOversampler:
-    """Полный набор тестов для DataOversampler (20 сценариев)"""
+    """Full test suite for DataOversampler (20 scenarios)"""
 
     @pytest.fixture
     def sample_data(self):
-        """Стандартный набор: 3 примера '0', 2 примера '1'"""
+        """Standard dataset: 3 samples of class '0', 2 samples of class '1'"""
         return pd.DataFrame(
             {
                 "feature1": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -33,10 +33,10 @@ class TestDataOversampler:
             }
         )
 
-    # --- 1. ТЕСТЫ АЛГОРИТМОВ (Базовые сценарии) ---
+    # --- 1. ALGORITHM TESTS (Basic scenarios) ---
 
     def test_basic_oversampling_smote(self, sample_data):
-        """Проверка SMOTE: multiplier=2 -> 10 строк"""
+        """Test SMOTE: multiplier=2 -> 10 rows"""
         sampler = DataOversampler(multiplier=2, algorithm="smote")
         result = sampler.oversample(sample_data, target="target")
         assert len(result) == 10
@@ -44,8 +44,8 @@ class TestDataOversampler:
         assert result.notna().all().all()
 
     def test_basic_oversampling_adasyn(self):
-        # Создаем больше данных, чтобы у миноритарного класса
-        # были соседи из мажоритарного
+        # Create more data so the minority class has
+        # neighbors from the majority class
         data = pd.DataFrame({"f1": np.arange(20), "target": [0] * 15 + [1] * 5})
         sampler = DataOversampler(multiplier=1.2, algorithm="adasyn")
         result = sampler.oversample(data, target="target")
@@ -53,30 +53,30 @@ class TestDataOversampler:
         assert result.notna().all().all()
 
     def test_random_without_noise(self, sample_data):
-        """Проверка Random без шума"""
+        """Test Random without noise"""
         sampler = DataOversampler(multiplier=3, algorithm="random", add_noise=False)
         result = sampler.oversample(sample_data)
         assert len(result) == 15
-        # Проверяем, что это просто дубликаты
+        # Check that the result is just duplicates
         assert result.duplicated().any()
 
     def test_random_with_noise_flag(self, sample_data):
-        """Проверка флага add_noise в Random"""
+        """Test the add_noise flag in Random"""
         sampler = DataOversampler(multiplier=3, algorithm="random", add_noise=True)
         result = sampler.oversample(sample_data)
-        # Значения должны быть уникальными из-за гауссовского шума
+        # Values must be unique due to Gaussian noise
         assert not result.drop("target", axis=1).duplicated().any()
 
-    # --- 2. ТЕСТЫ ТИПОВ ДАННЫХ (Валидация sklearn) ---
+    # --- 2. DATA TYPE TESTS (sklearn validation) ---
 
     def test_dataframe_input_output(self, sample_data):
-        """Вход DF -> Выход DF"""
+        """DataFrame input -> DataFrame output"""
         sampler = DataOversampler()
         result = sampler.oversample(sample_data)
         assert isinstance(result, pd.DataFrame)
 
     def test_array_input(self):
-        """Вход numpy array через fit_resample (стандарт imblearn)"""
+        """numpy array input via fit_resample (imblearn standard)"""
         X = np.random.rand(10, 2)
         y = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
         sampler = DataOversampler(multiplier=2)
@@ -85,46 +85,46 @@ class TestDataOversampler:
         assert len(X_res) == 20
 
     def test_list_input(self):
-        """Вход list (должен перевариваться внутренним _check_X_y)"""
+        """list input (must be handled by the internal _check_X_y)"""
         X = [[1, 2], [3, 4], [5, 6], [7, 8]]
         y = [0, 0, 1, 1]
         sampler = DataOversampler(multiplier=2)
         X_res, y_res = sampler.fit_resample(X, y)
         assert len(X_res) == 8
 
-    # --- 3. ПАРАМЕТРЫ И ГРАНИЦЫ ---
+    # --- 3. PARAMETERS AND BOUNDARIES ---
 
     def test_multiplier_1(self, sample_data):
-        """multiplier=1 не должен изменять размер данных"""
+        """multiplier=1 must not change the data size"""
         sampler = DataOversampler(multiplier=1.0)
         result = sampler.oversample(sample_data)
         assert len(result) == len(sample_data)
 
     def test_fractional_multiplier(self, sample_data):
-        """Проверка дробного множителя (ceil)"""
-        sampler = DataOversampler(multiplier=1.5)  # 3*1.5=4.5->5, 2*1.5=3. Итого 8.
+        """Test the fractional multiplier (ceil)"""
+        sampler = DataOversampler(multiplier=1.5)  # 3*1.5=4.5->5, 2*1.5=3. Total 8.
         result = sampler.oversample(sample_data)
         assert len(result) == 8
 
     def test_invalid_multiplier(self, sample_data):
         sampler = DataOversampler(multiplier=-1.0)
-        # Ошибка вылетит внутри fit_resample -> _strategy -> ValueError
-        # при создании словаря стратегии
+        # The error will be raised inside fit_resample -> _strategy -> ValueError
+        # when building the strategy dictionary
         with pytest.raises(Exception):
             sampler.oversample(sample_data)
 
     def test_unknown_algorithm(self, sample_data):
-        """Неподдерживаемый алгоритм"""
+        """Unsupported algorithm"""
         sampler = DataOversampler(algorithm="invalid_method")
         with pytest.raises(ValueError, match="Unsupported algorithm:"):
             sampler.oversample(sample_data)
 
-    # --- 4. СПЕЦИФИЧЕСКАЯ ЛОГИКА (Новый код) ---
+    # --- 4. SPECIFIC LOGIC (New code) ---
 
     def test_smote_single_minority_sample_error(self):
         """
-        SMOTE математически не определён при 1 объекте миноритарного класса.
-        Ожидаем ValueError согласно контракту imbalanced-learn.
+        SMOTE is mathematically undefined with a single minority-class sample.
+        We expect a ValueError per the imbalanced-learn contract.
         """
         data = pd.DataFrame({"f1": [1, 2, 3, 4], "target": [0, 0, 0, 1]})
 
@@ -134,17 +134,17 @@ class TestDataOversampler:
             sampler.oversample(data)
 
     def test_find_target_in_middle(self):
-        """Поиск таргета, если он не последний"""
+        """Finds the target when it is not the last column"""
         df = pd.DataFrame(
             {"f1": [1, 2, 3, 4], "target": [0, 0, 1, 1], "f2": [5, 6, 7, 8]}
         )
         sampler = DataOversampler(multiplier=2)
         result = sampler.oversample(df, target="target")
-        # Сборка в oversample() переносит таргет в конец
+        # Building in oversample() moves the target to the end
         assert list(result.columns) == ["f1", "f2", "target"]
         assert len(result) == 8
 
-    # --- 5. СИСТЕМНЫЕ ТЕСТЫ ---
+    # --- 5. SYSTEM TESTS ---
 
     def test_logging_error(self, caplog):
         sampler = DataOversampler()
@@ -155,7 +155,7 @@ class TestDataOversampler:
         assert "Oversampling error" in caplog.text
 
     def test_pickle_compatibility(self):
-        """Pickle (важно для мультипроцессинга в GridSearchCV)"""
+        """Pickle (important for multiprocessing in GridSearchCV)"""
         sampler = DataOversampler(multiplier=2, algorithm="smote")
 
         dump = pickle.dumps(sampler)
@@ -163,11 +163,11 @@ class TestDataOversampler:
 
         assert load.algorithm == "smote"
 
-        # lock восстановлен
+        # lock was restored
         assert hasattr(load, "_lock")
         assert load._lock is not None
 
-        # lock реентерабельный (ключевое свойство)
+        # lock is reentrant (a key property)
         acquired = load._lock.acquire(blocking=False)
         try:
             assert acquired is True
@@ -176,7 +176,7 @@ class TestDataOversampler:
                 load._lock.release()
 
     def test_multithreading_safety(self, sample_data):
-        """Проверка lock при записи в лог из разных потоков"""
+        """Check the lock when logging from different threads"""
         sampler = DataOversampler()
 
         def run():
@@ -190,46 +190,46 @@ class TestDataOversampler:
             t.join()
 
     def test_functional_interface(self, sample_data):
-        """Проверка быстрой функции-обертки"""
+        """Test the quick wrapper function"""
         result = functional_oversample(sample_data, multiplier=2, algorithm="random")
         assert len(result) == 10
 
 
 @pytest.fixture
 def sample_data():
-    """Создает минимальный DataFrame для тестов."""
+    """Creates a minimal DataFrame for tests."""
     return pd.DataFrame(
         {"feature1": np.random.rand(10), "target": [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]}
     )
 
 
 def test_critical_error_logging():
-    # 1. Готовим данные
+    # 1. Prepare the data
     X = pd.DataFrame(np.random.rand(10, 2), columns=["f1", "f2"])
-    y = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])  # Сбалансированные данные
+    y = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])  # Balanced data
 
-    # 2. Создаем экземпляр
+    # 2. Create an instance
     sampler = DataOversampler(algorithm="random")
 
-    # 3. Патчим только логгер в модуле oversampling
+    # 3. Patch only the logger in the oversampling module
     with patch("configurable_automl_engine.oversampling.logger") as mock_logger:
-        # 4. Имитируем "непредвиденную" ошибку через метод _strategy
-        # Этот метод вызывается внутри вашего _fit_resample СРАЗУ ПОСЛЕ _check_X_y
+        # 4. Simulate an "unexpected" error through the _strategy method
+        # This method is called inside _fit_resample RIGHT AFTER _check_X_y
         error_text = "Unexpected Crash during Strategy"
 
         with patch.object(sampler, "_strategy", side_effect=AttributeError(error_text)):
-            # Проверяем, что ошибка (AttributeError) пробрасывается наружу
+            # Check that the error (AttributeError) is propagated outward
             with pytest.raises(AttributeError, match=error_text):
                 sampler.fit_resample(X, y)
 
-        # 5. ПРОВЕРКА ЛОГОВ (те самые строки 136-139)
+        # 5. LOG CHECKS (the very lines 136-139)
 
-        # Проверяем logger.debug(..., exc_info=True)
+        # Check logger.debug(..., exc_info=True)
         mock_logger.debug.assert_called_once_with(
             "Unexpected error trace in _fit_resample:", exc_info=True
         )
 
-        # Проверяем logger.error(f"Critical error...")
+        # Check logger.error(f"Critical error...")
         mock_logger.error.assert_called_once_with(
             f"Critical error during data oversampling: {error_text}"
         )
@@ -237,46 +237,46 @@ def test_critical_error_logging():
 
 def test_catch_generic_exception_only():
     """
-    Проверяет, что блок ловит именно Exception,
-    который не входит в список (ValueError, TypeError и т.д.)
+    Verifies that the block catches exactly Exception,
+    which is not in the list (ValueError, TypeError, etc.)
     """
     with patch("configurable_automl_engine.oversampling.logger") as mock_log:
         sampler = DataOversampler()
 
-        # Вызываем ошибку, которая НЕ должна логироваться этим блоком (ValueError)
-        # так как она перехватывается выше и просто пробрасывается (re-raise)
+        # Raise an error that this block must NOT log (ValueError)
+        # because it is caught higher up and simply re-raised
         with patch.object(
             sampler, "_check_X_y", side_effect=ValueError("Standard Data Error")
         ):
             with pytest.raises(ValueError):
                 sampler.fit_resample(None, None)
 
-        # Logger не должен был вызваться, так как ValueError ушел в первый except
+        # The logger must not have been called because ValueError was caught by the first except
         assert mock_log.error.call_count == 0
 
 
-# 1. Покрытие строк 90-91: Шум в колонках типа object (содержащих числа)
+# 1. Coverage of lines 90-91: Noise in object columns (containing numbers)
 def test_noise_on_object_numeric_cols():
     df = pd.DataFrame(
         {
-            "A": ["1.0", "2.0", "3.0", "4.0"],  # Объект, но внутри числа
+            "A": ["1.0", "2.0", "3.0", "4.0"],  # Object, but numeric inside
             "target": [0, 0, 1, 1],
         }
     )
-    # Используем множитель 1 и шум
+    # Use a multiplier of 1 and noise
     sampler = DataOversampler(multiplier=1.0, add_noise=True, noise_level=0.1)
     res = sampler.oversample(df, target="target")
 
-    # Проверяем, что значения в 'A' изменились (зашумлены)
+    # Check that the values in 'A' changed (noise was added)
     assert not np.array_equal(
         res["A"].astype(float).values, df["A"].astype(float).values
     )
 
 
-# 2. Покрытие строк 131-140: Сериализация (pickle)
+# 2. Coverage of lines 131-140: Serialization (pickle)
 def test_serialization_pickle():
     sampler = DataOversampler(multiplier=2.0, algorithm="random")
-    # Проверка удаления и восстановления _lock
+    # Check the removal and restoration of _lock
     dumped = pickle.dumps(sampler)
     loaded = pickle.loads(dumped)
 
@@ -285,13 +285,13 @@ def test_serialization_pickle():
     assert isinstance(loaded._lock, type(sampler._lock))
 
 
-# 3. Покрытие строк 180, 184, 189, 193: Восстановление типов (int/float)
+# 3. Coverage of lines 180, 184, 189, 193: Type restoration (int/float)
 @pytest.mark.parametrize(
     "dtype, add_noise, expected_dtype",
     [
-        (np.int64, True, np.float64),  # Строка 180
-        (np.int32, True, np.float32),  # Строка 184 (через else)
-        (np.float32, False, np.float32),  # Строка 189
+        (np.int64, True, np.float64),  # Line 180
+        (np.int32, True, np.float32),  # Line 184 (via else)
+        (np.float32, False, np.float32),  # Line 189
     ],
 )
 def test_dtype_restoration(dtype, add_noise, expected_dtype):
@@ -301,7 +301,7 @@ def test_dtype_restoration(dtype, add_noise, expected_dtype):
     assert res["A"].dtype == expected_dtype
 
 
-# 4. Покрытие строки 211: Ошибка multiplier < 1
+# 4. Coverage of line 211: Error when multiplier < 1
 def test_invalid_multiplier():
     sampler = DataOversampler(multiplier=0.5)
     df = pd.DataFrame({"A": [1, 2], "target": [0, 1]})
@@ -309,7 +309,7 @@ def test_invalid_multiplier():
         sampler.fit_resample(df[["A"]], df["target"])
 
 
-# 5. Покрытие строк 220-223: Шум + разреженная матрица
+# 5. Coverage of lines 220-223: Noise + sparse matrix
 def test_sparse_matrix_noise_error():
     X_sparse = sparse.csr_matrix([[1, 0], [0, 1], [1, 1]])
     y = np.array([0, 1, 0])
@@ -319,13 +319,13 @@ def test_sparse_matrix_noise_error():
 
 
 # ------------------------------------------------------------------ #
-#  Sparse-ветка (выход hashing-кодирования, issue #4)                #
+#  Sparse branch (output of hashing encoding)                          #
 # ------------------------------------------------------------------ #
 
 
 def test_sparse_random_oversampling_keeps_sparse():
-    """Random-оверсэмплинг на csr_matrix остаётся разреженным
-    (pd.DataFrame(csr) не строится — молчаливый мусорный датафрейм)."""
+    """Random oversampling on a csr_matrix stays sparse
+    (pd.DataFrame(csr) is not built — it would be a silently garbage dataframe)."""
     X_sparse = sparse.csr_matrix(
         [
             [1.0, 0.0, 0.0],
@@ -343,13 +343,13 @@ def test_sparse_random_oversampling_keeps_sparse():
     assert X_res.format == "csr"
     assert X_res.shape[0] == 12
     assert len(y_res) == 12
-    # Значения бинарные, размерность сохранена
+    # Values are binary, the dimensionality is preserved
     assert X_res.shape[1] == 3
 
 
 def test_sparse_smote_densifies():
-    """SMOTE на разреженном входе (hashing) конвертируется в dense:
-    синтетические алгоритмы требуют плотные матрицы расстояний."""
+    """SMOTE on a sparse input (hashing) is converted to dense:
+    synthetic algorithms require dense distance matrices."""
     X_sparse = sparse.csr_matrix(
         [
             [1.0, 0.0, 0.0],
@@ -364,14 +364,14 @@ def test_sparse_smote_densifies():
     sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
     X_res, y_res = sampler.fit_resample(X_sparse, y)
     assert isinstance(X_res, np.ndarray)
-    # multiplier=1.5: ceil(3 * 1.5) = 5 на каждый класс -> 10 строк
+    # multiplier=1.5: ceil(3 * 1.5) = 5 per class -> 10 rows
     assert len(X_res) == 10
     assert len(y_res) == 10
     assert X_res.shape[1] == 3
 
 
 def test_sparse_adasyn_densifies():
-    """ADASYN на разреженном входе конвертируется в dense и работает."""
+    """ADASYN on a sparse input is converted to dense and works."""
     X_sparse = sparse.csr_matrix(
         [
             [1.0, 0.0, 0.0],
@@ -391,7 +391,7 @@ def test_sparse_adasyn_densifies():
 
 
 def test_sparse_unsupported_algorithm_raises():
-    """Неизвестный алгоритм на разреженном входе -> ValueError."""
+    """Unknown algorithm on a sparse input -> ValueError."""
     X_sparse = sparse.csr_matrix([[1.0, 0.0], [0.0, 1.0]])
     y = np.array([0, 1])
     sampler = DataOversampler(algorithm="magic")
@@ -399,9 +399,9 @@ def test_sparse_unsupported_algorithm_raises():
         sampler.fit_resample(X_sparse, y)
 
 
-# 6. Покрытие строки 259: Неподдерживаемый алгоритм
+# 6. Coverage of line 259: Unsupported algorithm
 def test_unsupported_algorithm():
-    # Обходим валидатор через прямой вызов или изменение атрибута
+    # Bypass the validator by calling directly or changing the attribute
     sampler = DataOversampler(algorithm="unknown_algo")
     df = pd.DataFrame({"A": [1, 2, 3, 4], "target": [0, 0, 1, 1]})
     with pytest.raises(ValueError, match="Unsupported algorithm"):
@@ -409,37 +409,37 @@ def test_unsupported_algorithm():
 
 
 def test_restoration_of_boolean_and_unusual_types():
-    """Проверка восстановления типов для данных, не являющихся числами или категориями."""
+    """Check type restoration for data that is neither numeric nor categorical."""
     df = pd.DataFrame({"is_valid": [True, False, True, False], "target": [0, 0, 1, 1]})
     sampler = DataOversampler(algorithm="random", multiplier=1.2)
     result = sampler.oversample(df, target="target")
-    # Проверяем, что тип bool сохранился после преобразований numpy
+    # Check that the bool type survived the numpy conversions
     assert result["is_valid"].dtype == bool
 
 
 def test_type_restoration_error_handling(caplog):
-    """Проверка устойчивости системы к ошибкам при восстановлении типов данных."""
+    """Check the system's resilience to errors during data type restoration."""
     sampler = DataOversampler()
     df = pd.DataFrame({"feature": [1, 2, 3]})
-    # Передаем некорректную серию типов для провокации исключения в блоке обработки
+    # Pass an invalid series of types to provoke an exception in the handling block
     with caplog.at_level(logging.WARNING):
         sampler._restore_dtypes(df, pd.Series({"feature": "non_existent_type_object"}))
     assert "Failed to restore type for column" in caplog.text
 
 
 def test_internal_resampling_mechanism_and_locks():
-    """Тестирование защищенного метода ресемплирования и работы механизма блокировок."""
+    """Test the protected resampling method and the locking mechanism."""
     sampler = DataOversampler(algorithm="random")
     features = np.array([[1.0], [2.0], [3.0], [4.0]])
     labels = np.array([0, 0, 1, 1])
-    # Проверка работы внутреннего API напрямую
+    # Check the internal API directly
     res_features, res_labels = sampler._fit_resample(features, labels)
     assert isinstance(res_features, np.ndarray)
     assert len(res_features) == len(res_labels)
 
 
 def test_synthetic_algorithm_validation_without_numeric_data():
-    """Проверка защиты SMOTE от запуска на данных без числовых признаков."""
+    """Check that SMOTE is protected from running on data without numeric features."""
     df = pd.DataFrame(
         {
             "category_a": ["high", "low", "high", "low"],
@@ -448,14 +448,14 @@ def test_synthetic_algorithm_validation_without_numeric_data():
         }
     )
     sampler = DataOversampler(algorithm="smote")
-    # Ожидаем ошибку, так как SMOTE не может работать только с категориями
+    # We expect an error because SMOTE cannot work with only categorical features
     with pytest.raises(TypeError, match="requires at least one numeric feature"):
         sampler.oversample(df, target="target")
 
 
 def test_exception_propagation_for_invalid_parameters():
-    """Проверка корректного проброса исключений при невалидных входных параметрах."""
-    # Множитель меньше 1 недопустим по логике библиотеки
+    """Check correct exception propagation for invalid input parameters."""
+    # A multiplier below 1 is invalid according to the library logic
     sampler = DataOversampler(multiplier=0.1)
     X = pd.DataFrame({"f1": [1, 2]})
     y = pd.Series([0, 1])
@@ -464,232 +464,232 @@ def test_exception_propagation_for_invalid_parameters():
 
 
 def test_unsupported_algorithm_name_validation():
-    """Проверка валидации названия алгоритма в публичном интерфейсе."""
+    """Check algorithm name validation in the public interface."""
     df = pd.DataFrame({"f1": [1, 2], "target": [0, 1]})
-    sampler = DataOversampler(algorithm="magic_boost")  # Несуществующий алгоритм
+    sampler = DataOversampler(algorithm="magic_boost")  # Non-existent algorithm
     with pytest.raises(ValueError, match="Unsupported algorithm"):
         sampler.oversample(df, target="target")
 
 
 def test_blind_oversampling_without_target_column():
-    """Тестирование 'слепого' увеличения выборки без указания целевой переменной."""
+    """Test 'blind' oversampling without specifying the target variable."""
     df = pd.DataFrame(
         {"feature_1": [0.1, 0.2, 0.3, 0.4], "feature_2": ["A", "B", "A", "B"]}
     )
-    # Проверка работы в режиме простого дублирования строк (Random)
+    # Check operation in simple row duplication mode (Random)
     result = oversample(df, multiplier=2.0, algorithm="random", target=None)
     assert len(result) == 8
-    # Убеждаемся, что временные служебные колонки удалены из результата
+    # Make sure the temporary helper columns are removed from the result
     assert "temp_target" not in result.columns
 
 
-# Тест-кейс для проверки ветки balance=True
+# Test case for covering the balance=True branch
 def test_strategy_balance_true_coverage(mocker):
-    # Создаем мок-объект класса, где реализован _strategy
-    # Имитируем self.balance = True
+    # Create a mock object of the class where _strategy is implemented
+    # Simulate self.balance = True
     mock_self = mocker.Mock()
     mock_self.balance = True
 
-    # Входные данные: класс 0 (10 шт), класс 1 (100 шт)
+    # Input data: class 0 (10 samples), class 1 (100 samples)
     y = pd.Series([0] * 10 + [1] * 100)
     multiplier = 1.5
 
-    # Вызываем метод (предположим, он определен в классе Sampler)
-    # Если вы тестируете конкретный класс, замените Sampler на ваше имя
+    # Call the method (assume it is defined in the Sampler class)
+    # If you test a specific class, replace Sampler with your class name
 
-    # Вызов напрямую через класс, передавая наш mock_self
+    # Call directly through the class, passing our mock_self
     result = DataOversampler._strategy(mock_self, y, multiplier)
 
-    # Расчет: base_size = 100 (макс от 10 и 100)
-    # Итог: ceil(100 * 1.5) = 150 для ВСЕХ классов
+    # Calculation: base_size = 100 (max of 10 and 100)
+    # Result: ceil(100 * 1.5) = 150 for ALL classes
     expected = {0: 150, 1: 150}
 
     assert result == expected
-    assert result[0] == result[1], "При balance=True размеры классов должны быть равны"
+    assert result[0] == result[1], "class sizes must be equal when balance=True"
 
 
 def test_restore_dtypes_none_handling():
     """
-    Тест для покрытия веток:
+    Test for covering the branch:
     if original_dtypes is None:
         return df
     """
-    # 1. Создаем экземпляр класса
-    # Параметры инициализации (add_noise и др.) не важны для этого теста,
-    # так как мы выходим из метода до их использования.
+    # 1. Create an instance of the class
+    # Initialization parameters (add_noise, etc.) are not important for this test,
+    # since we return from the method before they are used.
     sampler = DataOversampler()
 
-    # 2. Подготавливаем тестовый DataFrame
+    # 2. Prepare the test DataFrame
     test_df = pd.DataFrame(
         {"feature_1": [1.0, 2.5, 3.1], "feature_2": ["cat", "dog", "bird"]}
     )
 
-    # 3. Вызываем целевой метод с original_dtypes=None
-    # Это должно активировать ранний выход из функции
+    # 3. Call the target method with original_dtypes=None
+    # This should trigger the early return from the function
     result = sampler._restore_dtypes(df=test_df, original_dtypes=None)
 
-    # 4. Проверки (Assertions)
-    # Проверяем, что DataFrame вернулся без изменений
+    # 4. Assertions
+    # Verify that the DataFrame was returned unchanged
     pd.testing.assert_frame_equal(result, test_df)
 
-    # Проверка на идентичность объекта (в данной реализации должен вернуться тот же df)
+    # Check object identity (in this implementation the same df should be returned)
     assert result is test_df, (
-        "Метод должен возвращать исходный объект, если типы не переданы"
+        "the method must return the original object when types are not provided"
     )
 
 
 def test_restore_dtypes_missing_column_coverage():
     """
-    Тест для покрытия строк:
+    Test for covering the lines:
     if col not in df.columns:
         continue
     """
     sampler = DataOversampler()
 
-    # 1. Создаем DataFrame, в котором НЕТ колонки 'target'
+    # 1. Create a DataFrame that does NOT have the 'target' column
     df = pd.DataFrame({"feature_1": [1, 2, 3]})
 
-    # 2. Создаем Series с типами, где 'target' ПРИСУТСТВУЕТ
-    # (имитируем ситуацию, когда исходные типы были замерены для большего числа колонок)
+    # 2. Create a Series with dtypes where 'target' IS PRESENT
+    # (simulating a situation where the original dtypes were measured for more columns)
     original_dtypes = pd.Series(
         {
             "feature_1": np.dtype("int64"),
-            "target": np.dtype("int64"),  # Этой колонки нет в df
+            "target": np.dtype("int64"),  # This column is not in df
         }
     )
 
-    # 3. Вызываем метод
-    # Программа должна:
-    # - обработать 'feature_1'
-    # - увидеть, что 'target' нет в df.columns
-    # - выполнить 'continue' (перейти к следующей итерации или выйти из цикла)
+    # 3. Call the method
+    # The program should:
+    # - process 'feature_1'
+    # - notice that 'target' is not in df.columns
+    # - execute 'continue' (move to the next iteration or exit the loop)
     result = sampler._restore_dtypes(df=df, original_dtypes=original_dtypes)
 
-    # 4. Проверки
+    # 4. Assertions
     assert "feature_1" in result.columns
     assert "target" not in result.columns
     assert len(result.columns) == 1
-    # Убеждаемся, что метод завершился успешно и не упал с KeyError
+    # Make sure the method completed successfully and did not fail with KeyError
     assert isinstance(result, pd.DataFrame)
 
 
 def test_restore_dtypes_categorical_coverage():
     """
-    Тест для покрытия строк:
+    Test for covering the lines:
     if isinstance(dtype, pd.CategoricalDtype):
         df[col] = df[col].astype(dtype)
     """
     sampler = DataOversampler()
 
-    # 1. Определяем строгий категориальный тип с заданным порядком
+    # 1. Define a strict categorical dtype with a given order
     cat_type = pd.CategoricalDtype(
         categories=["small", "medium", "large"], ordered=True
     )
 
-    # 2. Имитируем DataFrame после оверсэмплинга
-    # (часто после библиотек генерации типы "слетают" в object или int)
+    # 2. Simulate a DataFrame after oversampling
+    # (generation libraries often degrade the dtypes to object or int)
     df = pd.DataFrame(
         {
-            "size": ["small", "large", "medium"]  # Сейчас это тип object
+            "size": ["small", "large", "medium"]  # Currently of dtype object
         }
     )
 
-    # 3. Задаем исходные типы, где колонка 'size' была категориальной
+    # 3. Set the original dtypes where the 'size' column was categorical
     original_dtypes = pd.Series({"size": cat_type})
 
-    # Проверяем начальное состояние (что это не категория)
+    # Check the initial state (that it is not a category)
     assert not isinstance(df["size"].dtype, pd.CategoricalDtype)
 
-    # 4. Вызываем восстановление типов
+    # 4. Call dtype restoration
     result = sampler._restore_dtypes(df=df, original_dtypes=original_dtypes)
 
-    # 5. Проверки (Assertions)
-    # Проверяем, что тип стал категориальным
+    # 5. Assertions
+    # Verify that the dtype became categorical
     assert isinstance(result["size"].dtype, pd.CategoricalDtype)
 
-    # Проверяем, что категории восстановились корректно
+    # Verify that the categories were restored correctly
     assert list(result["size"].dtype.categories) == ["small", "medium", "large"]
     assert result["size"].dtype.ordered is True
 
-    # Убеждаемся, что данные не пострадали
+    # Make sure the data was not corrupted
     assert result["size"].iloc[1] == "large"
 
 
 def test_restore_dtypes_object_coverage():
     """
-    Тест для покрытия строк:
+    Test for covering the lines:
     elif dtype == object:
         df[col] = df[col].astype(object)
     """
     sampler = DataOversampler()
 
-    # 1. Создаем DataFrame, где колонка 'description' имеет тип,
-    # отличный от чистого object (например, имитируем результат генерации)
-    # В Pandas 3.0 это может быть StringDtype, здесь просто создадим Series
+    # 1. Create a DataFrame where the 'description' column has a dtype
+    # different from plain object (e.g., simulating a generation result)
+    # In Pandas 3.0 this might be StringDtype; here we simply create a Series
     df = pd.DataFrame({"description": ["item1", "item2", "item3"]})
 
-    # 2. Указываем, что изначально тип был строго object
+    # 2. Specify that the original dtype was strictly object
     original_dtypes = pd.Series(
         {
-            "description": np.dtype("O")  # Это и есть тип object
+            "description": np.dtype("O")  # This is the object dtype
         }
     )
 
-    # 3. Вызываем метод
+    # 3. Call the method
     result = sampler._restore_dtypes(df=df, original_dtypes=original_dtypes)
 
-    # 4. Проверки
-    # Проверяем, что тип в итоге стал object
+    # 4. Assertions
+    # Verify that the resulting dtype is object
     assert result["description"].dtype == object
 
-    # Убеждаемся, что значения сохранились
+    # Make sure the values were preserved
     assert result["description"].iloc[0] == "item1"
 
 
 def test_fit_resample_smotenc_via_smote_coverage():
     """
-    Покрывает блок:
+    Covers the block:
     if algo_local == "smote":
         if cat_features_idx:
             sampler = SMOTENC(...)
     """
-    # 1. Инициализируем с алгоритмом SMOTE
+    # 1. Initialize with the SMOTE algorithm
     sampler = DataOversampler(algorithm="SMOTE", multiplier=1.5, random_state=42)
 
-    # 2. Создаем данные с категориальной колонкой (object)
+    # 2. Create data with a categorical column (object)
     X = pd.DataFrame(
         {
             "numeric_feat": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "categorical_feat": ["A", "A", "B", "B", "A", "B"],  # Нечисловая колонка
+            "categorical_feat": ["A", "A", "B", "B", "A", "B"],  # Non-numeric column
         }
     )
-    y = pd.Series([0, 0, 0, 0, 1, 1])  # Дисбаланс: класс 1 всего 2 примера
+    y = pd.Series([0, 0, 0, 0, 1, 1])  # Imbalance: class 1 has only 2 samples
 
-    # 3. Вызываем ресемплирование
-    # Внутри cat_features_idx станет [1], и вызовется SMOTENC
+    # 3. Run resampling
+    # Internally cat_features_idx will become [1], and SMOTENC will be used
     X_res, y_res = sampler._fit_resample(X, y)
 
-    # 4. Проверки
+    # 4. Assertions
     assert X_res.shape[0] > X.shape[0]
     assert X_res.shape[1] == 2
-    # Проверяем, что категориальная колонка осталась корректной (не превратилась в NaN)
+    # Verify that the categorical column stayed correct (did not become NaN)
     assert "A" in X_res[:, 1] or "B" in X_res[:, 1]
 
 
 def test_fit_resample_adasyn_to_smotenc_fallback_coverage(caplog):
     """
-    Тест для покрытия веток:
+    Test for covering the branches:
     elif algo_local == "adasyn":
         if cat_features_idx:
             logger.warning(...)
             sampler = SMOTENC(...)
     """
-    # 1. Инициализируем оверсэмплер с алгоритмом ADASYN
+    # 1. Initialize the oversampler with the ADASYN algorithm
     sampler = DataOversampler(algorithm="ADASYN", multiplier=2.0, random_state=42)
 
-    # 2. Создаем данные, где есть хотя бы одна категориальная колонка (тип object/string)
-    # Важно: ADASYN в оригинале упал бы на таких данных,
-    # но наш код должен переключиться на SMOTENC.
+    # 2. Create data with at least one categorical column (object/string dtype)
+    # Important: vanilla ADASYN would fail on such data,
+    # but our code must fall back to SMOTENC.
     X = pd.DataFrame(
         {
             "feature_numeric": [1.1, 2.2, 3.3, 4.4, 5.5, 6.6],
@@ -697,63 +697,63 @@ def test_fit_resample_adasyn_to_smotenc_fallback_coverage(caplog):
         }
     )
 
-    # Создаем целевую переменную с дисбалансом (минимум 2 примера для миноритарного класса)
+    # Create an imbalanced target (at least 2 samples for the minority class)
     y = np.array([0, 0, 0, 0, 1, 1])
 
-    # 3. Вызываем метод. Используем caplog для проверки логов.
+    # 3. Call the method. Use caplog to check the logs.
     with caplog.at_level("WARNING"):
         X_res, y_res = sampler._fit_resample(X, y)
 
-    # 4. Проверки (Assertions)
+    # 4. Assertions
 
-    # Проверка покрытия лога: ищем текст сообщения в логах
+    # Check log coverage: look for the message text in the logs
     assert any(
         "ADASYN does not support categorical columns" in record.message
         for record in caplog.records
-    ), "Должно появиться предупреждение о переключении на SMOTENC"
+    ), "a warning about the fallback to SMOTENC must be emitted"
 
-    # Проверка результата: данные должны быть синтезированы
+    # Check the result: the data must be synthesized
     assert len(y_res) > len(y), (
-        "Количество примеров должно увеличиться после оверсэмплинга"
+        "the number of samples must increase after oversampling"
     )
-    assert X_res.shape[1] == 2, "Количество признаков должно сохраниться"
+    assert X_res.shape[1] == 2, "the number of features must be preserved"
 
-    # Проверка целостности данных: категориальная колонка не должна быть пустой или сломанной
-    # (проверяем наличие строк в результирующем numpy-массиве)
+    # Check data integrity: the categorical column must not be empty or corrupted
+    # (we check for the presence of strings in the resulting numpy array)
     unique_cats = np.unique(X_res[:, 1])
     assert "type_A" in unique_cats or "type_B" in unique_cats
 
 
 def test_restore_dtypes_noise_numeric_pass():
     """
-    Тест проверяет ветку 'pass', когда:
+    The test covers the 'pass' branch when:
     1. add_noise = True
-    2. Исходный тип был object
-    3. Текущий тип в df является числовым
+    2. The original dtype was object
+    3. The current dtype in df is numeric
     """
-    # 1. Инициализируем оверсэмплер с включенным шумом
+    # 1. Initialize the oversampler with noise enabled
     oversampler = DataOversampler(add_noise=True)
-    # 2. Создаем исходные типы (когда-то колонка была строковой/объектом)
+    # 2. Create the original dtypes (the column once was string/object)
     original_dtypes = pd.Series(
         {
-            "feature_col": np.dtype("O")  # Тип object
+            "feature_col": np.dtype("O")  # object dtype
         }
     )
-    # 3. Создаем DataFrame, где эта колонка СТАЛА числовой
-    # (например, в процессе генерации данных или добавления шума)
+    # 3. Create a DataFrame where this column BECAME numeric
+    # (for example, during data generation or noise addition)
     df = pd.DataFrame(
         {
-            "feature_col": [1.1, 2.5, 3.8]  # Числовые значения (float64)
+            "feature_col": [1.1, 2.5, 3.8]  # Numeric values (float64)
         }
     )
-    # Убеждаемся в исходном состоянии перед вызовом метода
+    # Confirm the initial state before calling the method
     assert is_numeric_dtype(df["feature_col"])
 
-    # 4. Вызываем метод
+    # 4. Call the method
     result_df = oversampler._restore_dtypes(df, original_dtypes)
-    # 5. Проверки:
-    # Тип должен ОСТАТЬСЯ числовым (float64), так как сработал 'pass'
-    # Если бы сработал 'else', тип стал бы 'object'
+    # 5. Assertions:
+    # The dtype must STAY numeric (float64), because the 'pass' branch ran
+    # If the 'else' branch had run, the dtype would become 'object'
     assert is_numeric_dtype(result_df["feature_col"])
     assert result_df["feature_col"].dtype != object
     assert result_df["feature_col"].iloc[0] == 1.1
@@ -761,8 +761,8 @@ def test_restore_dtypes_noise_numeric_pass():
 
 def test_fit_resample_smote_requires_numeric_feature():
     """
-    Покрытие строк 332-334: проверка TypeError в _fit_resample
-    при вызове SMOTE на данных без числовых признаков.
+    Coverage of lines 332-334: check the TypeError in _fit_resample
+    when calling SMOTE on data without numeric features.
     """
     sampler = DataOversampler(algorithm="smote", multiplier=1.5)
     X = pd.DataFrame(
@@ -779,8 +779,8 @@ def test_fit_resample_smote_requires_numeric_feature():
 
 def test_fit_resample_adasyn_requires_numeric_feature():
     """
-    Покрытие строк 332-334: проверка TypeError в _fit_resample
-    при вызове ADASYN на данных без числовых признаков.
+    Coverage of lines 332-334: check the TypeError in _fit_resample
+    when calling ADASYN on data without numeric features.
     """
     sampler = DataOversampler(algorithm="adasyn", multiplier=1.5)
     X = pd.DataFrame(
@@ -794,9 +794,9 @@ def test_fit_resample_adasyn_requires_numeric_feature():
     with pytest.raises(TypeError, match="ADASYN requires at least one numeric feature"):
         sampler._fit_resample(X, y)
     """
-    Проверка, что при Random + add_noise=True категориальные колонки
-    не повреждаются шумом: шум исключается из ordinal-закодированных колонок,
-    а затем они корректно декодируются обратно в исходные категории.
+    Verify that with Random + add_noise=True categorical columns are not
+    corrupted by noise: noise is excluded from the ordinal-encoded columns,
+    and they are then correctly decoded back into the original categories.
     """
     df = pd.DataFrame(
         {
@@ -814,52 +814,52 @@ def test_fit_resample_adasyn_requires_numeric_feature():
     )
     result = sampler.oversample(df, target="target")
 
-    # Проверка 1: Размер увеличился (5 * 2 = 10)
+    # Check 1: The size increased (5 * 2 = 10)
     assert len(result) == 10
-    # Проверка 2: Категориальная колонка содержит ТОЛЬКО исходные метки
+    # Check 2: The categorical column contains ONLY the original labels
     valid_categories = {"low", "medium", "high"}
     assert set(result["category"].unique()) == valid_categories, (
-        "Шум не должен создавать новые значения в категориальной колонке"
+        "noise must not create new values in the categorical column"
     )
-    # Проверка 3: Числовая колонка изменилась (шум применён)
+    # Check 3: The numeric column changed (noise was applied)
     assert not np.array_equal(
         result["numeric"].values[:5], df["numeric"].values
-    ), "Шум должен изменить числовые значения"
-    # Проверка 4: Все значения не NaN
+    ), "noise must change the numeric values"
+    # Check 4: All values are not NaN
     assert result.notna().all().all()
 
 
 # ------------------------------------------------------------------ #
-#  Детекция категориальных колонок (numeric-strings edge cases)      #
+#  Categorical column detection (numeric-strings edge cases)      #
 # ------------------------------------------------------------------ #
 
 
 def test_numeric_strings_treated_as_numeric():
-    """'Числовые строки' ('10','20') считаются числовыми, а не категориями."""
+    """'Numeric strings' ('10','20') are treated as numeric, not categorical."""
     assert _is_categorical_col(pd.Series(["10", "20", "30"])) is False
 
 
 def test_mixed_strings_treated_as_categorical():
-    """Смешанные значения (числа + буквы) — категориальная колонка."""
+    """Mixed values (numbers + letters) — a categorical column."""
     assert _is_categorical_col(pd.Series(["10", "a", "20"])) is True
 
 
 def test_true_category_treated_as_categorical():
-    """Нечисловые категории остаются категориальными."""
+    """Non-numeric categories remain categorical."""
     assert _is_categorical_col(pd.Series(["red", "green", "blue"])) is True
 
 
 def test_numeric_dtype_treated_as_numeric():
-    """Числовой dtype не является категорией."""
+    """A numeric dtype is not categorical."""
     assert _is_categorical_col(pd.Series([1.0, 2.0, 3.0])) is False
 
 
 def test_smote_guard_not_triggered_for_numeric_strings():
     """
-    Оверсэмплинг (oversample) с колонкой 'числовых строк' не должен
-    ошибочно считать её категориальной и кидать TypeError
-    "requires at least one numeric feature" (согласованность guard-проверки
-    в oversample() и детекции в _fit_resample).
+    Oversampling with a column of 'numeric strings' must not
+    mistakenly treat it as categorical and raise a TypeError
+    "requires at least one numeric feature" (consistency between the guard check
+    in oversample() and the detection in _fit_resample).
     """
     df = pd.DataFrame(
         {

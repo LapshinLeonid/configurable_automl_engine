@@ -1,5 +1,5 @@
 
-Copyright (c) 2026, Леонид Лапшин
+Copyright (c) 2026, Leonid Lapshin
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

@@ -1,28 +1,27 @@
-"""Модуль управления жизненным циклом обучения моделей (Training Engine).
-Обеспечивает автоматизированный процесс от валидации входных данных до
-сохранения финальной модели. Поддерживает многофазовый поиск гиперпараметров
-(HPO), динамическую загрузку алгоритмов и параллельное выполнение вычислений.
-Публичный цикл обучения декомпозирован на шаги (issue #31):
-    - load_config: Загрузка и валидация конфигурации и входных данных.
-    - prepare_dataset: Подготовка X/y, резолюция валидации и типов колонок.
-    - execute_phases: Многофазовый поиск гиперпараметров (HPO).
-    - select_winner: Детерминированный выбор алгоритма-победителя.
-    - persist_artifact: Финальное обучение, сохранение модели и сборка отчёта.
-Двухстадийный выбор победителя (эпик #61, задачи T3/T4) выполняется
-явным select-шагом пайплайна (эпик #74, задача R2):
-    - select со strategy: sanity_gate — пул финалистов (T3), обучение
-      финалистов на 100% данных, аудит ModelSanityGate (T2) и
-      ранжирование прошедших аудит по RMSE_oof (T4, режим active);
-    - select со strategy: cv_best — детерминированное ранжирование по
-      CV-скору без аудита (аналог legacy-пути при mode: off).
-Основные компоненты:
-    - train_best_model: Публичный интерфейс — оркестрация перечисленных шагов.
-    - PhaseContext: Явный контекст между фазами (рабочее множество,
-      gate-контекст, circuit breaker).
-    - _run_hpo: Обертка для поиска гиперпараметров через внешние тюнеры.
-    - _fit_and_save: Финальное обучение модели на полном наборе данных.
-    - _load_module: Помощник для динамического импорта модулей по пути.
-Пример использования:
+"""Module managing the model training lifecycle (Training Engine).
+Provides an automated pipeline from input data validation to saving the final
+model. Supports multi-phase hyperparameter search (HPO), dynamic algorithm
+loading, and parallel computation.
+The public training loop is decomposed into steps:
+    - load_config: Load and validate the configuration and input data.
+    - prepare_dataset: Prepare X/y, resolve validation strategy and column types.
+    - execute_phases: Multi-phase hyperparameter search (HPO).
+    - select_winner: Deterministically select the winning algorithm.
+    - persist_artifact: Final training, model persistence, and report assembly.
+Two-stage winner selection is performed by an explicit pipeline select step:
+    - select with strategy: sanity_gate — a finalists pool, training each
+      finalist on 100% of the data, a ModelSanityGate audit, and ranking of the
+      audited candidates by RMSE_oof (active mode);
+    - select with strategy: cv_best — deterministic ranking by CV score without
+      audit (the equivalent of the legacy path with mode: off).
+Main components:
+    - train_best_model: Public interface — orchestrates the steps above.
+    - PhaseContext: Explicit context shared between phases (working set,
+      gate context, circuit breaker).
+    - _run_hpo: Wrapper for hyperparameter search through external tuners.
+    - _fit_and_save: Final model training on the full dataset.
+    - _load_module: Helper for dynamic module import by path.
+Usage example:
     results = train_best_model(
         config="path/to/config.yaml",
         df=my_dataframe,
@@ -90,27 +89,28 @@ _LOG = logging.getLogger("training_engine")
 
 
 def is_valid_winner_score(score: Any) -> bool:
-    """Проверить, что «сырое» значение скора может быть скором победителя.
+    """Check that a "raw" score value can qualify as a winning score.
 
-    Валидный скор победителя обязан быть:
-    - числом (int/float/np.floating): None, строки (в т.ч. числовые, например
-      ``"0.5"``) и прочие «мусорные» типы от кастомных тюнеров не проходят
-      (issue #32);
-    - конечным (NaN и ±inf — сигналы отсутствия валидной метрики);
-    - строго выше класса worst-score сентинела: любой скор <= точного
-      float32-минимума (``WORST_SCORE_THRESHOLD``) трактуется как сентинел.
-      Порог покрывает и константу ``HPO_WORST_SCORE`` (возвращается тюнером
-      для нефинитных метрик), и «сырое» значение ``float(np.finfo(np.float32).min)``
-      (возможно от numpy-cast метрик или кастомных тюнеров), которое старый
-      фильтр через ``math.isclose(rel_tol=1e-9)`` пропускал (относительная
-      разница ≈ 9.88e-9 > 1e-9). Реальные метрики такой величины практически
-      невозможны, поэтому ложный отсев исключён.
+    A valid winner score must be:
+    - numeric (int/float/np.floating): None, strings (including numeric ones
+      such as ``"0.5"``) and other "garbage" types from custom tuners are
+      rejected;
+    - finite (NaN and ±inf signal the absence of a valid metric);
+    - strictly above the worst-score sentinel class: any score at or below the
+      exact float32 minimum (``WORST_SCORE_THRESHOLD``) is treated as a
+      sentinel. The threshold covers both the ``HPO_WORST_SCORE`` constant
+      (returned by the tuner for non-finite metrics) and the raw
+      ``float(np.finfo(np.float32).min)`` value (possible from numpy-cast
+      metrics or custom tuners), which the old ``math.isclose(rel_tol=1e-9)``
+      filter let through (relative difference ≈ 9.88e-9 > 1e-9). Real metrics
+      of such magnitude are practically impossible, so false exclusion is
+      ruled out.
 
     Args:
-        score (Any): «Сырое» значение скора из фазы HPO.
+        score (Any): The raw score value from the HPO phase.
 
     Returns:
-        bool: True, если скор может попасть в ``result["score"]``.
+        bool: True if the score may end up in ``result["score"]``.
     """
     if not isinstance(score, (int, float, np.floating)):
         return False
@@ -122,24 +122,23 @@ def is_valid_winner_score(score: Any) -> bool:
 
 
 def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
-    """Детерминированно выбрать алгоритм-победителя по «сырому» скору.
+    """Deterministically select the winning algorithm by its "raw" score.
 
-    Побеждает алгоритм с максимальным значением скора (семантика
-    оптимизатора — «больше лучше»). Ничьи разрешаются порядком итерации по
-    ``results``: ``max`` стабилен, а словарь сохраняет порядок вставки —
-    для последовательного пути это порядок конфигурации, поэтому при равных
-    скорах побеждает первый настроенный алгоритм (задокументированный
-    tie-break, issue #32).
+    The algorithm with the maximum score wins (optimizer semantics — "higher
+    is better"). Ties are resolved by iteration order over ``results``: ``max``
+    is stable, and the dict preserves insertion order — for the sequential path
+    this is the configuration order, so on equal scores the first configured
+    algorithm wins (documented tie-break).
 
     Args:
-        results (dict[str, tuple[float, dict[str, Any]]]): Словарь
-            «алгоритм → (скор, параметры)» текущей фазы. Не должен быть пустым.
+        results (dict[str, tuple[float, dict[str, Any]]]): The "algorithm →
+            (score, params)" map of the current phase. Must not be empty.
 
     Returns:
-        str: Имя алгоритма-победителя.
+        str: The name of the winning algorithm.
 
     Raises:
-        ValueError: Если ``results`` пуст — победитель не существует.
+        ValueError: If ``results`` is empty — no winner exists.
     """
     if not results:
         raise ValueError("Cannot select a winner from empty results")
@@ -147,35 +146,35 @@ def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  Finalists pool Top-K (epic #61, task T3)                                    #
-#  Формирование пула финалистов: коридор δ от лидера в пользовательской       #
-#  семантике + жёсткий кап top_k_candidates. Тип ``CorridorMode`` определён   #
-#  в ``config_parser`` (используется также конфигом ``SanityGateCfg``).       #
+#  Finalists pool Top-K                                                        #
+#  Builds the finalists pool: a δ corridor from the leader in user semantics  #
+#  plus a hard cap of top_k_candidates. The ``CorridorMode`` type is defined  #
+#  in ``config_parser`` (also used by the ``SanityGateCfg`` config).          #
 # --------------------------------------------------------------------------- #
 FAMILY_DIVERSITY_MULTIPLIER_DEFAULT = 1.5
 
-# Малый относительный допуск для сравнений на границе коридора: артефакты
-# плавающей арифметики (например, 0.55 - 0.5 = 0.050000000000000044) не должны
-# исключать кандидата, математически находящегося ровно на границе (правило
-# «равенство границе — включение», задокументированный tie-break). Допуск
-# масштабируется величиной операндов (относительная точность float64), поэтому
-# для скоров порядка 1e-300 он не «расширяет» коридор до 1e-12.
+# Small relative tolerance for comparisons at the corridor boundary: floating
+# point artifacts (e.g. 0.55 - 0.5 = 0.050000000000000044) must not exclude a
+# candidate that is mathematically exactly at the boundary (the "boundary
+# counts as included" rule, a documented tie-break). The tolerance scales with
+# the operand magnitude (float64 relative precision), so for scores on the
+# order of 1e-300 it does not "widen" the corridor to 1e-12.
 _CORRIDOR_EPS = 1e-12
 
 
 def _tol_scale(value: float, limit: float) -> float:
-    """Шкала допуска: максимальная величина операндов (0 при обоих нулях)."""
+    """Tolerance scale: the maximum operand magnitude (0 when both are zero)."""
     scale = max(abs(value), abs(limit))
     return _CORRIDOR_EPS * scale if scale > 0.0 else 0.0
 
 
 def _le_tol(value: float, limit: float) -> bool:
-    """``value <= limit`` с малым относительным допуском (граница включается)."""
+    """``value <= limit`` with a small relative tolerance (boundary included)."""
     return value <= limit + _tol_scale(value, limit)
 
 
 def _ge_tol(value: float, limit: float) -> bool:
-    """``value >= limit`` с малым относительным допуском (граница включается)."""
+    """``value >= limit`` with a small relative tolerance (boundary included)."""
     return value >= limit - _tol_scale(value, limit)
 
 
@@ -208,14 +207,14 @@ def select_finalists(
     family_diversity_multiplier: float = FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
     disqualified: Iterable[str] = (),
 ) -> list[str]:
-    """Build the deterministic finalists pool (epic #61, task T3, issue #65).
+    """Build the deterministic finalists pool.
 
     Replaces the "blind" CV-first-place selection with a pool of candidates for
     the second phase: candidates whose CV score falls inside the δ corridor from
     the leader, intersected with the hard ``top_k_candidates`` cap. The corridor
     is expressed in **user** metric semantics (see ``metrics.user_direction``
     and ``metrics.to_user_value``): raw optimizer scores from ``results`` are
-    converted back to natural values first (issue #54 — the direction comes from
+    converted back to natural values first (the direction comes from
     ``user_direction``, not from the optimizer's ``greater_is_better``).
 
     Corridor forms (``corridor_mode``):
@@ -249,7 +248,7 @@ def select_finalists(
     ``allowed_families``; when the pool's single family is not permitted, no
     top-up happens at all.
 
-    Algorithms disqualified by the circuit breaker (issue #12) never enter the
+    Algorithms disqualified by the circuit breaker never enter the
     pool.
 
     Determinism: the pool is ordered by the raw score descending (optimizer
@@ -279,7 +278,7 @@ def select_finalists(
         family_diversity_multiplier (float): Width multiplier of the extended
             corridor for the top-up (default 1.5, must be > 0).
         disqualified (Iterable[str]): Algorithms disqualified by the circuit
-            breaker (issue #12); they are excluded from the pool.
+            breaker; they are excluded from the pool.
 
     Returns:
         list[str]: Ordered finalist names (best first), length in
@@ -306,10 +305,11 @@ def select_finalists(
     if family_diversity_multiplier <= 0:
         raise ValueError("family_diversity_multiplier must be > 0")
 
-    # Circuit breaker (issue #12): disqualified algorithms never enter the pool.
-    # Iterable материализуется ДО dict-comprehension: генератор, переданный
-    # как ``disqualified``, был бы потреблён ``set(...)`` на первой итерации
-    # comprehension, и дисквалифицированные «протекли» бы в пул (ревью PR #33).
+    # Circuit breaker: disqualified algorithms never enter the pool.
+    # The iterable is materialized BEFORE the dict-comprehension: a generator
+    # passed as ``disqualified`` would otherwise be consumed by ``set(...)`` on
+    # the first comprehension iteration, letting disqualified algorithms "leak"
+    # into the pool.
     disqualified_set = set(disqualified)
     candidates = {
         name: value for name, value in results.items() if name not in disqualified_set
@@ -320,33 +320,32 @@ def select_finalists(
             "disqualified algorithms"
         )
 
-    # Пользовательская семантика (issue #54): «сырые» скоры переводятся в
-    # естественные значения, направление берётся из user_direction (для ошибок
-    # это "minimize", хотя оптимизатор максимизирует их инверсии).
+    # User semantics: raw scores are converted into natural values, and the
+    # direction is taken from user_direction (for errors this is "minimize",
+    # even though the optimizer maximizes their inversions).
     user_scores = {
         name: to_user_value(metric_user, score)
         for name, (score, _) in candidates.items()
     }
     direction = user_direction(metric_user)
 
-    # Лидер по пользовательской семантике; ничья — первый в порядке вставки
-    # (тот же tie-break, что и в select_winner).
+    # Leader by user semantics; ties go to the first in insertion order (the
+    # same tie-break as in select_winner).
     if direction == "minimize":
         best_name = min(user_scores, key=lambda n: user_scores[n])
     else:
         best_name = max(user_scores, key=lambda n: user_scores[n])
     best_score = user_scores[best_name]
 
-    # Размах скоров по валидным кандидатам — вычисляется один раз (аддитивная
-    # форма коридора), а не внутри _in_corridor на каждого кандидата (O(n²),
-    # ревью PR #33).
+    # Score spread over valid candidates — computed once (for the additive
+    # corridor form) rather than inside _in_corridor for each candidate (O(n²)).
     score_spread = max(user_scores.values()) - min(user_scores.values())
 
     if corridor_mode == "auto":
         if is_error_metric(metric_user):
-            # Ошибка → multiplicative, кроме вырожденного случая best≈0
-            # (MAE≈0): мультипликативная форма даёт порог ≈0 и схлопывает пул
-            # до лидера — переходим на аддитивную форму (ревью PR #33).
+            # Error → multiplicative, except the degenerate case best≈0
+            # (MAE≈0): the multiplicative form yields a threshold ≈0 and
+            # collapses the pool to the leader — switch to the additive form.
             effective_mode: CorridorMode = (
                 "additive" if abs(best_score) <= _CORRIDOR_EPS else "multiplicative"
             )
@@ -356,11 +355,12 @@ def select_finalists(
         effective_mode = corridor_mode
 
     def _in_corridor(name: str, mode: CorridorMode, delta: float) -> bool:
-        """Проверить попадание кандидата в коридор заданной формы и ширины.
+        """Check whether a candidate falls inside the corridor of the given form
+        and width.
 
-        Равенство границе включается (документированный tie-break); малый
-        относительный допуск ``_CORRIDOR_EPS`` нейтрализует артефакты
-        плавающей арифметики.
+        Boundary equality counts as inclusion (documented tie-break); the small
+        relative tolerance ``_CORRIDOR_EPS`` neutralizes floating point
+        artifacts.
         """
         score = user_scores[name]
         if mode == "additive":
@@ -378,10 +378,10 @@ def select_finalists(
         if _in_corridor(name, effective_mode, corridor_delta)
     ]
     if best_name not in base_members:
-        # Коридор пуст при max-better метрике с отрицательным лучшим скором
-        # (например, R² < 0): мультипликативная форма исключает самого лидера
-        # (best*(1-δ) > best при best < 0). Выбираем аддитивную форму
-        # (документированный edge case из постановки).
+        # The corridor is empty for a max-better metric with a negative best
+        # score (e.g. R² < 0): the multiplicative form excludes the leader
+        # itself (best*(1-δ) > best when best < 0). Switch to the additive
+        # form (documented edge case).
         _LOG.warning(
             "Finalists corridor (mode=%s, direction=%s) excludes the leader "
             "%s (best %s); falling back to the additive corridor form",
@@ -397,22 +397,22 @@ def select_finalists(
             if _in_corridor(name, effective_mode, corridor_delta)
         ]
 
-    # Детерминированный порядок: «сырой» скор по убыванию (семантика
-    # оптимизатора, как в select_winner); ничьи — порядок вставки (порядок
-    # конфигурации). Сортировка стабильна.
+    # Deterministic ordering: raw score descending (optimizer semantics, as in
+    # select_winner); ties — insertion order (configuration order). The sort is
+    # stable.
     ordered = sorted(candidates, key=lambda n: candidates[n][0], reverse=True)
 
-    # Явная комбинация (пересечение): (кандидаты внутри коридора) ∩
-    # (первые top_k по CV-скору). Добор за пределы коридора не производится.
+    # Explicit combination (intersection): (candidates inside the corridor) ∩
+    # (first top_k by CV score). No topping up beyond the corridor.
     base_set = set(base_members)
     pool = [name for name in ordered if name in base_set][:top_k_candidates]
 
-    # Опциональный мягкий добор семейств (п. 4 постановки): если в пуле
-    # представлено ровно одно семейство И это семейство разрешено конфигом
-    # (allowed_families), добавляем лучшего представителя недостающих семейств
-    # из расширенного коридора (family_diversity_multiplier × δ), не превышая
-    # top_k_candidates. Добавляемые семейства также ограничиваются
-    # allowed_families. Поведение приведено к документации (ревью PR #33).
+    # Optional soft family top-up: if the pool represents exactly one family
+    # AND that family is permitted by the config (allowed_families), add the
+    # best representative of each missing family from the extended corridor
+    # (family_diversity_multiplier × δ), never exceeding top_k_candidates. The
+    # added families are also restricted to allowed_families. Behavior matches
+    # the documentation.
     if enforce_family_diversity and len(pool) < top_k_candidates:
         pool_families = {_family_of(name, algorithm_families) for name in pool}
         single_pool_family = (
@@ -455,47 +455,47 @@ def select_finalists(
                 pool_names.add(picked)
                 remaining.remove(_family_of(picked, algorithm_families))
 
-    # Финальный стабильный порядок: добавленные семейства слабее участников
-    # базового пула, но пересортировка делает инвариант явным.
+    # Final stable ordering: added families are weaker than base pool members,
+    # but the re-sort makes the invariant explicit.
     pool.sort(key=lambda n: candidates[n][0], reverse=True)
     return pool
 
 
 # --------------------------------------------------------------------------- #
-#  Robust winner selection (epic #61, task T4, issue #64)                      #
-#  Двухстадийный выбор победителя: пул финалистов (T3) → обучение каждого     #
-#  финалиста на 100% данных ОДИН раз → аудит ModelSanityGate (T2) →           #
-#  ранжирование прошедших аудит по RMSE_oof.                                  #
+#  Robust winner selection                                                     #
+#  Two-stage winner selection: finalists pool → training each finalist on     #
+#  100% of the data ONCE → ModelSanityGate audit → ranking of the audited     #
+#  candidates by RMSE_oof.                                                    #
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class FinalistCandidate:
-    """Финалист двухстадийного выбора: модель, обученная на 100% данных.
+    """A two-stage selection finalist: a model trained on 100% of the data.
 
-    Собирается до ``select_robust_winner`` (обучение финалистов на полных
-    данных выполняется ровно один раз, результат переиспользуется для
-    ``RMSE_full``, аудита и отчёта — без дублирования обучения, требование 4
-    постановки T4).
+    Assembled before ``select_robust_winner`` (finalists are trained on the
+    full data exactly once; the result is reused for ``RMSE_full``, the audit,
+    and the report — no duplicated training).
 
     Attributes:
-        algo_name (str): Имя алгоритма.
-        model (Any): Обученный на 100% данных пайплайн (``trainer.pipeline``);
-            используется аудитом (контур В) и для предсказаний ``y_pred_full``.
-        params (dict[str, Any]): Лучшие гиперпараметры из HPO
+        algo_name (str): The algorithm name.
+        model (Any): The pipeline trained on 100% of the data
+            (``trainer.pipeline``); used by the audit (circuit B) and for
+            ``y_pred_full`` predictions.
+        params (dict[str, Any]): The best hyperparameters from HPO
             (``phase_results[algo_name][1]``).
-        cv_score (float): «Сырой» скор из HPO-фазы (семантика оптимизатора);
-            используется select-шагом ``cv_best`` и для отчёта.
-        rmse_oof (float | None): ``RMSE_oof`` финалиста (``trainer.oof_score_``);
-            ``None``, если OOF-оценка невозможна.
-        y_pred_oof (Any): OOF-вектор предсказаний (``trainer.oof_predictions_``),
-            выровненный по строкам X.
-        y_pred_full (Any): Предсказания full-fit модели на тех же строках
-            (``trainer.predict(X)``); используется контуром Г (RMSE_full) и
-            отчётом.
+        cv_score (float): The raw score from the HPO phase (optimizer
+            semantics); used by the ``cv_best`` select step and the report.
+        rmse_oof (float | None): The finalist's ``RMSE_oof``
+            (``trainer.oof_score_``); ``None`` if an OOF estimate is impossible.
+        y_pred_oof (Any): The OOF prediction vector
+            (``trainer.oof_predictions_``), aligned to the rows of X.
+        y_pred_full (Any): The full-fit model's predictions on the same rows
+            (``trainer.predict(X)``); used by circuit D (RMSE_full) and the
+            report.
         rmse_full (float | None): ``RMSE_full = RMSE(y, y_pred_full)``;
-            ``None``, если вычислить нельзя.
-        trainer (Any | None): Сам ``ModelTrainer`` финалиста; передаётся в
-            ``persist_artifact``, чтобы артефакт сохранялся БЕЗ повторного
-            обучения победителя.
+            ``None`` if it cannot be computed.
+        trainer (Any | None): The finalist's ``ModelTrainer`` itself; passed to
+            ``persist_artifact`` so the artifact can be saved WITHOUT retraining
+            the winner.
     """
 
     algo_name: str
@@ -511,22 +511,24 @@ class FinalistCandidate:
 
 @dataclass(frozen=True)
 class RobustWinnerResult:
-    """Результат robust-выбора победителя (T4).
+    """Result of the robust winner selection.
 
     Attributes:
-        winner_algo (str): Имя алгоритма-победителя.
-        mode (SanityGateMode): Режим работы гейта ('off'/'active'). Select-шаги
-            со ``strategy: sanity_gate`` выполняют режим ``active``; ``off``
-            остаётся legacy-режимом прямых вызовов (CV-лидер без аудита).
-        pool (list[str]): Порядок пула финалистов (из T3, детерминированный
-            tie-break при равных RMSE_oof).
-        audit (dict[str, SanityCheckResult]): Аудит каждого финалиста
-            (имя → результат). Заполнен при mode != 'off'.
-        disqualified (dict[str, list[str]]): Дисквалифицированные финалисты
-            (имя → причины). В режиме ``active`` причины применяются.
-        fallback_used (bool): True, если все кандидаты забракованы и победитель
-            выбран fallback-критерием («наименее проблемная» модель).
-        winner_rmse_oof (float | None): ``RMSE_oof`` победителя.
+        winner_algo (str): The name of the winning algorithm.
+        mode (SanityGateMode): The gate operation mode ('off'/'active').
+            Select steps with ``strategy: sanity_gate`` run in ``active`` mode;
+            ``off`` remains the legacy mode of direct calls (CV leader without
+            audit).
+        pool (list[str]): The finalists pool order (deterministic tie-break on
+            equal RMSE_oof).
+        audit (dict[str, SanityCheckResult]): The audit of each finalist
+            (name → result). Filled when mode != 'off'.
+        disqualified (dict[str, list[str]]): Disqualified finalists
+            (name → reasons). In ``active`` mode the reasons are applied.
+        fallback_used (bool): True when all candidates were rejected and the
+            winner was chosen by the fallback criterion (the "least
+            problematic" model).
+        winner_rmse_oof (float | None): The winner's ``RMSE_oof``.
     """
 
     winner_algo: str
@@ -551,33 +553,33 @@ def _fit_finalist(
     n_folds: int | None,
     test_size: float | None,
 ) -> Any:
-    """Обучить финалиста на 100% данных и вернуть его ``ModelTrainer``.
+    """Train a finalist on 100% of the data and return its ``ModelTrainer``.
 
-    Выполняет ровно одно обучение (``ModelTrainer.fit``): валидационный
-    скоринг с OOF-каналом (issue #62) + финальный fit на полном наборе.
-    Результат переиспользуется далее для ``RMSE_full``, аудита и отчёта —
-    дублирование обучения отсутствует (требование 4 постановки T4).
+    Performs exactly one training pass (``ModelTrainer.fit``): validation
+    scoring with the OOF channel plus a final fit on the full dataset. The
+    result is reused downstream for ``RMSE_full``, the audit, and the report —
+    no duplicated training.
 
     Args:
-        algo_name (str): Имя алгоритма.
-        algo_cfg (AlgoCfg): Конфигурация алгоритма.
-        X (pd.DataFrame): Полная матрица признаков.
-        y (pd.Series): Полный вектор целевой переменной.
-        best_params (dict[str, Any]): Лучшие гиперпараметры из HPO.
-        cfg (Config): Корневой конфиг.
-        metric_name_sklearn (str): Имя метрики в sklearn-семантике.
-        validation_strategy (ValidationStrategy | str | None): Разрешённая
-            стратегия валидации.
-        n_folds (int | None): Число фолдов (для 'k_fold').
-        test_size (float | int | None): Размер hold-out части.
+        algo_name (str): The algorithm name.
+        algo_cfg (AlgoCfg): The algorithm configuration.
+        X (pd.DataFrame): The full feature matrix.
+        y (pd.Series): The full target vector.
+        best_params (dict[str, Any]): The best hyperparameters from HPO.
+        cfg (Config): The root config.
+        metric_name_sklearn (str): The metric name in sklearn semantics.
+        validation_strategy (ValidationStrategy | str | None): The resolved
+            validation strategy.
+        n_folds (int | None): The number of folds (for 'k_fold').
+        test_size (float | int | None): The hold-out size.
 
     Returns:
-        Any: Обученный ``ModelTrainer`` (pipeline на 100% данных, OOF-атрибуты).
+        Any: The trained ``ModelTrainer`` (pipeline on 100% of the data, OOF
+            attributes).
 
     Raises:
-        Exception: Любая ошибка обучения пробрасывается наверх — вызывающий
-            код (``_train_finalists``) ловит её и исключает финалиста
-            (требование 5 постановки T4).
+        Exception: Any training error is propagated upward — the calling code
+            (``_train_finalists``) catches it and excludes the finalist.
     """
     trainer = _build_trainer(
         algo_name,
@@ -601,22 +603,22 @@ def _to_candidate(
     X: pd.DataFrame,
     y: pd.Series,
 ) -> FinalistCandidate:
-    """Собрать ``FinalistCandidate`` из обученного ``ModelTrainer``.
+    """Assemble a ``FinalistCandidate`` from a trained ``ModelTrainer``.
 
-    Вычисляет производные величины (``y_pred_full``, ``rmse_full``) ровно
-    один раз из уже обученного тренера; OOF-вектор и ``RMSE_oof`` берутся из
-    атрибутов тренера (issue #62).
+    Computes the derived quantities (``y_pred_full``, ``rmse_full``) exactly
+    once from the already-trained trainer; the OOF vector and ``RMSE_oof`` come
+    from the trainer's attributes.
 
     Args:
-        algo_name (str): Имя алгоритма.
-        trainer (Any): Обученный ``ModelTrainer``.
-        params (dict[str, Any]): Лучшие гиперпараметры.
-        cv_score (float): «Сырой» CV-скор из HPO.
-        X (pd.DataFrame): Полная матрица признаков.
-        y (pd.Series): Полный вектор целевой переменной.
+        algo_name (str): The algorithm name.
+        trainer (Any): The trained ``ModelTrainer``.
+        params (dict[str, Any]): The best hyperparameters.
+        cv_score (float): The raw CV score from HPO.
+        X (pd.DataFrame): The full feature matrix.
+        y (pd.Series): The full target vector.
 
     Returns:
-        FinalistCandidate: Кандидат с переиспользуемыми full-fit векторами.
+        FinalistCandidate: A candidate with reusable full-fit vectors.
     """
     y_pred_full = np.asarray(trainer.predict(X), dtype=float).reshape(-1)
     rmse_full: float | None = None
@@ -643,22 +645,22 @@ def _train_finalists(
     cfg: Config,
     prepared: PreparedData,
 ) -> dict[str, FinalistCandidate]:
-    """Обучить каждый финалист пула на 100% данных ровно один раз.
+    """Train every finalist in the pool on 100% of the data exactly once.
 
-    Провал обучения отдельного финалиста не прерывает запуск: исключение
-    ловится, причина логируется (WARNING), кандидат пропускается (переход к
-    следующему, требование 5 постановки T4).
+    A training failure of a single finalist does not abort the run: the
+    exception is caught, the reason is logged (WARNING), and the candidate is
+    skipped (moving on to the next one).
 
     Args:
-        pool (list[str]): Упорядоченный пул финалистов (из ``select_finalists``).
-        phase_results (dict[str, tuple[float, dict[str, Any]]]): Результаты HPO
-            «алгоритм → (скор, параметры)».
-        cfg (Config): Корневой конфиг.
-        prepared (PreparedData): Подготовленные данные и настройки.
+        pool (list[str]): The ordered finalists pool (from ``select_finalists``).
+        phase_results (dict[str, tuple[float, dict[str, Any]]]): HPO results
+            "algorithm → (score, params)".
+        cfg (Config): The root config.
+        prepared (PreparedData): The prepared data and settings.
 
     Returns:
-        dict[str, FinalistCandidate]: Обученные кандидаты (ключ — имя
-            алгоритма), в порядке пула (dict сохраняет порядок вставки).
+        dict[str, FinalistCandidate]: Trained candidates (key — the algorithm
+            name), in pool order (the dict preserves insertion order).
     """
     algos = _algorithms_as_dict(cfg.algorithms)
     candidates: dict[str, FinalistCandidate] = {}
@@ -679,10 +681,10 @@ def _train_finalists(
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
             )
-        except Exception as err:  # noqa: BLE001 — финалист исключается
+        except Exception as err:  # noqa: BLE001 — the finalist is excluded
             _LOG.warning(
                 "Finalist %s failed to train on the full dataset: %s. "
-                "The candidate is skipped (T4 requirement 5).",
+                "The candidate is skipped.",
                 name,
                 err,
                 exc_info=True,
@@ -694,33 +696,34 @@ def _train_finalists(
     return candidates
 
 
-# Значимость контуров для fallback-критерия (T4, п. 3): Г > А > Б > В.
-# Чем больше ранг, тем «тяжелее» нарушение. Ранги фиксированы в коде.
-# Примечание (issue #108/#111): в warn-режиме контура Г никакое нарушение
-# (ни конечный gap > порога, ни бесконечный gap из деления на ноль) не даёт
-# reason — всё уходит в soft_warnings и в fallback-ранжировании не участвует;
-# ранг Г (3) применяется только к reject-режиму.
+# Circuit significance for the fallback criterion: D > A > B > C.
+# The higher the rank, the "heavier" the violation. Ranks are fixed in code.
+# Note: in the warn mode of circuit D no violation (neither a finite gap
+# above the threshold nor an infinite gap from division by zero) produces a
+# reason — everything goes to soft_warnings and does not take part in the
+# fallback ranking; the D rank (3) applies only to the reject mode.
 _CIRCUIT_RANK_BY_LETTER = {
-    "A": 2,  # А — diversity
-    "B": 1,  # Б — unique
-    "C": 0,  # В — dead features
-    "D": 3,  # Г — generalization gap (самое тяжёлое)
+    "A": 2,  # A — diversity
+    "B": 1,  # B — unique
+    "C": 0,  # C — dead features
+    "D": 3,  # D — generalization gap (the most severe)
 }
 
 
 def _circuit_rank(reason: str) -> int:
-    """Ранг значимости контура по строке reason (Г > А > Б > В).
+    """Significance rank of a circuit from the reason string (D > A > B > C).
 
-    Разбирает префикс ``Circuit <letter>`` в reason (формат
-    ``ModelSanityGate``). Неизвестный формат трактуется как наименее значимый
-    контур (ранг 0) — defensive fallback, чтобы fallback-ранжирование никогда
-    не падало на кастомных причинах.
+    Parses the ``Circuit <letter>`` prefix in reason (``ModelSanityGate``
+    format). An unknown format is treated as the least significant circuit
+    (rank 0) — a defensive fallback so the fallback ranking never fails on
+    custom reasons.
 
     Args:
-        reason (str): Текст причины дисквалификации.
+        reason (str): The disqualification reason text.
 
     Returns:
-        int: Ранг значимости (0..3); 3 — контур Г, 2 — А, 1 — Б, 0 — В/unknown.
+        int: The significance rank (0..3); 3 — circuit D, 2 — A, 1 — B,
+            0 — C/unknown.
     """
     match = re.search(r"Circuit\s+([A-D])", reason)
     if match is None:
@@ -729,17 +732,17 @@ def _circuit_rank(reason: str) -> int:
 
 
 def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
-    """Подпись тяжести нарушений для fallback-критерия (T4, п. 3).
+    """Violation severity signature for the fallback criterion.
 
-    Кортеж рангов значимости контуров, отсортированный по убыванию (самое
-    тяжёлое нарушение первым). Лексикографически меньшая подпись = менее
-    проблемная модель при равном числе нарушенных контуров.
+    A tuple of circuit significance ranks sorted in descending order (the most
+    severe violation first). A lexicographically smaller signature means a less
+    problematic model given the same number of violated circuits.
 
     Args:
-        reasons (list[str]): Причины дисквалификации кандидата.
+        reasons (list[str]): The candidate's disqualification reasons.
 
     Returns:
-        tuple[int, ...]: Отсортированная по убыванию подпись тяжести.
+        tuple[int, ...]: The severity signature sorted in descending order.
     """
     return tuple(sorted((_circuit_rank(r) for r in reasons), reverse=True))
 
@@ -747,18 +750,18 @@ def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
 def _best_by_rmse_oof(
     names: list[str], candidates: Mapping[str, FinalistCandidate]
 ) -> str:
-    """Выбрать кандидата с лучшим (минимальным) ``RMSE_oof``.
+    """Select the candidate with the best (minimal) ``RMSE_oof``.
 
-    Tie-break: при равных ``RMSE_oof`` побеждает первый в порядке списка
-    (порядок пула из T3 — детерминированный, требование постановки).
-    Кандидат с недоступным ``RMSE_oof`` (None) ранжируется последним.
+    Tie-break: on equal ``RMSE_oof`` the first in list order wins (the pool
+    order is deterministic). A candidate with unavailable ``RMSE_oof`` (None)
+    is ranked last.
 
     Args:
-        names (list[str]): Кандидаты в детерминированном порядке.
-        candidates (Mapping[str, FinalistCandidate]): Кандидаты.
+        names (list[str]): Candidates in deterministic order.
+        candidates (Mapping[str, FinalistCandidate]): Candidates.
 
     Returns:
-        str: Имя победителя.
+        str: The winner's name.
     """
 
     def _key(name: str) -> tuple[int, float]:
@@ -773,19 +776,19 @@ def _fallback_sort_key(
     audits: Mapping[str, SanityCheckResult],
     candidate_models: Mapping[str, FinalistCandidate],
 ) -> tuple[int, tuple[int, ...], bool, float]:
-    """Ключ fallback-ранжирования T4 (см. ``_select_active_winner``).
+    """Fallback ranking key (see ``_select_active_winner``).
 
-    Минимум числа нарушенных контуров → минимум тяжести (Г > А > Б > В) →
-    лучший ``RMSE_oof``. Вынесен на уровень модуля, чтобы ранжирование
-    select-шага (``output: top_k``/``pool``) совпадало с выбором победителя.
+    Minimum number of violated circuits → minimum severity (D > A > B > C) →
+    best ``RMSE_oof``. Hoisted to module level so the select step ranking
+    (``output: top_k``/``pool``) matches the winner selection.
 
     Args:
-        name (str): Имя кандидата.
-        audits (Mapping[str, SanityCheckResult]): Аудит каждого финалиста.
-        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
+        name (str): The candidate name.
+        audits (Mapping[str, SanityCheckResult]): The audit of each finalist.
+        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
 
     Returns:
-        tuple[int, tuple[int, ...], bool, float]: Ключ сортировки.
+        tuple[int, tuple[int, ...], bool, float]: The sort key.
     """
     reasons = audits[name].reasons
     rmse = candidate_models[name].rmse_oof
@@ -802,22 +805,22 @@ def _select_active_winner(
     audits: Mapping[str, SanityCheckResult],
     candidate_models: Mapping[str, FinalistCandidate],
 ) -> str:
-    """Выбрать победителя в режиме ``active`` (T4).
+    """Select the winner in ``active`` mode.
 
-    Сначала — лучший ``RMSE_oof`` среди прошедших аудит (CV и ``RMSE_full``
-    в ранжировании не участвуют). Если валидных кандидатов нет (тотальный
-    провал пула) — формальный fallback-критерий «наименее проблемной» модели:
-    минимум числа нарушенных контуров → минимум тяжести (значимость контуров
-    зафиксирована в коде: Г > А > Б > В, см. ``_circuit_rank``) → лучший
-    ``RMSE_oof``. Запуск не падает.
+    First — the best ``RMSE_oof`` among the candidates that passed the audit
+    (CV and ``RMSE_full`` do not participate in the ranking). If there are no
+    valid candidates (total pool failure) — the formal fallback criterion of
+    the "least problematic" model: minimum number of violated circuits →
+    minimum severity (circuit significance is fixed in code: D > A > B > C,
+    see ``_circuit_rank``) → best ``RMSE_oof``. The run never fails.
 
     Args:
-        pool_order (list[str]): Упорядоченный пул финалистов.
-        audits (Mapping[str, SanityCheckResult]): Аудит каждого финалиста.
-        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
+        pool_order (list[str]): The ordered finalists pool.
+        audits (Mapping[str, SanityCheckResult]): The audit of each finalist.
+        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
 
     Returns:
-        str: Имя победителя.
+        str: The winner's name.
     """
     valid = [n for n in pool_order if audits[n].is_valid]
     if valid:
@@ -829,58 +832,58 @@ def _select_active_winner(
 
 
 def _fmt_audit_value(value: float) -> str:
-    """Отформатировать числовую метрику аудита для логов (T6).
+    """Format a numeric audit metric for logs.
 
-    NaN/±inf (контур отключён либо не вычислим) выводятся как ``"n/a"``,
-    чтобы лог итогов аудита победителя оставался компактным и читаемым.
+    NaN/±inf (circuit disabled or not computable) are rendered as ``"n/a"`` so
+    that the winner's audit summary log stays compact and readable.
 
-    Заметка (эпик #74): форматтер используется в INFO-логе итогов аудита
-    select-шага со ``strategy: sanity_gate`` (задача R2); кроме того, его
-    применяют механизмы T6 (см. также ``select_finalists`` /
-    ``_train_finalists`` / ``select_robust_winner``).
+    Note: the formatter is used in the INFO log of the audit summary of the
+    ``sanity_gate`` select step; it is also used by the report mechanisms (see
+    also ``select_finalists`` / ``_train_finalists`` / ``select_robust_winner``).
 
     Args:
-        value (float): Значение метрики аудита (diversity/unique/gap).
+        value (float): The audit metric value (diversity/unique/gap).
 
     Returns:
-        str: ``"%.4f"`` для конечных значений, ``"n/a"`` иначе.
+        str: ``"%.4f"`` for finite values, ``"n/a"`` otherwise.
     """
     return f"{value:.4f}" if np.isfinite(value) else "n/a"
 
 
 class _AuditSkipReason(str, Enum):
-    """Причины пропуска аудита Sanity Gate (issue #102, T5).
+    """Reasons for skipping the Sanity Gate audit.
 
-    Пропуск аудита отличается от провала: проверка не выполнилась из-за
-    ресурсного ограничения фазы (``audit_time_budget_seconds``), а не из-за
-    качества модели. Кандидат с такой причиной не может победить в текущем
-    select-шаге (аудита нет), но НЕ должен дисквалифицироваться навсегда:
-    ограничение одной фазы не выбрасывает алгоритм из всех последующих.
+    An audit skip differs from a failure: the check did not run because of a
+    resource limit of the phase (``audit_time_budget_seconds``), not because
+    of the model quality. A candidate with such a reason cannot win the
+    current select step (there is no audit), but must NOT be disqualified
+    forever: the limit of one phase does not throw the algorithm out of all
+    subsequent ones.
     """
 
     BUDGET_EXCEEDED = "Sanity audit skipped: audit time budget"
 
 
 def _audit_budget_skip_reason(budget_seconds: float) -> str:
-    """Сформировать текст причины пропуска аудита по бюджету времени (T5).
+    """Build the reason text for a time-budget audit skip.
 
-    Единый источник формата: используется ``select_robust_winner`` при
-    формировании ``SanityCheckResult`` и тестами — строка нигде не
-    дублируется (ревью PR #49).
+    The single source of the format: used by ``select_robust_winner`` when
+    building the ``SanityCheckResult`` and by tests — the string is not
+    duplicated anywhere.
 
     Args:
-        budget_seconds (float): Значение ``audit_time_budget_seconds`` фазы.
+        budget_seconds (float): The phase's ``audit_time_budget_seconds`` value.
 
     Returns:
-        str: Причина вида «Sanity audit skipped: audit time budget (Ns) exceeded».
+        str: A reason like "Sanity audit skipped: audit time budget (Ns) exceeded".
     """
     return f"{_AuditSkipReason.BUDGET_EXCEEDED.value} ({budget_seconds:g}s) exceeded"
 
 
-# Полное соответствие причины пропуска аудита формату «{prefix} (Ns) exceeded»,
-# где N — число в формате %g (целое/десятичное/экспонента). Fullmatch-проверка
-# исключает ложные срабатывания на причинах, лишь начинающихся с префикса
-# (ревью PR #49).
+# Full match of the audit-skip reason to the "{prefix} (Ns) exceeded" format,
+# where N is a number in the %g format (integer/decimal/exponent). The
+# fullmatch check rules out false positives on reasons that only start with
+# the prefix.
 _AUDIT_BUDGET_SKIP_RE = re.compile(
     rf"{re.escape(_AuditSkipReason.BUDGET_EXCEEDED.value)} "
     r"\([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?s\) exceeded"
@@ -888,18 +891,18 @@ _AUDIT_BUDGET_SKIP_RE = re.compile(
 
 
 def _is_audit_budget_skip(reasons: list[str]) -> bool:
-    """True, если ВСЕ причины кандидата — пропуск аудита по бюджету времени.
+    """True if ALL candidate reasons are a time-budget audit skip.
 
-    Используется в ``_execute_select_sanity_gate``, чтобы такие кандидаты не
-    попадали в circuit breaker (``disqualified_algorithms``) — бюджет фазы не
-    должен выбрасывать алгоритм из всех последующих фаз (issue #102).
+    Used in ``_execute_select_sanity_gate`` so that such candidates do not
+    enter the circuit breaker (``disqualified_algorithms``) — the phase
+    budget must not throw the algorithm out of all subsequent phases.
 
     Args:
-        reasons (list[str]): Причины невалидности кандидата из аудита.
+        reasons (list[str]): The candidate's audit invalidity reasons.
 
     Returns:
-        bool: True, если причины сводятся к пропуску из-за исчерпания
-            ``audit_time_budget_seconds`` (хотя бы одна причина есть).
+        bool: True if the reasons reduce to a skip caused by an exhausted
+            ``audit_time_budget_seconds`` (at least one reason exists).
     """
     return bool(reasons) and all(
         _AUDIT_BUDGET_SKIP_RE.fullmatch(reason) is not None for reason in reasons
@@ -915,52 +918,53 @@ def select_robust_winner(
     mode: SanityGateMode = "off",
     audit_time_budget_seconds: float = 0,
 ) -> RobustWinnerResult:
-    """Двухстадийный выбор победителя с аудитом Sanity Gate (эпик #61, T4).
+    """Two-stage winner selection with a Sanity Gate audit.
 
-    Перебирает пул кандидатов (уже обученных на 100% данных), прогоняет
-    каждого через ``ModelSanityGate.check`` (diversity/unique считаются на
-    OOF-векторе; контур Г использует full-fit предсказания) и ранжирует
-    прошедших аудит по ``RMSE_oof`` (CV и ``RMSE_full`` в ранжировании НЕ
-    участвуют — композитный скор удалён по итогам ревью v2).
+    Iterates over the candidate pool (already trained on 100% of the data),
+    runs each candidate through ``ModelSanityGate.check`` (diversity/unique are
+    computed on the OOF vector; circuit D uses full-fit predictions) and ranks
+    the candidates that passed the audit by ``RMSE_oof`` (CV and ``RMSE_full``
+    do NOT participate in the ranking — the composite score was removed after
+    the v2 review).
 
-    Режимы (``mode``):
-    - ``off``: старое поведение ``select_winner`` — победитель = лучший
-      ``cv_score`` (без аудита; ``audit`` остаётся пустым);
-    - ``active``: дисквалификации применяются; победитель = лучший
-      ``RMSE_oof`` среди прошедших все проверки. Select-шаги пайплайна со
-      ``strategy: sanity_gate`` (эпик #74) выполняют именно этот режим.
-      Режим ``warn_only`` удалён вместе с ключами отчёта
-      ``sanity_gate_warn_only``/``winner_if_active`` (эпик #74).
+    Modes (``mode``):
+    - ``off``: legacy ``select_winner`` behavior — winner = best ``cv_score``
+      (no audit; ``audit`` stays empty);
+    - ``active``: disqualifications are applied; winner = best ``RMSE_oof``
+      among those that passed all checks. Pipeline select steps with
+      ``strategy: sanity_gate`` run exactly this mode. The ``warn_only`` mode
+      was removed along with the ``sanity_gate_warn_only``/``winner_if_active``
+      report keys.
 
-    Бюджет времени аудита (``audit_time_budget_seconds``, T5): суммарное
-    время фазы аудита ограничено; при исчерпании бюджета оставшиеся
-    кандидаты не аудируются и получают явный reason «audit skipped: budget
-    exceeded» (в ``active`` они не могут выиграть). ``0`` — без ограничения.
+    Audit time budget (``audit_time_budget_seconds``): the total time of the
+    audit phase is limited; when the budget is exhausted the remaining
+    candidates are not audited and receive the explicit reason "audit skipped:
+    budget exceeded" (in ``active`` mode they cannot win). ``0`` — no limit.
 
-    Fallback (формализован, п. 3 постановки): если все кандидаты забракованы,
-    выбирается «наименее проблемная» модель — минимум числа нарушенных
-    контуров, при равенстве — минимум тяжести нарушений (значимость контуров
-    зафиксирована в коде: Г > А > Б > В, см. ``_circuit_rank``), при равенстве
-    — лучший ``RMSE_oof``. Запуск не падает, в лог пишется WARNING с причинами.
+    Fallback (formalized): if all candidates are rejected, the "least
+    problematic" model is chosen — minimum number of violated circuits, on ties
+    — minimum violation severity (circuit significance is fixed in code:
+    D > A > B > C, see ``_circuit_rank``), on further ties — best ``RMSE_oof``.
+    The run never fails; a WARNING with the reasons is logged.
 
     Args:
-        candidate_models (Mapping[str, FinalistCandidate]): Пул кандидатов
-            (обучены на 100% данных, OOF-векторы доступны). Порядок вставки
-            — детерминированный порядок пула из T3.
-        X (pd.DataFrame): Полная матрица признаков.
-        y (pd.Series): Полный вектор целевой переменной.
-        sanity_gate (ModelSanityGate): Настроенный экземпляр гейта (T2).
-        mode (SanityGateMode): Режим работы ('off'/'active').
-        audit_time_budget_seconds (float): Суммарный бюджет времени фазы
-            аудита в секундах; 0 — без ограничения.
+        candidate_models (Mapping[str, FinalistCandidate]): The candidate pool
+            (trained on 100% of the data, OOF vectors available). Insertion
+            order is the deterministic pool order.
+        X (pd.DataFrame): The full feature matrix.
+        y (pd.Series): The full target vector.
+        sanity_gate (ModelSanityGate): The configured gate instance.
+        mode (SanityGateMode): The operation mode ('off'/'active').
+        audit_time_budget_seconds (float): The total audit phase time budget in
+            seconds; 0 — no limit.
 
     Returns:
-        RobustWinnerResult: Победитель, аудит по каждому кандидату,
-            применённые дисквалификации и флаг fallback.
+        RobustWinnerResult: The winner, the audit of each candidate, the
+            applied disqualifications, and the fallback flag.
 
     Raises:
-        RuntimeError: Если пул кандидатов пуст — победитель не существует.
-        ValueError: Если ``mode`` неизвестен.
+        RuntimeError: If the candidate pool is empty — no winner exists.
+        ValueError: If ``mode`` is unknown.
     """
     if not candidate_models:
         raise RuntimeError("Cannot select a robust winner from an empty candidate pool")
@@ -968,7 +972,7 @@ def select_robust_winner(
     pool_order = list(candidate_models)
 
     def _cv_winner() -> str:
-        """Старое поведение select_winner: лучший «сырой» скор, tie — порядок."""
+        """Legacy select_winner behavior: best raw score, ties — order."""
         return max(pool_order, key=lambda n: candidate_models[n].cv_score)
 
     if mode == "off":
@@ -983,9 +987,9 @@ def select_robust_winner(
     if mode not in ("off", "active"):
         raise ValueError(f"mode must be 'off' or 'active'; got {mode!r}")
 
-    # Аудит каждого финалиста: diversity/unique — на OOF-векторе, контур Г —
-    # на full-fit предсказаниях (требование 1 постановки T4). Суммарное время
-    # фазы ограничено бюджетом audit_time_budget_seconds (0 — без лимита).
+    # Audit each finalist: diversity/unique on the OOF vector, circuit D on the
+    # full-fit predictions. The total audit phase time is limited by the
+    # audit_time_budget_seconds budget (0 — no limit).
     audits: dict[str, SanityCheckResult] = {}
     audit_started = time.monotonic()
 
@@ -1018,7 +1022,7 @@ def select_robust_winner(
                 X=X,
                 model=cand.model,
             )
-        except Exception as err:  # noqa: BLE001 — сбой аудита = дисквалификация
+        except Exception as err:  # noqa: BLE001 — audit failure = disqualification
             _LOG.warning("Sanity audit failed for candidate %s: %s", name, err)
             audits[name] = SanityCheckResult(
                 is_valid=False,
@@ -1030,8 +1034,8 @@ def select_robust_winner(
         name: list(audits[name].reasons) for name in pool_order if audits[name].reasons
     }
 
-    # Требование T6: для каждого забракованного кандидата — WARNING с перечнем
-    # причин дисквалификации (режим active применяется к выбору победителя).
+    # For each rejected candidate — a WARNING listing the disqualification
+    # reasons (active mode applies to winner selection).
     for name, reasons in disqualified.items():
         _LOG.warning(
             "[sanity_gate active] Candidate %s disqualified by the sanity gate: %s",
@@ -1039,16 +1043,17 @@ def select_robust_winner(
             reasons,
         )
 
-    # mode == "active": применяем дисквалификации, ранжируем по RMSE_oof.
+    # mode == "active": apply disqualifications, rank by RMSE_oof.
     winner = _select_active_winner(pool_order, audits, candidate_models)
     all_failed = not any(audits[n].is_valid for n in pool_order)
     if all_failed:
-        # Fallback (п. 3 постановки): все кандидаты забракованы — «наименее
-        # проблемная» модель. Формальный критерий указывается в логе явно (T6).
+        # Fallback: all candidates were rejected — pick the "least
+        # problematic" model. The formal criterion is stated explicitly in the
+        # log.
         _LOG.warning(
             "[sanity_gate active] All %d candidate(s) failed the sanity audit; "
-            "falling back to the least problematic model %s. Formal criterion "
-            "(T4): min violated circuits -> min severity (D > A > B > C) -> "
+            "falling back to the least problematic model %s. Formal criterion: "
+            "min violated circuits -> min severity (D > A > B > C) -> "
             "best RMSE_oof. Reasons: %s",
             len(pool_order),
             winner,
@@ -1066,9 +1071,9 @@ def select_robust_winner(
 
 
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
-    """Преобразует AlgorithmsConfig в обычный словарь {name: AlgoCfg}."""
-    # model_fields через экземпляр тоже работает, но deprecated
-    # (PydanticDeprecatedSince211, удаление в V3.0) — используем класс
+    """Convert an AlgorithmsConfig into a plain dictionary {name: AlgoCfg}."""
+    # model_fields via an instance also works, but it is deprecated
+    # (PydanticDeprecatedSince211, removal in V3.0) — use the class
     return {
         name: algo_cfg
         for name in type(algorithms_cfg).model_fields
@@ -1079,14 +1084,14 @@ def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
 def _feature_selection_mode(
     cfg: FeatureSelectionCfg | dict[str, Any] | None,
 ) -> str | None:
-    """Извлечь строковое значение ``mode`` из конфигурации отбора признаков.
+    """Extract the string value of ``mode`` from a feature selection config.
 
     Args:
-        cfg: Объект ``FeatureSelectionCfg``, словарь конфигурации или ``None``.
+        cfg: A ``FeatureSelectionCfg`` object, a config dict, or ``None``.
 
     Returns:
-        str | None: Режим ('disabled'/'always'/'auto') либо ``None``, если
-            конфигурация не задана или не содержит режима.
+        str | None: The mode ('disabled'/'always'/'auto') or ``None`` if the
+            configuration is missing or contains no mode.
     """
     if isinstance(cfg, FeatureSelectionCfg):
         return cfg.mode.value
@@ -1102,15 +1107,15 @@ def _feature_selection_mode(
 #  Dyn-import helper                                                          #
 # --------------------------------------------------------------------------- #
 def _load_module(path: str) -> ModuleType:
-    """Импортировать модуль по указанному пути.
-    Динамически загружает Python-модуль, используя dotted-path нотацию.
-    В случае неудачи генерирует информативное исключение.
+    """Import a module by the given path.
+    Dynamically loads a Python module using dotted-path notation.
+    On failure, raises an informative exception.
     Args:
-        path (str): Путь к модулю в формате 'package.module'.
+        path (str): The module path in 'package.module' format.
     Returns:
-        ModuleType: Объект импортированного модуля.
+        ModuleType: The imported module object.
     Raises:
-        ImportError: Если модуль не найден по указанному пути.
+        ImportError: If the module is not found at the given path.
     """
     try:
         return importlib.import_module(path)
@@ -1148,55 +1153,58 @@ def _run_hpo(
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
-    """Запустить поиск оптимальных гиперпараметров для алгоритма.
-    Логика работы:
-    1. Загрузка тюнера: Импортируется модуль, указанный в `algo_cfg.tuner`.
-    2. Проверка сигнатуры: Метод `optimize` тюнера проверяется на поддержку
-       специфичных параметров (n_folds, oversampling, space_overrides).
-    3. Выполнение: Запускается оптимизация. Если алгоритм признан невалидным
-       через `InvalidAlgorithmError`, выбрасывается каноничное исключение.
+    """Run the hyperparameter search for an algorithm.
+    Workflow:
+    1. Tuner loading: the module specified in `algo_cfg.tuner` is imported.
+    2. Signature check: the tuner's `optimize` method is inspected for support
+       of specific parameters (n_folds, oversampling, space_overrides).
+    3. Execution: the optimization is run. If the algorithm is deemed invalid
+       via `InvalidAlgorithmError`, the canonical exception is raised.
     Args:
-        algo_name (str): Название алгоритма.
-        algo_cfg (AlgoCfg): Конфигурация алгоритма с путями к тюнеру.
-        X (pd.DataFrame): Матрица признаков.
-        y (pd.Series): Вектор целевой переменной.
-        metric_name_sklearn (str): Название метрики в формате sklearn.
-        n_trials (int): Количество итераций поиска.
-        validation_strategy (ValidationStrategy): Стратегия валидации
-            (k_fold, loo и т.д.).
-        n_folds (int | None): Количество фолдов для кросс-валидации.
-        train_test_split_test_size (float): Размер hold-out части для стратегии
-            'train_test_split' (доля в (0, 1) либо целое число строк после
-            резолюции 'auto'). Прокидывается тюнеру, поддерживающему параметр,
-            чтобы оценка HPO не расходилась с финальным val_score (D3 issue #24).
+        algo_name (str): The algorithm name.
+        algo_cfg (AlgoCfg): The algorithm configuration with tuner paths.
+        X (pd.DataFrame): The feature matrix.
+        y (pd.Series): The target vector.
+        metric_name_sklearn (str): The metric name in sklearn format.
+        n_trials (int): The number of search iterations.
+        validation_strategy (ValidationStrategy): The validation strategy
+            (k_fold, loo, etc.).
+        n_folds (int | None): The number of folds for cross-validation.
+        train_test_split_test_size (float): The hold-out size for the
+            'train_test_split' strategy (a fraction in (0, 1) or an integer
+            number of rows after 'auto' resolution). Passed to tuners that
+            support the parameter so that the HPO estimate does not diverge
+            from the final val_score.
         search_space_override (Dict[str, Any] | None):
-            Переопределенное пространство поиска.
-        data_oversampling (bool): Флаг включения оверсэмплинга.
-        data_oversampling_multiplier (float): Коэффициент увеличения выборки.
-        data_oversampling_algorithm (str): Название алгоритма оверсэмплинга.
-        initial_params (dict[str, Any] | None): Гиперпараметры из предыдущей фазы HPO
-            для enqueue_trial (монотонность улучшения между фазами).
-        categorical_features (list[str] | None): Имена категориальных колонок,
-            определённые один раз в ``train_best_model`` и передаваемые тюнеру.
-        numerical_features (list[str] | None): Имена числовых колонок.
-        encoding (str): Стратегия кодирования категорий ('one_hot' или 'ordinal'),
-            прокидываемая тюнеру для согласованной предобработки с финальным fit.
-        pruning (dict[str, Any] | None): Настройки ранней остановки (pruning)
-            из секции ``general.pruning``. Передаются только тюнерам, которые
-            поддерживают аргумент ``pruning``; кастомные тюнеры не затрагиваются.
-        feature_selection_cfg (FeatureSelectionCfg | dict | None): Конфигурация
-            отбора признаков из корневого ``Config.general.feature_selection``.
-            Передаётся только тюнерам, которые поддерживают аргумент
-            ``feature_selection_cfg`` или принимают ``**kwargs`` (сигнатура
-            проверяется через ``inspect.signature``); кастомные тюнеры не
-            затрагиваются.
+            The overridden search space.
+        data_oversampling (bool): The oversampling enable flag.
+        data_oversampling_multiplier (float): The sample size multiplier.
+        data_oversampling_algorithm (str): The oversampling algorithm name.
+        initial_params (dict[str, Any] | None): Hyperparameters from the
+            previous HPO phase for enqueue_trial (monotonic improvement between
+            phases).
+        categorical_features (list[str] | None): Categorical column names,
+            detected once in ``train_best_model`` and passed to the tuner.
+        numerical_features (list[str] | None): Numerical column names.
+        encoding (str): The categorical encoding strategy ('one_hot' or
+            'ordinal'), passed to the tuner for preprocessing consistent with
+            the final fit.
+        pruning (dict[str, Any] | None): Early stopping (pruning) settings
+            from the ``general.pruning`` section. Passed only to tuners that
+            support the ``pruning`` argument; custom tuners are unaffected.
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): The feature
+            selection config from the root ``Config.general.feature_selection``.
+            Passed only to tuners that support the ``feature_selection_cfg``
+            argument or accept ``**kwargs`` (the signature is checked via
+            ``inspect.signature``); custom tuners are unaffected.
     Returns:
         Optional[Tuple[float, Dict[str, Any]]]:
-            Кортеж (лучшая метрика, лучшие параметры)
-            или None, если произошла ошибка при выполнении HPO.
+            The tuple (best metric, best params) or None if an error occurred
+            during HPO.
     Raises:
-        _CanonicalIAE: Если тюнер сообщает о несовместимости алгоритма с данными.
-        AttributeError: Если в модуле тюнера отсутствует функция `optimize`.
+        _CanonicalIAE: If the tuner reports that the algorithm is incompatible
+            with the data.
+        AttributeError: If the tuner module lacks an `optimize` function.
     """
     if algo_cfg.tuner is None:
         raise ValueError("Tuner path is not configured")
@@ -1205,9 +1213,9 @@ def _run_hpo(
         raise AttributeError(f"Module {algo_cfg.tuner} lacks `optimize`")
 
     sig = inspect.signature(tuner.optimize)
-    # Сигнатура с **kwargs считается совместимой (аналогично _fit_and_save):
-    # тюнер сам решает, что делать с лишними ключами, поэтому служебные
-    # аргументы отбора признаков можно безопасно прокидывать.
+    # A signature with **kwargs is considered compatible (same as
+    # _fit_and_save): the tuner itself decides what to do with extra keys, so
+    # the feature-selection helper arguments can be passed safely.
     tuner_accepts_var_kwargs = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     )
@@ -1220,7 +1228,7 @@ def _run_hpo(
         "validation_strategy": validation_strategy,
     }
 
-    # прокидываем n_folds, если модуль это умеет
+    # pass n_folds if the module supports it
     if (
         validation_strategy == ValidationStrategy.k_fold
         and n_folds is not None
@@ -1228,13 +1236,13 @@ def _run_hpo(
     ):
         kwargs["n_folds"] = n_folds
 
-    # прокидываем разрешённый размер hold-out (issue #24, D3): при 'auto' →
-    # 'train_test_split' choose_validation_method возвращает целое число строк,
-    # которое обязано совпадать и в HPO, и в финальном fit.
+    # pass the resolved hold-out size: for 'auto' → 'train_test_split'
+    # choose_validation_method returns an integer number of rows, which must
+    # match both in HPO and in the final fit.
     if "train_test_split_test_size" in sig.parameters:
         kwargs["train_test_split_test_size"] = train_test_split_test_size
 
-    # прокидываем oversampling параметры, если tuner их поддерживает
+    # pass oversampling parameters if the tuner supports them
     if "data_oversampling" in sig.parameters:
         kwargs["data_oversampling"] = data_oversampling
 
@@ -1244,33 +1252,33 @@ def _run_hpo(
     if "data_oversampling_algorithm" in sig.parameters:
         kwargs["data_oversampling_algorithm"] = data_oversampling_algorithm
 
-    # прокидываем кастомный search space, если предусмотрен
+    # pass the custom search space if provided
     if search_space_override is not None:
-        # Мы передаем словарь {algo_name: hyperparameters_dict}
+        # We pass a dict {algo_name: hyperparameters_dict}
         overrides = {algo_name: search_space_override}
         if "space_overrides" in sig.parameters:
             kwargs["space_overrides"] = overrides
 
-    # прокидываем initial_params, если есть (для refine phase, эпик #74/R3)
+    # pass initial_params if available (for the refine phase)
     if initial_params is not None and "initial_params" in sig.parameters:
         kwargs["initial_params"] = initial_params
 
-    # прокидываем детектированные категориальные/числовые колонки,
-    # чтобы фаза HPO строила препроцессор согласованно с финальным обучением
+    # pass the detected categorical/numerical columns so that the HPO phase
+    # builds its preprocessor consistently with the final training
     if "categorical_features" in sig.parameters:
         kwargs["categorical_features"] = categorical_features
 
     if "numerical_features" in sig.parameters:
         kwargs["numerical_features"] = numerical_features
 
-    # прокидываем стратегию кодирования, если тюнер её поддерживает
+    # pass the encoding strategy if the tuner supports it
     if "encoding" in sig.parameters:
         kwargs["encoding"] = encoding
     else:
-        # Кастомный тюнер не принимает encoding: стратегия молча игнорируется
-        # в фазе HPO, но применяется в финальном обучении -> рассинхрон
-        # представления признаков. Предупреждаем, чтобы пользователь мог
-        # обновить тюнер до поддерживающего аргумент `encoding`.
+        # The custom tuner does not accept encoding: the strategy is silently
+        # ignored during HPO but applied in the final training -> a mismatch in
+        # the feature representation. Warn so the user can update the tuner to
+        # one supporting the `encoding` argument.
         _LOG.warning(
             "Tuner %s does not accept `encoding`; categorical_encoding=%r "
             "will NOT be applied during HPO (final fit may diverge).",
@@ -1278,19 +1286,19 @@ def _run_hpo(
             encoding,
         )
 
-    # прокидываем переопределение пресета предобработки (FR-5): явное указание
-    # пользователя из конфигурации применяется и в HPO, и в финальном обучении
+    # pass the preprocessing preset override: an explicit user setting from the
+    # configuration applies both in HPO and in the final training
     preprocessing_override = getattr(algo_cfg, "preprocessing", None)
     if "preprocessing_override" in sig.parameters:
         kwargs["preprocessing_override"] = preprocessing_override
 
-    # прокидываем настройки ранней остановки (pruning), если тюнер их
-    # поддерживает; кастомные тюнеры без аргумента `pruning` не затрагиваются
+    # pass the early stopping (pruning) settings if the tuner supports them;
+    # custom tuners without the `pruning` argument are unaffected
     if pruning is not None and "pruning" in sig.parameters:
         kwargs["pruning"] = pruning
 
-    # прокидываем параметры high-cardinality кодирования и новых стратегий
-    # (issue #20), если тюнер их поддерживает; согласованно с финальным обучением
+    # pass the high-cardinality encoding parameters and the new strategies if
+    # the tuner supports them; consistent with the final training
     if "high_cardinality_threshold" in sig.parameters:
         kwargs["high_cardinality_threshold"] = high_cardinality_threshold
 
@@ -1306,11 +1314,11 @@ def _run_hpo(
     if "target_encoding_fallback" in sig.parameters:
         kwargs["target_encoding_fallback"] = target_encoding_fallback
 
-    # прокидываем конфигурацию отбора признаков (issue #11), если тюнер
-    # поддерживает аргумент `feature_selection_cfg` или принимает **kwargs;
-    # кастомные тюнеры без поддержки не затрагиваются. При активном режиме
-    # отбора предупреждаем о рассинхроне HPO ↔ финальный fit (аналогично
-    # encoding): конфигурация не будет применена в фазе поиска.
+    # pass the feature selection config if the tuner supports the
+    # `feature_selection_cfg` argument or accepts **kwargs; custom tuners
+    # without support are unaffected. When feature selection is active, warn
+    # about the HPO ↔ final fit mismatch (as with encoding): the configuration
+    # will not be applied during the search phase.
     if "feature_selection_cfg" in sig.parameters or tuner_accepts_var_kwargs:
         kwargs["feature_selection_cfg"] = feature_selection_cfg
     elif _feature_selection_mode(feature_selection_cfg) not in (None, "disabled"):
@@ -1327,9 +1335,9 @@ def _run_hpo(
         if best_score is None or best_params is None:
             # Tuner couldn't get a valid result: either all trials failed
             # (optuna.TrialPruned) or it failed otherwise. Return None so the
-            # main loop knows the algorithm didn't pass (issue #13): the dummy
-            # candidate with score -3.4e38 and params=None should no longer
-            # end up in phase_results.
+            # main loop knows the algorithm didn't pass: the dummy candidate
+            # with score -3.4e38 and params=None should no longer end up in
+            # phase_results.
             _LOG.error(
                 "Algorithm %s failed during HPO: no valid result "
                 "(best_score=%r, best_params=%r)",
@@ -1361,35 +1369,33 @@ def _build_trainer(
     n_folds: int | None = None,
     test_size: float | None = None,
 ) -> Any:
-    """Сконструировать ``ModelTrainer`` для алгоритма по конфигурации.
+    """Construct a ``ModelTrainer`` for an algorithm from its configuration.
 
-    Единая точка сборки тренера, используемая и финальным обучением
-    победителя (``_fit_and_save``), и обучением финалистов на 100% данных
-    (T4, ``_fit_finalist``): гарантирует, что оба пути передают тренеру
-    одинаковые настройки предобработки, оверсэмплинга, кодирования,
-    отбора признаков и валидации (issue #24, D3).
+    The single assembly point for the trainer, used both by the final training
+    of the winner (``_fit_and_save``) and by the training of finalists on 100%
+    of the data (``_fit_finalist``): it guarantees that both paths pass the
+    same preprocessing, oversampling, encoding, feature selection, and
+    validation settings to the trainer.
 
     Args:
-        algo_name (str): Название выбранного алгоритма.
-        algo_cfg (AlgoCfg): Конфигурация алгоритма с путем к тренеру.
-        best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
-        cfg (Config): Общий объект конфигурации.
-        metric_name_sklearn (str): Имя основной метрики в формате sklearn.
-        validation_strategy (ValidationStrategy | str | None): Разрешённая
-            стратегия валидации (issue #24, D3). ``None`` — дефолт
-            ``ModelTrainer`` ('train_test_split').
-        n_folds (int | None): Число фолдов (для 'k_fold').
-        test_size (float | int | None): Размер hold-out части.
+        algo_name (str): The name of the selected algorithm.
+        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
+        best_params (Dict[str, Any]): The found optimal hyperparameters.
+        cfg (Config): The common configuration object.
+        metric_name_sklearn (str): The main metric name in sklearn format.
+        validation_strategy (ValidationStrategy | str | None): The resolved
+            validation strategy. ``None`` — the ``ModelTrainer`` default
+            ('train_test_split').
+        n_folds (int | None): The number of folds (for 'k_fold').
+        test_size (float | int | None): The hold-out size.
 
     Returns:
-        Any: Сконструированный (но ещё не обученный) ``ModelTrainer``.
+        Any: The constructed (but not yet trained) ``ModelTrainer``.
 
     Raises:
-        ValueError: Если ``algo_cfg.trainer_module`` не задан либо
-            ``best_params`` равен ``None`` (сигнал полного отказа HPO,
-            issue #13).
-        AttributeError: Если в модуле тренера отсутствует класс
-            ``ModelTrainer``.
+        ValueError: If ``algo_cfg.trainer_module`` is not set or ``best_params``
+            is ``None`` (a signal of a complete HPO failure).
+        AttributeError: If the trainer module lacks a ``ModelTrainer`` class.
     """
     if algo_cfg.trainer_module is None:
         raise ValueError("Trainer module path is not configured")
@@ -1405,21 +1411,21 @@ def _build_trainer(
             f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
         )
 
-    # Решение победителя HPO по отбору признаков (issue #11): в режиме
-    # 'auto' ключ "use_feature_selection" зафиксирован в best_params Optuna;
-    # в режимах 'always'/'disabled' ключа нет -> None, и ModelTrainer сам
-    # разрешает активность по конфигурации. Служебный ключ извлекается из
-    # копии: исходный best_params (он же возвращается в result["params"]) не
-    # мутируется, а "use_feature_selection" гарантированно не попадает в
-    # гиперпараметры ModelTrainer (раньше выпадал только неявно через
-    # clean_hyperparameters).
+    # The HPO winner's feature selection decision: in 'auto' mode the
+    # "use_feature_selection" key is fixed in the Optuna best_params; in
+    # 'always'/'disabled' modes the key is absent -> None, and ModelTrainer
+    # resolves the activity itself from the configuration. The helper key is
+    # popped from a copy: the original best_params (also returned in
+    # result["params"]) is not mutated, and "use_feature_selection" is
+    # guaranteed not to leak into the ModelTrainer hyperparameters (previously
+    # it was dropped only implicitly through clean_hyperparameters).
     trainer_params = dict(best_params)
     fs_active = trainer_params.pop("use_feature_selection", None)
 
-    # Проверяем сигнатуру ModelTrainer (аналогично тюнерам в _run_hpo):
-    # кастомные тренеры без поддержки отбора признаков не должны получать
-    # новые аргументы (иначе TypeError). Сигнатура с **kwargs считается
-    # совместимой — тренер сам решает, что делать с лишними ключами.
+    # Check the ModelTrainer signature (same as for tuners in _run_hpo):
+    # custom trainers without feature selection support must not receive new
+    # arguments (otherwise a TypeError). A signature with **kwargs is
+    # considered compatible — the trainer decides what to do with extra keys.
     trainer_sig = inspect.signature(trainer_module.ModelTrainer)
     trainer_accepts_var_kwargs = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in trainer_sig.parameters.values()
@@ -1431,27 +1437,26 @@ def _build_trainer(
         "algorithm": algo_name,
         "hyperparams": trainer_params,
         "metric": metric_name_sklearn,
-        # Пробрасываем настройки оверсэмплинга из конфига в тренер
+        # Pass the oversampling settings from the config to the trainer
         "data_oversampling": cfg.oversampling.enable,
         "data_oversampling_multiplier": cfg.oversampling.multiplier,
         "data_oversampling_algorithm": cfg.oversampling.algorithm,
         "serialization_format": cfg.general.serialization_format,
         "encoding_strategy": cfg.general.categorical_encoding,
         "additional_metrics": cfg.general.additional_metrics,
-        # Явное переопределение пресета предобработки из конфига (FR-5):
-        # применяется согласованно с фазой HPO (AC-7).
+        # Explicit preprocessing preset override from the config: applied
+        # consistently with the HPO phase.
         "preprocessing_override": getattr(algo_cfg, "preprocessing", None),
-        # Параметры high-cardinality кодирования и новых стратегий (issue #20)
+        # High-cardinality encoding parameters and the new strategies
         "high_cardinality_threshold": cfg.general.high_cardinality_threshold,
         "high_cardinality_encoding": cfg.general.high_cardinality_encoding,
         "hashing_n_components": cfg.general.hashing_n_components,
         "target_encoding_smoothing": cfg.general.target_encoding_smoothing,
         "target_encoding_fallback": cfg.general.target_encoding_fallback,
     }
-    # Отбор признаков: конфигурация из корневого Config + решение
-    # победителя HPO (issue #11). Аргументы передаются только тренерам,
-    # которые их поддерживают; при активном режиме отбора предупреждаем
-    # о молчаливом игнорировании.
+    # Feature selection: the root Config configuration plus the HPO winner's
+    # decision. Arguments are passed only to trainers that support them; when
+    # feature selection is active we warn about silent ignoring.
     if trainer_has_fs_cfg or trainer_accepts_var_kwargs:
         trainer_kwargs["feature_selection_cfg"] = cfg.general.feature_selection
     elif _feature_selection_mode(cfg.general.feature_selection) not in (
@@ -1476,12 +1481,12 @@ def _build_trainer(
             fs_active,
         )
 
-    # Параметры валидации (issue #24, D3): в финальный fit передаются
-    # разрешённые значения (метод + число фолдов/размер hold-out), а не строка
-    # 'auto', чтобы финальный val_score считался тем же методом, что и оценка
-    # сравнения моделей в HPO. Кастомным тренерам без поддержки аргументов
-    # новые ключи не передаются (сигнатура проверяется, как для отбора
-    # признаков); поведение по умолчанию ModelTrainer при этом совпадает.
+    # Validation parameters: the resolved values (method + number of folds /
+    # hold-out size) are passed to the final fit instead of the 'auto' string,
+    # so the final val_score is computed with the same method as the model
+    # comparison estimate in HPO. Custom trainers without support for the
+    # arguments do not receive the new keys (the signature is checked as for
+    # feature selection); the ModelTrainer default behavior then matches.
     if validation_strategy is not None:
         if (
             "validation_strategy" in trainer_sig.parameters
@@ -1521,30 +1526,31 @@ def _fit_and_save(
     n_folds: int | None = None,
     test_size: float | None = None,
 ) -> Any:
-    """Выполнить финальное обучение модели и сохранить результат на диск.
+    """Train the final model and save the result to disk.
     Args:
-        algo_name (str): Название выбранного алгоритма.
-        algo_cfg (AlgoCfg): Конфигурация алгоритма с путем к тренеру.
-        X (pd.DataFrame): Полная матрица признаков для обучения.
-        y (pd.Series): Полный вектор целевой переменной.
-        best_params (Dict[str, Any]): Найденные оптимальные гиперпараметры.
-        model_path (Path): Путь для сохранения файла модели.
-        cfg (Config): Общий объект конфигурации для получения настроек оверсэмплинга.
-        metric_name_sklearn (str): Имя основной метрики в формате sklearn.
-        validation_strategy (ValidationStrategy | str | None): Разрешённая
-            стратегия валидации финальной модели (issue #24, D3). ``None`` —
-            дефолт ``ModelTrainer`` ('train_test_split').
-        n_folds (int | None): Число фолдов (для 'k_fold').
-        test_size (float | int | None): Размер hold-out части (доля либо число
-            строк после резолюции 'auto').
+        algo_name (str): The name of the selected algorithm.
+        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
+        X (pd.DataFrame): The full feature matrix for training.
+        y (pd.Series): The full target vector.
+        best_params (Dict[str, Any]): The found optimal hyperparameters.
+        model_path (Path): The path to save the model file to.
+        cfg (Config): The common configuration object used to obtain the
+            oversampling settings.
+        metric_name_sklearn (str): The main metric name in sklearn format.
+        validation_strategy (ValidationStrategy | str | None): The resolved
+            validation strategy of the final model. ``None`` — the
+            ``ModelTrainer`` default ('train_test_split').
+        n_folds (int | None): The number of folds (for 'k_fold').
+        test_size (float | int | None): The hold-out size (a fraction or a
+            number of rows after 'auto' resolution).
     Returns:
-        Any: Экземпляр ``ModelTrainer`` после обучения и сохранения
-            (используется для доступа к значениям дополнительных метрик).
+        Any: The ``ModelTrainer`` instance after training and saving (used to
+            access the additional metric values).
     Raises:
-        AttributeError: Если в модуле тренера отсутствует класс `ModelTrainer`.
+        AttributeError: If the trainer module lacks a `ModelTrainer` class.
         ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
             no valid hyperparameters (protection against the TypeError
-            'NoneType' object is not iterable, issue #13).
+            'NoneType' object is not iterable).
     """
     trainer = _build_trainer(
         algo_name,
@@ -1563,8 +1569,8 @@ def _fit_and_save(
 
 
 # --------------------------------------------------------------------------- #
-#  Orchestration helpers (issue #31)                                          #
-#  Шаги пайплайна, вынесенные из монолитного ``train_best_model``:           #
+#  Orchestration helpers                                                      #
+#  Pipeline steps extracted from the monolithic ``train_best_model``:         #
 #  load_config → prepare_dataset → execute_phases → select_winner →          #
 #  persist_artifact.                                                          #
 # --------------------------------------------------------------------------- #
@@ -1572,30 +1578,28 @@ def _fit_and_save(
 
 @dataclass(frozen=True)
 class PreparedData:
-    """Подготовленные данные и разрешённые настройки для фаз HPO.
+    """Prepared data and resolved settings for the HPO phases.
 
-    Единый контейнер, который ``prepare_dataset`` создаёт ровно один раз,
-    а ``execute_phases`` / ``persist_artifact`` потребляют. Гарантирует, что
-    все этапы пайплайна используют одинаковое представление признаков,
-    метрик и стратегии валидации (issue #24, D3) без дублирования
-    вычислений.
+    The single container that ``prepare_dataset`` creates exactly once and that
+    ``execute_phases`` / ``persist_artifact`` consume. Guarantees that all
+    pipeline stages use the same feature representation, metric, and validation
+    strategy without duplicating computations.
 
     Attributes:
-        X (pd.DataFrame): Матрица признаков без целевой колонки.
-        y (pd.Series): Вектор целевой переменной.
-        metric_user (str): Пользовательское имя метрики сравнения
+        X (pd.DataFrame): The feature matrix without the target column.
+        y (pd.Series): The target vector.
+        metric_user (str): The user-facing comparison metric name
             (``general.comparison_metric``).
-        metric_sklearn (str): Имя метрики в sklearn-семантике
-            (например, ``neg_root_mean_squared_error``).
-        resolved_validation (ValidationStrategy): Разрешённая стратегия
-            валидации: 'auto' уже раскрыта в конкретный метод
+        metric_sklearn (str): The metric name in sklearn semantics (e.g.
+            ``neg_root_mean_squared_error``).
+        resolved_validation (ValidationStrategy): The resolved validation
+            strategy: 'auto' is already expanded into a concrete method
             ('k_fold'/'train_test_split'/'loo').
-        resolved_n_folds (int): Число фолдов (актуально для 'k_fold').
-        resolved_test_size (float | int): Размер hold-out части — доля либо
-            целое число строк после резолюции 'auto'.
-        categorical_features (list[str]): Детектированные категориальные
-            колонки.
-        numerical_features (list[str]): Детектированные числовые колонки.
+        resolved_n_folds (int): The number of folds (relevant for 'k_fold').
+        resolved_test_size (float | int): The hold-out size — a fraction or an
+            integer number of rows after 'auto' resolution.
+        categorical_features (list[str]): The detected categorical columns.
+        numerical_features (list[str]): The detected numerical columns.
     """
 
     X: pd.DataFrame
@@ -1614,32 +1618,33 @@ def load_config(
     df: pd.DataFrame,
     target: str | None = None,
 ) -> tuple[Config, str]:
-    """Загрузить и провалидировать конфигурацию запуска.
+    """Load and validate the run configuration.
 
-    Шаг 1 пайплайна (issue #31). Проверяет входные данные и целевую колонку,
-    приводит конфигурацию к объекту ``Config`` (из файла, словаря или уже
-    готового объекта) и при необходимости настраивает файловое логирование.
+    Pipeline step 1. Validates the input data and the target column, coerces
+    the configuration into a ``Config`` object (from a file, a dict, or an
+    already-built object), and sets up file logging when required.
 
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация
-            обучения.
-        df (pd.DataFrame): Исходные данные.
-        target (str | None): Имя целевого столбца. По умолчанию 'target'.
+        config (Union[str, Path, Config, Dict[str, Any]]): The training
+            configuration.
+        df (pd.DataFrame): The input data.
+        target (str | None): The target column name. Defaults to 'target'.
 
     Returns:
-        Tuple[Config, str]: Кортеж (объект ``Config``, имя целевой колонки).
+        Tuple[Config, str]: A tuple (``Config`` object, target column name).
 
     Raises:
-        TypeError: При передаче конфига неподдерживаемого типа.
-        ValueError: Если DataFrame пуст или целевая колонка отсутствует.
+        TypeError: If a config of an unsupported type is passed.
+        ValueError: If the DataFrame is empty or the target column is missing.
     """
-    # Centralized validation входных данных до инициализации тяжёлых ресурсов
+    # Centralized validation of the input data before initializing heavy
+    # resources
     validate_df_not_empty(df)
     target_col = target or "target"
     check_target_exists(df, target_col)
 
-    # Если передана строка или Path, читаем файл.
-    # Если объект Config или dict, обрабатываем их.
+    # If a string or Path is passed, read the file.
+    # If a Config object or dict is passed, process it.
     if isinstance(config, Config):
         cfg = config
     elif isinstance(config, dict):
@@ -1657,27 +1662,27 @@ def load_config(
             f"Expected Config, dict, str, or Path."
         )
 
-    # Если в конфиге указан путь к лог-файлу, настраиваем логирование
+    # If a log-file path is set in the config, set up logging
     if cfg.general.log_to_file:
         setup_logging(cfg.general.log_to_file)
     return cfg, target_col
 
 
 def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedData:
-    """Подготовить данные и разрешить настройки для фаз HPO.
+    """Prepare the data and resolve the settings for the HPO phases.
 
-    Шаг 2 пайплайна (issue #31). Разделяет DataFrame на X/y, резолвит
-    стратегию валидации ('auto' → конкретный метод/фолды/test_size, issue
-    #24, D3) и детектирует типы колонок ровно один раз — гарантия
-    согласованной предобработки между HPO и финальным обучением.
+    Pipeline step 2. Splits the DataFrame into X/y, resolves the validation
+    strategy ('auto' → a concrete method/folds/test_size), and detects column
+    types exactly once — a guarantee of consistent preprocessing between HPO
+    and the final training.
 
     Args:
-        cfg (Config): Объект конфигурации.
-        df (pd.DataFrame): Исходные данные.
-        target_col (str): Имя целевой колонки.
+        cfg (Config): The configuration object.
+        df (pd.DataFrame): The input data.
+        target_col (str): The target column name.
 
     Returns:
-        PreparedData: Подготовленный контейнер данных и настроек.
+        PreparedData: The prepared container of data and settings.
     """
     metric_user = cfg.general.comparison_metric
     metric_sklearn = to_sklearn_name(metric_user)
@@ -1685,12 +1690,12 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
-    # Единая резолюция стратегии валидации (issue #24, D3): 'auto' разрешается
-    # ровно один раз по сырым X/y — до фаз HPO. Разрешённые значения (метод +
-    # число фолдов / размер hold-out) передаются и в HPO, и в финальный fit,
-    # чтобы оценка сравнения моделей и финальный val_score не расходились
-    # (например, auto → train_test_split с целочисленным test_size из
-    # choose_validation_method, а не фиксированным 0.2).
+    # Single resolution of the validation strategy: 'auto' is resolved exactly
+    # once on the raw X/y — before the HPO phases. The resolved values (method
+    # + number of folds / hold-out size) are passed both to HPO and to the
+    # final fit, so the model comparison estimate and the final val_score do
+    # not diverge (e.g. auto → train_test_split with an integer test_size from
+    # choose_validation_method, not the fixed 0.2).
     val_method_eff, cv_obj, auto_decision = make_cv(
         n_samples=len(X),
         val_method=cfg.general.validation_strategy,
@@ -1701,22 +1706,23 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     )
     resolved_validation = ValidationStrategy(val_method_eff)
     if val_method_eff == "k_fold":
-        # Число фолдов берём из готового cv_obj: для 'auto'→kfold он содержит
-        # k из решения choose_validation_method, отличное от cfg.general.n_folds.
+        # The fold count is taken from the ready cv_obj: for 'auto'→kfold it
+        # holds the k from the choose_validation_method decision, which may
+        # differ from cfg.general.n_folds.
         assert cv_obj is not None
         resolved_n_folds = int(cv_obj.get_n_splits())
     else:
         resolved_n_folds = cfg.general.n_folds
-    # Для auto → train_test_split choose_validation_method возвращает целое
-    # число строк; для явной стратегии — фиксированная доля 0.2.
+    # For auto → train_test_split, choose_validation_method returns an integer
+    # number of rows; for an explicit strategy — the fixed fraction 0.2.
     if val_method_eff == "train_test_split" and auto_decision is not None:
         resolved_test_size: float | int = int(auto_decision["test_size"])
     else:
         resolved_test_size = 0.2
 
-    # Определяем типы колонок ровно один раз на входном DataFrame и прокидываем
-    # в фазу HPO. Это гарантирует одинаковую предобработку (one-hot) между HPO
-    # и финальным обучением ModelTrainer.
+    # Detect column types exactly once on the input DataFrame and pass them to
+    # the HPO phase. This guarantees the same preprocessing (one-hot) between
+    # HPO and the final ModelTrainer training.
     categorical_features, numerical_features = detect_feature_types(X)
 
     return PreparedData(
@@ -1734,34 +1740,33 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
 
 @dataclass
 class PhaseContext:
-    """Явный контекст между фазами пайплайна (эпик #74, задача R2).
+    """Explicit context shared between pipeline phases.
 
-    Заменяет локальную переменную ``phase_results``: контекст создаётся
-    ``execute_phases`` один раз и последовательно изменяется фазами.
-    Выход select-шага ЗАМЕЩАЕТ рабочее множество (последующие
-    ``refine`` / ``select`` работают уже с ним).
+    Replaces the local ``phase_results`` variable: the context is created by
+    ``execute_phases`` once and is mutated sequentially by the phases. The
+    select step output REPLACES the working set (subsequent ``refine`` /
+    ``select`` steps operate on it).
 
     Attributes:
-        working_set (dict[str, tuple[float, dict[str, Any]]]): Рабочее
-            множество «алгоритм → (сырой CV-скор, параметры)». Пересобирается
-            каждой фазой HPO и замещается выходом каждого select-шага.
-        disqualified_algorithms (dict[str, str]): Circuit breaker (issue #12):
-            «алгоритм → причина». Наполняется HPO-провалами и дисквалификациями
-            Sanity Gate select-шагов (эпик #74) — источники смешаны осознанно;
-            детальный аудит гейта — в ``sanity_gate_sections``.
-        full_fit_trainers (dict[str, Any]): Обученные на 100% данных
-            ``ModelTrainer`` финалистов последнего select-шага со
-            ``strategy: sanity_gate``. Очищается каждой фазой HPO (параметры
-            перестали быть актуальными) и пересоздаётся каждым sanity-select
-            (старые full-fit тренеры не переиспользуются).
-        sanity_gate_sections (dict[str, dict[str, Any]]): Секции отчёта (T6)
-            select-шагов со ``strategy: sanity_gate`` (ключ — имя фазы).
-        winner_algo (str | None): Имя победителя терминального select-шага
-            (``output: winner``); ``None`` до его выполнения.
-        pre_trained_trainer (Any | None): Обученный на 100% данных тренер
-            победителя терминального select-шага со ``strategy: sanity_gate``
-            (переобучение победителя не требуется); ``None`` в остальных
-            случаях.
+        working_set (dict[str, tuple[float, dict[str, Any]]]): The working set
+            "algorithm → (raw CV score, params)". Rebuilt by each HPO phase and
+            replaced by the output of each select step.
+        disqualified_algorithms (dict[str, str]): Circuit breaker:
+            "algorithm → reason". Populated by HPO failures and Sanity Gate
+            select-step disqualifications — the sources are mixed deliberately;
+            the detailed gate audit lives in ``sanity_gate_sections``.
+        full_fit_trainers (dict[str, Any]): The ``ModelTrainer`` objects of the
+            last ``sanity_gate`` select step, trained on 100% of the data.
+            Cleared by each HPO phase (params are no longer current) and
+            rebuilt by each sanity-select (old full-fit trainers are not
+            reused).
+        sanity_gate_sections (dict[str, dict[str, Any]]): Report sections of
+            the ``sanity_gate`` select steps (key — the phase name).
+        winner_algo (str | None): The winner of the terminal select step
+            (``output: winner``); ``None`` until it runs.
+        pre_trained_trainer (Any | None): The winner's trainer of the terminal
+            ``sanity_gate`` select step, trained on 100% of the data (no
+            retraining of the winner required); ``None`` otherwise.
     """
 
     working_set: dict[str, tuple[float, dict[str, Any]]] = field(default_factory=dict)
@@ -1774,14 +1779,14 @@ class PhaseContext:
 
 @dataclass
 class _HPOWorkerResult:
-    """Результат одного HPO-воркера (сериализуется между процессами).
+    """Result of a single HPO worker (serialized between processes).
 
     Attributes:
-        name (str): Имя алгоритма.
-        score (float | None): Валидный «сырой» скор; ``None`` при провале.
-        params (dict[str, Any] | None): Лучшие параметры; ``None`` при провале.
-        disqualify_reason (str | None): Причина дисквалификации circuit
-            breaker (issue #12); ``None`` — алгоритм не дисквалифицирован.
+        name (str): The algorithm name.
+        score (float | None): A valid "raw" score; ``None`` on failure.
+        params (dict[str, Any] | None): The best parameters; ``None`` on failure.
+        disqualify_reason (str | None): Circuit breaker disqualification
+            reason; ``None`` — the algorithm is not disqualified.
     """
 
     name: str
@@ -1792,39 +1797,39 @@ class _HPOWorkerResult:
 
 @dataclass
 class _HpoPhaseSpec:
-    """Неизменяемый снимок параметров фазы HPO, передаваемый воркеру.
+    """An immutable snapshot of the HPO phase parameters passed to the worker.
 
-    Собирается в ``execute_phases`` один раз на фазу и передаётся в
-    ``_hpo_phase_worker`` явным аргументом. Это позволяет держать воркер
-    функцией уровня модуля (а не замыканием), которая сериализуется
-    в ``processes``-режиме (issue #100): замыкание внутри ``execute_phases``
-    сериализовать нельзя.
+    Built in ``execute_phases`` once per phase and passed to
+    ``_hpo_phase_worker`` as an explicit argument. This keeps the worker a
+    module-level function (not a closure), which can be serialized in the
+    "processes" mode: a closure inside ``execute_phases`` cannot be
+    serialized.
 
     Attributes:
-        phase (HPOPhaseCfg): Конфигурация текущей фазы.
-        prev_results (dict[str, tuple[float, dict[str, Any]]]): Снимок
-            результатов предыдущих фаз (для warm-start refine, эпик #74/R3).
-        X (pd.DataFrame): Матрица признаков.
-        y (pd.Series): Вектор целевой переменной.
-        metric_sklearn (str): Имя метрики в sklearn-семантике.
-        resolved_validation (ValidationStrategy): Разрешённая стратегия
-            валидации.
-        resolved_n_folds (int): Число фолдов для 'k_fold'.
-        resolved_test_size (float | int): Размер hold-out части.
-        categorical_features (list[str]): Детектированные категориальные колонки.
-        numerical_features (list[str]): Детектированные числовые колонки.
-        oversampling_enabled (bool): Флаг включения оверсэмплинга.
-        oversampling_multiplier (float): Коэффициент увеличения выборки.
-        oversampling_algorithm (str): Имя алгоритма оверсэмплинга.
-        pruning_cfg (dict[str, Any] | None): Настройки ранней остановки.
-        encoding (str): Стратегия кодирования категорий.
-        high_cardinality_threshold (int | None): Порог high-cardinality.
-        high_cardinality_encoding (str | None): Стратегия high-cardinality.
-        hashing_n_components (int): Число компонент хэширования.
-        target_encoding_smoothing (float): Сглаживание target encoding.
-        target_encoding_fallback (float | None): Fallback target encoding.
-        feature_selection_cfg (FeatureSelectionCfg | dict | None): Конфигурация
-            отбора признаков.
+        phase (HPOPhaseCfg): Configuration of the current phase.
+        prev_results (dict[str, tuple[float, dict[str, Any]]]): Snapshot of
+            the previous phase results (for warm-start refine).
+        X (pd.DataFrame): The feature matrix.
+        y (pd.Series): The target vector.
+        metric_sklearn (str): Metric name in sklearn semantics.
+        resolved_validation (ValidationStrategy): The resolved validation
+            strategy.
+        resolved_n_folds (int): Number of folds for 'k_fold'.
+        resolved_test_size (float | int): Size of the hold-out part.
+        categorical_features (list[str]): Detected categorical columns.
+        numerical_features (list[str]): Detected numeric columns.
+        oversampling_enabled (bool): Whether oversampling is enabled.
+        oversampling_multiplier (float): Sample increase coefficient.
+        oversampling_algorithm (str): Oversampling algorithm name.
+        pruning_cfg (dict[str, Any] | None): Early stopping settings.
+        encoding (str): Categorical encoding strategy.
+        high_cardinality_threshold (int | None): High-cardinality threshold.
+        high_cardinality_encoding (str | None): High-cardinality strategy.
+        hashing_n_components (int): Number of hashing components.
+        target_encoding_smoothing (float): Target encoding smoothing.
+        target_encoding_fallback (float | None): Target encoding fallback.
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
+            selection configuration.
     """
 
     phase: HPOPhaseCfg
@@ -1853,30 +1858,29 @@ class _HpoPhaseSpec:
 def _prepare_search_space(
     algo_name: str, user_overrides: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """Подготовить пространство поиска гиперпараметров.
+    """Prepare the hyperparameter search space.
 
-    Объединяет системные значения по умолчанию с пользовательскими
-    переопределениями из конфигурации. Функция уровня модуля (не замыкание),
-    чтобы воркер ``_hpo_phase_worker`` сериализовался в ``processes``-режиме
-    (issue #100).
+    Merges the system defaults with the user overrides from the
+    configuration. A module-level function (not a closure) so that the
+    ``_hpo_phase_worker`` worker is serializable in the "processes" mode.
 
     Args:
-        algo_name (str): Имя алгоритма для поиска дефолтов.
-        user_overrides (dict[str, Any] | None): Словарь с параметрами для замены.
+        algo_name (str): The algorithm name used to look up defaults.
+        user_overrides (dict[str, Any] | None): A dict of parameters to override.
 
     Returns:
-        dict[str, Any]: Итоговое пространство поиска.
+        dict[str, Any]: The resulting search space.
     """
     space = DEFAULT_SPACES.get(algo_name, {}).copy()
     if user_overrides:
         space.update(user_overrides)
 
-    # Адаптивный epsilon для SVR (issue #55): границы поиска epsilon
-    # масштабируются разбросом y_train в рантайме (tuner.resolve_search_space),
-    # поэтому дефолтный слепой диапазон [1e-3, 1.0] из DEFAULT_SPACES
-    # опускается. Если пользователь задал epsilon явно — он уже в space
-    # (space.update(user_overrides) выше), и приоритет пользователя
-    # сохраняется: адаптивная логика не вмешивается.
+    # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
+    # y_train spread at runtime (tuner.resolve_search_space), so the
+    # default blind range [1e-3, 1.0] from DEFAULT_SPACES is dropped. If the
+    # user set epsilon explicitly — it is already in space
+    # (space.update(user_overrides) above), and the user's priority is
+    # preserved: the adaptive logic does not interfere.
     if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
         space.pop("epsilon", None)
 
@@ -1892,30 +1896,30 @@ def _execute_hpo_phase(
     search_space: dict[str, Any] | None = None,
     initial_params: dict[str, Any] | None = None,
 ) -> tuple[float, dict[str, Any]] | None:
-    """Выполнить конкретную фазу HPO для алгоритма (функция уровня модуля).
+    """Run a specific HPO phase for an algorithm (module-level function).
 
-    Обеспечивает логирование этапа и обработку результатов оверсэмплинга.
-    Функция уровня модуля (не замыкание): все данные фазы передаются через
-    ``spec``, чтобы воркер ``_hpo_phase_worker`` сериализовался
-    в ``processes``-режиме (issue #100).
+    Provides phase logging and oversampling result processing. The function
+    is module-level (not a closure): all phase data is passed through
+    ``spec`` so that the ``_hpo_phase_worker`` worker is serializable in
+    the "processes" mode.
 
     Args:
-        phase_name (str): Название текущей фазы (напр. 'coarse').
-        algo (str): Имя алгоритма.
-        a_cfg (AlgoCfg): Конфигурация алгоритма.
-        n_trials (int): Количество итераций в этой фазе.
-        spec (_HpoPhaseSpec): Снимок параметров фазы HPO.
-        search_space (dict[str, Any] | None): Пространство поиска для фазы.
-        initial_params (dict[str, Any] | None): Параметры warm-start (refine).
+        phase_name (str): The current phase name (e.g. 'coarse').
+        algo (str): The algorithm name.
+        a_cfg (AlgoCfg): The algorithm configuration.
+        n_trials (int): The number of iterations in this phase.
+        spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
+        search_space (dict[str, Any] | None): The search space for the phase.
+        initial_params (dict[str, Any] | None): Warm-start parameters (refine).
 
     Returns:
-        tuple[float, dict[str, Any]] | None: Кортеж (score, params) либо
-            ``None``, когда HPO не вернул валидный результат (алгоритм
-            исключается из кандидатов, issue #13).
+        tuple[float, dict[str, Any]] | None: The (score, params) tuple, or
+            ``None`` when HPO did not return a valid result (the algorithm
+            is excluded from candidates).
 
     Raises:
-        Exception: Исключения из ``_run_hpo`` логируются и пробрасываются
-            (включая ``InvalidAlgorithmError``).
+        Exception: Exceptions from ``_run_hpo`` are logged and re-raised
+            (including ``InvalidAlgorithmError``).
     """
     _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
 
@@ -1952,11 +1956,11 @@ def _execute_hpo_phase(
 
         score, params = result
 
-        # Логируем значение в пользовательской семантике: для neg_*-метрик
-        # (например, neg_root_mean_squared_error) «сырое» значение скорера
-        # инвертировано, пользователю показываем естественное (положительное).
-        # Направление сопровождает значение явно («min better» для ошибок,
-        # issue #54): флаг оптимизатора greater_is_better не применяется.
+        # Log the value in user semantics: for neg_*-metrics (e.g.
+        # neg_root_mean_squared_error) the raw scorer value is inverted, so
+        # the natural (positive) value is shown to the user. The direction
+        # accompanies the value explicitly ("min better" for errors): the
+        # optimizer's greater_is_better flag is not used.
         disp = to_user_value(spec.metric_sklearn, score)
         _LOG.info(
             f"{phase_name} {algo:15} | score {disp:.5f} "
@@ -1973,24 +1977,24 @@ def _hpo_phase_worker(
     algo_cfg: AlgoCfg,
     spec: _HpoPhaseSpec,
 ) -> _HPOWorkerResult:
-    """Воркер параллельного или последовательного запуска задачи HPO.
+    """Worker for parallel or sequential execution of an HPO task.
 
-    Функция уровня модуля (не замыкание): сериализуется в ``processes``-режиме
-    (issue #100). Не мутирует общий контекст: дисквалификация возвращается
-    в ``disqualify_reason`` результата и применяется в главном процессе
-    (иначе запись из другого процесса была бы потеряна).
+    A module-level function (not a closure): serializable in the "processes"
+    mode. Does not mutate the shared context: the disqualification is
+    returned in the result's ``disqualify_reason`` and applied in the main
+    process (otherwise a write from another process would be lost).
 
     Args:
-        algo_name (str): Имя алгоритма.
-        algo_cfg (AlgoCfg): Конфигурация алгоритма.
-        spec (_HpoPhaseSpec): Снимок параметров фазы HPO.
+        algo_name (str): The algorithm name.
+        algo_cfg (AlgoCfg): The algorithm configuration.
+        spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
 
     Returns:
-        _HPOWorkerResult: Результат задачи: ``(score, params)`` при успехе,
-            ``disqualify_reason`` при дисквалификации circuit breaker
-            (issue #12), иначе — результат без скора и причины.
+        _HPOWorkerResult: The task result: ``(score, params)`` on success,
+            ``disqualify_reason`` on a circuit breaker disqualification,
+            otherwise a result without a score and reason.
     """
-    # Determine initial_params for refine (epic #74, R3): each candidate
+    # Determine initial_params for refine: each candidate
     # warm-starts from its OWN previous-phase parameters (enqueue_trial in the
     # tuner guarantees score monotonicity). The prev_results snapshot lives in
     # the immutable spec (frozen at phase definition time), so the worker uses
@@ -2004,10 +2008,10 @@ def _hpo_phase_worker(
         _, prev_params = spec.prev_results[algo_name]
         init_params = prev_params
 
-    # 1. Берем системные дефолты + накладываем то, что в AlgoCfg (из YAML/JSON)
+    # 1. Take the system defaults and overlay what is in AlgoCfg (from YAML/JSON)
     full_search_space = _prepare_search_space(
         algo_name,
-        algo_cfg.hyperparameters,  # это dict из вашего config_parser
+        algo_cfg.hyperparameters,  # this is the dict from config_parser
     )
     try:
         result = _execute_hpo_phase(
@@ -2027,10 +2031,10 @@ def _hpo_phase_worker(
 
         return _HPOWorkerResult(name=algo_name, score=score, params=params)
     except _CanonicalIAE as err:
-        # Circuit breaker (issue #12): алгоритм дисквалифицирован после
-        # MAX_FATAL_FAILURES подряд фатальных ошибок. Это НЕ аварийный
-        # стоп всего запуска — алгоритм исключается из кандидатов,
-        # остальные продолжают обучение (аналогично None-результату).
+        # Circuit breaker: the algorithm is disqualified after
+        # MAX_FATAL_FAILURES consecutive fatal errors. This is NOT an abort
+        # of the whole run — the algorithm is excluded from the candidates,
+        # the rest continue training (same as a None result).
         _LOG.warning(
             "Algorithm %s disqualified in phase %s: %s",
             algo_name,
@@ -2048,19 +2052,18 @@ def _consume_worker_results(
     phase_results: dict[str, tuple[float, dict[str, Any]]],
     ctx: PhaseContext,
 ) -> None:
-    """Разложить результаты воркеров по рабочему множеству и дисквалификациям.
+    """Distribute worker results into the working set and disqualifications.
 
-    В ``processes``-режиме воркер не может писать в ``ctx`` напрямую
-    (изменения в дочернем процессе потерялись бы), поэтому дисквалификации
-    возвращаются в результатах и применяются здесь, в главном процессе
-    (issue #100). ``None``-результаты (таймаут/падение задачи в пуле)
-    игнорируются.
+    In the "processes" mode the worker cannot write to ``ctx`` directly
+    (changes in the child process would be lost), so disqualifications are
+    returned in the results and applied here, in the main process.
+    ``None`` results (a task timeout/failure in the pool) are ignored.
 
     Args:
-        results (Iterable[_HPOWorkerResult | None]): Результаты воркеров.
-        phase_results (dict[str, tuple[float, dict[str, Any]]]): Рабочее
-            множество текущей фазы — сюда попадают валидные результаты.
-        ctx (PhaseContext): Контекст фаз — сюда сливаются дисквалификации.
+        results (Iterable[_HPOWorkerResult | None]): Worker results.
+        phase_results (dict[str, tuple[float, dict[str, Any]]]): The working
+            set of the current phase — valid results land here.
+        ctx (PhaseContext): The phase context — disqualifications merge here.
     """
     for res in results:
         if res is None:
@@ -2077,55 +2080,54 @@ def execute_phases(
     cfg: Config,
     prepared: PreparedData,
 ) -> PhaseContext:
-    """Выполнить все фазы пайплайна и вернуть итоговый контекст фаз.
+    """Run all pipeline phases and return the final phase context.
 
-    Шаг 3 пайплайна (issue #31; select-шаги — эпик #74, задача R2). Содержит
-    цикл по фазам, параллельное выполнение HPO, синхронные select-шаги,
-    circuit breaker дисквалификации и фильтрацию невалидных результатов.
-    HPO-воркер ``_hpo_phase_worker`` и помощники ``_prepare_search_space`` /
-    ``_execute_hpo_phase`` — функции уровня модуля: все данные фазы
-    передаются через ``_HpoPhaseSpec``, чтобы воркер сериализовался
-    в ``processes``-режиме (issue #100).
+    Pipeline step 3. Contains the phase loop, parallel HPO execution,
+    synchronous select steps, circuit breaker disqualification, and filtering
+    of invalid results. The HPO worker ``_hpo_phase_worker`` and the helpers
+    ``_prepare_search_space`` / ``_execute_hpo_phase`` are module-level
+    functions: all phase data is passed through ``_HpoPhaseSpec`` so that the
+    worker is serializable in the "processes" mode.
 
-    Multi-phase semantics (issue #13): рабочее множество не аккумулируется —
-    каждая фаза HPO пересобирает его с нуля, поэтому алгоритм, провалившийся
-    в текущей фазе (полный отказ HPO: ``None`` или невалидный скор), полностью
-    исключается и не держит устаревшую запись предыдущей фазы. Выход
-    select-шага замещает рабочее множество пайплайна (эпик #74); финальный
-    победитель определяется терминальным select-шагом.
+    Multi-phase semantics: the working set is not accumulated — each HPO phase
+    rebuilds it from scratch, so an algorithm that failed in the current phase
+    (complete HPO failure: ``None`` or an invalid score) is fully excluded and
+    does not keep a stale record from a previous phase. The select step output
+    replaces the pipeline working set; the final winner is determined by the
+    terminal select step.
 
-    Refine step (epic #74, task R3): ``action='refine'`` performs ``n_trials``
-    warm-started HPO attempts for **every** candidate of the incoming working
-    set (the results of the last HPO phase, or the output of the previous
-    select step). Only ``params`` of the incoming records are used
-    (they become ``initial_params`` for ``enqueue_trial`` in the tuner);
-    incoming scores are ignored. The output keeps the same set of names with
-    updated ``(score', params')`` records and replaces the working set. There
-    is no narrowing in refine — narrowing is the job of explicit select steps.
-    As the first phase, refine runs over the full set of enabled algorithms
-    without warm-start. A per-algorithm failure excludes only that algorithm
-    (circuit breaker / invalid-result filters); if refine wipes out the whole
-    working set, ``RuntimeError`` is raised — a silent fallback to pre-refine
-    parameters would hide the regression (deliberate epic #74 decision).
+    Refine step: ``action='refine'`` performs ``n_trials`` warm-started HPO
+    attempts for **every** candidate of the incoming working set (the results
+    of the last HPO phase, or the output of the previous select step). Only
+    ``params`` of the incoming records are used (they become ``initial_params``
+    for ``enqueue_trial`` in the tuner); incoming scores are ignored. The
+    output keeps the same set of names with updated ``(score', params')``
+    records and replaces the working set. There is no narrowing in refine —
+    narrowing is the job of explicit select steps. As the first phase, refine
+    runs over the full set of enabled algorithms without warm-start. A
+    per-algorithm failure excludes only that algorithm (circuit breaker /
+    invalid-result filters); if refine wipes out the whole working set,
+    ``RuntimeError`` is raised — a silent fallback to pre-refine parameters
+    would hide the regression (deliberate design decision).
 
     Args:
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и разрешённые настройки.
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data and resolved settings.
 
     Returns:
-        PhaseContext: Итоговый контекст фаз. Для валидного конфига (эпик #74)
-            последняя фаза — терминальный select (``output: winner``),
-            поэтому ``winner_algo`` указывает на победителя, а рабочее
-            множество содержит единственную запись. Контекст пуст, если фазы
-            не выполнялись (``general.phases`` пуст) — защита от пустого
-            списка остаётся в ``train_best_model``.
+        PhaseContext: The final phase context. For a valid config the last
+            phase is a terminal select (``output: winner``), so ``winner_algo``
+            points to the winner and the working set holds a single record. The
+            context is empty if no phases ran (``general.phases`` is empty) —
+            the protection against an empty phase list stays in
+            ``train_best_model``.
 
     Raises:
-        NotImplementedError: Для фаз ``refine`` — исполнение появится в
-            задаче R3 (эпик #74).
-        RuntimeError: Если фаза HPO не получила ни одного валидного скора,
-            select-шаг получил пустое рабочее множество либо ни один
-            финалист не обучился на полном наборе данных.
+        NotImplementedError: For ``refine`` phases — execution is not yet
+            implemented.
+        RuntimeError: If an HPO phase produced no valid score, a select step
+            received an empty working set, or no finalist was trained on the
+            full dataset.
     """
     X = prepared.X
     y = prepared.y
@@ -2138,16 +2140,16 @@ def execute_phases(
 
     ctx = PhaseContext()
 
-    # Начальный список кандидатов (все включенные алгоритмы)
+    # Initial candidate list (all enabled algorithms)
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
-    # Дисквалифицированные алгоритмы (circuit breaker): имя -> причина.
-    # Дисквалификация не прерывает запуск: алгоритм исключается из
-    # кандидатов и результатов, остальные продолжают обучение (issue #12).
-    # living in ctx: наполняется HPO-провалами и select-шагами (эпик #74).
+    # Disqualified algorithms (circuit breaker): name -> reason.
+    # Disqualification does not abort the run: the algorithm is excluded from
+    # candidates and results, the rest continue training.
+    # living in ctx: populated by HPO failures and select steps.
     for phase in cfg.general.phases:
         if phase.action == "select":
-            # Select-шаг выполняется синхронно (вне run_parallel): отбор
-            # оперирует уже готовыми результатами HPO (эпик #74, задача R2).
+            # The select step runs synchronously (outside run_parallel): it
+            # operates on already-finished HPO results.
             _execute_select_phase(phase=phase, cfg=cfg, prepared=prepared, ctx=ctx)
             continue
 
@@ -2162,26 +2164,25 @@ def execute_phases(
         # set is rebuilt from the current phase only, so an algorithm that
         # failed in it (returned None or an invalid score) does not keep a
         # stale record from a previous phase and does not compete with real
-        # results (issue #13). Consequence: the final winner is chosen by the
-        # terminal select step (epic #74).
+        # results. Consequence: the final winner is chosen by the terminal
+        # select step.
         prev_results = ctx.working_set
 
-        # Фаза HPO пересобирает рабочее множество с нуля (issue #13), поэтому
-        # full-fit тренеры и результат терминального select предыдущих фаз
-        # больше не соответствуют параметрам рабочего множества.
+        # The HPO phase rebuilds the working set from scratch, so the full-fit
+        # trainers and the terminal select result of previous phases no longer
+        # match the working set parameters.
         ctx.full_fit_trainers.clear()
         ctx.winner_algo = None
         ctx.pre_trained_trainer = None
 
         if phase.action == "refine":
-            # Refine (эпик #74, R3): warm-start HPO для ВСЕГО входного
-            # рабочего множества. Вход — результаты последней фазы HPO
-            # или выход предыдущего select-шага; используются только
-            # params (initial_params для enqueue_trial), входные score
-            # игнорируются. Сужения нет: никаких победителей, top-K и
-            # коридоров — сужение множества выполняют явные select-шаги.
-            # Выход замещает рабочее множество: те же имена, обновлённые
-            # (score', params').
+            # Refine: warm-start HPO for the ENTIRE incoming working set. The
+            # input is the last HPO phase results or the output of the previous
+            # select step; only params are used (initial_params for
+            # enqueue_trial), incoming scores are ignored. There is no
+            # narrowing: no winners, top-K, or corridors — narrowing is done by
+            # explicit select steps. The output replaces the working set: the
+            # same names with updated (score', params').
             if prev_results:
                 current_candidates = {
                     n: all_algorithms[n]
@@ -2189,9 +2190,9 @@ def execute_phases(
                     if n in all_algorithms and n not in ctx.disqualified_algorithms
                 }
             else:
-                # refine первой фазой: входное рабочее множество — полный
-                # набор включённых алгоритмов, warm-start не передаётся
-                # (предыдущих результатов нет).
+                # refine as the first phase: the incoming working set is the
+                # full set of enabled algorithms, no warm-start is passed
+                # (there are no previous results).
                 current_candidates = {
                     n: a
                     for n, a in all_algorithms.items()
@@ -2200,7 +2201,7 @@ def execute_phases(
         else:
             # all_algorithms phase: every enabled algorithm, results from
             # previous phases are not accumulated. Algorithms disqualified by
-            # the circuit breaker do not return to the phase (issue #12).
+            # the circuit breaker do not return to the phase.
             current_candidates = {
                 n: a
                 for n, a in all_algorithms.items()
@@ -2209,17 +2210,18 @@ def execute_phases(
 
         # Each phase starts with an empty working set: it is rebuilt from the
         # current phase only, so an algorithm that fails in this phase does not
-        # keep a stale record from a previous phase (issue #13).
+        # keep a stale record from a previous phase.
         phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
 
-        # Кандидаты, участвующие в текущей фазе (нужны для диагностики
-        # в сообщении об отсутствии валидных результатов)
+        # Candidates participating in the current phase (needed for the
+        # diagnostics in the "no valid results" message)
         phase_candidates = list(current_candidates.keys())
 
-        # Неизменяемый снимок параметров фазы для воркера (issue #100):
-        # воркер — функция уровня модуля, все данные фазы передаются через
-        # ``spec`` явно, чтобы воркер сериализовался в ``processes``-режиме
-        # (замыкание внутри ``execute_phases`` сериализовать нельзя).
+        # An immutable snapshot of the phase parameters for the worker: the
+        # worker is a module-level function and all phase data is passed to it
+        # through ``spec`` explicitly so that the worker is serializable in
+        # the "processes" mode (a closure inside ``execute_phases`` cannot be
+        # serialized).
         ovr = cfg.oversampling
         pruning_cfg: dict[str, Any] | None = None
         if cfg.general.pruning.enable:
@@ -2254,7 +2256,7 @@ def execute_phases(
             feature_selection_cfg=cfg.general.feature_selection,
         )
 
-        # Выполнение (параллельное или последовательное)
+        # Execution (parallel or sequential)
         if (
             cfg.general.parallel_strategy == "algorithms"
             and len(current_candidates) > 1
@@ -2264,12 +2266,13 @@ def execute_phases(
                 args_seq=[(n, a, spec) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
-                # Таймауты поддерживаются только в процессах (issue #101).
-                # В threads-режиме конфиг-валидация их запрещает, а run_parallel
-                # при прямом вызове игнорирует их с warning. Здесь в threads не
-                # передаётся fallback `or 3600`: иначе на дефолтном threads-конфиге
-                # (phase_timeout=None -> 3600) warning об игнорировании срабатывал
-                # бы на каждой фазе.
+                # Timeouts are supported only in processes mode.
+                # In threads mode config validation forbids them, and
+                # run_parallel ignores them with a warning on direct calls.
+                # Here the threads path does not pass the fallback `or 3600`:
+                # otherwise, on a default threads config
+                # (phase_timeout=None -> 3600) the ignore-warning would fire
+                # on every phase.
                 timeout=(
                     None
                     if cfg.general.parallel_mode == "threads"
@@ -2302,12 +2305,11 @@ def execute_phases(
         # HPO_WORST_SCORE constant (returned by the tuner when a trial metric is
         # non-finite) and the raw float(np.finfo(np.float32).min) value (possible
         # from numpy-cast metrics or custom tuners), which the old
-        # math.isclose(rel_tol=1e-9) check missed (relative difference ≈ 9.88e-9,
-        # issue #32). Real metrics of such magnitude are practically impossible,
-        # so the threshold cannot drop a legitimate winner. params must be a
-        # dict (the tuner failure signal is params=None, issue #13); garbage
-        # score types from custom tuners (None, strings, etc.) are rejected by
-        # is_valid_winner_score.
+        # math.isclose(rel_tol=1e-9) check missed (relative difference ≈ 9.88e-9).
+        # Real metrics of such magnitude are practically impossible, so the
+        # threshold cannot drop a legitimate winner. params must be a dict (the
+        # tuner failure signal is params=None); garbage score types from custom
+        # tuners (None, strings, etc.) are rejected by is_valid_winner_score.
         valid_results: dict[str, tuple[float, dict[str, Any]]] = {}
         for name, (score, params) in phase_results.items():
             if not isinstance(params, dict):
@@ -2331,7 +2333,7 @@ def execute_phases(
         # Keep only the valid results of the current phase in the working set:
         # entries with an invalid score (HPO_WORST_SCORE etc.) are removed.
         # Since the phase results started empty, the working set is guaranteed
-        # to contain only this phase's results (issue #13).
+        # to contain only this phase's results.
         ctx.working_set = valid_results
 
         if not valid_results:
@@ -2344,27 +2346,27 @@ def execute_phases(
 
 
 # --------------------------------------------------------------------------- #
-#  Select steps (epic #74, task R2)                                            #
-#  Явные шаги отбора: strategy cv_best (ранжирование по CV-скору без аудита)  #
-#  и sanity_gate (пул финалистов T3 → обучение на 100% данных → аудит T2 →    #
-#  ранжирование по RMSE_oof T4). Выход select-шага замещает рабочее           #
-#  множество пайплайна.                                                       #
+#  Select steps                                                                #
+#  Explicit selection steps: strategy cv_best (ranking by CV score without    #
+#  audit) and sanity_gate (finalists pool → training on 100% of the data →   #
+#  audit → ranking by RMSE_oof). The select step output replaces the          #
+#  pipeline working set.                                                       #
 # --------------------------------------------------------------------------- #
 def _rank_cv_best(
     working_set: dict[str, tuple[float, dict[str, Any]]],
 ) -> list[str]:
-    """Отранжировать рабочее множество по «сырому» CV-скору по убыванию.
+    """Rank the working set by the raw CV score in descending order.
 
-    Семантика оптимизатора — та же, что в ``select_winner``/``select_finalists``:
-    ничья разрешается порядком вставки (порядок конфигурации,
-    документированный tie-break, issue #32).
+    The optimizer semantics are the same as in ``select_winner``/
+    ``select_finalists``: ties are resolved by insertion order (the
+    configuration order, a documented tie-break).
 
     Args:
-        working_set (dict[str, tuple[float, dict[str, Any]]]): Рабочее
-            множество «алгоритм → (скор, параметры)».
+        working_set (dict[str, tuple[float, dict[str, Any]]]): The working set
+            "algorithm → (score, params)".
 
     Returns:
-        list[str]: Имена алгоритмов, лучшие по CV-скору первыми.
+        list[str]: Algorithm names, best CV score first.
     """
     return sorted(working_set, key=lambda n: working_set[n][0], reverse=True)
 
@@ -2373,19 +2375,19 @@ def _rank_sanity_candidates(
     result: RobustWinnerResult,
     candidate_models: Mapping[str, FinalistCandidate],
 ) -> list[str]:
-    """Детерминированный ранжир select-шага ``sanity_gate`` (эпик #74, R2).
+    """Deterministic ranking of the ``sanity_gate`` select step.
 
-    Ранжирующая метрика стратегии — ``RMSE_oof``: прошедшие аудит кандидаты
-    сортируются по возрастанию ``RMSE_oof`` (None — последними, ничья —
-    порядком пула T3), затем — забракованные по fallback-критерию T4.
-    Первый элемент ранжира всегда совпадает с ``result.winner_algo``.
+    The strategy's ranking metric is ``RMSE_oof``: candidates that passed the
+    audit are sorted by ascending ``RMSE_oof`` (None — last, ties — pool
+    order), followed by the rejected ones per the fallback criterion. The
+    first element of the ranking always matches ``result.winner_algo``.
 
     Args:
-        result (RobustWinnerResult): Результат ``select_robust_winner``.
-        candidate_models (Mapping[str, FinalistCandidate]): Кандидаты.
+        result (RobustWinnerResult): The result of ``select_robust_winner``.
+        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
 
     Returns:
-        list[str]: Имена кандидатов в порядке ранжира стратегии.
+        list[str]: Candidate names in the strategy ranking order.
     """
 
     def _rmse_key(name: str) -> tuple[bool, float]:
@@ -2402,25 +2404,25 @@ def _rank_sanity_candidates(
 def _serialize_audit_result(
     audit: SanityCheckResult, generalization_gap_mode: str
 ) -> dict[str, Any]:
-    """Сериализовать ``SanityCheckResult`` в JSON-совместимый словарь (T6).
+    """Serialize a ``SanityCheckResult`` into a JSON-compatible dict.
 
-    NaN-статистики отключённых/невычислимых контуров заменяются на ``None``.
-    Бесконечный ``generalization_gap`` (деление на ноль, контур Г)
-    сериализуется явным флагом ``generalization_gap_infinite`` (issue #111):
-    в ``warn``-режиме бесконечный gap — мягкое предупреждение, и без флага
-    читатель не отличил бы его от «контур отключён или не вычислим».
-    Применённый режим контура Г (``generalization_gap_mode``, issue #108)
-    попадает в сериализацию каждого кандидата: в warn-режиме читатель видит
-    рядом с Circuit D-warning, что нарушение НЕ дисквалифицировало модель, а
-    в reject-режиме — что оно стало reason.
+    NaN statistics of disabled/non-computable circuits are replaced with
+        ``None``. An infinite ``generalization_gap`` (division by zero, circuit D)
+        is serialized with an explicit ``generalization_gap_infinite`` flag: in
+        the ``warn`` mode an infinite gap is a soft warning, and without the flag
+        the reader could not tell it apart from "circuit disabled or not
+        computable". The applied circuit D mode (``generalization_gap_mode``) is
+        included in the serialization of each candidate: in warn mode the reader
+        sees next to a Circuit D warning that the violation did NOT disqualify
+        the model, and in reject mode — that it became a reason.
 
-    Args:
-        audit (SanityCheckResult): Результат аудита одного финалиста.
-        generalization_gap_mode (str): Применённый режим контура Г:
-            'warn' | 'reject'.
+        Args:
+            audit (SanityCheckResult): The audit result of a single finalist.
+            generalization_gap_mode (str): The applied circuit D mode:
+                'warn' | 'reject'.
 
-    Returns:
-        dict[str, Any]: Словарь для секции отчёта select-шага.
+        Returns:
+            dict[str, Any]: A dict for the select step's report section.
     """
 
     def _num(value: float) -> float | None:
@@ -2441,21 +2443,21 @@ def _serialize_audit_result(
 
 
 def _build_sanity_gate(sg_cfg: SanityGateCfg) -> ModelSanityGate:
-    """Собрать ``ModelSanityGate`` из секции ``general.sanity_gate`` (T2/T5).
+    """Build a ``ModelSanityGate`` from the ``general.sanity_gate`` section.
 
-    Секция конфигурации — источник порогов: все пороги контуров и флаги
-    включения передаются в конструктор гейта без изменений, включая режим
-    контура Г ``generalization_gap_mode`` (issue #108): ``"warn"`` (дефолт) —
-    конечный ``gap > max_generalization_gap`` уходит в ``soft_warnings``;
-    ``"reject"`` — строгая дисквалификация (старое поведение). Режим
-    ``warn_only`` гейта не используется: select-шаг ``sanity_gate`` применяет
-    дисквалификации.
+    The config section is the source of thresholds: all circuit thresholds and
+    enable flags are passed to the gate constructor unchanged, including the
+    circuit D mode ``generalization_gap_mode``: ``"warn"`` (default) —
+    a gap violation (finite or infinite) goes to ``soft_warnings``;
+    ``"reject"`` — strict disqualification (the old behavior). The gate's
+    ``warn_only`` mode is not used: the ``sanity_gate`` select step applies
+    disqualifications.
 
     Args:
-        sg_cfg (SanityGateCfg): Секция ``general.sanity_gate``.
+        sg_cfg (SanityGateCfg): The ``general.sanity_gate`` section.
 
     Returns:
-        ModelSanityGate: Настроенный экземпляр гейта.
+        ModelSanityGate: The configured gate instance.
     """
     return ModelSanityGate(
         min_prediction_diversity=sg_cfg.min_prediction_diversity,
@@ -2485,19 +2487,19 @@ def _build_finalists_pool(
     prepared: PreparedData,
     ctx: PhaseContext,
 ) -> list[str]:
-    """Построить пул финалистов T3 из текущего рабочего множества.
+    """Build the finalists pool from the current working set.
 
-    Пороги (коридор δ, ``top_k_candidates``, добор семейств) берутся из
-    ``general.sanity_gate``; алгоритмы, дисквалифицированные circuit breaker'ом
-    (HPO-провалы и предыдущие select-шаги), в пул не попадают.
+    The thresholds (corridor δ, ``top_k_candidates``, family top-up) come from
+    ``general.sanity_gate``; algorithms disqualified by the circuit breaker
+    (HPO failures and previous select steps) do not enter the pool.
 
     Args:
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и настройки.
-        ctx (PhaseContext): Контекст фаз пайплайна.
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data and settings.
+        ctx (PhaseContext): The pipeline phase context.
 
     Returns:
-        list[str]: Упорядоченный пул финалистов (лучшие первыми).
+        list[str]: The ordered finalists pool (best first).
     """
     sg_cfg = cfg.general.sanity_gate
     return select_finalists(
@@ -2524,35 +2526,34 @@ def _execute_select_cv_best(
     prepared: PreparedData,
     ctx: PhaseContext,
 ) -> None:
-    """Обработать select-шаг со стратегией ``cv_best`` (эпик #74, R2).
+    """Handle a select step with the ``cv_best`` strategy.
 
-    Ранжирование входного множества по «сырому» CV-скору (аналог legacy-пути
-    при ``sanity_gate.mode: off``): аудита нет, gate-секция отчёта не
-    создаётся. Формы выхода:
+    Ranks the incoming set by the raw CV score (the equivalent of the legacy
+    path with ``sanity_gate.mode: off``): no audit, no gate report section is
+    created. Output forms:
 
-    - ``winner`` — единственный победитель (терминальный шаг);
-    - ``top_k`` — первые ``k`` кандидатов ранжира;
-    - ``pool`` — коридорный пул финалистов T3 (коридор δ ∩
-      ``top_k_candidates``, пороги из ``general.sanity_gate``), ранжированный
-      по CV-скору, без аудита ``ModelSanityGate``.
+    - ``winner`` — the single winner (terminal step);
+    - ``top_k`` — the first ``k`` candidates of the ranking;
+    - ``pool`` — the corridor-based finalists pool (corridor δ ∩
+      ``top_k_candidates``, thresholds from ``general.sanity_gate``), ranked by
+      CV score, without a ``ModelSanityGate`` audit.
 
-    Выход замещает рабочее множество пайплайна.
+    The output replaces the pipeline working set.
 
     Args:
-        phase (HPOPhaseCfg): Конфигурация select-фазы.
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и настройки.
-        ctx (PhaseContext): Контекст фаз пайплайна (изменяется).
+        phase (HPOPhaseCfg): The select phase configuration.
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data and settings.
+        ctx (PhaseContext): The pipeline phase context (mutated).
     """
     if phase.output == "winner":
         winner_algo = select_winner(ctx.working_set)
         ctx.working_set = {winner_algo: ctx.working_set[winner_algo]}
         ctx.winner_algo = winner_algo
         ctx.pre_trained_trainer = None
-        # Единая пользовательская семантика (issue #26, T6): как и лог фазы
-        # HPO, select-шаг печатает естественное значение метрики (для ошибок
-        # — положительное RMSE/MAE), а не «сырое» инвертированное значение
-        # скорера оптимизатора.
+        # Consistent user semantics: like the HPO phase log, the select step
+        # prints the natural metric value (for errors — positive RMSE/MAE),
+        # not the raw inverted optimizer scorer value.
         _LOG.info(
             "Select phase '%s' (strategy: cv_best): winner %s (score %.5f)",
             phase.name,
@@ -2562,8 +2563,8 @@ def _execute_select_cv_best(
         return
 
     if phase.output == "top_k":
-        # Ранжир строится лениво: для winner он не нужен (источник истины —
-        # select_winner), для pool пул строится отдельно.
+        # The ranking is built lazily: not needed for winner (the source of
+        # truth is select_winner), and the pool is built separately.
         kept = _rank_cv_best(ctx.working_set)[: phase.k]
         ctx.working_set = {name: ctx.working_set[name] for name in kept}
         _LOG.info(
@@ -2574,7 +2575,7 @@ def _execute_select_cv_best(
         )
         return
 
-    # output == "pool": коридорный пул финалистов T3 по CV-скору (без аудита).
+    # output == "pool": corridor-based finalists pool by CV score (no audit).
     pool = _build_finalists_pool(cfg, prepared, ctx)
     ctx.working_set = {name: ctx.working_set[name] for name in pool}
     _LOG.info(
@@ -2585,24 +2586,24 @@ def _execute_select_cv_best(
 def _drop_kept_from_circuit_breaker(
     ctx: PhaseContext, returned_by_fallback: Iterable[str]
 ) -> None:
-    """Снять с circuit breaker кандидатов, возвращённых выходом select-шага.
+    """Un-disqualify candidates returned by the select step output.
 
-    Select-шаг со ``strategy: sanity_gate`` (``output: top_k``/``pool``)
-    сознательно возвращает в рабочее множество кандидатов, не прошедших
-    аудит (fallback T4) — иначе пайплайн остался бы с пустым множеством.
-    Оставлять их в ``disqualified_algorithms`` нельзя: следующая фаза
-    отфильтровала бы их и упала (refine — RuntimeError «no valid results»,
-    следующий sanity-select — ``select_finalists``).
+    A select step with ``strategy: sanity_gate`` (``output: top_k``/``pool``)
+    deliberately returns candidates that did not pass the audit (fallback) to
+    the working set — otherwise the pipeline would end up with an empty set.
+    Keeping them in ``disqualified_algorithms`` is not allowed: the next
+    phase would filter them out and fail (refine — RuntimeError "no valid
+    results", the next sanity-select — ``select_finalists``).
 
-    Снимаются ТОЛЬКО имена, переданные ``returned_by_fallback``: провалы,
-    дисквалифицированные именно этим шагом и вернувшиеся в его выход.
-    Предсуществующие дисквалификации (HPO circuit breaker и др.) не
-    трогаются — за них ответственны другие фазы (ревью PR #49).
+    Only the names passed via ``returned_by_fallback`` are removed: failures
+    disqualified by this step and returned into its output.
+    Pre-existing disqualifications (the HPO circuit breaker and others) are
+    not touched — other phases are responsible for them.
 
     Args:
-        ctx (PhaseContext): Контекст фаз (изменяется).
-        returned_by_fallback (Iterable[str]): Имена, вернувшиеся в выход шага
-            и дисквалифицированные этим же шагом.
+        ctx (PhaseContext): The phase context (mutated).
+        returned_by_fallback (Iterable[str]): Names returned into the step
+            output and disqualified by the same step.
     """
     kept = set(returned_by_fallback)
     for name in list(ctx.disqualified_algorithms):
@@ -2616,50 +2617,52 @@ def _execute_select_sanity_gate(
     prepared: PreparedData,
     ctx: PhaseContext,
 ) -> None:
-    """Обработать select-шаг со стратегией ``sanity_gate`` (эпик #74, R2).
+    """Handle a select step with the ``sanity_gate`` strategy.
 
-    Переиспользует двухстадийный выбор (эпик #61):
+        Reuses the two-stage selection:
 
-    1. Пул финалистов T3 (коридор δ ∩ ``top_k_candidates`` из
-       ``general.sanity_gate``);
-    2. ``_train_finalists`` — обучение каждого финалиста на 100% данных ровно
-       один раз (повторный select после фаз HPO обучает финалистов заново —
-       старые full-fit тренеры не переиспользуются);
-    3. Аудит ``ModelSanityGate`` (T2);
-    4. ``select_robust_winner`` (T4, режим ``active``): ранжирование прошедших
-       аудит по ``RMSE_oof``, fallback-критерий при полной дисквалификации.
+        1. Finalists pool (corridor δ ∩ ``top_k_candidates`` from
+           ``general.sanity_gate``);
+        2. ``_train_finalists`` — train each finalist on 100% of the data exactly
+           once (a repeated select after HPO phases trains the finalists anew —
+           old full-fit trainers are not reused);
+        3. ``ModelSanityGate`` audit;
+        4. ``select_robust_winner`` (``active`` mode): rank the candidates that
+           passed the audit by ``RMSE_oof``, with a fallback criterion on total
+           disqualification.
 
-    Дисквалификации гейта попадают в circuit breaker
-    (``disqualified_algorithms``) наравне с HPO-провалами (эпик #74);
-    исключение — кандидаты, пропущенные из-за исчерпания
-    ``audit_time_budget_seconds`` (issue #102): они не аудированы, а не
-    забракованы, и не дисквалифицируются навсегда. Секция отчёта (T6)
-    добавляется в ``ctx.sanity_gate_sections`` под именем фазы. Формы выхода:
+    Gate disqualifications enter the circuit breaker
+        (``disqualified_algorithms``) on par with HPO failures; the exception is
+        candidates skipped because of an exhausted ``audit_time_budget_seconds``:
+        they were not audited rather than rejected, so they are not disqualified
+        forever. A report section is added to ``ctx.sanity_gate_sections`` under
+        the phase name. Output forms:
 
-    - ``winner`` — единственный победитель (терминальный шаг); его full-fit
-      тренер передаётся в ``persist_artifact`` через ``pre_trained_trainer``;
-    - ``top_k`` — первые ``k`` кандидатов ранжира (по ``RMSE_oof``);
-    - ``pool`` — все прошедшие отбор (аудит); при полной дисквалификации —
-      весь ранжир по fallback-критерию T4 (пайплайн не остаётся с пустым
-      множеством).
+        - ``winner`` — the single winner (terminal step); its full-fit trainer is
+          passed to ``persist_artifact`` via ``pre_trained_trainer``;
+        - ``top_k`` — the first ``k`` candidates of the ranking (by ``RMSE_oof``);
+        - ``pool`` — all candidates that passed the selection (audit); on total
+          disqualification — the full ranking per the fallback criterion (the
+          pipeline does not end up with an empty set).
 
-    Инвариант выхода (issue #102): рабочее множество не пересекается с
-    ``disqualified_algorithms`` — провалы, дисквалифицированные этим шагом и
-    возвращённые fallback'ом в выход ``top_k``/``pool``, снимаются с circuit
-    breaker (иначе следующая фаза отфильтровала бы их и упала).
-    Предсуществующие дисквалификации (HPO circuit breaker и др.) не
-    снимаются (ревью PR #49).
+        Output invariant: the working set does not intersect
+        ``disqualified_algorithms`` — failures disqualified by this step and
+        returned by the fallback into the ``top_k``/``pool`` output are removed
+        from the circuit breaker (otherwise the next phase would filter them out
+        and fail). Pre-existing disqualifications (the HPO circuit breaker and
+        others) are not removed.
 
-    Args:
-        phase (HPOPhaseCfg): Конфигурация select-фазы.
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и настройки.
-        ctx (PhaseContext): Контекст фаз пайплайна (изменяется).
+        Args:
+            phase (HPOPhaseCfg): The select phase configuration.
+            cfg (Config): The configuration object.
+            prepared (PreparedData): The prepared data and settings.
+            ctx (PhaseContext): The pipeline phase context (mutated).
 
-    Raises:
-        RuntimeError: Если ни один финалист пула не обучился на 100% данных.
+        Raises:
+            RuntimeError: If no finalist of the pool was trained on 100% of the
+                data.
     """
-    # 1. Пул финалистов (T3).
+    # 1. Finalists pool.
     pool = _build_finalists_pool(cfg, prepared, ctx)
     _LOG.info(
         "Select phase '%s' (strategy: sanity_gate): finalists pool %s",
@@ -2667,8 +2670,8 @@ def _execute_select_sanity_gate(
         pool,
     )
 
-    # 2. Обучение финалистов на 100% данных (T4, требование 4 — ровно один
-    # раз; повторный select после HPO-фаз обучает заново).
+    # 2. Train the finalists on 100% of the data (exactly once; a repeated
+    # select after HPO phases trains them anew).
     gate_started = time.monotonic()
     candidates = _train_finalists(pool, ctx.working_set, cfg, prepared)
     if not candidates:
@@ -2682,7 +2685,7 @@ def _execute_select_sanity_gate(
         if cand.trainer is not None
     }
 
-    # 3-4. Аудит (T2) и ранжирование по RMSE_oof (T4, режим active).
+    # 3-4. Audit and ranking by RMSE_oof (active mode).
     result = select_robust_winner(
         candidates,
         prepared.X,
@@ -2693,11 +2696,11 @@ def _execute_select_sanity_gate(
     )
     overhead_seconds = time.monotonic() - gate_started
 
-    # Дисквалификации гейта → circuit breaker (наравне с HPO-провалами,
-    # эпик #74): алгоритм не вернётся в пулы следующих select-шагов.
-    # Исключение — кандидаты, пропущенные из-за исчерпания audit_time_budget
-    # (issue #102): они НЕ аудированы, а не забракованы, поэтому не должны
-    # дисквалифицироваться навсегда из всех последующих фаз.
+    # Gate disqualifications → circuit breaker (on par with HPO failures): the
+    # algorithm will not return to the pools of subsequent select steps.
+    # The exception — candidates skipped because of an exhausted
+    # audit_time_budget: they are NOT audited rather than rejected, so they
+    # must not be disqualified forever from all subsequent phases.
     for name, reasons in result.disqualified.items():
         if _is_audit_budget_skip(reasons):
             _LOG.info(
@@ -2708,10 +2711,9 @@ def _execute_select_sanity_gate(
             continue
         ctx.disqualified_algorithms[name] = "; ".join(reasons)
 
-    # Провалы, дисквалифицированные ИМЕННО этим шагом (без бюджетных
-    # пропусков). Только их выход может вернуть в рабочее множество, снимая
-    # с circuit breaker; предсуществующие дисквалификации не трогаются
-    # (ревью PR #49).
+    # Failures disqualified by THIS step exactly (without budget skips).
+    # Only their output can return to the working set, removing them from the
+    # circuit breaker; pre-existing disqualifications are not touched.
     disqualified_this_step = {
         name
         for name, reasons in result.disqualified.items()
@@ -2729,9 +2731,10 @@ def _execute_select_sanity_gate(
         _fmt_audit_value(result.audit[result.winner_algo].generalization_gap),
     )
 
-    # Секция отчёта (T6): ключ — имя select-фазы (эпик #74). Применённый
-    # режим контура Г (issue #108) попадает в отчёт вместе с аудитом, чтобы
-    # читатель видел, что Circuit D-warning не дисквалифицировал модель.
+    # Report section: the key is the select phase name. The applied
+    # circuit D mode is included in the report together with the audit so
+    # that the reader sees that a Circuit D warning did not disqualify the
+    # model.
     generalization_gap_mode = cfg.general.sanity_gate.generalization_gap_mode
     ctx.sanity_gate_sections[phase.name] = {
         "strategy": "sanity_gate",
@@ -2749,14 +2752,15 @@ def _execute_select_sanity_gate(
         "overhead_seconds": overhead_seconds,
     }
 
-    # Форма выхода: замещаем рабочее множество (эпик #74).
+    # Output form: replace the working set.
     if phase.output == "winner":
         winner_algo = result.winner_algo
         ctx.working_set = {winner_algo: ctx.working_set[winner_algo]}
         ctx.winner_algo = winner_algo
         ctx.pre_trained_trainer = candidates[winner_algo].trainer
-        # Для артефакта нужен только тренер победителя: тренеры остальных
-        # финалистов не удерживаются в памяти до конца train_best_model.
+        # Only the winner's trainer is needed for the artifact: the other
+        # finalists' trainers are not kept in memory until the end of
+        # train_best_model.
         ctx.full_fit_trainers = {
             winner_algo: candidates[winner_algo].trainer,
         }
@@ -2768,9 +2772,9 @@ def _execute_select_sanity_gate(
         ctx.full_fit_trainers = {
             name: tr for name, tr in ctx.full_fit_trainers.items() if name in kept
         }
-        # Инвариант выхода (issue #102): вернувшиеся fallback-кандидаты
-        # снимаются с circuit breaker, иначе следующая фаза отфильтровала бы
-        # их и упала с RuntimeError. Снимаются только провалы этого шага.
+        # Output invariant: the returned fallback candidates are removed
+        # from the circuit breaker, otherwise the next phase would filter them
+        # out and fail with RuntimeError. Only this step's failures are removed.
         _drop_kept_from_circuit_breaker(ctx, set(kept) & disqualified_this_step)
         _LOG.info(
             "Select phase '%s' (strategy: sanity_gate): top_k=%d kept %s",
@@ -2780,15 +2784,16 @@ def _execute_select_sanity_gate(
         )
         return
 
-    # output == "pool": все прошедшие отбор; при полной дисквалификации —
-    # fallback-ранжир T4 (иначе пайплайн остаётся с пустым множеством).
+    # output == "pool": all candidates that passed the selection; on total
+    # disqualification — the fallback ranking (otherwise the pipeline would
+    # end up with an empty set).
     passed = [n for n in result.pool if result.audit[n].is_valid]
     if not passed:
         passed = ranked
         _LOG.warning(
             "Select phase '%s' (strategy: sanity_gate): all %d finalist(s) "
             "failed the audit; output 'pool' falls back to the full ranked "
-            "pool %s (T4 fallback criterion)",
+            "pool %s (fallback criterion)",
             phase.name,
             len(result.pool),
             passed,
@@ -2797,7 +2802,7 @@ def _execute_select_sanity_gate(
     ctx.full_fit_trainers = {
         name: tr for name, tr in ctx.full_fit_trainers.items() if name in passed
     }
-    # Инвариант выхода (issue #102): см. комментарий к ветке top_k.
+    # Output invariant: see the comment for the top_k branch.
     _drop_kept_from_circuit_breaker(ctx, set(passed) & disqualified_this_step)
     _LOG.info(
         "Select phase '%s' (strategy: sanity_gate): pool of passed candidates %s",
@@ -2812,21 +2817,21 @@ def _execute_select_phase(
     prepared: PreparedData,
     ctx: PhaseContext,
 ) -> None:
-    """Диспетчер select-шага по стратегии (эпик #74, задача R2).
+    """Select-step dispatcher by strategy.
 
-    Select выполняется синхронно (вне ``run_parallel``). Пустое входное
-    множество — ошибка: отбирать нечего.
+    Select runs synchronously (outside ``run_parallel``). An empty incoming
+    set is an error: there is nothing to select from.
 
     Args:
-        phase (HPOPhaseCfg): Конфигурация select-фазы.
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и настройки.
-        ctx (PhaseContext): Контекст фаз пайплайна (изменяется).
+        phase (HPOPhaseCfg): The select phase configuration.
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data and settings.
+        ctx (PhaseContext): The pipeline phase context (mutated).
 
     Raises:
-        RuntimeError: Если входное рабочее множество пусто.
-        ValueError: Если стратегия фазы неизвестна (защита; схема конфига
-            допускает только 'cv_best'/'sanity_gate').
+        RuntimeError: If the incoming working set is empty.
+        ValueError: If the phase strategy is unknown (protection; the config
+            schema allows only 'cv_best'/'sanity_gate').
     """
     if not ctx.working_set:
         raise RuntimeError(
@@ -2834,8 +2839,9 @@ def _execute_select_phase(
             "nothing to select from. Check that a preceding HPO phase "
             "produced valid results."
         )
-    # Единая защита для всех стратегий: top_k без k не имеет смысла
-    # (схема конфига уже требует k >= 1, проверка дублируется явно).
+    # Common protection for all strategies: top_k without k makes no sense
+    # (the config schema already requires k >= 1; the check is duplicated
+    # explicitly).
     if phase.output == "top_k" and phase.k is None:
         raise ValueError(
             f"Select phase '{phase.name}': output 'top_k' requires "
@@ -2849,7 +2855,7 @@ def _execute_select_phase(
         _execute_select_cv_best(phase, cfg, prepared, ctx)
     elif phase.strategy == "sanity_gate":
         _execute_select_sanity_gate(phase, cfg, prepared, ctx)
-    else:  # pragma: no cover — защищено схемой конфига
+    else:  # pragma: no cover — protected by the config schema
         raise ValueError(
             f"Select phase '{phase.name}': unknown strategy {phase.strategy!r}"
         )
@@ -2867,47 +2873,45 @@ def persist_artifact(
     pre_trained_trainer: Any | None = None,
     sanity_gate_sections: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Финальное обучение победителя, сохранение артефакта и сборка отчёта.
+    """Final training of the winner, artifact persistence, and report assembly.
 
-    Шаг 5 пайплайна (issue #31). Обучает модель алгоритма-победителя на
-    полном наборе данных через ``_fit_and_save`` (либо переиспользует уже
-    обученного финалиста терминального select-шага со ``strategy:
-    sanity_gate``, эпик #74), сохраняет артефакт на диск и формирует словарь
-    результата: ``algorithm``, ``score`` (в пользовательской семантике,
-    issue #26), ``metric``, ``params``, ``model_path``; при наличии
-    добавляются ``disqualified_algorithms`` (issue #12 — circuit breaker,
-    включая дисквалификации Sanity Gate select-шагов, эпик #74),
-    ``additional_metrics`` и ``sanity_gate`` — словарь секций отчёта
-    select-шагов со ``strategy: sanity_gate`` (ключ — имя фазы, T6).
+    Pipeline step 5. Trains the winning algorithm's model on the full dataset
+    via ``_fit_and_save`` (or reuses the already-trained finalist of the
+    terminal ``sanity_gate`` select step), saves the artifact to disk, and
+    builds the result dict: ``algorithm``, ``score`` (in user semantics),
+    ``metric``, ``params``, ``model_path``; when present it also adds
+    ``disqualified_algorithms`` (the circuit breaker, including Sanity Gate
+    select-step disqualifications), ``additional_metrics``, and ``sanity_gate``
+    — a dict of the report sections of the ``sanity_gate`` select steps (key —
+    the phase name).
 
     Args:
-        cfg (Config): Объект конфигурации.
-        prepared (PreparedData): Подготовленные данные и настройки.
-        winner_algo (str): Имя алгоритма-победителя (из контекста терминального
-            select-шага, эпик #74).
-        final_score (float): «Сырой» скор победителя (уже прошёл инвариант
-            ``is_valid_winner_score``).
-        final_params (Dict[str, Any]): Лучшие гиперпараметры победителя.
-        model_path_override (str | Path | None): Альтернативный путь
-            сохранения модели.
-        disqualified_algorithms (Dict[str, str]): Дисквалифицированные
-            алгоритмы (имя → причина); добавляются в результат при наличии.
-        pre_trained_trainer (Any | None): Уже обученный на 100% данных
-            ``ModelTrainer`` победителя (терминальный select-шаг со
-            ``strategy: sanity_gate``, эпик #74). Если задан, повторное
-            обучение НЕ выполняется — артефакт сохраняется из него
-            (требование 4 постановки T4: финалисты обучаются один раз).
-        sanity_gate_sections (Dict[str, Dict[str, Any]] | None): Секции отчёта
-            select-шагов со ``strategy: sanity_gate`` (ключ — имя фазы, T6,
-            эпик #74). Ключ ``sanity_gate`` добавляется в результат только
-            при наличии хотя бы одной секции.
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data and settings.
+        winner_algo (str): The name of the winning algorithm (from the terminal
+            select step context).
+        final_score (float): The raw winner score (already passed the
+            ``is_valid_winner_score`` invariant).
+        final_params (Dict[str, Any]): The winner's best hyperparameters.
+        model_path_override (str | Path | None): An alternative model save
+            path.
+        disqualified_algorithms (Dict[str, str]): Disqualified algorithms
+            (name → reason); added to the result when present.
+        pre_trained_trainer (Any | None): The winner's already-trained
+            ``ModelTrainer`` on 100% of the data (terminal ``sanity_gate``
+            select step). If given, retraining is NOT performed — the artifact
+            is saved from it (finalists are trained once).
+        sanity_gate_sections (Dict[str, Dict[str, Any]] | None): Report
+            sections of the ``sanity_gate`` select steps (key — the phase
+            name). The ``sanity_gate`` key is added to the result only when at
+            least one section is present.
 
     Returns:
-        Dict[str, Any]: Словарь с результатами обучения.
+        Dict[str, Any]: A dict with the training results.
 
     Raises:
-        Exception: Пробрасывается ошибка финального обучения/сохранения
-            (логируется перед повторным поднятием).
+        Exception: The final training/saving error is propagated (logged
+            before being re-raised).
     """
     model_path = Path(model_path_override or cfg.general.path_to_model)
     winner_cfg = _algorithms_as_dict(cfg.algorithms)[winner_algo]
@@ -2938,33 +2942,34 @@ def persist_artifact(
 
     result: dict[str, Any] = {
         "algorithm": winner_algo,
-        # Единая пользовательская семантика (issue #26): score всегда отражает
-        # естественное значение метрики (положительный RMSE/MAE, обычный R²),
-        # metric — пользовательское имя метрики сравнения из конфигурации.
-        # «Сырое» (инвертированное для neg_*-скореров) значение остаётся
-        # внутренней деталью оптимизатора и до пользователя не доходит.
+        # Consistent user semantics: score always reflects the natural metric
+        # value (positive RMSE/MAE, plain R²), and metric is the user-facing
+        # comparison metric name from the configuration. The raw (inverted for
+        # neg_*-scorers) value remains an internal optimizer detail and never
+        # reaches the user.
         "score": to_user_value(prepared.metric_user, final_score),
         "metric": prepared.metric_user,
         "params": final_params,
         "model_path": str(model_path),
     }
-    # Диагностика circuit breaker (issue #12): какие алгоритмы и почему были
-    # дисквалифицированы. Ключ добавляется только при наличии дисквалификаций,
-    # иначе результаты идентичны прежнему поведению. Источники смешаны
-    # осознанно (эпик #74): сюда попадают и HPO-провалы, и дисквалификации
-    # Sanity Gate select-шагов; детальный аудит — в секциях ``sanity_gate``.
+    # Circuit breaker diagnostics: which algorithms were disqualified and why.
+    # The key is added only when there are disqualifications, otherwise the
+    # results are identical to the previous behavior. The sources are mixed
+    # deliberately: both HPO failures and Sanity Gate select-step
+    # disqualifications land here; the detailed audit lives in the
+    # ``sanity_gate`` sections.
     if disqualified_algorithms:
         result["disqualified_algorithms"] = dict(disqualified_algorithms)
-    # Секции отчёта select-шагов (T6, эпик #74): ключ ``sanity_gate`` —
-    # словарь «имя select-фазы → секция». Добавляется только при наличии
-    # select-шагов со strategy: sanity_gate. Копируется глубоко: секции
-    # содержат вложенные списки/словари, мутации источников не должны
-    # влиять на отчёт.
+    # Report sections of the select steps: the ``sanity_gate`` key is a dict of
+    # "select phase name → section". Added only when there are select steps
+    # with strategy: sanity_gate. Deep-copied: sections contain nested
+    # lists/dicts, and source mutations must not affect the report.
     if sanity_gate_sections:
         result["sanity_gate"] = copy.deepcopy(sanity_gate_sections)
-    # Дополнительные информационные метрики финальной модели. Ключ добавляется
-    # только при наличии метрик (после дедупликации и исключения основной
-    # метрики сравнения), иначе результаты идентичны прежнему поведению.
+    # Additional informational metrics of the final model. The key is added
+    # only when metrics are present (after deduplication and exclusion of the
+    # main comparison metric), otherwise the results are identical to the
+    # previous behavior.
     if cfg.general.additional_metrics:
         result["additional_metrics"] = dict(trainer.additional_scores)
     return result
@@ -2981,78 +2986,74 @@ def train_best_model(
     target: str | None = None,
     model_path_override: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Основной интерфейс обучения лучшей модели.
+    """Main interface for training the best model.
 
-    Оркестрирует декомпозированный пайплайн (issue #31; select-шаги —
-    эпик #74, задача R2): ``load_config → prepare_dataset → execute_phases →
-    persist_artifact``. Логика каждого шага вынесена в отдельные функции
-    модуля; здесь остаются только инвариант winner-скора и передача
-    победителя/тренера из контекста терминального select-шага в
-    ``persist_artifact``.
+    Orchestrates the decomposed pipeline (``load_config → prepare_dataset →
+    execute_phases → persist_artifact``). The logic of each step is extracted
+    into separate module functions; here only the winner-score invariant and
+    the hand-off of the winner/trainer from the terminal select step context
+    to ``persist_artifact`` remain.
 
-    Двухстадийный выбор победителя (эпик #61, T3+T4) выполняется явным
-    select-шагом пайплайна со ``strategy: sanity_gate`` (эпик #74, задача R2):
-    пул финалистов (``select_finalists``), однократное обучение финалистов на
-    100% данных, аудит ``ModelSanityGate`` (T2) и ранжирование по ``RMSE_oof``
-    (``select_robust_winner``, режим ``active``). Терминальный select
-    (``output: winner``) отдаёт в ``persist_artifact`` обученного на 100%
-    данных тренера победителя через ``pre_trained_trainer`` — переобучение
-    победителя не требуется. Глобального переключателя
-    ``general.sanity_gate.mode`` больше нет: отбор выполняется ТОЛЬКО
-    явным select-шагом, секция ``general.sanity_gate`` — источник порогов.
+    Two-stage winner selection is performed by an explicit pipeline select step
+    with ``strategy: sanity_gate``: a finalists pool (``select_finalists``),
+    one-time training of the finalists on 100% of the data, a
+    ``ModelSanityGate`` audit, and ranking by ``RMSE_oof``
+    (``select_robust_winner``, ``active`` mode). The terminal select
+    (``output: winner``) hands the winner's already-trained-on-100%-of-the-data
+    trainer to ``persist_artifact`` via ``pre_trained_trainer`` — no retraining
+    of the winner is required. There is no global
+    ``general.sanity_gate.mode`` switch anymore: selection is performed ONLY
+    by an explicit select step, and the ``general.sanity_gate`` section is the
+    source of thresholds.
 
-    Multi-phase semantics (issue #13): рабочее множество не аккумулируется —
-    каждая фаза HPO пересобирает его с нуля, а выход select-шага замещает
-    его (эпик #74). Последняя фаза валидного конфига (эпик #74) —
-    терминальный select (``output: winner``), чей результат определяет
-    артефакт.
+    Multi-phase semantics: the working set is not accumulated — each HPO phase
+    rebuilds it from scratch, and the select step output replaces it. The last
+    phase of a valid config is a terminal select (``output: winner``), whose
+    result determines the artifact.
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): Конфигурация обучения.
-            Может быть путем к файлу, словарем или объектом Config.
-        df (pd.DataFrame): Исходные данные.
-        target (str | None): Имя целевого столбца. По умолчанию 'target'.
-        model_path_override (str | Path | None): Альтернативный путь сохранения модели.
+        config (Union[str, Path, Config, Dict[str, Any]]): The training
+            configuration. Can be a file path, a dict, or a Config object.
+        df (pd.DataFrame): The input data.
+        target (str | None): The target column name. Defaults to 'target'.
+        model_path_override (str | Path | None): An alternative model save path.
     Returns:
-        Dict[str, Any]: Словарь с результатами: название алгоритма,
-            ``score`` — значение метрики в пользовательской семантике
-            (положительный RMSE/MAE, обычный R²; для neg_-скореров значение
-            инвертировано обратно), ``metric`` — пользовательское имя метрики
-            сравнения, параметры и путь к файлу. Если в ходе запуска
-            какие-либо алгоритмы были дисквалифицированы circuit breaker'ом
-            (5 подряд фатальных ошибок HPO либо аудит Sanity Gate
-            select-шагов, эпик #74), в результат добавляется ключ
-            ``disqualified_algorithms`` — словарь {имя алгоритма: причина
-            дисквалификации}. Каждый select-шаг со ``strategy: sanity_gate``
-            добавляет свою секцию в ``result["sanity_gate"]`` (ключ — имя
-            фазы, T6).
+        Dict[str, Any]: A dict with the results: the algorithm name, ``score``
+            — the metric value in user semantics (positive RMSE/MAE, plain R²;
+            for neg_-scorers the value is inverted back), ``metric`` — the
+            user-facing comparison metric name, the parameters, and the file
+            path. If any algorithms were disqualified during the run by the
+            circuit breaker (consecutive fatal HPO errors or a Sanity Gate
+            select-step audit), the ``disqualified_algorithms`` key is added —
+            a dict {algorithm name: disqualification reason}. Each select step
+            with ``strategy: sanity_gate`` adds its section to
+            ``result["sanity_gate"]`` (key — the phase name).
     Raises:
-        TypeError: При передаче конфига неподдерживаемого типа.
-        RuntimeError: Если ни один алгоритм не смог успешно завершить фазу HPO,
-            select-шаг получил пустое рабочее множество либо ни один финалист
-            не обучился на полном наборе данных. Дисквалификация отдельного
-            алгоритма (``InvalidAlgorithmError``) запуск НЕ прерывает:
-            алгоритм исключается из кандидатов, остальные продолжают обучение
-            (issue #12).
+        TypeError: If a config of an unsupported type is passed.
+        RuntimeError: If no algorithm completed an HPO phase successfully, a
+            select step received an empty working set, or no finalist was
+            trained on the full dataset. The disqualification of a single
+            algorithm (``InvalidAlgorithmError``) does NOT abort the run: the
+            algorithm is excluded from the candidates and the rest continue
+            training.
     """
     cfg, target_col = load_config(config, df, target)
     prepared = prepare_dataset(cfg, df, target_col)
     ctx = execute_phases(cfg, prepared)
 
-    # Победитель берётся из контекста терминального select-шага (эпик #74):
-    # последняя фаза валидного конфига обязана быть select с output: winner
-    # (кросс-валидация схемы), поэтому ctx.winner_algo уже установлен.
+    # The winner is taken from the terminal select step context: the last phase
+    # of a valid config must be a select with output: winner (cross-validated
+    # by the schema), so ctx.winner_algo is already set.
     if ctx.winner_algo is None or not ctx.working_set:
-        # Защита от пустого списка фаз (конфиг допускает phases: []): цикл
-        # в execute_phases не выполнялся — поднимаем понятную RuntimeError
-        # (ревью PR #22).
+        # Protection against an empty phase list (the config allows phases: []):
+        # the loop in execute_phases did not run — raise a clear RuntimeError.
         raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
 
     winner_algo = ctx.winner_algo
     final_score, final_params = ctx.working_set[winner_algo]
-    # Финальный инвариант (issue #32): score победителя обязан быть конечным
-    # и строго выше класса worst-score сентинела, прежде чем попасть в
-    # result["score"]. Иначе сентинел мог бы протечь в отчёт — для neg_-
-    # метрик to_user_value инвертировал бы его в абсурдные +3.4e38.
+    # Final invariant: the winner's score must be finite and strictly above the
+    # worst-score sentinel class before entering result["score"]. Otherwise the
+    # sentinel could leak into the report — for neg_-metrics to_user_value
+    # would invert it into the absurd +3.4e38.
     if not is_valid_winner_score(final_score):
         raise RuntimeError(
             f"Winner '{winner_algo}' produced an invalid final score "

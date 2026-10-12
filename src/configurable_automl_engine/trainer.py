@@ -1,40 +1,39 @@
-"""Model Trainer: Универсальный оркестратор жизненного цикла регрессионных моделей.
+"""Model Trainer: A universal orchestrator of the regression model lifecycle.
 
-Данный модуль инкапсулирует логику построения обучающих пайплайнов,
-объединяя предобработку данных, балансировку выборок и обучение алгоритмов Scikit-learn.
+This module encapsulates the logic for building training pipelines,
+combining data preprocessing, sample balancing, and training of Scikit-learn algorithms.
 
-Ключевой особенностью является полная автоматизация подготовки признаков:
-система самостоятельно
-классифицирует типы данных,
-обрабатывает пропуски и масштабирует значения,
-гарантируя корректную передачу данных в финальный оценщик.
+A key feature is the full automation of feature preparation:
+the system classifies data types on its own,
+handles missing values and scales features,
+guaranteeing correct data delivery to the final estimator.
 
-Основные компоненты:
+Main components:
 
-ModelTrainer: Главный класс-контейнер для обучения, валидации и деплоя моделей.
-train_model: Функциональный интерфейс (Facade) для обеспечения
-    обратной совместимости со старым API.
-TrainingError: Специализированное исключение
-    для унифицированной обработки сбоев обучения.
+ModelTrainer: The main container class for model training, validation, and deployment.
+train_model: A functional interface (Facade) that provides
+    backward compatibility with the legacy API.
+TrainingError: A dedicated exception
+    for unified handling of training failures.
 
-Особенности реализации:
+Implementation highlights:
 
-Pipeline Integration: Использование imblearn.pipeline позволяет бесшовно интегрировать
-    механизмы оверсэмплинга (SMOTE, ADASYN) непосредственно в процесс обучения.
-Feature Selection: Опциональный шаг отбора признаков (FeatureSelector) встраивается
-    строго между preprocessor и oversampler; активность управляется явным флагом
-    (результат HPO) либо режимом конфигурации (always/disabled/auto). Режим ``auto``
-    выполняет автономную проверку целесообразности на каждом fit() (два
-    дополнительных обучения пайплайна, ~2–3x времени), поэтому в цикле HPO
-    рекомендуется явный флаг ``feature_selection_active``.
-Automated Feature Engineering: Встроенный ColumnTransformer автоматически применяет
-    One-Hot кодирование для категорий и StandardScaler для числовых признаков.
-Thread Safety: Использование рекурсивных блокировок (threading.RLock) гарантирует
-    безопасность при обращении к состоянию модели из нескольких потоков.
-Isotonic Support: Специальный трансформер IsotonicDataTransformer адаптирует
-    многомерные данные под строгие требования алгоритмов изотонической регрессии.
-Persistence: Встроенные методы save и load с поддержкой различных форматов сериализации
-    (Pickle, Joblib) через систему артефактов."""
+Pipeline Integration: Using imblearn.pipeline allows seamless integration
+    of oversampling mechanisms (SMOTE, ADASYN) directly into the training process.
+Feature Selection: An optional feature selection step (FeatureSelector) is
+    inserted strictly between the preprocessor and the oversampler; its activity
+    is controlled by an explicit flag (HPO result) or by the configuration mode
+    (always/disabled/auto). Mode ``auto`` performs a standalone feasibility check
+    on each fit() (two additional pipeline fits, ~2-3x time), so within an HPO
+    loop an explicit ``feature_selection_active`` flag is recommended.
+Automated Feature Engineering: The built-in ColumnTransformer automatically applies
+    One-Hot encoding for categorical features and StandardScaler for numerical ones.
+Thread Safety: Recursive locks (threading.RLock) guarantee safety
+    when accessing the model state from multiple threads.
+Isotonic Support: A dedicated IsotonicDataTransformer adapter transforms
+    multidimensional data to meet the strict requirements of isotonic regression algorithms.
+Persistence: Built-in save and load methods support various serialization
+    formats (Pickle, Joblib) through the artifact system."""
 
 from __future__ import annotations
 
@@ -100,32 +99,32 @@ from .models import (
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
-#: Минимальное число строк для автономной проверки отбора признаков (режим
-#: ``auto``). Порог выбран так, чтобы обе части hold-out сплита (80/20)
-#: содержали не менее 2 примеров: 10 * 0.8 = 8 и 10 * 0.2 = 2.
+#: Minimum number of rows for the standalone feature selection check (mode
+#: ``auto``). The threshold ensures that both parts of the hold-out split (80/20)
+#: contain at least 2 samples: 10 * 0.8 = 8 and 10 * 0.2 = 2.
 _MIN_AUTO_CHECK_SAMPLES = 10
 
 
 class TrainingError(RuntimeError):
-    """Исключение для ошибок, связанных с данными или параметрами обучения."""
+    """Exception raised for errors related to data or training parameters."""
 
 
 class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
-    """Трансформер для подготовки данных под IsotonicRegression.
-    Выбирает указанный столбец и обеспечивает корректную обработку пропусков
-    для соответствия требованиям алгоритма изотонической регрессии.
+    """Transformer for preparing data for IsotonicRegression.
+    Selects the specified column and ensures correct handling of missing values
+    to meet the requirements of the isotonic regression algorithm.
     Attributes:
-        feature_index (int): Порядковый номер признака для извлечения.
-        median_ (float): Вычисленное медианное значение для заполнения пропусков.
+        feature_index (int): Ordinal index of the feature to extract.
+        median_ (float): Computed median used to fill missing values.
     """
 
     def __init__(self, feature_index: int = 0):
-        """Инициализировать трансформер с указанием индекса целевого признака."""
+        """Initialize the transformer with the index of the target feature."""
         self.feature_index = feature_index
 
     def _get_dimensions(self, X: Any) -> tuple[int, int]:
-        """Получить количество строк и столбцов входных данных
-        в универсальном формате."""
+        """Return the number of rows and columns of the input data
+        in a universal format."""
         if hasattr(X, "shape"):
             return X.shape[0], (X.shape[1] if len(X.shape) > 1 else 1)
         n_rows = len(X)
@@ -133,7 +132,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         return n_rows, n_cols
 
     def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
-        """Вычислить медиану выбранного признака для последующей импутации пропусков."""
+        """Compute the median of the selected feature for subsequent missing-value imputation."""
         _, n_cols = self._get_dimensions(X)
         idx = self.feature_index if self.feature_index < n_cols else 0
 
@@ -151,33 +150,33 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         return self
 
     def transform(self, X: Any) -> np.ndarray:
-        """Извлечь признак, заполнить пропуски
-        и преобразовать в 2D-массив (n_samples, 1)."""
+        """Extract the feature, fill missing values,
+        and convert to a 2D array (n_samples, 1)."""
         try:
-            # 1. Получаем метаданные без принудительного копирования в DataFrame
-            # Используем логику из _extract_metadata, которую мы обсуждали ранее
+            # 1. Get metadata without forcing a copy into a DataFrame
+            # We use the logic from _extract_metadata discussed earlier
             _n_rows, n_cols = self._get_dimensions(X)
 
-            # 2. Валидация индекса признака
+            # 2. Validate the feature index
             if self.feature_index >= n_cols:
                 raise TrainingError(
                     f"Data transformation error: feature_index {self.feature_index} "
                     f"out of bounds. Dataset has only {n_cols} columns."
                 )
-            # 3. Извлечение колонки (Zero-copy для numpy и pandas)
-            # Если X - DataFrame, используем iloc. Если numpy - обычный слайсинг.
+            # 3. Extract the column (zero-copy for numpy and pandas)
+            # If X is a DataFrame, use iloc. If numpy, use regular slicing.
             X_col: pd.Series | np.ndarray
             if isinstance(X, pd.DataFrame):
                 X_col = X.iloc[:, self.feature_index]
             elif isinstance(X, np.ndarray):
                 X_col = X[:, self.feature_index]
             else:
-                # Для списков или других типов приводим к numpy (минимальная копия)
+                # For lists or other types, convert to numpy (minimal copy)
                 X_col = np.asarray(X)[:, self.feature_index]
-            # 4. Логика обработки NaN
-            # Проверяем, являются ли все значения в колонке NaN
-            # Используем pd.Series для удобства вычисления медианы,
-            # если это еще не Series
+            # 4. NaN handling logic
+            # Check whether all values in the column are NaN
+            # Use pd.Series for convenient median computation,
+            # if it is not already a Series
             s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
 
             if s_col.isna().all():
@@ -185,117 +184,117 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
                     f"Column with index {self.feature_index} contains only NaN values."
                     " Training IsotonicRegression is impossible."
                 )
-            # Вычисляем медиану и заполняем пропуски
+            # Compute the median and fill missing values
             fill_value = getattr(self, "median_", 0.0)
             X_imputed = s_col.fillna(fill_value)
-            # Возвращаем результат в виде 2D массива, как ожидает scikit-learn
+            # Return the result as a 2D array, as scikit-learn expects
             result = X_imputed.to_numpy().reshape(-1, 1)
             return cast(np.ndarray, result)
         except Exception as e:
             if isinstance(e, TrainingError):
                 raise
-            # Унификация сообщения об ошибке согласно тестам (#A8)
+            # Unify the error message according to the tests
             raise TrainingError(f"Data transformation error: {e}")
 
 
 class ModelTrainer:
-    """Оркестратор процесса обучения и валидации регрессионных моделей.
+    """Orchestrator of the training and validation process for regression models.
 
-    Автоматизирует построение пайплайна, включающего предобработку признаков
-    (импутация, скалирование, кодирование), синтетическое увеличение выборки
-    (oversampling) и обучение выбранного алгоритма с обязательной валидацией.
+    Automates the construction of a pipeline that includes feature preprocessing
+    (imputation, scaling, encoding), synthetic sample enlargement
+    (oversampling), and training of the selected algorithm with mandatory validation.
     Attributes:
-        algorithm (str): Название алгоритма или алиас
-            (например, 'elasticnet', 'xgboost').
-        hyperparams (dict): Конфигурация гиперпараметров для инициализации модели..
-        metric (str): Ключ метрики (r2, mse, mae) для оценки качества на валидации.
-        random_state (int | None): Зерно для воспроизводимости разбиения и обучения.
-        serialization_format (SerializationFormat): Формат сохранения (pickle/joblib).
-        categorical_features (list[str] | None): Список колонок для One-Hot кодирования.
-        numerical_features (list[str] | None): Список колонок для скалирования.
-        id_column (str | None): Идентификатор, исключаемый из процесса обучения.
-        encoding_strategy (str): Стратегия кодирования категорий
-            ('one_hot', 'ordinal', 'target', 'frequency' или 'hashing').
-            По умолчанию 'one_hot'.
-        additional_metrics (Iterable[str] | None): Дополнительные метрики качества,
-            рассчитываемые для обученной модели тем же методом валидации, что
-            и основная метрика (``train_test_split`` — hold-out скоринг,
-            ``k_fold``/``loo`` — среднее по фолдам). Принимается любая
-            итерируемая последовательность строк (list, tuple, set, генератор);
-            имя метрики нормализуется к нижнему регистру. Носят информационный
-            характер и не влияют на процесс обучения. Значения сохраняются в
-            ``additional_scores`` после вызова fit().
-        preprocessing_override (PreprocessingOverride | dict | None): Явное
-            переопределение пресета предобработки признаков (FR-5). Задаётся
-            частично или полностью и имеет приоритет над автоматическим выбором.
-        os_enable (bool): Флаг активации балансировки/увеличения выборки.
-        os_multiplier (float): Коэффициент генерации синтетических данных.
-        os_algorithm (str): Алгоритм оверсэмплинга ('random', 'smote', 'adasyn').
-        pipeline (Pipeline | None): Итоговый объект пайплайна после вызова fit().
-        val_score (float | None): Значение основной метрики, полученное на
-            отложенной (hold-out) части данных либо усреднённое по фолдам
-            кросс-валидации — тем же методом валидации, которым HPO сравнивает
-            модели (``validation.iter_splits``). Не является train-скором:
-            оценка всегда считается на данных, не участвовавших в обучении
-            пайплайна этого фолда. Для метрик-ошибок значение положительное
-            (sign-corrected).
-        oof_score_ (float | None): ``RMSE_oof`` — честная оценка качества на
-            всех строках без утечки (issue #62): предсказания валидационных
-            фолдов конкатенируются в один вектор и метрика считается по всему
-            вектору сразу (а не усреднением по мелким фолдам). ``None``, если
-            OOF-оценка невозможна (нет ни одной валидной пары). Отдельный
-            канал: ``val_score`` фаз HPO не изменяется.
-        oof_predictions_ (pd.Series | np.ndarray | None): Вектор
-            ``y_pred_oof``, выровненный по исходному порядку строк
-            (``pd.Series`` с сохранённым pandas-индексом для данных с
-            уникальным индексом, включая MultiIndex; ``np.ndarray`` по позиции
-            для numpy-входов и данных с дублирующимся индексом). Непокрытые
-            строки (например, train-часть ``train_test_split``) и нефинитные
-            предсказания — NaN. ``None`` до первого ``fit()``.
-        oof_coverage_ (float | None): Доля строк исходных данных, покрытых
-            OOF-предсказаниями (1.0 для ``k_fold``/``loo``; < 1.0 для
-            ``train_test_split`` — ограничение задокументировано в логе).
-        additional_scores (dict[str, float]): Значения дополнительных метрик,
-            рассчитанных тем же методом валидации, что и основная метрика
-            (пустой словарь, если метрики не заданы).
-        validation_strategy (str): Стратегия валидации финальной модели:
-            ``'train_test_split'`` (дефолт), ``'k_fold'``, ``'loo'`` или
-            ``'auto'``. ``'auto'`` разрешается внутри fit() через
-            ``validation.make_cv``; engine-путь передаёт уже разрешённый метод.
-            Список допустимых методов — в
-            ``validation.SUPPORTED_VALIDATION_METHODS`` (единая точка
-            расширения: новые стратегии, например order-aware
-            ``TimeSeriesSplit`` из T10, регистрируются там и в ``make_cv``,
-            после чего OOF-канал работает с ними без переписывания).
-        n_folds (int): Число фолдов для стратегии ``'k_fold'`` (по умолчанию 5).
-        test_size (float | int): Размер hold-out части: доля в (0, 1) либо целое
-            число строк (как в sklearn ``train_test_split``). По умолчанию 0.2.
-        feature_names (list[str] | None): Список имен признаков,
-            определенных при обучении.
-        dropped_features_ (list[str]): Имена колонок, удалённых очисткой
-            неинформативных признаков (пустых и строго константных) в
-            последнем вызове ``fit()`` (issue #57). Пустой список, если
-            очистка не применялась (вход без имён колонок) или ничего не
-            удалено. Заполняется только для ``pd.DataFrame``-входов: для
-            ``np.ndarray`` имён колонок нет, очистка не выполняется.
-        preprocessing_preset (PreprocessingPreset | None): Разрешённый пресет
-            предобработки (заполняется в процессе fit()).
-        feature_selection_cfg (FeatureSelectionCfg): Валидированная
-            конфигурация отбора признаков (метод, процентиль, min_features
-            и т.д.). По умолчанию ``FeatureSelectionCfg()`` (mode='disabled').
-        feature_selection_active (bool | None): Явный флаг активности отбора
-            признаков, переданный извне (результат триала HPO). Приоритетнее
-            режима из ``feature_selection_cfg``; ``None`` — решение принимается
-            по конфигурации.
-        feature_selection_active_ (bool): Фактический статус отбора признаков
-            в итоговом обучении (заполняется в fit(); False до первого fit).
-        selected_features_mask_ (np.ndarray | None): Булева маска отобранных
-            колонок после fit() (None, если отбор не применялся). Важно: маска
-            имеет размерность пост-препроцессорной матрицы (после one-hot-
-            раскрытия/скалирования), а не исходных колонок; сопоставление с
-            исходными именами не выполняется — фильтрация прозрачна через
-            pipeline.
-        lock (threading.RLock): Рекурсивная блокировка для потокобезопасного обучения.
+        algorithm (str): Algorithm name or alias
+            (e.g., 'elasticnet', 'xgboost').
+        hyperparams (dict): Hyperparameter configuration for model initialization..
+        metric (str): Metric key (r2, mse, mae) used to assess quality on validation.
+        random_state (int | None): Random seed for reproducible splits and training.
+        serialization_format (SerializationFormat): Storage format (pickle/joblib).
+        categorical_features (list[str] | None): List of columns for One-Hot encoding.
+        numerical_features (list[str] | None): List of columns to scale.
+        id_column (str | None): Identifier excluded from the training process.
+        encoding_strategy (str): Categorical encoding strategy
+            ('one_hot', 'ordinal', 'target', 'frequency' or 'hashing').
+            Defaults to 'one_hot'.
+        additional_metrics (Iterable[str] | None): Additional quality metrics
+            computed for the trained model using the same validation method as
+            the primary metric (``train_test_split`` — hold-out scoring,
+            ``k_fold``/``loo`` — mean across folds). Any iterable sequence of
+            strings is accepted (list, tuple, set, generator); the metric name
+            is normalized to lowercase. These metrics are informational only
+            and do not affect training. Values are stored in
+            ``additional_scores`` after calling fit().
+        preprocessing_override (PreprocessingOverride | dict | None): Explicit
+            override of the feature preprocessing preset. It may be specified
+            partially or fully and takes precedence over automatic selection.
+        os_enable (bool): Flag enabling dataset balancing/enlargement.
+        os_multiplier (float): Coefficient for generating synthetic data.
+        os_algorithm (str): Oversampling algorithm ('random', 'smote', 'adasyn').
+        pipeline (Pipeline | None): Final pipeline object after calling fit().
+        val_score (float | None): Value of the primary metric computed on the
+            hold-out part of the data or averaged over cross-validation folds —
+            using the same validation method that HPO uses to compare models
+            (``validation.iter_splits``). It is not a train score: the estimate
+            is always computed on data not used to train the pipeline of that
+            fold. For error metrics the value is positive (sign-corrected).
+        oof_score_ (float | None): ``RMSE_oof`` — an honest quality estimate on
+            all rows without leakage: predictions from validation folds are
+            concatenated into a single vector and the metric is computed on the
+            whole vector at once (rather than averaged over small folds).
+            ``None`` if an OOF estimate is impossible (no valid pairs at all).
+            Separate channel: the ``val_score`` of HPO phases is not affected.
+        oof_predictions_ (pd.Series | np.ndarray | None): The ``y_pred_oof``
+            vector, aligned to the original row order (``pd.Series`` with the
+            preserved pandas index for data with a unique index, including
+            MultiIndex; ``np.ndarray`` by position for numpy inputs and data
+            with duplicated indexes). Uncovered rows (e.g., the train part of
+            ``train_test_split``) and non-finite predictions are NaN.
+            ``None`` until the first ``fit()``.
+        oof_coverage_ (float | None): Fraction of the original data rows covered
+            by OOF predictions (1.0 for ``k_fold``/``loo``; < 1.0 for
+            ``train_test_split`` — the limitation is documented in the log).
+        additional_scores (dict[str, float]): Values of the additional metrics
+            computed using the same validation method as the primary metric
+            (empty dict if no metrics are configured).
+        validation_strategy (str): Validation strategy for the final model:
+            ``'train_test_split'`` (default), ``'k_fold'``, ``'loo'`` or
+            ``'auto'``. ``'auto'`` is resolved inside fit() via
+            ``validation.make_cv``; the engine path passes an already resolved
+            method. The list of allowed methods is in
+            ``validation.SUPPORTED_VALIDATION_METHODS`` (a single extension
+            point: new strategies, e.g. order-aware ``TimeSeriesSplit``, are
+            registered there and in ``make_cv``, after which the OOF channel
+            works with them without rewriting).
+        n_folds (int): Number of folds for the ``'k_fold'`` strategy (default 5).
+        test_size (float | int): Size of the hold-out part: a fraction in (0, 1)
+            or an integer number of rows (as in sklearn ``train_test_split``).
+            Defaults to 0.2.
+        feature_names (list[str] | None): List of feature names identified
+            during training.
+        dropped_features_ (list[str]): Names of columns removed by cleaning
+            uninformative features (empty and strictly constant ones) in the
+            last ``fit()`` call. Empty list if cleaning was not applied (input
+            without column names) or nothing was removed. Populated only for
+            ``pd.DataFrame`` inputs: ``np.ndarray`` inputs have no column names,
+            so cleaning is not performed.
+        preprocessing_preset (PreprocessingPreset | None): The resolved
+            preprocessing preset (populated during fit()).
+        feature_selection_cfg (FeatureSelectionCfg): Validated feature
+            selection configuration (method, percentile, min_features, etc.).
+            Defaults to ``FeatureSelectionCfg()`` (mode='disabled').
+        feature_selection_active (bool | None): Explicit flag of feature
+            selection activity passed from outside (result of an HPO trial).
+            Takes precedence over the mode from ``feature_selection_cfg``;
+            ``None`` — the decision is made based on the configuration.
+        feature_selection_active_ (bool): Actual feature selection status in
+            the final training (populated in fit(); False before the first fit).
+        selected_features_mask_ (np.ndarray | None): Boolean mask of the
+            selected columns after fit() (None if selection was not applied).
+            Note: the mask has the dimensionality of the post-preprocessor
+            matrix (after one-hot expansion/scaling), not of the original
+            columns; no mapping back to original names is performed — the
+            filtering is transparent through the pipeline.
+        lock (threading.RLock): Recursive lock for thread-safe training.
     """
 
     def __init__(
@@ -325,32 +324,33 @@ class ModelTrainer:
         n_folds: int = 5,
         test_size: float = 0.2,
     ):
-        """Инициализировать тренер с параметрами модели и настройками предобработки.
+        """Initialize the trainer with model parameters and preprocessing settings.
 
         Args:
-            feature_selection_cfg: Объект или словарь настроек отбора признаков
-                (метод, процентиль, min_features и т.д.). ``None`` —
-                ``FeatureSelectionCfg()`` (mode='disabled', отбор выключен).
-            feature_selection_active: Явный булев флаг активности отбора
-                (приоритет над режимом из ``feature_selection_cfg``). Передаётся
-                внешним циклом HPO, который уже решил, нужен ли отбор
-                (интеграция с component.py/tuner.py отслеживается в follow-up
-                issue). ``None`` — решение по конфигурации.
-            validation_strategy: Стратегия валидации финальной модели
-                ('train_test_split', 'k_fold', 'loo' или 'auto'). Строки
-                нормализуются через ``validation.norm_val_method`` (единый
-                источник с HPO). По умолчанию 'train_test_split' — одно
-                hold-out разбиение (дешёвая «честная» оценка качества).
-            n_folds: Количество фолдов для стратегии 'k_fold' (>= 2).
-            test_size: Размер hold-out части: доля в (0, 1) либо целое число
-                строк (как sklearn ``train_test_split``). По умолчанию 0.2.
+            feature_selection_cfg: Object or dict of feature selection settings
+                (method, percentile, min_features, etc.). ``None`` —
+                ``FeatureSelectionCfg()`` (mode='disabled', selection off).
+            feature_selection_active: Explicit boolean flag of selection activity
+                (takes precedence over the mode from ``feature_selection_cfg``).
+                It is passed by an external HPO loop that has already decided
+                whether selection is needed. ``None`` — the decision is made
+                based on the configuration.
+            validation_strategy: Validation strategy for the final model
+                ('train_test_split', 'k_fold', 'loo' or 'auto'). Strings are
+                normalized via ``validation.norm_val_method`` (a single source
+                shared with HPO). Defaults to 'train_test_split' — a single
+                hold-out split (a cheap "honest" quality estimate).
+            n_folds: Number of folds for the 'k_fold' strategy (>= 2).
+            test_size: Size of the hold-out part: a fraction in (0, 1) or an
+                integer number of rows (as in sklearn ``train_test_split``).
+                Defaults to 0.2.
         """
 
         self.logger = logging.getLogger(__name__)
 
         self.lock = threading.RLock()
 
-        # Проверка алгоритма
+        # Validate the algorithm
         if not isinstance(algorithm, str):
             raise TrainingError(f"Invalid algorithm: {algorithm!r}")
         self.algorithm = algorithm.lower()
@@ -363,16 +363,16 @@ class ModelTrainer:
         else:
             self.hyperparams = {}
 
-        # Остальные параметры
+        # Remaining parameters
         self.metric = metric.lower()
         self.random_state = random_state
         self.serialization_format = serialization_format
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.id_column = id_column
-        # Стратегия кодирования категорий: 'one_hot' (по умолчанию), 'ordinal',
-        # 'target', 'frequency' или 'hashing'. Хранится как строковый примитив,
-        # чтобы сохранять picklable-совместимость.
+        # Categorical encoding strategy: 'one_hot' (default), 'ordinal',
+        # 'target', 'frequency' or 'hashing'. Stored as a string primitive
+        # to remain pickle-compatible.
         if encoding_strategy not in (
             "one_hot",
             "ordinal",
@@ -389,9 +389,9 @@ class ModelTrainer:
             EncodingStrategy, encoding_strategy
         )
 
-        # Параметры high-cardinality кодирования и новых стратегий (issue #20).
-        # Валидируются сразу, чтобы некорректные значения отклонялись на этапе
-        # инициализации, до запуска обучения.
+        # High-cardinality encoding parameters and new strategies.
+        # Validated immediately so that invalid values are rejected at
+        # initialization time, before training starts.
         self.high_cardinality_threshold = high_cardinality_threshold
         self.high_cardinality_encoding = high_cardinality_encoding
         self.hashing_n_components = hashing_n_components
@@ -428,12 +428,12 @@ class ModelTrainer:
             )
 
         # ---------- additional (informational) metrics ----------
-        # Допускается любая итерируемая последовательность строк (list, tuple,
-        # set, генератор и т.п.). Строки-скаляры и отображения (dict) отклоняются:
-        # строку нельзя разбирать посимвольно в имена метрик, а итерирование
-        # dict по ключам было бы неявным и неожиданным поведением.
-        # Итерируемый объект материализуется ровно один раз, чтобы генераторы
-        # и другие одноразовые итераторы валидировались корректно.
+        # Any iterable sequence of strings is accepted (list, tuple,
+        # set, generator, etc.). Scalar strings and mappings (dict) are rejected:
+        # a string cannot be iterated character-by-character into metric names,
+        # and iterating a dict over keys would be implicit and surprising behavior.
+        # The iterable is materialized exactly once so that generators
+        # and other one-shot iterators are validated correctly.
         if additional_metrics is not None and isinstance(
             additional_metrics, (str, bytes, Mapping)
         ):
@@ -444,27 +444,27 @@ class ModelTrainer:
         self.additional_metrics: list[str] = [m.lower() for m in normalized_metrics]
         self.additional_scores: dict[str, float] = {}
 
-        # Явное переопределение пресета предобработки (FR-5): валидируем сразу,
-        # чтобы некорректные значения отклонялись на этапе инициализации.
+        # Explicit override of the preprocessing preset: validate it immediately
+        # so that invalid values are rejected at initialization time.
         self.preprocessing_override: PreprocessingOverride | None = (
             self._validate_preprocessing_override(preprocessing_override)
         )
-        # Разрешённый пресет — заполняется в _build_preprocessor во время fit().
+        # The resolved preset is populated in _build_preprocessor during fit().
         self.preprocessing_preset: PreprocessingPreset | None = None
 
-        # ---------- feature selection (issue #31) ----------
-        # Валидируем конфигурацию отбора признаков сразу, чтобы некорректные
-        # значения (percentile=150, неизвестный method/mode, лишние ключи)
-        # отклонялись на этапе инициализации, до тяжёлого обучения.
+        # ---------- feature selection ----------
+        # Validate the feature selection configuration immediately so that
+        # invalid values (percentile=150, unknown method/mode, extra keys)
+        # are rejected at initialization time, before expensive training.
         self.feature_selection_cfg: FeatureSelectionCfg = (
             self._validate_feature_selection_cfg(feature_selection_cfg)
         )
-        # Явный флаг из HPO/component.py (приоритет над конфигом); None —
-        # решение принимается в fit() по режиму из конфигурации. Тип строго
-        # bool | None: строка "false" из конфигурации/YAML не должна молча
-        # приводиться к True через bool("false") в _resolve_feature_selection_active
-        # (ревью PR #8), поэтому небулевые значения отклоняются на этапе
-        # инициализации, как и остальные параметры конструктора.
+        # Explicit flag from HPO/component.py (takes precedence over the config);
+        # None — the decision is made in fit() based on the configuration mode.
+        # The type is strictly bool | None: the string "false" from the
+        # configuration/YAML must not silently become True via bool("false") in
+        # _resolve_feature_selection_active, so non-boolean values are rejected
+        # at initialization time, like the other constructor parameters.
         if feature_selection_active is not None and not isinstance(
             feature_selection_active, bool
         ):
@@ -473,21 +473,21 @@ class ModelTrainer:
                 f"{type(feature_selection_active).__name__}"
             )
         self.feature_selection_active: bool | None = feature_selection_active
-        # Фактический статус отбора в итоговом обучении (заполняется в fit()).
+        # Actual selection status in the final training (populated in fit()).
         self.feature_selection_active_: bool = False
-        # Булева маска отобранных колонок пост-препроцессорной размерности.
+        # Boolean mask of the selected columns in post-preprocessor dimensionality.
         self.selected_features_mask_: np.ndarray | None = None
 
-        # ---------- validation (issue #24) ----------
-        # Стратегия оценки качества финальной модели. Хранится строковым
-        # примитивом (pickle-совместимость); строки нормализуются через
-        # validation.norm_val_method — единый источник маппинга с HPO
-        # (validation.make_cv / iter_splits). Валидируется сразу, чтобы
-        # неизвестная стратегия отклонялась на этапе инициализации.
-        # Список допустимых методов берётся из validation.SUPPORTED_VALIDATION_METHODS
-        # — единой точки расширения интерфейса стратегий (issue #62, T10):
-        # добавление новой стратегии (например, TimeSeriesSplit) не требует
-        # правок здесь.
+        # ---------- validation ----------
+        # Quality assessment strategy for the final model. Stored as a string
+        # primitive (pickle compatibility); strings are normalized via
+        # validation.norm_val_method — a single mapping source shared with HPO
+        # (validation.make_cv / iter_splits). Validated immediately so that an
+        # unknown strategy is rejected at initialization time.
+        # The list of allowed methods is taken from
+        # validation.SUPPORTED_VALIDATION_METHODS — the single extension point
+        # of the strategy interface: adding a new strategy (e.g.,
+        # TimeSeriesSplit) does not require changes here.
         normalized_strategy = norm_val_method(validation_strategy)
         if normalized_strategy not in SUPPORTED_VALIDATION_METHODS:
             raise TrainingError(
@@ -502,10 +502,10 @@ class ModelTrainer:
                 f"n_folds must be >= 2 for k_fold validation, got {n_folds}"
             )
         self.n_folds: int = n_folds
-        # test_size принимает долю в (0, 1) или целое число строк (как sklearn
-        # train_test_split): целочисленный test_size приходит из engine-пути
-        # после резолюции 'auto' (choose_validation_method возвращает число
-        # строк, см. D3 issue #24).
+        # test_size accepts a fraction in (0, 1) or an integer number of rows
+        # (as in sklearn train_test_split): an integer test_size comes from the
+        # engine path after 'auto' resolution (choose_validation_method returns
+        # a row count).
         if isinstance(test_size, bool) or not isinstance(test_size, (int, float)):
             raise TrainingError(f"test_size must be a number, got {test_size!r}")
         if isinstance(test_size, float) and not (0.0 < test_size < 1.0):
@@ -527,22 +527,22 @@ class ModelTrainer:
         if self.os_algorithm not in {"random", "smote", "adasyn"}:
             raise TrainingError("Unknown data_oversampling_algorithm")
 
-        # Поля, которые заполняются после fit(...)
+        # Fields populated after fit(...)
         self.pipeline: Pipeline | None = None
         self.base_model: Any = None
         self.val_score: float | None = None
-        # OOF-канал оценки кандидата (issue #62): честная метрика на всех
-        # строках без утечки. Каждая строка предсказывается моделью, не
-        # видевшей её при обучении; предсказания валидационных фолдов
-        # собираются в один вектор y_pred_oof, выровненный по исходному
-        # порядку строк, и RMSE_oof считается по всему вектору сразу.
+        # OOF candidate evaluation channel: an honest metric on all rows
+        # without leakage. Each row is predicted by a model that has not seen it
+        # during training; predictions from validation folds are collected into
+        # a single y_pred_oof vector aligned to the original row order, and
+        # RMSE_oof is computed on the whole vector at once.
         self.oof_score_: float | None = None
         self.oof_predictions_: pd.Series | np.ndarray | None = None
         self.oof_coverage_: float | None = None
         self.feature_names: list[str] | None = None
-        # Имена колонок, удалённых очисткой неинформативных признаков
-        # (issue #57). Заполняется в fit() для pd.DataFrame-входов; пустой
-        # список по умолчанию (pickle-совместимый атрибут).
+        # Names of columns removed by cleaning uninformative features.
+        # Populated in fit() for pd.DataFrame inputs; empty list by default
+        # (pickle-compatible attribute).
         self.dropped_features_: list[str] = []
         self._last_train_y: pd.Series | None = None
         self._last_val_y: pd.Series | None = None
@@ -560,7 +560,7 @@ class ModelTrainer:
                 )
 
     def _validate_features(self, X: pd.DataFrame) -> None:
-        """Проверить наличие всех заданных имен признаков в переданном DataFrame."""
+        """Verify that all specified feature names are present in the given DataFrame."""
 
         specified_features = (self.categorical_features or []) + (
             self.numerical_features or []
@@ -570,27 +570,27 @@ class ModelTrainer:
             raise TrainingError(f"Specified columns not found in data: {missing}")
 
     def _detect_feature_types(self, X: pd.DataFrame, target_column: str) -> None:
-        """Автоматически классифицировать колонки на числовые и категориальные."""
+        """Automatically classify columns into numerical and categorical ones."""
         with self.lock:
-            # Если оба списка уже заполнены пользователем — просто валидируем
+            # If both lists are already filled by the user, just validate them
             if (
                 self.categorical_features is not None
                 and self.numerical_features is not None
             ):
                 self._validate_features(X)
                 return
-            # Определяем список колонок для анализа (исключаем таргет и ID)
+            # Determine the column list for analysis (excluding the target and ID)
             exclude = {target_column}
             if self.id_column:
                 exclude.add(self.id_column)
 
             df_to_analyze = X.drop(columns=list(exclude & set(X.columns)))
-            # Авто-определение категориальных (object, category, bool)
+            # Auto-detect categorical features (object, category, bool)
             if self.categorical_features is None:
                 self.categorical_features = df_to_analyze.select_dtypes(
                     include=["object", "str", "category", "bool"]
                 ).columns.tolist()
-            # Авто-определение числовых (все оставшиеся типы 'number')
+            # Auto-detect numerical features (all remaining 'number' dtypes)
             if self.numerical_features is None:
                 self.numerical_features = df_to_analyze.select_dtypes(
                     include=["number"]
@@ -604,17 +604,17 @@ class ModelTrainer:
         self,
         override: PreprocessingOverride | dict[str, Any] | None,
     ) -> PreprocessingOverride | None:
-        """Валидировать и нормализовать пользовательское переопределение пресета.
+        """Validate and normalize a user-provided preprocessing preset override.
 
         Args:
-            override: Словарь или модель :class:`PreprocessingOverride`.
+            override: A dict or a :class:`PreprocessingOverride` model.
 
         Returns:
-            Нормализованная модель переопределения либо ``None``.
+            The normalized override model, or ``None``.
 
         Raises:
-            TrainingError: Если передан объект неподдерживаемого типа или
-                словарь с некорректными значениями.
+            TrainingError: If an object of an unsupported type or a dict with
+                invalid values is passed.
         """
         if override is None:
             return None
@@ -634,23 +634,23 @@ class ModelTrainer:
         self,
         cfg: FeatureSelectionCfg | dict[str, Any] | None,
     ) -> FeatureSelectionCfg:
-        """Валидировать и нормализовать конфигурацию отбора признаков.
+        """Validate and normalize the feature selection configuration.
 
-        Логика по образцу :meth:`_validate_preprocessing_override`:
-        ``None`` → дефолт ``FeatureSelectionCfg()`` (mode='disabled');
-        ``dict`` → ``FeatureSelectionCfg.model_validate(...)``, ошибка → TrainingError;
-        ``FeatureSelectionCfg`` → как есть;
-        иной тип → TrainingError.
+        Logic follows :meth:`_validate_preprocessing_override`:
+        ``None`` → default ``FeatureSelectionCfg()`` (mode='disabled');
+        ``dict`` → ``FeatureSelectionCfg.model_validate(...)``, error → TrainingError;
+        ``FeatureSelectionCfg`` → used as is;
+        any other type → TrainingError.
 
         Args:
-            cfg: Словарь или модель :class:`FeatureSelectionCfg`.
+            cfg: A dict or a :class:`FeatureSelectionCfg` model.
 
         Returns:
-            Нормализованная модель конфигурации отбора признаков.
+            The normalized feature selection configuration model.
 
         Raises:
-            TrainingError: Если передан объект неподдерживаемого типа или
-                словарь с некорректными значениями.
+            TrainingError: If an object of an unsupported type or a dict with
+                invalid values is passed.
         """
         if cfg is None:
             return FeatureSelectionCfg()
@@ -667,21 +667,21 @@ class ModelTrainer:
         )
 
     def _resolve_preprocessing_preset(self) -> PreprocessingPreset:
-        """Разрешить пресет предобработки для текущего алгоритма.
+        """Resolve the preprocessing preset for the current algorithm.
 
-        Автоматический выбор по таблице соответствия
-        (:func:`resolve_preprocessing_preset`) + применение явного
-        пользовательского переопределения (FR-5).
+        Automatic selection based on the lookup table
+        (:func:`resolve_preprocessing_preset`) plus application of an explicit
+        user override.
 
         Returns:
-            Итоговый пресет предобработки.
+            The final preprocessing preset.
         """
         override = getattr(self, "preprocessing_override", None)
         return resolve_preprocessing_preset(self.algorithm, override)
 
     def _extract_metadata(self, X: Any) -> list[str] | None:
-        """Получить имена колонок из различных структур данных
-        без копирования содержимого."""
+        """Extract column names from various data structures
+        without copying the contents."""
         if hasattr(X, "get_data_info"):
             return cast(list[str], X.get_data_info()["columns"])
         if isinstance(X, pd.DataFrame):
@@ -691,8 +691,8 @@ class ModelTrainer:
         return None
 
     def __getstate__(self) -> dict[str, Any]:
-        """Управление состоянием объекта для корректной сериализации
-        (исключение lock и logger)."""
+        """Control the object state for correct serialization
+        (excluding lock and logger)."""
         state = self.__dict__.copy()
         # Remove unpicklable entries
         if "lock" in state:
@@ -702,8 +702,8 @@ class ModelTrainer:
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Восстановить состояние объекта после десериализации,
-        инициализируя потокобезопасный lock и логгер"""
+        """Restore the object state after deserialization,
+        initializing a thread-safe lock and a logger."""
         self.__dict__.update(state)
         # Re-initialize the lock after unpickling
         self.lock = threading.RLock()
@@ -711,15 +711,15 @@ class ModelTrainer:
         self.logger = logging.getLogger(__name__)
 
     def _build_preprocessor(self, feature_names: list[str]) -> ColumnTransformer:
-        """Сконструировать ColumnTransformer для раздельной обработки типов данных.
+        """Build a ColumnTransformer for separate handling of data types.
 
-        Делегирует сборку в общий модуль :mod:`preprocessing`, который
-        используется также фазой HPO в ``tuner.optimize`` (DRY, единая логика).
-        Стратегия обработки числовых признаков (импутация и масштабирование)
-        выбирается автоматически по алгоритму через адаптивный пресет
-        предобработки и логируется (AC-9).
+        Delegates assembly to the shared :mod:`preprocessing` module, which is
+        also used by the HPO phase in ``tuner.optimize`` (DRY, single logic).
+        The numerical feature handling strategy (imputation and scaling) is
+        selected automatically based on the algorithm via an adaptive
+        preprocessing preset and is logged.
         """
-        # Логируем предупреждение, если ни одна колонка не совпала
+        # Log a warning if no column matched
         cat_indices = [
             feature_names.index(col)
             for col in (self.categorical_features or [])
@@ -734,12 +734,11 @@ class ModelTrainer:
             self.logger.warning(
                 "No features matched for preprocessing. Defaulting to passthrough."
             )
-        # Обратная совместимость: модели, сериализованные до появления
-        # параметра encoding_strategy (атрибут отсутствует у распикленных
-        # объектов), по умолчанию обрабатываются как one_hot. Новые параметры
-        # кодирования (issue #20) также получают значения по умолчанию через
-        # getattr, чтобы старые сохранённые модели продолжали работать без
-        # изменений поведения.
+        # Backward compatibility: models serialized before the encoding_strategy
+        # parameter existed (the attribute is absent on unpickled objects) are
+        # treated as one_hot by default. The new encoding parameters also get
+        # their default values via getattr so that old saved models continue to
+        # work without behavior changes.
         encoding: EncodingStrategy = cast(
             EncodingStrategy, getattr(self, "encoding_strategy", "one_hot")
         )
@@ -753,9 +752,9 @@ class ModelTrainer:
         hashing_n_components: int = getattr(self, "hashing_n_components", 16)
         target_smoothing: float = getattr(self, "target_encoding_smoothing", 20.0)
         target_fallback: float | None = getattr(self, "target_encoding_fallback", None)
-        # Автоматический выбор пресета предобработки по алгоритму (FR-1)
-        # с учётом явного переопределения (FR-5). Пресет разрешается один раз
-        # до обучения (производительность) и фиксируется для наблюдаемости (AC-9).
+        # Automatic preprocessing preset selection by algorithm, taking into
+        # account the explicit override. The preset is resolved once before
+        # training (performance) and recorded for observability.
         preset = self._resolve_preprocessing_preset()
         self.preprocessing_preset = preset
         self.logger.info(
@@ -763,13 +762,13 @@ class ModelTrainer:
             self.algorithm,
             preset,
         )
-        # Алгоритмы GPR/Isotonic/ARD отвергают разреженные матрицы: при
-        # hashing-кодировании (sparse-выход) препроцессор обязан вернуть
-        # плотную матрицу (issue: OOM fix, force_dense_output).
+        # GPR/Isotonic/ARD algorithms reject sparse matrices: with hashing
+        # encoding (sparse output) the preprocessor must return a dense matrix
+        # via force_dense_output.
         force_dense = requires_dense_input(self.algorithm)
-        # Строго одномерные алгоритмы (isotonic) несовместимы с
-        # колонками-индикаторами пропусков (issue #56). Если имя алгоритма
-        # пустое/не задано — безопасное значение по умолчанию (True).
+        # Strictly univariate algorithms (isotonic) are incompatible with
+        # missing-value indicator columns. If the algorithm name is empty or
+        # not set, a safe default value (True) is used.
         use_missing_indicator = (
             requires_missing_indicator(self.algorithm) if self.algorithm else True
         )
@@ -791,13 +790,13 @@ class ModelTrainer:
         )
 
     def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
-        """Валидировать входные типы данных
-        и разделить признаки от целевой переменной."""
+        """Validate the input data types
+        and separate features from the target variable."""
         try:
             self.feature_names = self._extract_metadata(X)
 
             self._detected_dtypes = X.dtypes if isinstance(X, pd.DataFrame) else None
-            # 1. Проверка типов
+            # 1. Type validation
             valid_types = (pd.DataFrame, pd.Series, np.ndarray, SharedDataFrame)
             if not isinstance(X, valid_types):
                 raise TrainingError(f"Unsupported data type: {type(X)}")
@@ -819,11 +818,11 @@ class ModelTrainer:
                     y_obj = y
                 elif isinstance(y, pd.DataFrame):
                     y_obj = y.iloc[:, 0]
-                elif hasattr(y, "get_view"):  # Поддержка SharedDataFrame для y
+                elif hasattr(y, "get_view"):  # Support SharedDataFrame for y
                     y_obj = y.get_view().iloc[:, 0]
                 else:
                     y_obj = np.asarray(y)
-            # Консолидированная валидация
+            # Consolidated validation
             n_samples = X_obj.shape[0] if hasattr(X_obj, "shape") else len(X_obj)
             if n_samples == 0:
                 raise TrainingError("Data is empty")
@@ -846,30 +845,30 @@ class ModelTrainer:
         preprocessor: ColumnTransformer,
         base_model: Any,
     ) -> bool:
-        """Разрешить фактическую активность отбора признаков для fit().
+        """Resolve the actual feature selection activity for fit().
 
-        Приоритет (строго в этом порядке):
-        1. IsotonicRegression — отбор принудительно отключается (алгоритм
-           строго одномерный, использует собственный ``IsotonicDataTransformer``);
-        2. явный флаг ``feature_selection_active`` (из HPO/component.py) —
-           имеет приоритет над конфигурацией;
-        3. режим из ``feature_selection_cfg.mode``: ``always`` → True,
+        Priority (strictly in this order):
+        1. IsotonicRegression — selection is forcibly disabled (the algorithm
+           is strictly univariate and uses its own ``IsotonicDataTransformer``);
+        2. the explicit ``feature_selection_active`` flag (from HPO/component.py)
+           takes precedence over the configuration;
+        3. the mode from ``feature_selection_cfg.mode``: ``always`` → True,
            ``disabled`` → False, ``auto`` → Standalone Auto-Check.
 
-        Обратная совместимость со старыми pickle: атрибуты читаются через
-        ``getattr`` (аналогично ``encoding_strategy`` в ``_build_preprocessor``),
-        отсутствующие атрибуты дают поведение disabled.
+        Backward compatibility with old pickles: attributes are read via
+        ``getattr`` (similar to ``encoding_strategy`` in ``_build_preprocessor``);
+        missing attributes result in disabled behavior.
 
         Args:
-            X_train: Обучающая матрица признаков (для режима ``auto``).
-            y_train: Целевая переменная (для режима ``auto``).
-            preprocessor: ``ColumnTransformer`` предобработки (для режима ``auto``).
-            base_model: Финальный регрессор (для режима ``auto``).
+            X_train: Training feature matrix (for the ``auto`` mode).
+            y_train: Target variable (for the ``auto`` mode).
+            preprocessor: Preprocessing ``ColumnTransformer`` (for the ``auto`` mode).
+            base_model: Final regressor (for the ``auto`` mode).
 
         Returns:
-            ``True``, если шаг отбора должен присутствовать в пайплайне.
+            ``True`` if the selection step should be present in the pipeline.
         """
-        # 1. Isotonic-байпас: одномерный алгоритм несовместим с отбором признаков.
+        # 1. Isotonic bypass: a univariate algorithm is incompatible with feature selection.
         algo_key = resolve_algorithm_name(self.algorithm)
         if algo_key == "isotonic_regression":
             self.logger.debug(
@@ -878,12 +877,12 @@ class ModelTrainer:
             )
             return False
 
-        # 2. Явный флаг из HPO/component.py имеет приоритет над конфигом.
+        # 2. The explicit flag from HPO/component.py takes precedence over the config.
         explicit_flag = getattr(self, "feature_selection_active", None)
         if explicit_flag is not None:
             return bool(explicit_flag)
 
-        # 3. Решение по режиму конфигурации.
+        # 3. Decision based on the configuration mode.
         cfg = getattr(self, "feature_selection_cfg", None)
         if not isinstance(cfg, FeatureSelectionCfg):
             cfg = FeatureSelectionCfg()
@@ -892,7 +891,7 @@ class ModelTrainer:
             return True
         if mode == FeatureSelectionMode.disabled:
             return False
-        # mode == auto: автономная проверка целесообразности отбора.
+        # mode == auto: standalone feasibility check for feature selection.
         return self._run_feature_selection_auto_check(
             X_train, y_train, preprocessor, base_model
         )
@@ -904,41 +903,41 @@ class ModelTrainer:
         preprocessor: ColumnTransformer,
         base_model: Any,
     ) -> bool:
-        """Выполнить Standalone Auto-Check целесообразности отбора признаков.
+        """Run the Standalone Auto-Check of feature selection usefulness.
 
-        Режим ``auto`` используется при прямом вызове ``ModelTrainer.fit()``
-        без HPO. Логика:
-        1. Hold-out сплит 80/20 с фиксированным ``random_state``.
-        2. Два контрольных пайплайна (без селектора и с селектором) обучаются
-           на train-части; скоринг на hold-out через
+        The ``auto`` mode is used when ``ModelTrainer.fit()`` is called
+        directly without HPO. Logic:
+        1. Hold-out split 80/20 with a fixed ``random_state``.
+        2. Two control pipelines (without and with the selector) are trained
+           on the train part; scoring is done on hold-out via
            ``get_scorer_object(self.metric, global_y=y_train)``.
-        3. Направленное сравнение «сырых» значений скорера: любой скорер
-           (реестра или sklearn) устроен так, что большее значение лучше
-           (neg_-метрики уже инвертированы для максимизации), поэтому
-           эвристика по имени метрики не нужна и не ломается для neg_*-метрик.
-           В лог выводятся значения в пользовательской семантике
+        3. Directional comparison of "raw" scorer values: any scorer (from the
+           registry or sklearn) is designed so that a larger value is better
+           (neg_ metrics are already inverted for maximization), so no heuristic
+           based on the metric name is needed and it does not break for
+           neg_* metrics. Values are logged in user-facing semantics
            (``to_user_value``).
-        4. Fail-safe: малые данные, ошибки сплита/скоринга или None/nan-скоры
-           дают WARNING и возвращают ``False`` — проверка не роняет fit().
+        4. Fail-safe: small data, split/scoring errors, or None/nan scores
+           produce a WARNING and return ``False`` — the check does not crash fit().
 
-        Стоимость: каждый ``fit()`` в режиме ``auto`` дополнительно обучает
-        два полных пайплайна на 80% данных — для тяжёлых алгоритмов это
-        ~2–3x времени обычного обучения. Режим рассчитан на прямые вызовы
-        без HPO; в цикле HPO активность отбора должна передаваться явным
-        флагом ``feature_selection_active``, чтобы проверка не выполнялась
-        для каждого триала.
+        Cost: each ``fit()`` in ``auto`` mode additionally trains two full
+        pipelines on 80% of the data — for heavy algorithms this is roughly
+        2-3x the regular training time. The mode targets direct calls without
+        HPO; within an HPO loop, selection activity should be passed via the
+        explicit ``feature_selection_active`` flag so the check is not run for
+        every trial.
 
-        Побочных эффектов нет: метод не трогает ``self.pipeline``,
-        ``self.val_score`` и ``self.feature_names``.
+        No side effects: the method does not touch ``self.pipeline``,
+        ``self.val_score`` or ``self.feature_names``.
 
         Args:
-            X_train: Обучающая матрица признаков.
-            y_train: Целевая переменная.
-            preprocessor: ``ColumnTransformer`` предобработки.
-            base_model: Финальный регрессор.
+            X_train: Training feature matrix.
+            y_train: Target variable.
+            preprocessor: Preprocessing ``ColumnTransformer``.
+            base_model: Final regressor.
 
         Returns:
-            ``True``, если качество с отбором строго выше, иначе ``False``.
+            ``True`` if the quality with selection is strictly higher, otherwise ``False``.
         """
         n_samples = X_train.shape[0] if hasattr(X_train, "shape") else len(X_train)
         if n_samples < _MIN_AUTO_CHECK_SAMPLES:
@@ -951,11 +950,11 @@ class ModelTrainer:
             )
             return False
         try:
-            # Детерминированность hold-out сплита: при random_state=None
-            # тренера (нефиксированное основное обучение) сплит всё равно
-            # обязан быть воспроизводимым, иначе решение об отборе будет
-            # меняться между вызовами fit() (ревью PR #8). Используем фикс.
-            # зерно-фолбэк, не трогая конфигурацию основного обучения.
+            # Deterministic hold-out split: with trainer random_state=None
+            # (non-fixed main training) the split must still be reproducible,
+            # otherwise the selection decision would change between fit() calls.
+            # Use a fixed fallback seed without touching the main training
+            # configuration.
             check_random_state = (
                 self.random_state if self.random_state is not None else 42
             )
@@ -965,10 +964,10 @@ class ModelTrainer:
                 test_size=0.2,
                 random_state=check_random_state,
             )
-            # Контрольные пайплайны изолированы друг от друга и от финального
-            # обучения: sklearn Pipeline не клонирует переданные шаги, поэтому
-            # общие экземпляры preprocessor/base_model мутировали бы состояние
-            # соседнего пайплайна при повторном fit.
+            # Control pipelines are isolated from each other and from the final
+            # training: sklearn Pipeline does not clone the passed steps, so
+            # shared preprocessor/base_model instances would mutate the state of
+            # a neighboring pipeline on repeated fit.
             pipe_full = Pipeline(
                 self._assemble_steps(
                     clone(preprocessor),
@@ -986,8 +985,8 @@ class ModelTrainer:
             pipe_full.fit(X_sub, y_sub)
             pipe_reduced.fit(X_sub, y_sub)
 
-            # global_y=y_train: глобальный NRMSE нормализуется по полному
-            # таргету (как в HPO и финальном валидационном скоринге).
+            # global_y=y_train: the global NRMSE is normalized by the full
+            # target (as in HPO and final validation scoring).
             scorer = cast(
                 Callable[..., Any], get_scorer_object(self.metric, global_y=y_train)
             )
@@ -1008,16 +1007,16 @@ class ModelTrainer:
                 )
                 return False
 
-            # Направление сравнения определяется самим объектом-скорером:
-            # любой скорер (реестра или sklearn) устроен так, что большее
-            # «сырое» значение лучше — neg_-метрики уже инвертированы для
-            # максимизации. Эвристика по имени метрики здесь не используется,
-            # поэтому направление не ломается для neg_*-метрик (issue #26).
+            # The comparison direction is determined by the scorer object
+            # itself: any scorer (from the registry or sklearn) is designed so
+            # that a larger "raw" value is better — neg_ metrics are already
+            # inverted for maximization. No heuristic based on the metric name
+            # is used here, so the direction does not break for neg_* metrics.
             active = raw_reduced > raw_full
-            # В лог выводим значения в пользовательской семантике
-            # (для ошибок — положительные), а решение принимаем по «сырым».
-            # Направление сопровождает значения явно («min better» для ошибок,
-            # issue #54) — флаг оптимизатора greater_is_better не используется.
+            # Log values in user-facing semantics (positive for errors), while
+            # the decision is made on the "raw" values. The direction explicitly
+            # accompanies the values ("min better" for errors) — the optimizer
+            # greater_is_better flag is not used.
             score_full = to_user_value(self.metric, raw_full)
             score_reduced = to_user_value(self.metric, raw_reduced)
             self.logger.info(
@@ -1044,27 +1043,27 @@ class ModelTrainer:
         *,
         feature_selection_active: bool,
     ) -> list[tuple[str, Any]]:
-        """Собрать список шагов обучающего пайплайна.
+        """Assemble the list of training pipeline steps.
 
-        Строгий порядок шагов (issue #31):
+        Strict step order:
         ``preprocessor → [feature_selector] → [oversampler] → model``.
-        Селектор признаков встраивается строго между препроцессором и
-        оверсэмплером, чтобы синтетические строки генерировались только для
-        информативных признаков.
+        The feature selector is inserted strictly between the preprocessor and
+        the oversampler so that synthetic rows are generated only for
+        informative features.
 
         Args:
-            preprocessor: ``ColumnTransformer`` предобработки признаков.
-            base_model: Финальный регрессор.
-            feature_selection_active: Флаг включения шага отбора признаков.
+            preprocessor: Feature preprocessing ``ColumnTransformer``.
+            base_model: Final regressor.
+            feature_selection_active: Flag enabling the feature selection step.
 
         Returns:
-            Список кортежей ``(name, transformer)`` для построения Pipeline.
+            A list of ``(name, transformer)`` tuples for building the Pipeline.
         """
         steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
         if feature_selection_active:
-            # Обратная совместимость со старыми pickle: конфигурация читается
-            # через getattr (аналогично encoding_strategy в _build_preprocessor),
-            # отсутствие атрибута даёт дефолт FeatureSelectionCfg().
+            # Backward compatibility with old pickles: the configuration is read
+            # via getattr (similar to encoding_strategy in _build_preprocessor);
+            # a missing attribute yields the FeatureSelectionCfg() default.
             cfg = getattr(self, "feature_selection_cfg", None)
             if not isinstance(cfg, FeatureSelectionCfg):
                 cfg = FeatureSelectionCfg()
@@ -1074,11 +1073,11 @@ class ModelTrainer:
                 min_features=cfg.min_features,
                 variance_threshold=cfg.variance_threshold,
                 n_estimators=cfg.n_estimators,
-                # Фикс-фолбэк зерна отбора (согласован с тюнером и
-                # _check_auto_feature_selection): при random_state=None
-                # основного обучения селектор всё равно обязан использовать
-                # фиксированный seed 42, иначе отбор не воспроизводим между
-                # вызовами fit() и расходится с фазой HPO.
+                # Fixed fallback seed for selection (consistent with the tuner
+                # and _check_auto_feature_selection): with random_state=None in
+                # the main training, the selector must still use the fixed seed
+                # 42, otherwise selection is not reproducible between fit() calls
+                # and diverges from the HPO phase.
                 random_state=self.random_state if self.random_state is not None else 42,
             )
             steps.append(("feature_selector", selector))
@@ -1100,49 +1099,50 @@ class ModelTrainer:
         *,
         feature_selection_active: bool = False,
     ) -> Pipeline:
-        """Собрать финальный пайплайн и запустить
-        процесс обучения на подготовленных данных.
+        """Assemble the final pipeline and run
+        the training process on the prepared data.
 
         Args:
-            X_train: Обучающая матрица признаков.
-            y_train: Целевая переменная.
-            preprocessor: ``ColumnTransformer`` предобработки признаков.
-            base_model: Финальный регрессор.
-            feature_selection_active: Флаг включения шага отбора признаков
-                (keyword-only; по умолчанию ``False`` — поведение без отбора).
+            X_train: Training feature matrix.
+            y_train: Target variable.
+            preprocessor: Feature preprocessing ``ColumnTransformer``.
+            base_model: Final regressor.
+            feature_selection_active: Flag enabling the feature selection step
+                (keyword-only; defaults to ``False`` — no-selection behavior).
         """
-        # 0) Сбрасываем фактический статус отбора и маску отобранных колонок.
-        # Если pipeline.fit упадёт, у тренера не должны остаться значения от
-        # предыдущего обучения (рекомендация ревью PR #8). После успешного
-        # фита значения перезаписываются в шаге 4.
+        # 0) Reset the actual selection status and the selected-column mask.
+        # If pipeline.fit fails, the trainer must not retain values from the
+        # previous training. After a successful fit the values are overwritten
+        # in step 4.
         self.feature_selection_active_ = False
         self.selected_features_mask_ = None
-        # 1) Формируем шаги пайплайна
+        # 1) Assemble the pipeline steps
         steps = self._assemble_steps(
             preprocessor,
             base_model,
             feature_selection_active=feature_selection_active,
         )
-        # 2) Инициализируем пайплайн
-        # Используем Pipeline из imblearn, чтобы шаги ресэмплинга работали корректно
+        # 2) Initialize the pipeline
+        # Use imblearn's Pipeline so that resampling steps work correctly
         self.pipeline = Pipeline(steps=steps)
-        # 3) Выполняем обучение
+        # 3) Run the training
         try:
             self.pipeline.fit(X_train, y_train)
         except (ValueError, TypeError):
-            # Пробрасываем валидационные ошибки напрямую, чтобы тесты могли их поймать
-            # Это критично для тестов, проверяющих некорректные гиперпараметры
+            # Re-raise validation errors directly so that tests can catch them
+            # This is critical for tests checking invalid hyperparameters
             raise
         except TrainingError:
             raise
         except Exception as e:
-            # Все остальные системные ошибки оборачиваем в TrainingError
+            # Wrap all other system errors in TrainingError
             self.logger.debug("Unexpected pipeline fit failure trace:", exc_info=True)
             self.logger.error(f"Unexpected error in pipeline fit: {e}")
             raise TrainingError(f"Internal training failure: {e}")
-        # 4) Фиксируем фактический статус отбора и маску отобранных колонок.
-        # Маска берётся с шага селектора внутри пайплайна и имеет размерность
-        # пост-препроцессорной матрицы (после one-hot-раскрытия/скалирования).
+        # 4) Record the actual selection status and the selected-column mask.
+        # The mask is taken from the selector step inside the pipeline and has
+        # the dimensionality of the post-preprocessor matrix (after one-hot
+        # expansion/scaling).
         self.feature_selection_active_ = feature_selection_active
         selector_step = self.pipeline.named_steps.get("feature_selector")
         if selector_step is not None and hasattr(selector_step, "support_"):
@@ -1154,34 +1154,34 @@ class ModelTrainer:
         return self.pipeline
 
     def fit(self, X: Any, y: Any) -> ModelTrainer:
-        """Запустить полный цикл подготовки данных, обучения модели и оценки метрик.
+        """Run the full cycle of data preparation, model training, and metric evaluation.
 
-        Оценка качества (``val_score`` / ``additional_scores``) выполняется на
-        отложенных данных тем же методом валидации, которым HPO сравнивает
-        модели (``validation.iter_splits``): ``train_test_split`` — одно
-        hold-out разбиение со скорингом на отложенной части; ``k_fold``/``loo``
-        — среднее по фолдам. Дополнительно собирается OOF-канал (issue #62):
-        предсказания валидационных фолдов конкатенируются в ``y_pred_oof`` и
-        по всему вектору сразу вычисляется ``RMSE_oof`` (``oof_score_``) —
-        честная оценка на всех строках без утечки, отдельная от ``val_score``.
-        После валидационного скоринга финальный пайплайн
-        обучается на полных данных: артефакт хранит обучение на 100% выборки,
-        а ``val_score`` остаётся честной оценкой качества (не train-скором).
+        Quality evaluation (``val_score`` / ``additional_scores``) is performed
+        on held-out data using the same validation method that HPO uses to
+        compare models (``validation.iter_splits``): ``train_test_split`` — a
+        single hold-out split with scoring on the held-out part;
+        ``k_fold``/``loo`` — mean across folds. In addition, an OOF channel is
+        collected: predictions from validation folds are concatenated into
+        ``y_pred_oof``, and ``RMSE_oof`` (``oof_score_``) is computed on the
+        whole vector at once — an honest estimate on all rows without leakage,
+        separate from ``val_score``. After validation scoring, the final
+        pipeline is trained on the full data: the artifact stores a training on
+        100% of the sample, while ``val_score`` remains an honest quality
+        estimate (not a train score).
         """
 
         with self.lock:
-            # Этап 0: Сбрасываем состояние обучения в начале fit(), до какой-либо
-            # обработки данных. Если обучение упадёт на любом этапе (подготовка
-            # данных, разрешение активности, валидационный скоринг, pipeline.fit),
-            # у тренера не останутся значения от предыдущего обучения (ревью PR #8
-            # и issue #24: негативный сценарий «все фолды упали»). Дублирующий
-            # сброс в _fit_internal сохраняется для прямых вызовов этого метода.
+            # Stage 0: Reset the training state at the start of fit(), before
+            # any data processing. If training fails at any stage (data
+            # preparation, activity resolution, validation scoring, pipeline.fit),
+            # the trainer must not retain values from the previous training
+            # (the negative scenario with every fold failing). The duplicate
+            # reset in _fit_internal is kept for direct calls to that method.
             self.pipeline = None
             self.val_score = None
             self.additional_scores = {}
-            # OOF-канал (issue #62): сбрасываем вместе с остальным состоянием,
-            # чтобы после неудачного fit() не оставались значения от
-            # предыдущего обучения.
+            # OOF channel: reset together with the rest of the state so that a
+            # failed fit() does not leave values from the previous training.
             self.oof_score_ = None
             self.oof_predictions_ = None
             self.oof_coverage_ = None
@@ -1189,7 +1189,7 @@ class ModelTrainer:
             self.selected_features_mask_ = None
             self.dropped_features_ = []
 
-            # Этап 1: Валидация и подготовка данных
+            # Stage 1: Validation and data preparation
             X_prepared, y_s = self._prepare_data(X, y)
 
             n_samples = (
@@ -1199,34 +1199,34 @@ class ModelTrainer:
                 raise TrainingError("Insufficient records for training")
 
             if isinstance(X_prepared, pd.DataFrame):
-                # Очистка неинформативных признаков (issue #57): полностью
-                # пустые и строго константные колонки удаляются ДО определения
-                # типов признаков и сборки препроцессора, чтобы HPO и финальное
-                # обучение работали с согласованным набором признаков (единая
-                # точка с tuner.optimize). Решение принимается только по
-                # обучающим данным (no leakage); для np.ndarray без имён колонок
-                # очистка не выполняется (задокументированное ограничение,
-                # как у detect_feature_types).
+                # Cleaning uninformative features: fully empty and strictly
+                # constant columns are removed BEFORE feature type detection and
+                # preprocessor assembly, so that HPO and final training work
+                # with a consistent feature set (a single point shared with
+                # tuner.optimize). The decision is made only on the training
+                # data (no leakage); for np.ndarray without column names no
+                # cleaning is performed (a documented limitation, as in
+                # detect_feature_types).
                 cleaned = _clean_uninformative_features(X_prepared)
                 self.dropped_features_ = [
                     col for col in X_prepared.columns if col not in cleaned.columns
                 ]
                 if self.dropped_features_:
                     X_prepared = cleaned
-                    # Обновляем feature_names на очищенный список: predict()
-                    # выравнивает колонки по self.feature_names (issue #2),
-                    # поэтому удалённые колонки на инференсе отбрасываются
-                    # автоматически, отсутствующие дают явную ошибку.
+                    # Update feature_names to the cleaned list: predict()
+                    # aligns columns by self.feature_names, so removed columns
+                    # are dropped automatically at inference, while missing ones
+                    # produce an explicit error.
                     if self.feature_names is not None:
                         self.feature_names = [
                             name
                             for name in self.feature_names
                             if name not in self.dropped_features_
                         ]
-                    # Явно заданные пользователем списки колонок тоже обязаны
-                    # быть согласованы с очищенным набором признаков: иначе
-                    # _detect_feature_types/build_preprocessor упадут на
-                    # отсутствующих колонках.
+                    # User-specified column lists must also be consistent with
+                    # the cleaned feature set: otherwise
+                    # _detect_feature_types/build_preprocessor would fail on
+                    # missing columns.
                     for attr in ("categorical_features", "numerical_features"):
                         features = getattr(self, attr)
                         if features is not None:
@@ -1249,14 +1249,14 @@ class ModelTrainer:
                 if self.feature_names is None:
                     self.feature_names = self.numerical_features
 
-            # Этап 2: Определение ключа алгоритма
-            # (перенесено выше для использования в препроцессоре)
+            # Stage 2: Resolve the algorithm key
+            # (moved above for use in the preprocessor)
             _ALIASES.get(self.algorithm, self.algorithm)
 
-            # Этап 3: Создаём модель через фабрику.
-            # Выполняется ДО сборки препроцессора, чтобы неизвестный алгоритм
-            # (опечатка в имени) отклонялся здесь с понятным сообщением,
-            # а не маскировался default-пресетом предобработки.
+            # Stage 3: Create the model via the factory.
+            # Done BEFORE preprocessor assembly so that an unknown algorithm
+            # (a typo in the name) is rejected here with a clear message rather
+            # than being masked by the default preprocessing preset.
             try:
                 model_kwargs = self.hyperparams.copy()
                 model_kwargs.pop("feature_index", None)
@@ -1264,23 +1264,23 @@ class ModelTrainer:
             except (ValueError, ImportError) as e:
                 raise TrainingError(f"Error creating model: {e}")
 
-            # Этап 4: Создаём препроцессор через делегирование
+            # Stage 4: Build the preprocessor via delegation
             if self.feature_names is None:
-                # Если имен нет, пытаемся извлечь их снова или создаем пустой список
+                # If there are no names, try to extract them again or create an empty list
                 self.feature_names = self._extract_metadata(X_prepared) or []
             preprocessor = self._build_preprocessor(self.feature_names)
 
-            # Этап 4.5: Разрешаем активность отбора признаков (issue #31).
-            # Приоритет: isotonic-байпас → явный флаг → режим конфигурации
-            # (always/disabled) → standalone auto-check для mode='auto'.
+            # Stage 4.5: Resolve feature selection activity.
+            # Priority: isotonic bypass -> explicit flag -> configuration mode
+            # (always/disabled) -> standalone auto-check for mode='auto'.
             feature_selection_active = self._resolve_feature_selection_active(
                 X_prepared, y_s, preprocessor, base_model
             )
 
-            # Этап 5: Валидационный скоринг (issue #24). Оценка качества
-            # выполняется тем же методом разбиения, что и сравнение моделей
-            # в HPO (validation.iter_splits), чтобы val_score/additional_scores
-            # были честными hold-out/CV-оценками, а не train-скорами.
+            # Stage 5: Validation scoring. Quality evaluation is performed with
+            # the same split method used for model comparison in HPO
+            # (validation.iter_splits), so that val_score/additional_scores are
+            # honest hold-out/CV estimates rather than train scores.
             self._score_on_validation_splits(
                 X_prepared,
                 y_s,
@@ -1289,9 +1289,9 @@ class ModelTrainer:
                 feature_selection_active=feature_selection_active,
             )
 
-            # Этап 6: Финальное обучение на полных данных (артефакт как сейчас):
-            # пайплайн обучается на 100% выборки, val_score при этом остаётся
-            # оценкой, посчитанной на отложенных данных (этап 5).
+            # Stage 6: Final training on the full data (the artifact as before):
+            # the pipeline is trained on 100% of the sample, while val_score
+            # remains the estimate computed on held-out data (stage 5).
             self.pipeline = self._fit_internal(
                 X_prepared,
                 y_s,
@@ -1311,66 +1311,68 @@ class ModelTrainer:
         *,
         feature_selection_active: bool,
     ) -> None:
-        """Оценить качество модели на отложенных данных (issue #24).
+        """Evaluate model quality on held-out data.
 
-        Единый механизм с HPO: разбиения строятся через
-        ``validation.iter_splits`` (та же фабрика, что и ``tuner.optimize``),
-        поэтому ``val_score``/``additional_scores`` соответствуют оценке, по
-        которой сравниваются модели, с точностью до sign-коррекции.
+        A single mechanism shared with HPO: splits are built via
+        ``validation.iter_splits`` (the same factory used by ``tuner.optimize``),
+        so ``val_score``/``additional_scores`` match the estimate used to
+        compare models, up to sign correction.
 
-        Логика работы:
-        1. На каждом фолде собирается свежий пайплайн из клонов
-           ``preprocessor``/``base_model`` (+ селектор/оверсэмплер по конфигу)
-           и обучается на train-части фолда (паттерн из auto-check отбора
-           признаков, вынесенный в общий ``_assemble_steps``).
-        2. На val-части фолда считаются «сырые» значения основной метрики и
-           всех дополнительных метрик.
+        How it works:
+        1. On each fold a fresh pipeline is assembled from clones of
+           ``preprocessor``/``base_model`` (plus selector/oversampler per
+           config) and trained on the fold's train part (a pattern taken from
+           the feature selection auto-check and extracted into the shared
+           ``_assemble_steps``).
+        2. Raw values of the primary metric and all additional metrics are
+           computed on the fold's validation part.
         3. ``val_score = to_user_value(metric, mean(raw))``;
            ``additional_scores[m] = to_user_value(m, mean(raw_m))``.
-        4. Параллельно собирается OOF-канал (issue #62): предсказания
-           валидационных частей фолдов складываются в один вектор
-           ``y_pred_oof``, выровненный по исходному порядку строк, и по всему
-           вектору сразу считается ``RMSE_oof`` (см. ``_finalize_oof``).
+        4. In parallel, an OOF channel is collected: predictions from the
+           validation parts of the folds are accumulated into a single
+           ``y_pred_oof`` vector aligned to the original row order, and
+           ``RMSE_oof`` is computed on the whole vector at once (see
+           ``_finalize_oof``).
 
-        Сбой отдельной дополнительной метрики (ошибка скорера/None на фолде) →
-        WARNING + пропуск метрики; падение всех фолдов основной метрики →
-        ``TrainingError`` (fail-fast, до финального обучения). Не-конечные скоры
-        фолдов (например, inf для NRMSE на константном таргете) возвращаются
-        как есть. Сбой сбора OOF на отдельном фолде не роняет валидационный
-        скоринг: он только уменьшает покрытие OOF-вектора (WARNING).
+        A failure of a single additional metric (scorer error/None on a fold) →
+        WARNING + the metric is skipped; failure of all folds of the primary
+        metric → ``TrainingError`` (fail-fast, before final training).
+        Non-finite fold scores (e.g., inf for NRMSE on a constant target) are
+        returned as is. An OOF collection failure on a single fold does not
+        crash the validation scoring: it only reduces the coverage of the OOF
+        vector (WARNING).
 
-        Примечание (интерфейс стратегий, issue #62/T10): сборка OOF не привязана
-        к конкретной стратегии — используется только позиционный ``test_idx``,
-        который ``iter_splits`` отдаёт для любой стратегии. Order-aware
-        стратегии (``TimeSeriesSplit`` и т.п.), регистрируемые в T10 через
-        ``validation.SUPPORTED_VALIDATION_METHODS``/``make_cv``, заработают
-        без переписывания этого метода.
+        Note (strategy interface): building the OOF channel does not depend on
+        a particular strategy — only the positional ``test_idx`` provided by
+        ``iter_splits`` for any strategy is used. Order-aware strategies
+        (``TimeSeriesSplit`` and similar) registered through
+        ``validation.SUPPORTED_VALIDATION_METHODS``/``make_cv`` will work
+        without rewriting this method.
 
         Args:
-            X: Матрица признаков (полные данные).
-            y: Целевая переменная (полные данные).
-            preprocessor: ``ColumnTransformer`` предобработки.
-            base_model: Базовый регрессор.
-            feature_selection_active: Флаг включения шага отбора признаков.
+            X: Feature matrix (full data).
+            y: Target variable (full data).
+            preprocessor: Preprocessing ``ColumnTransformer``.
+            base_model: Base regressor.
+            feature_selection_active: Flag enabling the feature selection step.
 
         Raises:
-            TrainingError: Если ни один фолд не дал валидного скора основной
-                метрики либо критическая ошибка инициализации разбиений.
+            TrainingError: If no fold produced a valid score for the primary
+                metric, or on a critical split-initialization error.
         """
-        # Детерминированность сплитов: при random_state=None тренера
-        # (нефиксированное основное обучение) валидационные разбиения всё
-        # равно обязаны быть воспроизводимыми (фикс-зерно-фолбэк, как в
-        # _run_feature_selection_auto_check, ревью PR #8).
+        # Deterministic splits: with trainer random_state=None (non-fixed main
+        # training) the validation splits must still be reproducible (a fixed
+        # fallback seed, as in _run_feature_selection_auto_check).
         splits_seed = self.random_state if self.random_state is not None else 42
-        # Обратная совместимость со старыми pickle: параметры валидации
-        # читаются через getattr с дефолтами (паттерн как для
+        # Backward compatibility with old pickles: the validation parameters
+        # are read via getattr with defaults (the same pattern used for
         # feature_selection_cfg/encoding_strategy).
         method = getattr(self, "validation_strategy", "train_test_split")
         n_folds = getattr(self, "n_folds", 5)
         test_size = getattr(self, "test_size", 0.2)
 
-        # global_y=y: глобальный NRMSE нормализуется по полному таргету
-        # (размах не зависит от конкретного фолда).
+        # global_y=y: the global NRMSE is normalized by the full target
+        # (the range does not depend on a given fold).
         try:
             scorer = cast(
                 Callable[..., Any], get_scorer_object(self.metric, global_y=y)
@@ -1391,12 +1393,12 @@ class ModelTrainer:
                     err,
                 )
 
-        # Материализуем разбиения до цикла по фолдам: ошибки инициализации
-        # валидации (недостаточно данных, неизвестный метод и т.п.) должны
-        # прерывать обучение сразу, а не маскироваться под «упавший фолд».
-        # include_indices=True (issue #62): разбиения дополнительно отдают
-        # позиционные индексы валидационных строк для сборки OOF-вектора,
-        # выровненного по исходному порядку.
+        # Materialize the splits before the fold loop: validation initialization
+        # errors (insufficient data, unknown method, etc.) must abort training
+        # immediately rather than being masked as a "failed fold".
+        # include_indices=True: the splits additionally provide positional
+        # indices of the validation rows for building an OOF vector aligned to
+        # the original order.
         try:
             splits = list(
                 iter_splits(
@@ -1412,11 +1414,11 @@ class ModelTrainer:
         except Exception as err:  # noqa: BLE001
             raise TrainingError(f"Error calculating metrics on validation: {err}")
 
-        # Фактически применённый метод после возможного fallback
-        # (k_fold → train_test_split при малом N): предупреждения OOF-канала
-        # обязаны опираться на реально использованные разбиения, а не на
-        # запрошенную стратегию (ревью PR #31). Разрешаем тем же make_cv, что
-        # вызывается внутри iter_splits, — значения гарантированно совпадают.
+        # The method actually applied after a possible fallback
+        # (k_fold -> train_test_split for small N): OOF channel warnings must
+        # rely on the splits actually used rather than the requested strategy.
+        # Resolve via the same make_cv that iter_splits calls internally — the
+        # values are guaranteed to match.
         n_samples = X.shape[0] if hasattr(X, "shape") else len(X)
         n_features = X.shape[1] if method == "auto" else None
         try:
@@ -1429,23 +1431,23 @@ class ModelTrainer:
                 n_features=n_features,
             )
         except Exception:  # noqa: BLE001
-            # Сплиты уже материализованы выше — сюда попадаем только в
-            # невозможном/дегенеративном случае; fallback на запрошенный метод.
+            # Splits were already materialized above — we get here only in an
+            # impossible/degenerate case; fall back to the requested method.
             effective_method = method
 
         fold_raw: list[float] = []
         add_raw: dict[str, list[float]] = {m: [] for m in add_scorers}
         fold_errors: list[str] = []
-        # Буферы OOF-канала (issue #62): заполняются по позициям валидационных
-        # строк в исходных данных; непокрытые строки остаются NaN и
-        # отбрасываются при расчёте RMSE_oof.
+        # OOF channel buffers: filled by the positions of validation rows in
+        # the original data; uncovered rows remain NaN and are discarded when
+        # computing RMSE_oof.
         oof_pred_buffer = np.full(n_samples, np.nan, dtype=float)
         oof_y_buffer = np.full(n_samples, np.nan, dtype=float)
         for X_tr, X_te, y_tr, y_te, test_idx in splits:
             try:
-                # Свежий пайплайн на каждый фолд: клоны preprocessor/base_model
-                # (sklearn Pipeline не клонирует переданные шаги, поэтому общие
-                # экземпляры мутировали бы состояние соседнего фолда).
+                # A fresh pipeline per fold: clones of preprocessor/base_model
+                # (sklearn Pipeline does not clone the passed steps, so shared
+                # instances would mutate the state of a neighboring fold).
                 fold_pipe = Pipeline(
                     self._assemble_steps(
                         clone(preprocessor),
@@ -1477,11 +1479,11 @@ class ModelTrainer:
                             err,
                         )
 
-                # OOF-канал (issue #62): предсказание на валидационной части
-                # фолда — модель обучалась только на train-части, поэтому
-                # строка гарантированно не участвовала в обучении (отсутствие
-                # утечки). Отдельный try: сбой сбора OOF не роняет скоринг
-                # фолда, а только уменьшает покрытие OOF-вектора (WARNING).
+                # OOF channel: a prediction on the validation part of the fold
+                # — the model was trained only on the train part, so the row is
+                # guaranteed not to have been used in training (no leakage).
+                # A separate try: an OOF collection failure does not crash the
+                # fold scoring, it only reduces the OOF vector coverage (WARNING).
                 try:
                     preds = np.asarray(fold_pipe.predict(X_te)).reshape(-1)
                     idx = np.asarray(test_idx)
@@ -1508,11 +1510,10 @@ class ModelTrainer:
 
         raw_mean = float(np.mean(fold_raw))
         self.val_score = to_user_value(self.metric, raw_mean)
-        # Пользовательская семантика (issue #54): val_score — значение в
-        # пользовательском представлении, поэтому направление в логе —
-        # user_direction («min better» для ошибок), а не флаг оптимизатора
-        # greater_is_better (для neg_-метрик он истинен, хотя пользователю
-        # меньшее значение лучше).
+        # User-facing semantics: val_score is a value in user representation,
+        # so the direction in the log is user_direction ("min better" for
+        # errors), not the optimizer greater_is_better flag (which is true for
+        # neg_ metrics even though a smaller value is better for the user).
         self.logger.debug(
             f"Metric calculation: raw={raw_mean:.4f},"
             f" final val_score={self.val_score:.4f} "
@@ -1522,14 +1523,14 @@ class ModelTrainer:
         self.additional_scores = {}
         for mname, raw_values in add_raw.items():
             if not raw_values:
-                # Все фолды упали для этой метрики — уже пропущена с WARNING.
+                # All folds failed for this metric — it was already skipped with a WARNING.
                 continue
             self.additional_scores[mname] = to_user_value(
                 mname, float(np.mean(raw_values))
             )
 
-        # OOF-канал (issue #62): RMSE_oof по всему вектору, предупреждения о
-        # покрытии/малом N, выравнивание y_pred_oof по исходному порядку строк.
+        # OOF channel: RMSE_oof on the whole vector, warnings about
+        # coverage/small N, and alignment of y_pred_oof to the original row order.
         self._finalize_oof(
             oof_pred_buffer,
             oof_y_buffer,
@@ -1547,26 +1548,26 @@ class ModelTrainer:
         *,
         method: str,
     ) -> None:
-        """Финализировать OOF-канал оценки (issue #62).
+        """Finalize the OOF evaluation channel.
 
-        По буферам предсказаний/таргета, собранным на валидационных фолдах
-        (``_score_on_validation_splits``), вычисляет ``RMSE_oof`` по всему
-        вектору сразу через :func:`metrics.oof_rmse`, заполняет атрибуты
-        ``oof_score_``/``oof_predictions_``/``oof_coverage_`` и логирует
-        предупреждения:
-        - ``train_test_split`` покрывает OOF-ом только валидационную часть
-          (задокументированное ограничение);
-        - очень малый N (2–5): короткий OOF-вектор, высокая дисперсия;
-        - нефинитные предсказания/таргеты исключаются из RMSE_oof.
+        Based on the prediction/target buffers collected on validation folds
+        (``_score_on_validation_splits``), computes ``RMSE_oof`` over the whole
+        vector at once via :func:`metrics.oof_rmse`, fills the
+        ``oof_score_``/``oof_predictions_``/``oof_coverage_`` attributes, and
+        logs warnings:
+        - ``train_test_split`` covers only the validation part with OOF
+          (a documented limitation);
+        - very small N (2-5): a short OOF vector with high variance;
+        - non-finite predictions/targets are excluded from RMSE_oof.
 
         Args:
-            oof_pred: Буфер OOF-предсказаний (NaN для непокрытых строк).
-            oof_y: Буфер истинных значений (NaN для непокрытых строк).
-            X: Исходная матрица признаков (для восстановления pandas-индекса).
-            n_samples: Общее число строк в исходных данных.
-            method: Фактически применённый метод валидации (после возможного
-                fallback ``k_fold`` → ``train_test_split``), от которого зависят
-                предупреждения о покрытии.
+            oof_pred: OOF prediction buffer (NaN for uncovered rows).
+            oof_y: True value buffer (NaN for uncovered rows).
+            X: Original feature matrix (to restore the pandas index).
+            n_samples: Total number of rows in the original data.
+            method: The validation method actually applied (after a possible
+                fallback ``k_fold`` → ``train_test_split``), which drives the
+                coverage warnings.
         """
         oof_vector = self._align_oof_vector(oof_pred, X)
         valid = np.isfinite(oof_pred) & np.isfinite(oof_y)
@@ -1574,8 +1575,8 @@ class ModelTrainer:
         coverage = float(n_valid / n_samples) if n_samples > 0 else 0.0
         self.oof_coverage_ = coverage
 
-        # Ограничение train_test_split: OOF покрывает только валидационную
-        # часть (issue #62, требование 4). Явно задокументировано в логе.
+        # train_test_split limitation: OOF covers only the validation part.
+        # Explicitly documented in the log.
         if method == "train_test_split":
             self.logger.warning(
                 "OOF evaluation with 'train_test_split' covers only the "
@@ -1587,8 +1588,7 @@ class ModelTrainer:
                 coverage * 100.0,
             )
 
-        # Очень малый N: OOF-вектор короткий, дисперсия оценки высокая
-        # (issue #62, edge cases).
+        # Very small N: the OOF vector is short and the estimate has high variance.
         if n_samples <= 5:
             self.logger.warning(
                 "OOF evaluation on very small data (N=%d): the OOF vector is "
@@ -1606,9 +1606,10 @@ class ModelTrainer:
             return
 
         dropped = n_samples - n_valid
-        # Для train_test_split непокрытые строки — это train-часть, ограничение
-        # уже задокументировано отдельным WARNING выше; общее предупреждение об
-        # исключении строк логируем только для нефинитных предсказаний/таргетов.
+        # For train_test_split the uncovered rows are the train part; the
+        # limitation was already documented by a separate WARNING above, so the
+        # generic row-exclusion warning is logged only for non-finite
+        # predictions/targets.
         if dropped and method != "train_test_split":
             self.logger.warning(
                 "%d row(s) excluded from RMSE_oof (non-finite prediction or "
@@ -1623,8 +1624,8 @@ class ModelTrainer:
             self.oof_score_ = None
             self.logger.warning("RMSE_oof could not be computed: %s", err)
         self.oof_predictions_ = oof_vector
-        # RMSE_oof — пользовательское значение ошибки («min better», issue #54):
-        # направление указывается явно, флаг оптимизатора не применяется.
+        # RMSE_oof is a user-facing error value ("min better"): the direction
+        # is stated explicitly, and the optimizer flag is not applied.
         self.logger.info(
             "OOF evaluation: RMSE_oof=%.4f (min better) on %d/%d rows (coverage=%.3f).",
             self.oof_score_ if self.oof_score_ is not None else float("nan"),
@@ -1638,59 +1639,57 @@ class ModelTrainer:
         oof_pred: np.ndarray,
         X: Any,
     ) -> pd.Series | np.ndarray:
-        """Выровнять OOF-вектор ``y_pred_oof`` по исходному порядку строк.
+        """Align the OOF vector ``y_pred_oof`` to the original row order.
 
-        Для pandas-входов (``DataFrame``/``Series``) с уникальным индексом
-        возвращается ``pd.Series`` с сохранёнными метками строк (issue #62,
-        требование 2), включая MultiIndex. Для numpy-входов и данных с
-        невосстановимым индексом (дубликаты меток) возвращается
-        ``np.ndarray``, выровненный по позиции: сортировка по значению индекса
-        не выполняется.
+        For pandas inputs (``DataFrame``/``Series``) with a unique index, a
+        ``pd.Series`` with preserved row labels is returned, including
+        MultiIndex. For numpy inputs and data with an unrecoverable index
+        (duplicate labels), an ``np.ndarray`` aligned by position is returned:
+        no sorting by index value is performed.
 
-        Примечание (фикс ревью PR #31): свойство ``Index.hasnans`` не
-        определено для ``MultiIndex`` (``NotImplementedError``), поэтому
-        проверка обёрнута в try/except — иначе ``fit()`` падал на данных с
-        MultiIndex-индексом, хотя на main такой вход работал.
+        Note: the ``Index.hasnans`` property is not defined for ``MultiIndex``
+        (``NotImplementedError``), so the check is wrapped in try/except —
+        otherwise ``fit()`` would fail on data with a MultiIndex even though
+        such input worked on main.
 
         Args:
-            oof_pred: Буфер OOF-предсказаний (NaN для непокрытых строк),
-                выровненный по позиции исходных данных.
-            X: Исходная матрица признаков.
+            oof_pred: OOF prediction buffer (NaN for uncovered rows), aligned
+                by position to the original data.
+            X: Original feature matrix.
 
         Returns:
-            Вектор ``y_pred_oof`` в исходном порядке строк.
+            The ``y_pred_oof`` vector in the original row order.
         """
         if isinstance(X, (pd.DataFrame, pd.Series)) and X.index.is_unique:
             try:
                 has_nan_labels = bool(X.index.hasnans)
             except (NotImplementedError, TypeError):
-                # MultiIndex и другие индексы без поддержки hasnans: проверить
-                # NaN-метки нельзя, но уникальность гарантирует однозначное
-                # позиционное выравнивание — сохраняем метки строк.
+                # MultiIndex and other indexes without hasnans support: NaN
+                # labels cannot be checked, but uniqueness guarantees unambiguous
+                # positional alignment — keep the row labels.
                 has_nan_labels = False
             if not has_nan_labels:
                 return pd.Series(oof_pred, index=X.index, name="y_pred_oof")
         return oof_pred
 
     def _align_predict_columns(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Выровнять колонки DataFrame к обучающему порядку (issue #2).
+        """Align the DataFrame columns to the training order.
 
-        Защитный слой для ``predict``: валидирует наличие всех
-        ``self.feature_names``, отбрасывает лишние колонки и возвращает
-        DataFrame с колонками в обучающем порядке. Это чинит и устаревшие
-        сериализованные модели, у которых препроцессор использует позиционные
-        индексы: после выравнивания позиционный срез снова указывает на те же
-        колонки, что и при обучении.
+        A defensive layer for ``predict``: validates the presence of all
+        ``self.feature_names``, drops extra columns, and returns a DataFrame
+        with columns in the training order. This also fixes legacy serialized
+        models whose preprocessor uses positional indices: after alignment, the
+        positional slice again points to the same columns as during training.
 
         Args:
-            X: Входной DataFrame с предсказываемыми признаками.
+            X: Input DataFrame with the features to predict on.
 
         Returns:
-            DataFrame с колонками в обучающем порядке (``self.feature_names``).
+            A DataFrame with columns in the training order (``self.feature_names``).
 
         Raises:
-            TrainingError: Если часть ``self.feature_names`` отсутствует в ``X``
-                либо встречается в ``X`` более одного раза.
+            TrainingError: If some of ``self.feature_names`` are missing in ``X``
+                or appear in ``X`` more than once.
         """
         feature_names = self.feature_names
         if not feature_names:
@@ -1710,24 +1709,23 @@ class ModelTrainer:
         return X[feature_names]
 
     def _align_predict_shared_dataframe(self, X: SharedDataFrame) -> Any:
-        """Подготовить SharedDataFrame к предсказанию (issue #2).
+        """Prepare a SharedDataFrame for prediction.
 
-        Если контейнер хранит имена колонок, данные восстанавливаются в
-        DataFrame и выравниваются к обучающему порядку (те же гарантии, что
-        для обычного ``pd.DataFrame``); иначе используется позиционный
-        numpy-fallback по обучающему порядку.
+        If the container stores column names, the data is restored into a
+        DataFrame and aligned to the training order (the same guarantees as for
+        a regular ``pd.DataFrame``); otherwise a positional numpy fallback in
+        the training order is used.
 
         Args:
-            X: Контейнер данных в разделяемой памяти.
+            X: Data container in shared memory.
 
         Returns:
-            ``pd.DataFrame`` с колонками в обучающем порядке либо
-            ``np.ndarray`` из разделяемой памяти, если имена колонок
-            недоступны.
+            A ``pd.DataFrame`` with columns in the training order, or a
+            ``np.ndarray`` from shared memory if column names are unavailable.
 
         Raises:
-            TrainingError: Если часть ``self.feature_names`` отсутствует в
-                колонках контейнера.
+            TrainingError: If some of ``self.feature_names`` are missing from
+                the container columns.
         """
         if X.columns is None or not self.feature_names:
             return X.shared_array
@@ -1740,28 +1738,27 @@ class ModelTrainer:
         return X.get_view(self.feature_names)
 
     def predict(self, X: Any) -> np.ndarray:
-        """Получить предсказания модели для новых данных,
-        используя обученный пайплайн.
+        """Get model predictions for new data using the trained pipeline.
 
-        Для ``pd.DataFrame`` выполняется защитная валидация и выравнивание
-        порядка колонок к обучающему (``self.feature_names``): недостающие
-        колонки дают явную ошибку, лишние отбрасываются, дублирующиеся имена
-        отклоняются (issue #2). ``SharedDataFrame`` восстанавливается в
-        DataFrame и выравнивается так же, когда доступны имена колонок.
-        Для ``np.ndarray`` и прочих входов без имён используется позиционный
-        порядок колонок, зафиксированный при обучении.
+        For ``pd.DataFrame`` inputs, a defensive validation and alignment of
+        the column order to the training order (``self.feature_names``) is
+        performed: missing columns raise an explicit error, extra columns are
+        dropped, and duplicated names are rejected. ``SharedDataFrame`` is
+        restored into a DataFrame and aligned the same way when column names
+        are available. For ``np.ndarray`` and other inputs without names, the
+        positional column order fixed at training time is used.
         """
 
         with self.lock:
-            # 1) Проверка: обучена ли модель
+            # 1) Check whether the model is trained
             if self.pipeline is None:
                 raise TrainingError(
                     "The predict method called for an untrained model."
                     " Perform fit() first."
                 )
             try:
-                # Выравниваем колонки для входов с именами; для остальных
-                # избегаем конвертации, если X уже массив или DataFrame
+                # Align columns for inputs with names; for the rest, avoid
+                # conversion if X is already an array or DataFrame
                 X_input: Any
                 if isinstance(X, pd.DataFrame):
                     X_input = self._align_predict_columns(X)
@@ -1779,33 +1776,33 @@ class ModelTrainer:
                 raise TrainingError(f"Error during prediction: {e}")
 
     def save(self, path: str | Path) -> None:
-        """Сериализовать и сохранить текущий экземпляр тренера на диск."""
+        """Serialize and save the current trainer instance to disk."""
         with self.lock:
             if self.pipeline is None and self.base_model is None:
                 raise TrainingError("Nothing to save: model is not trained")
 
             path_obj = Path(path)
-            # Создаем директории, если они не существуют
+            # Create the directories if they do not exist
             path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-            # Вызываем новую утилиту вместо pickle.dump
+            # Call the new utility instead of pickle.dump
             save_artifact(obj=self, path=path_obj, fmt=self.serialization_format)
 
     @classmethod
     def load(
         cls, path: str | Path, fmt: SerializationFormat = SerializationFormat.pickle
     ) -> ModelTrainer:
-        """Загрузить ранее сохраненный объект ModelTrainer из файла."""
+        """Load a previously saved ModelTrainer object from a file."""
         path_obj = Path(path)
 
-        # Попытка загрузки через утилиту
+        # Attempt to load via the utility
         try:
             obj = load_artifact(path=path_obj, fmt=fmt)
         except FileNotFoundError:
             raise TrainingError(f"File not found: {path}")
         except Exception as e:  # noqa: BLE001
             raise TrainingError(f"Error loading artifact: {e}")
-        # Проверка типа загруженного объекта
+        # Verify the type of the loaded object
         if not isinstance(obj, cls):
             raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
 
@@ -1825,47 +1822,44 @@ def train_model(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     feature_selection_active: bool | None = None,
 ) -> float:
-    """Обеспечить совместимость со старым API для обучения моделей.
-    Функция-фасад, которая принимает конфигурацию или набор позиционных аргументов,
-    инициирует ModelTrainer и возвращает значение метрики, полученное на
-    отложенных данных (hold-out либо среднее по фолдам CV) — тем же методом
-    валидации, которым оценивается качество в ``ModelTrainer.fit()``
-    (не train-скор).
+    """Provide backward compatibility with the legacy model training API.
+    A facade function that accepts a configuration or a set of positional
+    arguments, instantiates a ModelTrainer, and returns the metric value
+    computed on held-out data (hold-out or mean across CV folds) — using the
+    same validation method used to assess quality in ``ModelTrainer.fit()``
+    (not a train score).
 
-    Параметры отбора признаков (``feature_selection_cfg`` /
-    ``feature_selection_active``) — keyword-only: в ветке «config dict»
-    одноимённые ключи словаря имеют приоритет над явными аргументами
-    (аналогично ``data_oversampling``). Ключ, присутствующий в конфиге со
-    значением ``None``, трактуется как «значение не задано»: в этом случае,
-    как и при отсутствии ключа, используется явный аргумент функции
-    (фолбэк). В ветке простого API используются непосредственно аргументы
-    функции.
+    The feature selection parameters (``feature_selection_cfg`` /
+    ``feature_selection_active``) are keyword-only: in the "config dict"
+    branch, the same-named dict keys take precedence over the explicit
+    arguments (similarly to ``data_oversampling``). A key present in the config
+    with the value ``None`` is treated as "value not set": in that case, as
+    when the key is absent, the explicit function argument is used (fallback).
+    In the simple API branch, the function arguments are used directly.
 
     Attributes:
-        cfg_or_algo (dict | str): Словарь конфигурации или название алгоритма.
-        metric_or_testsize (str | float): Метрика или размер тестовой выборки.
-        params_or_metric (dict | str): Гиперпараметры или название метрики.
-        X (Any): Матрица признаков.
-        y (Any): Вектор целевой переменной.
-        enable_logging (bool): Флаг активации ведения журналов.
-        random_state (int | None): Зерно случайности.
-        log_path (str | Path | None): Путь к файлу логов.
+        cfg_or_algo (dict | str): Configuration dict or algorithm name.
+        metric_or_testsize (str | float): Metric or test sample size.
+        params_or_metric (dict | str): Hyperparameters or metric name.
+        X (Any): Feature matrix.
+        y (Any): Target variable vector.
+        enable_logging (bool): Flag enabling logging.
+        random_state (int | None): Random seed.
+        log_path (str | Path | None): Path to the log file.
         feature_selection_cfg (FeatureSelectionCfg | dict | None):
-            Конфигурация отбора признаков (метод, процентиль, min_features
-            и т.д.). В ветке «config dict» значение ключа
-            ``feature_selection_cfg`` имеет приоритет над этим аргументом,
-            кроме случая, когда ключ присутствует со значением ``None`` —
-            тогда используется этот аргумент (фолбэк).
-            ``None`` — ``FeatureSelectionCfg()`` (mode='disabled').
-        feature_selection_active (bool | None): Явный булев флаг активности
-            отбора признаков (приоритет над режимом из
-            ``feature_selection_cfg``). В ветке «config dict» значение ключа
-            ``feature_selection_active`` имеет приоритет над этим аргументом,
-            кроме случая, когда ключ присутствует со значением ``None`` —
-            тогда используется этот аргумент (фолбэк).
-            Небулевые значения отклоняются конструктором ``ModelTrainer``
-            (строгая типизация, ревью PR #8). ``None`` — решение по
-            конфигурации.
+            Feature selection configuration (method, percentile, min_features,
+            etc.). In the "config dict" branch, the ``feature_selection_cfg``
+            key takes precedence over this argument, except when the key is
+            present with the value ``None`` — then this argument is used
+            (fallback). ``None`` — ``FeatureSelectionCfg()`` (mode='disabled').
+        feature_selection_active (bool | None): Explicit boolean flag of
+            feature selection activity (takes precedence over the mode from
+            ``feature_selection_cfg``). In the "config dict" branch, the
+            ``feature_selection_active`` key takes precedence over this
+            argument, except when the key is present with the value ``None`` —
+            then this argument is used (fallback). Non-boolean values are
+            rejected by the ``ModelTrainer`` constructor (strict typing).
+            ``None`` — the decision is based on the configuration.
     """
     algo: str = ""
     metric: str = ""
@@ -1875,7 +1869,7 @@ def train_model(
     fs_cfg: FeatureSelectionCfg | dict[str, Any] | None
     fs_active: bool | None
 
-    # Случай «config dict»
+    # The "config dict" case
     if isinstance(cfg_or_algo, dict):
         cfg: dict[str, Any] = cfg_or_algo
         algo = str(cfg.get("algorithm", ""))
@@ -1886,9 +1880,9 @@ def train_model(
         data_os = bool(cfg.get("data_oversampling", False))
         data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
-        # Ключи конфига имеют приоритет над явными аргументами (аналогично
-        # ``data_oversampling``); ключ со значением None трактуется как
-        # «значение не задано» и даёт фолбэк на аргумент функции (см. docstring).
+        # Config keys take precedence over the explicit arguments (similarly to
+        # ``data_oversampling``); a key with the value None is treated as
+        # "value not set" and falls back to the function argument (see docstring).
         if "feature_selection_cfg" in cfg and cfg["feature_selection_cfg"] is not None:
             fs_cfg = cast(
                 FeatureSelectionCfg | dict[str, Any] | None,
@@ -1904,9 +1898,9 @@ def train_model(
         else:
             fs_active = feature_selection_active
     else:
-        # Простой API
-        # Если пришел None, мы НЕ превращаем его в строку "None" сразу,
-        # чтобы сохранить логику оригинальной валидации для тестов.
+        # Simple API
+        # If None is passed, we do NOT turn it into the string "None" right
+        # away to preserve the original validation logic for the tests.
         algo = cfg_or_algo if cfg_or_algo is not None else ""
         metric = str(metric_or_testsize)
         hyperparams = cast(dict[str, Any], params_or_metric)
@@ -1917,7 +1911,7 @@ def train_model(
         fs_cfg = feature_selection_cfg
         fs_active = feature_selection_active
 
-    # Проверка алгоритма
+    # Validate the algorithm
     if not isinstance(cfg_or_algo, (str, dict)):
         raise TrainingError("Invalid algorithm")
     algo_key = algo.lower()
@@ -1925,7 +1919,7 @@ def train_model(
     if not hyperparams and algo_key not in ["isotonic", "isotonic_regression"]:
         raise TrainingError("Model parameters are not specified")
 
-    # Создаём и обучаем ModelTrainer
+    # Create and train the ModelTrainer
     trainer = ModelTrainer(
         algorithm=algo,
         hyperparams=hyperparams,
@@ -1942,13 +1936,14 @@ def train_model(
     if val_score is None:
         raise TrainingError("Model did not return a metric value")
 
-    # Логирование (если enable_logging=True)
+    # Logging (if enable_logging=True)
     if enable_logging:
-        # Получаем логгер и пишем сообщение
+        # Get the logger and write the message
         logger = logging.getLogger(__name__)
-        # Тип метрики — по пользовательскому представлению: ошибки (RMSE/MAE,
-        # в т.ч. neg_-метрики, чьё значение инвертировано обратно) помечаются
-        # как "Error (Natural)", score-метрики (R² и т.п.) — как "Score".
+        # Metric type follows the user-facing representation: errors (RMSE/MAE,
+        # including neg_ metrics whose value is inverted back) are labeled as
+        # "Error (Natural)", while score metrics (R² and similar) are labeled
+        # as "Score".
         metric_type = "Error (Natural)" if is_error_metric(metric) else "Score"
 
         logger.info(

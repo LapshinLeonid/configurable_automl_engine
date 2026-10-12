@@ -1,4 +1,4 @@
-"""ModelSanityGate: module for auditing model degeneracy (epic #61, task T2).
+"""ModelSanityGate: module for auditing model degeneracy.
 
 Protects the final winner selection of the AutoML engine from "degenerate"
 models — constant/flat predictions, step functions, unused features and
@@ -44,7 +44,7 @@ C. Dead Feature Check (``check_dead_features``)
      warning, not a disqualification: on correlated features permutation
      reports "false-dead" features because the model borrows the information
      from a neighbour column. The whole permutation path can be turned off
-     with ``check_permutation_sensitivity=False`` (cost control, task T5);
+     with ``check_permutation_sensitivity=False`` (cost control);
      the linear ``coef_`` path is unaffected.
 
 D. Generalization Gap (``check_generalization_gap``)
@@ -52,12 +52,12 @@ D. Generalization Gap (``check_generalization_gap``)
    in the issue is equivalent to requiring this ratio below
    ``1 / max_generalization_gap``; the stored value grows with overfitting).
    A finite gap strictly exceeding ``max_generalization_gap`` (default 1.5)
-   is routed by ``generalization_gap_mode`` (issue #108): the default
+   is routed by ``generalization_gap_mode``: the default
    ``"warn"`` records it in ``soft_warnings`` (no disqualification,
    ``is_valid`` stays True, severity ≤ 1), while ``"reject"`` reproduces the
    legacy strict behavior — a reason and disqualification. In the ``"warn"``
-   mode the circuit never disqualifies because of the gap magnitude — even
-   an infinite one (issue #111): ``RMSE_full ≈ 0`` (a perfect in-sample fit
+mode the circuit never disqualifies because of the gap magnitude — even
+    an infinite one: ``RMSE_full ≈ 0`` (a perfect in-sample fit
    such as a depth-20 tree, 1-NN or ExtraTrees with ``min_samples_leaf=1``
    is a normal property of a whole class of models and says nothing about
    quality on new data) and ``RMSE_oof ≈ 0`` are routed to ``soft_warnings``
@@ -89,7 +89,7 @@ into a failure reason instead of raising.
 ``warn_only`` mode: the gate still computes every statistic and fills
 ``reasons`` with the would-be disqualifications, but ``is_valid`` is forced to
 True and ``severity`` is capped at the "warning" level — the upper layer
-decides whether to apply the verdict to winner selection. NOTE (epic #74):
+decides whether to apply the verdict to winner selection. NOTE:
 this is a low-level diagnostic option of the audit object itself; the pipeline
 does NOT use it — select steps with ``strategy: sanity_gate`` always apply the
 disqualifications (the ``warn_only`` selection mode was removed together with
@@ -118,24 +118,24 @@ logger = logging.getLogger(__name__)
 __all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
 
 
-#: Режим контура Г (issue #108): ``"warn"`` — конечный gap строго выше
-#: ``max_generalization_gap`` записывается в ``soft_warnings`` (не
-#: дисквалифицирует); ``"reject"`` — провал → ``reasons`` →
-#: дисквалификация (старое строгое поведение). Дефолт — ``"warn"``.
-#: Имя поля намеренно НЕ ``mode`` (коллизия с удалённым в эпике #74 полем
-#: ``sanity_gate.mode``, которое валидатор ``_reject_removed_mode``
-#: отвергает с ошибкой миграции). Тип объявлен здесь, в standalone-модуле
-#: гейта, и отдельно в ``config_parser.py`` (без импорта, чтобы сохранить
-#: независимость модуля от остального движка).
+#: Circuit D mode: ``"warn"`` — a finite gap strictly above
+#: ``max_generalization_gap`` is recorded in ``soft_warnings`` (does not
+#: disqualify); ``"reject"`` — a failure → ``reasons`` →
+#: disqualification (the old strict behavior). Default — ``"warn"``.
+#: The field name is deliberately NOT ``mode`` (a collision with the removed
+#: ``sanity_gate.mode`` field, which the ``_reject_removed_mode`` validator
+#: rejects with a migration error). The type is declared here, in the
+#: standalone gate module, and separately in ``config_parser.py`` (without an
+#: import, to keep the module independent of the rest of the engine).
 GeneralizationGapMode = Literal["warn", "reject"]
 
 
 # --------------------------------------------------------------------------- #
-#  Пороговые сравнения: ЕДИНСТВЕННАЯ точка фиксации стороны (< или ≤)
+#  Threshold comparisons: THE single place that fixes the comparison side (< or ≤)
 # --------------------------------------------------------------------------- #
-# Контуры А/Б проваливаются при СТРОГОМ недоборе до порога; контуры В/Г —
-# при СТРОГОМ превышении. Равенство порогу никогда не является провалом.
-# Настройка другого поведения (≤ вместо <) разрешена только здесь.
+# Circuits A/B fail on a STRICT shortfall below the threshold; circuits C/D —
+# on a STRICT excess. Equality with the threshold is never a failure.
+# Tuning other behavior (≤ instead of <) is allowed only here.
 def _fails_below(value: float, threshold: float) -> bool:
     """Fail on a strict shortfall: ``value < threshold`` (equality passes)."""
     return value < threshold
@@ -168,11 +168,11 @@ def _diversity_fails(diversity: float, threshold: float, adaptive: bool) -> bool
     return diversity < threshold
 
 
-# Численные допуски и константы округления.
-_ZERO_VAR_EPS = 1e-12  # дисперсия таргета ниже этого — «константный y»
-_ZERO_RMSE_EPS = 1e-12  # RMSE ниже этого считается нулевым (деление на ноль)
-_MSE_EPS = 1e-12  # стабилизатор знаменателя в относительном ΔMSE
-_FALLBACK_DECIMALS = 6  # precision округления при std(y)==0
+# Numerical tolerances and rounding constants.
+_ZERO_VAR_EPS = 1e-12  # target variance below this is treated as "constant y"
+_ZERO_RMSE_EPS = 1e-12  # RMSE below this is considered zero (division by zero)
+_MSE_EPS = 1e-12  # denominator stabilizer in the relative ΔMSE
+_FALLBACK_DECIMALS = 6  # rounding precision when std(y)==0
 _MIN_DECIMALS = -12
 _MAX_DECIMALS = 10
 
@@ -200,10 +200,10 @@ class SanityCheckResult:
             circuit is disabled or not computable, ``inf`` for the
             division-by-zero cases (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``).
             In ``generalization_gap_mode = "warn"`` every gap violation —
-            finite or infinite — is reported in ``soft_warnings`` (issue
-            #111) and never disqualifies; in ``"reject"`` mode it becomes a
+            finite or infinite — is reported in ``soft_warnings`` and never
+            disqualifies; in ``"reject"`` mode it becomes a
             disqualification reason.
-        severity: formalized severity for the fallback (T4):
+        severity: formalized severity for the fallback:
             0 — clean; 1 — soft warnings only;
             2/3/4 — one/two/three or more disqualification reasons.
             In ``warn_only`` mode it never exceeds 1.
@@ -222,7 +222,7 @@ class SanityCheckResult:
 def _compute_severity(
     reasons: list[str], soft_warnings: list[str], warn_only: bool
 ) -> int:
-    """Map reasons/warnings to a formalized severity level (T4 fallback).
+    """Map reasons/warnings to a formalized severity level.
 
     Args:
         reasons: disqualification reasons.
@@ -350,55 +350,55 @@ def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> An
 
 
 class ModelSanityGate:
-    """Audit a model for degeneracy through four optional circuits (epic #61).
+    """Audit a model for degeneracy through four optional circuits.
 
-    Standalone auditor: it depends only on numpy, pandas and scikit-learn and
-    knows nothing about the rest of the engine. Each circuit is optional and
-    disabled with a ``check_*`` flag. Errors and NaN are treated as a failure
-    of the corresponding circuit with a clear reason (except partial NaN in
-    predictions — such pairs are masked, as in ``metrics.oof_rmse``). Default
-    thresholds are deliberately soft (v2 statement), so honest models on
-    noisy/wide data are not disqualified.
+        Standalone auditor: it depends only on numpy, pandas and scikit-learn and
+        knows nothing about the rest of the engine. Each circuit is optional and
+        disabled with a ``check_*`` flag. Errors and NaN are treated as a failure
+        of the corresponding circuit with a clear reason (except partial NaN in
+        predictions — such pairs are masked, as in ``metrics.oof_rmse``). Default
+        thresholds are deliberately soft, so honest models on noisy/wide data are
+        not disqualified.
 
-    Attributes:
-        min_prediction_diversity: Circuit A threshold — ``Var(y_pred_oof) /
-            Var(y)`` (default 0.15, soft).
-        adaptive_diversity: Adaptive mode of circuit A relative to the
-            constant model: fails only for a zero prediction spread (the
-            absolute threshold is not applied).
-        min_unique_count: Absolute lower bound for nunique (circuit B).
-        min_unique_ratio: Lower bound for the share of unique predictions,
-            in (0, 1].
-        max_dead_feature_ratio: Dead-feature share threshold (circuit C);
-            above it — a soft signal, and combined with a circuit A failure
-            (when ``dead_features_require_low_diversity``) — a disqualification.
-        dead_features_require_low_diversity: Allow the combined
-            disqualification "many dead features AND low diversity".
-        zero_coef_tolerance: Coefficients with ``abs(coef) <=`` this value
-            count as zero (linear path of circuit C).
-        max_generalization_gap: Circuit D threshold — ``RMSE_oof / RMSE_full``
-            (default 1.5).
-        generalization_gap_mode: Circuit D routing of a gap violation (issue
-            #108): ``"warn"`` (default) — ``soft_warnings``, no
-            disqualification (including an infinite gap, issue #111);
-            ``"reject"`` — a reason and disqualification (legacy strict
-            default). Contract violations and non-computability stay reasons
-            in both modes.
-        check_permutation_sensitivity: Enable the permutation sensitivity
-            audit of circuit C for nonlinear models (cost control).
-        permutation_max_rows: Row subsampling cap for the permutation path.
-        permutation_max_features: Cap on checked columns in the permutation
-            path.
-        permutation_repeats: Shuffle repeats per column.
-        permutation_seed: Fixed seed for permutation determinism.
-        permutation_tolerance: Relative "deadness" threshold of a feature in
-            the permutation path.
-        check_diversity: Enable circuit A.
-        check_unique: Enable circuit B.
-        check_dead_features: Enable circuit C.
-        check_generalization_gap: Enable circuit D.
-        warn_only: Mode without the right to disqualify (statistics are
-            computed, ``is_valid`` is always True).
+        Attributes:
+            min_prediction_diversity: Circuit A threshold — ``Var(y_pred_oof) /
+                Var(y)`` (default 0.15, soft).
+            adaptive_diversity: Adaptive mode of circuit A relative to the
+                constant model: fails only for a zero prediction spread (the
+                absolute threshold is not applied).
+            min_unique_count: Absolute lower bound for nunique (circuit B).
+            min_unique_ratio: Lower bound for the share of unique predictions,
+                in (0, 1].
+            max_dead_feature_ratio: Dead-feature share threshold (circuit C);
+                above it — a soft signal, and combined with a circuit A failure
+                (when ``dead_features_require_low_diversity``) — a disqualification.
+            dead_features_require_low_diversity: Allow the combined
+                disqualification "many dead features AND low diversity".
+            zero_coef_tolerance: Coefficients with ``abs(coef) <=`` this value
+                count as zero (linear path of circuit C).
+            max_generalization_gap: Circuit D threshold — ``RMSE_oof / RMSE_full``
+                (default 1.5).
+    generalization_gap_mode: Circuit D routing of a gap violation: ``"warn"``
+                (default) — ``soft_warnings``, no
+                disqualification (including an infinite gap);
+                ``"reject"`` — a reason and disqualification (legacy strict
+                default). Contract violations and non-computability stay reasons
+                in both modes.
+            check_permutation_sensitivity: Enable the permutation sensitivity
+                audit of circuit C for nonlinear models (cost control).
+            permutation_max_rows: Row subsampling cap for the permutation path.
+            permutation_max_features: Cap on checked columns in the permutation
+                path.
+            permutation_repeats: Shuffle repeats per column.
+            permutation_seed: Fixed seed for permutation determinism.
+            permutation_tolerance: Relative "deadness" threshold of a feature in
+                the permutation path.
+            check_diversity: Enable circuit A.
+            check_unique: Enable circuit B.
+            check_dead_features: Enable circuit C.
+            check_generalization_gap: Enable circuit D.
+            warn_only: Mode without the right to disqualify (statistics are
+                computed, ``is_valid`` is always True).
     """
 
     def __init__(
@@ -427,52 +427,52 @@ class ModelSanityGate:
     ) -> None:
         """Initialize the gate with thresholds and circuit flags.
 
-        Args:
-            min_prediction_diversity: circuit A threshold, in (0, 1]
-                (default 0.15 — soft).
-            adaptive_diversity: adaptive mode A relative to the constant model:
-                fails only for a zero prediction spread (the absolute threshold
-                is not applied).
-            min_unique_count: absolute lower bound for nunique (circuit B).
-            min_unique_ratio: lower bound for the share of unique predictions,
-                in (0, 1].
-            max_dead_feature_ratio: dead-feature share threshold (circuit C):
-                above it — a soft signal, and combined with a circuit A failure
-                (when ``dead_features_require_low_diversity``) — disqualification.
-            dead_features_require_low_diversity: allow the combined
-                disqualification "many dead features AND low diversity".
-            zero_coef_tolerance: coefficients with ``abs(coef) <=`` this value
-                count as zero (linear path of circuit C).
-            max_generalization_gap: circuit D threshold (≥ 1, default 1.5).
-            generalization_gap_mode: circuit D routing of a gap violation
-                (issue #108/#111): ``"warn"`` (default) — the violation lands
-                in ``soft_warnings`` (``is_valid`` stays True, severity ≤ 1),
-                including an infinite gap from division by zero (``RMSE_full
-                ≈ 0`` / ``RMSE_oof ≈ 0``); ``"reject"`` — legacy strict
-                behavior: a reason and disqualification. Contract violations
-                (``y_pred_full = None``) and non-computability (no finite
-                pairs) remain reasons in both modes.
-            check_permutation_sensitivity: enable the permutation sensitivity
-                audit of circuit C for nonlinear models (default True — the
-                cost-controlled permutation path runs; False — the path is
-                skipped and only the linear ``coef_`` path of circuit C works).
-            permutation_max_rows: row subsampling for permutations (>= 1,
-                default 5000).
-            permutation_max_features: cap on checked columns (>= 1,
-                default 100).
-            permutation_repeats: shuffle repeats per column.
-            permutation_seed: fixed seed for permutation determinism.
-            permutation_tolerance: relative "deadness" threshold of a feature:
-                ``|ΔMSE| / (|mse_base| + eps) < tolerance``.
-            check_diversity: enable circuit A.
-            check_unique: enable circuit B.
-            check_dead_features: enable circuit C.
-            check_generalization_gap: enable circuit D.
-            warn_only: mode without the right to disqualify (statistics are
-                computed, ``is_valid`` is always True).
+                Args:
+                    min_prediction_diversity: circuit A threshold, in (0, 1]
+                        (default 0.15 — soft).
+                    adaptive_diversity: adaptive mode A relative to the constant model:
+                        fails only for a zero prediction spread (the absolute threshold
+                        is not applied).
+                    min_unique_count: absolute lower bound for nunique (circuit B).
+                    min_unique_ratio: lower bound for the share of unique predictions,
+                        in (0, 1].
+                    max_dead_feature_ratio: dead-feature share threshold (circuit C):
+                        above it — a soft signal, and combined with a circuit A failure
+                        (when ``dead_features_require_low_diversity``) — disqualification.
+                    dead_features_require_low_diversity: allow the combined
+                        disqualification "many dead features AND low diversity".
+                    zero_coef_tolerance: coefficients with ``abs(coef) <=`` this value
+                        count as zero (linear path of circuit C).
+                    max_generalization_gap: circuit D threshold (≥ 1, default 1.5).
+        generalization_gap_mode: circuit D routing of a gap violation:
+                        ``"warn"`` (default) — the violation lands
+                        in ``soft_warnings`` (``is_valid`` stays True, severity ≤ 1),
+                        including an infinite gap from division by zero (``RMSE_full
+                        ≈ 0`` / ``RMSE_oof ≈ 0``); ``"reject"`` — legacy strict
+                        behavior: a reason and disqualification. Contract violations
+                        (``y_pred_full = None``) and non-computability (no finite
+                        pairs) remain reasons in both modes.
+                    check_permutation_sensitivity: enable the permutation sensitivity
+                        audit of circuit C for nonlinear models (default True — the
+                        cost-controlled permutation path runs; False — the path is
+                        skipped and only the linear ``coef_`` path of circuit C works).
+                    permutation_max_rows: row subsampling for permutations (>= 1,
+                        default 5000).
+                    permutation_max_features: cap on checked columns (>= 1,
+                        default 100).
+                    permutation_repeats: shuffle repeats per column.
+                    permutation_seed: fixed seed for permutation determinism.
+                    permutation_tolerance: relative "deadness" threshold of a feature:
+                        ``|ΔMSE| / (|mse_base| + eps) < tolerance``.
+                    check_diversity: enable circuit A.
+                    check_unique: enable circuit B.
+                    check_dead_features: enable circuit C.
+                    check_generalization_gap: enable circuit D.
+                    warn_only: mode without the right to disqualify (statistics are
+                        computed, ``is_valid`` is always True).
 
-        Raises:
-            ValueError: for invalid thresholds or parameter combinations.
+                Raises:
+                    ValueError: for invalid thresholds or parameter combinations.
         """
         if not 0 < min_prediction_diversity <= 1:
             raise ValueError("min_prediction_diversity must be in (0, 1]")
@@ -582,7 +582,7 @@ class ModelSanityGate:
         generalization_gap = float("nan")
         diversity_failed = False
 
-        # Общая маска конечных пар для контуров, работающих с предсказаниями.
+        # Shared mask of finite pairs for the prediction-based circuits.
         valid_pairs = np.isfinite(y_arr) & np.isfinite(oof_arr)
 
         if self.check_diversity:
@@ -615,12 +615,12 @@ class ModelSanityGate:
                 y_arr, oof_arr, y_pred_full
             )
             reasons.extend(g_reasons)
-            # Маршрутизация нарушений контура Г (issue #108/#111):
-            # warn-режим (дефолт) — soft_warnings (не дисквалифицирует,
-            # включая бесконечный gap при делении на ноль); reject-режим —
-            # reasons (старое строгое поведение). reasons в обоих режимах
-            # остаются только для нарушений контракта (y_pred_full=None) и
-            # невычислимости (нет конечных пар).
+            # Routing of circuit D violations: warn mode
+            # (default) — soft_warnings (does not disqualify,
+            # including an infinite gap from division by zero); reject mode —
+            # reasons (the old strict behavior). Reasons in both modes
+            # remain only for contract violations (y_pred_full=None) and
+            # non-computability (no finite pairs).
             if self.generalization_gap_mode == "reject":
                 reasons.extend(g_warnings)
             else:
@@ -639,14 +639,14 @@ class ModelSanityGate:
                 reasons,
             )
         if soft_warnings:
-            # Требование T6: soft_warnings (dead-признаки у линейных моделей,
-            # «ложно мёртвые» признаки на корреляции, нарушения контура Г в
-            # warn-режиме) логируются на уровне DEBUG/INFO — они не
-            # дисквалифицируют сами по себе и никогда не должны подниматься
-            # до WARNING. Осознанное исключение (issue #111): подозрение на
-            # утечку таргета (RMSE_oof ≈ 0) в warn-режиме логируется на
-            # уровне WARNING — молчаливая дисквалификация подменяла бы
-            # победителя и прятала утечку, нужен заметный сигнал.
+            # Soft warnings (dead features in linear models, "false-dead"
+            # features on correlation, circuit D violations in the warn mode)
+            # are logged at DEBUG/INFO level — they do not disqualify on
+            # their own and must never be raised to WARNING. A deliberate
+            # exception: a suspected target leakage (RMSE_oof ≈ 0) in the
+            # warn mode is logged at the WARNING level — a silent
+            # disqualification would swap the winner and hide the leak, so a
+            # noticeable signal is needed.
             logger.info(
                 "Sanity gate: valid with %d soft warning(s) "
                 "(non-disqualifying signals)",
@@ -814,8 +814,8 @@ class ModelSanityGate:
         if coef is not None:
             return self._check_dead_features_linear(coef, diversity_failed)
         if not self.check_permutation_sensitivity:
-            # Пермутационный путь отключён пользователем (T5): для нелинейных
-            # моделей контур В бездействует — это осознанный выбор стоимости.
+            # The permutation path is disabled by the user: for nonlinear
+            # models circuit C is idle — an intentional cost decision.
             return 0, [], []
         if X is None:
             return (
@@ -868,8 +868,9 @@ class ModelSanityGate:
                         f"below its threshold"
                     )
                 elif not self.check_diversity:
-                    # Комбинация не вычислима: контур А отключён — явно
-                    # сообщаем, что правило не применялось (не молчаливо).
+                    # The combination cannot be computed: circuit A is
+                    # disabled — explicitly report that the rule was not
+                    # applied (not silently).
                     warnings.append(
                         "Circuit C (dead features): combination rule inactive — "
                         "check_diversity=False (dead-feature share is a signal "
@@ -913,7 +914,7 @@ class ModelSanityGate:
             return self._permutation_impl(
                 model=model, X=X, y=y, diversity_failed=diversity_failed
             )
-        except Exception as err:  # noqa: BLE001 — конвертируем в reason
+        except Exception as err:  # noqa: BLE001 — convert into a reason
             return (
                 0,
                 [f"Circuit C (dead features): permutation check failed: {err}"],
@@ -937,7 +938,7 @@ class ModelSanityGate:
             row_idx = rng.choice(n_rows, size=self.permutation_max_rows, replace=False)
         try:
             X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
-        except Exception as err:  # noqa: BLE001 — конвертируем в reason
+        except Exception as err:  # noqa: BLE001 — convert into a reason
             return (
                 0,
                 [(f"Circuit C (dead features): row subsampling of X failed: {err}")],
@@ -966,7 +967,7 @@ class ModelSanityGate:
 
         try:
             base_pred = np.asarray(model.predict(X_sub), dtype=float).reshape(-1)
-        except Exception as err:  # noqa: BLE001 — конвертируем в reason
+        except Exception as err:  # noqa: BLE001 — convert into a reason
             return (
                 0,
                 [
@@ -1009,7 +1010,7 @@ class ModelSanityGate:
             for _ in range(self.permutation_repeats):
                 try:
                     X_perm = _copy_with_permuted_column(X_sub, col, rng)
-                except Exception as err:  # noqa: BLE001 — конвертируем в reason
+                except Exception as err:  # noqa: BLE001 — convert into a reason
                     return (
                         0,
                         [
@@ -1024,7 +1025,7 @@ class ModelSanityGate:
                     perm_pred = np.asarray(model.predict(X_perm), dtype=float).reshape(
                         -1
                     )
-                except Exception as err:  # noqa: BLE001 — конвертируем в reason
+                except Exception as err:  # noqa: BLE001 — convert into a reason
                     return (
                         0,
                         [
@@ -1078,8 +1079,9 @@ class ModelSanityGate:
                         "threshold"
                     )
                 elif not self.check_diversity:
-                    # Комбинация не вычислима: контур А отключён — явно
-                    # сообщаем, что правило не применялось (не молчаливо).
+                    # The combination cannot be computed: circuit A is
+                    # disabled — explicitly report that the rule was not
+                    # applied (not silently).
                     warnings.append(
                         "Circuit C (dead features): combination rule inactive — "
                         "check_diversity=False (dead-feature share is a signal "
@@ -1095,29 +1097,30 @@ class ModelSanityGate:
     ) -> tuple[float, list[str], list[str]]:
         """Check ``RMSE_oof / RMSE_full`` against ``max_generalization_gap``.
 
-        Both RMSEs are computed on the **same** joint mask of finite pairs
-        (y, y_pred_oof, y_pred_full), so the ratio compares apples to apples.
+                Both RMSEs are computed on the **same** joint mask of finite pairs
+                (y, y_pred_oof, y_pred_full), so the ratio compares apples to apples.
 
+                Returns three lists separately so that ``check()`` can route them by
         Returns three lists separately so that ``check()`` can route them by
-        ``generalization_gap_mode`` (issue #108): a gap violation — finite
-        (strictly above the threshold) or infinite (division by zero:
-        ``RMSE_full ≈ 0`` perfect in-sample fit, ``RMSE_oof ≈ 0``) — is
-        returned as a ``warnings`` entry, which ``check()`` turns into a
-        reason in ``"reject"`` mode or into ``soft_warnings`` in ``"warn"``
-        mode (issue #111: in warn mode the circuit never disqualifies because
-        of the gap magnitude). Contract violations (``y_pred_full = None``)
-        and non-computability (no finite pairs) are returned as ``reasons``
-        in **both** modes. ``RMSE_oof ≈ 0`` is the only case additionally
-        logged at ``WARNING`` level in warn mode (possible target leakage).
+                ``generalization_gap_mode``: a gap violation — finite
+                (strictly above the threshold) or infinite (division by zero:
+                ``RMSE_full ≈ 0`` perfect in-sample fit, ``RMSE_oof ≈ 0``) — is
+                returned as a ``warnings`` entry, which ``check()`` turns into a
+                reason in ``"reject"`` mode or into ``soft_warnings`` in ``"warn"``
+                mode (in the warn mode the circuit never disqualifies because
+                of the gap magnitude). Contract violations (``y_pred_full = None``)
+                and non-computability (no finite pairs) are returned as ``reasons``
+                in **both** modes. ``RMSE_oof ≈ 0`` is the only case additionally
+                logged at ``WARNING`` level in warn mode (possible target leakage).
 
-        Args:
-            y: the target.
-            y_pred_oof: OOF predictions.
-            y_pred_full: full-fit predictions (None → fail with a reason).
+                Args:
+                    y: the target.
+                    y_pred_oof: OOF predictions.
+                    y_pred_full: full-fit predictions (None → fail with a reason).
 
-        Returns:
-            tuple[float, list[str], list[str]]: (generalization_gap, reasons,
-                warnings).
+                Returns:
+                    tuple[float, list[str], list[str]]: (generalization_gap, reasons,
+                        warnings).
         """
         if y_pred_full is None:
             return (
@@ -1141,10 +1144,10 @@ class ModelSanityGate:
         rmse_full = float(np.sqrt(mean_squared_error(y[mask], full_arr[mask])))
         rmse_oof = float(np.sqrt(mean_squared_error(y[mask], y_pred_oof[mask])))
         if rmse_oof <= _ZERO_RMSE_EPS:
-            # RMSE_oof ≈ 0: либо идеальная модель, либо утечка таргета.
-            # В warn-режиме — мягкое предупреждение с явным подозрением на
-            # утечку (дополнительно WARNING в лог, см. check(), issue #111);
-            # в reject-режиме — reason (паритет со старым поведением).
+            # RMSE_oof ≈ 0: either a perfect model or a target leakage.
+            # In warn mode — a soft warning with an explicit leakage
+            # suspicion (additionally a WARNING in the log, see check());
+            # in reject mode — a reason (parity with the old behavior).
             return (
                 float("inf"),
                 [],
@@ -1157,10 +1160,10 @@ class ModelSanityGate:
                 ],
             )
         if rmse_full <= _ZERO_RMSE_EPS:
-            # Идеальное обучение на train (дерево глубины 20, 1-NN,
-            # ExtraTrees с min_samples_leaf=1, ...) — нормальное свойство
-            # целого класса моделей; gap уходит в бесконечность, но о
-            # качестве на новых данных это ничего не говорит (issue #111).
+            # A perfect train fit (a depth-20 tree, 1-NN,
+            # ExtraTrees with min_samples_leaf=1, ...) — a normal property of
+            # a whole class of models; the gap goes to infinity, but this
+            # says nothing about the quality on new data.
             return (
                 float("inf"),
                 [],

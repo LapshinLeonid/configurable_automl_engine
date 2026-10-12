@@ -1,36 +1,36 @@
-"""Адаптивные пресеты предобработки признаков.
+"""Adaptive feature preprocessing presets.
 
-Модуль реализует автоматический выбор стратегии предобработки признаков
-в зависимости от выбранного регрессионного алгоритма (issue #18).
+This module implements automatic selection of the feature preprocessing strategy
+depending on the selected regression algorithm.
 
-Ключевые понятия:
+Key concepts:
 
-    * **Пресет предобработки** (:class:`PreprocessingPreset`) — декларативно
-      описанный набор правил обработки числовых признаков: стратегия
-      заполнения пропусков (:data:`ImputationStrategy`) и необходимость
-      масштабирования с его типом (:data:`ScalingType`).
-    * **Класс алгоритмов** (:class:`AlgorithmClass`) — группа регрессионных
-      алгоритмов с общими требованиями к предобработке.
-    * **Таблица соответствия** :data:`ALGORITHM_CLASS_MAPPING` — фиксирует
-      принадлежность каждого поддерживаемого алгоритма к классу. Добавление
-      нового алгоритма не требует правки ядра логики предобработки —
-      достаточно зарегистрировать его в таблице (FR-6).
+    * **Preprocessing preset** (:class:`PreprocessingPreset`) — a declaratively
+      described set of rules for processing numeric features: the missing value
+      imputation strategy (:data:`ImputationStrategy`) and the need for scaling
+      together with its type (:data:`ScalingType`).
+    * **Algorithm class** (:class:`AlgorithmClass`) — a group of regression
+      algorithms with common preprocessing requirements.
+    * **Mapping table** :data:`ALGORITHM_CLASS_MAPPING` — fixes
+      the class membership of every supported algorithm. Adding a new algorithm
+      does not require changing the core preprocessing logic —
+      it is enough to register it in the table.
 
-Правила выбора (FR-1):
+Selection rules:
 
-    1. Имя алгоритма нормализуется (lowercase + раскрытие алиасов) и
-       проверяется по реестру поддерживаемых алгоритмов: неизвестное имя
-       отклоняется :class:`ValueError` (защита от опечаток в конфигурации).
-    2. Класс алгоритма ищется в :data:`ALGORITHM_CLASS_MAPPING`; для
-       поддерживаемого алгоритма без явной регистрации используется класс
-       ``default`` (граничный случай — поведение по умолчанию).
-    3. Пользовательское переопределение (:class:`PreprocessingOverride`)
-       заменяет поля пресета полностью или частично (FR-5): явное указание
-       пользователя имеет приоритет над автоматическим выбором.
+    1. The algorithm name is normalized (lowercased and aliases are expanded) and
+       checked against the registry of supported algorithms: an unknown name is
+       rejected with a :class:`ValueError` (protection against typos in the config).
+    2. The algorithm class is looked up in :data:`ALGORITHM_CLASS_MAPPING`; for a
+       supported algorithm without explicit registration the ``default`` class is
+       used (edge case — default behavior).
+    3. A user override (:class:`PreprocessingOverride`)
+       replaces preset fields fully or partially: an explicit user
+       specification takes priority over automatic selection.
 
-Единая функция :func:`resolve_preprocessing_preset` используется на всех
-этапах жизненного цикла — фазе HPO, финальном обучении и предсказании, —
-что гарантирует единообразие применения пресета (FR-4).
+The single function :func:`resolve_preprocessing_preset` is used at every stage
+of the lifecycle — the HPO phase, final training and prediction — which
+guarantees consistent application of the preset.
 """
 
 from __future__ import annotations
@@ -45,28 +45,28 @@ from configurable_automl_engine.models import (
     resolve_algorithm_name,
 )
 
-#: Стратегии заполнения пропусков для числовых признаков.
+#: Missing value imputation strategies for numeric features.
 ImputationStrategy = Literal["mean", "median"]
 
-#: Типы масштабирования числовых признаков.
+#: Types of scaling for numeric features.
 ScalingType = Literal["standard", "robust", "none"]
 
 
 class AlgorithmClass(str, Enum):
-    """Классы регрессионных алгоритмов с общими требованиями к предобработке.
+    """Classes of regression algorithms with common preprocessing requirements.
 
     Attributes:
-        SCALE_SENSITIVE: Модели, чувствительные к масштабу (линейные, ядерные,
-            основанные на расстояниях) — масштабирование обязательно,
-            заполнение пропусков стандартной стратегией.
-        TREES: Деревья и ансамбли деревьев — масштабирование не требуется и
-            не должно применяться; заполнение пропусков устойчиво к выбросам.
-        GLM_SKEWED: Обобщённые линейные модели со скошенными распределениями —
-            заполнение пропусков, учитывающее скошенность данных; особые
-            требования к масштабированию.
-        UNIVARIATE: Специализированные одномерные алгоритмы — нестандартная
-            предобработка (без масштабирования).
-        DEFAULT: Поведение по умолчанию для алгоритмов без явной регистрации.
+        SCALE_SENSITIVE: Scale-sensitive models (linear, kernel-based,
+            distance-based) — scaling is mandatory, missing values are filled
+            with the standard strategy.
+        TREES: Trees and tree ensembles — scaling is not required and should
+            not be applied; missing value imputation is robust to outliers.
+        GLM_SKEWED: Generalized linear models with skewed distributions —
+            missing value imputation that accounts for data skewness; special
+            scaling requirements.
+        UNIVARIATE: Specialized univariate algorithms — non-standard
+            preprocessing (no scaling).
+        DEFAULT: Default behavior for algorithms without explicit registration.
     """
 
     SCALE_SENSITIVE = "scale_sensitive"
@@ -77,45 +77,43 @@ class AlgorithmClass(str, Enum):
 
 
 class PreprocessingPreset(BaseModel):
-    """Декларативно описанный пресет предобработки признаков (FR-3).
+    """A declaratively described feature preprocessing preset.
 
     Attributes:
-        algorithm_class: Класс алгоритмов, для которого определён пресет.
-        imputation_strategy: Стратегия заполнения пропусков для числовых
-            признаков: ``'mean'`` (стандартная) или ``'median'``
-            (устойчива к выбросам, учитывает скошенность).
-        scaling: Необходимость масштабирования и его тип: ``'standard'``
-            (StandardScaler), ``'robust'`` (RobustScaler, устойчив к выбросам)
-            или ``'none'`` (масштабирование не применяется).
-        description: Человекочитаемое описание пресета.
+        algorithm_class: The algorithm class for which the preset is defined.
+        imputation_strategy: The missing value imputation strategy for numeric
+            features: ``'mean'`` (standard) or ``'median'``
+            (robust to outliers, accounts for skewness).
+        scaling: Whether scaling is needed and its type: ``'standard'``
+            (StandardScaler), ``'robust'`` (RobustScaler, robust to outliers)
+            or ``'none'`` (no scaling is applied).
+        description: A human-readable description of the preset.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     algorithm_class: AlgorithmClass = Field(
         default=AlgorithmClass.DEFAULT,
-        description="Класс алгоритмов, для которого определён пресет.",
+        description="The algorithm class for which the preset is defined.",
     )
     imputation_strategy: ImputationStrategy = Field(
         default="mean",
         description=(
-            "Стратегия заполнения пропусков для числовых признаков: "
-            "'mean' или 'median'."
+            "Missing value imputation strategy for numeric features: "
+            "'mean' or 'median'."
         ),
     )
     scaling: ScalingType = Field(
         default="standard",
-        description=(
-            "Масштабирование числовых признаков: 'standard', 'robust' или 'none'."
-        ),
+        description=("Scaling of numeric features: 'standard', 'robust' or 'none'."),
     )
     description: str = Field(
         default="",
-        description="Человекочитаемое описание пресета.",
+        description="A human-readable description of the preset.",
     )
 
     def __str__(self) -> str:
-        """Компактная строка для логирования выбранного пресета (AC-9)."""
+        """Compact string for logging the selected preset."""
         return (
             f"PreprocessingPreset(class={self.algorithm_class.value!r}, "
             f"imputation_strategy={self.imputation_strategy!r}, "
@@ -126,11 +124,11 @@ class PreprocessingPreset(BaseModel):
 
 
 class PreprocessingOverride(BaseModel):
-    """Явное переопределение пресета предобработки пользователем (FR-5).
+    """An explicit user override of the preprocessing preset.
 
-    Задаётся частично или полностью: ``None`` в поле означает «оставить
-    значение, выбранное автоматически». Некорректные значения отклоняются
-    на этапе валидации конфигурации (Pydantic) с понятным сообщением.
+    It may be specified partially or fully: ``None`` in a field means "keep the
+    automatically selected value". Invalid values are rejected at the config
+    validation stage (Pydantic) with a clear message.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -138,23 +136,23 @@ class PreprocessingOverride(BaseModel):
     imputation_strategy: ImputationStrategy | None = Field(
         default=None,
         description=(
-            "Переопределение стратегии заполнения пропусков "
-            "('mean' или 'median'). None — автовыбор."
+            "Override of the missing value imputation strategy "
+            "('mean' or 'median'). None — automatic selection."
         ),
     )
     scaling: ScalingType | None = Field(
         default=None,
         description=(
-            "Переопределение масштабирования ('standard', 'robust' или 'none'). "
-            "None — автовыбор."
+            "Scaling override ('standard', 'robust' or 'none'). "
+            "None — automatic selection."
         ),
     )
 
 
-#: Таблица соответствия «алгоритм → класс алгоритмов» (FR-2, FR-6).
-#: Ключи — канонические имена алгоритмов из ``AVAILABLE_ALGORITHMS``.
+#: Mapping table "algorithm -> algorithm class".
+#: Keys are canonical algorithm names from ``AVAILABLE_ALGORITHMS``.
 ALGORITHM_CLASS_MAPPING: dict[str, AlgorithmClass] = {
-    # ── Масштабо-чувствительные модели (линейные, ядерные, по расстояниям) ──
+    # ── Scale-sensitive models (linear, kernel-based, distance-based) ──
     "elasticnet": AlgorithmClass.SCALE_SENSITIVE,
     "sgdregressor": AlgorithmClass.SCALE_SENSITIVE,
     "ridge": AlgorithmClass.SCALE_SENSITIVE,
@@ -163,31 +161,31 @@ ALGORITHM_CLASS_MAPPING: dict[str, AlgorithmClass] = {
     "svr": AlgorithmClass.SCALE_SENSITIVE,
     "nearest_neighbors_regression": AlgorithmClass.SCALE_SENSITIVE,
     "gaussian_process_regression": AlgorithmClass.SCALE_SENSITIVE,
-    # ── Деревья и ансамбли деревьев ──
+    # ── Trees and tree ensembles ──
     "decision_tree": AlgorithmClass.TREES,
     "random_forest": AlgorithmClass.TREES,
     "extra_trees": AlgorithmClass.TREES,
     "gradient_boosting": AlgorithmClass.TREES,
     "adaboost": AlgorithmClass.TREES,
     "xgboosting": AlgorithmClass.TREES,
-    # ── GLM со скошенными распределениями ──
+    # ── GLM with skewed distributions ──
     "poissonregressor": AlgorithmClass.GLM_SKEWED,
     "gammaregressor": AlgorithmClass.GLM_SKEWED,
     "tweedieregressor": AlgorithmClass.GLM_SKEWED,
     "glm": AlgorithmClass.GLM_SKEWED,
-    # ── Специализированные одномерные алгоритмы ──
+    # ── Specialized univariate algorithms ──
     "isotonic_regression": AlgorithmClass.UNIVARIATE,
 }
 
-#: Пресет предобработки для каждого класса алгоритмов.
+#: Preprocessing preset for each algorithm class.
 PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
     AlgorithmClass.SCALE_SENSITIVE: PreprocessingPreset(
         algorithm_class=AlgorithmClass.SCALE_SENSITIVE,
         imputation_strategy="mean",
         scaling="standard",
         description=(
-            "Модели, чувствительные к масштабу: масштабирование обязательно "
-            "(StandardScaler), заполнение пропусков стандартной стратегией (mean)."
+            "Scale-sensitive models: scaling is mandatory "
+            "(StandardScaler), missing values are filled with the standard strategy (mean)."
         ),
     ),
     AlgorithmClass.TREES: PreprocessingPreset(
@@ -195,8 +193,8 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
         imputation_strategy="median",
         scaling="none",
         description=(
-            "Деревья и ансамбли деревьев: масштабирование не требуется и не "
-            "применяется; заполнение пропусков медианой (устойчиво к выбросам)."
+            "Trees and tree ensembles: scaling is not required and is not "
+            "applied; missing values are filled with the median (robust to outliers)."
         ),
     ),
     AlgorithmClass.GLM_SKEWED: PreprocessingPreset(
@@ -204,9 +202,9 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
         imputation_strategy="median",
         scaling="robust",
         description=(
-            "GLM со скошенными распределениями: заполнение пропусков медианой "
-            "(устойчиво к выбросам, учитывает скошенность); масштабирование "
-            "RobustScaler (устойчиво к выбросам)."
+            "GLM with skewed distributions: missing values are filled with the median "
+            "(robust to outliers, accounts for skewness); scaling with "
+            "RobustScaler (robust to outliers)."
         ),
     ),
     AlgorithmClass.UNIVARIATE: PreprocessingPreset(
@@ -214,8 +212,8 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
         imputation_strategy="median",
         scaling="none",
         description=(
-            "Специализированные одномерные алгоритмы: масштабирование не "
-            "применяется, заполнение пропусков медианой."
+            "Specialized univariate algorithms: scaling is not "
+            "applied, missing values are filled with the median."
         ),
     ),
     AlgorithmClass.DEFAULT: PreprocessingPreset(
@@ -223,21 +221,21 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
         imputation_strategy="mean",
         scaling="standard",
         description=(
-            "Поведение по умолчанию для алгоритмов без явной регистрации "
-            "в таблице соответствия: mean + StandardScaler."
+            "Default behavior for algorithms without explicit registration "
+            "in the mapping table: mean + StandardScaler."
         ),
     ),
 }
 
 
 def normalize_algorithm(algorithm: str) -> str:
-    """Нормализовать имя алгоритма: lowercase + раскрытие алиасов.
+    """Normalize an algorithm name: lowercased + alias expansion.
 
     Args:
-        algorithm: Имя алгоритма или алиас (например, ``'RF'``, ``'xgb'``).
+        algorithm: An algorithm name or alias (e.g. ``'RF'``, ``'xgb'``).
 
     Returns:
-        Каноническое имя алгоритма для поиска в таблице соответствия.
+        The canonical algorithm name used for lookup in the mapping table.
     """
     return resolve_algorithm_name(algorithm)
 
@@ -245,10 +243,10 @@ def normalize_algorithm(algorithm: str) -> str:
 def _coerce_override(
     override: PreprocessingOverride | dict[str, Any],
 ) -> PreprocessingOverride:
-    """Привести пользовательское переопределение к модели :class:`PreprocessingOverride`.
+    """Coerce a user override into a :class:`PreprocessingOverride` model.
 
     Raises:
-        TypeError: Если передан объект неподдерживаемого типа.
+        TypeError: If an object of an unsupported type is passed.
     """
     if isinstance(override, PreprocessingOverride):
         return override
@@ -264,30 +262,31 @@ def resolve_preprocessing_preset(
     algorithm: str,
     override: PreprocessingOverride | dict[str, Any] | None = None,
 ) -> PreprocessingPreset:
-    """Определить пресет предобработки для заданного алгоритма (FR-1, FR-5).
+    """Determine the preprocessing preset for a given algorithm.
 
-    Логика выбора:
+    Selection logic:
 
-    1. Имя алгоритма нормализуется (lowercase + алиасы) и проверяется
-       по реестру поддерживаемых алгоритмов: неизвестное имя (опечатка)
-       отклоняется явной ошибкой, чтобы не скрывать ошибки конфигурации.
-    2. Класс алгоритма ищется в :data:`ALGORITHM_CLASS_MAPPING`; для
-       поддерживаемого алгоритма без явной регистрации используется класс
-       ``default`` (граничный случай — поведение по умолчанию).
-    3. Если передан ``override``, его непустые поля заменяют соответствующие
-       поля выбранного пресета (частичное или полное переопределение).
+    1. The algorithm name is normalized (lowercased + aliases) and checked
+       against the registry of supported algorithms: an unknown name (typo)
+       is rejected with an explicit error so that configuration mistakes are
+       not hidden.
+    2. The algorithm class is looked up in :data:`ALGORITHM_CLASS_MAPPING`; for a
+       supported algorithm without explicit registration the ``default`` class
+       is used (edge case — default behavior).
+    3. If ``override`` is passed, its non-empty fields replace the corresponding
+       fields of the selected preset (partial or full override).
 
     Args:
-        algorithm: Имя регрессионного алгоритма (или алиас).
-        override: Явное переопределение пресета (FR-5). ``None`` —
-            только автоматический выбор.
+        algorithm: A regression algorithm name (or alias).
+        override: An explicit preset override. ``None`` —
+            only automatic selection.
 
     Returns:
-        Итоговый пресет предобработки для алгоритма.
+        The final preprocessing preset for the algorithm.
 
     Raises:
-        ValueError: Если ``algorithm`` не является поддерживаемым алгоритмом.
-        TypeError: Если ``override`` имеет неподдерживаемый тип.
+        ValueError: If ``algorithm`` is not a supported algorithm.
+        TypeError: If ``override`` has an unsupported type.
     """
     algo_key = normalize_algorithm(algorithm)
     if algo_key not in AVAILABLE_ALGORITHMS:
@@ -311,28 +310,29 @@ def resolve_preprocessing_preset(
 
 
 def requires_missing_indicator(algorithm: str) -> bool:
-    """Нужны ли индикаторы пропусков для заданного алгоритма (issue #56).
+    """Whether missing value indicators are needed for the given algorithm.
 
-    Индикаторы пропусков включаются для всех классов алгоритмов, кроме
-    ``UNIVARIATE``: строго одномерные алгоритмы (``isotonic_regression``)
-    принимают ровно один признак, поэтому дополнительная бинарная
-    колонка-индикатор нарушила бы их входной контракт. Для остальных
-    алгоритмов индикатор даёт модели возможность отличать «реально измеренное
-    значение» от «значение восстановлено импутацией».
+    Missing value indicators are enabled for all algorithm classes except
+    ``UNIVARIATE``: strictly univariate algorithms (``isotonic_regression``)
+    accept exactly one feature, so an additional binary indicator column would
+    violate their input contract. For the remaining algorithms the indicator
+    lets the model distinguish "actually measured value" from "value recovered
+    by imputation".
 
     Args:
-        algorithm: Имя регрессионного алгоритма (или алиас).
+        algorithm: A regression algorithm name (or alias).
 
     Returns:
-        ``True`` — индикаторы пропусков следует включать; ``False`` —
-        алгоритм строго одномерный (индикатор несовместим с его входом).
+        ``True`` — missing value indicators should be enabled; ``False`` —
+        the algorithm is strictly univariate (the indicator is incompatible with
+        its input).
 
     Raises:
-        ValueError: Если ``algorithm`` не является поддерживаемым
-            алгоритмом (делегируется в
-            :func:`resolve_preprocessing_preset`). Вызывающий код обязан
-            либо гарантировать валидность имени, либо обрабатывать
-            исключение с безопасным значением по умолчанию (``True``).
+        ValueError: If ``algorithm`` is not a supported
+            algorithm (delegated to
+            :func:`resolve_preprocessing_preset`). The caller must
+            either guarantee the name is valid or handle the
+            exception with a safe default value (``True``).
     """
     return (
         resolve_preprocessing_preset(algorithm).algorithm_class

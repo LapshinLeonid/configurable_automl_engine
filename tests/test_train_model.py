@@ -29,10 +29,10 @@ from configurable_automl_engine.common.definitions import SerializationFormat
 from unittest.mock import MagicMock, patch
 from configurable_automl_engine.training_engine.logger import (
     setup_logging,
-)  # Импортируем setup
+)  # Import setup
 
 
-# Синтетические данные для тестирования
+# Synthetic data for testing
 X = pd.DataFrame({"a": np.random.rand(50), "b": np.random.rand(50)})
 y = X["a"] * 2 + X["b"] * -3 + np.random.randn(50) * 0.1
 
@@ -44,23 +44,23 @@ def base_params():
 
 def test_successful_training(tmp_path, monkeypatch, base_params):
 
-    # Переходим в рабочую директорию теста
+    # Change to the test working directory
     monkeypatch.chdir(tmp_path)
     log_file = tmp_path / "training.log"
 
-    # Предварительно настраиваем логгер для текущего теста
+    # Pre-configure the logger for the current test
     setup_logging(logfile=log_file)
 
     score = train_model("ElasticNet", "r2", base_params, X, y, enable_logging=True)
 
     assert isinstance(score, float)
     assert 0.3 < score <= 1.0
-    # Теперь проверка пройдет, так как инфраструктура логирования была готова
+    # Now the check passes because the logging infrastructure is ready
     assert log_file.exists()
 
 
 def test_no_logging(tmp_path, monkeypatch, base_params):
-    # Без логирования файл не создаётся
+    # Without logging, the file is not created
     monkeypatch.chdir(tmp_path)
     score = train_model("ElasticNet", "r2", base_params, X, y, enable_logging=False)
     assert isinstance(score, float)
@@ -83,14 +83,14 @@ def test_empty_params(base_params):
 
 
 def test_empty_data(base_params=None):
-    # Оба DataFrame пустые
+    # Both DataFrames are empty
     empty_df = pd.DataFrame([])
     with pytest.raises(TrainingError):
         train_model("ElasticNet", "r2", base_params or {}, empty_df, empty_df)
 
 
 def test_mismatch_dimensions(base_params):
-    # X и y разной длины
+    # X and y have different lengths
     X2 = X.iloc[:10]
     y2 = y.iloc[:9]
     with pytest.raises(TrainingError):
@@ -98,7 +98,7 @@ def test_mismatch_dimensions(base_params):
 
 
 def test_too_few_records(base_params):
-    # Меньше двух записей
+    # Fewer than two records
     X_small = X.iloc[:1]
     y_small = y.iloc[:1]
     with pytest.raises(TrainingError):
@@ -106,17 +106,17 @@ def test_too_few_records(base_params):
 
 
 def test_invalid_param_key(base_params):
-    # Неизвестные параметры должны молча игнорироваться (clean_hyperparameters
-    # отбрасывает их вместо выброса TypeError)
+    # Unknown parameters must be silently ignored (clean_hyperparameters
+    # discards them instead of raising TypeError)
     bad_params = {"foobar": 1}
     score = train_model("ElasticNet", "r2", bad_params, X, y)
     assert isinstance(score, float)
 
 
 def test_negative_alpha(base_params):
-    # Негативный alpha приводит к ValueError из sklearn внутри валидационного
-    # скоринга (issue #24). Все фолды падают → fail-fast TrainingError до
-    # финального обучения, с сохранением текста ошибки sklearn.
+    # Negative alpha raises a ValueError from sklearn inside validation
+    # scoring. All folds fail -> fail-fast TrainingError before
+    # final training, preserving the sklearn error text.
     neg_params = {"alpha": -1.0, "l1_ratio": 0.5}
     with pytest.raises(TrainingError, match="alpha"):
         train_model("ElasticNet", "r2", neg_params, X, y)
@@ -128,78 +128,78 @@ def test_invalid_data_type(base_params):
         train_model("ElasticNet", "r2", base_params, [1, 2, 3], [1, 2, 3])
 
 
-# --- Тесты для IsotonicDataTransformer ---
+# --- Tests for IsotonicDataTransformer ---
 def test_isotonic_transformer_median_nan():
-    """Cлучай, когда медиана не вычисляется (напр. пустой ввод после фильтрации)."""
-    # В текущей реализации до медианы доходит, если не все NaN.
-    # Но если median вернул NaN (крайний случай pandas), сработает строка.
+    """Case when the median cannot be computed (e.g. empty input after filtering)."""
+    # In the current implementation, the median is reached unless all values are NaN.
+    # But if median returned NaN (an edge case in pandas), the line triggers.
     transformer = IsotonicDataTransformer()
-    # Эмулируем структуру данных, где median может вернуть NaN
+    # Emulate a data structure where median may return NaN
     X = pd.DataFrame([np.nan, 1.0])
-    # В норме median будет 1.0, но если мы подменим поведение или передадим специфический тип:
+    # Normally the median will be 1.0, but if we replace the behavior or pass a specific type:
     result = transformer.transform(X)
     assert result.shape == (2, 1)
 
 
-# --- Тесты валидации параметров ---
+# --- Parameter validation tests ---
 def test_trainer_init_invalid_params():
-    """Тесты исключений в конструкторе."""
-    # Некорректный тип алгоритма
+    """Exception tests in the constructor."""
+    # Invalid algorithm type
     with pytest.raises(TrainingError, match="Invalid algorithm"):
         ModelTrainer(algorithm=123)
 
-    # hyperparams не словарь
+    # hyperparams is not a dictionary
     with pytest.raises(TrainingError, match="hyperparams must be a dictionary"):
         ModelTrainer(hyperparams="not a dict")
 
-    # hyperparams не словарь
+    # hyperparams is not a dictionary
     with pytest.raises(TrainingError, match="hyperparams must be a dictionary"):
         ModelTrainer(hyperparams=[1, 2, 3])
-    # множитель оверсэмплинга < 1
+    # oversampling multiplier < 1
     with pytest.raises(TrainingError, match="data_oversampling_multiplier"):
         ModelTrainer(data_oversampling_multiplier=0.5)
-    # неизвестный алгоритм оверсэмплинга
+    # unknown oversampling algorithm
     with pytest.raises(TrainingError, match="Unknown data_oversampling_algorithm"):
         ModelTrainer(data_oversampling_algorithm="magic_boost")
-    # random_with_noise удалён из интерфейса (issue #27) и отклоняется
+    # random_with_noise is removed from the interface and rejected
     with pytest.raises(TrainingError, match="Unknown data_oversampling_algorithm"):
         ModelTrainer(data_oversampling_algorithm="random_with_noise")
 
 
-# --- Тесты подготовки данных ---
+# --- Data preparation tests ---
 def test_prepare_data_variants():
-    """Тестирование различных форматов входных данных."""
+    """Test various input data formats."""
     trainer = ModelTrainer()
 
-    #  Неподдерживаемый тип (напр. list)
+    # Unsupported type (e.g. list)
     with pytest.raises(TrainingError, match="Unsupported data type"):
         trainer._prepare_data([1, 2], [1, 2])
-    #  y как DataFrame (превращение в Series)
+    # y as DataFrame (converted to Series)
     X = np.random.rand(10, 2)
     y_df = pd.DataFrame({"target": np.random.rand(10)})
     X_res, y_res = trainer._prepare_data(X, y_df)
     assert isinstance(y_res, pd.Series)
     assert len(y_res) == 10
-    # Ошибка при разбиении (слишком мало данных для train_test_split)
+    # Error during splitting (too little data for train_test_split)
     X_small = pd.DataFrame({"a": [1]})
     y_small = pd.Series([1])
-    # _prepare_data пропустит (там проверка < 2), но split может упасть
+    # _prepare_data will pass (its check is < 2), but the split may fail
     with pytest.raises(TrainingError, match="Insufficient records for training"):
         trainer.fit(X_small, y_small)
 
 
-# --- Тесты сохранения и загрузки  ---
+# --- Save and load tests ---
 def test_save_load_errors(tmp_path):
-    """Тесты ошибок сериализации."""
+    """Serialization error tests."""
     trainer = ModelTrainer()
     path = tmp_path / "model.pkl"
-    # Сохранение необученной модели
+    # Saving an untrained model
     with pytest.raises(TrainingError, match="Nothing to save"):
         trainer.save(path)
-    # Файл не найден при загрузке
+    # File not found when loading
     with pytest.raises(TrainingError, match="File not found"):
         ModelTrainer.load(tmp_path / "non_existent.pkl")
-    # Загрузка объекта другого типа
+    # Loading an object of a different type
     dummy_path = tmp_path / "dummy.pkl"
     import pickle
 
@@ -210,22 +210,22 @@ def test_save_load_errors(tmp_path):
         ModelTrainer.load(dummy_path)
 
 
-# --- Тесты train_model API  ---
+# --- train_model API tests ---
 
 
 def test_train_model_legacy_api(tmp_path):
-    # 0. ОЧИСТКА ЛОГГЕРА (Критически важно для тестов)
-    # Удаляем старые хендлеры от предыдущих тестов, чтобы setup_logging сработал заново
+    # 0. CLEAR THE LOGGER (Critical for tests)
+    # Remove old handlers from previous tests so setup_logging runs again
     base_logger = logging.getLogger("configurable_automl_engine")
     for handler in base_logger.handlers[:]:
         base_logger.removeHandler(handler)
-        handler.close()  # Закрываем файлы, чтобы Windows позволила их удалить
+        handler.close()  # Close the files so Windows allows them to be removed
 
     X = np.random.rand(20, 2)
     y = np.random.rand(20)
     log_file = tmp_path / "test.log"
 
-    # 1. Тест случая «config dict»
+    # 1. Test of the "config dict" case
     config = {
         "algorithm": "elasticnet",
         "metric": "r2",
@@ -234,38 +234,38 @@ def test_train_model_legacy_api(tmp_path):
         "log_path": str(log_file),
     }
 
-    # Теперь setup_logging увидит пустой список хендлеров и создаст нужный файл
+    # Now setup_logging sees an empty handler list and creates the required file
     setup_logging(logfile=log_file)
 
     score = train_model(config, "r2", {}, X, y, enable_logging=True)
 
     assert isinstance(score, float)
-    # Теперь файл точно будет создан
+    # Now the file is guaranteed to be created
     assert os.path.exists(log_file)
 
-    # 2. Тест простого API
+    # 2. Test of the simple API
     score2 = train_model("elasticnet", "r2", {"alpha": 0.5}, X, y)
     assert isinstance(score2, float)
 
-    # 3. Тест валидации
+    # 3. Validation test
     with pytest.raises(TrainingError, match="Invalid algorithm"):
         train_model(None, "r2", {}, X, y)
 
     with pytest.raises(TrainingError, match="Model parameters are not specified"):
         train_model("elasticnet", "r2", {}, X, y)
 
-    # 4. Тест проброса исключений
+    # 4. Exception propagation test
     with pytest.raises(TrainingError, match="l1_ratio"):
-        # Некорректный параметр l1_ratio (> 1.0) вызывает ValueError в sklearn
-        # внутри валидационного скоринга (issue #24); все фолды падают →
-        # fail-fast TrainingError с сохранением текста ошибки.
+        # An invalid l1_ratio parameter (> 1.0) raises ValueError in sklearn
+        # inside validation scoring; all folds fail ->
+        # fail-fast TrainingError preserves the error text.
         train_model("elasticnet", "r2", {"l1_ratio": 5.0}, X, y)
 
 
-# --- Тесты препроцессора и оверсэмплинга ---
+# --- Preprocessor and oversampling tests ---
 def test_fit_internal_and_predict():
-    """Покрытие внутренних механизмов обучения и предсказания."""
-    # алгоритм со скалированием (SGD)
+    """Coverage of internal training and prediction mechanics."""
+    # algorithm with scaling (SGD)
     trainer = ModelTrainer(algorithm="sgdregressor", hyperparams={"max_iter": 5})
     X = pd.DataFrame({"num": [1, 2, 3, 4, 5, 6], "cat": ["a", "b", "a", "b", "a", "b"]})
     y = np.array([1, 2, 3, 4, 5, 6])
@@ -273,195 +273,195 @@ def test_fit_internal_and_predict():
     trainer.fit(X, y)
     assert trainer.pipeline is not None
 
-    # Вызов predict
+    # Calling predict
     preds = trainer.predict(X)
     assert len(preds) == 6
-    # Predict для необученной модели
+    # Predict for an untrained model
     new_trainer = ModelTrainer()
     with pytest.raises(
         TrainingError, match="The predict method called for an untrained model"
     ):
         new_trainer.predict(X)
-    # Оверсэмплинг в fit_internal
+    # Oversampling in fit_internal
     os_trainer = ModelTrainer(
         data_oversampling=True, data_oversampling_algorithm="random"
     )
     os_trainer.fit(X, y)
-    # Проверяем, что в шагах пайплайна есть oversampler
+    # Verify that oversampler is among the pipeline steps
     step_names = [s[0] for s in os_trainer.pipeline.steps]
     assert "oversampler" in step_names
 
 
 def test_coverage_lock_removal_only():
     """
-    Тест для покрытия строки: if 'lock' in state: del state['lock']
+    Test to cover the line: if 'lock' in state: del state['lock']
     """
     trainer = ModelTrainer(algorithm="elasticnet")
 
-    # Внедряем lock напрямую в словарь объекта
+    # Inject lock directly into the object's state dict
     trainer.lock = threading.Lock()
 
-    # Вызываем __getstate__, который создает копию состояния и удаляет lock
+    # Call __getstate__, which copies the state and removes lock
     state = trainer.__getstate__()
 
-    # Проверяем, что в возвращенном состоянии ключа 'lock' нет
+    # Verify that the returned state has no 'lock' key
     assert "lock" not in state
 
 
 def test_prepare_data_empty_input_coverage():
     """
-    Тест для проверки обработки пустых входных данных.
-    После рефакторинга ожидается ValueError, так как это стандарт
-    для централизованной валидации в проекте.
+    Test to verify handling of empty input data.
+    After refactoring, a ValueError is expected, as this is the standard
+    for centralized validation in the project.
     """
     trainer = ModelTrainer(algorithm="elasticnet")
 
-    # Создаем пустые объекты (DataFrame и Series)
+    # Create empty objects (DataFrame and Series)
     X_empty = pd.DataFrame()
     y_empty = pd.Series([], dtype=float)
 
-    # Теперь ожидаем ValueError вместо TrainingError
+    # Now we expect ValueError instead of TrainingError
     with pytest.raises(TrainingError, match="Data is empty"):
         trainer._prepare_data(X_empty, y_empty)
 
 
 def test_fit_internal_unexpected_error():
     """
-    Тест для покрытия строки: raise TrainingError(f"Internal training failure: {e}")
-    Используем корректный препроцессор и специально настроенный mock модели.
+    Test to cover the line: raise TrainingError(f"Internal training failure: {e}")
+    Use a valid preprocessor and a specially configured model mock.
     """
     trainer = ModelTrainer(algorithm="elasticnet")
     X = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     y = pd.Series([1, 0])
 
-    # 1. Создаем mock для финальной модели
+    # 1. Create a mock for the final model
     mock_model = MagicMock()
 
-    # Чтобы imblearn.pipeline не ругался, что это одновременно и трансформер и модель,
-    # удаляем атрибут 'transform', если он есть в моке по умолчанию.
+    # So that imblearn.pipeline does not complain that it is both a transformer and a model,
+    # we remove the 'transform' attribute if it exists on the mock by default.
     if hasattr(mock_model, "transform"):
         del mock_model.transform
 
-    # Настраиваем падение с системной ошибкой при вызове fit
-    mock_model.fit.side_effect = RuntimeError("Системный сбой")
+    # Configure a system error to be raised when fit is called
+    mock_model.fit.side_effect = RuntimeError("System failure")
 
-    # Нам также нужно, чтобы mock_model имел атрибут _estimator_type (нужно для sklearn/imblearn)
+    # We also need mock_model to have the _estimator_type attribute (needed by sklearn/imblearn)
     mock_model._estimator_type = "regressor"
-    # 2. Выполнение и проверка
-    # Теперь мы должны проскочить валидацию шагов и упасть именно в блоке try-except fit
+    # 2. Execution and verification
+    # Now we must skip the steps validation and fail exactly in the fit try-except block
     with pytest.raises(TrainingError) as excinfo:
         trainer._fit_internal(
             X_train=X,
             y_train=y,
-            preprocessor=StandardScaler(),  # Используем реальный объект вместо мока
+            preprocessor=StandardScaler(),  # Use a real object instead of a mock
             base_model=mock_model,
         )
 
     # 3. Assertions
     assert "Internal training failure" in str(excinfo.value)
-    assert "Системный сбой" in str(excinfo.value)
+    assert "System failure" in str(excinfo.value)
 
 
 def test_coverage_fit_create_model_error():
     """
-    Тест для покрытия строки:
+    Test to cover the line:
     except (ValueError, ImportError) as e: raise TrainingError(f"Error creating model: {e}")
     """
-    # 1. Подготовка: Создаем трейнер с несуществующим алгоритмом.
-    # Большинство фабрик выбрасывают ValueError, если алгоритм не найден в списке поддерживаемых.
+    # 1. Preparation: create a trainer with a non-existent algorithm.
+    # Most factories raise ValueError if the algorithm is not found in the list of supported ones.
     invalid_algorithm = "non_existent_model_2026"
     trainer = ModelTrainer(algorithm=invalid_algorithm)
 
-    # Данные должны быть валидными, чтобы пройти Этап 1 (_prepare_data)
+    # Data must be valid to pass Stage 1 (_prepare_data)
     X = pd.DataFrame({"feature": [1, 2, 3]})
     y = pd.Series([1, 0, 1])
 
-    # 2. Выполнение: При вызове fit код дойдет до Этапа 4 и упадет в блоке try-except
+    # 2. Execution: when fit is called, the code reaches Stage 4 and fails in the try-except block
     with pytest.raises(TrainingError) as excinfo:
         trainer.fit(X, y)
 
-    # 3. Проверка: Убеждаемся, что ошибка обернута в наше сообщение
+    # 3. Verification: make sure the error is wrapped in our message
     assert "Error creating model" in str(excinfo.value)
 
 
 def test_predict_general_exception():
     """
-    Тест для покрытия ветки: raise TrainingError(f"Error during prediction: {e}")
+    Test to cover the branch: raise TrainingError(f"Error during prediction: {e}")
     """
-    # 1. Подготовка
+    # 1. Preparation
     trainer = ModelTrainer(algorithm="elasticnet")
 
-    # Создаем мок-объект для пайплайна
+    # Create a mock object for the pipeline
     mock_pipeline = MagicMock()
-    # Настраиваем его так, чтобы вызов .predict() выбрасывал исключение
+    # Configure it so that .predict() raises an exception
     mock_pipeline.predict.side_effect = RuntimeError("System failure during inference")
 
-    # Вручную устанавливаем мок в trainer (имитируем, что модель "обучена")
+    # Manually set the mock in trainer (simulating that the model is "trained")
     trainer.pipeline = mock_pipeline
-    # 2. Действие и Проверка
-    # Пытаемся вызвать predict с любыми данными
+    # 2. Action and Verification
+    # Try to call predict with any data
     X_input = pd.DataFrame([[1, 2, 3]])
 
     with pytest.raises(TrainingError) as excinfo:
         trainer.predict(X_input)
 
-    # 3. Верификация
-    # Проверяем, что возникло наше кастомное сообщение
+    # 3. Verification
+    # Check that our custom message was raised
     assert "Error during prediction" in str(excinfo.value)
-    # Проверяем, что исходная причина (e) также попала в текст
+    # Check that the original cause (e) is also present in the text
     assert "System failure during inference" in str(excinfo.value)
 
-    # Дополнительно проверяем, что вызов дошел до пайплайна
+    # Additionally check that the call reached the pipeline
     mock_pipeline.predict.assert_called_once()
 
 
 def test_load_general_exception_coverage(monkeypatch):
     """
-    Тест для покрытия ветки: raise TrainingError(f"Error loading artifact: {e}")
+    Test to cover the branch: raise TrainingError(f"Error loading artifact: {e}")
     """
 
-    # 1. Подготовка
-    # Имитируем ошибку, которая НЕ является FileNotFoundError
+    # 1. Preparation
+    # Simulate an error that is NOT a FileNotFoundError
     def mock_load_artifact_crash(*args, **kwargs):
         raise RuntimeError("Unexpected corruption or memory error")
 
-    # Патчим функцию load_artifact в модуле, где находится ModelTrainer
-    # Предполагаем путь: configurable_automl_engine.trainer
+    # Patch the load_artifact function in the module where ModelTrainer lives
+    # The assumed path is: configurable_automl_engine.trainer
     monkeypatch.setattr(
         "configurable_automl_engine.trainer.load_artifact", mock_load_artifact_crash
     )
-    # 2. Действие и Проверка
+    # 2. Action and Verification
     test_path = "some_existing_file.pkl"
 
     with pytest.raises(TrainingError) as excinfo:
-        # Вызываем метод load
+        # Call the load method
         ModelTrainer.load(path=test_path)
-    # 3. Верификация
-    # Проверяем, что сработало именно общее исключение
+    # 3. Verification
+    # Check that the general exception was triggered
     assert "Error loading artifact" in str(excinfo.value)
     assert "Unexpected corruption or memory error" in str(excinfo.value)
 
 
 def test_train_model_y_dataframe_conversion_coverage():
     """
-    Тест для покрытия ветки: if isinstance(y, pd.DataFrame): y_s = pd.Series(y.iloc[:, 0])
-    Проверяем, что функция корректно принимает DataFrame в качестве y.
+    Test to cover the branch: if isinstance(y, pd.DataFrame): y_s = pd.Series(y.iloc[:, 0])
+    Verify that the function correctly accepts a DataFrame as y.
     """
-    # 1. Подготовка данных
-    # Создаем X (минимум 2 строки, чтобы пройти валидацию внутри ModelTrainer)
+    # 1. Data preparation
+    # Create X (at least 2 rows to pass validation inside ModelTrainer)
     X = pd.DataFrame({"feature1": [1, 2, 3], "feature2": [4, 5, 6]})
 
-    # Создаем y как DataFrame с одним столбцом (как это часто бывает после чтения csv)
+    # Create y as a DataFrame with a single column (as often happens after reading a csv)
     y_df = pd.DataFrame({"target": [10, 20, 30]})
 
-    # Параметры для старого API train_model
+    # Parameters for the old train_model API
     algo = "elasticnet"
     metric = "r2"
     hyperparams = {"alpha": 0.1, "l1_ratio": 0.5}
 
-    # 2. Выполнение
-    # Мы вызываем функцию. Нам не обязательно проверять результат R2,
-    # главное — пройти через интересующую нас строку кода без ошибок.
+    # 2. Execution
+    # We call the function. We do not need to check the R2 result,
+    # the key is to pass through the line of interest without errors.
     try:
         result = train_model(
             cfg_or_algo=algo,
@@ -471,26 +471,26 @@ def test_train_model_y_dataframe_conversion_coverage():
             y=y_df,
         )
 
-        # 3. Проверка
+        # 3. Verification
         assert isinstance(result, float)
     except Exception as e:
-        # Если тест упал на обучении (например, из-за данных),
-        # проверка типа y уже должна была выполниться.
-        pytest.fail(f"Функция train_model упала при обработке y как DataFrame: {e}")
+        # If the test failed during training (e.g. due to data),
+        # the y type check should already have been performed.
+        pytest.fail(f"train_model failed while processing y as a DataFrame: {e}")
 
 
 def test_train_model_empty_data_coverage():
     """
-    Тест для покрытия ветки: if n_samples == 0 or len(y_s) == 0: raise TrainingError("Data is empty")
+    Test to cover the branch: if n_samples == 0 or len(y_s) == 0: raise TrainingError("Data is empty")
     """
-    # Подготовка: X пустой, y содержит данные (или наоборот)
+    # Preparation: X is empty, y contains data (or vice versa)
     X_empty = np.array([])
     y_valid = np.array([1, 2, 3])
 
     algo = "elasticnet"
     metric = "r2"
     hyperparams = {"alpha": 0.1}
-    # Действие и Проверка
+    # Action and Verification
     with pytest.raises(TrainingError) as excinfo:
         train_model(
             cfg_or_algo=algo,
@@ -499,36 +499,36 @@ def test_train_model_empty_data_coverage():
             X=X_empty,
             y=y_valid,
         )
-    # Верификация
+    # Verification
     assert str(excinfo.value) == "Data is empty"
 
 
 def test_fit_internal_rethrows_training_error():
     """
-    Тест проверяет, что если внутри pipeline.fit возникает TrainingError,
-    он пробрасывается (raise) без изменений.
+    The test verifies that if a TrainingError occurs inside pipeline.fit,
+    it is re-raised (raise) unchanged.
     """
 
-    # 1. Подготовка данных
+    # 1. Data preparation
     X_train = pd.DataFrame({"feature1": [1, 2, 3], "feature2": [4, 5, 6]})
     y_train = pd.Series([10, 20, 30])
 
-    # 2. Создание "сломанного" препроцессора, который выкидывает TrainingError
+    # 2. Create a "broken" preprocessor that raises TrainingError
     class BrokenPreprocessor(BaseEstimator, TransformerMixin):
         def fit(self, X, y=None):
-            # Имитируем специфическую ошибку обучения
-            raise TrainingError("Специфическая ошибка в процессе подготовки данных")
+            # Simulate a specific training error
+            raise TrainingError("Specific error during data preparation")
 
         def transform(self, X):
             return X
 
-    # 3. Инициализация тренера
+    # 3. Trainer initialization
     trainer = ModelTrainer(algorithm="elasticnet")
 
-    # Заменяем стандартную модель на заглушку
+    # Replace the standard model with a stub
     mock_model = MagicMock()
 
-    # 4. Проверка: перехватываем именно TrainingError
+    # 4. Verification: catch exactly TrainingError
     with pytest.raises(TrainingError) as exc_info:
         trainer._fit_internal(
             X_train=X_train,
@@ -537,23 +537,23 @@ def test_fit_internal_rethrows_training_error():
             base_model=mock_model,
         )
 
-    # Проверяем, что сообщение осталось оригинальным
-    assert "Специфическая ошибка в процессе подготовки данных" in str(exc_info.value)
+    # Check that the message remained original
+    assert "Specific error during data preparation" in str(exc_info.value)
 
 
 def test_prepare_data_index_error_coverage():
     """
-    Тест для покрытия блока except (TypeError, IndexError).
-    Передаем DataFrame без колонок.
-    isinstance(y, pd.DataFrame) вернет True, но y.iloc[:, 0] вызовет IndexError.
+    Test to cover the except (TypeError, IndexError) block.
+    Pass a DataFrame without columns.
+    isinstance(y, pd.DataFrame) returns True, but y.iloc[:, 0] raises IndexError.
     """
     trainer = ModelTrainer(algorithm="elasticnet")
 
-    # X — корректный (2 строки, 1 колонка)
+    # X is valid (2 rows, 1 column)
     X = np.array([[1], [2]])
 
-    # y — DataFrame, у которого есть строки (индексы), но НЕТ столбцов.
-    # Это вызовет IndexError: single positional indexer is out-of-bounds
+    # y is a DataFrame that has rows (indices) but NO columns.
+    # This raises IndexError: single positional indexer is out-of-bounds
     y_no_columns = pd.DataFrame(index=[0, 1])
 
     with pytest.raises(TrainingError, match="Data transformation error"):
@@ -562,113 +562,113 @@ def test_prepare_data_index_error_coverage():
 
 def test_fit_raises_error_when_scorer_returns_none():
     """
-    Тест проверяет выброс TrainingError, если объект-скорер
-    возвращает None вместо числового значения.
+    The test verifies that TrainingError is raised if the scorer object
+    returns None instead of a numeric value.
     """
 
-    # 1. Подготовка минимальных данных для обучения
+    # 1. Prepare minimal data for training
     X = pd.DataFrame({"feature1": [1, 2, 3, 4, 5]})
     y = pd.Series([10, 20, 30, 40, 50])
 
-    # 2. Настройка тренера
-    # Используем любой алгоритм, так как до обучения дело дойдет,
-    # но упадет на расчете метрики
+    # 2. Trainer setup
+    # Use any algorithm, since training will be reached,
+    # but it will fail when computing the metric
     trainer = ModelTrainer(
         algorithm="elasticnet", hyperparams={"alpha": 0.1}, metric="r2"
     )
 
-    # 3. Мокаем (подменяем) get_scorer_object
-    # Нам нужно, чтобы get_scorer_object вернул функцию (callable),
-    # которая при вызове возвращает None
+    # 3. Mock (replace) get_scorer_object
+    # We need get_scorer_object to return a callable
+    # that returns None when called
     mock_scorer = MagicMock(return_value=None)
 
     with patch(
         "configurable_automl_engine.trainer.get_scorer_object", return_value=mock_scorer
     ):
-        # Проверяем, что вызывается именно наше исключение с нужным текстом
+        # Verify that exactly our exception with the required text is raised
         with pytest.raises(TrainingError, match="Scorer returned None"):
             trainer.fit(X, y)
 
 
 def test_train_model_raises_error_when_val_score_is_none():
     """
-    Тест проверяет ситуацию в функции train_model, когда ModelTrainer.fit()
-    отработал, но не установил значение val_score.
+    The test checks the situation in train_model when ModelTrainer.fit()
+    succeeded but did not set the val_score value.
     """
-    # 1. Данные для прохождения валидации (минимум 2 примера)
+    # 1. Data to pass validation (at least 2 samples)
     X = np.array([[1], [2], [3]])
     y = np.array([1, 2, 3])
 
     algo = "elasticnet"
     metric = "r2"
     params = {"alpha": 0.5}
-    # 2. Мокаем класс ModelTrainer прямо в модуле trainer.py
-    # Это гарантирует, что train_model увидит именно Mock
+    # 2. Mock the ModelTrainer class directly in the trainer.py module
+    # This guarantees that train_model sees exactly the Mock
     with patch("configurable_automl_engine.trainer.ModelTrainer") as MockTrainer:
-        # Настраиваем поведение экземпляра
+        # Configure the instance behavior
         mock_instance = MagicMock()
         MockTrainer.return_value = mock_instance
 
-        # fit() возвращает self, имитируем успешное завершение
+        # fit() returns self, simulating a successful completion
         mock_instance.fit.return_value = mock_instance
 
-        # ПРОВОКАЦИЯ ОШИБКИ: val_score остается None
+        # Provoke the error: val_score remains None
         mock_instance.val_score = None
 
-        # 3. Проверяем, что функция train_model поймала этот None и выбросила исключение
+        # 3. Verify that train_model caught this None and raised an exception
         with pytest.raises(TrainingError, match="Model did not return a metric value"):
             train_model(algo, metric, params, X=X, y=y)
 
 
-# Тесты для IsotonicDataTransformer
+# Tests for IsotonicDataTransformer
 class TestIsotonicDataTransformer:
     def test_get_dimensions_various_inputs(self):
-        """Покрытие строк в _get_dimensions для разных типов входных данных."""
+        """Cover lines in _get_dimensions for different input data types."""
         transformer = IsotonicDataTransformer()
 
-        # 1. Покрытие hasattr(X, 'shape') и len(X.shape) > 1 (Numpy 2D)
+        # 1. Cover hasattr(X, 'shape') and len(X.shape) > 1 (Numpy 2D)
         assert transformer._get_dimensions(np.zeros((5, 3))) == (5, 3)
 
-        # 2. Покрытие len(X.shape) == 1 (Numpy 1D)
+        # 2. Cover len(X.shape) == 1 (Numpy 1D)
         assert transformer._get_dimensions(np.array([1, 2, 3])) == (3, 1)
 
-        # 3. Покрытие вложенных списков (list of lists)
+        # 3. Cover nested lists (list of lists)
         assert transformer._get_dimensions([[1, 2], [3, 4]]) == (2, 2)
 
-        # 4. Покрытие простых списков (n_cols = 1)
+        # 4. Cover plain lists (n_cols = 1)
         assert transformer._get_dimensions([1, 2, 3]) == (3, 1)
 
-        # 5. Покрытие пустого списка
+        # 5. Cover the empty list
         assert transformer._get_dimensions([]) == (0, 1)
 
     def test_fit_logic_and_median(self):
-        """Покрытие логики метода fit, включая расчет медианы и разные типы X."""
-        # 1. Тест для DataFrame и расчета медианы
+        """Cover the fit method logic, including median calculation and different X types."""
+        # 1. Test for DataFrame and median calculation
         df = pd.DataFrame({"a": [1, 2, np.nan, 4, 5]})
         transformer = IsotonicDataTransformer(feature_index=0)
         transformer.fit(df)
-        assert transformer.median_ == 3.0  # медиана [1, 2, 4, 5] это 3.0
+        assert transformer.median_ == 3.0  # median of [1, 2, 4, 5] is 3.0
 
-        # 2. Тест для Numpy массива (2D)
+        # 2. Test for a Numpy array (2D)
         arr = np.array([[10], [20], [30]])
         transformer.fit(arr)
         assert transformer.median_ == 20.0
 
-        # 3. Тест для случая, когда все NaN (median_ должен стать 0.0)
+        # 3. Test for the case when all values are NaN (median_ should become 0.0)
         df_nan = pd.DataFrame({"a": [np.nan, np.nan]})
         transformer.fit(df_nan)
         assert transformer.median_ == 0.0
 
     def test_transform_index_out_of_bounds(self):
-        """Покрытие ошибки feature_index out of bounds."""
+        """Cover the feature_index out of bounds error."""
         transformer = IsotonicDataTransformer(feature_index=5)
-        X = np.array([[1, 2], [3, 4]])  # Всего 2 колонки
+        X = np.array([[1, 2], [3, 4]])  # Only 2 columns
 
         with pytest.raises(TrainingError, match="out of bounds"):
             transformer.transform(X)
 
     def test_transform_all_nan_error(self):
-        """Покрытие ошибки, когда колонка содержит только NaN."""
+        """Cover the error when a column contains only NaN."""
         transformer = IsotonicDataTransformer(feature_index=0)
         X = pd.DataFrame({"a": [np.nan, np.nan]})
 
@@ -676,7 +676,7 @@ class TestIsotonicDataTransformer:
             transformer.transform(X)
 
     def test_transform_different_formats(self):
-        """Покрытие веток извлечения колонок (DataFrame, ndarray, list)."""
+        """Cover the column extraction branches (DataFrame, ndarray, list)."""
         # 1. DataFrame branch
         df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
         t1 = IsotonicDataTransformer(feature_index=1).fit(df)
@@ -694,41 +694,41 @@ class TestIsotonicDataTransformer:
         assert np.array_equal(res_lst, np.array([[20], [40]]))
 
     def test_exception_unification(self):
-        """Покрытие блока except Exception и унификации ошибок."""
+        """Cover the except Exception block and error unification."""
         transformer = IsotonicDataTransformer(feature_index=0)
-        # Передаем что-то, что вызовет ошибку внутри (например, None)
+        # Pass something that raises an error inside (e.g. None)
         with pytest.raises(TrainingError, match="Data transformation error"):
             transformer.transform(None)
 
     def test_imputation_with_median(self):
-        """Проверка, что пропуски реально заполняются медианой из fit."""
-        X_train = pd.DataFrame({"a": [1, 2, 3]})  # медиана 2
+        """Verify that missing values are actually filled with the median from fit."""
+        X_train = pd.DataFrame({"a": [1, 2, 3]})  # median is 2
         X_test = pd.DataFrame({"a": [1, np.nan, 3]})
 
         transformer = IsotonicDataTransformer(feature_index=0)
         transformer.fit(X_train)
         result = transformer.transform(X_test)
 
-        assert result[1, 0] == 2.0  # NaN заменен на медиану 2.0
+        assert result[1, 0] == 2.0  # NaN replaced by the median 2.0
 
     def test_features_parameter_validation(self):
         """
-        Покрытие веток валидации параметра features:
-        1. features не является списком.
-        2. features является списком, но содержит не только строки.
+        Cover the branches of features parameter validation:
+        1. features is not a list.
+        2. features is a list but contains non-string items.
         """
-        attr_name = "selected_features"  # Имя атрибута для сообщения об ошибке
+        attr_name = "selected_features"  # Attribute name for the error message
 
 
 class TestModelTrainerCoverage:
-    # 1. Тест для проверки валидации списков признаков в __init__
-    # Строки: if features is not None: if not isinstance(features, list)... raise TrainingError
+    # 1. Test for validating feature lists in __init__
+    # Lines: if features is not None: if not isinstance(features, list)... raise TrainingError
     @pytest.mark.parametrize(
         "attr_name, invalid_value",
         [
             ("categorical_features", "not_a_list"),
-            ("numerical_features", [1, 2, 3]),  # список, но не строк
-            ("categorical_features", ["col1", None]),  # есть не-строка в списке
+            ("numerical_features", [1, 2, 3]),  # a list, but not of strings
+            ("categorical_features", ["col1", None]),  # contains a non-string in the list
         ],
     )
     def test_init_features_validation_error(self, invalid_value, attr_name):
@@ -737,8 +737,8 @@ class TestModelTrainerCoverage:
             ModelTrainer(**kwargs)
         assert f"Parameter {attr_name} must be a list of strings" in str(excinfo.value)
 
-    # 2. Тест для _validate_features (отсутствующие колонки)
-    # Строки: missing = [col for col in specified_features if col not in X.columns] ... raise TrainingError
+    # 2. Test for _validate_features (missing columns)
+    # Lines: missing = [col for col in specified_features if col not in X.columns] ... raise TrainingError
     def test_validate_features_missing_columns(self):
         trainer = ModelTrainer(
             categorical_features=["cat1"], numerical_features=["num1"]
@@ -749,42 +749,42 @@ class TestModelTrainerCoverage:
             trainer._validate_features(df)
         assert "Specified columns not found in data: ['num1']" in str(excinfo.value)
 
-    # 3. Тест для _detect_feature_types (когда оба списка заданы)
-    # Строки: if self.categorical_features is not None and self.numerical_features is not None: ... return
+    # 3. Test for _detect_feature_types (when both lists are specified)
+    # Lines: if self.categorical_features is not None and self.numerical_features is not None: ... return
     def test_detect_feature_types_early_return(self):
         trainer = ModelTrainer(
             categorical_features=["cat_col"], numerical_features=["num_col"]
         )
         df = pd.DataFrame({"cat_col": ["a"], "num_col": [1]})
 
-        # Вызываем метод. Если условие работает, он вызовет _validate_features и выйдет (return)
-        # Мы можем проверить это, убедившись, что авто-определение не изменило списки
+        # Call the method. If the condition works, it calls _validate_features and returns
+        # We can verify this by checking that auto-detection did not change the lists
         trainer._detect_feature_types(df, target_column="target")
 
         assert trainer.categorical_features == ["cat_col"]
         assert trainer.numerical_features == ["num_col"]
 
-    # 4. Тест для исключения id_column
-    # Строки: if self.id_column: exclude.add(self.id_column)
+    # 4. Test for excluding id_column
+    # Lines: if self.id_column: exclude.add(self.id_column)
     def test_detect_feature_types_exclude_id(self):
         trainer = ModelTrainer(id_column="my_id")
-        # Создаем DF, где есть ID, таргет и один полезный признак
+        # Create a DF with an ID, a target, and one useful feature
         df = pd.DataFrame({"my_id": [1, 2], "target": [10, 20], "feature": [0.1, 0.2]})
 
-        # Списки изначально None, чтобы сработало авто-определение
+        # The lists are initially None so that auto-detection kicks in
         trainer._detect_feature_types(df, target_column="target")
 
-        # Проверяем, что my_id не попал ни в один из списков
+        # Verify that my_id is not in either list
         assert "my_id" not in trainer.categorical_features
         assert "my_id" not in trainer.numerical_features
         assert "feature" in trainer.numerical_features
 
-    # 5. Тест для _extract_metadata с объектами, имеющими get_data_info
-    # Строки: if hasattr(X, 'get_data_info'): return X.get_data_info()['columns']
+    # 5. Test for _extract_metadata with objects having get_data_info
+    # Lines: if hasattr(X, 'get_data_info'): return X.get_data_info()['columns']
     def test_extract_metadata_custom_object(self):
         trainer = ModelTrainer()
 
-        # Создаем мок-объект, имитирующий SharedDataFrame или аналогичный
+        # Create a mock object mimicking SharedDataFrame or similar
         mock_data = MagicMock()
         mock_data.get_data_info.return_value = {"columns": ["custom1", "custom2"]}
 
@@ -793,21 +793,21 @@ class TestModelTrainerCoverage:
         assert cols == ["custom1", "custom2"]
         mock_data.get_data_info.assert_called_once()
 
-    # 6. Дополнительный тест: отсутствие признаков вообще
+    # 6. Additional test: no features at all
     def test_validate_features_empty_ok(self):
         trainer = ModelTrainer(categorical_features=None, numerical_features=None)
         df = pd.DataFrame({"any": [1]})
-        # Не должно вызывать исключений
+        # Should not raise any exceptions
         trainer._validate_features(df)
 
 
 def test_build_preprocessor_no_features_matched(caplog):
     """
-    Тест ветки: self.logger.warning("No features matched...")
-    Срабатывает, когда списки признаков пусты или не найдены в feature_names.
+    Test of the branch: self.logger.warning("No features matched...")
+    Triggers when the feature lists are empty or not found in feature_names.
     """
     trainer = ModelTrainer(categorical_features=[], numerical_features=[])
-    # Передаем список имен, в котором нет того, что ищет тренер
+    # Pass a list of names that does not contain what the trainer looks for
     feature_names = ["some_random_column"]
 
     with caplog.at_level(logging.WARNING):
@@ -815,15 +815,15 @@ def test_build_preprocessor_no_features_matched(caplog):
 
     assert "No features matched for preprocessing" in caplog.text
     assert isinstance(preprocessor, ColumnTransformer)
-    # Проверка, что создался passthrough для всех колонок
+    # Check that passthrough was created for all columns
     assert preprocessor.transformers[0][0] == "bypass"
     assert preprocessor.transformers[0][1] == "passthrough"
 
 
 def test_prepare_data_target_str_x_not_dataframe():
     """
-    Тест ветки: if isinstance(y, str) and not isinstance(X, pd.DataFrame)
-    Должен вызвать TrainingError.
+    Test of the branch: if isinstance(y, str) and not isinstance(X, pd.DataFrame)
+    Should raise TrainingError.
     """
     trainer = ModelTrainer()
     X_ndarray = np.array([[1, 2], [3, 4]])
@@ -838,7 +838,7 @@ def test_prepare_data_target_str_x_not_dataframe():
 
 def test_prepare_data_target_str_success():
     """
-    Тест ветки: Извлечение X_obj и y_obj, если y - строка (название колонки).
+    Test of the branch: Extracting X_obj and y_obj when y is a string (column name).
     """
     trainer = ModelTrainer()
     df = pd.DataFrame({"feature1": [1, 2], "target": [0, 1]})
@@ -852,17 +852,17 @@ def test_prepare_data_target_str_success():
 
 def test_prepare_data_y_shared_dataframe_view():
     """
-    Тест ветки: elif hasattr(y, 'get_view'): (Поддержка SharedDataFrame для y)
+    Test of the branch: elif hasattr(y, 'get_view'): (SharedDataFrame support for y)
     """
     trainer = ModelTrainer()
     X = pd.DataFrame({"a": [1, 2]})
 
-    # Имитируем SharedDataFrame
+    # Mimic SharedDataFrame
     mock_shared_df = MagicMock()
     mock_view = pd.DataFrame({"target": [10, 20]})
     mock_shared_df.get_view.return_value = mock_view
 
-    # Проверяем, что вызывается get_view() и берется первая колонка
+    # Verify that get_view() is called and the first column is taken
     _, y_obj = trainer._prepare_data(X, mock_shared_df)
 
     assert isinstance(y_obj, pd.Series)
@@ -872,8 +872,8 @@ def test_prepare_data_y_shared_dataframe_view():
 
 def test_prepare_data_y_as_ndarray_fallback():
     """
-    Тест ветки: else: y_obj = np.asarray(y)
-    Для случаев, когда y - это обычный список.
+    Test of the branch: else: y_obj = np.asarray(y)
+    For cases when y is a plain list.
     """
     trainer = ModelTrainer()
     X = pd.DataFrame({"a": [1, 2]})
@@ -887,15 +887,15 @@ def test_prepare_data_y_as_ndarray_fallback():
 
 def test_prepare_data_empty_data_reraise():
     """
-    Тест ветки: if str(e) == "Data is empty": raise
-    Проверяет, что ошибка "Data is empty" пробрасывается как есть,
-    а не оборачивается в "Data transformation error".
+    Test of the branch: if str(e) == "Data is empty": raise
+    Verifies that the "Data is empty" error is re-raised as is,
+    not wrapped in "Data transformation error".
     """
     trainer = ModelTrainer()
-    empty_df = pd.DataFrame()  # Пустой DF
+    empty_df = pd.DataFrame()  # Empty DF
 
-    # Мы ожидаем TrainingError("Data is empty"), так как это условие
-    # прописано внутри блока try перед возникновением исключений трансформации
+    # We expect TrainingError("Data is empty") since this condition
+    # is written inside the try block before transformation exceptions occur
     with pytest.raises(TrainingError) as exc_info:
         trainer._prepare_data(empty_df, np.array([]))
 
@@ -904,31 +904,31 @@ def test_prepare_data_empty_data_reraise():
 
 def test_prepare_data_catch_and_raise_empty_data_string():
     """
-    Тест ветки: if str(e) == "Data is empty": raise
-    Имитируем ситуацию, когда стандартное исключение (ValueError)
-    выбрасывается с текстом "Data is empty".
+    Test of the branch: if str(e) == "Data is empty": raise
+    Simulate a situation where the standard exception (ValueError)
+    is raised with the text "Data is empty".
     """
     trainer = ModelTrainer()
     X = pd.DataFrame({"a": [1, 2]})
     y = [10, 20]
-    # Мы имитируем, что метод _extract_metadata выбрасывает ValueError("Data is empty")
-    # Это исключение попадет в блок except (ValueError, ...)
-    # И там сработает условие if str(e) == "Data is empty": raise
+    # We simulate that the _extract_metadata method raises ValueError("Data is empty")
+    # This exception enters the except (ValueError, ...) block
+    # And there the condition if str(e) == "Data is empty": raise triggers
     with patch.object(
         ModelTrainer, "_extract_metadata", side_effect=ValueError("Data is empty")
     ):
         with pytest.raises(ValueError) as exc_info:
             trainer._prepare_data(X, y)
 
-        # Проверяем, что было выброшено именно исходное ValueError,
-        # а не обернутое в TrainingError
+        # Verify that exactly the original ValueError was raised,
+        # not one wrapped in TrainingError
         assert exc_info.type is ValueError
         assert str(exc_info.value) == "Data is empty"
 
 
 class TestModelTrainerCoverage2:
     # --------------------------------------------------------------------------
-    # 1. Покрытие блока обработки метрик (val_score и abs)
+    # 1. Coverage of the metric handling block (val_score and abs)
     # --------------------------------------------------------------------------
     def test_metric_abs_conversion_coverage(self):
         """
@@ -963,12 +963,12 @@ class TestModelTrainerCoverage2:
         assert hasattr(trainer, "val_score")
 
     def test_global_nrmse_metric_fit_does_not_crash(self):
-        """Регрессия ревью PR #18: metric='global_nrmse' не роняет fit().
+        """Regression: metric='global_nrmse' does not crash fit().
 
-        Раньше is_greater_better('global_nrmse') кидал ValueError (sklearn не
-        знает такого скорера), а вызов шёл безусловно из eager f-string
-        debug-лога _score_on_validation_splits на каждом fit(). На main путь
-        работал; теперь снова работает и возвращает положительный NRMSE.
+        Earlier, is_greater_better('global_nrmse') raised ValueError (sklearn does
+        not know such a scorer), and the call ran unconditionally from an eager
+        f-string debug log of _score_on_validation_splits on every fit(). The main
+        path worked; now it works again and returns a positive NRMSE.
         """
         df = pd.DataFrame(
             {
@@ -987,21 +987,21 @@ class TestModelTrainerCoverage2:
         assert isinstance(trainer.val_score, float)
 
     # --------------------------------------------------------------------------
-    # 2. Покрытие веток predict (SharedDataFrame vs np.asarray)
+    # 2. Coverage of predict branches (SharedDataFrame vs np.asarray)
     # --------------------------------------------------------------------------
     def test_predict_input_branches_coverage(self):
         """
-        Покрывает строки в методе predict:
+        Covers the lines in the predict method:
         elif isinstance(X, SharedDataFrame):
             X_input = X.shared_array
         else:
             X_input = np.asarray(X)
         """
-        # Подготовка: обучаем модель на простых данных
+        # Preparation: train the model on simple data
         df_train = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "target": [7, 8, 9]})
         trainer = ModelTrainer(algorithm="ridge")
         trainer.fit(df_train, "target")
-        # ВЕТКА A: Передача SharedDataFrame
+        # BRANCH A: Passing SharedDataFrame
         # (X_input = X.shared_array)
         test_df = pd.DataFrame({"a": [1], "b": [4]})
         sdf = SharedDataFrame(test_df)
@@ -1013,7 +1013,7 @@ class TestModelTrainerCoverage2:
         finally:
             sdf.close()
             sdf.unlink()
-        # ВЕТКА B: Передача обычного списка (не DF, не ndarray)
+        # BRANCH B: Passing a plain list (not a DF, not an ndarray)
         # (X_input = np.asarray(X))
         raw_list = [[1, 4], [2, 5]]
         res_list = trainer.predict(raw_list)
@@ -1022,7 +1022,7 @@ class TestModelTrainerCoverage2:
         assert res_list.shape == (2,)
 
     # --------------------------------------------------------------------------
-    # 3. Покрытие веток _prepare_data (SharedDataFrame в подготовке)
+    # 3. Coverage of _prepare_data branches (SharedDataFrame in preparation)
     # --------------------------------------------------------------------------
     def test_predict_shared_df_branch(self):
         """
@@ -1044,20 +1044,20 @@ class TestModelTrainerCoverage2:
 
 def test_fit_sets_feature_names_from_numerical_when_none():
     """
-    Тестирует строку: if self.feature_names is None: self.feature_names = self.numerical_features
-    Условие: Входные данные - numpy array (нет имен колонок),
-    categorical_features не заданы.
+    Tests the line: if self.feature_names is None: self.feature_names = self.numerical_features
+    Condition: input data is a numpy array (no column names),
+    categorical_features is not specified.
     """
-    # Создаем данные без имен колонок
+    # Create data without column names
     X = np.array([[1, 2], [3, 4], [5, 6], [7, 8]])
     y = np.array([10, 20, 30, 40])
 
     trainer = ModelTrainer(algorithm="elasticnet", random_state=42)
 
-    # Мокаем внешние зависимости, чтобы тест не упал на этапе обучения модели.
-    # create_model возвращает реальный лёгкий оценщик: валидационный скоринг
-    # (issue #24) клонирует модель на каждый фолд, а клонирование MagicMock
-    # приводит к RecursionError (sklearn clone).
+    # Mock the external dependencies so the test does not fail during model training.
+    # create_model returns a real lightweight estimator: validation scoring
+    # clones the model for each fold, and cloning a MagicMock
+    # leads to RecursionError (sklearn clone).
     with (
         patch(
             "configurable_automl_engine.trainer.create_model",
@@ -1065,34 +1065,34 @@ def test_fit_sets_feature_names_from_numerical_when_none():
         ) as mock_create,
         patch("configurable_automl_engine.trainer.get_scorer_object") as mock_scorer,
     ):
-        # Настройка моков для минимально успешного прохода
+        # Configure mocks for a minimally successful pass
         mock_scorer.return_value = lambda m, x, y: 0.9
 
         trainer.fit(X, y)
 
-        # Проверка: так как имен не было, они должны были создаться как col_0, col_1
-        # и присвоиться в feature_names
+        # Check: since there were no names, they must have been created as col_0, col_1
+        # and assigned to feature_names
         assert trainer.feature_names == ["col_0", "col_1"]
         assert trainer.feature_names == trainer.numerical_features
 
 
 def test_fit_extracts_metadata_as_fallback():
     """
-    Тестирует строку: self.feature_names = self._extract_metadata(X_prepared) or []
-    Условие: Мы принудительно зануляем feature_names перед этапом построения препроцессора.
+    Tests the line: self.feature_names = self._extract_metadata(X_prepared) or []
+    Condition: we forcibly reset feature_names before the preprocessor building stage.
     """
     X = pd.DataFrame({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
     y = pd.Series([1, 0, 1, 0])
 
     trainer = ModelTrainer()
-    # Патчим зависимости.
-    # ВАЖНО: убедитесь, что путь к 'create_model' и др. совпадает с вашей структурой
+    # Patch the dependencies.
+    # IMPORTANT: make sure the path to 'create_model' etc. matches your structure
     with (
         patch.object(ModelTrainer, "_detect_feature_types"),
         patch.object(ModelTrainer, "_extract_metadata") as mock_extract,
-        # Реальный лёгкий оценщик вместо MagicMock: валидационный скоринг
-        # (issue #24) клонирует модель на каждый фолд, а clone(MagicMock)
-        # даёт RecursionError.
+        # A real lightweight estimator instead of MagicMock: validation scoring
+        # clones the model for each fold, and clone(MagicMock)
+        # causes RecursionError.
         patch(
             "configurable_automl_engine.trainer.create_model",
             return_value=LinearRegression(),
@@ -1105,22 +1105,22 @@ def test_fit_extracts_metadata_as_fallback():
             return_value="min better",
         ),
     ):
-        # 1. Настраиваем возврат имен при повторном извлечении
+        # 1. Configure the returned names on the repeated extraction
         mock_extract.return_value = ["a", "b"]
 
-        # 3. Исправляем ошибку MagicMock.__format__:
-        # Настраиваем фабрику скореров так, чтобы она возвращала функцию,
-        # которая возвращает число (float), а не мок-объект.
+        # 3. Fix the MagicMock.__format__ error:
+        # Configure the scorer factory so that it returns a function
+        # that returns a number (float) instead of a mock object.
         mock_scorer_func = MagicMock(return_value=0.85)
         mock_scorer_factory.return_value = mock_scorer_func
 
-        # Нам нужно, чтобы к моменту "Этапа 3" в методе fit() self.feature_names был None.
-        # Используем side_effect для _prepare_data, чтобы сбросить поле после его заполнения.
+        # We need self.feature_names to be None by "Stage 3" in the fit() method.
+        # Use a side_effect for _prepare_data to reset the field after it is filled.
         original_prepare = trainer._prepare_data
 
         def side_effect_prepare(X_in, y_in):
             res_X, res_y = original_prepare(X_in, y_in)
-            trainer.feature_names = None  # Сбрасываем для теста ветки fallback
+            trainer.feature_names = None  # Reset for the fallback branch test
             return res_X, res_y
 
         with patch.object(
@@ -1128,31 +1128,31 @@ def test_fit_extracts_metadata_as_fallback():
         ):
             trainer.fit(X, y)
 
-        # ПРОВЕРКИ:
-        # Убеждаемся, что fallback сработал и имена извлечены повторно
+        # CHECKS:
+        # Make sure the fallback worked and the names were extracted again
         assert trainer.feature_names == ["a", "b"]
-        # Проверяем, что вызов экстрактора действительно был сделан в Этапе 3
+        # Verify that the extractor was indeed called in Stage 3
         assert mock_extract.called
-        # Проверяем, что метрика корректно записалась
+        # Verify that the metric was recorded correctly
         assert trainer.val_score == 0.85
 
 
 def test_coverage_feature_names_from_numerical_fallback():
     """
-    Тестирует конкретную строку:
+    Tests the specific line:
     if self.feature_names is None:
         self.feature_names = self.numerical_features
     """
-    # 1. Данные НЕ DataFrame (чтобы попасть в else-ветку fit)
+    # 1. Data NOT a DataFrame (to reach the else branch of fit)
     X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
     y = np.array([1, 2, 3, 4])
     trainer = ModelTrainer(algorithm="elasticnet")
-    # Путь к модулю (замените на ваш фактический путь)
+    # Module path (replace with your actual path)
     module_path = "configurable_automl_engine.trainer"
     with (
-        # Реальный лёгкий оценщик вместо MagicMock: валидационный скоринг
-        # (issue #24) клонирует модель на каждый фолд, а clone(MagicMock)
-        # даёт RecursionError.
+        # A real lightweight estimator instead of MagicMock: validation scoring
+        # clones the model for each fold, and clone(MagicMock)
+        # causes RecursionError.
         patch(
             f"{module_path}.create_model", return_value=LinearRegression()
         ),
@@ -1161,20 +1161,20 @@ def test_coverage_feature_names_from_numerical_fallback():
             f"{module_path}.direction_label", return_value="min better"
         ),
     ):
-        # Настраиваем окружение обучения
+        # Configure the training environment
         mock_scorer_factory.return_value = lambda p, x, y: 0.5
 
-        # КЛЮЧЕВОЙ МОМЕНТ:
-        # Мы патчим _extract_metadata ТАК, чтобы он вернул None.
-        # Это заставит _prepare_data оставить self.feature_names = None.
+        # KEY POINT:
+        # We patch _extract_metadata to return None.
+        # This makes _prepare_data leave self.feature_names = None.
         with patch.object(ModelTrainer, "_extract_metadata", return_value=None):
             trainer.fit(X, y)
-        # ПРОВЕРКА ПОКРЫТИЯ И ЛОГИКИ:
-        # 1. Так как это был numpy array, numerical_features должны были создаться
+        # COVERAGE AND LOGIC CHECKS:
+        # 1. Since this was a numpy array, numerical_features must have been created
         assert trainer.numerical_features == ["col_0", "col_1"]
-        # 2. Так как feature_names был None, он должен был подтянуть значения из numerical_features
+        # 2. Since feature_names was None, it must have taken the values from numerical_features
         assert trainer.feature_names == ["col_0", "col_1"]
-        # Проверяем, что они ссылаются на один и тот же список (или идентичны)
+        # Check that they refer to the same list (or are identical)
         assert trainer.feature_names is trainer.numerical_features
 
 
@@ -1192,14 +1192,14 @@ def test_constructor_param_info_self_skipped(base_params):
 
 def test_metric_calculation_debug_log_formats_val_score(caplog):
     """
-    Регрессионный тест исправления логирования результирующей метрики.
+    Regression test for the fix of result metric logging.
 
-    Debug-сообщение "Metric calculation" должно содержать фактическое значение
-    val_score (например, final val_score=0.9421), а не литеральный текст
-    {self.val_score:.4f} из не-f-строки.
+    The debug message "Metric calculation" must contain the actual val_score
+    value (e.g. final val_score=0.9421), not the literal text
+    {self.val_score:.4f} from a non-f-string.
 
-    Достаточно большая выборка, чтобы hold-out R² (issue #24) был конечным
-    (на 1-строчном hold-out r2_score возвращает NaN).
+    A sufficiently large sample so that hold-out R2 is finite
+    (on a 1-row hold-out r2_score returns NaN).
     """
     X = pd.DataFrame(
         {
@@ -1214,19 +1214,19 @@ def test_metric_calculation_debug_log_formats_val_score(caplog):
     with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
         model_trainer.fit(X, y)
 
-    # Литерал плейсхолдера не должен попадать в лог
+    # The placeholder literal must not appear in the log
     assert "{self.val_score" not in caplog.text
-    # Фактическое значение должно быть отформатировано с 4 знаками после запятой
+    # The actual value must be formatted with 4 decimal places
     assert re.search(r"final val_score=-?\d+\.\d{4}", caplog.text)
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Adaptive preprocessing presets in ModelTrainer (issue #18)
+#  Adaptive preprocessing presets in ModelTrainer
 # ──────────────────────────────────────────────────────────────────────────
 
 def _num_transformer_of(trainer: ModelTrainer):
-    """Извлечь числовой трансформер из обученного пайплайна тренера."""
-    assert trainer.pipeline is not None, "pipeline не обучен"
+    """Extract the numerical transformer from the trainer's fitted pipeline."""
+    assert trainer.pipeline is not None, "pipeline is not fitted"
     preprocessor = trainer.pipeline.named_steps["preprocessor"]
     transformers = dict(
         (name, transformer) for name, transformer, _ in preprocessor.transformers
@@ -1235,7 +1235,7 @@ def _num_transformer_of(trainer: ModelTrainer):
 
 
 def test_trainer_scale_sensitive_has_standard_scaler():
-    """Масштабо-чувствительная модель (ridge): StandardScaler применяется всегда (AC-4)."""
+    """Scale-sensitive model (ridge): StandardScaler is always applied."""
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
     num = _num_transformer_of(trainer)
     assert isinstance(num.named_steps["scaler"], StandardScaler)
@@ -1245,7 +1245,7 @@ def test_trainer_scale_sensitive_has_standard_scaler():
 
 
 def test_trainer_tree_has_no_scaler():
-    """Деревья и ансамбли: масштабирование не применяется (AC-3)."""
+    """Trees and ensembles: scaling is not applied."""
     trainer = ModelTrainer(
         algorithm="random_forest", hyperparams={"n_estimators": 5}
     ).fit(X, y)
@@ -1257,7 +1257,7 @@ def test_trainer_tree_has_no_scaler():
 
 
 def test_trainer_glm_uses_robust_scaler_and_median():
-    """GLM со скошенными распределениями: median + RobustScaler (AC-5)."""
+    """GLM with skewed distributions: median + RobustScaler."""
     y_pos = np.abs(y) + 1.0
     trainer = ModelTrainer(
         algorithm="gammaregressor",
@@ -1269,11 +1269,11 @@ def test_trainer_glm_uses_robust_scaler_and_median():
 
 
 def test_trainer_univariate_no_scaling():
-    """Одномерный алгоритм (isotonic): без масштабирования.
+    """Univariate algorithm (isotonic): no scaling.
 
-    Перемешанные данные: при hold-out валидации (issue #24) тренировочная
-    часть фолда покрывает весь диапазон значений, иначе IsotonicRegression
-    (out_of_bounds='nan') даёт NaN-предсказания на hold-out.
+    Shuffled data: during hold-out validation the training part
+    of the fold covers the full value range, otherwise IsotonicRegression
+    (out_of_bounds='nan') produces NaN predictions on hold-out.
     """
     rng = np.random.RandomState(0)
     X1 = pd.DataFrame({"a": rng.permutation(np.linspace(0, 1, 50))})
@@ -1285,8 +1285,8 @@ def test_trainer_univariate_no_scaling():
 
 
 def test_trainer_override_has_priority_over_automatic_selection():
-    """Явное переопределение пресета имеет приоритет над автовыбором (AC-7)."""
-    # Дерево по умолчанию не масштабируется, но пользователь просит standard scaling
+    """Explicit preset override takes priority over automatic selection."""
+    # A tree is not scaled by default, but the user requests standard scaling
     trainer = ModelTrainer(
         algorithm="random_forest",
         hyperparams={"n_estimators": 5},
@@ -1294,10 +1294,10 @@ def test_trainer_override_has_priority_over_automatic_selection():
     ).fit(X, y)
     num = _num_transformer_of(trainer)
     assert isinstance(num.named_steps["scaler"], StandardScaler)
-    # Импутация осталась автовыбором класса деревьев (median)
+    # Imputation remained the automatic choice of the tree class (median)
     assert num.named_steps["imputer"].strategy == "median"
 
-    # Масштабо-чувствительная модель, пользователь отключает масштабирование
+    # A scale-sensitive model, the user disables scaling
     trainer2 = ModelTrainer(
         algorithm="ridge",
         hyperparams={"alpha": 0.1},
@@ -1308,7 +1308,7 @@ def test_trainer_override_has_priority_over_automatic_selection():
 
 
 def test_trainer_override_invalid_value_rejected_at_init():
-    """Некорректное переопределение отклоняется на этапе инициализации тренера."""
+    """Invalid override is rejected at the trainer initialization stage."""
     with pytest.raises(TrainingError, match="Invalid preprocessing_override"):
         ModelTrainer(algorithm="ridge", preprocessing_override={"scaling": "bogus"})
 
@@ -1317,7 +1317,7 @@ def test_trainer_override_invalid_value_rejected_at_init():
 
 
 def test_trainer_logs_resolved_preset(caplog):
-    """Выбранный пресет фиксируется в логах (AC-9)."""
+    """The selected preset is recorded in the logs."""
     import logging as _logging
 
     with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
@@ -1331,7 +1331,7 @@ def test_trainer_logs_resolved_preset(caplog):
 
 
 def test_trainer_preset_survives_save_load(tmp_path):
-    """Пресет сохраняется в сериализованном тренере."""
+    """The preset is preserved in the serialized trainer."""
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
     pkl = tmp_path / "preset.pkl"
     trainer.save(pkl)
@@ -1340,11 +1340,11 @@ def test_trainer_preset_survives_save_load(tmp_path):
     assert restored.preprocessing_preset.scaling == "standard"
 
 
-# ─────────────────── Безопасность порядка колонок в predict (issue #2) ──────
+# ────────────────── Column order safety in predict ──────────────────
 
 
 def _mixed_trainer() -> tuple[ModelTrainer, pd.DataFrame]:
-    """Обученный тренер на данных со смешанными типами колонок (cat + num)."""
+    """A trained trainer on data with mixed column types (cat + num)."""
     X = pd.DataFrame(
         {
             "cat": ["a", "b", "a", "b", "a", "b", "a", "b"],
@@ -1358,7 +1358,7 @@ def _mixed_trainer() -> tuple[ModelTrainer, pd.DataFrame]:
 
 
 def test_predict_reordered_columns_identical():
-    """Предсказание на переупорядоченном DataFrame совпадает с исходным (issue #2)."""
+    """Prediction on a reordered DataFrame matches the original."""
     trainer, X = _mixed_trainer()
     baseline = trainer.predict(X)
 
@@ -1367,14 +1367,14 @@ def test_predict_reordered_columns_identical():
 
 
 def test_predict_missing_column_raises():
-    """Отсутствующая колонка в predict даёт явную ошибку (issue #2)."""
+    """A missing column in predict gives an explicit error."""
     trainer, X = _mixed_trainer()
     with pytest.raises(TrainingError, match="Missing columns in prediction data"):
         trainer.predict(X.drop(columns=["cat"]))
 
 
 def test_predict_extra_column_ignored():
-    """Лишние колонки в predict отбрасываются без влияния на результат."""
+    """Extra columns in predict are dropped without affecting the result."""
     trainer, X = _mixed_trainer()
     X_extra = X.copy()
     X_extra["extra_col"] = 0.0
@@ -1383,7 +1383,7 @@ def test_predict_extra_column_ignored():
 
 
 def test_predict_duplicated_columns_raise():
-    """Дублирующиеся имена колонок в predict отклоняются (неоднозначность)."""
+    """Duplicated column names in predict are rejected (ambiguity)."""
     trainer, X = _mixed_trainer()
     X_dup = pd.concat([X["cat"], X["num1"], X["num1"], X["num2"]], axis=1)
     X_dup.columns = ["cat", "num1", "num1", "num2"]
@@ -1393,7 +1393,7 @@ def test_predict_duplicated_columns_raise():
 
 
 def test_predict_numpy_after_dataframe_fit():
-    """numpy-вход в обучающем порядке после DataFrame-fit работает позиционно."""
+    """numpy input in training order after a DataFrame fit works positionally."""
     trainer, X = _mixed_trainer()
     baseline = trainer.predict(X)
 
@@ -1402,12 +1402,12 @@ def test_predict_numpy_after_dataframe_fit():
 
 
 def test_predict_shared_df_reordered_columns():
-    """SharedDataFrame с переупорядоченными колонками даёт корректный результат.
+    """SharedDataFrame with reordered columns gives a correct result.
 
-    Регрессия issue #2: раньше predict() брал ``shared_array`` (numpy) напрямую,
-    и переупорядоченные колонки обрабатывались позиционно — модель получала
-    «переставленные» признаки. Теперь SharedDataFrame восстанавливается в
-    DataFrame и выравнивается к обучающему порядку колонок.
+    Regression: previously predict() took ``shared_array`` (numpy) directly,
+    and reordered columns were processed positionally — the model received
+    "swapped" features. Now SharedDataFrame is restored into a
+    DataFrame and aligned to the training column order.
     """
     rng = np.random.default_rng(42)
     X = pd.DataFrame(
@@ -1431,7 +1431,7 @@ def test_predict_shared_df_reordered_columns():
 
 
 def test_save_load_predict_reordered_columns(tmp_path):
-    """Сериализованная модель корректно предсказывает на переупорядоченном DF."""
+    """A serialized model correctly predicts on a reordered DF."""
     trainer, X = _mixed_trainer()
     baseline = trainer.predict(X)
 
@@ -1444,12 +1444,12 @@ def test_save_load_predict_reordered_columns(tmp_path):
 
 
 def test_predict_legacy_positional_preprocessor_fixed_by_alignment():
-    """Выравнивание колонок чинит legacy-препроцессор с позиционными индексами.
+    """Column alignment fixes a legacy preprocessor with positional indices.
 
-    Имитируем старый артефакт: препроцессор, собранный до issue #2
-    (ColumnTransformer со списками int-индексов вместо ColumnNameSelector).
-    predict() выравнивает колонки DataFrame к обучающему порядку, поэтому
-    позиционный срез снова попадает в те же колонки, что и при обучении.
+    We simulate an old artifact: a preprocessor built with positional column
+    indices instead of ColumnNameSelector.
+    predict() aligns the DataFrame columns to the training order, so the
+    positional slice again targets the same columns as during training.
     """
     from sklearn.compose import ColumnTransformer as SkColumnTransformer
     from sklearn.impute import SimpleImputer as SkSimpleImputer
@@ -1467,7 +1467,7 @@ def test_predict_legacy_positional_preprocessor_fixed_by_alignment():
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
     baseline = trainer.predict(X)
 
-    # Собираем препроцессор «в старом стиле» — позиционные индексы [0] и [1].
+    # Build the preprocessor "in the old style" — positional indices [0] and [1].
     legacy_preprocessor = SkColumnTransformer(
         transformers=[
             (
@@ -1497,14 +1497,14 @@ def test_predict_legacy_positional_preprocessor_fixed_by_alignment():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Feature selection integration in ModelTrainer (issue #31)
+#  Feature selection integration in ModelTrainer
 # ──────────────────────────────────────────────────────────────────────────
 
 def _fs_dataset(
     seed: int = 42, n: int = 120, p: int = 10, noise_sigma: float = 0.1
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Синтетический DataFrame в стиле существующих тестов:
-    первый признак информативен, остальные — независимый шум."""
+    """Synthetic DataFrame in the style of existing tests:
+    the first feature is informative, the rest are independent noise."""
     rng = np.random.default_rng(seed)
     X = pd.DataFrame(rng.normal(size=(n, p)))
     y = pd.Series(X[0] * 2.0 + rng.normal(0, noise_sigma, n))
@@ -1512,7 +1512,7 @@ def _fs_dataset(
 
 
 def _fs_noisy_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
-    """90% шумных признаков: только первый признак связан с таргетом."""
+    """90% noisy features: only the first feature is related to the target."""
     rng = np.random.default_rng(seed)
     X = pd.DataFrame(rng.normal(size=(200, 10)))
     y = pd.Series(X[0] * 3.0 + rng.normal(0, 0.3, 200))
@@ -1520,7 +1520,7 @@ def _fs_noisy_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
 
 
 def _fs_all_important_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
-    """Все признаки критически важны: удаление любого ломает качество."""
+    """All features are critically important: removing any one breaks quality."""
     rng = np.random.default_rng(seed)
     X = pd.DataFrame(rng.normal(size=(200, 10)))
     y = pd.Series(sum(X[i] for i in range(10)) + rng.normal(0, 0.1, 200))
@@ -1528,8 +1528,8 @@ def _fs_all_important_dataset(seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:
 
 
 def test_feature_selection_always_present_and_reduces_features():
-    """Режим always: шаг feature_selector присутствует, модель получает
-    меньше признаков, чем отдаёт препроцессор."""
+    """Mode always: the feature_selector step is present, the model receives
+    fewer features than the preprocessor outputs."""
     X, y = _fs_dataset()
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -1550,8 +1550,8 @@ def test_feature_selection_always_present_and_reduces_features():
 
 
 def test_feature_selection_disabled_default_identical_to_baseline():
-    """Режим disabled (по умолчанию): селектор отсутствует, поведение
-    полностью идентично тренеру без параметров отбора."""
+    """Mode disabled (default): the selector is absent, the behavior
+    is fully identical to a trainer without feature selection parameters."""
     X, y = _fs_dataset()
     baseline = ModelTrainer(algorithm="ridge").fit(X, y)
     trainer = ModelTrainer(
@@ -1565,16 +1565,16 @@ def test_feature_selection_disabled_default_identical_to_baseline():
     assert baseline.val_score == trainer.val_score
     assert np.array_equal(baseline.predict(X), trainer.predict(X))
 
-    # Дефолт конструктора — тоже disabled.
+    # The constructor default is also disabled.
     default_trainer = ModelTrainer(algorithm="ridge").fit(X, y)
     assert "feature_selector" not in default_trainer.pipeline.named_steps
 
 
 def test_feature_selection_explicit_flag_overrides_config():
-    """Явный флаг feature_selection_active имеет приоритет над конфигом."""
+    """The explicit feature_selection_active flag overrides the config."""
     X, y = _fs_dataset()
 
-    # active=True поверх mode='disabled' → селектор включён.
+    # active=True on top of mode='disabled' -> the selector is enabled.
     on = ModelTrainer(
         algorithm="ridge",
         feature_selection_cfg={"mode": "disabled"},
@@ -1584,7 +1584,7 @@ def test_feature_selection_explicit_flag_overrides_config():
     assert "feature_selector" in on.pipeline.named_steps
     assert on.feature_selection_active_ is True
 
-    # active=False поверх mode='always' → селектор выключен.
+    # active=False on top of mode='always' -> the selector is disabled.
     off = ModelTrainer(
         algorithm="ridge",
         feature_selection_cfg={"mode": "always"},
@@ -1596,7 +1596,7 @@ def test_feature_selection_explicit_flag_overrides_config():
 
 
 def test_feature_selection_auto_noisy_activates():
-    """Standalone auto: на данных с 90% шумных признаков отбор включается."""
+    """Standalone auto: on data with 90% noisy features, selection is enabled."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
         algorithm="knn",
@@ -1616,7 +1616,7 @@ def test_feature_selection_auto_noisy_activates():
 
 
 def test_feature_selection_auto_all_important_disables():
-    """Standalone auto: когда все признаки важны, отбор деактивируется."""
+    """Standalone auto: when all features matter, selection is deactivated."""
     X, y = _fs_all_important_dataset()
     trainer = ModelTrainer(
         algorithm="knn",
@@ -1636,7 +1636,7 @@ def test_feature_selection_auto_all_important_disables():
 
 
 def test_feature_selection_auto_logs_info_message(caplog):
-    """INFO-лог автономной проверки строго в заданном формате."""
+    """INFO log of the standalone check strictly in the given format."""
     X, y = _fs_noisy_dataset()
     with caplog.at_level(logging.INFO, logger="configurable_automl_engine.trainer"):
         ModelTrainer(
@@ -1659,11 +1659,11 @@ def test_feature_selection_auto_logs_info_message(caplog):
 
 
 def test_feature_selection_auto_check_with_neg_error_metric():
-    """Standalone auto-check с neg_-метрикой реестра (issue #26).
+    """Standalone auto-check with a neg_-metric from the registry.
 
-    metric='neg_root_mean_squared_error' — инвертированная ошибка: «сырое»
-    значение скорера (-RMSE) максимизируется. На данных с 90% шумных
-    признаков отбор обязан включиться, как и для обычного 'rmse'.
+    metric='neg_root_mean_squared_error' is an inverted error: the "raw"
+    scorer value (-RMSE) is maximized. On data with 90% noisy
+    features selection must turn on, as for ordinary 'rmse'.
     """
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
@@ -1682,19 +1682,19 @@ def test_feature_selection_auto_check_with_neg_error_metric():
     assert trainer.feature_selection_active_ is True
     assert trainer.pipeline is not None
     assert "feature_selector" in trainer.pipeline.named_steps
-    # Пользовательская семантика val_score: положительный RMSE
+    # Custom val_score semantics: positive RMSE
     assert trainer.val_score is not None
     assert trainer.val_score >= 0
 
 
 def test_feature_selection_auto_check_direction_follows_raw_scorer():
-    """auto-check сравнивает «сырые» значения скорера, а не имя метрики.
+    """auto-check compares the "raw" scorer values, not the metric name.
 
-    Направление сравнения определяется объектом-скорером: любое «сырое»
-    значение устроено так, что большее лучше (neg_-метрики уже инвертированы
-    для максимизации). Старая эвристика по подстрокам имени (issue #26)
-    трактовала neg_*-метрику как ошибку и сравнивала модули значений, что
-    давало противоположный ответ при разных знаках raw-скор.
+    The comparison direction is determined by the scorer object: any "raw"
+    value is designed so that bigger is better (neg_-metrics are already inverted
+    for maximization). The old name-substring heuristic
+    treated neg_*-metrics as errors and compared absolute values, which
+    produced the opposite answer for raw scores of different signs.
     """
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
@@ -1711,9 +1711,9 @@ def test_feature_selection_auto_check_direction_follows_raw_scorer():
     )
 
     def mixed_sign_scorer(model, X_val, y_val):  # noqa: ANN001
-        # Контрольный пайплайн auto-check со шагом feature_selector
-        # (reduced) получает МЕНЬШЕЕ «сырое» значение, чем полный (full):
-        # raw_reduced < raw_full -> отбор НЕ включается.
+        # The auto-check control pipeline with the feature_selector step
+        # (reduced) receives a SMALLER "raw" value than the full one:
+        # raw_reduced < raw_full -> selection is NOT enabled.
         if "feature_selector" in model.named_steps:
             return -0.20
         return 0.50
@@ -1730,7 +1730,7 @@ def test_feature_selection_auto_check_direction_follows_raw_scorer():
 
 
 def test_feature_selection_auto_check_exception_falls_back(caplog):
-    """Fail-safe: исключение в auto-check → WARNING + отбор выключен."""
+    """Fail-safe: an exception in auto-check -> WARNING + selection disabled."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
         algorithm="knn",
@@ -1744,9 +1744,9 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
         random_state=7,
     )
 
-    # Первый вызов — контрольный пайплайн auto-check: он падает, после
-    # fail-safe автономная проверка прерывается, а финальный скоринг fit()
-    # получает валидное значение.
+    # The first call is the auto-check control pipeline: it fails; after the
+    # fail-safe, the standalone check is interrupted and the final fit() scoring
+    # receives a valid value.
     scorer_calls = {"n": 0}
 
     def exploding_scorer(model, X_val, y_val):  # noqa: ANN001
@@ -1770,12 +1770,12 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
 
 
 def test_feature_selection_isotonic_forced_disabled(caplog):
-    """IsotonicRegression: отбор принудительно отключается, обучение проходит.
+    """IsotonicRegression: selection is forcibly disabled, training succeeds.
 
-    Данные перемешаны (не монотонный linspace): при hold-out валидации
-    (issue #24) тренировочная часть фолда покрывает весь диапазон значений,
-    иначе IsotonicRegression (out_of_bounds='nan') даёт NaN-предсказания на
-    hold-out и валидационный скоринг падает.
+    The data is shuffled (not a monotonic linspace): during hold-out validation
+    the training part of the fold covers the full value range,
+    otherwise IsotonicRegression (out_of_bounds='nan') gives NaN predictions on
+    hold-out and the validation scoring fails.
     """
     rng = np.random.RandomState(0)
     f = rng.permutation(np.linspace(0, 10, 60))
@@ -1796,7 +1796,7 @@ def test_feature_selection_isotonic_forced_disabled(caplog):
 
 
 def test_feature_selection_step_order_with_oversampler():
-    """Порядок шагов: preprocessor → feature_selector → oversampler → model."""
+    """Step order: preprocessor -> feature_selector -> oversampler -> model."""
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.normal(size=(80, 6)))
     y = pd.Series(np.where(X[0] > 0, 1.0, 0.0))
@@ -1817,7 +1817,7 @@ def test_feature_selection_step_order_with_oversampler():
 
 
 def test_feature_selection_mask_state():
-    """Маска selected_features_mask_ корректна при отборе и None без него."""
+    """The selected_features_mask_ mask is correct with selection and None without it."""
     X, y = _fs_dataset()
 
     sel = ModelTrainer(
@@ -1839,7 +1839,7 @@ def test_feature_selection_mask_state():
 
 
 def test_feature_selection_save_load_roundtrip(tmp_path):
-    """Save/load roundtrip (.pkl и .joblib): predict идентичен до машинного нуля."""
+    """Save/load roundtrip (.pkl and .joblib): predict is identical up to machine zero."""
     X, y = _fs_dataset()
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -1883,31 +1883,31 @@ def test_feature_selection_save_load_roundtrip(tmp_path):
     ],
 )
 def test_feature_selection_cfg_invalid_rejected_at_init(bad_cfg):
-    """Невалидный feature_selection_cfg отклоняется на этапе __init__."""
+    """Invalid feature_selection_cfg is rejected at the __init__ stage."""
     with pytest.raises(TrainingError, match="feature_selection_cfg"):
         ModelTrainer(feature_selection_cfg=bad_cfg)
 
 
 @pytest.mark.parametrize("bad_flag", ["false", "true", "yes", "disabled", 1, 0, 1.0])
 def test_feature_selection_active_invalid_type_rejected_at_init(bad_flag):
-    """Небулевый feature_selection_active отклоняется на этапе __init__.
+    """A non-boolean feature_selection_active is rejected at the __init__ stage.
 
-    Ревью PR #8: строка "false" из конфигурации/YAML не должна молча
-    включать отбор через bool("false") == True.
+    The string "false" from configuration/YAML must not silently
+    enable selection via bool("false") == True.
     """
     with pytest.raises(TrainingError, match="feature_selection_active"):
         ModelTrainer(feature_selection_active=bad_flag)
 
 
 def test_feature_selection_active_none_and_bool_accepted():
-    """bool и None принимаются; None означает «решение по конфигурации»."""
+    """bool and None are accepted; None means "decision by configuration"."""
     for flag in (None, True, False):
         trainer_obj = ModelTrainer(feature_selection_active=flag)
         assert trainer_obj.feature_selection_active is flag
 
 
 def test_feature_selection_auto_tiny_dataset_warning(caplog):
-    """Auto-check на очень малой выборке: WARNING + отбор выключен, обучение успешно."""
+    """Auto-check on a very small sample: WARNING + selection disabled, training succeeds."""
     rng = np.random.default_rng(1)
     X = pd.DataFrame(rng.normal(size=(8, 3)))
     y = pd.Series(X[0] * 2.0 + rng.normal(0, 0.1, 8))
@@ -1924,7 +1924,7 @@ def test_feature_selection_auto_tiny_dataset_warning(caplog):
 
 
 def test_feature_selection_passthrough_when_p_le_min_features():
-    """P <= min_features: селектор присутствует, но маска all-True (passthrough)."""
+    """P <= min_features: the selector is present, but the mask is all-True (passthrough)."""
     rng = np.random.default_rng(3)
     X = pd.DataFrame(rng.normal(size=(50, 3)))
     y = pd.Series(X[0] * 2.0)
@@ -1942,8 +1942,8 @@ def test_feature_selection_passthrough_when_p_le_min_features():
 
 
 def test_feature_selection_old_model_without_new_attrs_compatible():
-    """Экземпляр без новых атрибутов (имитация старого pickle):
-    fit/predict работают как раньше (поведение disabled)."""
+    """An instance without the new attributes (imitating an old pickle):
+    fit/predict work as before (disabled behavior)."""
     X, y = _fs_dataset()
     trainer = ModelTrainer(algorithm="ridge")
     for attr in (
@@ -1958,14 +1958,14 @@ def test_feature_selection_old_model_without_new_attrs_compatible():
     trainer.fit(X, y)
     assert trainer.pipeline is not None
     assert "feature_selector" not in trainer.pipeline.named_steps
-    # _fit_internal фиксирует фактический статус даже для «старого» объекта.
+    # _fit_internal records the actual status even for an "old" object.
     assert trainer.feature_selection_active_ is False
     assert trainer.selected_features_mask_ is None
     assert len(trainer.predict(X)) == len(y)
 
 
 def test_feature_selection_numpy_input_always():
-    """numpy-вход без имён колонок + always: обучение и маска корректны."""
+    """numpy input without column names + always: training and mask are correct."""
     rng = np.random.default_rng(5)
     X = rng.normal(size=(120, 10))
     y = X[:, 0] * 2.0 + rng.normal(0, 0.1, 120)
@@ -1988,7 +1988,7 @@ def test_feature_selection_numpy_input_always():
 
 
 def test_feature_selection_importance_method():
-    """Метод importance (по умолчанию) корректно работает в режиме always."""
+    """The importance method (default) works correctly in always mode."""
     X, y = _fs_dataset()
     trainer = ModelTrainer(
         algorithm="ridge", feature_selection_cfg={"mode": "always"}
@@ -2003,7 +2003,7 @@ def test_feature_selection_importance_method():
 
 
 def test_feature_selection_refit_resets_state():
-    """Повторный fit() перезаписывает статус и маску, состояние не копится."""
+    """A repeated fit() overwrites the status and mask, no state accumulates."""
     from configurable_automl_engine.training_engine.config_parser import (
         FeatureSelectionCfg,
     )
@@ -2029,7 +2029,7 @@ def test_feature_selection_refit_resets_state():
 
 
 def test_feature_selection_failed_fit_resets_state():
-    """Падение pipeline.fit сбрасывает статус и маску от предыдущего обучения."""
+    """A pipeline.fit failure resets the status and mask from the previous training."""
     X, y = _fs_dataset()
     trainer = ModelTrainer(
         algorithm="ridge",
@@ -2043,7 +2043,7 @@ def test_feature_selection_failed_fit_resets_state():
     assert trainer.feature_selection_active_ is True
     assert trainer.selected_features_mask_ is not None
 
-    # Мок-модель, падающая на fit (аналогично test_fit_internal_unexpected_error).
+    # A mock model that fails on fit (similar to test_fit_internal_unexpected_error).
     mock_model = MagicMock()
     if hasattr(mock_model, "transform"):
         del mock_model.transform
@@ -2059,18 +2059,18 @@ def test_feature_selection_failed_fit_resets_state():
             feature_selection_active=True,
         )
 
-    # Неудачный фит не оставляет устаревшие значения от прошлого обучения.
+    # A failed fit does not leave stale values from the previous training.
     assert trainer.feature_selection_active_ is False
     assert trainer.selected_features_mask_ is None
 
 
 def test_feature_selection_state_reset_on_failure_before_fit_internal():
-    """Сбой до _fit_internal (подготовка данных) тоже сбрасывает статус/маску.
+    """A failure before _fit_internal (data preparation) also resets the status/mask.
 
-    Ревью PR #8: сброс жил только в _fit_internal; теперь состояние
-    очищается в начале fit(), поэтому ошибки на более ранних этапах
-    (валидация и подготовка данных) не оставляют значения от предыдущего
-    обучения.
+    The reset lived only in _fit_internal; now the state
+    is cleared at the beginning of fit(), so errors at earlier stages
+    (validation and data preparation) do not leave values from the previous
+    training.
     """
     X, y = _fs_dataset()
     trainer = ModelTrainer(
@@ -2085,7 +2085,7 @@ def test_feature_selection_state_reset_on_failure_before_fit_internal():
     assert trainer.feature_selection_active_ is True
     assert trainer.selected_features_mask_ is not None
 
-    # Ошибка в _prepare_data (несовпадение длин X и y) — до _fit_internal.
+    # An error in _prepare_data (X and y length mismatch) — before _fit_internal.
     with pytest.raises(TrainingError, match="Mismatched samples"):
         trainer.fit(X, y[:-5])
 
@@ -2094,7 +2094,7 @@ def test_feature_selection_state_reset_on_failure_before_fit_internal():
 
 
 def test_feature_selection_auto_scorer_none_falls_back(caplog):
-    """Fail-safe: None-скоры на hold-out → WARNING + отбор выключен, fit успешен."""
+    """Fail-safe: None scores on hold-out -> WARNING + selection disabled, fit succeeds."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
         algorithm="knn",
@@ -2109,12 +2109,12 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
     )
 
     def flaky_scorer(model, X_val, y_val):  # noqa: ANN001
-        # Fail-safe ветка: контрольный пайплайн auto-check со шагом
-        # feature_selector возвращает None, а скоринг финальной метрики
-        # в fit() (пайплайн без селектора, т.к. отбор выключен) — валидное
-        # значение. Различаем вызовы по составу пайплайна, а не по числу/
-        # порядку вызовов: изменение числа скорингов в auto-check не
-        # сломает тест молча.
+        # Fail-safe branch: the auto-check control pipeline with the
+        # feature_selector step returns None, while the final metric scoring
+        # in fit() (a pipeline without the selector, since selection is disabled)
+        # is a valid value. We distinguish calls by pipeline composition rather
+        # than by the number/order of calls: changing the number of scorings in
+        # auto-check will not silently break the test.
         if "feature_selector" in model.named_steps:
             return None
         return 0.9
@@ -2134,11 +2134,11 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
 
 
 def test_feature_selection_auto_check_deterministic_when_random_state_none():
-    """random_state=None тренера: hold-out сплит auto-check детерминирован.
+    """Trainer random_state=None: the auto-check hold-out split is deterministic.
 
-    Ревью PR #8: при None-зерне основного обучения сплит auto-check обязан
-    использовать фиксированное зерно-фолбэк, иначе решение об отборе
-    менялось бы между вызовами fit().
+    With a None seed for the main training, the auto-check split
+    must use a fixed fallback seed, otherwise the selection decision
+    would change between fit() calls.
     """
     from configurable_automl_engine.trainer import train_test_split as real_split
 
@@ -2161,8 +2161,8 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
     ) as mocked_split:
         tr.fit(X, y)
 
-    # auto-check — единственный потребитель train_test_split в fit();
-    # все вызовы обязаны идти с непустым random_state (фикс-фолбэк вместо None).
+    # auto-check is the only consumer of train_test_split in fit();
+    # all calls must go with a non-empty random_state (fix-fallback instead of None).
     non_none_calls = [
         call
         for call in mocked_split.call_args_list
@@ -2174,12 +2174,12 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
 
 
 def test_feature_selection_selector_seed_fallback_when_random_state_none():
-    """random_state=None тренера: FeatureSelector получает фикс. seed 42.
+    """Trainer random_state=None: FeatureSelector gets a fixed seed 42.
 
-    Согласовано с тюнером (fs_transformer_factory) и auto-check: при
-    None-зерне основного обучения селектор обязан использовать
-    фиксированный seed-фолбэк, иначе отбор невоспроизводим между вызовами
-    fit() и расходится с фазой HPO.
+    Consistent with the tuner (fs_transformer_factory) and auto-check: with a
+    None seed for the main training, the selector must use a
+    fixed fallback seed, otherwise selection is not reproducible between fit()
+    calls and diverges from the HPO phase.
     """
     X, y = _fs_dataset()
     tr = ModelTrainer(
@@ -2199,7 +2199,7 @@ def test_feature_selection_selector_seed_fallback_when_random_state_none():
 
 
 def test_feature_selection_selector_uses_explicit_random_state_when_set():
-    """Явный random_state тренера пробрасывается селектору как есть."""
+    """The explicit trainer random_state is passed to the selector as is."""
     X, y = _fs_dataset()
     tr = ModelTrainer(
         algorithm="ridge",
@@ -2218,14 +2218,14 @@ def test_feature_selection_selector_uses_explicit_random_state_when_set():
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  FeatureSelector unit tests (public API, issue #31 dependency)
+#  FeatureSelector unit tests (public API)
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestFeatureSelectorUnit:
-    """Модульные тесты FeatureSelector из feature_selection.py."""
+    """Unit tests for FeatureSelector from feature_selection.py."""
 
     def test_variance_method_drops_constant_features(self):
-        """Метод variance: константные признаки отбрасываются."""
+        """Variance method: constant features are dropped."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         rng = np.random.default_rng(0)
@@ -2237,7 +2237,7 @@ class TestFeatureSelectorUnit:
         assert selector.transform(X).shape == (50, 1)
 
     def test_mutual_info_method(self):
-        """Метод mutual_info: работает и возвращает корректную размерность."""
+        """Mutual_info method: works and returns a correct dimensionality."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         X, y = _fs_dataset(seed=11)
@@ -2249,7 +2249,7 @@ class TestFeatureSelectorUnit:
         assert selector.transform(X).shape[1] == selector.support_.sum()
 
     def test_min_features_expansion(self):
-        """Расширение маски до min_features, если метод отобрал слишком мало."""
+        """Expand the mask to min_features if the method selected too few."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         X, y = _fs_dataset(seed=13)
@@ -2260,7 +2260,7 @@ class TestFeatureSelectorUnit:
         assert selector.transform(X).shape[1] == 6
 
     def test_transform_before_fit_raises(self):
-        """transform/get_feature_names_out до fit → NotFittedError."""
+        """transform/get_feature_names_out before fit -> NotFittedError."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         selector = FeatureSelector()
@@ -2270,7 +2270,7 @@ class TestFeatureSelectorUnit:
             selector.get_feature_names_out()
 
     def test_get_feature_names_out(self):
-        """Имена отобранных признаков (из DataFrame и автосгенерированные)."""
+        """Names of the selected features (from DataFrame and auto-generated)."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         rng = np.random.default_rng(0)
@@ -2291,7 +2291,7 @@ class TestFeatureSelectorUnit:
         assert auto_names[0].startswith("x")
 
     def test_supervised_methods_require_y(self):
-        """Супервизорные методы отклоняют fit без y."""
+        """Supervised methods reject fit without y."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         X = np.zeros((5, 3))
@@ -2300,7 +2300,7 @@ class TestFeatureSelectorUnit:
                 FeatureSelector(method=method).fit(X)
 
     def test_invalid_method_rejected(self):
-        """Неизвестный метод отклоняется с понятной ошибкой."""
+        """An unknown method is rejected with a clear error."""
         from configurable_automl_engine.feature_selection import FeatureSelector
 
         with pytest.raises(ValueError, match="Unknown method"):
@@ -2308,7 +2308,7 @@ class TestFeatureSelectorUnit:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  train_model facade: feature selection passthrough (issue #10)
+#  train_model facade: feature selection passthrough
 # ──────────────────────────────────────────────────────────────────────────
 
 _FS_CFG_ALWAYS = {
@@ -2319,16 +2319,16 @@ _FS_CFG_ALWAYS = {
 
 
 def _patched_facade_trainer():
-    """Вернуть патчер ``ModelTrainer`` для проверки вызова фасада.
+    """Return a patcher for ``ModelTrainer`` to verify the facade call.
 
-    Патчит ``ModelTrainer`` в модуле trainer.py; тест самостоятельно
-    настраивает возвращаемый экземпляр (fit/val_score).
+    Patches ``ModelTrainer`` in the trainer.py module; the test itself
+    configures the returned instance (fit/val_score).
     """
     return patch("configurable_automl_engine.trainer.ModelTrainer")
 
 
 def _facade_xy(n: int = 20) -> tuple[np.ndarray, np.ndarray]:
-    """Синтетические X/y для unit-проверок проброса аргументов."""
+    """Synthetic X/y for unit checks of argument forwarding."""
     rng = np.random.default_rng(0)
     X = rng.normal(size=(n, 2))
     y = X[:, 0] * 2.0 + rng.normal(0, 0.1, n)
@@ -2336,7 +2336,7 @@ def _facade_xy(n: int = 20) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_train_model_forwards_feature_selection_from_dict_config():
-    """dict-конфиг: feature_selection_cfg / active пробрасываются в ModelTrainer."""
+    """dict config: feature_selection_cfg / active are forwarded to ModelTrainer."""
     X, y = _facade_xy()
     config = {
         "algorithm": "elasticnet",
@@ -2359,7 +2359,7 @@ def test_train_model_forwards_feature_selection_from_dict_config():
 
 
 def test_train_model_forwards_feature_selection_explicit_args():
-    """Простой API: явные keyword-only аргументы пробрасываются в ModelTrainer."""
+    """Simple API: explicit keyword-only arguments are forwarded to ModelTrainer."""
     X, y = _facade_xy()
     with _patched_facade_trainer() as MockTrainer:
         instance = MagicMock()
@@ -2383,10 +2383,10 @@ def test_train_model_forwards_feature_selection_explicit_args():
 
 
 def test_train_model_feature_selection_omitted_defaults_to_none():
-    """Обратная совместимость: без параметров отбора поведение не меняется.
+    """Backward compatibility: without selection parameters the behavior does not change.
 
-    Фасад передаёт конструктору None/None, что соответствует дефолтному
-    поведению ModelTrainer (mode='disabled', отбор выключен).
+    The facade passes None/None to the constructor, which matches the default
+    ModelTrainer behavior (mode='disabled', selection disabled).
     """
     X, y = _facade_xy()
     with _patched_facade_trainer() as MockTrainer:
@@ -2402,7 +2402,7 @@ def test_train_model_feature_selection_omitted_defaults_to_none():
 
 
 def test_train_model_config_dict_wins_over_explicit_args():
-    """Ветка «config dict»: ключи конфига имеют приоритет над явными аргументами."""
+    """Branch "config dict": config keys take priority over explicit arguments."""
     X, y = _facade_xy()
     config = {
         "algorithm": "elasticnet",
@@ -2427,13 +2427,13 @@ def test_train_model_config_dict_wins_over_explicit_args():
             feature_selection_active=False,
         )
 
-    # Значения из словаря перекрывают явные аргументы функции.
+    # The dictionary values override the explicit function arguments.
     assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
     assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
 
 
 def test_train_model_config_dict_falls_back_to_explicit_args():
-    """Ветка «config dict»: отсутствующие ключи — фолбэк на явные аргументы."""
+    """Branch "config dict": missing keys fall back to explicit arguments."""
     X, y = _facade_xy()
     config = {
         "algorithm": "elasticnet",
@@ -2461,11 +2461,12 @@ def test_train_model_config_dict_falls_back_to_explicit_args():
 
 
 def test_train_model_config_dict_none_key_falls_back_to_explicit_args():
-    """Ветка «config dict»: ключ со значением None трактуется как «не задан».
+    """Branch "config dict": a key with the value None is treated as "not set".
 
-    Присутствующий в конфиге ключ ``feature_selection_cfg`` /
-    ``feature_selection_active`` со значением ``None`` не переопределяет
-    явные аргументы функции — используется аргумент (фолбэк, ревью PR #9).
+    A key ``feature_selection_cfg`` /
+    ``feature_selection_active`` present in the config with the value ``None``
+    does not override the explicit function arguments — the argument is used
+    (fallback).
     """
     X, y = _facade_xy()
     config = {
@@ -2491,16 +2492,16 @@ def test_train_model_config_dict_none_key_falls_back_to_explicit_args():
             feature_selection_active=True,
         )
 
-    # Ключи со значением None дают фолбэк на явные аргументы функции.
+    # Keys with the value None fall back to the explicit function arguments.
     assert MockTrainer.call_args.kwargs["feature_selection_cfg"] == _FS_CFG_ALWAYS
     assert MockTrainer.call_args.kwargs["feature_selection_active"] is True
 
 
 def test_train_model_config_dict_none_key_without_explicit_args_defaults():
-    """Ветка «config dict»: ключи со значением None без явных аргументов.
+    """Branch "config dict": keys with the value None and no explicit arguments.
 
-    Если явные аргументы не заданы (дефолт None), ключи конфига со значением
-    ``None`` дают тот же результат — фасад передаёт конструктору None/None.
+    If explicit arguments are not given (default None), config keys with the value
+    ``None`` produce the same result — the facade passes None/None to the constructor.
     """
     X, y = _facade_xy()
     config = {
@@ -2523,7 +2524,7 @@ def test_train_model_config_dict_none_key_without_explicit_args_defaults():
 
 
 def test_train_model_feature_selection_invalid_active_from_config_raises():
-    """Строка "false" из dict-конфига отклоняется (строгая типизация, PR #8)."""
+    """The string "false" from a dict config is rejected (strict typing)."""
     X, y = _facade_xy()
     config = {
         "algorithm": "elasticnet",
@@ -2536,7 +2537,7 @@ def test_train_model_feature_selection_invalid_active_from_config_raises():
 
 
 def test_train_model_feature_selection_invalid_cfg_from_config_raises():
-    """Невалидный feature_selection_cfg из dict-конфига отклоняется в __init__."""
+    """Invalid feature_selection_cfg from a dict config is rejected in __init__."""
     X, y = _facade_xy()
     config = {
         "algorithm": "elasticnet",
@@ -2549,7 +2550,7 @@ def test_train_model_feature_selection_invalid_cfg_from_config_raises():
 
 
 def test_train_model_feature_selection_explicit_args_real_training():
-    """Интеграция: реальное обучение через фасад с включённым отбором."""
+    """Integration: real training through the facade with selection enabled."""
     X, y = _fs_dataset(n=120, p=10)
     score = train_model(
         "ridge",
@@ -2564,7 +2565,7 @@ def test_train_model_feature_selection_explicit_args_real_training():
 
 
 def test_train_model_feature_selection_dict_config_real_training():
-    """Интеграция: реальное обучение через dict-конфиг с отбором признаков."""
+    """Integration: real training through a dict config with feature selection."""
     X, y = _fs_dataset(n=120, p=10)
     config = {
         "algorithm": "ridge",
@@ -2578,14 +2579,14 @@ def test_train_model_feature_selection_dict_config_real_training():
     assert 0.0 < score <= 1.0
 
 
-# ─────────── Очистка неинформативных признаков (issue #57) ───────────────────
+# ───────────────────── Dropping uninformative features ─────────────────────
 
 
 def _garbage_df(n: int = 120, seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-    """Чистый и «грязный» DataFrame с одинаковыми информативными колонками.
+    """Clean and "dirty" DataFrames with the same informative columns.
 
-    Грязная версия добавляет мусорные колонки: константную числовую,
-    полностью пустую, почти пустую (>= 95% NaN) и константную категориальную.
+    The dirty version adds garbage columns: a constant numeric one,
+    a fully empty one, an almost empty one (>= 95% NaN), and a constant categorical one.
     """
     rng = np.random.default_rng(seed)
     X_clean = pd.DataFrame({"x1": rng.normal(size=n), "x2": rng.normal(size=n)})
@@ -2600,8 +2601,8 @@ def _garbage_df(n: int = 120, seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame
 
 
 def test_fit_drops_uninformative_features():
-    """fit() удаляет пустые и константные колонки ДО определения типов:
-    feature_names обрезается, dropped_features_ фиксирует удалённое."""
+    """fit() drops empty and constant columns BEFORE type detection:
+    feature_names is trimmed, dropped_features_ records what was removed."""
     X_clean, X_dirty, y = _garbage_df()
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
         X_dirty, y
@@ -2615,15 +2616,15 @@ def test_fit_drops_uninformative_features():
     }
     assert trainer.feature_names == ["x1", "x2"]
     assert trainer.val_score is not None and np.isfinite(trainer.val_score)
-    # Паттерн единой точки: препроцессор обучен только на очищенных колонках.
+    # Single source of truth pattern: the preprocessor is trained only on cleaned columns.
     preprocessor = trainer.pipeline.named_steps["preprocessor"]
     assert set(preprocessor.feature_names_in_) == {"x1", "x2"}
 
 
 @pytest.mark.parametrize("algo", ["ridge", "svr", "knn"])
 def test_metric_models_with_garbage_columns_train_and_score(algo):
-    """Мотивационный сценарий: SVR/KNN/Ridge на данных с мусорными колонками
-    обучаются без NaN/мусора, метрики не хуже, чем на данных без мусора."""
+    """Motivational scenario: SVR/KNN/Ridge on data with garbage columns
+    train without NaN/garbage, and metrics are no worse than on clean data."""
     X_clean, X_dirty, y = _garbage_df()
     trainer_clean = ModelTrainer(algorithm=algo, random_state=0).fit(X_clean, y)
     trainer_dirty = ModelTrainer(algorithm=algo, random_state=0).fit(X_dirty, y)
@@ -2632,13 +2633,13 @@ def test_metric_models_with_garbage_columns_train_and_score(algo):
     assert np.isfinite(trainer_dirty.val_score)
     assert trainer_clean.val_score is not None
     assert np.isfinite(trainer_clean.val_score)
-    # После очистки набор признаков идентичен чистым данным -> качество не хуже.
+    # After cleaning, the feature set is identical to clean data -> quality is no worse.
     assert trainer_dirty.val_score >= trainer_clean.val_score - 1e-12
 
 
 def test_predict_after_cleaning_drops_extra_columns():
-    """predict() после обучения с очисткой отбрасывает лишние колонки
-    (в т.ч. мусорные) — поведение issue #2 сохраняется."""
+    """predict() after training with cleaning drops extra columns
+    (including garbage ones) — the behavior is preserved."""
     X_clean, X_dirty, y = _garbage_df()
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
         X_dirty, y
@@ -2646,14 +2647,14 @@ def test_predict_after_cleaning_drops_extra_columns():
 
     baseline = trainer.predict(X_clean)
     assert np.isfinite(baseline).all()
-    # Вход с лишними (мусорными) колонками даёт тот же результат.
+    # Input with extra (garbage) columns gives the same result.
     with_extra = trainer.predict(X_dirty)
     assert np.allclose(baseline, with_extra)
 
 
 def test_predict_after_cleaning_missing_column_raises():
-    """predict() после обучения с очисткой: отсутствующая информативная
-    колонка даёт явную ошибку."""
+    """predict() after training with cleaning: a missing informative
+    column gives an explicit error."""
     X_clean, X_dirty, y = _garbage_df()
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
         X_dirty, y
@@ -2665,8 +2666,8 @@ def test_predict_after_cleaning_missing_column_raises():
 
 
 def test_trainer_cleaning_survives_save_load(tmp_path):
-    """trainer.save()/load(): feature_names уже обрезаны, удалённые колонки
-    восстановимы из dropped_features_."""
+    """trainer.save()/load(): feature_names are already trimmed, the dropped columns
+    can be recovered from dropped_features_."""
     X_clean, X_dirty, y = _garbage_df()
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(
         X_dirty, y
@@ -2681,8 +2682,8 @@ def test_trainer_cleaning_survives_save_load(tmp_path):
 
 
 def test_fit_numpy_input_skips_cleaning():
-    """np.ndarray без имён колонок: очистка не выполняется (ограничение),
-    обучение проходит без падений."""
+    """np.ndarray without column names: cleaning is not performed (limitation),
+    training succeeds without crashes."""
     rng = np.random.default_rng(0)
     X_arr = rng.normal(size=(80, 3))
     y_arr = X_arr[:, 0] * 2.0 + rng.normal(0, 0.1, 80)
@@ -2696,8 +2697,8 @@ def test_fit_numpy_input_skips_cleaning():
 
 
 def test_fit_clean_data_feature_count_unchanged():
-    """Регрессия: на данных без мусорных колонок очистка не меняет число
-    признаков и dropped_features_ пуст."""
+    """Regression: on data without garbage columns cleaning does not change the
+    number of features and dropped_features_ is empty."""
     rng = np.random.default_rng(1)
     X = pd.DataFrame({"a": rng.normal(size=60), "b": rng.normal(size=60)})
     y = X["a"] + 0.5 * X["b"] + rng.normal(0, 0.05, 60)

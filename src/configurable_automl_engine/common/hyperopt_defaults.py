@@ -14,20 +14,20 @@ T = TypeVar("T", str, int, float, bool)
 
 # ───────────────── hyperopt ───────────────── #
 class BaseDistribution(BaseModel):
-    """Абстрактный базовый класс для распределений поиска."""
+    """Abstract base class for search distributions."""
 
     type: str
 
 
 class CategoricalSpace(BaseDistribution, Generic[T]):
-    """Распределение для категориальных признаков: [options, 'categorical']."""
+    """Distribution for categorical features: [options, 'categorical']."""
 
     type: Literal["categorical"]
     options: list[T]
 
 
 class NumericSpace(BaseDistribution):
-    """Базовый класс для числовых диапазонов."""
+    """Base class for numeric ranges."""
 
     low: float
     high: float
@@ -40,21 +40,21 @@ class NumericSpace(BaseDistribution):
 
 
 class FloatSpace(NumericSpace):
-    """Распределение для чисел с плавающей точкой: [min, max, 'float', step?]."""
+    """Distribution for floating-point numbers: [min, max, 'float', step?]."""
 
     type: Literal["float", "float_log"]
     step: float | None = None
 
     @staticmethod
     def validate_log_low(low: float) -> None:
-        """Проверить нижнюю границу на пригодность для логарифмической шкалы.
+        """Validate the lower bound for suitability on a logarithmic scale.
 
-        Optuna требует строго положительный ``low`` для
+        Optuna requires a strictly positive ``low`` for
         ``trial.suggest_float(..., log=True)``.
         Args:
-            low (float): Нижняя граница распределения.
+            low (float): Lower bound of the distribution.
         Raises:
-            ValueError: Если ``low <= 0``.
+            ValueError: If ``low <= 0``.
         """
         if low <= 0:
             raise ValueError(
@@ -73,7 +73,7 @@ class FloatSpace(NumericSpace):
 
 
 class IntSpace(NumericSpace):
-    """Распределение для целых чисел: [min, max, 'int', step?]."""
+    """Distribution for integer numbers: [min, max, 'int', step?]."""
 
     type: Literal["int"]
     low: int
@@ -88,14 +88,14 @@ class IntSpace(NumericSpace):
 
 
 class SearchSpaceEntry(BaseModel):
-    """Описание пространства поиска для отдельного гиперпараметра.
+    """Description of the search space for an individual hyperparameter.
 
-    Универсальный контейнер, поддерживающий как категориальные списки,
-    так и числовые диапазоны. Реализует логику прозрачной конвертации
-    из сокращенной YAML-записи в типизированные объекты распределений.
+    A universal container supporting both categorical lists and numeric
+    ranges. Implements transparent conversion logic from the shorthand
+    YAML notation into typed distribution objects.
     Attributes:
-        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Валидированный
-            объект конкретного типа распределения.
+        config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated
+            object of a concrete distribution type.
     """
 
     config: Annotated[
@@ -105,29 +105,28 @@ class SearchSpaceEntry(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _parse_list_to_dict(cls, data: Any) -> Any:
-        """Преобразовать краткую списочную запись YAML
-        в структурированный словарь Pydantic.
+        """Convert a shorthand YAML list entry into a structured Pydantic dict.
 
-        Логика парсинга:
-        1. Если входные данные не список, возвращает их "как есть"
-            для стандартной обработки.
-        2. Определяет тип распределения по индексу [1] (categorical) или [2] (numeric).
-        3. Для числовых типов автоматически выводит подтип (int/float),
-            если он не указан явно.
-        4. Формирует внутренний словарь с ключами `type`, `low`, `high`, `step` для
-           последующей дискриминации моделей.
+        Parsing logic:
+        1. If the input is not a list, it is returned "as is" for standard
+            processing.
+        2. Determines the distribution type by index [1] (categorical) or [2] (numeric).
+        3. For numeric types, automatically infers the subtype (int/float)
+            when it is not explicitly specified.
+        4. Builds the internal dict with `type`, `low`, `high`, `step` keys for
+           subsequent model discrimination.
         Args:
-            data (Any): Исходные данные из YAML (список или словарь).
+            data (Any): Original data from YAML (list or dict).
         Returns:
-            Any: Словарь, готовый для инициализации Pydantic-модели.
+            Any: A dict ready to initialize a Pydantic model.
         Raises:
-            ValueError: Если список содержит менее 2 элементов.
+            ValueError: If the list contains fewer than 2 elements.
         """
         if not isinstance(data, list):
             return data
-        # Если это одиночное значение (строка, число) — обернуть как категориальное
+        # If this is a single value (string, number) — wrap it as categorical
         if len(data) == 1:
-            # Одиночное значение → категориальное распределение с одним вариантом
+            # Single value → categorical distribution with one option
             return {"config": {"type": "categorical", "options": data}}
         if data[1] == "categorical":
             return {"config": {"type": "categorical", "options": data[0]}}
@@ -169,7 +168,7 @@ class SearchSpaceEntry(BaseModel):
         return res
 
 
-# Общие параметры для Poisson, Gamma и Tweedie регрессоров
+# Common parameters for Poisson, Gamma and Tweedie regressors
 GLM_COMMON = {
     "alpha": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
     "fit_intercept": SearchSpaceEntry.model_validate([[True, False], "categorical"]),
@@ -210,9 +209,9 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "svr": {
         "C": SearchSpaceEntry.model_validate([1e-2, 100.0, "float_log"]),
         "epsilon": SearchSpaceEntry.model_validate([1e-3, 1.0, "float_log"]),
-        # Исключены 'sigmoid' (не является строго положительно определённым,
-        # насыщается на больших аргументах) и 'poly' (склонен к вырождению на
-        # малых выборках) — в HPO оставляем только надёжные ядра rbf/linear.
+        # Excluded 'sigmoid' (not strictly positive semi-definite, saturates
+        # on large arguments) and 'poly' (prone to degeneracy on small
+        # samples) — HPO keeps only the reliable rbf/linear kernels.
         "kernel": SearchSpaceEntry.model_validate([["rbf", "linear"], "categorical"]),
         "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
     },
@@ -278,11 +277,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "gaussian_process_regression": {},
 }
 
-# Проекция ключей DEFAULT_SPACES. Информационная сводка параметров, для которых
-# заданы дефолтные пространства поиска. НЕ используется валидацией конфигурации:
-# допустимое множество гиперпараметров определяется сигнатурой конструктора
-# оценщика (models.get_allowed_hyperparameters), поэтому параметры вне этого
-# реестра (например, min_samples_split) также разрешены, если их принимает оценщик.
+# A projection of DEFAULT_SPACES keys. An informational summary of parameters
+# with default search spaces. NOT used by configuration validation:
+# the allowed hyperparameter set is determined by the estimator constructor
+# signature (models.get_allowed_hyperparameters), so parameters outside this
+# registry (e.g. min_samples_split) are also allowed if the estimator accepts them.
 ALGO_HYPERPARAMETER_REGISTRY: dict[str, set[str]] = {
     algo: set(params.keys()) for algo, params in DEFAULT_SPACES.items()
 }
@@ -293,24 +292,24 @@ DATA_DEPENDENT_CONSTRAINTS: dict[str, str] = {
     "min_samples_split": "n_samples",
 }
 
-# ───────────────── адаптивный epsilon для SVR ───────────────── #
-# Физический смысл epsilon в SVR — абсолютная погрешность в единицах
-# целевой переменной y, внутри которой ошибка предсказания игнорируется.
-# Слепой диапазон [1e-3, 1.0] деградирует на данных с малым/большим
-# разбросом y: при σ(y)=0.244 epsilon=0.1 — это ~40% всей шкалы, а для
-# цен в миллионах epsilon=0.1 заставляет модель подгонять каждый рубль.
-# Поэтому границы поиска масштабируются разбросом y_train (issue #55).
+# ───────────────── adaptive epsilon for SVR ───────────────── #
+# The physical meaning of epsilon in SVR is the absolute error in units of
+# the target variable y within which the prediction error is ignored.
+# A blind range [1e-3, 1.0] degrades on data with a small/large spread of y:
+# with σ(y)=0.244, epsilon=0.1 is ~40% of the whole scale, while for prices
+# in the millions epsilon=0.1 forces the model to fit every cent.
+# Therefore the search bounds are scaled by the spread of y_train.
 SVR_EPSILON_REL_MIN = 0.005
-"""Нижняя граница epsilon как доля разброса y: 0.005·spread (~0.5% «шума»)."""
+"""Lower bound of epsilon as a fraction of the spread of y: 0.005·spread (~0.5% "noise")."""
 
 SVR_EPSILON_REL_MAX = 0.10
-"""Верхняя граница epsilon как доля разброса y: 0.10·spread (~10% «шума»)."""
+"""Upper bound of epsilon as a fraction of the spread of y: 0.10·spread (~10% "noise")."""
 
 SVR_EPSILON_FALLBACK = (1e-4, 1e-2)
-"""Fallback-границы при константном/NaN-таргете или нулевом разбросе."""
+"""Fallback bounds for a constant/NaN target or zero spread."""
 
 SVR_EPSILON_MIN_LOW = 1e-8
-"""Положительный минимум нижней границы (инвариант ``FloatSpace.validate_log_low``)."""
+"""Positive minimum for the lower bound (invariant of ``FloatSpace.validate_log_low``)."""
 
 
 def compute_svr_epsilon_bounds(
@@ -322,44 +321,44 @@ def compute_svr_epsilon_bounds(
     strategy: Literal["std", "iqr"] = "std",
     min_low: float = SVR_EPSILON_MIN_LOW,
 ) -> tuple[float, float]:
-    """Вычислить адаптивные границы поиска ``epsilon`` для SVR по разбросу ``y``.
+    """Compute adaptive search bounds for ``epsilon`` of an SVR from the spread of ``y``.
 
-    ``epsilon`` в SVR — абсолютная погрешность в единицах целевой
-    переменной, поэтому универсальный слепой диапазон неприменим: границы
-    масштабируются разбросом обучающей выборки (по умолчанию σ(y)).
+    ``epsilon`` in SVR is the absolute error in units of the target variable,
+    so a universal blind range does not apply: the bounds are scaled by the
+    spread of the training sample (by default σ(y)).
 
-    Особенности:
-    1. Вычисление выполняется один раз на запуск ``optimize()`` (вне
-       ``space_fn``), иначе у каждого триала были бы свои границы и
-       TPE-сэмплер Optuna ломался бы.
-    2. Константный ``y`` (σ = 0), NaN/нефинитные значения или пустой
-       вектор приводят к fallback-границам без исключений.
-    3. Нижняя граница клампится к положительному минимуму ``min_low`` —
-       инвариант логарифмической шкалы (``FloatSpace.validate_log_low``).
-       При субнормально малом разбросе верхняя граница дополнительно
-       поднимается, чтобы сохранить ``low < high``.
+    Features:
+    1. The computation runs once per ``optimize()`` call (outside
+       ``space_fn``), otherwise each trial would have its own bounds and
+       the Optuna TPE sampler would break.
+    2. A constant ``y`` (σ = 0), NaN/non-finite values or an empty vector
+       lead to fallback bounds without exceptions.
+    3. The lower bound is clamped to the positive minimum ``min_low`` —
+       an invariant of the logarithmic scale (``FloatSpace.validate_log_low``).
+       For abnormally small spread the upper bound is additionally raised to
+       preserve ``low < high``.
 
     Args:
-        y (Any): Вектор целевой переменной (np.ndarray, pd.Series,
-            pd.DataFrame или итерируемый).
-        rel_min (float): Множитель нижней границы. По умолчанию 0.005.
-        rel_max (float): Множитель верхней границы. По умолчанию 0.10.
-        fallback (tuple[float, float]): Границы, возвращаемые при нулевом
-            или неопределённом разбросе. По умолчанию (1e-4, 1e-2).
-        strategy (Literal["std", "iqr"]): Стратегия оценки разброса.
-            ``'std'`` — стандартное отклонение (по умолчанию);
-            ``'iqr'`` — робастный вариант через межквартильный размах
-            (IQR / 1.349, эквивалент σ для нормального распределения),
-            устойчивый к выбросам.
-        min_low (float): Положительный минимум нижней границы для
-            логарифмической шкалы. Должен быть строго больше нуля.
+        y (Any): Target vector (np.ndarray, pd.Series,
+            pd.DataFrame or an iterable).
+        rel_min (float): Multiplier of the lower bound. Defaults to 0.005.
+        rel_max (float): Multiplier of the upper bound. Defaults to 0.10.
+        fallback (tuple[float, float]): Bounds returned for zero or
+            undefined spread. Defaults to (1e-4, 1e-2).
+        strategy (Literal["std", "iqr"]): Spread estimation strategy.
+            ``'std'`` — standard deviation (default);
+            ``'iqr'`` — robust variant via the interquartile range
+            (IQR / 1.349, the σ equivalent for a normal distribution),
+            resistant to outliers.
+        min_low (float): Positive minimum of the lower bound for the
+            logarithmic scale. Must be strictly greater than zero.
 
     Returns:
-        tuple[float, float]: Пара ``(low, high)`` границ поиска epsilon
-            с инвариантами ``low > 0`` и ``low < high``.
+        tuple[float, float]: Pair ``(low, high)`` of epsilon search bounds
+            with the invariants ``low > 0`` and ``low < high``.
 
     Raises:
-        ValueError: Если ``strategy`` не из ``{"std", "iqr"}`` или
+        ValueError: If ``strategy`` is not in ``{"std", "iqr"}`` or
             ``min_low <= 0``.
     """
     if strategy not in {"std", "iqr"}:
@@ -368,8 +367,8 @@ def compute_svr_epsilon_bounds(
         raise ValueError(f"min_low must be > 0 for log-scale bounds. Got {min_low}")
 
     arr = np.asarray(y, dtype=float).reshape(-1)
-    # Fallback-поведение: константный y, NaN/±inf или пустой вектор —
-    # никаких исключений (контракт issue #55).
+    # Fallback behavior: constant y, NaN/±inf or an empty vector —
+    # no exceptions.
     if arr.size == 0 or not np.all(np.isfinite(arr)):
         return fallback
 
@@ -384,11 +383,10 @@ def compute_svr_epsilon_bounds(
 
     low = rel_min * spread
     high = rel_max * spread
-    # Клампинг к положительному минимуму для float_log (low > 0).
+    # Clamp to the positive minimum for float_log (low > 0).
     low = max(low, min_low)
-    # При субнормально малом разбросе после клампинга low может превысить
-    # high — поднимаем high, сохраняя low < high (валидный диапазон для
-    # suggest_float(log=True)).
+    # For abnormally small spread after clamping, low may exceed high — raise
+    # high, keeping low < high (a valid range for suggest_float(log=True)).
     if low >= high:
         high = max(high, low * 2.0)
     return float(low), float(high)
@@ -396,46 +394,46 @@ def compute_svr_epsilon_bounds(
 
 def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
     """
-    Корректирует границы пространства поиска на основе размера выборки.
+    Adjust the search space bounds based on the sample size.
 
-    Особенности:
-    1. Исключает мутацию глобального состояния через deep copy (Pydantic model_copy).
-    2. Гарантирует, что и low, и high не превышают физический лимит данных.
-    3. Сохраняет типы данных (int/float) согласно исходной конфигурации.
+    Features:
+    1. Avoids mutating global state through a deep copy (Pydantic model_copy).
+    2. Guarantees that both low and high do not exceed the physical limit of the data.
+    3. Preserves data types (int/float) according to the original configuration.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive. Got {n_samples}")
 
-    # Создаем новый словарь, чтобы не изменять оригинальный space
+    # Create a new dict so the original space is not mutated
     clipped_space = {}
 
     for param, entry in space.items():
         strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)
 
-        # Если параметр не требует клиппинга или это не SearchSpaceEntry,
-        # копируем как есть
+        # If the parameter does not require clipping or is not a SearchSpaceEntry,
+        # copy it as is
         if not strategy or not isinstance(entry, SearchSpaceEntry):
             clipped_space[param] = entry
             continue
 
-        # 1. Рассчитываем физический предел для данного параметра
+        # 1. Compute the physical limit for this parameter
         raw_limit = n_samples - 1 if strategy == "n_samples_minus_one" else n_samples
-        limit = float(max(1, raw_limit))  # Гарантируем минимум 1
+        limit = float(max(1, raw_limit))  # Guarantee a minimum of 1
 
-        # 2. Глубокое копирование через Pydantic (защита от Global State Mutation)
+        # 2. Deep copy via Pydantic (protection against global state mutation)
         new_entry = entry.model_copy(deep=True)
         config = new_entry.config
 
-        # 3. Клиппинг числовых диапазонов
+        # 3. Clip numeric ranges
         if isinstance(config, (IntSpace, FloatSpace)):
-            # Сначала определяем новый high (не может быть выше limit)
+            # First determine the new high (must not exceed limit)
             new_high = min(config.high, limit)
 
-            # Затем определяем новый low (не может быть выше нового high)
-            # Это решает проблему Low > Limit Crash
+            # Then determine the new low (must not exceed the new high)
+            # This solves the "low > limit" crash
             new_low = min(config.low, new_high)
 
-            # 4. Обновляем конфиг через model_copy для соблюдения внутренней валидации
+            # 4. Update the config via model_copy to satisfy internal validation
             if isinstance(config, IntSpace):
                 new_entry.config = config.model_copy(
                     update={"low": int(new_low), "high": int(new_high)}

@@ -3,7 +3,7 @@
     build-backend = "setuptools.build_meta"
 
     [project]
-    name = "configurable-automl-engine"              # имя на PyPI (может отличаться от модуля)
+    name = "configurable-automl-engine"              # PyPI name (may differ from the module name)
     dynamic = ["version"]
     description = "A configuration-driven AutoML orchestrator for automated model selection and two-stage hyperparameter optimization."
     readme = "README.md"
@@ -48,7 +48,7 @@
 
     xgboost = ["xgboost>=3.1.3"]
 
-    # Логирование с поддержкой многопоточности
+    # Logging with multithreading support
     logging = ["concurrent-log-handler>=0.9.25"]
 
     test = ["pytest>=9.0.2", "pytest-mock>=3.14.0"]
@@ -82,7 +82,7 @@
 
     [tool.pytest.ini_options]
     filterwarnings = [
-        # Поля модели через __fields__ / model_fields на экземпляре deprecated:
+        # Model fields accessed via __fields__ / model_fields on an instance are deprecated:
         # __fields__ — PydanticDeprecatedSince20, instance-model_fields —
         # PydanticDeprecatedSince211
         "error::pydantic.warnings.PydanticDeprecatedSince20",

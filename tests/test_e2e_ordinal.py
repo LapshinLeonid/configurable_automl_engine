@@ -1,10 +1,11 @@
-"""E2E-тесты обучения моделей с ординальным (порядковым) кодированием категорий.
+"""E2E tests of training models with ordinal encoding of categories.
 
-Проверяют, что движок корректно обучается на данных с категориальными признаками
-при ``general.categorical_encoding='ordinal'`` через ``train_best_model`` и что
-``tuner.optimize(..., encoding='ordinal')`` не даёт pruned-испытаний. Дополнительно
-проверяется совместная работа ordinal-кодирования с SMOTE-оверсэмплингом и
-сериализация ``ModelTrainer`` с ordinal-стратегией.
+Verify that the engine trains correctly on data with categorical features
+when ``general.categorical_encoding='ordinal'`` is used through
+``train_best_model``, and that ``tuner.optimize(..., encoding='ordinal')``
+produces no pruned trials. Additionally, the joint operation of ordinal
+encoding with SMOTE oversampling and the serialization of ``ModelTrainer``
+with the ordinal strategy are verified.
 """
 
 from __future__ import annotations
@@ -23,11 +24,11 @@ from configurable_automl_engine.trainer import ModelTrainer
 
 
 def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
-    """Синтетический датасет регрессии с категориальными признаками."""
+    """Synthetic regression dataset with categorical features."""
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
-    id_code = rng.choice(["10", "20", "30"], size=n)  # 'числовые строки'-категории
+    id_code = rng.choice(["10", "20", "30"], size=n)  # numeric-string categories
     num = rng.normal(size=n)
 
     target = (
@@ -51,7 +52,7 @@ def _make_regression_df(n: int = 180, seed: int = 42) -> pd.DataFrame:
 
 
 def _make_binary_df(n: int = 200, seed: int = 7) -> pd.DataFrame:
-    """Синтетический датасет с бинарным таргетом (для оверсэмплинга SMOTE)."""
+    """Synthetic dataset with a binary target (for SMOTE oversampling)."""
     rng = np.random.default_rng(seed)
     color = rng.choice(["red", "green", "blue"], size=n)
     size = rng.choice(["S", "M", "L"], size=n)
@@ -79,7 +80,7 @@ def _make_config(
     n_trials: int = 2,
     encoding: str = "ordinal",
 ) -> dict[str, Any]:
-    """Собрать конфигурацию для train_best_model с ordinal-кодированием."""
+    """Build a train_best_model configuration with ordinal encoding."""
     return {
         "general": {
             "comparison_metric": "r2",
@@ -112,8 +113,8 @@ def _make_config(
 
 
 def test_train_best_model_ordinal_encoding(tmp_path: Path) -> None:
-    """Полный цикл обучения с categorical_encoding='ordinal': модель сохраняется
-    и предсказывает конечные значения на новых данных."""
+    """Full training cycle with categorical_encoding='ordinal': the model is saved
+    and predicts finite values on new data."""
     df = _make_regression_df()
     model_path = tmp_path / "models" / "ordinal.pkl"
     config = _make_config(model_path, n_trials=2)
@@ -129,7 +130,7 @@ def test_train_best_model_ordinal_encoding(tmp_path: Path) -> None:
 
     loaded = ModelTrainer.load(str(result["model_path"]))
     assert loaded.pipeline is not None
-    # Стратегия кодирования сохранилась в тренере
+    # The encoding strategy was preserved in the trainer
     assert loaded.encoding_strategy == "ordinal"
 
     new_df = df.head(10).drop(columns=["target"])
@@ -139,8 +140,8 @@ def test_train_best_model_ordinal_encoding(tmp_path: Path) -> None:
 
 
 def test_tuner_optimize_ordinal_not_pruned() -> None:
-    """tuner.optimize(..., encoding='ordinal') возвращает обученную модель
-    и конечный score (нет pruned-испытаний)."""
+    """tuner.optimize(..., encoding='ordinal') returns a trained model
+    and a finite score (no pruned trials)."""
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
@@ -166,8 +167,8 @@ def test_tuner_optimize_ordinal_not_pruned() -> None:
 
 
 def test_train_best_model_ordinal_with_smote(tmp_path: Path) -> None:
-    """Совместная работа ordinal-кодирования и SMOTE-оверсэмплинга
-    (SMOTE получает уже закодированную числовую матрицу)."""
+    """Ordinal encoding works together with SMOTE oversampling
+    (SMOTE receives an already-encoded numeric matrix)."""
     df = _make_binary_df()
     model_path = tmp_path / "models" / "ordinal_smote.pkl"
     config = _make_config(
@@ -185,7 +186,7 @@ def test_train_best_model_ordinal_with_smote(tmp_path: Path) -> None:
 
 
 def test_model_trainer_invalid_encoding_strategy() -> None:
-    """Невалидная encoding_strategy у ModelTrainer вызывает TrainingError."""
+    """An invalid ModelTrainer encoding_strategy raises TrainingError."""
     with pytest.raises(Exception, match="Unknown encoding_strategy"):
         ModelTrainer(algorithm="elasticnet", encoding_strategy="binary")
 
@@ -196,7 +197,7 @@ def test_model_trainer_invalid_encoding_strategy() -> None:
 def test_model_trainer_ordinal_serialization_roundtrip(
     tmp_path: Path, fmt: SerializationFormat
 ) -> None:
-    """ModelTrainer с ordinal-стратегией корректно сохраняется/загружается."""
+    """ModelTrainer with the ordinal strategy saves/loads correctly."""
     df = _make_regression_df(n=60, seed=11)
     trainer = ModelTrainer(
         algorithm="elasticnet",
@@ -222,8 +223,8 @@ def test_model_trainer_ordinal_serialization_roundtrip(
 def test_model_trainer_backward_compat_missing_encoding_strategy(
     tmp_path: Path,
 ) -> None:
-    """Модель, сериализованная до появления атрибута encoding_strategy,
-    загружается и продолжает работать (обратная совместимость)."""
+    """A model serialized before the encoding_strategy attribute existed
+    still loads and keeps working (backward compatibility)."""
     df = _make_regression_df(n=60, seed=12)
     trainer = ModelTrainer(
         algorithm="elasticnet",
@@ -232,8 +233,8 @@ def test_model_trainer_backward_compat_missing_encoding_strategy(
     )
     trainer.fit(df.drop(columns=["target"]), df["target"])
 
-    # Имитируем модель, созданную до введения параметра encoding_strategy:
-    # атрибут отсутствует у распикленного объекта.
+    # Simulate a model created before the encoding_strategy parameter was
+    # introduced: the attribute is missing on the pickled object.
     del trainer.encoding_strategy
     path = tmp_path / "legacy.pkl"
     trainer.save(path)
@@ -241,10 +242,10 @@ def test_model_trainer_backward_compat_missing_encoding_strategy(
     loaded = ModelTrainer.load(path)
     assert not hasattr(loaded, "encoding_strategy")
 
-    # predict работает (использует сохранённый pipeline)...
+    # prediction works (uses the saved pipeline)...
     preds = loaded.predict(df.drop(columns=["target"]).head(10))
     assert np.isfinite(preds).all()
 
-    # ...и повторный fit не падает: _build_preprocessor() откатывается на one_hot.
+    # ...and re-fitting does not fail: _build_preprocessor() falls back to one_hot.
     loaded.fit(df.drop(columns=["target"]), df["target"])
     assert loaded.pipeline is not None

@@ -1,4 +1,4 @@
-"""Feature selector for reducing the feature space (issue #29).
+"""Feature selector for reducing the feature space.
 
 This module implements :class:`FeatureSelector` — a standalone sklearn
 transformer (``BaseEstimator`` + ``TransformerMixin``) that reduces the

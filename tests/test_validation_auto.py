@@ -1,4 +1,4 @@
-"""Tests for the 'auto' validation strategy (#13)."""
+"""Tests for the 'auto' validation strategy."""
 
 import math
 
@@ -133,7 +133,7 @@ def test_choose_fixed_kfold_transition_50_to_51():
         (5, 3, "LOO", None),  # Branch 6: micro-sample relabel LOO
         (100, 5, "kfold", 5),  # Branch 6: continuous k-fold
         (150, 5, "kfold", 7),  # Branch 6: continuous k-fold (unchanged)
-        (1000, 5, "kfold", 5),  # Branch 3: mid-size fixed 5-fold CV (issue #99)
+        (1000, 5, "kfold", 5),  # Branch 3: mid-size fixed 5-fold CV
         (50000, 5, "train_test_split", None),  # Branch 4: standard split, large N
         (60000, 10000, "train_test_split", None),  # Branch 5: high-dimensional
     ],
@@ -149,7 +149,7 @@ def test_choose_unchanged_branches(n_samples, n_features, method, expected_k):
 def test_choose_mid_size_fixed_kfold():
     """Branch 3: mid-size samples with a good N/P ratio use fixed 5-fold CV.
 
-    Issue #99: the old standard hold-out of max(30, 2*P) rows (30 rows for
+    The old standard hold-out of max(30, 2*P) rows (30 rows for
     N=1000, 100 rows for N=10000) compared models on far too few points,
     making the winner nearly random and the Sanity Gate OOF vector cover only
     ~3% of the data. 5-fold CV scores every row exactly once.
@@ -157,7 +157,7 @@ def test_choose_mid_size_fixed_kfold():
     for n_samples, n_features in [
         (200, 5),  # old: hold-out of 30 rows
         (500, 5),  # old: hold-out of 30 rows
-        (999, 5),  # N не кратен 5: 5 фолдов по 200/200/200/200/199
+        (999, 5),  # N is not a multiple of 5: folds of 200/200/200/200/199
         (1000, 5),  # old: hold-out of 30 rows
         (10000, 5),  # old: hold-out of 100 rows
         (300, 3),  # pipeline-size dataset (test_prepare_dataset case)
@@ -291,7 +291,7 @@ def test_make_cv_auto_relabel_loo():
 
 
 def test_make_cv_auto_mid_size_kfold():
-    """auto on mid-size data (issue #99) resolves to a fixed 5-fold KFold."""
+    """auto on mid-size data resolves to a fixed 5-fold KFold."""
     method, cv, decision = make_cv(
         1000,
         val_method="auto",
@@ -463,19 +463,19 @@ def test_iter_splits_auto_fixed_kfold():
 
 
 def test_iter_splits_auto_mid_size_kfold():
-    """auto -> kfold (issue #99): N=1000 is scored with 5-fold CV, not a 30-row
+    """auto -> kfold: N=1000 is scored with 5-fold CV, not a 30-row
     hold-out, so every row is validated exactly once."""
     X, y = _dummy_data(n=1000, p=5)
     splits = list(iter_splits(X, y, method="auto"))
     assert len(splits) == 5
     test_sizes = {len(x_te) for _, x_te, _, _ in splits}
     assert test_sizes == {200}
-    # OOF-покрытие: каждая строка ровно один раз в валидационном фолде.
+    # OOF coverage: each row appears exactly once in a validation fold.
     assert sum(len(x_te) for _, x_te, _, _ in splits) == 1000
 
 
 def test_iter_splits_auto_mid_size_kfold_uneven_n():
-    """auto -> kfold for N not divisible by 5 (issue #99): KFold produces
+    """auto -> kfold for N not divisible by 5: KFold produces
     uneven folds (4x200 + 199 for N=999) and keeps 100% OOF coverage."""
     X, y = _dummy_data(n=999, p=5)
     splits = list(iter_splits(X, y, method="auto"))
@@ -489,10 +489,10 @@ def test_iter_splits_auto_train_test_split_dynamic_test_size(monkeypatch):
     """auto -> train_test_split (large N) uses the computed (integer) test size,
     not 0.2.
 
-    Сама эвристика («большие N → split») покрыта числовыми тестами
+    The heuristic itself ("large N → split") is covered by the numeric tests
     (test_choose_train_test_split_standard / test_make_cv_auto_train_test_split);
-    здесь make_cv замокан, чтобы не создавать массив на 50k строк ради
-    проверки проброса целочисленного test_size в фактическое разбиение.
+    here make_cv is patched to avoid building a 50k-row array just to check
+    that the integer test_size is forwarded to the actual split.
     """
     X, y = _dummy_data(n=1000, p=5)
     fake_decision = {
@@ -531,7 +531,7 @@ def test_iter_splits_auto_pandas():
         (100, 5, 80),  # kfold k=5 -> floor(100 * (1 - 1/5))
         (10, 3, 9),  # LOO -> N - 1
         (5, 3, 4),  # relabel LOO -> N - 1
-        (1000, 5, 800),  # mid-size: fixed 5-fold CV (issue #99)
+        (1000, 5, 800),  # mid-size: fixed 5-fold CV
         (50000, 5, 49500),  # large N: train_test_split -> train_size
         (24, 2, 18),  # fixed kfold k=4 -> floor(24 * (1 - 1/4))
     ],
@@ -582,16 +582,16 @@ def test_get_effective_train_size_auto_n_lt_2():
 
 
 def test_get_effective_train_size_integer_test_size():
-    """Целочисленный test_size (резолюция 'auto' → split, issue #24):
-    трактуется как число строк, а не доля (иначе Neff схлопывался бы до 1).
+    """Integer test_size ('auto' resolution → split):
+    is treated as a number of rows, not a fraction (otherwise Neff would collapse to 1).
     """
-    # Явная train_test_split с целым test_size
+    # Explicit train_test_split with an integer test_size
     result = get_effective_train_size(
         120, ValidationStrategy.train_test_split, test_size=15
     )
     assert result == 105
-    # auto → train_test_split: choose_validation_method возвращает целое
-    # число строк; get_effective_train_size обязан дать тот же train_size.
+# auto → train_test_split: choose_validation_method returns an integer
+    # number of rows; get_effective_train_size must produce the same train_size.
     decision = choose_validation_method(50000, 5)
     assert decision["method"] == "train_test_split"
     result_auto = get_effective_train_size(
@@ -618,8 +618,8 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     def fake_make_cv(n_samples, *, val_method, n_folds, random_state, test_size, n_features=None):
         captured_cv["n_features"] = n_features
         captured_cv["n_samples"] = n_samples
-        # k_fold всегда сопровождается готовым cv_obj (инвариант make_cv),
-        # из которого tuner берёт число фолдов для pruning-ветки.
+        # k_fold is always accompanied by a ready cv_obj (make_cv invariant),
+        # from which the tuner takes the fold count for the pruning branch.
         return "k_fold", KFold(n_splits=2, shuffle=True, random_state=random_state), None
 
     def fake_get_effective_train_size(
@@ -654,7 +654,7 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     """optimize() routes auto->train_test_split with the resolved test size.
 
     Guards the threaded-decision path: when the auto strategy resolves to a
-    train/test split (large N >= 50000, issue #99), the objective must call
+    train/test split (large N >= 50000), the objective must call
     iter_splits with ``method="train_test_split"`` and the dataset-derived
     (integer) ``test_size`` from the already-resolved decision, instead of
     re-resolving 'auto' or using the fixed 0.2 fraction.

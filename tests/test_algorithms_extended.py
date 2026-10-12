@@ -25,13 +25,13 @@ ALGORITHMS = [
         "xgboost",
         marks=pytest.mark.skipif(
             importlib.util.find_spec("xgboost") is None,
-            reason="xgboost не установлен",
+            reason="xgboost is not installed",
         ),
     ),
 ]
 
 X_full, y_full = load_diabetes(return_X_y=True, as_frame=True)
-# Добавим NaN-ы в копию, чтобы проверить импьютер
+# Add NaNs to a copy to test the imputer
 X_nan = X_full.copy()
 X_nan.iloc[0:20, 0] = np.nan
 
@@ -61,9 +61,9 @@ BAD_PARAMS = {
 
 @pytest.mark.parametrize("algo,bad_param", BAD_PARAMS.items())
 def test_invalid_hyperparams(algo, bad_param):
-    # Некорректные гиперпараметры вызывают ValueError из sklearn внутри
-    # валидационного скоринга (issue #24); все фолды падают → fail-fast
-    # TrainingError до финального обучения, с сохранением текста ошибки.
+    # Invalid hyperparameters raise a sklearn ValueError inside the
+    # validation scoring; all folds fail → fail-fast
+    # TrainingError before the final training, preserving the error text.
     with pytest.raises(TrainingError):
         ModelTrainer(algorithm=algo, hyperparams=bad_param).fit(X_full, y_full)
 

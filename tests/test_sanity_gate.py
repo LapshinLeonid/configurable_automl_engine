@@ -1,24 +1,26 @@
-"""Тесты ModelSanityGate — модуля аудита вырождения моделей (эпик #61, T2).
+"""Tests for ModelSanityGate — the model-degeneration audit module.
 
-Покрытие:
-    1. Контур А (Diversity Ratio): честная модель проходит; константный прогноз
-       проваливается; граница «равенство порогу» проходит; константный y —
-       пропуск с soft_warning; адаптивный режим относительно константной модели.
-    2. Контур Б (Unique Ratio): масштаб округления от std(y); нижняя граница
-       nunique; граница «nunique == min_unique_count» проходит.
-    3. Контур В (Dead Feature Check): Lasso с ~60% нулей — сигнал, не
-       дисквалификация; комбинация «много нулей + низкий diversity»
-       дисквалифицирует; пермутационный путь для нелинейных моделей с
-       контролем стоимости и детерминизмом; исключения predict → reason.
-    4. Контур Г (Generalization Gap): переобученные модели (дерево глубины 20,
-       1-NN) с RMSE_full≈0 / RMSE_oof≈0 — бесконечный gap; граница
-       gap == max проходит; пример из issue (0.1 vs 0.19); режимы
-       generalization_gap_mode 'warn' (soft_warning, не дисквалифицирует —
-       включая бесконечный gap из деления на ноль, issue #111) и 'reject'
-       (строгое поведение старого дефолта, паритет; деление на ноль →
-       reasons).
-    5. Режимы и edge cases: warn_only; отключение контуров; NaN-маскирование;
-       severity; валидация параметров; различающиеся reasons/soft_warnings.
+Coverage:
+    1. Circuit A (Diversity Ratio): an honest model passes; a constant
+       prediction fails; the 'ratio equals threshold' boundary passes;
+       a constant target is skipped with a soft_warning; the adaptive
+       mode relative to the constant model.
+    2. Circuit B (Unique Ratio): rounding scale driven by std(y); the
+       lower nunique bound; the 'nunique == min_unique_count' boundary
+       passes.
+    3. Circuit C (Dead Feature Check): Lasso with ~60% zeros is a signal,
+       not a disqualification; the 'many zeros + low diversity' combination
+       disqualifies; the permutation path for non-linear models with cost
+       control and determinism; predict exceptions become reasons.
+    4. Circuit D (Generalization Gap): overfitted models (depth-20 tree,
+       1-NN) fail; RMSE_oof≈0 / RMSE_full≈0 — an infinite gap; division by
+       zero; the gap == max boundary passes; the example (0.1 vs 0.19); the
+       generalization_gap_mode regimes 'warn' (soft_warning, does not
+       disqualify — including the infinite gap from division by zero) and
+       'reject' (the strict old-default behavior, parity; division by zero
+       → reasons).
+    5. Modes and edge cases: warn_only; circuit toggling; NaN masking;
+       severity; parameter validation; distinct reasons/soft_warnings.
 """
 
 from __future__ import annotations
@@ -47,12 +49,12 @@ from configurable_automl_engine.training_engine.sanity_gate import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Хелперы
+#  Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _dataset(seed: int = 7, n: int = 150, p: int = 6, noise: float = 1.0):
-    """Чистый датасет: X0/X1 информативны, остальное — шум."""
+    """Clean dataset: X0/X1 are informative, the rest is noise."""
     rng = np.random.RandomState(seed)
     X = rng.randn(n, p)
     y = 2.0 * X[:, 0] + 0.5 * X[:, 1] + rng.randn(n) * noise
@@ -62,9 +64,9 @@ def _dataset(seed: int = 7, n: int = 150, p: int = 6, noise: float = 1.0):
 def _honest_oof_full(
     factory: Callable[[], Any], X: np.ndarray, y: np.ndarray, folds: int = 4
 ) -> tuple[np.ndarray, np.ndarray, Any]:
-    """Честный OOF-вектор (модель фолда не видела строку) + full-fit.
+    """Honest OOF vector (the fold model has not seen the row) + full-fit.
 
-    Возвращает (y_pred_oof, y_pred_full, full_model).
+    Returns (y_pred_oof, y_pred_full, full_model).
     """
     kf = KFold(n_splits=folds, shuffle=True, random_state=0)
     oof = np.full(len(y), np.nan)
@@ -77,28 +79,28 @@ def _honest_oof_full(
 
 
 def _with_rmse(base: np.ndarray, target_rmse: float, rng: np.random.RandomState) -> np.ndarray:
-    """Вектор с заданным RMSE относительно ``base`` (см. issue, контур Г)."""
+    """A vector with the given RMSE relative to ``base`` (see Circuit D)."""
     noise = rng.randn(len(base))
     noise = noise / np.sqrt(np.mean(noise**2)) * target_rmse
     return base + noise
 
 
 class _CoefModel:
-    """Суб-модель только с ``coef_`` — для линейного пути контура В."""
+    """A sub-model with only ``coef_`` — for the linear path of Circuit C."""
 
     def __init__(self, coef: Any) -> None:
         self.coef_ = np.asarray(coef, dtype=float)
 
 
 class _BrokenPredictModel:
-    """Модель, падающая в ``predict`` — проверка перехвата исключений."""
+    """A model that fails in ``predict`` — tests exception interception."""
 
     def predict(self, X: Any) -> Any:
         raise RuntimeError("boom")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Структура результата
+#  Result structure
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -120,12 +122,12 @@ def test_reasons_and_soft_warnings_are_distinct_channels():
     result = gate.check(y=y, y_pred_oof=np.full(50, 1.0), y_pred_full=y)
     assert any("Circuit A" in r for r in result.reasons)
     assert any("Circuit B" in r for r in result.reasons)
-    # Сигналы и дисквалификации не смешиваются.
+    # Signals and disqualifications do not mix.
     assert not any("signal" in r for r in result.reasons)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур А — Diversity Ratio
+#  Circuit A — Diversity Ratio
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -153,7 +155,7 @@ def test_diversity_constant_predictions_fail():
 
 
 def test_diversity_boundary_equality_passes():
-    # y = arange → дисперсия точная; pred = c*y → ratio = c² ровно.
+    # y = arange → exact variance; pred = c*y → ratio equals c².
     y = np.arange(200, dtype=float)
     c = np.sqrt(0.15)
     gate = ModelSanityGate(
@@ -183,10 +185,10 @@ def test_diversity_constant_target_skips_with_warning():
         check_unique=False, check_dead_features=False, check_generalization_gap=False
     )
     result = gate.check(y=y, y_pred_oof=np.full(50, 5.0))
-    assert result.is_valid  # контур А пропущен, оценивает контур Б
+    assert result.is_valid  # Circuit A skipped; Circuit B is evaluated
     assert any("target variance is zero" in w for w in result.soft_warnings)
     assert not any("Circuit A" in r for r in result.reasons)
-    # Отношение не определено (деление на ноль) — NaN, а не 0.0 (ревью PR #32).
+    # The ratio is undefined (division by zero) — NaN, not 0.0.
     assert np.isnan(result.diversity_ratio)
 
 
@@ -198,18 +200,18 @@ def test_diversity_adaptive_mode_relative_to_constant_model():
         check_dead_features=False,
         check_generalization_gap=False,
     )
-    # Любой положительный разброс лучше константной модели.
+    # Any positive spread is better than a constant model.
     result = gate.check(y=y, y_pred_oof=0.01 * y)
     assert result.is_valid
     assert result.diversity_ratio == pytest.approx(0.0001, rel=1e-6)
-    # Нулевой разброс — ровно как у константной модели → провал.
+    # Zero spread — exactly like a constant model → failure.
     const = gate.check(y=y, y_pred_oof=np.full(100, y.mean()))
     assert not const.is_valid
     assert any("Circuit A" in r for r in const.reasons)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур Б — Unique Ratio
+#  Circuit B — Unique Ratio
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -237,7 +239,7 @@ def test_unique_constant_predictions_fail():
 
 def test_unique_boundary_equal_to_min_unique_count_passes():
     y = np.arange(100, dtype=float)
-    pred = np.tile(np.arange(5, dtype=float), 20)  # ровно 5 уникальных
+    pred = np.tile(np.arange(5, dtype=float), 20)  # exactly 5 unique values
     gate = ModelSanityGate(
         min_unique_count=5,
         check_diversity=False,
@@ -258,10 +260,10 @@ def test_unique_boundary_equal_to_min_unique_count_passes():
 
 
 def test_unique_ratio_rounding_scaled_by_target_std():
-    # Крупномасштабный y: одинаковый «джиттер» 0.001 в предсказаниях
-    # неразличим после округления (granularity = 10) → провал.
+    # Large-scale y: the same 0.001 'jitter' in predictions is
+    # indistinguishable after rounding (granularity = 10) → failure.
     y_big = np.arange(100, dtype=float) * 100.0  # std ≈ 2887 → decimals ≤ 0
-    pred_big = 50000.0 + np.linspace(0.0, 0.099, 100)  # шаг 0.001
+    pred_big = 50000.0 + np.linspace(0.0, 0.099, 100)  # step 0.001
     gate = ModelSanityGate(
         check_diversity=False, check_dead_features=False, check_generalization_gap=False
     )
@@ -269,17 +271,17 @@ def test_unique_ratio_rounding_scaled_by_target_std():
     assert not res_big.is_valid
     assert any("Circuit B" in r for r in res_big.reasons)
 
-    # Мелкомасштабный y (std ≈ 0.29, granularity = 0.001): тот же джиттер
-    # значим → все 100 значений различны → проход.
+    # Small-scale y (std ≈ 0.29, granularity = 0.001): the same jitter is
+    # significant → all 100 values are distinct → pass.
     y_small = np.arange(100, dtype=float) * 0.01
-    pred_small = 5.0 + np.linspace(0.0, 0.099, 100)  # шаг 0.001
+    pred_small = 5.0 + np.linspace(0.0, 0.099, 100)  # step 0.001
     res_small = gate.check(y=y_small, y_pred_oof=pred_small)
     assert res_small.is_valid
     assert res_small.unique_ratio == pytest.approx(1.0)
 
 
 def test_unique_min_unique_ratio_lower_bound_applies():
-    # N=1000: required = max(5, 0.05*1000) = 50 → 20 уникальных — провал.
+    # N=1000: required = max(5, 0.05*1000) = 50 → 20 unique values — failure.
     y = np.arange(1000, dtype=float)
     pred = np.tile(np.arange(20, dtype=float), 50)
     gate = ModelSanityGate(
@@ -291,7 +293,7 @@ def test_unique_min_unique_ratio_lower_bound_applies():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур В — Dead Feature Check
+#  Circuit C — Dead Feature Check
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -301,11 +303,11 @@ def test_dead_features_lasso_many_zeros_is_signal_not_disqualification():
     y = 2.0 * X[:, 0] + 1.0 * X[:, 1] + rng.randn(200)
     lasso = Lasso(alpha=0.06, random_state=0).fit(X, y)
     gate = ModelSanityGate()
-    # Порог нулевых коэффициентов берём из самого гейта, чтобы тест не
-    # рассинхронизировался с реализацией (ревью PR #32).
+    # Take the zero-coefficient threshold from the gate itself so the test
+    # stays in sync with the implementation.
     tol = gate.zero_coef_tolerance
     zero_ratio = float((np.abs(lasso.coef_) <= tol).mean())
-    assert zero_ratio > 0.5  # ~57–60% нулевых коэффициентов
+    assert zero_ratio > 0.5  # ~57–60% zero coefficients
 
     result = gate.check(
         y=y, y_pred_oof=lasso.predict(X), y_pred_full=lasso.predict(X), X=X, model=lasso
@@ -320,21 +322,21 @@ def test_dead_features_linear_combo_with_low_diversity_disqualifies():
     rng = np.random.RandomState(5)
     n = 100
     y = rng.randn(n)
-    model = _CoefModel(np.zeros(10))  # 100% нулей
+    model = _CoefModel(np.zeros(10))  # 100% zeros
     gate = ModelSanityGate(check_unique=False, check_generalization_gap=False)
     result = gate.check(
         y=y,
-        y_pred_oof=np.full(n, y.mean()),  # diversity = 0 → контур А провален
+        y_pred_oof=np.full(n, y.mean()),  # diversity = 0 → Circuit A fails
         y_pred_full=np.full(n, y.mean()),
         X=rng.randn(n, 10),
         model=model,
     )
-    # Комбинация «много нулей И низкий diversity»: контур В дисквалифицирует
-    # только потому, что контур А уже провалился (diversity_failed=True).
+    # The 'many zeros AND low diversity' combination: Circuit C only
+    # disqualifies because Circuit A already failed (diversity_failed=True).
     assert not result.is_valid
     assert any("combination" in r and "Circuit C" in r for r in result.reasons)
     assert any("Circuit A" in r for r in result.reasons)
-    # Сигнал тоже присутствует.
+    # The signal is present too.
     assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
 
 
@@ -355,15 +357,16 @@ def test_dead_features_combo_disabled_when_require_low_diversity_false():
         X=rng.randn(n, 10),
         model=model,
     )
-    # Дисквалификация только по контуру А; контур В — сигнал.
+    # Disqualification by Circuit A only; Circuit C is a signal.
     assert not result.is_valid
     assert all("Circuit C" not in r for r in result.reasons)
     assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
 
 
 def test_dead_features_combo_inactive_reported_when_check_diversity_off():
-    # check_diversity=False: комбинация C+A не вычислима — гейт явно
-    # сообщает об этом soft_warning'ом, а не молча отключает правило.
+    # check_diversity=False: the C+A combination cannot be computed — the
+    # gate explicitly reports this via a soft_warning instead of silently
+    # disabling the rule.
     rng = np.random.RandomState(5)
     n = 100
     y = rng.randn(n)
@@ -380,12 +383,12 @@ def test_dead_features_combo_inactive_reported_when_check_diversity_off():
         X=rng.randn(n, 10),
         model=model,
     )
-    assert result.is_valid  # без контура А нет дисквалификации
+    assert result.is_valid  # without Circuit A there is no disqualification
     assert any("combination rule inactive" in w for w in result.soft_warnings)
 
 
 def test_dead_features_zero_ratio_boundary_equality_no_warning():
-    model = _CoefModel([1.0, 0.0, 0.0, 0.0])  # ровно 0.75 нулей
+    model = _CoefModel([1.0, 0.0, 0.0, 0.0])  # exactly 0.75 zeros
     y = np.arange(40, dtype=float)
     gate = ModelSanityGate(
         max_dead_feature_ratio=0.75,
@@ -395,14 +398,14 @@ def test_dead_features_zero_ratio_boundary_equality_no_warning():
     )
     result = gate.check(y=y, y_pred_oof=np.arange(40, dtype=float), model=model)
     assert result.is_valid
-    assert result.soft_warnings == []  # равенство порогу — не превышение
+    assert result.soft_warnings == []  # equality with the threshold is not an excess
 
 
 def test_dead_features_nonlinear_permutation_positive_rf():
     rng = np.random.RandomState(3)
     n, p = 150, 6
     X = rng.randn(n, p)
-    y = X.sum(axis=1) + rng.randn(n)  # все признаки информативны
+    y = X.sum(axis=1) + rng.randn(n)  # all features are informative
     rf = RandomForestRegressor(max_depth=4, n_estimators=60, random_state=0)
     oof, full, model = _honest_oof_full(
         lambda: RandomForestRegressor(max_depth=4, n_estimators=60, random_state=0),
@@ -418,10 +421,11 @@ def test_dead_features_nonlinear_permutation_positive_rf():
 
 
 def test_dead_features_nonlinear_correlated_noise_soft_warning_only():
-    # «Ложно мёртвые» признаки (коррелирующие колонки): модель использует
-    # только первую колонку, остальные — почти точные копии (информация
-    # берётся у соседа). Пермутация копий не меняет предсказания → высокая
-    # доля «мёртвых» признаков → soft_warning, а НЕ дисквалификация.
+    # 'Falsely dead' features (correlated columns): the model uses only the
+    # first column, the rest are almost exact copies (the information comes
+    # from a neighbor). Permuting the copies does not change the
+    # predictions → a high share of 'dead' features → soft_warning, NOT a
+    # disqualification.
     rng = np.random.RandomState(3)
     n, p = 120, 10
     x0 = rng.randn(n)
@@ -436,14 +440,14 @@ def test_dead_features_nonlinear_correlated_noise_soft_warning_only():
     result = ModelSanityGate(check_generalization_gap=False).check(
         y=y, y_pred_oof=model.predict(X), y_pred_full=model.predict(X), X=X, model=model
     )
-    assert result.is_valid  # не дисквалификация
+    assert result.is_valid  # not a disqualification
     assert result.dead_features_count == p - 1
     assert any("dead-feature ratio" in w for w in result.soft_warnings)
 
 
 def test_dead_features_permutation_disabled_when_sensitivity_off():
-    # T5: check_permutation_sensitivity=False отключает пермутационный путь
-    # контура В для нелинейных моделей; линейный путь по coef_ остаётся.
+    # check_permutation_sensitivity=False disables the permutation path of
+    # Circuit C for non-linear models; the linear path via coef_ remains.
     rng = np.random.RandomState(3)
     n, p = 120, 10
     x0 = rng.randn(n)
@@ -455,8 +459,8 @@ def test_dead_features_permutation_disabled_when_sensitivity_off():
             return np.asarray(X)[:, 0] * 3.0
 
     model = _FirstColumnModel()
-    # С выключенной чувствительностью пермутационный аудит не выполняется:
-    # «мёртвые» признаки не считаются, мягких предупреждений нет.
+    # With sensitivity disabled, the permutation audit is not performed:
+    # no 'dead' features are counted and there are no soft warnings.
     gate = ModelSanityGate(
         check_permutation_sensitivity=False,
         check_generalization_gap=False,
@@ -468,8 +472,8 @@ def test_dead_features_permutation_disabled_when_sensitivity_off():
     assert result.dead_features_count == 0
     assert result.soft_warnings == []
 
-    # Контроль: тот же инпут с включённой чувствительностью даёт «мёртвые»
-    # признаки (пермутационный путь реально работает).
+    # Control: the same input with sensitivity enabled yields 'dead'
+    # features (the permutation path actually works).
     gate_on = ModelSanityGate(check_generalization_gap=False)
     result_on = gate_on.check(
         y=y, y_pred_oof=model.predict(X), y_pred_full=model.predict(X), X=X, model=model
@@ -478,14 +482,15 @@ def test_dead_features_permutation_disabled_when_sensitivity_off():
 
 
 def test_dead_features_permutation_disabled_keeps_linear_path():
-    # T5: выключение пермутационной чувствительности НЕ влияет на линейный
-    # путь контура В (модель с coef_): сигнал и комбинация работают как раньше.
+    # Disabling permutation sensitivity does NOT affect the linear path of
+    # Circuit C (a model with coef_): the signal and the combination work
+    # as before.
     rng = np.random.RandomState(5)
     n, p = 200, 12
     X = rng.randn(n, p)
     y = X[:, 0] + rng.randn(n) * 0.01
     lasso = Lasso(alpha=1e3).fit(X, y)
-    assert np.mean(np.abs(lasso.coef_) <= 1e-12) > 0.8  # много нулей
+    assert np.mean(np.abs(lasso.coef_) <= 1e-12) > 0.8  # many zeros
     gate = ModelSanityGate(
         check_permutation_sensitivity=False,
         max_dead_feature_ratio=0.4,
@@ -500,7 +505,7 @@ def test_dead_features_permutation_disabled_keeps_linear_path():
         X=X,
         model=lasso,
     )
-    assert result.is_valid  # сигнал, не дисквалификация
+    assert result.is_valid  # a signal, not a disqualification
     assert result.dead_features_count > 0
     assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
 
@@ -521,7 +526,7 @@ def test_dead_features_permutation_cost_controls_rows_and_features():
         check_generalization_gap=False,
     )
     result = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
-    # Проверено не более 5 колонок.
+    # At most 5 columns were checked.
     assert 0 <= result.dead_features_count <= 5
 
 
@@ -542,7 +547,7 @@ def test_dead_features_permutation_deterministic_with_seed():
     )
     r1 = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
     r2 = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
-    # NaN-поля не участвуют в сравнении (nan != nan), сравниваем суть.
+    # NaN fields do not participate in comparison (nan != nan); compare the essentials.
     assert r1.is_valid == r2.is_valid
     assert r1.reasons == r2.reasons
     assert r1.soft_warnings == r2.soft_warnings
@@ -564,9 +569,9 @@ def test_dead_features_permutation_works_with_dataframe_x():
 
 
 def test_dead_features_permutation_works_with_sparse_x():
-    # Sparse X — штатный выход препроцессинга репозитория (ревью PR #32:
-    # HashingEncodingTransformer → csr_matrix). Пермутации не должны падать
-    # на np.array(sparse) (0-D object-array).
+    # Sparse X is a standard output of the repository's preprocessing
+    # (HashingEncodingTransformer → csr_matrix). Permutations must not fail
+    # on np.array(sparse) (a 0-D object array).
     from scipy import sparse
 
     rng = np.random.RandomState(0)
@@ -633,25 +638,24 @@ def test_dead_features_pipeline_unwrapped_to_linear_estimator():
     result = gate.check(
         y=y, y_pred_oof=pipe.predict(X), y_pred_full=pipe.predict(X), X=X, model=pipe
     )
-    # Пайплайн распакован до финального оценщика: считаем нули его coef_.
+    # The pipeline is unwrapped to the final estimator: count zeros of its coef_.
     assert result.dead_features_count == int(zero_ratio * p)
-    # Доля нулей заметная → сигнал; контур А отключён, поэтому комбинация
-    # C+A не применяется — причин Circuit C быть не должно.
+    # The zero share is noticeable → a signal; Circuit A is off, so the
+    # C+A combination is not applied — there must be no Circuit C reasons.
     assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
     assert not any("Circuit C" in r for r in result.reasons)
     assert "combination rule inactive" in " ".join(result.soft_warnings)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур Г — Generalization Gap
+#  Circuit D — Generalization Gap
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _gap_only_gate(max_gap: float, mode: str = "reject") -> ModelSanityGate:
-    # Режим по умолчанию здесь — "reject": существующие тесты контура Г
-    # (строки 636-732) фиксируют СТРОГОЕ поведение старого дефолта
-    # (паритет, issue #108). Новые тесты warn-режима передают mode="warn"
-    # явно.
+    # The default mode here is "reject": the existing circuit D tests fix the
+    # STRICT behavior of the old default (parity). The new warn-mode tests
+    # pass mode="warn" explicitly.
     return ModelSanityGate(
         max_generalization_gap=max_gap,
         generalization_gap_mode=mode,
@@ -673,7 +677,7 @@ def test_gap_honest_model_passes():
 
 
 def test_gap_issue_example_0_1_vs_0_19_fails_at_1_5_passes_at_2_0():
-    # Пример из issue: RMSE_full=0.1, RMSE_oof=0.19 — явное переобучение.
+    # Example: RMSE_full=0.1, RMSE_oof=0.19 — clear overfitting.
     rng = np.random.RandomState(1)
     y = rng.randn(500) * 10.0
     full = _with_rmse(y, 0.1, rng)
@@ -693,8 +697,8 @@ def test_gap_deep_tree_rmse_full_zero_fails():
     y = 2.0 * X[:, 0] + rng.randn(120)
     tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
     full = tree.predict(X)
-    # Предпосылка сценария: дерево глубины 20 идеально обучается на train
-    # (RMSE_full ≈ 0 в пределах точности float).
+    # Scenario precondition: a depth-20 tree fits the train set perfectly
+    # (RMSE_full ≈ 0 within float precision).
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
     result = _gap_only_gate(1.5).check(y=y, y_pred_oof=oof, y_pred_full=full)
@@ -709,7 +713,7 @@ def test_gap_one_nn_fails():
     y = 2.0 * X[:, 0] + rng.randn(120)
     knn = KNeighborsRegressor(n_neighbors=1).fit(X, y)
     full = knn.predict(X)
-    # Предпосылка: 1-NN имеет нулевую ошибку на train (RMSE_full ≈ 0).
+    # Precondition: 1-NN has zero error on the train set (RMSE_full ≈ 0).
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
     result = _gap_only_gate(1.5).check(y=y, y_pred_oof=oof, y_pred_full=full)
@@ -721,12 +725,12 @@ def test_gap_boundary_equality_passes():
     rng = np.random.RandomState(3)
     y = rng.randn(300) * 10.0
     full = _with_rmse(y, 1.0, rng)
-    oof = _with_rmse(y, 1.0, rng)  # gap = 1.0 ровно
+    oof = _with_rmse(y, 1.0, rng)  # gap = 1.0 exactly
     result = _gap_only_gate(1.0).check(y=y, y_pred_oof=oof, y_pred_full=full)
     assert result.is_valid
     assert result.generalization_gap == pytest.approx(1.0, rel=1e-6)
 
-    oof_over = _with_rmse(y, 2.0, rng)  # gap = 2.0 > 1.0 → провал
+    oof_over = _with_rmse(y, 2.0, rng)  # gap = 2.0 > 1.0 → failure
     over = _gap_only_gate(1.0).check(y=y, y_pred_oof=oof_over, y_pred_full=full)
     assert not over.is_valid
 
@@ -747,15 +751,15 @@ def test_gap_rmse_oof_zero_is_division_by_zero_reason():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур Г — режимы warn / reject (issue #108)
+#  Circuit D — warn / reject modes
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_gap_warn_mode_finite_over_threshold_is_soft_warning_not_reason():
-    """Warn-режим (дефолт): конечный gap > порога — soft_warning, не reason.
+    """Warn mode (default): a finite gap above the threshold is a soft_warning, not a reason.
 
-    ``is_valid`` остаётся True, severity == 1, ``generalization_gap`` записан.
-    В reject-режиме тот же вход — reason и ``is_valid == False``.
+    ``is_valid`` stays True, severity == 1, ``generalization_gap`` is recorded.
+    In reject mode the same input is a reason and ``is_valid == False``.
     """
     rng = np.random.RandomState(11)
     y = rng.randn(500) * 10.0
@@ -782,12 +786,12 @@ def test_gap_warn_mode_finite_over_threshold_is_soft_warning_not_reason():
 
 
 def test_gap_warn_mode_deep_tree_division_by_zero_is_soft_warning():
-    """Warn-режим (issue #111): RMSE_full≈0 (deep tree) — soft_warning, не reason.
+    """Warn mode: RMSE_full≈0 (deep tree) — soft_warning, not a reason.
 
-    Нулевая ошибка на train — нормальное свойство целого класса моделей и
-    ничего не говорит о качестве на новых данных: в warn-режиме модель
-    валидна (severity == 1), в reject-режиме — reason (паритет со старым
-    поведением).
+    Zero training error is a normal property of a whole class of models and
+    says nothing about quality on new data: in warn mode the model is valid
+    (severity == 1); in reject mode it is a reason (parity with the old
+    behavior).
     """
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
@@ -817,7 +821,7 @@ def test_gap_warn_mode_deep_tree_division_by_zero_is_soft_warning():
 
 
 def test_gap_warn_mode_one_nn_division_by_zero_is_soft_warning():
-    """Warn-режим (issue #111): 1-NN (идеальный in-sample фит) — soft_warning."""
+    """Warn mode: 1-NN (a perfect in-sample fit) — soft_warning."""
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
     y = 2.0 * X[:, 0] + rng.randn(120)
@@ -844,7 +848,7 @@ def test_gap_warn_mode_one_nn_division_by_zero_is_soft_warning():
 
 
 def test_gap_warn_mode_missing_y_pred_full_is_reason():
-    """Warn-режим: y_pred_full=None — контрактное нарушение, reason."""
+    """Warn mode: y_pred_full=None — a contract violation, a reason."""
     y = np.arange(50, dtype=float)
     for mode in ("warn", "reject"):
         result = _gap_only_gate(1.5, mode=mode).check(y=y, y_pred_oof=y)
@@ -853,11 +857,11 @@ def test_gap_warn_mode_missing_y_pred_full_is_reason():
 
 
 def test_gap_warn_mode_rmse_oof_zero_is_soft_warning():
-    """Warn-режим (issue #111): RMSE_oof≈0 — soft_warning об утечке таргета.
+    """Warn mode: RMSE_oof≈0 — a soft_warning about target leakage.
 
-    В warn-режиме модель валидна, предупреждение прямо называет подозрение
-    на утечку таргета; в reject-режиме — reason (паритет со старым
-    поведением).
+    In warn mode the model is valid and the warning explicitly names the
+    suspected target leakage; in reject mode it is a reason (parity with the
+    old behavior).
     """
     y = np.arange(100, dtype=float)
     warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=y, y_pred_full=y)
@@ -876,14 +880,14 @@ def test_gap_warn_mode_rmse_oof_zero_is_soft_warning():
 
 
 def test_gap_boundary_equality_passes_in_both_modes():
-    """Граница: gap == max_generalization_gap ровно — не провал в обоих режимах.
+    """Boundary: gap == max_generalization_gap exactly — not a failure in both modes.
 
-    Семантика ``_fails_above``: строгое превышение, равенство всегда проходит.
+    The ``_fails_above`` semantics: a strict excess; equality always passes.
     """
     rng = np.random.RandomState(13)
     y = rng.randn(300) * 10.0
     full = _with_rmse(y, 2.0, rng)
-    oof = _with_rmse(y, 2.0, rng)  # gap = 1.0 ровно при пороге 1.0
+    oof = _with_rmse(y, 2.0, rng)  # gap = 1.0 exactly at a threshold of 1.0
     for mode in ("warn", "reject"):
         result = _gap_only_gate(1.0, mode=mode).check(
             y=y, y_pred_oof=oof, y_pred_full=full
@@ -895,7 +899,7 @@ def test_gap_boundary_equality_passes_in_both_modes():
 
 
 def test_gap_warn_mode_above_threshold_boundary():
-    """Граница: gap == 1.5 + ε — warning в warn-режиме, reason в reject-режиме."""
+    """Boundary: gap == 1.5 + ε — a warning in warn mode, a reason in reject mode."""
     rng = np.random.RandomState(14)
     y = rng.randn(300) * 10.0
     full = _with_rmse(y, 1.0, rng)
@@ -911,15 +915,15 @@ def test_gap_warn_mode_above_threshold_boundary():
 
 
 def test_gap_inf_boundary_rmse_full_zero_soft_warning_in_warn_mode():
-    """Граница (issue #111): RMSE_full==0 ровно при RMSE_oof>0 — soft_warning.
+    """Boundary: RMSE_full==0 exactly with RMSE_oof>0 — soft_warning.
 
-    В warn-режиме модель проходит аудит (бесконечный gap не
-    дисквалифицирует); в reject-режиме тот же вход — reason с текстом про
-    RMSE_full.
+    In warn mode the model passes the audit (the infinite gap does not
+    disqualify); in reject mode the same input is a reason with the
+    RMSE_full message.
     """
     rng = np.random.RandomState(15)
     y = np.arange(100, dtype=float) * 1.0
-    full = y.copy()  # RMSE_full == 0 ровно
+    full = y.copy()  # RMSE_full == 0 exactly
     oof = y + rng.randn(100) * 1e-3  # RMSE_oof ≈ 1e-3 > _ZERO_RMSE_EPS
     warn = _gap_only_gate(1.5, mode="warn").check(
         y=y, y_pred_oof=oof, y_pred_full=full
@@ -942,7 +946,7 @@ def test_gap_inf_boundary_rmse_full_zero_soft_warning_in_warn_mode():
 
 
 def test_gap_invalid_mode_raises_value_error():
-    """Неизвестное значение generalization_gap_mode отклоняется."""
+    """An unknown generalization_gap_mode value is rejected."""
     with pytest.raises(ValueError, match="generalization_gap_mode"):
         ModelSanityGate(generalization_gap_mode="invalid")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="generalization_gap_mode"):
@@ -950,11 +954,11 @@ def test_gap_invalid_mode_raises_value_error():
 
 
 def test_gap_reject_mode_parity_with_legacy_default():
-    """Паритет (issue #108): reject-режим = старое строгое поведение дефолта.
+    """Parity: reject mode = the old strict default behavior.
 
-    Явный ``generalization_gap_mode="reject"`` полностью воспроизводит
-    поведение прежнего дефолта: переобученная модель дисквалифицируется,
-    честная проходит, деление на ноль — reason.
+    An explicit ``generalization_gap_mode="reject"`` fully reproduces the old
+    default: an overfit model is disqualified, an honest one passes, division
+    by zero is a reason.
     """
     rng = np.random.RandomState(16)
     y = rng.randn(500) * 10.0
@@ -979,13 +983,13 @@ def test_gap_reject_mode_parity_with_legacy_default():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Контур Г — деление на ноль в warn-режиме (issue #111)
+#  Circuit D — division by zero in warn mode
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-# Модели с нулевой ошибкой на train (RMSE_full ≈ 0): идеальный in-sample фит —
-# нормальное свойство класса моделей, ничего не говорит о качестве на новых
-# данных. В warn-режиме они НЕ дисквалифицируются.
+# Models with zero training error (RMSE_full ≈ 0): a perfect in-sample fit
+# is a normal property of a class of models and says nothing about quality
+# on new data. In warn mode they are NOT disqualified.
 _GAP_INF_MODEL_FACTORIES = [
     lambda: DecisionTreeRegressor(max_depth=20, random_state=0),
     lambda: KNeighborsRegressor(n_neighbors=1),
@@ -996,16 +1000,16 @@ _GAP_INF_MODEL_FACTORIES = [
 
 @pytest.mark.parametrize("factory", _GAP_INF_MODEL_FACTORIES)
 def test_gap_warn_mode_division_by_zero_soft_warning_models(factory: Callable[[], Any]):
-    """Positive (warn, issue #111): модели с RMSE_full≈0 проходят аудит.
+    """Positive (warn): models with RMSE_full≈0 pass the audit.
 
-    is_valid True, Circuit D-предупреждение про RMSE_full≈0 в soft_warnings,
+    is_valid is True, a Circuit D warning about RMSE_full≈0 in soft_warnings,
     generalization_gap == inf, severity == 1.
     """
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
     y = 2.0 * X[:, 0] + rng.randn(120)
     oof, full, model = _honest_oof_full(factory, X, y, folds=5)
-    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6  # предпосылка: RMSE_full≈0
+    assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6  # precondition: RMSE_full≈0
     warn = _gap_only_gate(1.5, mode="warn").check(
         y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
     )
@@ -1020,9 +1024,9 @@ def test_gap_warn_mode_division_by_zero_soft_warning_models(factory: Callable[[]
 def test_gap_reject_mode_division_by_zero_models_disqualified(
     factory: Callable[[], Any],
 ):
-    """Negative (reject, issue #111): те же модели отбраковываются.
+    """Negative (reject): the same models are disqualified.
 
-    Тексты причин совпадают с текущими (паритет со старым поведением).
+    The reason texts match the current ones (parity with the old behavior).
     """
     rng = np.random.RandomState(12)
     X = rng.randn(120, 6)
@@ -1041,10 +1045,10 @@ def test_gap_reject_mode_division_by_zero_models_disqualified(
 
 
 def test_gap_warn_mode_rmse_oof_zero_logs_warning(caplog):
-    """Warn-режим: RMSE_oof≈0 → WARNING в лог (осознанное исключение T6).
+    """Warn mode: RMSE_oof≈0 → a WARNING in the log (a deliberate exception).
 
-    Молчаливая дисквалификация подменяла бы победителя и прятала утечку
-    таргета — нужен заметный сигнал уровня WARNING.
+    A silent disqualification would replace the winner and hide the target
+    leakage; a noticeable WARNING-level signal is needed instead.
     """
     y = np.arange(100, dtype=float)
     with caplog.at_level("WARNING", logger="configurable_automl_engine"):
@@ -1055,7 +1059,7 @@ def test_gap_warn_mode_rmse_oof_zero_logs_warning(caplog):
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("target leakage" in r.message for r in warning_records)
 
-    # Контраст: RMSE_full≈0 (не утечка) в warn-режиме НЕ даёт WARNING.
+    # Contrast: RMSE_full≈0 (not leakage) in warn mode does NOT produce a WARNING.
     rng = np.random.RandomState(17)
     full = y.copy()
     oof = y + rng.randn(100) * 1e-3
@@ -1066,10 +1070,10 @@ def test_gap_warn_mode_rmse_oof_zero_logs_warning(caplog):
 
 
 def test_gap_warn_boundary_rmse_full_zero_and_above_eps_both_pass():
-    """Граница _ZERO_RMSE_EPS: RMSE_full == 0 ровно и 2e-12 (чуть выше eps).
+    """The _ZERO_RMSE_EPS boundary: RMSE_full == 0 exactly and 2e-12 (just above eps).
 
-    В warn-режиме оба кандидата проходят аудит; отличается только значение
-    gap (inf или конечное большое).
+    In warn mode both candidates pass the audit; only the gap value differs
+    (inf or a finite large one).
     """
     rng = np.random.RandomState(18)
     y = np.arange(100, dtype=float) * 1.0
@@ -1087,14 +1091,14 @@ def test_gap_warn_boundary_rmse_full_zero_and_above_eps_both_pass():
     )
     assert near.is_valid is True
     assert np.isfinite(near.generalization_gap)
-    assert near.generalization_gap > 1.5  # конечный большой gap → warning
+    assert near.generalization_gap > 1.5  # a finite large gap → warning
 
 
 def test_gap_rmse_full_and_oof_both_zero_single_leakage_warning():
-    """RMSE_full ≈ RMSE_oof ≈ 0: одна ветка (RMSE_oof) — без дубля про RMSE_full.
+    """RMSE_full ≈ RMSE_oof ≈ 0: a single branch (RMSE_oof) — no duplicate RMSE_full message.
 
-    В warn-режиме — одно предупреждение об утечке; в reject-режиме — одна
-    причина (RMSE_oof).
+    In warn mode — a single leakage warning; in reject mode — a single
+    reason (RMSE_oof).
     """
     y = np.arange(100, dtype=float)
     warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=y, y_pred_full=y)
@@ -1112,7 +1116,7 @@ def test_gap_rmse_full_and_oof_both_zero_single_leakage_warning():
 
 
 def test_gap_no_finite_pairs_is_reason_in_both_modes():
-    """Нет конечных пар (y, oof, full) — reason в обоих режимах (невычислимость)."""
+    """No finite pairs (y, oof, full) — a reason in both modes (uncomputable)."""
     y = np.arange(50, dtype=float)
     for mode in ("warn", "reject"):
         result = _gap_only_gate(1.5, mode=mode).check(
@@ -1124,7 +1128,7 @@ def test_gap_no_finite_pairs_is_reason_in_both_modes():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Комплексные сценарии (positive / negative из issue)
+#  Complex scenarios (positive / negative)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -1147,10 +1151,10 @@ def test_positive_honest_nonlinear_passes_all_circuits_clean_data():
 
 
 def test_positive_honest_model_passes_on_noisy_r2_about_0_3():
-    # Зашумлённые данные с теоретическим R²≈0.3: честная модель НЕ
-    # дисквалифицируется (мягкий порог diversity — ключевое изменение v2).
-    # Var(signal)=6 (сумма 6 независимых N(0,1)); шум выбираем так, чтобы
-    # R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3 ровно.
+    # Noisy data with a theoretical R²≈0.3: an honest model is NOT
+    # disqualified (the soft diversity threshold is a key v2 change).
+    # Var(signal)=6 (the sum of 6 independent N(0,1)); we pick the noise so
+    # that R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3 exactly.
     rng = np.random.RandomState(3)
     n = 200
     X = rng.randn(n, 6)
@@ -1161,19 +1165,19 @@ def test_positive_honest_model_passes_on_noisy_r2_about_0_3():
     result = ModelSanityGate().check(y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model)
     assert result.is_valid
     assert result.reasons == []
-    assert 0.1 < result.diversity_ratio < 0.5  # ≈ R², много выше жёсткого 0.15
+    assert 0.1 < result.diversity_ratio < 0.5  # ≈ R², well above the strict 0.15
     assert result.generalization_gap <= 1.5
 
 
 def test_negative_elasticnet_zero_weights_and_zero_diversity():
-    # Реальный ElasticNet с большой регуляризацией зануляет ВСЕ веса
-    # (проверяем предпосылку); сам гейт получает копию этих весов через
-    # _CoefModel, чтобы результат не зависел от версии sklearn.
+    # A real ElasticNet with heavy regularization zeroes ALL weights (we check
+    # the precondition); the gate itself receives a copy of those weights
+    # via _CoefModel so the result does not depend on the sklearn version.
     rng = np.random.RandomState(5)
     X = rng.randn(120, 15)
     y = 2.0 * X[:, 0] + rng.randn(120)
     en = ElasticNet(alpha=500.0, random_state=0).fit(X, y)
-    assert float((np.abs(en.coef_) <= 1e-12).mean()) == 1.0  # все веса нулевые
+    assert float((np.abs(en.coef_) <= 1e-12).mean()) == 1.0  # all weights are zero
     model = _CoefModel(en.coef_)
     flat = np.full(120, y.mean())
     result = ModelSanityGate(check_generalization_gap=False).check(
@@ -1185,14 +1189,14 @@ def test_negative_elasticnet_zero_weights_and_zero_diversity():
 
 
 def test_negative_svr_sigmoid_tanh_plateau():
-    # Сценарий из issue: SVR с сигмоидным ядром при малом gamma и coef0=0
-    # упирается в плато tanh и выдаёт почти константные предсказания.
-    # Сначала проверяем предпосылку (разброс предсказаний ≪ разброса y),
-    # затем — что контур А это детектирует.
+    # Scenario: SVR with a sigmoid kernel, small gamma and coef0=0 hits the
+    # tanh plateau and produces almost constant predictions. First we check
+    # the precondition (prediction spread ≪ y spread), then that Circuit A
+    # detects it.
     X, y = _dataset(n=150)
     sigmoid = SVR(kernel="sigmoid", gamma=0.001, coef0=0.0).fit(X, y)
     pred = sigmoid.predict(X)
-    assert pred.std() < 0.1 * y.std()  # плато tanh: предсказания почти const
+    assert pred.std() < 0.1 * y.std()  # tanh plateau: predictions are almost constant
     result = ModelSanityGate(check_generalization_gap=False).check(
         y=y, y_pred_oof=pred, y_pred_full=pred, X=X, model=sigmoid
     )
@@ -1202,7 +1206,7 @@ def test_negative_svr_sigmoid_tanh_plateau():
 
 
 def test_positive_deep_tree_rmse_full_zero_soft_warning_in_warn_mode():
-    """Warn-режим (дефолт, issue #111): глубокое дерево — Circuit D soft_warning."""
+    """Warn mode (default): a deep tree — Circuit D soft_warning."""
     X, y = _dataset(n=120)
     tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
     result = ModelSanityGate(check_diversity=False, check_unique=False).check(
@@ -1213,7 +1217,7 @@ def test_positive_deep_tree_rmse_full_zero_soft_warning_in_warn_mode():
 
 
 def test_positive_one_nn_soft_warning_in_warn_mode():
-    """Warn-режим (дефолт, issue #111): 1-NN — Circuit D soft_warning."""
+    """Warn mode (default): 1-NN — Circuit D soft_warning."""
     X, y = _dataset(n=120)
     knn = KNeighborsRegressor(n_neighbors=1).fit(X, y)
     result = ModelSanityGate(check_diversity=False, check_unique=False).check(
@@ -1224,7 +1228,7 @@ def test_positive_one_nn_soft_warning_in_warn_mode():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Режимы и edge cases
+#  Modes and edge cases
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -1232,9 +1236,9 @@ def test_warn_only_returns_counts_without_disqualification():
     y = np.arange(100, dtype=float)
     gate = ModelSanityGate(warn_only=True, check_dead_features=False)
     result = gate.check(y=y, y_pred_oof=np.full(100, y.mean()), y_pred_full=y)
-    assert result.is_valid is True  # нет права дисквалификации
-    assert len(result.reasons) >= 2  # причины посчитаны для отчёта
-    assert result.severity == 1  # capped на уровне «предупреждение»
+    assert result.is_valid is True  # no right to disqualify
+    assert len(result.reasons) >= 2  # reasons are counted for the report
+    assert result.severity == 1  # capped at the 'warning' level
     assert result.diversity_ratio == 0.0
 
 
@@ -1257,22 +1261,21 @@ def test_all_circuits_disabled_always_valid():
 
 
 def test_nan_predictions_are_masked_like_oof_rmse():
-    # Структурированные предсказания: каждая строка уникальна после
-    # округления, поэтому unique_ratio = 1.0 и с маской, и без неё —
-    # сравнение строгое (ревью PR #32: abs=0.2 было слишком мягким).
+    # Structured predictions: each row is unique after rounding, so
+    # unique_ratio = 1.0 both with and without the mask — strict comparison.
     rng = np.random.RandomState(0)
     n = 100
     y = rng.randn(n) * 10.0
-    pred = np.linspace(-5.0, 5.0, n)  # шаг ≈ 0.1 > granularity округления
+    pred = np.linspace(-5.0, 5.0, n)  # step ≈ 0.1 > rounding granularity
     pred_masked = pred.copy()
-    pred_masked[::5] = np.nan  # 20% непокрытых строк
+    pred_masked[::5] = np.nan  # 20% uncovered rows
     gate = ModelSanityGate(
         check_dead_features=False, check_generalization_gap=False
     )
     full_result = gate.check(y=y, y_pred_oof=pred, y_pred_full=y)
     masked_result = gate.check(y=y, y_pred_oof=pred_masked, y_pred_full=y)
-    # Маскирование не меняет семантику: оба проходят/проваливают одинаково,
-    # а доля уникальных среди валидных строк одинакова.
+    # Masking does not change the semantics: both pass/fail identically,
+    # and the unique share among valid rows is the same.
     assert full_result.is_valid == masked_result.is_valid
     assert masked_result.unique_ratio == pytest.approx(1.0)
     assert masked_result.unique_ratio == pytest.approx(full_result.unique_ratio)
@@ -1297,7 +1300,7 @@ def test_nan_in_y_is_masked():
         check_generalization_gap=False,
     )
     result = gate.check(y=y, y_pred_oof=rng.randn(60))
-    assert result.is_valid  # считается по конечным парам, без падения
+    assert result.is_valid  # computed over finite pairs, without raising
 
 
 def test_severity_mapping():
@@ -1376,13 +1379,13 @@ def test_input_contract_validation():
         gate.check(y=None, y_pred_oof=np.arange(10))
     with pytest.raises(ValueError):
         gate.check(y=np.arange(10).reshape(2, 5), y_pred_oof=np.arange(10))
-    # list-X не имеет .shape → ValueError, а не AttributeError (ревью PR #32).
+    # A list-X has no .shape → ValueError, not an AttributeError.
     with pytest.raises(ValueError):
         gate.check(y=np.arange(10), y_pred_oof=np.arange(10), X=[[0.0] * 3] * 10)
 
 
 def test_module_is_standalone_clean_import():
-    # Модуль не зависит от остального движка: импортируем напрямую.
+    # The module is independent from the rest of the engine: import it directly.
     import importlib
 
     mod = importlib.import_module(
@@ -1393,7 +1396,7 @@ def test_module_is_standalone_clean_import():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Дополнительное покрытие edge cases
+#  Additional edge-case coverage
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -1425,8 +1428,8 @@ def test_gap_no_finite_pairs_for_rmse():
 
 
 def test_unique_constant_target_uses_fallback_precision():
-    # Константный y: std(y)=0 → fallback-точность округления; константный
-    # прогноз даёт nunique=1 → провал контура Б (см. edge case issue).
+    # Constant y: std(y)=0 → fallback rounding precision; a constant
+    # prediction yields nunique=1 → Circuit B failure.
     y = np.full(60, 7.0)
     gate = ModelSanityGate(
         check_diversity=False, check_dead_features=False, check_generalization_gap=False
@@ -1499,7 +1502,7 @@ def test_dead_features_predict_fails_only_on_permuted_x():
 def test_dead_features_predict_wrong_output_length_is_reason():
     class _WrongLengthModel:
         def predict(self, X: Any) -> np.ndarray:
-            return np.ones(len(X) + 3)  # неверная длина выхода
+            return np.ones(len(X) + 3)  # wrong output length
 
     rng = np.random.RandomState(0)
     X = rng.randn(50, 4)
@@ -1514,7 +1517,7 @@ def test_dead_features_predict_wrong_output_length_is_reason():
 
 def test_dead_features_permuted_column_nan_pairs_are_skipped():
     class _NanOnPermutedX:
-        """Базовое предсказание ок, на перемешанном X — NaN (не падение)."""
+        """Baseline prediction is fine; on permuted X it returns NaN (not a failure)."""
 
         def __init__(self) -> None:
             self.calls = 0
@@ -1532,14 +1535,14 @@ def test_dead_features_permuted_column_nan_pairs_are_skipped():
         check_diversity=False, check_unique=False, check_generalization_gap=False
     )
     result = gate.check(y=y, y_pred_oof=y, model=_NanOnPermutedX(), X=X)
-    # Все колонки пропущены (нет валидных пар) — не падение, dead_count=0.
+    # All columns are skipped (no valid pairs) — no failure, dead_count=0.
     assert result.is_valid
     assert result.dead_features_count == 0
 
 
 def test_dead_features_row_subsampling_failure_is_reason():
     class _UnsliceableX:
-        """Имеет .shape, но не умеет слайситься по строкам."""
+        """Has .shape but cannot be sliced by rows."""
 
         @property
         def shape(self) -> tuple[int, int]:
@@ -1561,7 +1564,7 @@ def test_dead_features_row_subsampling_failure_is_reason():
 
 def test_dead_features_unexpected_permutation_error_is_reason():
     class _ListReturningX:
-        """__getitem__ возвращает list без .ndim → падение внутри impl."""
+        """__getitem__ returns a list without .ndim → failure inside the implementation."""
 
         @property
         def shape(self) -> tuple[int, int]:
@@ -1580,14 +1583,14 @@ def test_dead_features_unexpected_permutation_error_is_reason():
         check_diversity=False, check_unique=False, check_generalization_gap=False
     )
     result = gate.check(y=y, y_pred_oof=y, model=_DummyModel(), X=_ListReturningX())
-    # Сбой внутри пермутационного пути превращается в reason, а не падение.
+    # A failure inside the permutation path becomes a reason, not a crash.
     assert not result.is_valid
     assert any("permutation check failed" in r for r in result.reasons)
 
 
 def test_dead_features_column_permutation_failure_is_reason():
     class _BrokenSparseLike:
-        """toarray() падает — имитация сбойного sparse-объекта."""
+        """toarray() raises — simulates a broken sparse object."""
 
         @property
         def shape(self) -> tuple[int, int]:
@@ -1641,7 +1644,7 @@ def test_core_estimator_unwraps_nested_pipeline_objects():
     est = _core_estimator(outer)
     assert np.array_equal(est.coef_, [1.0, 0.0])
 
-    # Пайплайн без шагов и цикличный объект не зацикливаются.
+    # Pipelines without steps and cyclic objects do not loop forever.
     empty = FakePipeline([])
     assert _core_estimator(empty) is empty
     cyclic = FakePipeline([Step("self", None)])
@@ -1651,7 +1654,7 @@ def test_core_estimator_unwraps_nested_pipeline_objects():
     class WeirdPipeline:
         @property
         def named_steps(self) -> Any:
-            return object()  # нет .values()
+            return object()  # no .values()
 
     weird = WeirdPipeline()
     assert _core_estimator(weird) is weird
@@ -1668,16 +1671,15 @@ def test_constructor_zero_coef_tolerance_validation():
         ModelSanityGate(zero_coef_tolerance=-1e-6)
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  T6 (issue #66): уровни логирования soft_warnings
+#  Soft-warning log levels
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_soft_warnings_logged_at_debug_not_warning(caplog):
-    """soft_warnings — DEBUG/INFO, никогда WARNING (T6).
+    """soft_warnings are logged at DEBUG/INFO, never at WARNING.
 
-    Dead-признаки у линейных моделей («сигнал») логируются на уровне
-    DEBUG/INFO: они не дисквалифицируют сами по себе и не должны
-    подниматься до WARNING.
+    Dead features in linear models (a 'signal') are logged at DEBUG/INFO:
+    they do not disqualify on their own and must not be promoted to WARNING.
     """
     import logging
 
@@ -1700,19 +1702,19 @@ def test_soft_warnings_logged_at_debug_not_warning(caplog):
 
     assert result.is_valid
     assert any("soft warning" in r.message for r in caplog.records)
-    # Детали каждого soft_warning — на DEBUG.
+    # Details of each soft_warning are logged at DEBUG.
     assert any("Sanity gate soft warning" in r.message for r in caplog.records)
-    # Ни одного WARNING и выше (требование T6).
+    # No WARNING level or above is emitted.
     assert all(r.levelno < logging.WARNING for r in caplog.records)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  T7 (issue #69): «золотые» сценарии на синтетических данных N=10–30
+#  Golden scenarios on synthetic data N=10–30
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _small_dataset(n: int = 25, seed: int = 7, noise: float = 0.5, p: int = 4):
-    """Синтетический датасет малого размера: X0/X1 информативны, остальное — шум."""
+    """Small synthetic dataset: X0/X1 are informative, the rest is noise."""
     rng = np.random.RandomState(seed)
     X = rng.randn(n, p)
     y = 2.0 * X[:, 0] + 0.5 * X[:, 1] + rng.randn(n) * noise
@@ -1720,10 +1722,10 @@ def _small_dataset(n: int = 25, seed: int = 7, noise: float = 0.5, p: int = 4):
 
 
 def test_golden_small_n_honest_gbr_passes_all_circuits():
-    """Positive (T7, п. 5e): честная модель (градиентный бустинг) на N=30.
+    """Positive: an honest model (gradient boosting) on N=30.
 
-    Маленькие датасеты (N=10–30) не должны ложно дисквалифицировать честные
-    модели: diversity > 0.15, unique достаточен, gap ≤ 1.5.
+    Small datasets (N=10–30) must not falsely disqualify honest models:
+    diversity > 0.15, unique ratio sufficient, gap ≤ 1.5.
     """
     X, y = _small_dataset(n=30, seed=7)
     oof, full, model = _honest_oof_full(
@@ -1772,17 +1774,17 @@ def test_golden_small_n_honest_gbr_passes_all_circuits():
 def test_golden_small_n_degenerate_models_fail(
     name: str, factory: Callable[[], Any], expected_circuit: str
 ):
-    """Negative (T7, п. 5a–d): вырожденные модели на N=25 дисквалифицируются.
+    """Negative: degenerate models on N=25 are disqualified.
 
-    (a) ElasticNet с занулёнными коэффициентами («полка»);
-    (b) SVR-sigmoid, упёршийся в плато tanh;
-    (c) дерево глубины 20 (RMSE_train≈0);
+    (a) ElasticNet with zeroed coefficients ('shelf');
+    (b) SVR-sigmoid stuck on the tanh plateau;
+    (c) a depth-20 tree (RMSE_train≈0);
     (d) 1-NN.
 
-    Для случаев контура Г (deep_tree, knn_1) дисквалификация достигается
-    явным ``generalization_gap_mode="reject"``: дефолтный warn-режим
-    (issue #111) переводит RMSE_full≈0 в soft_warnings и не
-    дисквалифицирует.
+    For the Circuit D cases (deep_tree, knn_1) the disqualification is
+    achieved via an explicit ``generalization_gap_mode="reject"``: the
+    default warn mode moves RMSE_full≈0 into soft_warnings and does not
+    disqualify.
     """
     X, y = _small_dataset(n=25, seed=7)
     oof, full, model = _honest_oof_full(factory, X, y, folds=5)
@@ -1791,16 +1793,17 @@ def test_golden_small_n_degenerate_models_fail(
     )
     assert not result.is_valid
     assert any(expected_circuit in r for r in result.reasons)
-    # У вырожденных моделей обязана быть хотя бы одна причина.
+    # A degenerate model must have at least one reason.
     assert result.reasons
 
 
 def test_v2_wide_data_lasso_high_zero_ratio_soft_warning_only():
-    """v2 (T7, п. 7): широкие данные, Lasso с 60–90% нулевых коэффициентов.
+    """Wide data, Lasso with 60–90% zero coefficients.
 
-    Высокая доля нулевых коэффициентов — soft_warning, но НЕ дисквалификация:
-    на широких зашумлённых данных Lasso легитимно зануляет признаки, а
-    diversity при нормальном сигнале высокий (комбинация C+A не срабатывает).
+    A high zero-coefficient share is a soft_warning, but NOT a
+    disqualification: on wide noisy data Lasso legitimately zeroes features,
+    and diversity stays high with a normal signal (the C+A combination does
+    not trigger).
     """
     rng = np.random.RandomState(21)
     n, p = 100, 80
@@ -1810,23 +1813,24 @@ def test_v2_wide_data_lasso_high_zero_ratio_soft_warning_only():
     gate = ModelSanityGate()
     tol = gate.zero_coef_tolerance
     zero_ratio = float((np.abs(lasso.coef_) <= tol).mean())
-    assert 0.6 <= zero_ratio <= 0.95  # предпосылка: 60–90% нулей
+    assert 0.6 <= zero_ratio <= 0.95  # precondition: 60–90% zeros
 
     result = gate.check(
         y=y, y_pred_oof=lasso.predict(X), y_pred_full=lasso.predict(X), X=X, model=lasso
     )
-    assert result.is_valid  # не дисквалификация
+    assert result.is_valid  # not a disqualification
     assert result.reasons == []
     assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
-    assert result.diversity_ratio > 0.15  # нормальный diversity
+    assert result.diversity_ratio > 0.15  # normal diversity
 
 
 def test_v2_noisy_honest_model_not_disqualified_small_n():
-    """v2 (T7, п. 7): зашумлённые данные, честная модель — гейт НЕ дисквалифицирует.
+    """Noisy data, honest model — the gate does NOT disqualify it.
 
-    R²≈0.3 (Var(signal)=3 при 3 информативных признаках, шум подобран так,
-    чтобы R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3) — мягкий порог
-    diversity (0.15) пропускает честную модель даже на малой выборке N=30.
+    R²≈0.3 (Var(signal)=3 with 3 informative features, noise chosen so that
+    R² = Var(signal)/(Var(signal)+Var(noise)) = 0.3) — the soft diversity
+    threshold (0.15) lets the honest model through even on a small sample
+    of N=30.
     """
     rng = np.random.RandomState(3)
     n = 30
@@ -1836,14 +1840,14 @@ def test_v2_noisy_honest_model_not_disqualified_small_n():
     y = signal + rng.randn(n) * np.sqrt(noise_var)
 
     class _LinearHonest:
-        """Линейная честная модель: восстанавливает сигнал с шумом."""
+        """A linear honest model: recovers the signal with noise."""
 
         def __init__(self, X: np.ndarray, y: np.ndarray) -> None:
             self._X = X
             self._y = y
 
         def fit(self, X: np.ndarray, y: np.ndarray) -> "_LinearHonest":
-            # OLS по методу наименьших квадратов — без sklearn-зависимости.
+            # OLS (ordinary least squares) — no sklearn dependency.
             Xd = np.column_stack([np.ones(len(X)), X])
             coef, *_ = np.linalg.lstsq(Xd, y, rcond=None)
             self._coef = coef
@@ -1855,7 +1859,7 @@ def test_v2_noisy_honest_model_not_disqualified_small_n():
 
     model = _LinearHonest(X, y).fit(X, y)
     pred = model.predict(X)
-    # На OOF-семантике теста считаем честный OOF через KFold.
+    # Under the test's OOF semantics, compute the honest OOF via KFold.
     kf = KFold(n_splits=5, shuffle=True, random_state=0)
     oof = np.full(len(y), np.nan)
     for tr, te in kf.split(X):
@@ -1864,9 +1868,9 @@ def test_v2_noisy_honest_model_not_disqualified_small_n():
     result = ModelSanityGate(check_generalization_gap=False).check(
         y=y, y_pred_oof=oof, y_pred_full=pred, X=X, model=model
     )
-    assert result.is_valid  # НЕ дисквалифицируется (мягкий diversity-порог)
+    assert result.is_valid  # NOT disqualified (soft diversity threshold)
     assert result.reasons == []
-    # Diversity ≈ R² зашумлённой честной модели: много выше жёсткого порога
-    # 0.15, но заметно ниже «идеального» (шум не даёт R² ≈ 1).
+    # Diversity ≈ R² of the noisy honest model: well above the strict 0.15
+    # threshold but noticeably below the 'ideal' value (noise prevents R² ≈ 1).
     assert result.diversity_ratio > 0.15
     assert result.diversity_ratio < 0.9

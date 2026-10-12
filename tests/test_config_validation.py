@@ -29,7 +29,7 @@ from configurable_automl_engine.common.definitions import (
 
 from unittest.mock import patch
 
-# Терминальный select-шаг (эпик #74): последняя фаза любого валидного конфига.
+# Terminal select step: the last phase of any valid config.
 TERMINAL_SELECT = {
     "name": "final_select",
     "n_trials": 1,
@@ -58,7 +58,7 @@ def test_n_folds_ok():
 
 
 def test_categorical_encoding_ordinal_valid():
-    """Конфиг с categorical_encoding='ordinal' проходит валидацию Config."""
+    """A config with categorical_encoding='ordinal' passes Config validation."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "categorical_encoding": "ordinal"}
     }
@@ -67,13 +67,13 @@ def test_categorical_encoding_ordinal_valid():
 
 
 def test_categorical_encoding_default_one_hot():
-    """По умолчанию categorical_encoding='one_hot'."""
+    """By default, categorical_encoding='one_hot'."""
     cfg = Config.model_validate(BASE)
     assert cfg.general.categorical_encoding == "one_hot"
 
 
 def test_categorical_encoding_invalid_rejected():
-    """Конфиг с categorical_encoding='binary' отклоняется (Literal)."""
+    """A config with categorical_encoding='binary' is rejected (Literal)."""
     cfg_data = BASE | {"general": {**BASE["general"], "categorical_encoding": "binary"}}
     with pytest.raises(ValidationError):
         Config.model_validate(cfg_data)
@@ -83,14 +83,14 @@ def test_categorical_encoding_invalid_rejected():
     "enc", ["one_hot", "ordinal", "target", "frequency", "hashing"]
 )
 def test_categorical_encoding_new_strategies_valid(enc):
-    """Все поддерживаемые стратегии (включая новые) проходят валидацию."""
+    """All supported strategies (including the new ones) pass validation."""
     cfg_data = BASE | {"general": {**BASE["general"], "categorical_encoding": enc}}
     cfg = Config.model_validate(cfg_data)
     assert cfg.general.categorical_encoding == enc
 
 
 def test_high_cardinality_encoding_pair_valid():
-    """Согласованная пара threshold + high_cardinality_encoding проходит."""
+    """A consistent threshold + high_cardinality_encoding pair is accepted."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -105,7 +105,7 @@ def test_high_cardinality_encoding_pair_valid():
 
 
 def test_high_cardinality_threshold_zero_allowed():
-    """Порог, равный нулю, допустим (все непустые колонки — high-cardinality)."""
+    """A threshold of zero is allowed (all non-empty columns become high-cardinality)."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -118,7 +118,7 @@ def test_high_cardinality_threshold_zero_allowed():
 
 
 def test_high_cardinality_threshold_negative_rejected():
-    """Отрицательный порог отклоняется на этапе валидации конфигурации."""
+    """A negative threshold is rejected during configuration validation."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -131,7 +131,7 @@ def test_high_cardinality_threshold_negative_rejected():
 
 
 def test_high_cardinality_encoding_unsupported_rejected():
-    """Неподдерживаемая HC-стратегия отклоняется."""
+    """An unsupported high-cardinality strategy is rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -144,7 +144,7 @@ def test_high_cardinality_encoding_unsupported_rejected():
 
 
 def test_high_cardinality_pair_must_be_set_together():
-    """Задан только один из пары параметров -> понятная ошибка."""
+    """Only one parameter of the pair is set -> a clear error is raised."""
     only_threshold = BASE | {
         "general": {
             **BASE["general"],
@@ -165,14 +165,14 @@ def test_high_cardinality_pair_must_be_set_together():
 
 
 def test_hashing_n_components_zero_rejected():
-    """hashing_n_components=0 отклоняется."""
+    """hashing_n_components=0 is rejected."""
     cfg_data = BASE | {"general": {**BASE["general"], "hashing_n_components": 0}}
     with pytest.raises(ValidationError, match="hashing_n_components"):
         Config.model_validate(cfg_data)
 
 
 def test_target_encoding_smoothing_negative_rejected():
-    """Отрицательное сглаживание target encoding отклоняется."""
+    """Negative target-encoding smoothing is rejected."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "target_encoding_smoothing": -0.5}
     }
@@ -181,7 +181,7 @@ def test_target_encoding_smoothing_negative_rejected():
 
 
 def test_target_encoding_fallback_any_float():
-    """target_encoding_fallback принимает float или None."""
+    """target_encoding_fallback accepts a float or None."""
     for fallback in (0.0, -5.5, 42.0):
         cfg_data = BASE | {
             "general": {**BASE["general"], "target_encoding_fallback": fallback}
@@ -191,7 +191,7 @@ def test_target_encoding_fallback_any_float():
 
 
 def test_new_params_absent_backward_compat():
-    """Конфигурация без новых параметров работает как раньше (обратная совместимость)."""
+    """A config without the new parameters behaves as before (backward compatibility)."""
     cfg = Config.model_validate(BASE)
     assert cfg.general.categorical_encoding == "one_hot"
     assert cfg.general.high_cardinality_threshold is None
@@ -211,13 +211,13 @@ def test_n_folds_ignored_for_loo():
     loo = BASE | {
         "general": {**BASE["general"], "validation_strategy": "loo", "n_folds": 1}
     }
-    cfg = Config.model_validate(loo)  # не должно падать
+    cfg = Config.model_validate(loo)  # should not raise
     assert cfg.general.validation_strategy == ValidationStrategy.loo
 
 
-# --- Тесты для OversamplingCfg ---
+# --- Tests for OversamplingCfg ---
 def test_oversampling_warn_useless_multiplier(caplog):
-    # Предупреждение при multiplier=1 и enable=True
+    # Warning when multiplier=1 and enable=True
     with caplog.at_level(logging.WARNING):
         OversamplingCfg(enable=True, multiplier=1.0)
 
@@ -225,21 +225,21 @@ def test_oversampling_warn_useless_multiplier(caplog):
 
 
 def test_oversampling_algorithm_random_with_noise_rejected():
-    """random_with_noise удалён из интерфейса (issue #27): конфиг с ним
-    отклоняется на этапе валидации с понятным сообщением."""
+    """random_with_noise was removed from the interface: a config using it
+    is rejected during validation with a clear error message."""
     with pytest.raises(ValidationError, match="random_with_noise"):
         OversamplingCfg(enable=True, multiplier=2.0, algorithm="random_with_noise")
 
 
 def test_oversampling_unknown_algorithm_rejected():
-    """Неизвестный алгоритм отклоняется валидацией конфига."""
+    """An unknown algorithm is rejected by config validation."""
     with pytest.raises(ValidationError):
         OversamplingCfg(enable=True, multiplier=2.0, algorithm="magic_boost")
 
 
-# --- Тесты для AlgoCfg ---
+# --- Tests for AlgoCfg ---
 def test_algo_cfg_empty_paths():
-    # Пустые пути модулей
+    # Empty module paths
     with pytest.raises(ValidationError, match=".*not a valid dotted path.*"):
         AlgoCfg(tuner="")
 
@@ -247,9 +247,9 @@ def test_algo_cfg_empty_paths():
         AlgoCfg(trainer_module="")
 
 
-# --- Тесты для корневого Config и API ---
+# --- Tests for the root Config and the API ---
 def test_config_no_enabled_algorithms():
-    # Тест валидатора _must_have_enabled
+    # Test for the _must_have_enabled validator
     algo_disabled = AlgoCfg(enable=False)
     with pytest.raises(
         ValidationError, match=".*At least one algorithm must be enabled.*"
@@ -258,7 +258,7 @@ def test_config_no_enabled_algorithms():
 
 
 def test_read_config_integration(tmp_path):
-    # Тест функции read_config и корректной загрузки YAML
+    # Test for read_config and correct YAML loading
     yaml_content = """
     general:
       comparison_metric: "r2"
@@ -288,9 +288,9 @@ def test_read_config_integration(tmp_path):
     assert getattr(config.algorithms, "random_forest").enable is True
 
 
-# ─────────────────── Таймауты в режиме потоков (issue #101) ───────────────────
+# ─────────────────── Timeouts in threads mode ───────────────────
 def test_threads_mode_rejects_phase_timeout():
-    """phase_timeout + parallel_mode='threads' — ошибка конфига (issue #101)."""
+    """phase_timeout + parallel_mode='threads' is a config error."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -303,7 +303,7 @@ def test_threads_mode_rejects_phase_timeout():
 
 
 def test_threads_mode_rejects_task_timeout():
-    """task_timeout + parallel_mode='threads' — ошибка конфига (issue #101)."""
+    """task_timeout + parallel_mode='threads' is a config error."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -316,7 +316,7 @@ def test_threads_mode_rejects_task_timeout():
 
 
 def test_threads_mode_rejects_both_timeouts():
-    """Оба таймаута + parallel_mode='threads' — ошибка конфига, оба названы."""
+    """Both timeouts + parallel_mode='threads' — a config error naming both."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -333,7 +333,7 @@ def test_threads_mode_rejects_both_timeouts():
 
 
 def test_threads_mode_without_timeouts_valid():
-    """threads-режим без таймаутов валиден (дефолтный конфиг)."""
+    """Threads mode without timeouts is valid (the default config)."""
     cfg_data = BASE | {"general": {**BASE["general"], "parallel_mode": "threads"}}
     cfg = Config.model_validate(cfg_data)
     assert cfg.general.parallel_mode == "threads"
@@ -342,7 +342,7 @@ def test_threads_mode_without_timeouts_valid():
 
 
 def test_processes_mode_allows_timeouts():
-    """Таймауты разрешены в режиме процессов (жёсткий таймаут)."""
+    """Timeouts are allowed in processes mode (hard timeout)."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -357,9 +357,9 @@ def test_processes_mode_allows_timeouts():
     assert cfg.general.task_timeout == 30
 
 
-# Тесты для (Успешная валидация GeneralCfg)
+# Tests for (successful GeneralCfg validation)
 def test_general_cfg_valid_n_folds():
-    """Успешное завершение валидатора _check_n_folds."""
+    """The _check_n_folds validator completes successfully."""
     cfg = GeneralCfg(
         phases=[
             HPOPhaseCfg(name="test", n_trials=1),
@@ -377,9 +377,9 @@ def test_general_cfg_valid_n_folds():
     assert cfg.n_folds == 3
 
 
-# 3. Тесты для AlgoCfg._must_not_be_empty
+# 3. Tests for AlgoCfg._must_not_be_empty
 def test_algo_cfg_empty_paths():
-    """Проверка на пустую строку в путях модулей."""
+    """Checks that an empty string is rejected in module paths."""
     with pytest.raises(ValidationError) as exc_info:
         AlgoCfg(tuner="", hyperparameters={})
 
@@ -391,9 +391,9 @@ def test_algo_cfg_empty_paths():
     assert "Value error" in error_msg
 
 
-# Дополнительный тест для логики n_folds (граничные условия)
+# Additional test for the n_folds logic (boundary conditions)
 def test_general_cfg_invalid_n_folds_kfold():
-    """Покрывает ошибку валидации при n_folds < 2 для k_fold."""
+    """Covers the validation error when n_folds < 2 for k_fold."""
     with pytest.raises(ValidationError, match="(?s).*n_folds must be ≥ 2.*"):
         GeneralCfg(
             phases=[
@@ -411,13 +411,13 @@ def test_general_cfg_invalid_n_folds_kfold():
         )
 
 
-# Вызов исключения ValueError
+# Triggering a ValueError
 def test_general_cfg_coverage_line_83():
     """
-    Мы передаем n_folds=0, что должно вызвать первое исключение в _check_n_folds
-    вне зависимости от выбранной стратегии валидации.
+    We pass n_folds=0, which should trigger the first exception in
+    _check_n_folds regardless of the chosen validation strategy.
     """
-    # Используем первый доступный элемент из Enum, чтобы избежать AttributeError
+    # Use the first available Enum element to avoid an AttributeError
     strategy = list(ValidationStrategy)[0]
 
     with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
@@ -433,15 +433,15 @@ def test_general_cfg_coverage_line_83():
                 ),
             ],
             validation_strategy=strategy,
-            n_folds=0,  # Это активирует raise на строке 83
+            n_folds=0,  # This triggers the raise on line 83
         )
 
 
-# Успешный возврат return v в AlgoCfg
+# Successful return of v in AlgoCfg
 def test_algo_cfg_coverage_line_205():
-    """Успешный возврат значения пути модуля."""
-    # При создании корректного AlgoCfg, валидатор _must_not_be_empty
-    # должен вернуть значение v (строка 205)
+    """The module path value is returned successfully."""
+    # When creating a valid AlgoCfg, the _must_not_be_empty validator
+    # should return the value v (line 205)
     algo = AlgoCfg(tuner="path.to.tuner", trainer_module="path.to.trainer")
     assert algo.tuner == "path.to.tuner"
     assert algo.trainer_module == "path.to.trainer"
@@ -449,8 +449,8 @@ def test_algo_cfg_coverage_line_205():
 
 @patch("configurable_automl_engine.training_engine.config_parser.is_installed")
 def test_joblib_not_installed_raises_error(mock_is_installed):
-    """Тест исключения при отсутствии joblib."""
-    # Имитируем отсутствие пакета
+    """Test for the exception raised when joblib is missing."""
+    # Simulate the package being absent
     mock_is_installed.return_value = False
 
     data = {
@@ -472,7 +472,7 @@ def test_joblib_not_installed_raises_error(mock_is_installed):
 
 @patch("configurable_automl_engine.training_engine.config_parser.is_installed")
 def test_missing_algorithm_dependency_raises_error(mock_is_installed):
-    """Тест исключения при отсутствии библиотеки алгоритма."""
+    """Test for the exception raised when an algorithm's library is missing."""
     mock_is_installed.return_value = False
 
     data = {
@@ -495,46 +495,46 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
 
 def test_config_skips_disabled_algorithms_dependency_check():
     """
-    Тест проверяет, что валидатор зависимостей игнорирует выключенные алгоритмы.
-    Покрывает строку: if not algo_cfg.enable: continue
+    Verifies that the dependency validator ignores disabled algorithms.
+    Covers the line: if not algo_cfg.enable: continue
     """
 
-    # Данные конфигурации:
-    # 1. 'some_custom_algo' включен (чтобы пройти валидатор _must_have_enabled)
-    # 2. 'xgboost' выключен. Даже если библиотеки xgboost нет в системе,
-    #    ошибка не должна возникнуть благодаря 'continue'.
+    # Configuration data:
+    # 1. 'some_custom_algo' is enabled (to pass the _must_have_enabled validator)
+    # 2. 'xgboost' is disabled. Even if the xgboost library is not installed,
+    #    no error should be raised thanks to 'continue'.
     config_data = {
         "general": {"phases": [{"name": "test", "n_trials": 1}, TERMINAL_SELECT]},
         "algorithms": {"elasticnet": {"enable": True}, "xgboosting": {"enable": False}},
     }
-    # Имитируем отсутствие библиотеки xgboost в системе
+    # Simulate the xgboost library being absent from the system
     with patch(
         "configurable_automl_engine.common.dependency_utils.is_installed",
         return_value=False,
     ):
-        # Если continue работает, объект будет создан успешно.
-        # Если continue не сработает, вылетит ValueError: "Алгоритм 'xgboosting' включён..."
+        # If continue works, the config object is created successfully.
+        # Otherwise, a ValueError: "Algorithm 'xgboosting' is enabled..." is raised.
         config = Config.model_validate(config_data)
 
     assert getattr(config.algorithms, "xgboosting").enable is False
     assert hasattr(config.algorithms, "xgboosting")
 
 
-# 1. Тест для: if self.low > self.high: raise ValueError(...)
+# 1. Test for: if self.low > self.high: raise ValueError(...)
 def test_numeric_space_range_validation():
-    # Ошибка: low > high
-    # Используем re.escape, чтобы скобки (10.0) не воспринимались как группа в regex
+    # Error case: low > high
+    # Use re.escape so that brackets (10.0) are not treated as a regex group
     expected_msg = re.escape("low (10.0) must be <= high (5.0)")
 
     with pytest.raises(ValidationError, match=expected_msg):
         NumericSpace(type="base", low=10.0, high=5.0)
 
-    # Успех: low == high (допустимо)
+    # Success case: low == high (allowed)
     n = NumericSpace(type="base", low=5.0, high=5.0)
     assert n.low == 5.0
 
 
-# 2. Тест для: if self.type == "float_log" and self.step is not None:
+# 2. Test for: if self.type == "float_log" and self.step is not None:
 def test_float_log_step_forbidden():
     with pytest.raises(
         ValidationError, match="The 'step' parameter is not supported for 'float_log'"
@@ -542,14 +542,14 @@ def test_float_log_step_forbidden():
         FloatSpace(type="float_log", low=1.0, high=10.0, step=0.1)
 
 
-# 2a. Тест для: float_log требует low > 0 (issue #20)
+# 2a. Test for: float_log requires low > 0
 @pytest.mark.parametrize("bad_low", [0, -1, -0.0001])
 def test_float_log_non_positive_low_rejected(bad_low):
-    """float_log c low <= 0 отклоняется на этапе валидации.
+    """float_log with low <= 0 is rejected during validation.
 
-    Параметризовано по значению lower-границы: покрывает как краткую
-    списочную форму ``[low, high, \"float_log\"]`` через SearchSpaceEntry
-    (в т.ч. с целочисленным ``0``), так и словарную форму через FloatSpace.
+    Parameterized over the lower-bound value: covers both the compact list
+    form ``[low, high, "float_log"]`` via SearchSpaceEntry (including the
+    integer ``0``) and the dict form via FloatSpace.
     """
     with pytest.raises(
         ValidationError, match="low must be > 0 for log-scale distributions"
@@ -563,7 +563,7 @@ def test_float_log_non_positive_low_rejected(bad_low):
 
 
 def test_float_log_positive_low_valid():
-    """Позитивный сценарий: float_log со строго положительным low проходит."""
+    """Positive scenario: float_log with a strictly positive low is accepted."""
     entry = SearchSpaceEntry.model_validate([1e-6, 1.0, "float_log"])
     assert entry.dist_type == "float_log"
     assert entry.low == 1e-6
@@ -572,7 +572,7 @@ def test_float_log_positive_low_valid():
 
 
 def test_float_log_non_positive_low_rejected_in_config():
-    """Конфиг с float_log и low <= 0 отклоняется на этапе Config.model_validate."""
+    """A config with float_log and low <= 0 is rejected at Config.model_validate."""
     cfg_data = BASE | {
         "algorithms": {
             "ridge": {
@@ -587,51 +587,51 @@ def test_float_log_non_positive_low_rejected_in_config():
         Config.model_validate(cfg_data)
 
 
-# 3. Тест для: if self.step is not None and self.step <= 0: (в FloatSpace и IntSpace)
+# 3. Test for: if self.step is not None and self.step <= 0: (in FloatSpace and IntSpace)
 def test_step_positive_validation():
-    # Для FloatSpace
+    # For FloatSpace
     with pytest.raises(ValidationError, match="Step must be positive. Got -1.0"):
         FloatSpace(type="float", low=0.0, high=1.0, step=-1.0)
 
-    # Для IntSpace
+    # For IntSpace
     with pytest.raises(ValidationError, match="Step must be positive. Got 0"):
         IntSpace(type="int", low=1, high=10, step=0)
 
 
-# 4. Тест для: _parse_list_to_dict (валидация различных форматов списков)
+# 4. Test for: _parse_list_to_dict (validation of various list formats)
 def test_parse_list_to_dict_logic():
-    # Проверка len(data) >= 3 и payload["step"] = data[3]
+    # Check len(data) >= 3 and payload["step"] = data[3]
     raw_data = [1, 10, "int", 2]
     entry = SearchSpaceEntry.model_validate(raw_data)
     assert entry.dist_type == "int"
     assert entry.step == 2
 
-    # Проверка случая, если передали не список (должен вернуть как есть)
-    # Pydantic выбросит ошибку валидации позже, если это не словарь,
-    # но сам метод _parse_list_to_dict должен пропустить данные.
+    # Test the case of a non-list input (should be returned as is).
+    # Pydantic raises a validation error later if it is not a dict,
+    # but _parse_list_to_dict itself should pass the data through.
     not_a_list = {"config": {"type": "int", "low": 1, "high": 5}}
     entry_from_dict = SearchSpaceEntry.model_validate(not_a_list)
     assert entry_from_dict.low == 1
 
 
-# 5. Тест для: property bounds (формирование списка из объекта)
+# 5. Test for: the bounds property (building a list from the object)
 def test_search_space_bounds_property():
-    # Для числового с шагом
+    # For numeric with a step
     entry_int = SearchSpaceEntry.model_validate([1, 10, "int", 2])
     assert entry_int.bounds == [1, 10, "int", 2]
 
-    # Для категориального
+    # For categorical
     cat_data = [["a", "b"], "categorical"]
     entry_cat = SearchSpaceEntry.model_validate(cat_data)
     assert entry_cat.bounds == [["a", "b"], "categorical"]
 
 
-# 5a. Тест состава DEFAULT_SPACES['svr'] (issue #58): только надёжные ядра
+# 5a. Test of the DEFAULT_SPACES['svr'] composition: only reliable kernels
 def test_default_svr_kernel_space_only_reliable_kernels():
-    """В пространстве поиска SVR остаются только ядра rbf и linear.
+    """Only the rbf and linear kernels remain in the SVR search space.
 
-    Позитивный сценарий: options == ["rbf", "linear"].
-    Негативный сценарий: 'sigmoid' и 'poly' исключены из перебора.
+    Positive scenario: options == ["rbf", "linear"].
+    Negative scenario: 'sigmoid' and 'poly' are excluded from the search.
     """
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 
@@ -643,10 +643,10 @@ def test_default_svr_kernel_space_only_reliable_kernels():
 
 
 def test_default_svr_gamma_stays_in_space():
-    """Параметр gamma остаётся в пространстве поиска SVR.
+    """The gamma parameter remains in the SVR search space.
 
-    Для rbf он используется, для linear игнорируется sklearn —
-    удалять его не требуется (issue #58).
+    It is used for rbf and ignored for linear by sklearn, so it does not
+    need to be removed.
     """
     from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 
@@ -657,9 +657,9 @@ def test_default_svr_gamma_stays_in_space():
     assert gamma_entry.config.options == ["scale", "auto"]
 
 
-# 6. Тест для: _check_algorithm_dependencies (проверка установленных пакетов)
+# 6. Test for: _check_algorithm_dependencies (checking installed packages)
 def test_algorithm_dependency_check():
-    # Мокаем маппинг и функцию проверки установки
+    # Mock the mapping and the installation-check function
     with (
         patch(
             "configurable_automl_engine.training_engine.config_parser.ALGO_PACKAGE_MAPPING",
@@ -669,7 +669,7 @@ def test_algorithm_dependency_check():
             "configurable_automl_engine.training_engine.config_parser.is_installed"
         ) as mock_installed,
     ):
-        # Ситуация: пакет НЕ установлен
+        # Scenario: the package is NOT installed
         mock_installed.return_value = False
 
         config_data = {
@@ -684,21 +684,21 @@ def test_algorithm_dependency_check():
         expected_msg = "Algorithm 'xgboosting' is enabled, but the package 'xgboost_pkg' is not installed"
         with pytest.raises(ValueError, match=re.escape(expected_msg)):
             Config.model_validate(config_data)
-        # Ситуация: пакет установлен
+        # Scenario: the package is installed
         mock_installed.return_value = True
         cfg = Config.model_validate(config_data)
         assert getattr(cfg.algorithms, "xgboosting").enable is True
 
 
-# 7. Дополнительный тест на n_folds (общая логика GeneralCfg)
+# 7. Additional test for n_folds (the general GeneralCfg logic)
 def test_general_cfg_n_folds():
     base_phases = [{"name": "test", "n_trials": 1}, TERMINAL_SELECT]
 
-    # Ошибка: n_folds < 1
+    # Error case: n_folds < 1
     with pytest.raises(ValidationError, match="`n_folds` must be at least 1"):
         GeneralCfg(phases=base_phases, n_folds=0)
 
-    # Ошибка: k_fold требует n_folds >= 2
+    # Error case: k_fold requires n_folds >= 2
     with pytest.raises(ValidationError, match=".*n_folds must be ≥ 2 for k-fold.*"):
         GeneralCfg(phases=base_phases, validation_strategy="k_fold", n_folds=1)
 
@@ -709,29 +709,29 @@ def test_get_unknown_hyperparameters_none():
 
 
 def test_get_unknown_hyperparameters_skipped_when_unresolvable():
-    """Если оценщик не разрешается (неизвестный алгоритм / нет зависимости),
-    проверка мягко пропускается — список неизвестных пуст."""
+    """If the estimator cannot be resolved (unknown algorithm / missing dependency),
+    the check is skipped gracefully — the list of unknowns is empty."""
     cfg = AlgoCfg(hyperparameters={"a": [1, 10]})
     assert cfg.get_unknown_hyperparameters("no_such_algo") == []
 
 
 def test_get_unknown_hyperparameters_valid():
     cfg = AlgoCfg(
-        hyperparameters={"alpha": [1e-4, 10.0]}  # ✅ валидный параметр ElasticNet
+        hyperparameters={"alpha": [1e-4, 10.0]}  # valid ElasticNet parameter
     )
 
     assert cfg.get_unknown_hyperparameters("elasticnet") == []
 
 
 def test_get_unknown_hyperparameters_legacy_name_valid():
-    """Legacy-имя n_iter для ardregression считается допустимым."""
+    """The legacy name n_iter is considered valid for ardregression."""
     cfg = AlgoCfg(hyperparameters={"n_iter": [100, 500]})
     assert cfg.get_unknown_hyperparameters("ardregression") == []
 
 
 def test_get_unknown_hyperparameters_unknown():
     cfg = AlgoCfg(
-        hyperparameters={"bad_param": [1, 10]}  # ❌ не в сигнатуре ElasticNet
+        hyperparameters={"bad_param": [1, 10]}  # not in the ElasticNet signature
     )
 
     assert cfg.get_unknown_hyperparameters("elasticnet") == ["bad_param"]
@@ -753,9 +753,9 @@ def test_validator_invalid_path():
         AlgoCfg(tuner="invalid-path")
 
 
-# --- Тесты для preprocessing override (FR-5) ---
+# --- Tests for the preprocessing override ---
 def test_algo_cfg_preprocessing_valid_override():
-    """Валидный блок переопределения пресета принимается конфигом."""
+    """A valid preprocessing override block is accepted by the config."""
     cfg = AlgoCfg(preprocessing={"imputation_strategy": "median", "scaling": "none"})
     assert cfg.preprocessing is not None
     assert cfg.preprocessing.imputation_strategy == "median"
@@ -763,20 +763,20 @@ def test_algo_cfg_preprocessing_valid_override():
 
 
 def test_algo_cfg_preprocessing_partial_override():
-    """Частичное переопределение: незаданные поля остаются None."""
+    """Partial override: unset fields remain None."""
     cfg = AlgoCfg(preprocessing={"scaling": "robust"})
     assert cfg.preprocessing.scaling == "robust"
     assert cfg.preprocessing.imputation_strategy is None
 
 
 def test_algo_cfg_preprocessing_default_none():
-    """Без блока preprocessing автовыбор (None)."""
+    """Without a preprocessing block, the auto-selected default is None."""
     assert AlgoCfg().preprocessing is None
 
 
 def test_algo_cfg_preprocessing_invalid_scaling_rejected():
-    """Некорректное значение scaling отклоняется на этапе валидации
-    с понятным сообщением (негативный сценарий)."""
+    """An invalid scaling value is rejected during validation
+    with a clear error message (negative scenario)."""
     with pytest.raises(ValidationError, match="scaling"):
         AlgoCfg(preprocessing={"scaling": "quantile"})
 
@@ -787,13 +787,13 @@ def test_algo_cfg_preprocessing_invalid_imputation_rejected():
 
 
 def test_algo_cfg_preprocessing_unknown_field_rejected():
-    """Неизвестные поля в блоке переопределения отклоняются (extra='forbid')."""
+    """Unknown fields in the override block are rejected (extra='forbid')."""
     with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
         AlgoCfg(preprocessing={"unknown_field": 1})
 
 
 def test_config_preprocessing_override_end_to_end():
-    """Блок preprocessing в конфиге алгоритма доходит до Config без потерь."""
+    """The preprocessing block in an algorithm config reaches Config without loss."""
     cfg_data = BASE | {
         "algorithms": {
             "elasticnet": {
@@ -825,11 +825,12 @@ def test_hyperparameter_compatibility_error():
 
 
 def test_hyperparameter_compatibility_error_lists_allowed():
-    """Сообщение об ошибке содержит реальный список допустимых гиперпараметров.
+    """The error message contains the actual list of allowed hyperparameters.
 
-    Регрессионный тест: ранее в текст подставлялся литеральный ``{allowed}``
-    (результат ``sorted(...)`` отбрасывался), что делало сообщение бесполезным.
-    Допустимое множество теперь строится по сигнатуре конструктора оценщика.
+    Regression test: previously the literal ``{allowed}`` was substituted
+    into the text (the result of ``sorted(...)`` was discarded), making the
+    message useless. The allowed set is now built from the estimator's
+    constructor signature.
     """
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
@@ -845,13 +846,13 @@ def test_hyperparameter_compatibility_error_lists_allowed():
     msg = str(exc_info.value)
     assert "unknown hyperparameters ['bad']" in msg
     assert "Allowed parameters:" in msg
-    assert "'alpha'" in msg  # реальный параметр ElasticNet присутствует в списке
+    assert "'alpha'" in msg  # the actual ElasticNet parameter appears in the list
     assert "'l1_ratio'" in msg
     assert "{allowed}" not in msg
 
 
 def test_hyperparameter_compatibility_valid_hyperparameters_pass():
-    """Совместимые гиперпараметры не приводят к ошибке валидации."""
+    """Compatible hyperparameters do not cause a validation error."""
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
     algo_name = AVAILABLE_ALGORITHMS[0]  # elasticnet
@@ -867,11 +868,11 @@ def test_hyperparameter_compatibility_valid_hyperparameters_pass():
 
 
 def test_hyperparameter_compatibility_nondefault_valid_params():
-    """Нестандартные, но валидные для оценщика параметры проходят валидацию.
+    """Non-default but estimator-valid parameters pass validation.
 
-    Регрессионный тест на issue #15: min_samples_split и max_features
-    отсутствуют в DEFAULT_SPACES['random_forest'], но принимаются
-    конструктором RandomForestRegressor.
+    Regression test: min_samples_split and max_features are absent from
+    DEFAULT_SPACES['random_forest'] but are accepted by the
+    RandomForestRegressor constructor.
     """
     cfg_data = BASE | {
         "algorithms": {
@@ -897,10 +898,10 @@ def test_hyperparameter_compatibility_nondefault_valid_params():
 
 
 def test_hyperparameter_compatibility_gpr_alpha():
-    """alpha для gaussian_process_regression проходит валидацию.
+    """alpha for gaussian_process_regression passes validation.
 
-    Регрессионный тест на issue #15: DEFAULT_SPACES['gaussian_process_regression']
-    пуст, но alpha — штатный параметр GaussianProcessRegressor.
+    Regression test: DEFAULT_SPACES['gaussian_process_regression'] is empty,
+    but alpha is a standard GaussianProcessRegressor parameter.
     """
     cfg_data = BASE | {
         "algorithms": {
@@ -916,10 +917,10 @@ def test_hyperparameter_compatibility_gpr_alpha():
 
 
 def test_hyperparameter_compatibility_constant_value():
-    """Одиночное (константное) значение валидного параметра проходит.
+    """A single (constant) value of a valid parameter passes.
 
-    SearchSpaceEntry трактует [value] как categorical с одним вариантом —
-    фиксация любого валидного параметра не должна отклоняться.
+    SearchSpaceEntry treats [value] as a categorical with a single option —
+    fixing any valid parameter should not be rejected.
     """
     cfg_data = BASE | {
         "algorithms": {
@@ -940,7 +941,7 @@ def test_hyperparameter_compatibility_constant_value():
 
 
 def test_hyperparameter_compatibility_legacy_name():
-    """Legacy-имя n_iter для ardregression проходит валидацию."""
+    """The legacy name n_iter for ardregression passes validation."""
     cfg_data = BASE | {
         "algorithms": {
             "ardregression": {
@@ -955,7 +956,7 @@ def test_hyperparameter_compatibility_legacy_name():
 
 
 def test_hyperparameter_compatibility_typo_rejected():
-    """Опечатка в имени параметра по-прежнему отклоняется."""
+    """A typo in a parameter name is still rejected."""
     cfg_data = BASE | {
         "algorithms": {
             "random_forest": {
@@ -970,10 +971,10 @@ def test_hyperparameter_compatibility_typo_rejected():
 
 
 def test_hyperparameter_compatibility_gpr_typo_rejected():
-    """Опечатка для gaussian_process_regression теперь тоже отклоняется.
+    """A typo for gaussian_process_regression is now rejected too.
 
-    Ранее пустой реестр DEFAULT_SPACES['gaussian_process_regression']
-    молча пропускал любые ключи, включая опечатки.
+    Previously, the empty DEFAULT_SPACES['gaussian_process_regression']
+    registry silently accepted any keys, including typos.
     """
     cfg_data = BASE | {
         "algorithms": {
@@ -989,10 +990,10 @@ def test_hyperparameter_compatibility_gpr_typo_rejected():
 
 
 def test_hyperparameter_compatibility_skips_disabled():
-    """Выключенные алгоритмы пропускаются проверкой совместимости.
+    """Disabled algorithms are skipped by the compatibility check.
 
-    algo_b выключен и содержит недопустимый гиперпараметр: тест проходит
-    только благодаря guard'у ``enable=False``.
+    algo_b is disabled and holds an invalid hyperparameter: the test passes
+    only thanks to the ``enable=False`` guard.
     """
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
@@ -1005,13 +1006,13 @@ def test_hyperparameter_compatibility_skips_disabled():
         }
     }
 
-    cfg = Config.model_validate(cfg_data)  # не должно падать
+    cfg = Config.model_validate(cfg_data)  # should not raise
     assert getattr(cfg.algorithms, algo_a).enable is True
     assert getattr(cfg.algorithms, algo_b).enable is False
 
 
 def test_hyperparameter_compatibility_aggregates_errors():
-    """Ошибки для нескольких алгоритмов собираются в одно исключение."""
+    """Errors for multiple algorithms are aggregated into a single exception."""
     from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 
     algo_a, algo_b = AVAILABLE_ALGORITHMS[0], AVAILABLE_ALGORITHMS[1]
@@ -1033,7 +1034,7 @@ def test_hyperparameter_compatibility_aggregates_errors():
 
 # ─────────────────── Tests for PruningCfg (early stopping) ───────────────────
 def test_pruning_disabled_by_default():
-    """Ранняя остановка выключена по умолчанию: конфиг без блока работает как раньше."""
+    """Early stopping is disabled by default: a config without the block behaves as before."""
     cfg = Config.model_validate(BASE)
     assert cfg.general.pruning.enable is False
     assert cfg.general.pruning.strategy.value == "median"
@@ -1043,7 +1044,7 @@ def test_pruning_disabled_by_default():
 
 
 def test_pruning_valid_median_config():
-    """Корректная конфигурация median-прайнера проходит валидацию."""
+    """A valid median-pruner configuration passes validation."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1065,7 +1066,7 @@ def test_pruning_valid_median_config():
 
 
 def test_pruning_valid_hyperband_config():
-    """Корректная конфигурация hyperband-прайнера проходит валидацию."""
+    """A valid hyperband-pruner configuration passes validation."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1085,7 +1086,7 @@ def test_pruning_valid_hyperband_config():
 
 
 def test_pruning_unknown_strategy_rejected():
-    """Неизвестная стратегия отклоняется на этапе валидации конфигурации."""
+    """An unknown strategy is rejected during configuration validation."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1098,7 +1099,7 @@ def test_pruning_unknown_strategy_rejected():
 
 @pytest.mark.parametrize("bad_min_steps", [0, -1, -100])
 def test_pruning_invalid_min_steps_rejected(bad_min_steps):
-    """Недопустимые значения min_steps (< 1) отклоняются."""
+    """Invalid min_steps values (< 1) are rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1110,7 +1111,7 @@ def test_pruning_invalid_min_steps_rejected(bad_min_steps):
 
 
 def test_pruning_invalid_n_startup_trials_rejected():
-    """Недопустимое значение n_startup_trials (< 1) отклоняется."""
+    """An invalid n_startup_trials value (< 1) is rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1122,7 +1123,7 @@ def test_pruning_invalid_n_startup_trials_rejected():
 
 
 def test_pruning_invalid_reduction_factor_rejected():
-    """Недопустимое значение reduction_factor (< 2) отклоняется."""
+    """An invalid reduction_factor value (< 2) is rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1134,7 +1135,7 @@ def test_pruning_invalid_reduction_factor_rejected():
 
 
 def test_pruning_conflict_kfold_min_steps_exceeds_folds():
-    """Конфликт с валидацией: min_steps > n_folds при k_fold отклоняется."""
+    """Validation conflict: min_steps > n_folds with k_fold is rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1151,7 +1152,7 @@ def test_pruning_conflict_kfold_min_steps_exceeds_folds():
 
 
 def test_pruning_disabled_skips_kfold_conflict_check():
-    """При enable=False конфликт min_steps/n_folds не проверяется (обратная совместимость)."""
+    """With enable=False the min_steps/n_folds conflict is not checked (backward compatibility)."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1160,15 +1161,15 @@ def test_pruning_disabled_skips_kfold_conflict_check():
             "pruning": {"enable": False, "min_steps": 10},
         }
     }
-    cfg = Config.model_validate(cfg_data)  # не должно падать
+    cfg = Config.model_validate(cfg_data)  # should not raise
     assert cfg.general.pruning.enable is False
 
 
 def test_pruning_train_test_split_warns_and_allows(caplog):
-    """Прайнинг + train_test_split: конфиг принимается, выдаётся предупреждение.
+    """Pruning + train_test_split: the config is accepted with a warning.
 
-    Для стратегий валидации без естественных шагов прайнер не применяется —
-    поведение задокументировано и безопасно (AC-7).
+    For validation strategies without natural steps, the pruner is not
+    applied — the behavior is documented and safe.
     """
     cfg_data = BASE | {
         "general": {
@@ -1184,7 +1185,7 @@ def test_pruning_train_test_split_warns_and_allows(caplog):
 
 
 def test_pruning_allows_loo_and_auto():
-    """Прайнинг разрешён для loo и auto (валидируется без ошибок)."""
+    """Pruning is allowed for loo and auto (validates without errors)."""
     for strategy in ("loo", "auto"):
         cfg_data = BASE | {
             "general": {
@@ -1197,12 +1198,13 @@ def test_pruning_allows_loo_and_auto():
         assert cfg.general.pruning.enable is True
 
 
-# ─────────────── Tests for feature_selection (issue #8) ───────────────
+# ─────────────── Tests for feature_selection ───────────────
 def test_feature_selection_defaults_backward_compat():
-    """Конфиг без блока feature_selection парсится с дефолтным disabled-режимом.
+    """A config without the feature_selection block parses with the default
+    disabled mode.
 
-    Обратная совместимость: отсутствие секции не меняет поведение библиотеки,
-    все параметры принимают значения по умолчанию.
+    Backward compatibility: the absence of the section does not change the
+    library's behavior, and all parameters keep their defaults.
     """
     cfg = Config.model_validate(BASE)
     fs = cfg.general.feature_selection
@@ -1216,7 +1218,7 @@ def test_feature_selection_defaults_backward_compat():
 
 @pytest.mark.parametrize("mode", ["disabled", "always", "auto"])
 def test_feature_selection_explicit_modes_valid(mode):
-    """Все поддерживаемые режимы отбора признаков проходят валидацию."""
+    """All supported feature-selection modes pass validation."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"mode": mode}}
     }
@@ -1228,7 +1230,7 @@ def test_feature_selection_explicit_modes_valid(mode):
     "method", ["importance", "percentile", "mutual_info", "variance"]
 )
 def test_feature_selection_methods_valid(method):
-    """Каждый из четырёх методов отбора признаков парсится корректно."""
+    """Each of the four feature-selection methods parses correctly."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"method": method}}
     }
@@ -1237,7 +1239,7 @@ def test_feature_selection_methods_valid(method):
 
 
 def test_feature_selection_full_block_end_to_end():
-    """Полный блок feature_selection доходит до Config без потерь."""
+    """The full feature_selection block reaches Config without loss."""
     fs_block = {
         "mode": "always",
         "method": "mutual_info",
@@ -1258,7 +1260,7 @@ def test_feature_selection_full_block_end_to_end():
 
 
 def test_feature_selection_percentile_int_coerced_to_float():
-    """Целочисленный литерал percentile из YAML приводится к float без ошибок."""
+    """An integer percentile literal from YAML is coerced to float without errors."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"percentile": 50}}
     }
@@ -1268,7 +1270,7 @@ def test_feature_selection_percentile_int_coerced_to_float():
 
 
 def test_feature_selection_model_standalone():
-    """FeatureSelectionCfg можно использовать напрямую (без Config)."""
+    """FeatureSelectionCfg can be used directly (without Config)."""
     fs = FeatureSelectionCfg(mode="auto", method="variance", n_estimators=25)
     assert fs.mode == FeatureSelectionMode.auto
     assert fs.method == FeatureSelectionMethod.variance
@@ -1286,7 +1288,7 @@ def test_feature_selection_model_standalone():
     ],
 )
 def test_feature_selection_boundary_values_valid(field, value):
-    """Граничные валидные значения параметров принимаются схемой."""
+    """Boundary-valid parameter values are accepted by the schema."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {field: value}}
     }
@@ -1296,9 +1298,9 @@ def test_feature_selection_boundary_values_valid(field, value):
 
 @pytest.mark.parametrize("mode", ["magic", 123, "ALWAYS"])
 def test_feature_selection_invalid_mode_rejected(mode):
-    """Неизвестный или несовпадающий по регистру mode отклоняется.
+    """An unknown or case-mismatched mode is rejected.
 
-    Сравнение значений enum строгое: 'ALWAYS' не равен 'always'.
+    Enum value comparison is strict: 'ALWAYS' is not equal to 'always'.
     """
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"mode": mode}}
@@ -1311,7 +1313,7 @@ def test_feature_selection_invalid_mode_rejected(mode):
 
 @pytest.mark.parametrize("method", ["pca", "rfe"])
 def test_feature_selection_invalid_method_rejected(method):
-    """Неизвестный метод отбора признаков отклоняется на этапе парсинга."""
+    """An unknown feature-selection method is rejected during parsing."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"method": method}}
     }
@@ -1321,7 +1323,7 @@ def test_feature_selection_invalid_method_rejected(method):
 
 @pytest.mark.parametrize("percentile", [0.0, -10.0, 105.0])
 def test_feature_selection_invalid_percentile_rejected(percentile):
-    """percentile вне диапазона (0, 100] отклоняется."""
+    """A percentile outside the (0, 100] range is rejected."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"percentile": percentile}}
     }
@@ -1331,7 +1333,7 @@ def test_feature_selection_invalid_percentile_rejected(percentile):
 
 @pytest.mark.parametrize("min_features", [0, -1])
 def test_feature_selection_invalid_min_features_rejected(min_features):
-    """min_features < 1 отклоняется (защита от опустошения матрицы)."""
+    """min_features < 1 is rejected (protection against an empty matrix)."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1343,7 +1345,7 @@ def test_feature_selection_invalid_min_features_rejected(min_features):
 
 
 def test_feature_selection_negative_variance_threshold_rejected():
-    """Отрицательный variance_threshold отклоняется."""
+    """A negative variance_threshold is rejected."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1355,7 +1357,7 @@ def test_feature_selection_negative_variance_threshold_rejected():
 
 
 def test_feature_selection_small_n_estimators_rejected():
-    """n_estimators < 10 отклоняется (порог ge=10)."""
+    """n_estimators < 10 is rejected (the ge=10 threshold)."""
     cfg_data = BASE | {
         "general": {**BASE["general"], "feature_selection": {"n_estimators": 5}}
     }
@@ -1364,7 +1366,7 @@ def test_feature_selection_small_n_estimators_rejected():
 
 
 def test_feature_selection_extra_field_rejected():
-    """Лишние ключи внутри блока отклоняются (extra='forbid')."""
+    """Extra keys inside the block are rejected (extra='forbid')."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1376,7 +1378,7 @@ def test_feature_selection_extra_field_rejected():
 
 
 def test_feature_selection_invalid_rejected_even_when_disabled():
-    """Строгая схема: невалидные параметры отклоняются даже при mode='disabled'."""
+    """Strict schema: invalid parameters are rejected even at mode='disabled'."""
     cfg_data = BASE | {
         "general": {
             **BASE["general"],
@@ -1388,7 +1390,7 @@ def test_feature_selection_invalid_rejected_even_when_disabled():
 
 
 def test_read_config_feature_selection_yaml(tmp_path):
-    """Реальный YAML с секцией feature_selection парсится в корректный Config."""
+    """A real YAML with the feature_selection section parses into a correct Config."""
     yaml_content = """
     general:
       comparison_metric: "r2"
@@ -1428,7 +1430,7 @@ def test_read_config_feature_selection_yaml(tmp_path):
 
 
 def test_read_config_feature_selection_absent_defaults(tmp_path):
-    """YAML без секции feature_selection даёт disabled-режим по умолчанию."""
+    """A YAML without the feature_selection section defaults to the disabled mode."""
     yaml_content = """
     general:
       comparison_metric: "r2"
@@ -1460,11 +1462,11 @@ def test_read_config_feature_selection_absent_defaults(tmp_path):
     assert fs.n_estimators == 50
 
 
-# ─────────────────────── Sanity Gate v2 (эпик #61, T7, issue #69) ────────────
+# ─────────────────────── Sanity Gate v2 ───────────────────────
 
 
 def _sg_cfg(sanity_gate_block: dict) -> dict:
-    """Конфиг с блоком ``general.sanity_gate`` поверх базового."""
+    """A config with the ``general.sanity_gate`` block on top of the base one."""
     return {
         "general": {**BASE["general"], "sanity_gate": sanity_gate_block},
         "algorithms": BASE["algorithms"],
@@ -1472,9 +1474,9 @@ def _sg_cfg(sanity_gate_block: dict) -> dict:
 
 
 def test_sanity_gate_v2_defaults():
-    """Дефолты блока sanity_gate v2: мягкие пороги из постановки.
+    """Defaults of the sanity_gate v2 block: soft thresholds from the spec.
 
-    Эпик #74: поле mode удалено — секция является только источником порогов.
+    The mode field was removed — the section is only a source of thresholds.
     """
     cfg = Config.model_validate(BASE)
     sg = cfg.general.sanity_gate
@@ -1502,7 +1504,7 @@ def test_sanity_gate_v2_defaults():
 
 
 def test_sanity_gate_v2_full_block_parses():
-    """Полный блок sanity_gate v2 (постановка эпика #61 / T5) парсится."""
+    """The full sanity_gate v2 block parses."""
     block = {
         "top_k_candidates": 5,
         "corridor_delta": 0.2,
@@ -1565,12 +1567,13 @@ def test_sanity_gate_v2_full_block_parses():
 
 @pytest.mark.parametrize("legacy_mode", ["off", "warn_only", "active", "weird"])
 def test_sanity_gate_v2_mode_removed_with_migration_hint(legacy_mode):
-    """Поле sanity_gate.mode удалено (эпик #74): конфиг с ним отвергается
-    с понятной ошибкой и подсказкой миграции на явный select-шаг.
+    """The sanity_gate.mode field was removed: a config using it is rejected
+    with a clear error and a migration hint to an explicit select phase.
 
-    Идентификация ошибки — по стабильному коду
-    (``ERR_REMOVED_SANITY_GATE_MODE`` из error['type']); содержательные
-    части подсказки (упоминание поля и select-шага) проверяются отдельно.
+    The error is identified by a stable code
+    (``ERR_REMOVED_SANITY_GATE_MODE`` in error['type']); the meaningful
+    parts of the hint (mentioning the field and the select phase) are
+    checked separately.
     """
     with pytest.raises(ValidationError) as exc_info:
         Config.model_validate(_sg_cfg({"mode": legacy_mode}))
@@ -1583,13 +1586,13 @@ def test_sanity_gate_v2_mode_removed_with_migration_hint(legacy_mode):
 
 @pytest.mark.parametrize("corridor_mode", ["multiplicative", "additive", "auto"])
 def test_sanity_gate_v2_corridor_mode_valid(corridor_mode):
-    """Все три формы коридора принимаются схемой."""
+    """All three corridor forms are accepted by the schema."""
     cfg = Config.model_validate(_sg_cfg({"corridor_mode": corridor_mode}))
     assert cfg.general.sanity_gate.corridor_mode == corridor_mode
 
 
 def test_sanity_gate_v2_corridor_mode_invalid_rejected():
-    """Неизвестная форма коридора отклоняется на этапе валидации."""
+    """An unknown corridor form is rejected during validation."""
     with pytest.raises(ValidationError, match="corridor_mode"):
         Config.model_validate(_sg_cfg({"corridor_mode": "geometric"}))
 
@@ -1605,7 +1608,7 @@ def test_sanity_gate_v2_generalization_gap_mode_valid(gap_mode):
     "bad_value", ["invalid", "", "warn_only", "active", "off", 1, None]
 )
 def test_sanity_gate_v2_generalization_gap_mode_invalid_rejected(bad_value):
-    """Неизвестное значение generalization_gap_mode отклоняется."""
+    """An unknown value of generalization_gap_mode is rejected."""
     with pytest.raises(ValidationError, match="generalization_gap_mode"):
         Config.model_validate(_sg_cfg({"generalization_gap_mode": bad_value}))
 
@@ -1613,7 +1616,7 @@ def test_sanity_gate_v2_generalization_gap_mode_invalid_rejected(bad_value):
 @pytest.mark.parametrize(
     "field,value",
     [
-        # Граничные значения (равенство порогу — валидно).
+        # Boundary values (equality with the threshold is valid).
         ("min_prediction_diversity", 1.0),
         ("min_unique_ratio", 1.0),
         ("max_dead_feature_ratio", 0.0),
@@ -1621,9 +1624,9 @@ def test_sanity_gate_v2_generalization_gap_mode_invalid_rejected(bad_value):
         ("max_generalization_gap", 1.0),
         ("top_k_candidates", 1),
         ("min_unique_count", 1),
-        # corridor_delta → 0 (строго больше нуля, но сколь угодно мал).
+        # corridor_delta → 0 (strictly positive, but arbitrarily small).
         ("corridor_delta", 1e-9),
-        # Множители и допуски: неотрицательные/положительные границы.
+        # Multipliers and tolerances: non-negative/positive boundaries.
         ("family_diversity_multiplier", 1e-9),
         ("zero_coef_tolerance", 0.0),
         ("permutation_tolerance", 0.0),
@@ -1631,7 +1634,7 @@ def test_sanity_gate_v2_generalization_gap_mode_invalid_rejected(bad_value):
     ],
 )
 def test_sanity_gate_v2_threshold_boundaries_valid(field, value):
-    """Граничные значения порогов блока v2 проходят валидацию."""
+    """Boundary threshold values of the v2 block pass validation."""
     cfg = Config.model_validate(_sg_cfg({field: value}))
     assert getattr(cfg.general.sanity_gate, field) == value
 
@@ -1665,13 +1668,13 @@ def test_sanity_gate_v2_threshold_boundaries_valid(field, value):
     ],
 )
 def test_sanity_gate_v2_threshold_out_of_bounds_rejected(field, value):
-    """Значения порогов вне допустимых границ отклоняются с именем поля."""
+    """Threshold values out of range are rejected with the field name mentioned."""
     with pytest.raises(ValidationError, match=re.escape(field)):
         Config.model_validate(_sg_cfg({field: value}))
 
 
 def test_sanity_gate_v2_extra_forbid():
-    """Лишние ключи внутри блока sanity_gate отклоняются (extra='forbid')."""
+    """Extra keys inside the sanity_gate block are rejected (extra='forbid')."""
     with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs"):
         Config.model_validate(_sg_cfg({"unknown_sanity_key": True}))
 
@@ -1690,10 +1693,10 @@ def test_sanity_gate_v2_extra_forbid():
     ],
 )
 def test_sanity_gate_v2_check_flags_accept_bools_only(field):
-    """Флаги-контуры принимают bool; несовместимые типы отклоняются.
+    """Circuit flag fields accept bool; incompatible types are rejected.
 
-    Pydantic в lax-режиме коэрсит ``1``/``"yes"`` в True, но списки,
-    словари и None — несовместимые типы — отклоняются.
+    In lax mode Pydantic coerces ``1``/``"yes"`` to True, but lists,
+    dicts and None — incompatible types — are rejected.
     """
     for flag_value in (True, False):
         cfg = Config.model_validate(_sg_cfg({field: flag_value}))
@@ -1707,8 +1710,8 @@ def test_sanity_gate_v2_check_flags_accept_bools_only(field):
 
 
 def test_sanity_gate_v2_empty_block_is_valid_thresholds_only():
-    """Пустой блок sanity_gate: {} валиден — секция является источником
-    порогов, а не поведенческим флагом (эпик #74)."""
+    """An empty sanity_gate block (``{}``) is valid — the section is a
+    source of thresholds, not a behavioral flag."""
     cfg = Config.model_validate(_sg_cfg({}))
     sg = cfg.general.sanity_gate
     assert "mode" not in SanityGateCfg.model_fields
@@ -1718,25 +1721,25 @@ def test_sanity_gate_v2_empty_block_is_valid_thresholds_only():
     assert sg.generalization_gap_mode == "warn"
 
 
-# ─────────────── Pipeline phases: refine / select (эпик #74) ───────────────
+# ─────────────── Pipeline phases: refine / select ───────────────
 
 
 def _phase(**overrides: object) -> dict:
-    """Словарь одной фазы пайплайна поверх дефолтов."""
+    """A dict for a single pipeline phase on top of defaults."""
     base: dict = {"name": "phase", "n_trials": 1, "action": "all_algorithms"}
     base.update(overrides)
     return base
 
 
 def _cfg_with_phases(*phases: dict) -> dict:
-    """Конфиг с заданной последовательностью фаз поверх BASE."""
+    """A config with the given phase sequence on top of BASE."""
     return {
         "general": {**BASE["general"], "phases": list(phases)},
         "algorithms": BASE["algorithms"],
     }
 
 
-# ── Позитивные сценарии ──
+# ── Positive scenarios ──
 
 
 @pytest.mark.parametrize(
@@ -1790,10 +1793,10 @@ def _cfg_with_phases(*phases: dict) -> dict:
     ],
 )
 def test_phase_actions_valid_combinations(phase):
-    """Все допустимые комбинации action/strategy/output/k парсятся схемой.
+    """All valid action/strategy/output/k combinations are parsed by the schema.
 
-    Фазы с output='winner' ставятся последними (терминальный шаг), остальные
-    — в середину пайплайна перед терминальным select.
+    Phases with output='winner' come last (the terminal step); the rest go
+    in the middle of the pipeline before the terminal select.
     """
     is_terminal = phase.get("output") == "winner"
     phases = [_phase(), phase] if is_terminal else [_phase(), phase, TERMINAL_SELECT]
@@ -1806,7 +1809,7 @@ def test_phase_actions_valid_combinations(phase):
 
 
 def test_refine_default_fields_are_none():
-    """У фаз all_algorithms/refine поля strategy/output/k равны None."""
+    """For all_algorithms/refine phases the strategy/output/k fields are None."""
     cfg = Config.model_validate(
         _cfg_with_phases(
             _phase(action="all_algorithms"), _phase(action="refine"), TERMINAL_SELECT
@@ -1819,7 +1822,7 @@ def test_refine_default_fields_are_none():
 
 
 def test_select_immediately_after_select_is_valid():
-    """select сразу после select валиден (эпик #74, edge case 5): top_k → winner."""
+    """select immediately after select is valid (edge case): top_k → winner."""
     cfg = Config.model_validate(
         _cfg_with_phases(
             _phase(),
@@ -1835,7 +1838,7 @@ def test_select_immediately_after_select_is_valid():
 
 
 def test_refine_right_after_all_algorithms_is_valid():
-    """refine сразу после all_algorithms валиден (эпик #74, edge case 4)."""
+    """refine right after all_algorithms is valid (edge case)."""
     cfg = Config.model_validate(
         _cfg_with_phases(_phase(), _phase(action="refine"), TERMINAL_SELECT)
     )
@@ -1847,8 +1850,9 @@ def test_refine_right_after_all_algorithms_is_valid():
 
 
 def test_sanity_gate_section_without_sanity_select_is_valid():
-    """Секция sanity_gate без select-шагов со strategy: sanity_gate валидна:
-    секция — источник порогов, а не поведенческий флаг (эпик #74)."""
+    """A sanity_gate section without select phases using strategy:
+    sanity_gate is valid: the section is a source of thresholds, not a
+    behavioral flag."""
     data = _cfg_with_phases(_phase(), TERMINAL_SELECT)
     data["general"]["sanity_gate"] = {
         "top_k_candidates": 2,
@@ -1861,25 +1865,25 @@ def test_sanity_gate_section_without_sanity_select_is_valid():
 
 
 def test_empty_phases_list_is_still_accepted():
-    """Пустой список фаз не проверяется кросс-валидацией (защита от пустого
-    пайплайна остаётся рантайм-проверкой train_best_model)."""
+    """An empty phase list is not checked by cross-validation (the protection
+    against an empty pipeline stays a runtime check in train_best_model)."""
     cfg = Config(
         general=GeneralCfg(phases=[]), algorithms={"elasticnet": {"enable": True}}
     )
     assert cfg.general.phases == []
 
 
-# ── Негативные сценарии ──
+# ── Negative scenarios ──
 
 
 def test_refine_winner_rejected_with_migration_hint():
-    """action 'refine_winner' удалён: конфиг отвергается с подсказкой
-    миграции (не молчаливое игнорирование).
+    """The 'refine_winner' action was removed: the config is rejected with
+    a migration hint (not silently ignored).
 
-    Тест завязывается на стабильный код ошибки
-    (``ERR_REMOVED_REFINE_WINNER`` из error['type']) и отдельно — на
-    содержательные части текста подсказки; точная формулировка подсказки
-    может меняться без поломки теста.
+    The test depends on the stable error code
+    (``ERR_REMOVED_REFINE_WINNER`` in error['type']) and separately on the
+    meaningful parts of the hint text; the exact wording of the hint may
+    change without breaking the test.
     """
     with pytest.raises(ValidationError) as exc_info:
         Config.model_validate(
@@ -1895,7 +1899,7 @@ def test_refine_winner_rejected_with_migration_hint():
 
 
 def test_select_first_phase_rejected():
-    """select не может быть первой фазой: нечего ранжировать/аудировать."""
+    """select cannot be the first phase: there is nothing to rank or audit."""
     with pytest.raises(ValidationError, match="cannot be the first phase"):
         Config.model_validate(
             _cfg_with_phases(
@@ -1905,7 +1909,7 @@ def test_select_first_phase_rejected():
 
 
 def test_phases_after_terminal_select_rejected():
-    """Фазы после терминального select (output: winner) запрещены."""
+    """Phases after the terminal select (output: winner) are forbidden."""
     with pytest.raises(ValidationError, match="terminal"):
         Config.model_validate(
             _cfg_with_phases(
@@ -1917,7 +1921,7 @@ def test_phases_after_terminal_select_rejected():
 
 
 def test_select_winner_in_middle_rejected():
-    """select(output: winner) в середине пайплайна отклоняется."""
+    """A select(output: winner) in the middle of the pipeline is rejected."""
     with pytest.raises(ValidationError, match="terminal"):
         Config.model_validate(
             _cfg_with_phases(
@@ -1931,20 +1935,20 @@ def test_select_winner_in_middle_rejected():
 @pytest.mark.parametrize(
     "last_phase",
     [
-        _phase(),  # all_algorithms последней
-        _phase(action="refine"),  # refine последней
+        _phase(),  # all_algorithms last
+        _phase(action="refine"),  # refine last
         _phase(action="select", strategy="cv_best", output="top_k", k=1),
         _phase(action="select", strategy="cv_best", output="pool"),
     ],
 )
 def test_last_phase_must_be_terminal_select(last_phase):
-    """Последняя фаза обязана быть select с output: winner."""
+    """The last phase must be a select with output: winner."""
     with pytest.raises(ValidationError, match="must be a 'select' phase"):
         Config.model_validate(_cfg_with_phases(_phase(), last_phase))
 
 
 def test_last_phase_select_without_winner_output_rejected():
-    """Последняя фаза select, но с output != winner — ошибка."""
+    """The last phase is a select but with output != winner — an error."""
     with pytest.raises(ValidationError, match="must be a 'select' phase"):
         Config.model_validate(
             _cfg_with_phases(
@@ -1955,7 +1959,7 @@ def test_last_phase_select_without_winner_output_rejected():
 
 
 def test_top_k_without_k_rejected():
-    """output: top_k без k >= 1 отклоняется."""
+    """output: top_k without k >= 1 is rejected."""
     with pytest.raises(ValidationError, match="top_k.*requires.*k"):
         Config.model_validate(
             HPOPhaseCfg(n_trials=1, action="select", strategy="cv_best", output="top_k")
@@ -1963,7 +1967,7 @@ def test_top_k_without_k_rejected():
 
 
 def test_k_zero_or_negative_rejected():
-    """k < 1 отклоняется ограничением поля (ge=1)."""
+    """k < 1 is rejected by the field constraint (ge=1)."""
     with pytest.raises(ValidationError, match="k"):
         Config.model_validate(
             HPOPhaseCfg(
@@ -1974,7 +1978,7 @@ def test_k_zero_or_negative_rejected():
 
 @pytest.mark.parametrize("output", ["winner", "pool"])
 def test_k_with_winner_or_pool_rejected(output):
-    """k при output: winner|pool запрещён."""
+    """k is forbidden with output: winner|pool."""
     with pytest.raises(ValidationError, match="k is not allowed"):
         Config.model_validate(
             HPOPhaseCfg(
@@ -1985,7 +1989,7 @@ def test_k_with_winner_or_pool_rejected(output):
 
 @pytest.mark.parametrize("field", ["strategy", "output", "k"])
 def test_select_fields_forbidden_on_non_select_phases(field):
-    """Поля strategy/output/k запрещены у фаз all_algorithms/refine."""
+    """The strategy/output/k fields are forbidden on all_algorithms/refine phases."""
     value: object = (
         "cv_best" if field == "strategy" else "winner" if field == "output" else 2
     )
@@ -1994,33 +1998,32 @@ def test_select_fields_forbidden_on_non_select_phases(field):
 
 
 def test_select_without_strategy_rejected():
-    """select без strategy отклоняется с подсказкой допустимых значений."""
+    """A select without strategy is rejected with a hint of allowed values."""
     with pytest.raises(ValidationError, match="requires fields \\['strategy'\\]"):
         HPOPhaseCfg(n_trials=1, action="select", output="winner")
 
 
 def test_select_without_output_rejected():
-    """select без output отклоняется с подсказкой допустимых значений."""
+    """A select without output is rejected with a hint of allowed values."""
     with pytest.raises(ValidationError, match="requires fields \\['output'\\]"):
         HPOPhaseCfg(n_trials=1, action="select", strategy="cv_best")
 
 
 def test_select_without_strategy_and_output_rejected():
-    """select без обоих полей перечисляет оба в сообщении об ошибке."""
+    """A select without both fields lists both in the error message."""
     with pytest.raises(ValidationError, match="\\['strategy', 'output'\\]"):
         HPOPhaseCfg(n_trials=1, action="select")
 
 
-# ─────────── Runtime: select/refine execution (эпик #74) ───────────
+# ─────────── Runtime: select/refine execution ───────────
 
 
 def test_refine_phase_executes_with_warm_start():
-    """refine исполним (эпик #74, R3): warm-start HPO для всего множества.
+    """refine is executable: warm-start HPO for the whole set.
 
-    Конфиг [all_algorithms → refine → terminal select] выполняет обе HPO-фазы
-    (по одному запуску HPO на каждый алгоритм в каждой фазе; в refine
-    передаются initial_params) и завершается артефактом терминального
-    select-шага (R2).
+    The config [all_algorithms → refine → terminal select] runs both HPO
+    phases (one HPO run per algorithm per phase; initial_params are passed
+    to refine) and finishes with the artifact of the terminal select phase.
     """
     import numpy as np
     import pandas as pd
@@ -2041,8 +2044,9 @@ def test_refine_phase_executes_with_warm_start():
 
     assert res["algorithm"] in BASE["algorithms"]
     assert "sanity_gate" not in res
-    # elasticnet — единственный алгоритм BASE: 1 вызов в all_algorithms-фазе
-    # (без initial_params) + 1 вызов в refine-фазе (с warm-start).
+    # elasticnet is the only algorithm in BASE: 1 call in the
+    # all_algorithms phase (without initial_params) + 1 call in the refine
+    # phase (with a warm start).
     assert mock_hpo.call_count == 2
     first_call = mock_hpo.call_args_list[0].kwargs
     refine_call = mock_hpo.call_args_list[1].kwargs
@@ -2051,8 +2055,8 @@ def test_refine_phase_executes_with_warm_start():
 
 
 def test_select_phase_executes_in_pipeline():
-    """Исполнение select-фаз реализовано (эпик #74, задача R2): терминальный
-    select(cv_best, winner) отрабатывает и возвращает артефакт."""
+    """Select-phase execution works: the terminal select(cv_best, winner)
+    runs and returns the artifact."""
     import numpy as np
     import pandas as pd
     from configurable_automl_engine.training_engine.component import train_best_model
@@ -2068,13 +2072,13 @@ def test_select_phase_executes_in_pipeline():
     assert "sanity_gate" not in res
 
 
-# ─────────── M1/M2 (ревью PR !43): граничные комбинации фаз ───────────
+# ─────────── M1/M2: boundary phase combinations ───────────
 
 
 def test_refine_first_phase_is_valid():
-    """refine первой фазой валиден (M1): входное рабочее множество —
-    полный набор включённых алгоритмов (warm-start от предыдущей фазы
-    отсутствует); семантика исполнения финализируется задачей R3."""
+    """refine as the first phase is valid (M1): the input working set is the
+    full set of enabled algorithms (no warm start from a previous phase);
+    the execution semantics are finalized by the refine task."""
     cfg = Config.model_validate(
         _cfg_with_phases(_phase(action="refine"), TERMINAL_SELECT)
     )
@@ -2082,9 +2086,9 @@ def test_refine_first_phase_is_valid():
 
 
 def test_select_cv_best_pool_is_valid():
-    """select(strategy: cv_best, output: pool) валиден (M2): коридорный пул
-    финалистов (коридор δ ∩ top_k_candidates, пороги из секции sanity_gate),
-    ранжирование по CV-скору БЕЗ аудита ModelSanityGate."""
+    """select(strategy: cv_best, output: pool) is valid (M2): a corridor
+    finalists pool (corridor δ ∩ top_k_candidates, thresholds from the
+    sanity_gate section), ranked by CV score WITHOUT a ModelSanityGate audit."""
     phase = _phase(action="select", strategy="cv_best", output="pool")
     cfg = Config.model_validate(_cfg_with_phases(_phase(), phase, TERMINAL_SELECT))
     parsed = cfg.general.phases[1]
@@ -2094,9 +2098,9 @@ def test_select_cv_best_pool_is_valid():
 
 
 def test_k_exceeding_top_k_candidates_is_accepted():
-    """k > sanity_gate.top_k_candidates не проверяется на уровне конфига
-    (M3): пул финалистов сначала ограничивается top_k_candidates, точное
-    взаимодействие k с пулом определяется при исполнении (задача R2)."""
+    """k > sanity_gate.top_k_candidates is not checked at the config level
+    (M3): the finalists pool is first capped by top_k_candidates, and the
+    exact interaction of k with the pool is decided at execution time."""
     data = _cfg_with_phases(_phase(), TERMINAL_SELECT)
     data["general"]["sanity_gate"] = {"top_k_candidates": 3}
     cfg = Config.model_validate(
@@ -2108,4 +2112,4 @@ def test_k_exceeding_top_k_candidates_is_accepted():
     )
     assert cfg.general.phases[1].k == 10
     assert cfg.general.sanity_gate.top_k_candidates == 3
-    _ = data  # sanity_gate-секция валидна сама по себе
+    _ = data  # the sanity_gate section is valid on its own

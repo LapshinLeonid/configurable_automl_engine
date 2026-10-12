@@ -1,24 +1,24 @@
-"""Регрессионный бенчмарк Sanity Gate на целевом пайплайне (эпик #74, R4).
+"""Regression benchmark of the Sanity Gate on the target pipeline.
 
-Сравнение вариантов пайплайна на одних и тех же датасетах:
+Comparison of pipeline variants on the same datasets:
 
-* ``baseline`` — ``all_algorithms → select(cv_best, winner)`` (CV-лидер без
-  аудита, современный аналог старого поведения);
+* ``baseline`` — ``all_algorithms → select(cv_best, winner)`` (CV leader
+  without audit, the modern counterpart of the old behavior);
 * ``target`` — ``all_algorithms → select(sanity_gate, top_k) → refine →
-  select(sanity_gate, winner)`` (целевой DAG эпика #74).
+  select(sanity_gate, winner)`` (the target DAG).
 
-Покрытие:
+Coverage:
 
-1. Positive: на эталонных датасетах (зашумлённые R²≈0.3, широкие p=200,
-   малые N) победитель не изменился И гейт не сработал (0 дисквалификаций
-   ни в одном sanity-select).
-2. Negative: на вырожденных датасетах (полка / плато tanh / переобучение)
-   победитель изменился, вырожденный CV-лидер дисквалифицирован, честный
-   кандидат выигрывает в целевом DAG.
-3. Smoke: таблица «датасет × вариант × победитель × гейт» рендерится;
-   критерии приёмки (check_acceptance) согласованы с тестами.
+1. Positive: on reference datasets (noisy R²≈0.3, wide p=200, small N)
+   the winner did not change AND the gate did not trigger (0 disqualifications
+   in any sanity-select).
+2. Negative: on degenerate datasets (shelf / tanh plateau / overfitting)
+   the winner changed, the degenerate CV leader was disqualified, and the
+   honest candidate wins in the target DAG.
+3. Smoke: the table «dataset × variant × winner × gate» renders;
+   the acceptance checks (check_acceptance) agree with the tests.
 
-Время прогона ограничено (CI): n_trials=1, N ≤ 300, 6 датасетов.
+Runtime is bounded (CI): n_trials=1, N ≤ 300, 6 datasets.
 """
 
 from __future__ import annotations
@@ -35,15 +35,15 @@ from benchmarks.sanity_gate_benchmark import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Positive: эталонные датасеты — победитель не меняется, гейт не срабатывает
+#  Positive: reference datasets — winner unchanged, gate not triggered
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_reference_winner_unchanged_and_gate_not_triggered():
-    """Эталонные датасеты: 0 изменений победителя (baseline vs target).
+    """Reference datasets: 0 winner changes (baseline vs target).
 
-    Гейт НЕ должен срабатывать на нормальных данных: ни один кандидат пула
-    не дисквалифицируется, победитель целевого DAG совпадает с CV-лидером.
+    The gate must NOT trigger on normal data: no candidate of the pool is
+    disqualified and the target DAG winner matches the CV leader.
     """
     for case in REFERENCE_CASES:
         result = run_case(case)
@@ -53,31 +53,31 @@ def test_reference_winner_unchanged_and_gate_not_triggered():
         assert result.changed is False
         assert result.gate_triggered is False, result.disqualified
         assert all(not names for names in result.disqualified.values())
-        # Пул финалистов первого sanity-select непуст.
+        # The finalists pool of the first sanity-select is non-empty.
         assert result.pool
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Negative: вырожденные датасеты — победитель обязан измениться
+#  Negative: degenerate datasets — the winner must change
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_degenerate_winner_changes():
-    """Вырожденные датасеты: 100% изменений победителя.
+    """Degenerate datasets: 100% winner changes.
 
-    Вырожденный кандидат (CV-лидер базовой линии) дисквалифицируется гейтом
-    в первом sanity-select целевого DAG, победителем становится честный
-    кандидат.
+    The degenerate candidate (baseline CV leader) is disqualified by the gate
+    in the first sanity-select of the target DAG, and the honest candidate
+    becomes the winner.
     """
     for case in DEGENERATE_CASES:
         result = run_case(case)
-        # Победитель обязан измениться (полка / плато tanh / переобучение).
+        # The winner must change (shelf / tanh plateau / overfitting).
         assert result.changed is True, (
             f"{case.name}: winners equal ({result.winner_baseline})"
         )
         assert result.winner_target != result.winner_baseline
-        # Гейт сработал: вырожденный CV-лидер дисквалифицирован в первом
-        # sanity-select; честный победитель прошёл аудит.
+        # The gate triggered: the degenerate CV leader was disqualified in the
+        # first sanity-select; the honest winner passed the audit.
         assert result.gate_triggered is True
         assert result.winner_baseline in result.disqualified[GATE_SELECT_PHASE]
         assert result.audit_valid[result.winner_baseline] is False
@@ -85,30 +85,30 @@ def test_degenerate_winner_changes():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Smoke: таблица и критерии приёмки
+#  Smoke: table and acceptance checks
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_benchmark_table_renders_with_expected_columns():
-    """Таблица «датасет × вариант × победитель × гейт» рендерится."""
-    # Два быстрых кейса достаточно для smoke-проверки форматирования.
+    """The «dataset × variant × winner × gate» table renders."""
+    # Two fast cases are enough for the smoke check of the formatting.
     results = [run_case(case) for case in (REFERENCE_CASES[2], DEGENERATE_CASES[2])]
     table = render_table(results)
-    assert "датасет" in table
-    assert "вариант" in table
-    assert "победитель" in table
-    assert "гейт" in table
+    assert "dataset" in table
+    assert "variant" in table
+    assert "winner" in table
+    assert "gate" in table
     assert "baseline" in table and "target" in table
-    # У каждого датасета две строки (baseline + target).
+    # Each dataset has two rows (baseline + target).
     assert table.count(results[0].dataset) >= 1
 
 
 def test_check_acceptance_matches_test_semantics():
-    """check_acceptance согласован с семантикой тестов.
+    """check_acceptance agrees with the test semantics.
 
-    Эталонные кейсы без изменений и срабатываний проходят; вырожденные
-    с изменением и дисквалификацией CV-лидера — проходят.
+    Reference cases without changes and triggers pass; degenerate cases with
+    a change and a CV-leader disqualification pass.
     """
     results = [run_case(case) for case in ALL_CASES]
     passed, errors = check_acceptance(results)
-    assert passed, f"Критерии приёмки нарушены: {errors}"
+    assert passed, f"Acceptance criteria violated: {errors}"
