@@ -34,6 +34,7 @@ import configurable_automl_engine.training_engine.component as component
 from configurable_automl_engine.training_engine.component import (
     FinalistCandidate,
     PhaseContext,
+    PhaseResult,
     PreparedData,
     RobustWinnerResult,
     _build_sanity_gate,
@@ -171,7 +172,7 @@ class _FakeTrainer:
         Path(path).write_bytes(b"fake-model")
 
 
-def _make_ctx(scores: dict[str, tuple[float, dict[str, Any]]]) -> PhaseContext:
+def _make_ctx(scores: dict[str, PhaseResult]) -> PhaseContext:
     """A phase context with the given working set."""
     return PhaseContext(working_set=dict(scores))
 
@@ -198,7 +199,7 @@ def _patch_hpo():
         component,
         "_run_hpo",
         side_effect=lambda **kw: (
-            (-0.10, {"p": 1}) if kw["algo_name"] == "ridge" else (-0.08, {"p": 1})
+            PhaseResult(score=-0.10, params={"p": 1}) if kw["algo_name"] == "ridge" else PhaseResult(score=-0.08, params={"p": 1})
         ),
     )
 
@@ -218,7 +219,7 @@ def _patch_honest_finalists(y: pd.Series):
 def test_select_cv_best_winner():
     """select(cv_best, winner): working set = CV leader, no gate section."""
     cfg = _hpo_cfg()
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
@@ -231,7 +232,7 @@ def test_select_cv_best_winner():
 def test_select_cv_best_top_k():
     """select(cv_best, top_k): the k best by CV score."""
     cfg = _hpo_cfg()
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
@@ -242,7 +243,7 @@ def test_select_cv_best_top_k():
 def test_select_cv_best_top_k_tie_keeps_insertion_order():
     """select(cv_best, top_k): a CV-score tie keeps insertion order (tie-break)."""
     cfg = _hpo_cfg()
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.10, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.10, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
@@ -252,7 +253,7 @@ def test_select_cv_best_top_k_tie_keeps_insertion_order():
 def test_select_cv_best_pool_corridor_and_cap():
     """select(cv_best, pool): corridor pool (δ ∩ top_k_candidates)."""
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.05})
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
@@ -261,7 +262,7 @@ def test_select_cv_best_pool_corridor_and_cap():
 
     # Wide corridor + top_k_candidates=2 cap: both candidates.
     cfg2 = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
-    ctx2 = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx2 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(name="sel2", output="pool"),
         cfg=cfg2,
@@ -274,7 +275,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     # Cap boundary: the pool is wide (both inside the δ=0.9 corridor), but
     # top_k_candidates=1 cuts it down to the leader.
     cfg3 = _hpo_cfg(sanity_gate={"top_k_candidates": 1, "corridor_delta": 0.9})
-    ctx3 = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx3 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     component._execute_select_phase(
         phase=_select_phase(name="sel3", output="pool"),
         cfg=cfg3,
@@ -287,7 +288,7 @@ def test_select_cv_best_pool_corridor_and_cap():
 def test_select_cv_best_pool_excludes_disqualified():
     """select(cv_best, pool): candidates disqualified by the circuit breaker are not in the pool."""
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     ctx.disqualified_algorithms = {"ridge": "HPO failure"}
     component._execute_select_phase(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
@@ -321,7 +322,7 @@ def _result(
 def test_select_sanity_gate_winner_sets_pre_trained_trainer():
     """select(sanity_gate, winner): the winner's full-fit trainer goes into the context."""
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     trainer = object()
 
     def fake_fit(algo_name, *args, **kwargs):
@@ -361,7 +362,7 @@ def test_select_sanity_gate_top_k_ranks_by_rmse_oof():
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
     # The CV leader is 'ridge', but its RMSE_oof is worse: top_k by
     # RMSE_oof picks 'extra_trees'.
-    ctx = _make_ctx({"ridge": (-0.08, {"p": 1}), "extra_trees": (-0.09, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.08, params={"p": 1}), "extra_trees": PhaseResult(score=-0.09, params={"p": 1})})
 
     with (
         patch.object(
@@ -404,7 +405,7 @@ def test_select_sanity_gate_top_k_ranks_by_rmse_oof():
 def test_select_sanity_gate_pool_keeps_passed_candidates():
     """select(sanity_gate, pool): all candidates that passed the audit remain in the working set."""
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
 
     with (
         patch.object(
@@ -446,7 +447,7 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
     them out and fail. The audit is preserved in the gate section.
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
 
     with (
         patch.object(
@@ -505,7 +506,7 @@ def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
     RuntimeError.
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
 
     with (
         patch.object(
@@ -547,7 +548,7 @@ def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
 def test_select_sanity_gate_top_k_drops_failed_outside_k():
     """select(sanity_gate, top_k): a rejected candidate outside the slice stays disqualified."""
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
 
     with (
         patch.object(
@@ -595,7 +596,7 @@ def test_select_sanity_gate_pool_partial_failure_keeps_only_passed():
     following phases).
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
 
     with (
         patch.object(
@@ -642,7 +643,7 @@ def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
     The reasons remain in the gate section of the report.
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     # The reason format is taken from the code (single source).
     budget_reason = component._audit_budget_skip_reason(5.0)
 
@@ -711,9 +712,9 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
     )
     ctx = _make_ctx(
         {
-            "extra_trees": (-0.08, {"p": 1}),
-            "ridge": (-0.10, {"p": 1}),
-            "svr": (-0.12, {"p": 1}),
+            "extra_trees": PhaseResult(score=-0.08, params={"p": 1}),
+            "ridge": PhaseResult(score=-0.10, params={"p": 1}),
+            "svr": PhaseResult(score=-0.12, params={"p": 1}),
         }
     )
     budget_reason = component._audit_budget_skip_reason(5.0)
@@ -771,7 +772,7 @@ def test_select_sanity_gate_pool_keeps_pre_existing_disqualification():
     if it ended up in the step output.
     """
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     ctx.disqualified_algorithms = {"ridge": "HPO failure"}
 
     with (
@@ -849,7 +850,7 @@ def test_is_audit_budget_skip_detects_only_budget_reasons():
 def test_select_after_select():
     """select after select: the first one's output replaces the second one's input."""
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1}), "extra_trees": (-0.08, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     prepared = _prepared()
 
     with _patch_honest_finalists(prepared.y):
@@ -878,7 +879,7 @@ def test_select_after_select():
 def test_select_top_k_without_k_raises():
     """select(sanity_gate, top_k) without k → ValueError (the guard duplicates the schema)."""
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1})})
     phase = HPOPhaseCfg.model_construct(
         name="gate",
         n_trials=1,
@@ -1211,7 +1212,7 @@ def test_report_warn_only_keys_removed():
     )
     cfg = Config.model_validate(cfg_dict)
     prepared = _prepared()
-    ctx = _make_ctx({"ridge": (-0.10, {"p": 1})})
+    ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1})})
     ctx.winner_algo = "ridge"
     ctx.sanity_gate_sections = {
         "gate": {

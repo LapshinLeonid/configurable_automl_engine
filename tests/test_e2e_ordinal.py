@@ -149,7 +149,7 @@ def test_tuner_optimize_ordinal_not_pruned() -> None:
     X = df.drop(columns=["target"])
     y = df["target"]
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "elasticnet",
         X,
         y,
@@ -160,6 +160,9 @@ def test_tuner_optimize_ordinal_not_pruned() -> None:
         space_overrides={"elasticnet": DEFAULT_SPACES["elasticnet"]},
         encoding="ordinal",
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert model is not None
     assert isinstance(params, dict) and params

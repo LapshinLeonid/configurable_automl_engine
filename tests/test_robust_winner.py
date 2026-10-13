@@ -43,6 +43,7 @@ from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.training_engine.component import (
     FinalistCandidate,
+    PhaseResult,
     _circuit_rank,
     _severity_signature,
     select_robust_winner,
@@ -747,8 +748,8 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
     df = _tiny_df()
     prepared = comp.prepare_dataset(cfg, df, "target")
     phase_results = {
-        "ridge": (-0.08, {"alpha": 1.0}),
-        "elasticnet": (-0.081, {"alpha": 0.5, "l1_ratio": 0.5}),
+        "ridge": PhaseResult(score=-0.08, params={"alpha": 1.0}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 0.5, "l1_ratio": 0.5}),
     }
 
     def _fake_fit(algo_name, *args, **kwargs):

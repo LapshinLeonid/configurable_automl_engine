@@ -27,6 +27,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     compute_svr_epsilon_bounds,
 )
 from configurable_automl_engine.training_engine.component import (
+    PhaseResult,
     PreparedData,
     execute_phases,
     train_best_model,
@@ -201,7 +202,10 @@ def test_tuner_svr_default_space_all_trials_within_adaptive_bounds(monkeypatch):
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
 
-    _, params, _ = optimize("svr", X, y, n_trials=6, random_state=42)
+    opt_res = optimize("svr", X, y, n_trials=6, random_state=42)
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert len(seen) >= 6
     for eps in seen:
@@ -219,7 +223,7 @@ def test_tuner_svr_dict_override_without_epsilon_gets_adaptive(monkeypatch):
     _mock_optimize_infra(monkeypatch, seen)
 
     space = {"C": SearchSpaceEntry.model_validate([1e-2, 100.0, "float_log"])}
-    _, params, _ = optimize(
+    opt_res = optimize(
         "svr",
         X,
         y,
@@ -227,6 +231,9 @@ def test_tuner_svr_dict_override_without_epsilon_gets_adaptive(monkeypatch):
         random_state=42,
         space_overrides={"svr": space},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -246,7 +253,7 @@ def test_tuner_svr_user_epsilon_override_has_priority(monkeypatch):
     _mock_optimize_infra(monkeypatch, seen)
 
     user_eps = SearchSpaceEntry.model_validate([0.5, 1.0, "float_log"])
-    _, params, _ = optimize(
+    opt_res = optimize(
         "svr",
         X,
         y,
@@ -254,6 +261,9 @@ def test_tuner_svr_user_epsilon_override_has_priority(monkeypatch):
         random_state=42,
         space_overrides={"svr": {"epsilon": user_eps}},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -273,7 +283,7 @@ def test_tuner_svr_callable_override_unchanged(monkeypatch):
     def custom_space(trial):
         return {"epsilon": trial.suggest_float("epsilon", 0.2, 0.3)}
 
-    _, params, _ = optimize(
+    opt_res = optimize(
         "svr",
         X,
         y,
@@ -281,6 +291,9 @@ def test_tuner_svr_callable_override_unchanged(monkeypatch):
         random_state=42,
         space_overrides={"svr": custom_space},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -302,7 +315,7 @@ def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
 
-    _, params, _ = optimize(
+    opt_res = optimize(
         "svr",
         X,
         y,
@@ -315,6 +328,9 @@ def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
             "gamma": "scale",
         },
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert low <= prev_epsilon <= high
     assert seen[0] == prev_epsilon  # the first trial is the enqueued value
@@ -330,7 +346,7 @@ def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
     _mock_optimize_infra(monkeypatch, seen)
 
     user_eps = SearchSpaceEntry.model_validate([0.5, 1.0, "float_log"])
-    _, params, _ = optimize(
+    opt_res = optimize(
         "svr",
         X,
         y,
@@ -338,6 +354,9 @@ def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
         random_state=42,
         space_overrides={"svr": {"epsilon": user_eps}},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -353,7 +372,10 @@ def test_tuner_svr_constant_y_falls_back(monkeypatch):
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
 
-    _, params, _ = optimize("svr", X, y, n_trials=4, random_state=42)
+    opt_res = optimize("svr", X, y, n_trials=4, random_state=42)
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -378,7 +400,10 @@ def test_tuner_svr_nan_y_falls_back(monkeypatch):
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen, model_factory=lambda algo, **p: _FitOnlyEstimator())
 
-    _, params, _ = optimize("svr", X, y, n_trials=4, random_state=42)
+    opt_res = optimize("svr", X, y, n_trials=4, random_state=42)
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert seen
     for eps in seen:
@@ -394,7 +419,7 @@ def test_tuner_other_algorithms_unaffected(monkeypatch):
     seen: list[float] = []
     _mock_optimize_infra(monkeypatch, seen)
 
-    _, params, _ = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -402,6 +427,9 @@ def test_tuner_other_algorithms_unaffected(monkeypatch):
         random_state=42,
         space_overrides={"ridge": {"alpha": SearchSpaceEntry.model_validate([0.1, 1.0, "float_log"])}},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert 0.1 <= params["alpha"] <= 1.0
     assert "epsilon" not in params
@@ -579,7 +607,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
 
     def fake_run_hpo(**kwargs):
         captured["search_space"] = kwargs.get("search_space_override")
-        return (0.9, {"C": 1.0})
+        return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
         "configurable_automl_engine.training_engine.component._run_hpo",
@@ -610,7 +638,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
 
     def fake_run_hpo(**kwargs):
         captured["search_space"] = kwargs.get("search_space_override")
-        return (0.9, {"C": 1.0})
+        return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
         "configurable_automl_engine.training_engine.component._run_hpo",
@@ -651,7 +679,7 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
 
     def fake_run_hpo(**kwargs):
         captured["search_space"] = kwargs.get("search_space_override")
-        return (0.9, {"alpha": 0.1})
+        return PhaseResult(score=0.9, params={"alpha": 0.1})
 
     monkeypatch.setattr(
         "configurable_automl_engine.training_engine.component._run_hpo",

@@ -36,7 +36,7 @@ from configurable_automl_engine.trainer import (
     ModelTrainer,
     TrainingError,
 )
-from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.component import PhaseResult, train_best_model
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     to_user_value,
@@ -387,7 +387,7 @@ def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
         ),
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {"alpha": 0.1}),
+            return_value=PhaseResult(score=0.9, params={"alpha": 0.1}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -451,7 +451,7 @@ def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
 
     def fake_run_hpo(**kwargs):
         captured_hpo.update(kwargs)
-        return (0.9, {"alpha": 0.1})
+        return PhaseResult(score=0.9, params={"alpha": 0.1})
 
     with (
         patch(

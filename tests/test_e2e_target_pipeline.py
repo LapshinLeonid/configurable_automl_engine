@@ -33,6 +33,7 @@ from pydantic import ValidationError
 
 import configurable_automl_engine.training_engine.component as component
 from configurable_automl_engine.training_engine.component import (
+    PhaseResult,
     execute_phases,
     prepare_dataset,
     train_best_model,
@@ -147,26 +148,26 @@ class _FakeTrainer:
         Path(path).write_bytes(b"fake-model")
 
 
-def _houndstooth_hpo(**kwargs: Any) -> tuple[float, dict[str, Any]]:
+def _houndstooth_hpo(**kwargs: Any) -> PhaseResult:
     """Deterministic HPO: extra_trees beats ridge; refine boosts.
 
-    The coarse phase returns fixed (score, params). The refine phase is called
-    with ``initial_params`` from the gate context (verified below) and returns
-    improved (score', params').
+    The coarse phase returns fixed ``PhaseResult`` records. The refine phase
+    is called with ``initial_params`` from the gate context (verified below)
+    and returns improved (score', params').
     """
     algo = kwargs["algo_name"]
     if kwargs.get("initial_params") is None:
         # coarse (all_algorithms): gate-context parameters of phase 1.
         return {
-            "ridge": (-0.10, {"alpha": 1.0}),
-            "extra_trees": (-0.08, {"n_estimators": 10}),
+            "ridge": PhaseResult(score=-0.10, params={"alpha": 1.0}),
+            "extra_trees": PhaseResult(score=-0.08, params={"n_estimators": 10}),
         }[algo]
     # refine: warm start from the output parameters of the first select (gate context).
     if algo == "ridge":
         assert kwargs["initial_params"] == {"alpha": 1.0}, kwargs["initial_params"]
-        return -0.09, {"alpha": 1.5}
+        return PhaseResult(score=-0.09, params={"alpha": 1.5})
     assert kwargs["initial_params"] == {"n_estimators": 10}, kwargs["initial_params"]
-    return -0.07, {"n_estimators": 20}
+    return PhaseResult(score=-0.07, params={"n_estimators": 20})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -303,10 +304,10 @@ def test_e2e_target_dag_winner_refined_params_in_gate_context():
     assert len(ctx.working_set) == 1
     winner = ctx.winner_algo
     assert winner is not None
-    score, params = ctx.working_set[winner]
+    winner_record = ctx.working_set[winner]
     # The winner was updated by the refine phase: parameters from the refine stub.
-    assert params in ({"alpha": 1.5}, {"n_estimators": 20})
-    assert score in (-0.09, -0.07)
+    assert winner_record.params in ({"alpha": 1.5}, {"n_estimators": 20})
+    assert winner_record.score in (-0.09, -0.07)
     assert ctx.pre_trained_trainer is not None
     assert set(ctx.sanity_gate_sections) == {"gate_select", "gate_final"}
 

@@ -251,7 +251,7 @@ def test_tuner_optimize_numpy_without_features_warns() -> None:
     X = rng.normal(size=(80, 3))
     y = rng.normal(size=80)
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "elasticnet",
         X,
         y,
@@ -261,6 +261,9 @@ def test_tuner_optimize_numpy_without_features_warns() -> None:
         validation_strategy="train_test_split",
         space_overrides={"elasticnet": DEFAULT_SPACES["elasticnet"]},
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
     assert model is not None
     assert np.isfinite(score)
 
@@ -274,7 +277,7 @@ def test_tuner_optimize_numpy_with_features_warns(caplog) -> None:
     X = rng.normal(size=(80, 3))
     y = rng.normal(size=80)
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "elasticnet",
         X,
         y,
@@ -286,6 +289,9 @@ def test_tuner_optimize_numpy_with_features_warns(caplog) -> None:
         categorical_features=["a", "b"],
         numerical_features=["c"],
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
     assert model is not None
     assert np.isfinite(score)
 
@@ -379,7 +385,7 @@ def test_tuner_optimize_new_encoding_strategies() -> None:
     y = df["target"]
 
     for encoding in ("target", "frequency", "hashing"):
-        model, params, score = optimize(
+        opt_res = optimize(
             "elasticnet",
             X,
             y,
@@ -390,6 +396,9 @@ def test_tuner_optimize_new_encoding_strategies() -> None:
             space_overrides={"elasticnet": DEFAULT_SPACES["elasticnet"]},
             encoding=encoding,
         )
+        assert opt_res is not None
+        model, params, score = opt_res.model, opt_res.params, opt_res.score
+
         assert model is not None
         assert isinstance(params, dict) and params
         assert np.isfinite(score)
@@ -404,7 +413,7 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
     X = df.drop(columns=["target"])
     y = df["target"]
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "random_forest",
         X,
         y,
@@ -417,6 +426,9 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
         high_cardinality_threshold=10,
         high_cardinality_encoding="target",
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
     assert model is not None
     assert isinstance(params, dict) and params
     assert np.isfinite(score)

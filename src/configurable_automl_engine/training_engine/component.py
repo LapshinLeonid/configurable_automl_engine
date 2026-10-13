@@ -48,6 +48,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 from configurable_automl_engine.common.validation_utils import (
@@ -71,7 +72,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 from configurable_automl_engine.validation import RANDOM_STATE, make_cv
 
 # ───────────────────────── canonical IAE ─────────────────────── #
-from ..tuner import WORST_SCORE_THRESHOLD
+from ..tuner import WORST_SCORE_THRESHOLD, HPOHistoryError, OptimizeResult
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
@@ -121,7 +122,34 @@ def is_valid_winner_score(score: Any) -> bool:
     return math.isfinite(value) and value > WORST_SCORE_THRESHOLD
 
 
-def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
+@dataclass(frozen=True)
+class PhaseResult:
+    """Result of an HPO phase for a single algorithm.
+
+    The single record of the pipeline working set
+    (``PhaseContext.working_set: dict[str, PhaseResult]``): replaces the
+    legacy ``(score, params)`` tuple plus the parallel trials dictionary.
+    The select steps narrow the working set by rebuilding the dict — the
+    ``trials`` travel with the record automatically (no separate
+    synchronization).
+
+    Attributes:
+        score (float): The raw CV score of the phase (optimizer semantics,
+            higher is better). Already passes the ``is_valid_winner_score``
+            invariant.
+        params (dict[str, Any]): The best found hyperparameters.
+        trials (list[FrozenTrial]): The Optuna trials of the current phase
+            ONLY (transferred TPE history is excluded). Empty for custom
+            tuners that do not expose trials; passed as ``previous_trials``
+            to the next HPO phase (refine warm-start).
+    """
+
+    score: float
+    params: dict[str, Any]
+    trials: list[FrozenTrial] = field(default_factory=list)
+
+
+def select_winner(results: dict[str, PhaseResult]) -> str:
     """Deterministically select the winning algorithm by its "raw" score.
 
     The algorithm with the maximum score wins (optimizer semantics — "higher
@@ -131,8 +159,8 @@ def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
     algorithm wins (documented tie-break).
 
     Args:
-        results (dict[str, tuple[float, dict[str, Any]]]): The "algorithm →
-            (score, params)" map of the current phase. Must not be empty.
+        results (dict[str, PhaseResult]): The "algorithm → PhaseResult" map of
+            the current phase. Must not be empty.
 
     Returns:
         str: The name of the winning algorithm.
@@ -142,7 +170,7 @@ def select_winner(results: dict[str, tuple[float, dict[str, Any]]]) -> str:
     """
     if not results:
         raise ValueError("Cannot select a winner from empty results")
-    return max(results.items(), key=lambda kv: kv[1][0])[0]
+    return max(results.items(), key=lambda kv: kv[1].score)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -195,7 +223,7 @@ def _family_of(algo_name: str, algorithm_families: Mapping[str, str] | None) -> 
 
 
 def select_finalists(
-    results: dict[str, tuple[float, dict[str, Any]]],
+    results: dict[str, PhaseResult],
     *,
     metric_user: str,
     top_k_candidates: int = 3,
@@ -257,9 +285,9 @@ def select_finalists(
     documented tie-break.
 
     Args:
-        results (dict[str, tuple[float, dict[str, Any]]]): HPO phase results
-            "algorithm → (raw score, params)". Must not be empty after removing
-            the disqualified algorithms.
+        results (dict[str, PhaseResult]): HPO phase results "algorithm →
+            PhaseResult". Must not be empty after removing the disqualified
+            algorithms.
         metric_user (str): User-facing metric name (``general.comparison_metric``);
             used to convert raw scores to user semantics and to pick the
             corridor direction/form.
@@ -324,8 +352,8 @@ def select_finalists(
     # direction is taken from user_direction (for errors this is "minimize",
     # even though the optimizer maximizes their inversions).
     user_scores = {
-        name: to_user_value(metric_user, score)
-        for name, (score, _) in candidates.items()
+        name: to_user_value(metric_user, cand.score)
+        for name, cand in candidates.items()
     }
     direction = user_direction(metric_user)
 
@@ -400,7 +428,7 @@ def select_finalists(
     # Deterministic ordering: raw score descending (optimizer semantics, as in
     # select_winner); ties — insertion order (configuration order). The sort is
     # stable.
-    ordered = sorted(candidates, key=lambda n: candidates[n][0], reverse=True)
+    ordered = sorted(candidates, key=lambda n: candidates[n].score, reverse=True)
 
     # Explicit combination (intersection): (candidates inside the corridor) ∩
     # (first top_k by CV score). No topping up beyond the corridor.
@@ -457,7 +485,7 @@ def select_finalists(
 
     # Final stable ordering: added families are weaker than base pool members,
     # but the re-sort makes the invariant explicit.
-    pool.sort(key=lambda n: candidates[n][0], reverse=True)
+    pool.sort(key=lambda n: candidates[n].score, reverse=True)
     return pool
 
 
@@ -481,7 +509,7 @@ class FinalistCandidate:
             (``trainer.pipeline``); used by the audit (circuit B) and for
             ``y_pred_full`` predictions.
         params (dict[str, Any]): The best hyperparameters from HPO
-            (``phase_results[algo_name][1]``).
+            (``phase_results[algo_name].params``).
         cv_score (float): The raw score from the HPO phase (optimizer
             semantics); used by the ``cv_best`` select step and the report.
         rmse_oof (float | None): The finalist's ``RMSE_oof``
@@ -641,7 +669,7 @@ def _to_candidate(
 
 def _train_finalists(
     pool: list[str],
-    phase_results: dict[str, tuple[float, dict[str, Any]]],
+    phase_results: dict[str, PhaseResult],
     cfg: Config,
     prepared: PreparedData,
 ) -> dict[str, FinalistCandidate]:
@@ -653,8 +681,8 @@ def _train_finalists(
 
     Args:
         pool (list[str]): The ordered finalists pool (from ``select_finalists``).
-        phase_results (dict[str, tuple[float, dict[str, Any]]]): HPO results
-            "algorithm → (score, params)".
+        phase_results (dict[str, PhaseResult]): HPO results
+            "algorithm → PhaseResult".
         cfg (Config): The root config.
         prepared (PreparedData): The prepared data and settings.
 
@@ -667,7 +695,9 @@ def _train_finalists(
     for name in pool:
         if name not in phase_results:
             continue
-        score, params = phase_results[name]
+        record = phase_results[name]
+        params = record.params
+        score = record.score
         try:
             trainer = _fit_finalist(
                 name,
@@ -1142,6 +1172,8 @@ def _run_hpo(
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
     initial_params: dict[str, Any] | None = None,
+    previous_trials: list[FrozenTrial] | None = None,
+    random_state: int | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: str = "one_hot",
@@ -1152,14 +1184,16 @@ def _run_hpo(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
-) -> tuple[float, dict[str, Any]] | None:
+) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
     Workflow:
     1. Tuner loading: the module specified in `algo_cfg.tuner` is imported.
     2. Signature check: the tuner's `optimize` method is inspected for support
-       of specific parameters (n_folds, oversampling, space_overrides).
+       of specific parameters (n_folds, oversampling, space_overrides,
+       previous_trials, random_state).
     3. Execution: the optimization is run. If the algorithm is deemed invalid
-       via `InvalidAlgorithmError`, the canonical exception is raised.
+       via `InvalidAlgorithmError`, the canonical exception is raised. The
+       phase's own trials are returned inside the ``PhaseResult``.
     The HPO phase consumes only the best parameters and score: the final
     full-data fit of the best model is skipped (``fit_best_model=False`` for
     tuners that support it) and the model is discarded — the engine trains
@@ -1187,6 +1221,18 @@ def _run_hpo(
         initial_params (dict[str, Any] | None): Hyperparameters from the
             previous HPO phase for enqueue_trial (monotonic improvement between
             phases).
+        previous_trials (list[FrozenTrial] | None): The TPE history of the
+            previous phase, forwarded to tuners that accept the argument
+            (``study.add_trials`` warm-start). A tuner WITHOUT the
+            ``previous_trials`` argument that receives non-empty history is a
+            configuration error — ``HPOHistoryError`` is raised (fail fast),
+            refine must not silently degrade to a cold run. An empty list is a
+            no-op.
+        random_state (int | None): The random seed of the current HPO phase
+            (``RANDOM_STATE + hpo_phase_ordinal``). Always forwarded to tuners
+            that accept the argument — for the bundled
+            ``configurable_automl_engine.tuner`` it is mandatory so that each
+            phase uses a different seed and TPE startup points do not repeat.
         categorical_features (list[str] | None): Categorical column names,
             detected once in ``train_best_model`` and passed to the tuner.
         numerical_features (list[str] | None): Numerical column names.
@@ -1202,12 +1248,17 @@ def _run_hpo(
             argument or accept ``**kwargs`` (the signature is checked via
             ``inspect.signature``); custom tuners are unaffected.
     Returns:
-        Optional[Tuple[float, Dict[str, Any]]]:
-            The tuple (best metric, best params) or None if an error occurred
-            during HPO.
+        PhaseResult | None: The phase result — score, params and the phase's
+            own Optuna trials; or ``None`` if an error occurred during HPO
+            (the algorithm is excluded from candidates; NO fallback to the
+            previous phase's parameters).
     Raises:
         _CanonicalIAE: If the tuner reports that the algorithm is incompatible
             with the data.
+        HPOHistoryError: If ``previous_trials`` are passed to a tuner that
+            does not accept the argument, or the transferred history is
+            incompatible (fail fast — the pipeline fails with a clear
+            message).
         AttributeError: If the tuner module lacks an `optimize` function.
     """
     if algo_cfg.tuner is None:
@@ -1223,6 +1274,26 @@ def _run_hpo(
     tuner_accepts_var_kwargs = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     )
+
+    # TPE history transfer (refine): a tuner without `previous_trials` that
+    # receives non-empty history is a configuration error — fail fast with the
+    # tuner name instead of silently degrading refine to a cold run. A
+    # ``**kwargs`` signature is considered compatible (the tuner itself
+    # decides what to do with the extra key), same as for the other helper
+    # arguments below.
+    if (
+        previous_trials
+        and "previous_trials" not in sig.parameters
+        and not tuner_accepts_var_kwargs
+    ):
+        raise HPOHistoryError(
+            f"Tuner '{algo_cfg.tuner}' does not accept the `previous_trials` "
+            f"argument, but the pipeline needs to transfer TPE history for "
+            f"algorithm '{algo_name}'. Update the tuner to accept "
+            f"`previous_trials` (list of optuna FrozenTrial) or drop the "
+            f"refine phase for this algorithm."
+        )
+
     kwargs: dict[str, Any] = {
         "algo_name": algo_name,
         "X": X,
@@ -1231,6 +1302,11 @@ def _run_hpo(
         "n_trials": n_trials,
         "validation_strategy": validation_strategy,
     }
+
+    # pass the phase random seed if the tuner supports it (mandatory for the
+    # bundled tuner: each HPO phase must use a different seed)
+    if "random_state" in sig.parameters:
+        kwargs["random_state"] = random_state
 
     # pass n_folds if the module supports it
     if (
@@ -1266,6 +1342,13 @@ def _run_hpo(
     # pass initial_params if available (for the refine phase)
     if initial_params is not None and "initial_params" in sig.parameters:
         kwargs["initial_params"] = initial_params
+
+    # pass the TPE history of the previous phase (refine) if available;
+    # a ``**kwargs`` tuner receives the key as well (it decides what to do)
+    if previous_trials and (
+        "previous_trials" in sig.parameters or tuner_accepts_var_kwargs
+    ):
+        kwargs["previous_trials"] = previous_trials
 
     # pass the detected categorical/numerical columns so that the HPO phase
     # builds its preprocessor consistently with the final training
@@ -1343,7 +1426,31 @@ def _run_hpo(
         kwargs["fit_best_model"] = False
 
     try:
-        _, best_params, best_score = tuner.optimize(**kwargs)
+        result = tuner.optimize(**kwargs)
+        if result is None:
+            # Tuner couldn't get a valid result: either all trials failed
+            # (optuna.TrialPruned) or it failed otherwise. Return None so the
+            # main loop knows the algorithm didn't pass: the dummy candidate
+            # with score -3.4e38 and params=None should no longer end up in
+            # phase_results.
+            _LOG.error(
+                "Algorithm %s failed during HPO: no valid result (tuner returned None)",
+                algo_name,
+            )
+            return None
+        if isinstance(result, OptimizeResult):
+            # The bundled tuner: a self-documenting result with the phase's
+            # own trials (transferred history excluded).
+            best_score, best_params, trials = (
+                result.score,
+                result.params,
+                list(result.trials),
+            )
+        else:
+            # A legacy custom tuner returning the (model, params, score)
+            # triple; the trials are unavailable (empty history).
+            _, best_params, best_score = result
+            trials = []
         if best_score is None or best_params is None:
             # Tuner couldn't get a valid result: either all trials failed
             # (optuna.TrialPruned) or it failed otherwise. Return None so the
@@ -1358,10 +1465,15 @@ def _run_hpo(
                 best_params,
             )
             return None
-        return best_score, best_params
+        return PhaseResult(score=best_score, params=best_params, trials=trials)
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
+        if isinstance(err, HPOHistoryError):
+            # TPE history transfer problems are configuration errors: fail
+            # fast with a clear message instead of silently excluding the
+            # algorithm.
+            raise
         _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
         # Return None so the main loop knows the algorithm didn't pass.
         return None
@@ -1760,8 +1872,8 @@ class PhaseContext:
     ``select`` steps operate on it).
 
     Attributes:
-        working_set (dict[str, tuple[float, dict[str, Any]]]): The working set
-            "algorithm → (raw CV score, params)". Rebuilt by each HPO phase and
+        working_set (dict[str, PhaseResult]): The working set
+            "algorithm → PhaseResult". Rebuilt by each HPO phase and
             replaced by the output of each select step.
         disqualified_algorithms (dict[str, str]): Circuit breaker:
             "algorithm → reason". Populated by HPO failures and Sanity Gate
@@ -1781,7 +1893,7 @@ class PhaseContext:
             retraining of the winner required); ``None`` otherwise.
     """
 
-    working_set: dict[str, tuple[float, dict[str, Any]]] = field(default_factory=dict)
+    working_set: dict[str, PhaseResult] = field(default_factory=dict)
     disqualified_algorithms: dict[str, str] = field(default_factory=dict)
     full_fit_trainers: dict[str, Any] = field(default_factory=dict)
     sanity_gate_sections: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1796,15 +1908,26 @@ class _HPOWorkerResult:
     Attributes:
         name (str): The algorithm name.
         score (float | None): A valid "raw" score; ``None`` on failure.
-        params (dict[str, Any] | None): The best parameters; ``None`` on failure.
+        params (dict[str, Any] | None): The best parameters; ``None`` on
+            failure.
+        trials (list[FrozenTrial] | None): The phase's own Optuna trials;
+            ``None`` on failure or for tuners that do not expose trials.
         disqualify_reason (str | None): Circuit breaker disqualification
             reason; ``None`` — the algorithm is not disqualified.
+        history_error (str | None): A TPE history transfer error
+            (``HPOHistoryError``) raised inside the worker. Carried as a
+            string (not the exception object) so the result stays
+            serializable in the "processes" mode; the consumer re-raises the
+            error in the main process — fail fast even in the parallel mode,
+            where ``run_parallel`` otherwise swallows worker exceptions.
     """
 
     name: str
     score: float | None = None
     params: dict[str, Any] | None = None
+    trials: list[FrozenTrial] | None = None
     disqualify_reason: str | None = None
+    history_error: str | None = None
 
 
 @dataclass
@@ -1819,8 +1942,8 @@ class _HpoPhaseSpec:
 
     Attributes:
         phase (HPOPhaseCfg): Configuration of the current phase.
-        prev_results (dict[str, tuple[float, dict[str, Any]]]): Snapshot of
-            the previous phase results (for warm-start refine).
+        prev_results (dict[str, PhaseResult]): Snapshot of the previous phase
+            results (for warm-start refine: params + TPE trials).
         X (pd.DataFrame): The feature matrix.
         y (pd.Series): The target vector.
         metric_sklearn (str): Metric name in sklearn semantics.
@@ -1842,10 +1965,13 @@ class _HpoPhaseSpec:
         target_encoding_fallback (float | None): Target encoding fallback.
         feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
             selection configuration.
+        random_state (int | None): The random seed of the current HPO phase
+            (``RANDOM_STATE + hpo_phase_ordinal`` — a different seed per HPO
+            phase, so TPE random startup points do not repeat between phases).
     """
 
     phase: HPOPhaseCfg
-    prev_results: dict[str, tuple[float, dict[str, Any]]]
+    prev_results: dict[str, PhaseResult]
     X: pd.DataFrame
     y: pd.Series
     metric_sklearn: str
@@ -1865,6 +1991,7 @@ class _HpoPhaseSpec:
     target_encoding_smoothing: float
     target_encoding_fallback: float | None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    random_state: int | None = None
 
 
 def _prepare_search_space(
@@ -1907,7 +2034,9 @@ def _execute_hpo_phase(
     spec: _HpoPhaseSpec,
     search_space: dict[str, Any] | None = None,
     initial_params: dict[str, Any] | None = None,
-) -> tuple[float, dict[str, Any]] | None:
+    previous_trials: list[FrozenTrial] | None = None,
+    random_state: int | None = None,
+) -> PhaseResult | None:
     """Run a specific HPO phase for an algorithm (module-level function).
 
     Provides phase logging and oversampling result processing. The function
@@ -1923,15 +2052,19 @@ def _execute_hpo_phase(
         spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
         search_space (dict[str, Any] | None): The search space for the phase.
         initial_params (dict[str, Any] | None): Warm-start parameters (refine).
+        previous_trials (list[FrozenTrial] | None): The TPE history of the
+            previous phase (refine warm-start), forwarded to ``_run_hpo``.
+        random_state (int | None): The random seed of the current HPO phase,
+            forwarded to ``_run_hpo``.
 
     Returns:
-        tuple[float, dict[str, Any]] | None: The (score, params) tuple, or
+        PhaseResult | None: The phase result (score, params, trials), or
             ``None`` when HPO did not return a valid result (the algorithm
             is excluded from candidates).
 
     Raises:
         Exception: Exceptions from ``_run_hpo`` are logged and re-raised
-            (including ``InvalidAlgorithmError``).
+            (including ``InvalidAlgorithmError`` and ``HPOHistoryError``).
     """
     _LOG.info(f"=== {phase_name} phase: {algo} ({n_trials} tries) ===")
 
@@ -1951,6 +2084,8 @@ def _execute_hpo_phase(
             data_oversampling_multiplier=spec.oversampling_multiplier,
             data_oversampling_algorithm=spec.oversampling_algorithm,
             initial_params=initial_params,
+            previous_trials=previous_trials,
+            random_state=random_state,
             categorical_features=spec.categorical_features,
             numerical_features=spec.numerical_features,
             encoding=spec.encoding,
@@ -1966,19 +2101,17 @@ def _execute_hpo_phase(
         if result is None:
             return None
 
-        score, params = result
-
         # Log the value in user semantics: for neg_*-metrics (e.g.
         # neg_root_mean_squared_error) the raw scorer value is inverted, so
         # the natural (positive) value is shown to the user. The direction
         # accompanies the value explicitly ("min better" for errors): the
         # optimizer's greater_is_better flag is not used.
-        disp = to_user_value(spec.metric_sklearn, score)
+        disp = to_user_value(spec.metric_sklearn, result.score)
         _LOG.info(
             f"{phase_name} {algo:15} | score {disp:.5f} "
-            f"({direction_label(spec.metric_sklearn)}) | params {params}"
+            f"({direction_label(spec.metric_sklearn)}) | params {result.params}"
         )
-        return score, params
+        return result
     except Exception as err:
         _LOG.warning(f"Skip {algo} in {phase_name}: {err}")
         raise
@@ -2002,7 +2135,7 @@ def _hpo_phase_worker(
         spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
 
     Returns:
-        _HPOWorkerResult: The task result: ``(score, params)`` on success,
+        _HPOWorkerResult: The task result: score/params/trials on success,
             ``disqualify_reason`` on a circuit breaker disqualification,
             otherwise a result without a score and reason.
     """
@@ -2015,10 +2148,22 @@ def _hpo_phase_worker(
     # the phase phase_results is re-bound to the filtered valid_results
     # (objects are never mutated) — therefore the snapshot is stable in both
     # parallel and sequential modes.
+    # Determine the warm-start for refine: each candidate warm-starts from
+    # its OWN previous-phase record — initial_params (the enqueue_trial
+    # anchor, which guarantees score monotonicity) AND previous_trials (the
+    # TPE history transferred via study.add_trials). The prev_results
+    # snapshot lives in the immutable spec (frozen at phase definition time),
+    # so the worker uses the state at phase start. Workers only READ this
+    # dict; writes to phase_results happen after all phase workers finish,
+    # and at the end of the phase phase_results is re-bound to the filtered
+    # valid_results (objects are never mutated) — therefore the snapshot is
+    # stable in both parallel and sequential modes.
     init_params = None
+    previous_trials: list[FrozenTrial] | None = None
     if spec.phase.action == "refine" and algo_name in spec.prev_results:
-        _, prev_params = spec.prev_results[algo_name]
-        init_params = prev_params
+        prev = spec.prev_results[algo_name]
+        init_params = prev.params
+        previous_trials = prev.trials or None
 
     # 1. Take the system defaults and overlay what is in AlgoCfg (from YAML/JSON)
     full_search_space = _prepare_search_space(
@@ -2034,14 +2179,19 @@ def _hpo_phase_worker(
             spec,
             full_search_space,
             initial_params=init_params,
+            previous_trials=previous_trials,
+            random_state=spec.random_state,
         )
 
         if result is None:
             return _HPOWorkerResult(name=algo_name)
 
-        score, params = result
-
-        return _HPOWorkerResult(name=algo_name, score=score, params=params)
+        return _HPOWorkerResult(
+            name=algo_name,
+            score=result.score,
+            params=result.params,
+            trials=list(result.trials),
+        )
     except _CanonicalIAE as err:
         # Circuit breaker: the algorithm is disqualified after
         # MAX_FATAL_FAILURES consecutive fatal errors. This is NOT an abort
@@ -2054,6 +2204,21 @@ def _hpo_phase_worker(
             err,
         )
         return _HPOWorkerResult(name=algo_name, disqualify_reason=str(err))
+    except HPOHistoryError as err:
+        # TPE history transfer problems are configuration errors: fail fast
+        # with a clear message instead of silently excluding the algorithm
+        # (the pipeline must not continue with a degraded refine). The error
+        # is carried in the result (a string, serializable in the "processes"
+        # mode) and re-raised in the main process by
+        # ``_consume_worker_results``: raising here would be swallowed by
+        # ``run_parallel``, which converts worker exceptions to ``None``.
+        _LOG.error(
+            "Algorithm %s cannot transfer TPE history in phase %s: %s",
+            algo_name,
+            spec.phase.name,
+            err,
+        )
+        return _HPOWorkerResult(name=algo_name, history_error=str(err))
     except Exception as e:  # noqa: BLE001
         _LOG.warning(f"Algorithm {algo_name} failed in phase {spec.phase.name}: {e}")
         return _HPOWorkerResult(name=algo_name)
@@ -2061,7 +2226,7 @@ def _hpo_phase_worker(
 
 def _consume_worker_results(
     results: Iterable[_HPOWorkerResult | None],
-    phase_results: dict[str, tuple[float, dict[str, Any]]],
+    phase_results: dict[str, PhaseResult],
     ctx: PhaseContext,
 ) -> None:
     """Distribute worker results into the working set and disqualifications.
@@ -2070,22 +2235,35 @@ def _consume_worker_results(
     (changes in the child process would be lost), so disqualifications are
     returned in the results and applied here, in the main process.
     ``None`` results (a task timeout/failure in the pool) are ignored.
+    A ``history_error`` result re-raises ``HPOHistoryError`` in the main
+    process: TPE history transfer problems are configuration errors and must
+    fail the run even in the parallel mode (where ``run_parallel`` swallows
+    worker exceptions).
 
     Args:
         results (Iterable[_HPOWorkerResult | None]): Worker results.
-        phase_results (dict[str, tuple[float, dict[str, Any]]]): The working
-            set of the current phase — valid results land here.
+        phase_results (dict[str, PhaseResult]): The working set of the
+            current phase — valid results land here.
         ctx (PhaseContext): The phase context — disqualifications merge here.
+
+    Raises:
+        HPOHistoryError: If a worker reported a TPE history transfer error
+            (fail fast — the pipeline must not continue with a degraded
+            refine).
     """
     for res in results:
         if res is None:
             continue
+        if res.history_error is not None:
+            raise HPOHistoryError(res.history_error)
         if res.disqualify_reason is not None:
             ctx.disqualified_algorithms[res.name] = res.disqualify_reason
             continue
         if res.score is None or res.params is None:
             continue
-        phase_results[res.name] = (res.score, res.params)
+        phase_results[res.name] = PhaseResult(
+            score=res.score, params=res.params, trials=list(res.trials or [])
+        )
 
 
 def execute_phases(
@@ -2110,17 +2288,24 @@ def execute_phases(
 
     Refine step: ``action='refine'`` performs ``n_trials`` warm-started HPO
     attempts for **every** candidate of the incoming working set (the results
-    of the last HPO phase, or the output of the previous select step). Only
-    ``params`` of the incoming records are used (they become ``initial_params``
-    for ``enqueue_trial`` in the tuner); incoming scores are ignored. The
-    output keeps the same set of names with updated ``(score', params')``
-    records and replaces the working set. There is no narrowing in refine —
-    narrowing is the job of explicit select steps. As the first phase, refine
-    runs over the full set of enabled algorithms without warm-start. A
-    per-algorithm failure excludes only that algorithm (circuit breaker /
-    invalid-result filters); if refine wipes out the whole working set,
-    ``RuntimeError`` is raised — a silent fallback to pre-refine parameters
-    would hide the regression (deliberate design decision).
+    of the last HPO phase, or the output of the previous select step). The
+    incoming records are used completely: ``params`` become ``initial_params``
+    for ``enqueue_trial`` (the monotonicity anchor) and ``trials`` become
+    ``previous_trials`` for ``study.add_trials`` (the TPE history warm-start);
+    incoming scores are ignored. The output keeps the same set of names with
+    updated records and replaces the working set. There is no narrowing in
+    refine — narrowing is the job of explicit select steps. As the first
+    phase, refine runs over the full set of enabled algorithms without
+    warm-start. A per-algorithm failure excludes only that algorithm (circuit
+    breaker / invalid-result filters); if refine wipes out the whole working
+    set, ``RuntimeError`` is raised — a silent fallback to pre-refine
+    parameters would hide the regression (deliberate design decision).
+
+    Per-phase seeds: each HPO phase (``all_algorithms``/``refine``) runs with
+    its own random seed ``RANDOM_STATE + hpo_phase_ordinal`` (the first HPO
+    phase = 42, the second = 43, etc.; select steps do not count). Together
+    with the ``previous_trials`` transfer this guarantees that TPE startup
+    points do not repeat between phases.
 
     Args:
         cfg (Config): The configuration object.
@@ -2135,11 +2320,12 @@ def execute_phases(
             ``train_best_model``.
 
     Raises:
-        NotImplementedError: For ``refine`` phases — execution is not yet
-            implemented.
         RuntimeError: If an HPO phase produced no valid score, a select step
             received an empty working set, or no finalist was trained on the
             full dataset.
+        HPOHistoryError: If a refine phase passes TPE history to a tuner that
+            does not accept ``previous_trials``, or the transferred history is
+            incompatible with the current search space (fail fast).
     """
     X = prepared.X
     y = prepared.y
@@ -2158,6 +2344,12 @@ def execute_phases(
     # Disqualification does not abort the run: the algorithm is excluded from
     # candidates and results, the rest continue training.
     # living in ctx: populated by HPO failures and select steps.
+    # HPO phase ordinal: incremented only for all_algorithms/refine phases
+    # (select steps are not counted). The per-phase seed is
+    # RANDOM_STATE + hpo_phase_ordinal: the first HPO phase keeps the
+    # documented engine seed 42, every next HPO phase gets a different seed,
+    # so TPE random startup points never repeat between phases.
+    hpo_phase_ordinal = 0
     for phase in cfg.general.phases:
         if phase.action == "select":
             # The select step runs synchronously (outside run_parallel): it
@@ -2165,9 +2357,11 @@ def execute_phases(
             _execute_select_phase(phase=phase, cfg=cfg, prepared=prepared, ctx=ctx)
             continue
 
+        phase_seed = RANDOM_STATE + hpo_phase_ordinal
+        hpo_phase_ordinal += 1
         _LOG.info(
             f"--- Starting Phase: {phase.name} ({phase.n_trials}"
-            f" trials, action: {phase.action}) ---"
+            f" trials, action: {phase.action}, seed: {phase_seed}) ---"
         )
 
         # Snapshot of the incoming working set. Used ONLY to pass
@@ -2190,11 +2384,13 @@ def execute_phases(
         if phase.action == "refine":
             # Refine: warm-start HPO for the ENTIRE incoming working set. The
             # input is the last HPO phase results or the output of the previous
-            # select step; only params are used (initial_params for
-            # enqueue_trial), incoming scores are ignored. There is no
-            # narrowing: no winners, top-K, or corridors — narrowing is done by
-            # explicit select steps. The output replaces the working set: the
-            # same names with updated (score', params').
+            # select step; params become initial_params for enqueue_trial (the
+            # monotonicity anchor) and trials become previous_trials for
+            # study.add_trials (the TPE history warm-start); incoming scores
+            # are ignored. There is no narrowing: no winners, top-K, or
+            # corridors — narrowing is done by explicit select steps. The
+            # output replaces the working set: the same names with updated
+            # records.
             if prev_results:
                 current_candidates = {
                     n: all_algorithms[n]
@@ -2223,7 +2419,7 @@ def execute_phases(
         # Each phase starts with an empty working set: it is rebuilt from the
         # current phase only, so an algorithm that fails in this phase does not
         # keep a stale record from a previous phase.
-        phase_results: dict[str, tuple[float, dict[str, Any]]] = {}
+        phase_results: dict[str, PhaseResult] = {}
 
         # Candidates participating in the current phase (needed for the
         # diagnostics in the "no valid results" message)
@@ -2266,6 +2462,7 @@ def execute_phases(
             target_encoding_smoothing=cfg.general.target_encoding_smoothing,
             target_encoding_fallback=cfg.general.target_encoding_fallback,
             feature_selection_cfg=cfg.general.feature_selection,
+            random_state=phase_seed,
         )
 
         # Execution (parallel or sequential)
@@ -2322,8 +2519,10 @@ def execute_phases(
         # threshold cannot drop a legitimate winner. params must be a dict (the
         # tuner failure signal is params=None); garbage score types from custom
         # tuners (None, strings, etc.) are rejected by is_valid_winner_score.
-        valid_results: dict[str, tuple[float, dict[str, Any]]] = {}
-        for name, (score, params) in phase_results.items():
+        valid_results: dict[str, PhaseResult] = {}
+        for name, record in phase_results.items():
+            params = record.params
+            score = record.score
             if not isinstance(params, dict):
                 _LOG.warning(
                     "Algorithm %s produced invalid params %r (expected dict); "
@@ -2340,7 +2539,7 @@ def execute_phases(
                     score,
                 )
                 continue
-            valid_results[name] = (score, params)
+            valid_results[name] = record
 
         # Keep only the valid results of the current phase in the working set:
         # entries with an invalid score (HPO_WORST_SCORE etc.) are removed.
@@ -2364,9 +2563,7 @@ def execute_phases(
 #  audit → ranking by RMSE_oof). The select step output replaces the          #
 #  pipeline working set.                                                       #
 # --------------------------------------------------------------------------- #
-def _rank_cv_best(
-    working_set: dict[str, tuple[float, dict[str, Any]]],
-) -> list[str]:
+def _rank_cv_best(working_set: dict[str, PhaseResult]) -> list[str]:
     """Rank the working set by the raw CV score in descending order.
 
     The optimizer semantics are the same as in ``select_winner``/
@@ -2374,13 +2571,13 @@ def _rank_cv_best(
     configuration order, a documented tie-break).
 
     Args:
-        working_set (dict[str, tuple[float, dict[str, Any]]]): The working set
-            "algorithm → (score, params)".
+        working_set (dict[str, PhaseResult]): The working set
+            "algorithm → PhaseResult".
 
     Returns:
         list[str]: Algorithm names, best CV score first.
     """
-    return sorted(working_set, key=lambda n: working_set[n][0], reverse=True)
+    return sorted(working_set, key=lambda n: working_set[n].score, reverse=True)
 
 
 def _rank_sanity_candidates(
@@ -2570,7 +2767,7 @@ def _execute_select_cv_best(
             "Select phase '%s' (strategy: cv_best): winner %s (score %.5f)",
             phase.name,
             winner_algo,
-            to_user_value(prepared.metric_user, ctx.working_set[winner_algo][0]),
+            to_user_value(prepared.metric_user, ctx.working_set[winner_algo].score),
         )
         return
 
@@ -3061,7 +3258,9 @@ def train_best_model(
         raise RuntimeError("No valid results after HPO phases; cannot select a winner.")
 
     winner_algo = ctx.winner_algo
-    final_score, final_params = ctx.working_set[winner_algo]
+    winner_record = ctx.working_set[winner_algo]
+    final_score = winner_record.score
+    final_params = winner_record.params
     # Final invariant: the winner's score must be finite and strictly above the
     # worst-score sentinel class before entering result["score"]. Otherwise the
     # sentinel could leak into the report — for neg_-metrics to_user_value

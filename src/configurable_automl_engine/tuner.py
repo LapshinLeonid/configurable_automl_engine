@@ -26,6 +26,7 @@ from __future__ import annotations
 # ─────────────────────────────── stdlib
 import logging as _logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, NoReturn, cast
 
@@ -34,7 +35,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
-from optuna.trial import Trial
+from optuna.trial import FrozenTrial, Trial
 from sklearn import model_selection
 from sklearn.base import clone
 from sklearn.model_selection import (
@@ -90,6 +91,53 @@ class InvalidAlgorithmError(HyperoptError):
 
 class InvalidDataError(HyperoptError):
     """Error raised when invalid X or y data structures are passed."""
+
+
+class HPOHistoryError(HyperoptError):
+    """Error raised when TPE history cannot be transferred between HPO phases.
+
+    Raised in three situations:
+    - the tuner does not accept the ``previous_trials`` argument, but the
+      pipeline needs to transfer history (e.g. a custom tuner in a refine
+      phase) — fail fast instead of silently degrading refine to a cold run;
+    - the transferred trials have distributions incompatible with the current
+      search space (``study.add_trials`` desync) — fail fast instead of
+      silently skipping the history;
+    - the current search space cannot be reproduced by the distribution
+      pre-check (an exotic custom ``space_fn``) — the transfer cannot be
+      validated, and silently dropping the history would degrade refine to a
+      cold run (the exact bug this feature fixes).
+    """
+
+
+@dataclass
+class OptimizeResult:
+    """Result of a single HPO phase run (self-documenting return type).
+
+    Replaces the positional ``(model, params, score)`` tuple of ``optimize``:
+    the fields have explicit names, and the current phase's trials travel with
+    the result so the caller can feed them into the next phase
+    (``previous_trials``).
+
+    Attributes:
+        model: The final model trained on all data with the best parameters.
+            ``None`` when ``fit_best_model=False`` (the full-data fit is
+            skipped for HPO-only callers); otherwise never ``None`` on a
+            non-``None`` ``OptimizeResult``.
+        params: The best found hyperparameters (optimizer semantics, as for
+            the score).
+        score: The best raw "optimizer" score of the phase (higher is
+            better).
+        trials: The frozen trials of the current phase ONLY — transferred
+            ``previous_trials`` are excluded. Always present on a non-``None``
+            result; the list may contain COMPLETED/PRUNED/FAILED trials of
+            the phase.
+    """
+
+    model: Any | None
+    params: dict[str, Any] | None
+    score: float | None
+    trials: list[FrozenTrial]
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
@@ -539,6 +587,56 @@ def _evaluate_with_intermediate_reports(
 
 
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
+class _DistributionRecorder:
+    """Record the canonical distributions of the phase search space.
+
+    A lightweight stand-in for an Optuna ``Trial`` that only collects the
+    distributions of every ``suggest_*`` call (``suggest_int`` /
+    ``suggest_float`` / ``suggest_categorical``). Running ``space_fn`` on the
+    recorder yields the distributions the current phase would produce — they
+    are compared against the distributions of ``previous_trials`` BEFORE
+    ``study.add_trials`` so that an incompatible history fails fast with a
+    clear message instead of a silent skip (or a confusing error during the
+    first trial of the new phase).
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty distribution recorder."""
+        self.distributions: dict[str, Any] = {}
+        # Trial-compatible attributes that user space functions may read
+        # (e.g. ``trial.number`` to alternate between good/bad points).
+        self.number = -1
+
+    def suggest_int(self, name: str, low: int, high: int, step: int = 1) -> int:
+        """Record an ``IntDistribution`` and return ``low`` (a valid value)."""
+        self.distributions[name] = optuna.distributions.IntDistribution(
+            low=low, high=high, step=step
+        )
+        return low
+
+    def suggest_float(
+        self,
+        name: str,
+        low: float,
+        high: float,
+        *,
+        step: float | None = None,
+        log: bool = False,
+    ) -> float:
+        """Record a ``FloatDistribution`` and return ``low`` (a valid value)."""
+        self.distributions[name] = optuna.distributions.FloatDistribution(
+            low=low, high=high, step=step, log=log
+        )
+        return low
+
+    def suggest_categorical(self, name: str, choices: list[Any]) -> Any:
+        """Record a ``CategoricalDistribution`` and return the first choice."""
+        self.distributions[name] = optuna.distributions.CategoricalDistribution(
+            choices=list(choices)
+        )
+        return choices[0]
+
+
 class _OptimizeRunner:
     """A single hyperparameter optimisation run, split into steps.
 
@@ -551,9 +649,18 @@ class _OptimizeRunner:
          ├─ resolve_search_space()
          ├─ build_trial_pipeline()
          ├─ handle_pruning()
+         ├─ transfer_previous_trials()        (TPE history warm-start)
          ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
          ├─ select_best_trial()
          └─ _fit_best_model()  (skipped when ``fit_best_model=False``)
+
+    TPE history transfer: when ``previous_trials`` is passed, the trials are
+    added to the study with ``study.add_trials`` AFTER ``create_study`` and
+    BEFORE ``enqueue_trial``/``optimize``. The boundary of the current phase's
+    own trials (``phase_start_number``) is fixed right after the transfer, so
+    ``select_best_trial`` counts and ranks ONLY the trials of the current
+    phase — the transferred history feeds the TPE sampler but cannot mask a
+    total failure of the current phase (the no-fallback refine contract).
 
     The run state is stored in instance attributes: each step fills in its own
     fields, and subsequent steps (as well as the Optuna objective) read them
@@ -581,6 +688,7 @@ class _OptimizeRunner:
         train_test_split_test_size: float,
         space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None,
         initial_params: dict[str, Any] | None,
+        previous_trials: list[FrozenTrial] | None = None,
         preprocessor: Any | None,
         categorical_features: list[str] | None,
         numerical_features: list[str] | None,
@@ -613,6 +721,7 @@ class _OptimizeRunner:
         self.train_test_split_test_size = train_test_split_test_size
         self.space_overrides = space_overrides
         self.initial_params = initial_params
+        self.previous_trials = previous_trials
         self.preprocessor = preprocessor
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
@@ -628,8 +737,8 @@ class _OptimizeRunner:
         # Whether to train the best model on all data after the Optuna loop
         # (``_fit_best_model``). Set to False when the caller only needs the
         # best parameters and score (e.g. the training engine's HPO phase):
-        # the full-data fit is then skipped and the model slot of the returned
-        # tuple is None.
+        # the full-data fit is then skipped and the ``model`` field of the
+        # returned ``OptimizeResult`` is None.
         self.fit_best_model = fit_best_model
 
         # Names of columns dropped by cleaning uninformative features.
@@ -664,16 +773,32 @@ class _OptimizeRunner:
         self.pruner: optuna.pruners.BasePruner | None = None
         self.pruning_active = False
         self.study: optuna.Study
+        # The trial-number boundary between the transferred TPE history and the
+        # current phase's own trials: fixed in run() right after
+        # study.add_trials(previous_trials) and before enqueue_trial/optimize.
+        self.phase_start_number = 0
+        # Trials of the current phase only (number >= phase_start_number);
+        # filled in run() after the Optuna loop and returned in OptimizeResult.
+        self.phase_trials: list[FrozenTrial] = []
         self.consecutive_fatal_failures = 0
         self.best_params: dict[str, Any]
         self.best_score: float
         self.clean_model_params: dict[str, Any]
         self.best_apply_fs: bool
 
-    def run(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
-        """Run the full optimisation cycle, split into steps."""
+    def run(self) -> OptimizeResult | None:
+        """Run the full optimisation cycle, split into steps.
+
+        Returns:
+            OptimizeResult: The result of the phase — the final model, the
+                best params, the best score, and the trials of the current
+                phase ONLY (transferred ``previous_trials`` are excluded).
+            None: The "no valid result" signal — ``n_trials=0`` or no
+                COMPLETED trial of the current phase. Transferred history
+                does NOT count toward the current phase validity.
+        """
         if not self._validate_n_trials():
-            return None, None, None
+            return None
 
         self.resolve_validation()
         self.resolve_search_space()
@@ -687,6 +812,12 @@ class _OptimizeRunner:
             sampler=optuna.samplers.TPESampler(seed=self.random_state),
             pruner=self.pruner if self.pruning_active else optuna.pruners.NopPruner(),
         )
+        # TPE history transfer BEFORE enqueue_trial/optimize: the transferred
+        # trials feed the TPE sampler (incl. the n_startup_trials window) but
+        # are NOT part of the current phase's own trial set (the boundary
+        # phase_start_number is fixed right after add_trials).
+        self._transfer_previous_trials()
+        self.phase_start_number = len(self.study.get_trials(deepcopy=False))
         # If there are parameters from the previous phase, enqueue them as the first trial
         if self.initial_params is not None:
             self.study.enqueue_trial(self.initial_params)
@@ -703,19 +834,120 @@ class _OptimizeRunner:
             )
             raise
 
+        # The current phase's own trials (transferred ones have smaller
+        # numbers and are excluded). Returned with the result so the caller
+        # can warm-start the next phase with them.
+        self.phase_trials = [
+            t
+            for t in self.study.get_trials(deepcopy=False)
+            if t.number >= self.phase_start_number
+        ]
         if not self.select_best_trial():
-            return None, None, None
+            return None
         self._log_best_result()
         if not self.fit_best_model:
             # HPO-only mode (e.g. the training engine's phases): the caller
             # needs only the best parameters and score — the final model is
             # trained later by its own trainer. The redundant full-data fit
             # is skipped, saving one full training per algorithm per phase;
-            # the model slot stays None to keep the tuple shape.
-            return None, self.best_params, self.best_score
-        return self._fit_best_model()
+            # the model slot of the OptimizeResult stays None.
+            return OptimizeResult(
+                model=None,
+                params=self.best_params,
+                score=self.best_score,
+                trials=self.phase_trials,
+            )
+        return OptimizeResult(
+            model=self._fit_best_model(),
+            params=self.best_params,
+            score=self.best_score,
+            trials=self.phase_trials,
+        )
 
     # ─────────────────── run steps ─────────────────────────────────────────
+
+    def _transfer_previous_trials(self) -> None:
+        """Transfer the TPE history of the previous phase into the study.
+
+        Fails fast (``HPOHistoryError``) instead of silently skipping the
+        history:
+        - when some transferred trial has a parameter whose distribution does
+          not match the current search space (a search space change between
+          phases would break the TPE state in an obscure way during the first
+          trial of the new phase);
+        - when the current search space cannot be reproduced by the
+          distribution pre-check (an exotic custom ``space_fn``) — the
+          transfer cannot be validated, and silently dropping the history
+          would degrade refine to a cold run (the issue this feature fixes);
+        - an empty list is a no-op (``previous_trials=[]`` is allowed).
+        """
+        if not self.previous_trials:
+            return
+        canonical = self._canonical_distributions()
+        if canonical is None:
+            # The search space cannot be reproduced by the pre-check (an
+            # exotic custom ``space_fn``, e.g. one using legacy ``suggest_*``
+            # methods the recorder does not implement). Transferring the
+            # history blind would risk a silent ``study.add_trials`` desync,
+            # and skipping the transfer would silently degrade refine to a
+            # cold run — both violate the fail-fast contract: raise.
+            raise HPOHistoryError(
+                f"Cannot transfer TPE history for algorithm '{self.algo}': "
+                "the search space cannot be reproduced for the distribution "
+                "compatibility check (the space function uses constructs the "
+                "check does not support). TPE history transfer requires a "
+                "search space that can be replayed for validation."
+            )
+        for trial in self.previous_trials:
+            for name, dist in trial.distributions.items():
+                expected = canonical.get(name)
+                if expected is None or expected != dist:
+                    raise HPOHistoryError(
+                        f"Cannot transfer trial #{trial.number} of algorithm "
+                        f"'{self.algo}': parameter '{name}' has distribution "
+                        f"{dist}, incompatible with the current search space "
+                        f"({expected!r}). TPE history transfer requires the "
+                        f"same search space between HPO phases."
+                    )
+        self.study.add_trials(self.previous_trials)
+        log.info(
+            "Transferred %d trial(s) from the previous phase", len(self.previous_trials)
+        )
+
+    def _canonical_distributions(self) -> dict[str, Any] | None:
+        """Compute the canonical distributions of the current phase space.
+
+        Runs ``space_fn`` (plus the feature selection suggestion) on a
+        ``_DistributionRecorder`` — the distributions the phase WOULD produce
+        for its trials. If the space function cannot be reproduced (a custom
+        exotic ``space_fn``, e.g. one using legacy ``suggest_*`` methods the
+        recorder does not implement), ``None`` is returned — the caller
+        (``_transfer_previous_trials``) fails fast with ``HPOHistoryError``:
+        the history transfer cannot be validated, and silently dropping it
+        would degrade refine to a cold run.
+
+        Returns:
+            dict[str, Any]: Parameter name → Optuna distribution; ``None`` —
+                the space cannot be reproduced (the caller fails fast).
+        """
+        try:
+            recorder = _DistributionRecorder()
+            # The recorder is a Trial-compatible stand-in: it implements the
+            # suggest_* methods (and the ``number`` attribute) that space_fn
+            # and _resolve_apply_fs call.
+            trial_like = cast(Trial, recorder)
+            self.space_fn(trial_like)
+            self._resolve_apply_fs(trial_like)
+        except Exception as err:  # noqa: BLE001 — the pre-check is best-effort
+            log.warning(
+                "Cannot reproduce the search space for the history transfer "
+                "check of algorithm '%s': %s. Skipping the distribution "
+                "pre-check.",
+                self.algo,
+                err,
+            )
+            return None
+        return recorder.distributions
 
     def resolve_validation(self) -> None:
         """Resolve the validation strategy and related quantities (step 1).
@@ -1219,30 +1451,46 @@ class _OptimizeRunner:
         raise optuna.TrialPruned() from err
 
     def select_best_trial(self) -> bool:
-        """Select the best completed trial (step 7).
+        """Select the best completed trial of the CURRENT phase (step 7).
 
         Explicit trial state counting: the presence of a valid result is
-        determined by the number of completed (COMPLETED) trials rather than
-        by the internal behavior of ``study.best_params`` (a ValueError when
-        there are no completed trials — an Optuna implementation detail that
-        must not be relied upon). Counters are logged for observability ("no
+        determined by the number of completed (COMPLETED) trials of the
+        current phase (``number >= phase_start_number``) rather than by the
+        internal behavior of ``study.best_params``. Transferred trials
+        (``previous_trials``) feed the TPE sampler but are NEVER counted or
+        ranked here: they must not mask a total failure of the current phase
+        (otherwise a refine phase that wiped out all its own trials would
+        silently fall back to the previous phase's parameters — the forbidden
+        no-fallback contract). Counters are logged for observability ("no
         valid result" must be explainable from the logs).
 
+        The best trial is selected EXPLICITLY by its value among the current
+        phase's COMPLETED trials; ``study.best_params`` is deliberately not
+        used — it would rank the transferred trials too.
+
         Returns:
-            bool: True if there is a completed trial; False — the "no valid
-                result" contract (all trials PRUNED/FAILED or an empty list).
+            bool: True if there is a completed trial of the current phase;
+                False — the "no valid result" contract (all OWN trials
+                PRUNED/FAILED or an empty list).
         """
-        trials = self.study.get_trials(deepcopy=False)
+        assert self.study is not None
+        own_trials = self.phase_trials or [
+            t
+            for t in self.study.get_trials(deepcopy=False)
+            if t.number >= self.phase_start_number
+        ]
         n_completed = sum(
-            1 for t in trials if t.state == optuna.trial.TrialState.COMPLETE
+            1 for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE
         )
-        n_pruned = sum(1 for t in trials if t.state == optuna.trial.TrialState.PRUNED)
-        n_failed = sum(1 for t in trials if t.state == optuna.trial.TrialState.FAIL)
+        n_pruned = sum(
+            1 for t in own_trials if t.state == optuna.trial.TrialState.PRUNED
+        )
+        n_failed = sum(1 for t in own_trials if t.state == optuna.trial.TrialState.FAIL)
         if self.pruning_active:
             log.info(
                 "Early stopping: pruned %d of %d trials (algo=%s)",
                 n_pruned,
-                len(trials),
+                len(own_trials),
                 self.algo,
             )
         log.info(
@@ -1253,11 +1501,11 @@ class _OptimizeRunner:
             n_failed,
         )
         if n_completed == 0:
-            # The "no valid result" contract: all trials are pruned (PRUNED),
-            # failed (FAILED), or the trial list is empty. Return a plain None
-            # instead of the "magic" HPO_WORST_SCORE constant so the caller
-            # (_run_hpo) can tell a failure from a valid result and exclude
-            # the algorithm from the candidates.
+            # The "no valid result" contract: all OWN trials are pruned
+            # (PRUNED), failed (FAILED), or the trial list is empty. Transferred
+            # history is irrelevant here. Return False so the caller (_run_hpo)
+            # can tell a failure from a valid result and exclude the algorithm
+            # from the candidates.
             log.warning(
                 "Algorithm '%s' produced no completed trials "
                 "(completed=%d, pruned=%d, failed=%d); returning no result",
@@ -1268,10 +1516,14 @@ class _OptimizeRunner:
             )
             return False
 
-        best_params = self.study.best_params
-        self.best_score = self.study.best_value
+        best_trial = max(
+            (t for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE),
+            key=lambda t: cast(float, t.value),
+        )
+        self.best_score = float(cast(float, best_trial.value))
+        best_params = dict(best_trial.params)
 
-        # The feature selection decision comes from study.best_params
+        # The feature selection decision comes from the best trial's params
         # (mode='auto': the "use_feature_selection" key is already fixed by
         # Optuna) or from the configuration mode ('always' -> True, 'disabled'
         # -> False). For isotonic_regression selection is forcibly ignored.
@@ -1294,7 +1546,7 @@ class _OptimizeRunner:
         # auxiliary key ("use_feature_selection" is not a model
         # hyperparameter). They are built from the already filtered
         # self.best_params (for isotonic_regression the key was excluded
-        # above) so the source is single; the original study.best_params is
+        # above) so the source is single; the best trial's params are
         # not mutated and the key is guaranteed not to reach the model
         # constructor.
         self.clean_model_params = dict(self.best_params)
@@ -1312,18 +1564,18 @@ class _OptimizeRunner:
             self.best_params,
         )
 
-    def _fit_best_model(self) -> tuple[Any | None, dict[str, Any] | None, float | None]:
+    def _fit_best_model(self) -> Any:
         """Train the final model on all provided data (step 8).
 
         Assembles the pipeline with the best parameters (taking the feature
         selection decision from ``select_best_trial`` into account) and trains
         it on the full dataset. If oversampling was enabled, the final model
         goes through it as well. Skipped entirely when ``fit_best_model`` is
-        False (HPO-only callers).
+        False (HPO-only callers). The trained model is stored in
+        ``self.best_model``.
 
         Returns:
-            tuple[Any | None, dict[str, Any] | None, float | None]: A tuple
-                (best_model, best_params, best_score).
+            Any: The trained best model (``self.best_model``).
         """
         best_model = self.assemble_estimator(
             create_model(self.algo, **self.clean_model_params),
@@ -1331,7 +1583,8 @@ class _OptimizeRunner:
         )
         best_model.fit(self.X, self.y)
 
-        return best_model, self.best_params, self.best_score
+        self.best_model = best_model
+        return best_model
 
     # ─────────────────── private helpers ───────────────────────────────────
 
@@ -1340,7 +1593,7 @@ class _OptimizeRunner:
 
         Returns:
             bool: True if Optuna should run; False — return
-                ``(None, None, None)`` without running.
+                ``None`` (the "no valid result" signal) without running.
         Raises:
             ValueError: If ``n_trials`` is negative or not an integer.
         """
@@ -1400,6 +1653,7 @@ def optimize(
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
     initial_params: dict[str, Any] | None = None,
+    previous_trials: list[FrozenTrial] | None = None,
     preprocessor: Any | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
@@ -1413,7 +1667,7 @@ def optimize(
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     fit_best_model: bool = True,
-) -> tuple[Any | None, dict[str, Any] | None, float | None]:
+) -> OptimizeResult | None:
     """Run the model hyperparameter optimisation process using Optuna.
 
     The function automatically selects the validation strategy, sets up the
@@ -1447,7 +1701,15 @@ def optimize(
         space_overrides (dict | None): Dict for overriding search spaces.
         initial_params (dict[str, Any] | None): Hyperparameters from the
             previous phase for enqueue_trial. Keeps the improvement monotonic
-            between HPO phases.
+            between HPO phases ("monotonicity anchor").
+        previous_trials (list[FrozenTrial] | None): Optuna trials of the
+            previous HPO phase to be transferred into the new study via
+            ``study.add_trials`` — the TPE history warm-start. The transfer
+            happens BEFORE ``enqueue_trial``/``optimize``; the transferred
+            trials feed the TPE sampler (including the ``n_startup_trials``
+            window) but never count as the current phase's own trials. An
+            empty list is a no-op. Trials with distributions incompatible with
+            the current search space raise ``HPOHistoryError`` (fail fast).
         preprocessor (Any | None): A ready ``ColumnTransformer`` for feature
             preprocessing (categories -> one-hot, numerics -> StandardScaler).
             If passed, it takes precedence over
@@ -1498,33 +1760,39 @@ def optimize(
             ``isotonic_regression`` selection is forcibly disabled (a
             univariate algorithm).
         fit_best_model (bool): Whether to train the final model on all
-            provided data after the search and return it as the first element
-            of the tuple. Defaults to True (the original behavior). Set to
-            False when only the best parameters and score are needed (e.g.
-            the training engine's HPO phases — the final model is trained by
-            its own trainer): the redundant full-data fit is skipped and the
-            model slot of the returned tuple is None.
+            provided data after the search and return it in the ``model``
+            field of the result. Defaults to True (the original behavior).
+            Set to False when only the best parameters and score are needed
+            (e.g. the training engine's HPO phases — the final model is
+            trained by its own trainer): the redundant full-data fit is
+            skipped and the ``model`` field of the result is None.
 
     Returns:
-        tuple[Any, dict[str, Any], float]: A tuple containing:
-            - best_model: The trained model with the best parameters.
-              ``None`` when ``fit_best_model=False`` (the fit is skipped).
-            - best_params: Dict of the found optimal hyperparameters
-              (in ``'auto'`` mode it contains the auxiliary
-              ``use_feature_selection`` key with the selection decision).
-            - best_score: The best metric value on validation.
-            If no trial finished with a valid result (e.g., every trial was
-            turned into ``optuna.TrialPruned`` by a non-fatal error, every
-            trial failed, or ``n_trials`` is 0 — an empty trial list),
-            ``(None, None, None)`` is returned — the failure signal for the
-            caller (the algorithm is excluded from candidates).
+        OptimizeResult: The result of the phase — ``model`` (the trained
+            model with the best parameters; ``None`` when
+            ``fit_best_model=False`` — the fit is skipped), ``params`` (the
+            found optimal hyperparameters; in ``'auto'`` mode it contains
+            the auxiliary ``use_feature_selection`` key with the selection
+            decision), ``score`` (the best raw "optimizer" metric value on
+            validation, higher is better), and ``trials`` — the frozen
+            trials of the current phase ONLY (transferred
+            ``previous_trials`` are excluded).
+        None: The "no valid result" signal — ``n_trials=0`` (an empty trial
+            list) or no trial of the current phase completed (e.g., every
+            trial was turned into ``optuna.TrialPruned`` by a non-fatal
+            error, or every trial failed). Transferred history never counts
+            toward the current phase validity; the caller (``_run_hpo``)
+            treats ``None`` as the failure signal and excludes the algorithm
+            from candidates (no fallback to previous-phase parameters).
 
     Raises:
         ValueError: If ``n_trials`` is a negative integer (or not an
             integer). The value ``n_trials=0`` is allowed and leads to an
-            empty trial list → ``(None, None, None)``.
+            empty trial list → ``None``.
         HyperoptError: If no search space is defined for the selected
             algorithm, or an invalid ``feature_selection_cfg`` is passed.
+        HPOHistoryError: If ``previous_trials`` contain distributions
+            incompatible with the current search space (fail fast).
     """
     # Thin wrapper: all run logic is moved into the _OptimizeRunner steps so
     # that optimize() stays a readable entry point.
@@ -1544,6 +1812,7 @@ def optimize(
         train_test_split_test_size=train_test_split_test_size,
         space_overrides=space_overrides,
         initial_params=initial_params,
+        previous_trials=previous_trials,
         preprocessor=preprocessor,
         categorical_features=categorical_features,
         numerical_features=numerical_features,

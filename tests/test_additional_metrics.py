@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 from configurable_automl_engine.training_engine.component import (
+    PhaseResult,
     _fit_and_save,
     train_best_model,
 )
@@ -447,7 +448,7 @@ def test_train_best_model_returns_additional_metrics(tiny_df):
             "configurable_automl_engine.training_engine.component._run_hpo",
             # comparison_metric='rmse': "raw" scorer value -RMSE,
             # result["score"] is the positive RMSE
-            return_value=(-0.9, {"alpha": 0.1}),
+            return_value=PhaseResult(score=-0.9, params={"alpha": 0.1}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -475,7 +476,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(-0.9, {}),
+            return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -501,7 +502,7 @@ def test_train_best_model_no_key_when_additional_empty(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(-0.9, {}),
+            return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -519,7 +520,7 @@ def test_train_best_model_comparison_only_not_duplicated(tiny_df):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(-0.9, {}),
+            return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -555,8 +556,8 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
         # "Raw" scorer values are negative (-MAE): maximization
         # picks the larger one (-0.60 > -0.95).
         if kwargs["algo_name"] == "ridge":
-            return -0.60, {"alpha": 0.5}
-        return -0.95, {"alpha": 0.1}
+            return PhaseResult(score=-0.60, params={"alpha": 0.5})
+        return PhaseResult(score=-0.95, params={"alpha": 0.1})
 
     with (
         patch(

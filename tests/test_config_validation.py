@@ -2028,7 +2028,10 @@ def test_refine_phase_executes_with_warm_start():
     """
     import numpy as np
     import pandas as pd
-    from configurable_automl_engine.training_engine.component import train_best_model
+    from configurable_automl_engine.training_engine.component import (
+        PhaseResult,
+        train_best_model,
+    )
 
     rng = np.random.RandomState(0)
     df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])
@@ -2039,7 +2042,7 @@ def test_refine_phase_executes_with_warm_start():
     )
     with patch(
         "configurable_automl_engine.training_engine.component._run_hpo",
-        side_effect=lambda **kw: (0.9, {"p": 1}),
+        side_effect=lambda **kw: PhaseResult(score=0.9, params={"p": 1}),
     ) as mock_hpo:
         res = train_best_model(cfg_refine, df, target="target")
 
@@ -2060,7 +2063,10 @@ def test_select_phase_executes_in_pipeline():
     runs and returns the artifact."""
     import numpy as np
     import pandas as pd
-    from configurable_automl_engine.training_engine.component import train_best_model
+    from configurable_automl_engine.training_engine.component import (
+        PhaseResult,
+        train_best_model,
+    )
 
     rng = np.random.RandomState(0)
     df = pd.DataFrame(rng.randn(30, 3), columns=["a", "b", "c"])

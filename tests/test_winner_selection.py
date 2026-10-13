@@ -43,6 +43,7 @@ from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.training_engine.component import (
     FinalistCandidate,
+    PhaseResult,
     is_valid_winner_score,
     select_finalists,
     select_robust_winner,
@@ -61,7 +62,7 @@ from configurable_automl_engine.tuner import (
 # ──────────────────────────────────────────────────────────────────────────────
 def test_select_winner_single_algorithm():
     """A single algorithm — it wins (a string name is returned)."""
-    results = {"ridge": (0.7, {"alpha": 1.0})}
+    results = {"ridge": PhaseResult(score=0.7, params={"alpha": 1.0})}
     winner = select_winner(results)
     assert isinstance(winner, str)
     assert winner == "ridge"
@@ -70,9 +71,9 @@ def test_select_winner_single_algorithm():
 def test_select_winner_max_score_wins():
     """The algorithm with the maximum 'raw' score wins."""
     results = {
-        "ridge": (0.4, {"alpha": 1.0}),
-        "random_forest": (0.9, {"n_estimators": 10}),
-        "extra_trees": (0.6, {"n_estimators": 20}),
+        "ridge": PhaseResult(score=0.4, params={"alpha": 1.0}),
+        "random_forest": PhaseResult(score=0.9, params={"n_estimators": 10}),
+        "extra_trees": PhaseResult(score=0.6, params={"n_estimators": 20}),
     }
     assert select_winner(results) == "random_forest"
 
@@ -85,9 +86,9 @@ def test_select_winner_tie_breaks_by_configuration_order():
     sequential path).
     """
     results = {
-        "random_forest": (0.5, {"n_estimators": 10}),
-        "extra_trees": (0.5, {"n_estimators": 20}),
-        "elasticnet": (0.5, {"alpha": 0.5}),
+        "random_forest": PhaseResult(score=0.5, params={"n_estimators": 10}),
+        "extra_trees": PhaseResult(score=0.5, params={"n_estimators": 20}),
+        "elasticnet": PhaseResult(score=0.5, params={"alpha": 0.5}),
     }
     assert select_winner(results) == "random_forest"
 
@@ -95,8 +96,8 @@ def test_select_winner_tie_breaks_by_configuration_order():
 def test_select_winner_tie_reorders_with_negative_scores():
     """The tie-break is correct for negative (inverted) scores too."""
     results = {
-        "extra_trees": (-0.5, {}),
-        "random_forest": (-0.5, {}),
+        "extra_trees": PhaseResult(score=-0.5, params={}),
+        "random_forest": PhaseResult(score=-0.5, params={}),
     }
     assert select_winner(results) == "extra_trees"
 
@@ -177,7 +178,7 @@ def test_threshold_covers_hpo_worst_score_and_raw_f32_min():
 #  Integration of the two-stage winner selection
 # ──────────────────────────────────────────────────────────────────────────────
 
-R = dict[str, tuple[float, dict[str, Any]]]
+R = dict[str, PhaseResult]
 
 
 def _golden_dataset(
@@ -293,9 +294,9 @@ def test_integration_off_and_active_pool_to_robust_winner():
     """
     X, y = _golden_dataset(n=80, seed=11)
     results: R = {
-        "elasticnet_zero": (-0.081, {"alpha": 500.0}),
-        "svr": (-0.085, {"C": 1.0}),
-        "random_forest": (-0.089, {"n_estimators": 50}),
+        "elasticnet_zero": PhaseResult(score=-0.081, params={"alpha": 500.0}),
+        "svr": PhaseResult(score=-0.085, params={"C": 1.0}),
+        "random_forest": PhaseResult(score=-0.089, params={"n_estimators": 50}),
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -388,9 +389,9 @@ def test_boundary_active_reports_disqualifications_without_changing_pool():
 def test_boundary_pool_exactly_top_k_candidates():
     """Boundary: a pool of exactly top_k candidates (all inside the δ corridor)."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "svr": (-0.085, {}),
-        "random_forest": (-0.089, {}),
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "svr": PhaseResult(score=-0.085, params={}),
+        "random_forest": PhaseResult(score=-0.089, params={}),
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -412,9 +413,9 @@ def test_issue_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
     """
     X, y = _golden_dataset(n=80, seed=11, noise=0.5, p=5)
     results: R = {
-        "elasticnet": (-0.081, {"alpha": 500.0}),
-        "svr": (-0.085, {"C": 1.0}),
-        "random_forest": (-0.089, {"n_estimators": 50}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 500.0}),
+        "svr": PhaseResult(score=-0.085, params={"C": 1.0}),
+        "random_forest": PhaseResult(score=-0.089, params={"n_estimators": 50}),
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3

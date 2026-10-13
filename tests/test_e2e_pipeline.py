@@ -208,7 +208,7 @@ def test_algorithm_quality_baseline(algo_name: str) -> None:
     X_df, y_series = _generate_data(algo_name)
     y_series = _adjust_for_positive_target(algo_name, y_series)
 
-    best_model, best_params, best_score = optimize(
+    opt_res = optimize(
         algo_name,
         X_df,
         y_series,
@@ -218,6 +218,9 @@ def test_algorithm_quality_baseline(algo_name: str) -> None:
         validation_strategy="train_test_split",
         space_overrides=_build_space_overrides(algo_name),
     )
+    assert opt_res is not None
+    best_model, best_params, best_score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert best_score >= 0.70, (
         f"{algo_name}: R²={best_score:.4f} < 0.70 — quality regression detected"
@@ -248,7 +251,7 @@ def test_decision_tree_quality() -> None:
     X_df = pd.DataFrame(X)
     y_series = pd.Series(y, name="target")
 
-    best_model, best_params, best_score = optimize(
+    opt_res = optimize(
         "decision_tree",
         X_df,
         y_series,
@@ -258,6 +261,9 @@ def test_decision_tree_quality() -> None:
         validation_strategy="train_test_split",
         space_overrides=_build_space_overrides("decision_tree"),
     )
+    assert opt_res is not None
+    best_model, best_params, best_score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert best_score >= 0.40, (
         f"decision_tree: R²={best_score:.4f} < 0.40 on friedman1 data"
@@ -285,7 +291,7 @@ def test_search_space_integrity(algo_name: str) -> None:
     X_df, y_series = _generate_data(algo_name)
     y_series = _adjust_for_positive_target(algo_name, y_series)
 
-    best_model, _, _ = optimize(
+    opt_res = optimize(
         algo_name,
         X_df,
         y_series,
@@ -295,6 +301,9 @@ def test_search_space_integrity(algo_name: str) -> None:
         validation_strategy="train_test_split",
         space_overrides=_build_space_overrides(algo_name),
     )
+    assert opt_res is not None
+    best_model, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert best_model is not None, (
         f"{algo_name}: model is None after successful optimisation"

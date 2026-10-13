@@ -88,13 +88,16 @@ def test_optimize_smoke(algo: str, toy_data):
     """optimize must not fail and returns valid objects."""
     X, y = _prepare_data(algo, *toy_data)
 
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         algo,
         X,
         y,
         n_trials=3,  # minimal for speed
         random_state=0,
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert isinstance(params, dict) and params, "best_params is empty"
     assert isinstance(score, float) and not np.isnan(score), "score is invalid"
@@ -110,13 +113,16 @@ def test_space_override(toy_data):
     def tiny_space(trial):
         return {"alpha": trial.suggest_float("alpha", 0.0, 0.001)}
 
-    _, params, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "elasticnet",
         X,
         y,
         n_trials=2,
         space_overrides={"elasticnet": tiny_space},
     )
+    assert opt_res is not None
+    _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
     assert params["alpha"] <= 0.001
 
 
@@ -142,18 +148,16 @@ def test_non_positive_trials(bad_trials, toy_data):
 
 
 def test_zero_trials_returns_no_result(toy_data):
-    """n_trials=0 → an empty trial list → (None, None, None).
+    """n_trials=0 → None (the unified "no valid result" signal).
 
     Previously n_trials=0 was considered invalid and raised ValueError. Now it is
     a legal "empty search": no trials means no valid result, so optimize()
-    signals that by returning all None.
+    signals that by returning None.
     """
     X, y = toy_data
-    model, params, score = hyperopt.optimize("ridge", X, y, n_trials=0)
+    result = hyperopt.optimize("ridge", X, y, n_trials=0)
 
-    assert model is None
-    assert params is None
-    assert score is None
+    assert result is None
 
 
 def test_apply_dynamic_space_types(toy_data):
@@ -191,9 +195,12 @@ def test_apply_dynamic_space_types(toy_data):
         "weights": MockEntry([["uniform", "distance"], None, "categorical"]),
         "leaf_size": 30,  # Constant (line 144)
     }
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "knn", X, y, n_trials=2, space_overrides={"knn": dynamic_config}
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert isinstance(params["n_neighbors"], int)
     assert params["weights"] in ["uniform", "distance"]
@@ -226,7 +233,7 @@ def test_optimize_with_oversampling(toy_data):
     """
     X, y = toy_data
     y_bin = (y > y.mean()).astype(int)
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "knn",
         X,
         y_bin,
@@ -235,6 +242,9 @@ def test_optimize_with_oversampling(toy_data):
         data_oversampling_multiplier=1.2,
         n_trials=2,
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     print(model.steps)
     assert isinstance(model, ImbPipeline)
@@ -248,13 +258,16 @@ def test_optimize_pure_numeric_builds_preprocessor(toy_data):
 
     X, y = toy_data  # fully numeric DataFrame
 
-    model, _, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "knn",
         X,
         y,
         n_trials=2,
         random_state=0,
     )
+    assert opt_res is not None
+    model, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     # The preprocessor must be built even when there are no categories
     assert isinstance(model, ImbPipeline)
@@ -309,7 +322,7 @@ def test_optimize_pruning(toy_data):
         return {"n_neighbors": n_neighbors, "weights": "uniform", "p": 2}
 
     # The method must not fail; Trial 1 will simply be marked as Pruned
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "knn",
         X,
         y,
@@ -317,6 +330,9 @@ def test_optimize_pruning(toy_data):
         # Pass it as a dict for the specific algorithm
         space_overrides={"knn": pruning_space},
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     # Now params will not be empty because Trial 0 completed successfully
     assert "n_neighbors" in params
@@ -500,9 +516,12 @@ def test_optimize_train_test_split_mode(toy_data):
     X, y = toy_data
     # Force the hold-out mode by passing a small amount of data
     # or by explicitly specifying the strategy
-    model, params, score = optimize(
+    opt_res = optimize(
         "knn", X, y, validation_strategy="train_test_split", n_trials=1
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
     assert score is not None
 
 
@@ -573,9 +592,12 @@ class TestTunerObjective:
             mock_create.return_value = MagicMock()
             mock_scorer_factory.return_value = MagicMock()
             # Call
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             # Verify
             assert best_score == EXPECTED_FALLBACK
             assert mock_finite.called
@@ -604,9 +626,12 @@ class TestTunerObjective:
             mock_cv.return_value = np.array(
                 [1.0]
             )  # the value does not matter since mean will return nan
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             assert best_score == HPO_WORST_SCORE
 
     def test_consecutive_failures_disqualifies_algorithm(self, dummy_data, mock_space):
@@ -662,9 +687,12 @@ class TestTunerObjective:
                 np.array([0.85]),
             ]
 
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             assert best_score == 0.85
 
     def test_consecutive_failures_with_train_test_split(self, dummy_data, mock_space):
@@ -761,9 +789,12 @@ class TestTunerObjective:
             mock_scorer = MagicMock(return_value=0.85)
             mock_scorer_factory.return_value = mock_scorer
 
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             assert best_score == 0.85
 
     def test_valueerror_not_fatal(self, dummy_data, mock_space):
@@ -789,16 +820,15 @@ class TestTunerObjective:
 
             # Optimization completes without InvalidAlgorithmError;
             # ValueError simply interrupts the trial (optuna.TrialPruned)
-            best_algo, best_model, best_score = optimize(
+            result = optimize(
                 algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
             )
-            # No trial is successful: study.best_params raises ValueError,
-            # and optimize() signals failure by returning all None —
-            # this is NOT the "magic" constant -3.4028235e38, which looked
-            # like a valid result to the orchestrator.
-            assert best_algo is None
-            assert best_model is None
-            assert best_score is None
+
+            # No trial is successful: no COMPLETED trial of the phase, and
+            # optimize() signals failure by returning None — this is NOT the
+            # "magic" constant -3.4028235e38, which looked like a valid
+            # result to the orchestrator.
+            assert result is None
 
     def test_pruned_trials_reset_fatal_counter(self, dummy_data, mock_space):
         """
@@ -834,7 +864,7 @@ class TestTunerObjective:
                 0.85,  # trial 7
             ]
 
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf",
                 X=X,
                 y=y,
@@ -847,6 +877,9 @@ class TestTunerObjective:
                     "n_startup_trials": 1,
                 },
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             assert best_score == 0.85
 
     def test_valueerror_between_failures_resets_counter(self, dummy_data, mock_space):
@@ -881,9 +914,12 @@ class TestTunerObjective:
                 np.array([0.85]),  # trial 8
             ]
 
-            _, _, best_score = optimize(
+            opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=8, space_overrides=mock_space
             )
+            assert opt_res is not None
+            _, _, best_score = opt_res.model, opt_res.params, opt_res.score
+
             assert best_score == 0.85
 
 
@@ -993,7 +1029,7 @@ def test_optimize_trees_preprocessor_without_scaling(toy_data):
 
     X, y = toy_data
 
-    model, _, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "random_forest",
         X,
         y,
@@ -1003,6 +1039,9 @@ def test_optimize_trees_preprocessor_without_scaling(toy_data):
             "random_forest": lambda t: {"n_estimators": t.suggest_int("n_estimators", 5, 20)}
         },
     )
+    assert opt_res is not None
+    model, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     preprocessor = model.named_steps["preprocessor"]
     num = _num_transformer_of(preprocessor)
@@ -1019,7 +1058,7 @@ def test_optimize_glm_uses_robust_scaler(toy_data):
     X, y = toy_data
     y_pos = pd.Series(np.abs(y) + 1.0)
 
-    model, _, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "gammaregressor",
         X,
         y_pos,
@@ -1032,6 +1071,9 @@ def test_optimize_glm_uses_robust_scaler(toy_data):
             }
         },
     )
+    assert opt_res is not None
+    model, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     num = _num_transformer_of(model.named_steps["preprocessor"])
     assert isinstance(num.named_steps["scaler"], RobustScaler)
@@ -1045,7 +1087,7 @@ def test_optimize_preprocessing_override_applied(toy_data):
     X, y = toy_data
 
     # For a tree, the user explicitly asks for standard scaling
-    model, _, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "random_forest",
         X,
         y,
@@ -1056,6 +1098,9 @@ def test_optimize_preprocessing_override_applied(toy_data):
             "random_forest": lambda t: {"n_estimators": t.suggest_int("n_estimators", 5, 20)}
         },
     )
+    assert opt_res is not None
+    model, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     num = _num_transformer_of(model.named_steps["preprocessor"])
     assert isinstance(num.named_steps["scaler"], StandardScaler)
@@ -1136,7 +1181,10 @@ def _run_optimize_with_captured_study(
     with patch(
         "configurable_automl_engine.tuner.optuna.create_study", return_value=real_study
     ):
-        model, params, score = hyperopt.optimize(*args, **kwargs)
+        opt_res = hyperopt.optimize(*args, **kwargs)
+        assert opt_res is not None
+        model, params, score = opt_res.model, opt_res.params, opt_res.score
+
     return model, real_study, params, score
 
 
@@ -1191,20 +1239,23 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
         mock_study = MagicMock()
-        mock_study.best_params = {
-            "alpha": 0.6,
-            "l1_ratio": 0.4,
-            "use_feature_selection": False,
-        }
-        mock_study.best_value = 0.9
-        # Explicit trial-state accounting: one COMPLETED trial,
-        # so optimize() passes the n_completed > 0 check and reaches best_params.
-        mock_study.get_trials.return_value = [
-            MagicMock(state=optuna.trial.TrialState.COMPLETE)
-        ]
+        # Explicit trial-state accounting: the mock study exposes one COMPLETED
+        # trial with the feature-selection decision, so select_best_trial
+        # picks it and reaches the final assembly.
+        mock_trial = MagicMock(
+            state=optuna.trial.TrialState.COMPLETE,
+            number=1,
+            value=0.9,
+            params={
+                "alpha": 0.6,
+                "l1_ratio": 0.4,
+                "use_feature_selection": False,
+            },
+        )
+        mock_study.get_trials.return_value = [mock_trial]
         mock_create.return_value = mock_study
 
-        model, params, _ = optimize(
+        opt_res = optimize(
             "elasticnet",
             X,
             y,
@@ -1214,6 +1265,9 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
                 "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
             },
         )
+        assert opt_res is not None
+        model, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     # The HPO winner explicitly opted out of selection: no selector is built in
     assert "use_feature_selection" in params
@@ -1305,7 +1359,7 @@ def test_isotonic_regression_ignores_feature_selection(toy_data):
     X_iso = X.iloc[:, [0]]
 
     # mode='always' — even forced mode does not break the univariate algorithm
-    model_always, _, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "isotonic_regression",
         X_iso,
         y,
@@ -1314,12 +1368,15 @@ def test_isotonic_regression_ignores_feature_selection(toy_data):
         feature_selection_cfg={"mode": "always"},
         space_overrides=_FS_ISOTONIC_SPACE,
     )
+    assert opt_res is not None
+    model_always, _, _ = opt_res.model, opt_res.params, opt_res.score
+
     assert hasattr(model_always, "predict")
     steps_always = [name for name, _ in getattr(model_always, "steps", [])]
     assert "feature_selector" not in steps_always
 
     # mode='auto' — even if Optuna picks True, the selector does not enter the model
-    model_auto, params_auto, _ = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "isotonic_regression",
         X_iso,
         y,
@@ -1328,6 +1385,9 @@ def test_isotonic_regression_ignores_feature_selection(toy_data):
         feature_selection_cfg={"mode": "auto"},
         space_overrides=_FS_ISOTONIC_SPACE,
     )
+    assert opt_res is not None
+    model_auto, params_auto, _ = opt_res.model, opt_res.params, opt_res.score
+
     assert hasattr(model_auto, "predict")
     steps_auto = [name for name, _ in getattr(model_auto, "steps", [])]
     assert "feature_selector" not in steps_auto
@@ -1378,12 +1438,15 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
         mock_study = MagicMock()
-        mock_study.best_params = {"alpha": 0.6}
-        mock_study.best_value = 0.9
-        # Explicit trial-state accounting: one COMPLETED trial,
-        # so optimize() passes the n_completed > 0 check and reaches best_params.
+        # Explicit trial-state accounting: the mock study exposes one
+        # COMPLETED trial so select_best_trial passes its completeness check.
         mock_study.get_trials.return_value = [
-            MagicMock(state=optuna.trial.TrialState.COMPLETE)
+            MagicMock(
+                state=optuna.trial.TrialState.COMPLETE,
+                number=1,
+                value=0.9,
+                params={"alpha": 0.6},
+            )
         ]
         mock_create.return_value = mock_study
 
@@ -1414,8 +1477,14 @@ def test_fs_reproducible_with_random_state_none(noisy_fs_data):
         feature_selection_cfg={"mode": "always"},
         space_overrides={"elasticnet": lambda t: {"alpha": 0.01, "l1_ratio": 0.5}},
     )
-    model1, _, _ = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
-    model2, _, _ = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
+    opt_res = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
+    assert opt_res is not None
+    model1, _, _ = opt_res.model, opt_res.params, opt_res.score
+
+    opt_res = hyperopt.optimize("elasticnet", X, y, **run_kwargs)
+    assert opt_res is not None
+    model2, _, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     assert np.allclose(model1.predict(X), model2.predict(X))
 
@@ -1442,20 +1511,23 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
         mock_study = MagicMock()
-        mock_study.best_params = {
-            "alpha": 0.6,
-            "l1_ratio": 0.4,
-            "use_feature_selection": True,
-        }
-        mock_study.best_value = 0.9
-        # Explicit trial-state accounting: one COMPLETED trial,
-        # so optimize() passes the n_completed > 0 check and reaches best_params.
-        mock_study.get_trials.return_value = [
-            MagicMock(state=optuna.trial.TrialState.COMPLETE)
-        ]
+        # Explicit trial-state accounting: the mock study exposes one COMPLETED
+        # trial with the feature-selection decision, so select_best_trial
+        # picks it and reaches the final assembly.
+        mock_trial = MagicMock(
+            state=optuna.trial.TrialState.COMPLETE,
+            number=1,
+            value=0.9,
+            params={
+                "alpha": 0.6,
+                "l1_ratio": 0.4,
+                "use_feature_selection": True,
+            },
+        )
+        mock_study.get_trials.return_value = [mock_trial]
         mock_create.return_value = mock_study
 
-        _, params, _ = optimize(
+        opt_res = optimize(
             "elasticnet",
             X,
             y,
@@ -1466,6 +1538,9 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
                 "elasticnet": lambda t: {"alpha": t.suggest_float("alpha", 0, 1)}
             },
         )
+        assert opt_res is not None
+        _, params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
         # enqueue_trial receives the previous phase's decision (HPO monotonicity)
         mock_study.enqueue_trial.assert_called_once_with(initial_params)
@@ -1605,18 +1680,17 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
         # All 10 cross_val_score calls (evaluation stage) raise ValueError
         mock_cv.side_effect = ValueError("non-fatal scoring error")
 
-        best_algo, best_model, best_score = optimize(
+        result = optimize(
             algo_name="rf",
             X=X,
             y=y,
             n_trials=10,
             space_overrides={"rf": lambda trial: {"n_estimators": 10}},
         )
+
         # No trial completed → the "no valid result" contract:
-        # all None, without InvalidAlgorithmError.
-        assert best_algo is None
-        assert best_model is None
-        assert best_score is None
+        # None, without InvalidAlgorithmError.
+        assert result is None
 
 
 # ─────────── Cleaning uninformative features ───────────────────
@@ -1645,7 +1719,7 @@ def test_optimize_cleans_uninformative_features():
     and extra input columns do not affect the result."""
     X, y = _tuner_garbage_data()
 
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "ridge",
         X,
         y,
@@ -1655,6 +1729,9 @@ def test_optimize_cleans_uninformative_features():
             "ridge": lambda t: {"alpha": t.suggest_float("alpha", 0.05, 0.5)}
         },
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert isinstance(score, float) and np.isfinite(score)
     assert isinstance(params, dict) and params
@@ -1679,7 +1756,7 @@ def test_optimize_numpy_input_skips_cleaning():
     X_arr = rng.normal(size=(100, 3))
     y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
 
-    model, params, score = hyperopt.optimize(
+    opt_res = hyperopt.optimize(
         "ridge",
         X_arr,
         y_arr,
@@ -1689,6 +1766,9 @@ def test_optimize_numpy_input_skips_cleaning():
             "ridge": lambda t: {"alpha": t.suggest_float("alpha", 0.05, 0.5)}
         },
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert isinstance(score, float) and np.isfinite(score)
     assert hasattr(model, "predict")
@@ -1819,6 +1899,126 @@ def test_missing_indicator_enabled_regular_algorithms():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  TPE history transfer between HPO phases (previous_trials)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_previous_trials_returns_only_own_phase_trials(toy_data):
+    """T2/T1: when previous_trials is passed, the new study keeps the
+    transferred history as TPE warm-start, and the returned OptimizeResult
+    contains ONLY the current phase's own trials (numbers >= the transferred
+    boundary)."""
+    X, y = toy_data
+    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    assert first is not None
+    assert [t.number for t in first.trials] == [0, 1]
+
+    second = hyperopt.optimize(
+        "knn", X, y, n_trials=2, random_state=43, previous_trials=first.trials
+    )
+    assert second is not None
+    # Only the current phase's own trials (transferred history is excluded).
+    assert len(second.trials) == 2
+    assert all(t.number >= 2 for t in second.trials)
+    assert len(second.trials + first.trials) == 4
+
+
+def test_optimize_empty_previous_trials_is_noop(toy_data):
+    """N4: previous_trials=[] is a no-op — no exception, no transfer."""
+    X, y = toy_data
+    res = hyperopt.optimize("knn", X, y, n_trials=2, previous_trials=[])
+    assert res is not None
+    assert len(res.trials) == 2
+
+
+def test_optimize_incompatible_previous_trials_fail_fast(toy_data):
+    """N2: trials with distributions incompatible with the current search
+    space raise HPOHistoryError (fail fast, not a silent skip)."""
+    from optuna.distributions import FloatDistribution
+    from optuna.trial import create_trial
+
+    X, y = toy_data
+    bad = create_trial(
+        value=0.5,
+        params={"n_neighbors": 5},
+        distributions={"n_neighbors": FloatDistribution(0.0, 100.0)},
+    )
+    with pytest.raises(hyperopt.HPOHistoryError, match="incompatible"):
+        hyperopt.optimize("knn", X, y, n_trials=1, previous_trials=[bad])
+
+
+def test_optimize_unrepresentable_space_fails_fast(toy_data):
+    """B2: a search space that cannot be reproduced by the distribution
+    pre-check (e.g. a legacy ``suggest_uniform`` call) fails fast with
+    ``HPOHistoryError`` when non-empty history is transferred — no silent
+    skip, which would silently degrade refine to a cold run."""
+    X, y = toy_data
+    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    assert first is not None
+
+    def exotic_space(trial):
+        # suggest_uniform is not implemented by the _DistributionRecorder
+        # (only suggest_int/suggest_float/suggest_categorical are), so the
+        # pre-check cannot reproduce the space.
+        return {"n_neighbors": trial.suggest_uniform("n_neighbors", 1.0, 5.0)}
+
+    with pytest.raises(hyperopt.HPOHistoryError, match="cannot be reproduced"):
+        hyperopt.optimize(
+            "knn",
+            X,
+            y,
+            n_trials=2,
+            space_overrides={"knn": exotic_space},
+            previous_trials=first.trials,
+        )
+
+
+def test_optimize_zero_trials_with_history_returns_none(toy_data):
+    """B2: n_trials=0 with transferred history → None (unified no-result
+    signal), the history is not added to any study."""
+    X, y = toy_data
+    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    assert first is not None
+    res = hyperopt.optimize("knn", X, y, n_trials=0, previous_trials=first.trials)
+    assert res is None
+
+
+def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
+    """N1 (tuner level): if ALL own trials of the current phase fail, the run
+    returns None even when transferred COMPLETED history is present — the
+    history must not make the phase appear valid (no fallback)."""
+    X, y = toy_data
+    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    assert first is not None
+
+    with (
+        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.tuner.create_model"),
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.tuner._validate_data"),
+        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch(
+            "configurable_automl_engine.tuner.model_selection.cross_val_score"
+        ) as mock_cv,
+    ):
+        mock_make_cv.return_value = ("k_fold", MagicMock(), None)
+        # Every OWN trial evaluation raises a non-fatal ValueError → the trial
+        # is PRUNED. With transferred COMPLETED history present, the phase must
+        # STILL report no valid result (no fallback to previous-phase params).
+        mock_cv.side_effect = ValueError("score boom")
+
+        res = hyperopt.optimize(
+            "knn",
+            X,
+            y,
+            n_trials=3,
+            random_state=44,
+            validation_strategy="k_fold",
+            n_folds=3,
+            previous_trials=first.trials,
+        )
+        assert res is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  fit_best_model: skipping the redundant final full-data fit
 # ──────────────────────────────────────────────────────────────────────────────
 def _ridge_space(trial):
@@ -1838,7 +2038,7 @@ def test_optimize_fit_best_model_disabled_skips_final_fit(toy_data, monkeypatch)
 
     monkeypatch.setattr(hyperopt._OptimizeRunner, "_fit_best_model", _forbidden)
 
-    model, params, score = hyperopt.optimize(
+    result = hyperopt.optimize(
         "ridge",
         X,
         y,
@@ -1848,9 +2048,10 @@ def test_optimize_fit_best_model_disabled_skips_final_fit(toy_data, monkeypatch)
         space_overrides={"ridge": _ridge_space},
     )
 
-    assert model is None
-    assert isinstance(params, dict) and params
-    assert isinstance(score, float) and np.isfinite(score)
+    assert result is not None
+    assert result.model is None
+    assert isinstance(result.params, dict) and result.params
+    assert isinstance(result.score, float) and np.isfinite(result.score)
 
 
 @pytest.mark.parametrize(
@@ -1861,7 +2062,7 @@ def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
     """The flag controls whether the tuned model (fit on all data) is returned."""
     X, y = toy_data
 
-    model, params, score = hyperopt.optimize(
+    result = hyperopt.optimize(
         "ridge",
         X,
         y,
@@ -1871,6 +2072,7 @@ def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
         space_overrides={"ridge": _ridge_space},
     )
 
-    assert (model is not None) is expect_model
-    assert isinstance(params, dict) and params
-    assert isinstance(score, float) and np.isfinite(score)
+    assert result is not None
+    assert (result.model is not None) is expect_model
+    assert isinstance(result.params, dict) and result.params
+    assert isinstance(result.score, float) and np.isfinite(result.score)

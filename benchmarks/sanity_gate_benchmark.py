@@ -64,6 +64,7 @@ import pandas as pd
 import configurable_automl_engine.training_engine.component as _component
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
+    PhaseResult,
     execute_phases,
     prepare_dataset,
 )
@@ -167,7 +168,7 @@ class ReferenceCase:
 class DegenerateCase:
     """Degenerate case: end-to-end run with a deterministic HPO replacement.
 
-    ``stub_hpo`` returns ``(score, params)`` for each algorithm name:
+    ``stub_hpo`` returns a ``PhaseResult`` for each algorithm name:
     the degenerate candidate receives parameters under which real training of
     the finalist yields a degenerate model, and the "raw" CV score is better
     than the honest candidate's (which would be the "winner" of the old
@@ -177,8 +178,8 @@ class DegenerateCase:
         name (str): Dataset name.
         generator (Callable): Generator (X, y) with a fixed seed.
         algorithms (dict[str, dict]): Algorithm configuration.
-        stub_hpo (Callable[[str], tuple[float, dict[str, Any]]]): Deterministic
-            "tuner": algorithm name → (raw CV score, parameters).
+        stub_hpo (Callable[[str], PhaseResult]): Deterministic
+            "tuner": algorithm name → raw CV score + parameters.
         top_k_candidates (int): Cap on the finalist pool size.
         corridor_delta (float): Width of the pool corridor.
     """
@@ -186,7 +187,7 @@ class DegenerateCase:
     name: str
     generator: Callable[[], tuple[np.ndarray, np.ndarray]]
     algorithms: dict[str, dict[str, Any]]
-    stub_hpo: Callable[[str], tuple[float, dict[str, Any]]]
+    stub_hpo: Callable[[str], PhaseResult]
     kind: str = "degenerate"
     n_trials: int = 1
     top_k_candidates: int = 2
@@ -246,8 +247,8 @@ DEGENERATE_CASES: list[DegenerateCase] = [
             "ridge": {"enable": True, "limit_hyperparameters": True},
         },
         stub_hpo=lambda name: {
-            "elasticnet": (-0.08, {"alpha": 500.0}),
-            "ridge": (-0.09, {"alpha": 1.0}),
+            "elasticnet": PhaseResult(score=-0.08, params={"alpha": 500.0}),
+            "ridge": PhaseResult(score=-0.09, params={"alpha": 1.0}),
         }[name],
     ),
     DegenerateCase(
@@ -258,11 +259,11 @@ DEGENERATE_CASES: list[DegenerateCase] = [
             "ridge": {"enable": True, "limit_hyperparameters": True},
         },
         stub_hpo=lambda name: {
-            "svr": (
-                -0.08,
-                {"kernel": "sigmoid", "gamma": 0.001, "coef0": 0.0, "C": 1.0},
+            "svr": PhaseResult(
+                score=-0.08,
+                params={"kernel": "sigmoid", "gamma": 0.001, "coef0": 0.0, "C": 1.0},
             ),
-            "ridge": (-0.09, {"alpha": 1.0}),
+            "ridge": PhaseResult(score=-0.09, params={"alpha": 1.0}),
         }[name],
     ),
     DegenerateCase(
@@ -273,8 +274,8 @@ DEGENERATE_CASES: list[DegenerateCase] = [
             "ridge": {"enable": True, "limit_hyperparameters": True},
         },
         stub_hpo=lambda name: {
-            "decision_tree": (-0.08, {"max_depth": 20}),
-            "ridge": (-0.09, {"alpha": 1.0}),
+            "decision_tree": PhaseResult(score=-0.08, params={"max_depth": 20}),
+            "ridge": PhaseResult(score=-0.09, params={"alpha": 1.0}),
         }[name],
     ),
 ]
@@ -384,7 +385,7 @@ def _execute(
     cfg_dict: dict[str, Any],
     df: pd.DataFrame,
     *,
-    stub_hpo: Callable[[str], tuple[float, dict[str, Any]]] | None = None,
+    stub_hpo: Callable[[str], PhaseResult] | None = None,
 ) -> PhaseContext:
     """Run ``execute_phases`` on a configuration, optionally replacing HPO.
 
@@ -425,7 +426,7 @@ def run_case(case: ReferenceCase | DegenerateCase) -> VariantResult:
     """
     started = time.monotonic()
     df = _df_from_case(case)
-    stub: Callable[[str], tuple[float, dict[str, Any]]] | None = (
+    stub: Callable[[str], PhaseResult] | None = (
         case.stub_hpo if isinstance(case, DegenerateCase) else None
     )
 

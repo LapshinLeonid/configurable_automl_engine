@@ -233,7 +233,7 @@ def test_optimize_pruning_median_prunes_bad_trials(
     X, y = toy_data
 
     with caplog.at_level(logging.INFO):
-        model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -249,6 +249,9 @@ def test_optimize_pruning_median_prunes_bad_trials(
                 "n_startup_trials": 1,
             },
         )
+        assert opt_res is not None
+        model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     # The best trial completed fully and has maximum quality.
     assert score == pytest.approx(0.9)
@@ -267,7 +270,7 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
     X, y = toy_data
 
     with caplog.at_level(logging.INFO):
-        model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -283,6 +286,9 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
                 "reduction_factor": 2,
             },
         )
+        assert opt_res is not None
+        model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -312,7 +318,7 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
     )
 
     with caplog.at_level(logging.INFO):
-        model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -328,10 +334,7 @@ def test_optimize_pruning_all_trials_pruned_returns_no_results(
                 "n_startup_trials": 1,
             },
         )
-
-    assert model is None
-    assert params is None
-    assert score is None
+        assert opt_res is None
     # The state-counter log: 4 pruned, 0 completed, 0 failed.
     assert "Trial states for algorithm 'ridge'" in caplog.text
     assert "completed=0, pruned=4, failed=0" in caplog.text
@@ -351,7 +354,7 @@ def test_optimize_pruning_single_trial_pruned_returns_no_results(
         tuner.optuna.trial.Trial, "should_prune", return_value=True
     )
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -367,10 +370,7 @@ def test_optimize_pruning_single_trial_pruned_returns_no_results(
             "n_startup_trials": 1,
         },
     )
-
-    assert model is None
-    assert params is None
-    assert score is None
+    assert opt_res is None
 
 
 def _make_study_with_states(
@@ -407,7 +407,7 @@ def test_optimize_all_trials_failed_returns_no_results(
     mocker.patch.object(tuner.optuna, "create_study", return_value=study)
     mocker.patch.object(study, "optimize")
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -423,10 +423,7 @@ def test_optimize_all_trials_failed_returns_no_results(
             "n_startup_trials": 1,
         },
     )
-
-    assert model is None
-    assert params is None
-    assert score is None
+    assert opt_res is None
 
 
 def test_optimize_pruned_and_failed_mix_returns_no_results(
@@ -449,7 +446,7 @@ def test_optimize_pruned_and_failed_mix_returns_no_results(
     mocker.patch.object(tuner.optuna, "create_study", return_value=study)
     mocker.patch.object(study, "optimize")
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -465,10 +462,7 @@ def test_optimize_pruned_and_failed_mix_returns_no_results(
             "n_startup_trials": 1,
         },
     )
-
-    assert model is None
-    assert params is None
-    assert score is None
+    assert opt_res is None
 
 
 def test_optimize_pruning_nonfinite_score_uses_worst_score(
@@ -491,7 +485,7 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
         return np.nan
 
     with patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate):
-        model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -507,6 +501,9 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
                 "n_startup_trials": 1,
             },
         )
+        assert opt_res is not None
+        model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == HPO_WORST_SCORE
     assert params is not None
@@ -520,7 +517,7 @@ def test_optimize_pruning_not_applied_for_train_test_split(
     X, y = toy_data
 
     with caplog.at_level(logging.WARNING):
-        _model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -535,6 +532,9 @@ def test_optimize_pruning_not_applied_for_train_test_split(
                 "n_startup_trials": 1,
             },
         )
+        assert opt_res is not None
+        _model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     # All trials completed — the best one was found by the usual maximization rule.
     assert score == pytest.approx(0.9)
@@ -546,7 +546,7 @@ def test_optimize_pruning_loo_works(toy_data, quality_patches):
     """LOO, as a strategy with natural steps, works with pruning."""
     X, y = toy_data
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -561,6 +561,9 @@ def test_optimize_pruning_loo_works(toy_data, quality_patches):
             "n_startup_trials": 1,
         },
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -573,7 +576,7 @@ def test_optimize_pruning_with_initial_params_refine(
     """refine (initial_params + enqueue_trial) is compatible with pruning."""
     X, y = toy_data
 
-    _model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -590,6 +593,9 @@ def test_optimize_pruning_with_initial_params_refine(
             "n_startup_trials": 1,
         },
     )
+    assert opt_res is not None
+    _model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -599,7 +605,7 @@ def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
     """A small number of folds (2) works with pruning (edge scenario)."""
     X, y = toy_data
 
-    model, params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -615,6 +621,9 @@ def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
             "n_startup_trials": 1,
         },
     )
+    assert opt_res is not None
+    model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -729,7 +738,7 @@ def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
     X, y = toy_data
     n_trials = 12
 
-    _model, _params, score = optimize(
+    opt_res = optimize(
         "ridge",
         X,
         y,
@@ -745,6 +754,9 @@ def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
             "n_startup_trials": 1,
         },
     )
+    assert opt_res is not None
+    _model, _params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     # The optimization completed without InvalidAlgorithmError.
     assert score == pytest.approx(0.9)
@@ -897,7 +909,7 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
         patch.object(tuner.optuna.trial.Trial, "report", fake_report),
     ):
-        _model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -913,6 +925,9 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
                 "n_startup_trials": 5,
             },
         )
+        assert opt_res is not None
+        _model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1135,7 +1150,7 @@ def test_optimize_auto_loo_with_pruning_works():
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
         patch.object(tuner.optuna.trial.Trial, "report", fake_report),
     ):
-        _model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -1151,6 +1166,9 @@ def test_optimize_auto_loo_with_pruning_works():
                 "n_startup_trials": 5,
             },
         )
+        assert opt_res is not None
+        _model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1192,7 +1210,7 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
         patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
     ):
-        _model, params, score = optimize(
+        opt_res = optimize(
             "ridge",
             X,
             y,
@@ -1208,6 +1226,9 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
                 "n_startup_trials": 1,
             },
         )
+        assert opt_res is not None
+        _model, params, score = opt_res.model, opt_res.params, opt_res.score
+
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1263,3 +1284,45 @@ def test_train_best_model_auto_pruning_e2e(tmp_path: Path) -> None:
     assert isinstance(result["score"], float)
     assert result["params"]
     assert _Path(result["model_path"]).exists()
+
+
+def test_optimize_pruning_with_transferred_history(toy_data, quality_patches):
+    """Pruning + transferred TPE history interplay: the phase runs with the
+    pruner on the transferred study, keeps the transferred trials as warm-start
+    history, and returns ONLY its own (post-transfer) trials."""
+    X, y = toy_data
+
+    first = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        space_overrides={"ridge": _make_quality_space()},
+    )
+    assert first is not None
+    assert len(first.trials) == 4
+
+    second = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=43,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 2,
+        },
+        previous_trials=first.trials,
+    )
+    assert second is not None
+    # Only the current phase's own trials (numbers >= the transferred count).
+    assert len(second.trials) == 4
+    assert all(t.number >= 4 for t in second.trials)

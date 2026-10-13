@@ -25,10 +25,11 @@ import pytest
 
 from configurable_automl_engine.training_engine.component import (
     FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
+    PhaseResult,
     select_finalists,
 )
 
-R = dict[str, tuple[float, dict[str, Any]]]
+R = dict[str, PhaseResult]
 
 FAMILIES = {
     "elasticnet": "linear",
@@ -53,9 +54,9 @@ def test_positive_example_from_issue_statement():
     the corridor.
     """
     results: R = {
-        "elasticnet": (-0.081, {"alpha": 0.1}),
-        "svr": (-0.085, {"C": 1.0}),
-        "random_forest": (-0.089, {"n_estimators": 100}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 0.1}),
+        "svr": PhaseResult(score=-0.085, params={"C": 1.0}),
+        "random_forest": PhaseResult(score=-0.089, params={"n_estimators": 100}),
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -66,9 +67,9 @@ def test_positive_example_from_issue_statement():
 def test_min_better_multiplicative_corridor_includes_within_delta():
     """min-better: candidates with error ≤ best×(1+δ) enter the pool."""
     results: R = {
-        "ridge": (-0.05, {}),
-        "svr": (-0.055, {}),
-        "random_forest": (-0.06, {}),
+        "ridge": PhaseResult(score=-0.05, params={}),
+        "svr": PhaseResult(score=-0.055, params={}),
+        "random_forest": PhaseResult(score=-0.06, params={}),
     }
     # Threshold = 0.05 × 1.2 = 0.06: SVR (0.055) and RF (0.06, exactly on the boundary) inside.
     pool = select_finalists(
@@ -80,9 +81,9 @@ def test_min_better_multiplicative_corridor_includes_within_delta():
 def test_max_better_multiplicative_corridor_explicit_mode():
     """max-better: threshold = best×(1−δ); explicit multiplicative for r2."""
     results: R = {
-        "ridge": (0.90, {}),
-        "svr": (0.85, {}),
-        "random_forest": (0.80, {}),
+        "ridge": PhaseResult(score=0.90, params={}),
+        "svr": PhaseResult(score=0.85, params={}),
+        "random_forest": PhaseResult(score=0.80, params={}),
     }
     # Threshold = 0.90 × 0.85 = 0.765: 0.85 and 0.80 inside, 0.70 outside.
     pool = select_finalists(
@@ -98,8 +99,8 @@ def test_max_better_multiplicative_corridor_explicit_mode():
 def test_auto_mode_selects_multiplicative_for_errors():
     """auto for an error metric (rmse) → multiplicative: a candidate beyond the threshold is outside the pool."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "xgboosting": (-0.09, {}),
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "xgboosting": PhaseResult(score=-0.09, params={}),
     }
     # Threshold = 0.081 × 1.05 = 0.08505: 0.09 > threshold → xgboosting outside the pool.
     pool = select_finalists(
@@ -111,8 +112,8 @@ def test_auto_mode_selects_multiplicative_for_errors():
 def test_auto_mode_selects_additive_for_score_metric():
     """auto for r2 (a signed score metric) → additive, not multiplicative."""
     results: R = {
-        "a": (-0.5, {}),
-        "b": (-0.55, {}),
+        "a": PhaseResult(score=-0.5, params={}),
+        "b": PhaseResult(score=-0.55, params={}),
     }
     # additive: range = 0.05, threshold = 0.15×0.05 = 0.0075 → b outside the pool.
     pool = select_finalists(results, metric_user="r2", corridor_delta=0.15)
@@ -125,10 +126,10 @@ def test_auto_mode_selects_additive_for_score_metric():
 def test_negative_model_outside_corridor_excluded():
     """A model whose CV score lies outside the corridor does not enter the pool (min-better)."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "svr": (-0.085, {}),
-        "random_forest": (-0.089, {}),
-        "xgboosting": (-0.20, {}),  # 0.20 > 0.09315 → outside the corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "svr": PhaseResult(score=-0.085, params={}),
+        "random_forest": PhaseResult(score=-0.089, params={}),
+        "xgboosting": PhaseResult(score=-0.20, params={}),  # 0.20 > 0.09315 → outside the corridor
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -139,9 +140,9 @@ def test_negative_model_outside_corridor_excluded():
 def test_negative_model_outside_corridor_excluded_max_better():
     """max-better: a model whose r2 is below the best×(1−δ) threshold does not enter the pool."""
     results: R = {
-        "ridge": (0.90, {}),
-        "svr": (0.85, {}),
-        "random_forest": (0.70, {}),  # 0.70 < 0.765 → outside the corridor
+        "ridge": PhaseResult(score=0.90, params={}),
+        "svr": PhaseResult(score=0.85, params={}),
+        "random_forest": PhaseResult(score=0.70, params={}),  # 0.70 < 0.765 → outside the corridor
     }
     pool = select_finalists(
         results,
@@ -160,9 +161,9 @@ def test_negative_family_diversity_disabled_no_topup():
     SVR from another family, being outside the base corridor, is not added.
     """
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),  # outside the base corridor (0.095 > 0.09315)
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "ridge": PhaseResult(score=-0.082, params={}),
+        "svr": PhaseResult(score=-0.095, params={}),  # outside the base corridor (0.095 > 0.09315)
     }
     pool = select_finalists(
         results,
@@ -181,9 +182,9 @@ def test_negative_family_diversity_disabled_no_topup():
 def test_boundary_top_k_equals_one():
     """top_k=1: the pool is a single leader — equivalent to the current behavior."""
     results: R = {
-        "ridge": (0.90, {}),
-        "svr": (0.85, {}),
-        "random_forest": (0.80, {}),
+        "ridge": PhaseResult(score=0.90, params={}),
+        "svr": PhaseResult(score=0.85, params={}),
+        "random_forest": PhaseResult(score=0.80, params={}),
     }
     pool = select_finalists(
         results,
@@ -197,9 +198,9 @@ def test_boundary_top_k_equals_one():
 def test_boundary_pool_capped_at_top_k():
     """A pool larger than top_k: the hard cap truncates it to top_k_candidates."""
     results: R = {
-        "ridge": (0.90, {}),
-        "svr": (0.85, {}),
-        "random_forest": (0.80, {}),
+        "ridge": PhaseResult(score=0.90, params={}),
+        "svr": PhaseResult(score=0.85, params={}),
+        "random_forest": PhaseResult(score=0.80, params={}),
     }
     pool = select_finalists(
         results,
@@ -214,7 +215,7 @@ def test_boundary_pool_capped_at_top_k():
 def test_boundary_single_valid_algorithm():
     """A single valid algorithm — the pool has one candidate."""
     pool = select_finalists(
-        {"ridge": (0.7, {})}, metric_user="r2", top_k_candidates=3
+        {"ridge": PhaseResult(score=0.7, params={})}, metric_user="r2", top_k_candidates=3
     )
     assert pool == ["ridge"]
 
@@ -225,8 +226,8 @@ def test_boundary_corridor_gives_less_than_top_k():
     No top-up beyond the corridor happens (without the optional rule).
     """
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "xgboosting": (-0.20, {}),  # outside the corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "xgboosting": PhaseResult(score=-0.20, params={}),  # outside the corridor
     }
     pool = select_finalists(
         results, metric_user="rmse", corridor_delta=0.15, top_k_candidates=3
@@ -242,9 +243,9 @@ def test_boundary_negative_r2_additive_form():
     outside.
     """
     results: R = {
-        "a": (-0.5, {}),
-        "b": (-0.55, {}),
-        "c": (-0.6, {}),
+        "a": PhaseResult(score=-0.5, params={}),
+        "b": PhaseResult(score=-0.55, params={}),
+        "c": PhaseResult(score=-0.6, params={}),
     }
     pool = select_finalists(
         results,
@@ -264,8 +265,8 @@ def test_boundary_multiplicative_empty_with_negative_best_falls_back_to_additive
     chosen; at δ=1.0 both candidates enter the pool.
     """
     results: R = {
-        "a": (-0.5, {}),
-        "b": (-0.6, {}),
+        "a": PhaseResult(score=-0.5, params={}),
+        "b": PhaseResult(score=-0.6, params={}),
     }
     pool = select_finalists(
         results,
@@ -283,9 +284,9 @@ def test_boundary_mae_near_zero_additive_form():
     User scores 0.001/0.0015/0.002; range = 0.001, threshold = 0.5×0.001 = 0.0005.
     """
     results: R = {
-        "a": (-0.001, {}),
-        "b": (-0.0015, {}),
-        "c": (-0.002, {}),
+        "a": PhaseResult(score=-0.001, params={}),
+        "b": PhaseResult(score=-0.0015, params={}),
+        "c": PhaseResult(score=-0.002, params={}),
     }
     pool = select_finalists(
         results,
@@ -300,9 +301,9 @@ def test_boundary_mae_near_zero_additive_form():
 def test_boundary_disqualified_leader_excluded():
     """A disqualified algorithm is excluded from the pool (even the leader)."""
     results: R = {
-        "svr": (0.95, {}),
-        "ridge": (0.90, {}),
-        "random_forest": (0.88, {}),
+        "svr": PhaseResult(score=0.95, params={}),
+        "ridge": PhaseResult(score=0.90, params={}),
+        "random_forest": PhaseResult(score=0.88, params={}),
     }
     pool = select_finalists(
         results,
@@ -317,9 +318,9 @@ def test_boundary_disqualified_leader_excluded():
 def test_boundary_tie_breaks_by_configuration_order():
     """Equal scores → configuration order (as in select_winner)."""
     results: R = {
-        "random_forest": (0.5, {}),
-        "extra_trees": (0.5, {}),
-        "elasticnet": (0.5, {}),
+        "random_forest": PhaseResult(score=0.5, params={}),
+        "extra_trees": PhaseResult(score=0.5, params={}),
+        "elasticnet": PhaseResult(score=0.5, params={}),
     }
     pool = select_finalists(
         results,
@@ -333,9 +334,9 @@ def test_boundary_tie_breaks_by_configuration_order():
 def test_boundary_equal_scores_on_corridor_edge_all_included():
     """Scores exactly on the corridor edge are all included (inclusive tie-break)."""
     results: R = {
-        "ridge": (-0.05, {}),
-        "svr": (-0.06, {}),
-        "random_forest": (-0.06, {}),
+        "ridge": PhaseResult(score=-0.05, params={}),
+        "svr": PhaseResult(score=-0.06, params={}),
+        "random_forest": PhaseResult(score=-0.06, params={}),
     }
     # Threshold = 0.05 × 1.2 = 0.06: both candidates are exactly on the boundary.
     pool = select_finalists(
@@ -355,10 +356,10 @@ def test_family_diversity_topup_from_extended_corridor():
     (0.081 × 1.225 = 0.0992) → added; the pool reaches top_k=3.
     """
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),
-        "random_forest": (-0.11, {}),  # outside even the extended corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "ridge": PhaseResult(score=-0.082, params={}),
+        "svr": PhaseResult(score=-0.095, params={}),
+        "random_forest": PhaseResult(score=-0.11, params={}),  # outside even the extended corridor
     }
     pool = select_finalists(
         results,
@@ -374,9 +375,9 @@ def test_family_diversity_topup_from_extended_corridor():
 def test_family_diversity_respects_top_k_cap():
     """The family top-up does not exceed top_k_candidates."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "ridge": PhaseResult(score=-0.082, params={}),
+        "svr": PhaseResult(score=-0.095, params={}),
     }
     pool = select_finalists(
         results,
@@ -392,9 +393,9 @@ def test_family_diversity_respects_top_k_cap():
 def test_family_diversity_allowed_families_restriction():
     """allowed_families restricts which families can be topped up."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "ridge": PhaseResult(score=-0.082, params={}),
+        "svr": PhaseResult(score=-0.095, params={}),
     }
     pool = select_finalists(
         results,
@@ -411,9 +412,9 @@ def test_family_diversity_allowed_families_restriction():
 def test_family_diversity_no_topup_when_two_families_in_pool():
     """The pool already has two families — the top-up rule is not applied."""
     results: R = {
-        "elasticnet": (-0.081, {}),  # linear
-        "svr": (-0.085, {}),  # kernel
-        "ridge": (-0.095, {}),  # linear, outside the base corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),  # linear
+        "svr": PhaseResult(score=-0.085, params={}),  # kernel
+        "ridge": PhaseResult(score=-0.095, params={}),  # linear, outside the base corridor
     }
     pool = select_finalists(
         results,
@@ -429,9 +430,9 @@ def test_family_diversity_no_topup_when_two_families_in_pool():
 def test_family_diversity_unmapped_algorithms_own_family():
     """Algorithms without a family mapping get their own family (determinism)."""
     results: R = {
-        "elasticnet": (-0.081, {}),  # linear
-        "ridge": (-0.082, {}),  # linear
-        "custom_algo": (-0.095, {}),  # its own family
+        "elasticnet": PhaseResult(score=-0.081, params={}),  # linear
+        "ridge": PhaseResult(score=-0.082, params={}),  # linear
+        "custom_algo": PhaseResult(score=-0.095, params={}),  # its own family
     }
     pool = select_finalists(
         results,
@@ -451,8 +452,8 @@ def test_family_diversity_without_families_map():
     candidate from the extended corridor (b, 0.095 ≤ 0.081×1.225 = 0.0992).
     """
     results: R = {
-        "a": (-0.081, {}),
-        "b": (-0.095, {}),
+        "a": PhaseResult(score=-0.081, params={}),
+        "b": PhaseResult(score=-0.095, params={}),
     }
     pool = select_finalists(
         results,
@@ -485,7 +486,7 @@ def test_edge_empty_results_raises_runtime_error():
 
 def test_edge_all_disqualified_raises_runtime_error():
     """All algorithms are disqualified → RuntimeError."""
-    results: R = {"svr": (0.95, {}), "ridge": (0.90, {})}
+    results: R = {"svr": PhaseResult(score=0.95, params={}), "ridge": PhaseResult(score=0.90, params={})}
     with pytest.raises(RuntimeError, match="disqualified"):
         select_finalists(
             results,
@@ -496,18 +497,18 @@ def test_edge_all_disqualified_raises_runtime_error():
 
 def test_edge_invalid_top_k_candidates():
     with pytest.raises(ValueError, match="top_k_candidates"):
-        select_finalists({"a": (0.5, {})}, metric_user="r2", top_k_candidates=0)
+        select_finalists({"a": PhaseResult(score=0.5, params={})}, metric_user="r2", top_k_candidates=0)
 
 
 def test_edge_invalid_corridor_delta():
     with pytest.raises(ValueError, match="corridor_delta"):
-        select_finalists({"a": (0.5, {})}, metric_user="r2", corridor_delta=-0.1)
+        select_finalists({"a": PhaseResult(score=0.5, params={})}, metric_user="r2", corridor_delta=-0.1)
 
 
 def test_edge_invalid_corridor_mode():
     with pytest.raises(ValueError, match="corridor_mode"):
         select_finalists(
-            {"a": (0.5, {})},
+            {"a": PhaseResult(score=0.5, params={})},
             metric_user="r2",
             corridor_mode="weird",  # type: ignore[arg-type]
         )
@@ -516,22 +517,22 @@ def test_edge_invalid_corridor_mode():
 def test_edge_invalid_family_diversity_multiplier():
     with pytest.raises(ValueError, match="family_diversity_multiplier"):
         select_finalists(
-            {"a": (0.5, {})}, metric_user="r2", family_diversity_multiplier=0.0
+            {"a": PhaseResult(score=0.5, params={})}, metric_user="r2", family_diversity_multiplier=0.0
         )
 
 
 def test_edge_unknown_metric_raises():
     with pytest.raises(ValueError, match="not implemented"):
-        select_finalists({"a": (0.5, {})}, metric_user="unknown_custom_metric")
+        select_finalists({"a": PhaseResult(score=0.5, params={})}, metric_user="unknown_custom_metric")
 
 
 def test_edge_determinism_repeated_calls():
     """Determinism: repeated calls return an identical pool and order."""
     results: R = {
-        "elasticnet": (-0.081, {}),
-        "ridge": (-0.082, {}),
-        "svr": (-0.095, {}),
-        "random_forest": (-0.11, {}),
+        "elasticnet": PhaseResult(score=-0.081, params={}),
+        "ridge": PhaseResult(score=-0.082, params={}),
+        "svr": PhaseResult(score=-0.095, params={}),
+        "random_forest": PhaseResult(score=-0.11, params={}),
     }
     kwargs = {
         "metric_user": "rmse",
@@ -548,9 +549,9 @@ def test_edge_determinism_repeated_calls():
 def test_edge_zero_delta_only_leader():
     """δ=0: the corridor collapses to exact equality — only the leader."""
     results: R = {
-        "ridge": (0.90, {}),
-        "svr": (0.90, {}),  # exactly equal to the leader
-        "random_forest": (0.89, {}),
+        "ridge": PhaseResult(score=0.90, params={}),
+        "svr": PhaseResult(score=0.90, params={}),  # exactly equal to the leader
+        "random_forest": PhaseResult(score=0.89, params={}),
     }
     pool = select_finalists(
         results,
@@ -566,13 +567,13 @@ def test_edge_zero_delta_only_leader():
 def test_edge_min_better_and_max_better_metrics_parametrized():
     """The direction comes from user_direction: min- and max-better metrics."""
     # min-better (rmse): leader with the smallest error
-    min_results: R = {"good": (-0.05, {}), "bad": (-0.10, {})}
+    min_results: R = {"good": PhaseResult(score=-0.05, params={}), "bad": PhaseResult(score=-0.10, params={})}
     # Threshold = 0.05 × 1.5 = 0.075: bad (0.10) outside the corridor.
     assert select_finalists(
         min_results, metric_user="rmse", corridor_delta=0.5, top_k_candidates=3
     ) == ["good"]
     # max-better (r2): leader with the highest score
-    max_results: R = {"good": (0.90, {}), "bad": (0.80, {})}
+    max_results: R = {"good": PhaseResult(score=0.90, params={}), "bad": PhaseResult(score=0.80, params={})}
     # Threshold = 0.90 × 0.5 = 0.45: bad (0.80) inside; the threshold is wide.
     assert select_finalists(
         max_results,
@@ -596,9 +597,9 @@ def test_regression_disqualified_generator_not_consumed():
     materialized before the comprehension.
     """
     results: R = {
-        "a": (0.90, {}),
-        "b": (0.85, {}),
-        "c": (0.95, {}),  # best by CV, but disqualified
+        "a": PhaseResult(score=0.90, params={}),
+        "b": PhaseResult(score=0.85, params={}),
+        "c": PhaseResult(score=0.95, params={}),  # best by CV, but disqualified
     }
     pool = select_finalists(
         results,
@@ -619,8 +620,8 @@ def test_regression_pool_family_not_allowed_no_topup():
     instead of ['elasticnet']).
     """
     results: R = {
-        "elasticnet": (-0.081, {}),  # linear
-        "svr": (-0.095, {}),  # kernel, inside the extended corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),  # linear
+        "svr": PhaseResult(score=-0.095, params={}),  # kernel, inside the extended corridor
     }
     pool = select_finalists(
         results,
@@ -642,10 +643,10 @@ def test_regression_pool_family_allowed_and_missing_allowed():
     ``allowed_families`` and the missing family is allowed too.
     """
     results: R = {
-        "elasticnet": (-0.081, {}),  # linear
-        "ridge": (-0.082, {}),  # linear
-        "svr": (-0.095, {}),  # kernel, inside the extended corridor
-        "random_forest": (-0.11, {}),  # ensemble, outside the extended corridor
+        "elasticnet": PhaseResult(score=-0.081, params={}),  # linear
+        "ridge": PhaseResult(score=-0.082, params={}),  # linear
+        "svr": PhaseResult(score=-0.095, params={}),  # kernel, inside the extended corridor
+        "random_forest": PhaseResult(score=-0.11, params={}),  # ensemble, outside the extended corridor
     }
     pool = select_finalists(
         results,
@@ -667,9 +668,9 @@ def test_regression_auto_mode_best_near_zero_switches_to_additive():
     δ×range.
     """
     results: R = {
-        "a": (0.0, {}),  # MAE ≈ 0 (raw -0.0 after inversion)
-        "b": (-1e-4, {}),
-        "c": (-2e-4, {}),
+        "a": PhaseResult(score=0.0, params={}),  # MAE ≈ 0 (raw -0.0 after inversion)
+        "b": PhaseResult(score=-1e-4, params={}),
+        "c": PhaseResult(score=-2e-4, params={}),
     }
     # additive: range = 2e-4, threshold = 0.5×2e-4 = 1e-4 → b, on the boundary, is included.
     pool = select_finalists(

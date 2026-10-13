@@ -35,6 +35,7 @@ from sklearn.datasets import load_diabetes, make_friedman3, make_regression
 import configurable_automl_engine.training_engine.component as component
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import (
+    PhaseResult,
     _run_hpo,
     _fit_and_save,
     execute_phases,
@@ -48,7 +49,11 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionMode,
     ValidationStrategy,
 )
-from configurable_automl_engine.tuner import HPO_WORST_SCORE, InvalidAlgorithmError
+from configurable_automl_engine.tuner import (
+    HPO_WORST_SCORE,
+    HPOHistoryError,
+    InvalidAlgorithmError,
+)
 
 import textwrap
 
@@ -549,7 +554,7 @@ class TestTrainingEngineCoverage:
         # Mock HPO so that real training is not run
         with patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(0.9, {}),
+            return_value=PhaseResult(score=0.9, params={}),
         ):
             with patch(
                 "configurable_automl_engine.training_engine.component._fit_and_save"
@@ -572,7 +577,7 @@ class TestTrainingEngineCoverage:
     # Fixed test for a save error
     @patch(
         "configurable_automl_engine.training_engine.component._run_hpo",
-        return_value=(0.9, {"p": 1}),
+        return_value=PhaseResult(score=0.9, params={"p": 1}),
     )
     @patch("configurable_automl_engine.training_engine.component._fit_and_save")
     def test_fit_and_save_failure(
@@ -623,7 +628,7 @@ def test_run_hpo_success_return():
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=mock_tuner):
-        score, params = _run_hpo(
+        result = _run_hpo(
             algo_name="test_algo",
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1]}),
@@ -632,6 +637,9 @@ def test_run_hpo_success_return():
             n_trials=1,
             validation_strategy=ValidationStrategy.train_test_split,
         )
+        score = result.score
+        params = result.params
+
         assert score == 0.95
         assert params == {"param": 1}
 
@@ -663,7 +671,7 @@ def test_run_hpo_forwards_resolved_test_size_to_tuner():
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=SplitAwareTuner()):
-        score, params = _run_hpo(
+        result = _run_hpo(
             algo_name="test_algo",
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1, 2, 3]}),
@@ -673,6 +681,9 @@ def test_run_hpo_forwards_resolved_test_size_to_tuner():
             validation_strategy=ValidationStrategy.train_test_split,
             train_test_split_test_size=15,
         )
+        score = result.score
+        params = result.params
+
 
     assert score == 0.95
     assert params == {"param": 1}
@@ -703,7 +714,7 @@ def test_run_hpo_skips_test_size_for_legacy_tuner():
             train_test_split_test_size=0.25,
         )
 
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert calls["test_size_passed"] is False
 
 
@@ -736,7 +747,7 @@ def test_run_hpo_passes_pruning_when_tuner_supports_it():
         "reduction_factor": 3,
     }
     with patch("importlib.import_module", return_value=PruningAwareTuner()):
-        score, params = _run_hpo(
+        result = _run_hpo(
             algo_name="test_algo",
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1]}),
@@ -746,6 +757,9 @@ def test_run_hpo_passes_pruning_when_tuner_supports_it():
             validation_strategy=ValidationStrategy.k_fold,
             pruning=pruning_cfg,
         )
+        score = result.score
+        params = result.params
+
 
     assert score == 0.95
     assert params == {"param": 1}
@@ -775,7 +789,7 @@ def test_run_hpo_skips_pruning_for_legacy_tuner():
             pruning={"enable": True, "strategy": "median"},
         )
 
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert calls["pruning_passed"] is False
 
 
@@ -803,7 +817,7 @@ def test_run_hpo_asks_tuner_to_skip_final_fit():
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=FitAwareTuner()):
-        score, params = _run_hpo(
+        result = _run_hpo(
             algo_name="test_algo",
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1]}),
@@ -813,8 +827,7 @@ def test_run_hpo_asks_tuner_to_skip_final_fit():
             validation_strategy=ValidationStrategy.k_fold,
         )
 
-    assert score == 0.95
-    assert params == {"param": 1}
+    assert result == PhaseResult(score=0.95, params={"param": 1})
     assert received["fit_best_model"] is False
 
 
@@ -840,8 +853,98 @@ def test_run_hpo_skips_fit_best_model_for_legacy_tuner():
             validation_strategy=ValidationStrategy.k_fold,
         )
 
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert calls["fit_best_model_passed"] is False
+
+
+def test_run_hpo_var_kwargs_tuner_receives_previous_trials():
+    """A tuner with a ``**kwargs`` signature is compatible with
+    ``previous_trials``: the key is forwarded (the tuner decides what to do)
+    instead of being rejected with ``HPOHistoryError``."""
+    received: dict[str, object] = {}
+
+    class KwargsTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            **kwargs,
+        ):
+            received["previous_trials"] = kwargs.get("previous_trials")
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=KwargsTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2]}),
+            y=pd.Series([1, 2]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            previous_trials=["trial-1"],
+        )
+
+    assert result == PhaseResult(score=0.95, params={"param": 1})
+    assert received["previous_trials"] == ["trial-1"]
+
+
+# --------------------------------------------------------------------------- #
+#  B1: TPE history transfer errors fail fast in the PARALLEL mode too
+# --------------------------------------------------------------------------- #
+def test_execute_phases_parallel_hpo_history_error_fails_fast():
+    """A TPE history transfer error (``HPOHistoryError``) inside a parallel
+    HPO worker is re-raised in the main process (fail fast) instead of being
+    swallowed by ``run_parallel``.
+
+    Without the propagation the error would be replaced with ``None`` and the
+    algorithm silently excluded — refine would degrade to a cold run with no
+    history transfer, exactly the behavior the fail-fast contract forbids.
+    """
+    cfg_dict = {
+        "general": {
+            "comparison_metric": "mae",
+            "validation_strategy": "train_test_split",
+            "parallel_strategy": "algorithms",
+            "parallel_mode": "threads",
+            "phases": [
+                {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+                {"name": "fine", "n_trials": 1, "action": "refine"},
+                TERMINAL_SELECT,
+            ],
+            "path_to_model": "model.pkl",
+        },
+        "algorithms": {
+            "elasticnet": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            },
+            "ridge": {
+                "enable": True,
+                "tuner": "unittest.mock",
+                "trainer_module": "unittest.mock",
+            },
+        },
+        "oversampling": {"enable": False},
+    }
+    cfg = Config.model_validate(cfg_dict)
+    cfg.general.phases = cfg.general.phases[:-1]
+    df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+    prepared = prepare_dataset(cfg, df, "target")
+
+    def hpo_side_effect(**kwargs):
+        raise HPOHistoryError("tuner does not accept `previous_trials`")
+
+    with patch(f"{_MODULE}._run_hpo", side_effect=hpo_side_effect):
+        with pytest.raises(HPOHistoryError, match="previous_trials"):
+            execute_phases(cfg, prepared)
 
 
 # Error if the target_col is missing from the DataFrame
@@ -927,7 +1030,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
 
     def hpo_side_effect(**kwargs):
         calls.append((kwargs["algo_name"], kwargs.get("initial_params")))
-        return 0.9, {"C": 1.0}
+        return PhaseResult(score=0.9, params={"C": 1.0})
 
     # Patch _run_hpo (called inside the nested _execute_hpo_phase)
     with patch(
@@ -989,7 +1092,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
             stack.enter_context(
                 patch(
                     "configurable_automl_engine.training_engine.component._run_hpo",
-                    return_value=(0.9, {}),
+                    return_value=PhaseResult(score=0.9, params={}),
                 )
             )
             mock_save = stack.enter_context(
@@ -1069,13 +1172,13 @@ def test_refine_uses_initial_params_from_phase1():
         call_count += 1
         if call_count == 1:
             # Phase 1: MAE = 0.9 (raw = -0.9)
-            return -0.9, {"alpha": 0.5, "l1_ratio": 0.3}
+            return PhaseResult(score=-0.9, params={"alpha": 0.5, "l1_ratio": 0.3})
         # Phase 2 (refine): initial_params must contain the Phase 1 parameters
         assert kwargs["initial_params"] == {"alpha": 0.5, "l1_ratio": 0.3}, (
             f"expected Phase 1 params, got {kwargs['initial_params']}"
         )
         # Return an improved score: MAE = 0.8 (raw = -0.8)
-        return -0.8, {"alpha": 0.6, "l1_ratio": 0.4}
+        return PhaseResult(score=-0.8, params={"alpha": 0.6, "l1_ratio": 0.4})
 
     cfg, prepared = _hpo_only_cfg_and_prepared(
         config_dict["general"]["phases"], df, config_dict["algorithms"]
@@ -1091,10 +1194,10 @@ def test_refine_uses_initial_params_from_phase1():
     # Same names, updated records: refine output replaces the working set
     assert set(phase_results) == {"elasticnet"}
     # Monotonicity: the raw Phase 2 score (-0.8) is not worse than Phase 1 (-0.9)
-    score, params = phase_results["elasticnet"]
-    assert score == pytest.approx(-0.8)
-    assert score > -0.9, "Score must be monotonically non-decreasing between phases"
-    assert params == {"alpha": 0.6, "l1_ratio": 0.4}
+    record = phase_results["elasticnet"]
+    assert record.score == pytest.approx(-0.8)
+    assert record.score > -0.9, "Score must be monotonically non-decreasing between phases"
+    assert record.params == {"alpha": 0.6, "l1_ratio": 0.4}
     assert mock_hpo.call_count == 2
 
 
@@ -1135,7 +1238,7 @@ def test_result_score_matches_logged_user_value(caplog):
     with (
         patch(
             "configurable_automl_engine.training_engine.component._run_hpo",
-            return_value=(-0.12345, {"alpha": 0.1}),
+            return_value=PhaseResult(score=-0.12345, params={"alpha": 0.1}),
         ),
         patch(
             "configurable_automl_engine.training_engine.component._fit_and_save",
@@ -1178,7 +1281,7 @@ def test_refine_first_phase_runs_without_warm_start():
     def hpo_side_effect(**kwargs):
         # The first phase — warm-start has nowhere to come from
         assert kwargs.get("initial_params") is None
-        return 0.9, {"alpha": 0.5}
+        return PhaseResult(score=0.9, params={"alpha": 0.5})
 
     cfg, prepared = _hpo_only_cfg_and_prepared(
         config_dict["general"]["phases"], df, config_dict["algorithms"]
@@ -1192,7 +1295,7 @@ def test_refine_first_phase_runs_without_warm_start():
         disqualified = ctx.disqualified_algorithms
 
     assert set(phase_results) == {"elasticnet"}
-    assert phase_results["elasticnet"] == (0.9, {"alpha": 0.5})
+    assert phase_results["elasticnet"] == PhaseResult(score=0.9, params={"alpha": 0.5})
     assert disqualified == {}
 
 
@@ -1499,7 +1602,7 @@ class TestPartialNoneResults:
                 return None
             # comparison_metric='rmse': the "raw" scorer value is -RMSE,
             # the user is returned a positive RMSE
-            return (-0.42, {"n_estimators": 10})
+            return PhaseResult(score=-0.42, params={"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1520,7 +1623,7 @@ class TestPartialNoneResults:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return None
-            return (0.42, {"n_estimators": 10})
+            return PhaseResult(score=0.42, params={"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1547,7 +1650,7 @@ class TestWorstScoreResultsExcluded:
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
         """All algorithms returned HPO_WORST_SCORE → a clean RuntimeError."""
-        mock_hpo.side_effect = lambda **kwargs: (HPO_WORST_SCORE, {"n_estimators": 10})
+        mock_hpo.side_effect = lambda **kwargs: PhaseResult(score=HPO_WORST_SCORE, params={"n_estimators": 10})
 
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=config_two_algos, df=minimal_df, target="target")
@@ -1564,10 +1667,10 @@ class TestWorstScoreResultsExcluded:
         """One algorithm with HPO_WORST_SCORE, the second valid → the second wins."""
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
-                return HPO_WORST_SCORE, {"n_estimators": 10}
+                return PhaseResult(score=HPO_WORST_SCORE, params={"n_estimators": 10})
             # comparison_metric='rmse': the "raw" scorer value is -RMSE,
             # the user is returned a positive RMSE
-            return -0.42, {"n_estimators": 10}
+            return PhaseResult(score=-0.42, params={"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1597,8 +1700,8 @@ class TestWorstScoreResultsExcluded:
 
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
-                return raw_f32_min, {"n_estimators": 10}
-            return -0.42, {"n_estimators": 10}
+                return PhaseResult(score=raw_f32_min, params={"n_estimators": 10})
+            return PhaseResult(score=-0.42, params={"n_estimators": 10})
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1624,7 +1727,7 @@ class TestWorstScoreResultsExcluded:
         float32 minimum are discarded — the old isclose filter let them through.
         """
         bad_results = [
-            (None, {"n_estimators": 10}),  # score is None
+            PhaseResult(score=None, params={"n_estimators": 10}),  # score is None
             (0.5, None),  # params is None
             (float("nan"), {"n_estimators": 10}),  # NaN
             (float("-inf"), {"n_estimators": 10}),  # -inf
@@ -1635,7 +1738,7 @@ class TestWorstScoreResultsExcluded:
             (np.float32("-inf"), {"n_estimators": 10}),
             # worst-score sentinel class: the exact constant and the
             # "raw" float32 minimum (and its numpy representation)
-            (HPO_WORST_SCORE, {"n_estimators": 10}),
+            PhaseResult(score=HPO_WORST_SCORE, params={"n_estimators": 10}),
             (float(np.finfo(np.float32).min), {"n_estimators": 10}),
             (np.float32(np.finfo(np.float32).min), {"n_estimators": 10}),
         ]
@@ -1665,7 +1768,7 @@ class TestWorstScoreResultsExcluded:
         """
         garbage_results = [
             "not-a-number",  # string: ValueError in to_user_value → excluded
-            ("0.5", {"n_estimators": 10}),  # numeric string → excluded by the filter
+            PhaseResult(score="0.5", params={"n_estimators": 10}),  # numeric string → excluded by the filter
             (0.5, "params-garbage"),  # params not dict/None — excluded by the filter
         ]
         for garbage in garbage_results:
@@ -1727,7 +1830,7 @@ class TestWorstScoreResultsExcluded:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return None  # complete HPO failure (all trials cut off)
-            return -0.8, {"alpha": 0.5}  # MAE 0.8
+            return PhaseResult(score=-0.8, params={"alpha": 0.5})  # MAE 0.8
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1869,7 +1972,7 @@ class TestWorstScoreResultsExcluded:
         def hpo_side_effect(**kwargs):
             if kwargs["algo_name"] == "random_forest":
                 return None  # complete HPO failure (all trials pruned)
-            return -0.8, {"alpha": 0.5}  # MAE 0.8
+            return PhaseResult(score=-0.8, params={"alpha": 0.5})  # MAE 0.8
 
         mock_hpo.side_effect = hpo_side_effect
         mock_save.return_value = None
@@ -1966,7 +2069,7 @@ class TestWorstScoreResultsExcluded:
         extra_trees in the AVAILABLE_ALGORITHMS registry, so on equal scores
         random_forest is declared the winner (max is stable).
         """
-        mock_hpo.side_effect = lambda **kwargs: (-0.5, {"n_estimators": 10})
+        mock_hpo.side_effect = lambda **kwargs: PhaseResult(score=-0.5, params={"n_estimators": 10})
         mock_save.return_value = None
 
         result = train_best_model(
@@ -1997,7 +2100,7 @@ class TestWorstScoreResultsExcluded:
         that ends up in result["score"] must be finite and strictly above
         HPO_WORST_SCORE; a sentinel/NaN/±inf cannot physically leak through.
         """
-        mock_hpo.side_effect = lambda **kwargs: (raw_score, {"n_estimators": 10})
+        mock_hpo.side_effect = lambda **kwargs: PhaseResult(score=raw_score, params={"n_estimators": 10})
         mock_save.return_value = None
 
         result = train_best_model(
@@ -2087,10 +2190,10 @@ class TestRefineFailureCleanup:
             call_count += 1
             if call_count == 1:
                 # Phase 1: a valid result
-                return 0.8, {"alpha": 0.5}
+                return PhaseResult(score=0.8, params={"alpha": 0.5})
             # Phase 2 (refine): a complete failure — the tuner returned
             # the "worst score" with parameters (all trials with a non-finite metric)
-            return HPO_WORST_SCORE, {"alpha": 0.9}
+            return PhaseResult(score=HPO_WORST_SCORE, params={"alpha": 0.9})
 
         mock_hpo.side_effect = hpo_side_effect
 
@@ -2156,12 +2259,12 @@ class TestMultiPhaseFailureExclusion:
             if algo == "random_forest":
                 if calls[algo] == 1:
                     # MAE = 0.9 (raw = -0.9)
-                    return -0.9, {"n_estimators": 50}
+                    return PhaseResult(score=-0.9, params={"n_estimators": 50})
                 return None  # complete failure in the 2nd phase
             # elasticnet — valid in both phases: MAE 0.7 → 0.8 (raw: -0.7 → -0.8)
             if calls[algo] == 1:
-                return -0.7, {"alpha": 0.5}
-            return -0.8, {"alpha": 0.7}
+                return PhaseResult(score=-0.7, params={"alpha": 0.5})
+            return PhaseResult(score=-0.8, params={"alpha": 0.7})
 
         mock_hpo.side_effect = hpo_side_effect
 
@@ -2172,7 +2275,7 @@ class TestMultiPhaseFailureExclusion:
         phase_results = ctx.working_set
 
         assert set(phase_results) == {"elasticnet"}
-        assert phase_results["elasticnet"] == (-0.8, {"alpha": 0.7})
+        assert phase_results["elasticnet"] == PhaseResult(score=-0.8, params={"alpha": 0.7})
 
     @patch(f"{_MODULE}._run_hpo")
     def test_s2_refine_none_failure_raises_runtime_error(
@@ -2209,7 +2312,7 @@ class TestMultiPhaseFailureExclusion:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return 0.9, {"alpha": 0.5}
+                return PhaseResult(score=0.9, params={"alpha": 0.5})
             return None  # canonical failure signal (all trials cut off)
 
         mock_hpo.side_effect = hpo_side_effect
@@ -2262,12 +2365,12 @@ class TestMultiPhaseFailureExclusion:
             calls[algo] = calls.get(algo, 0) + 1
             if algo == "random_forest":
                 if calls[algo] == 1:
-                    return 0.9, {"n_estimators": 50}
+                    return PhaseResult(score=0.9, params={"n_estimators": 50})
                 return None  # failure in refine — the candidate is excluded
             # elasticnet: MAE 0.8 → 0.5 (warm-start improved the score)
             if calls[algo] == 1:
-                return -0.8, {"alpha": 0.5}
-            return -0.5, {"alpha": 0.7}
+                return PhaseResult(score=-0.8, params={"alpha": 0.5})
+            return PhaseResult(score=-0.5, params={"alpha": 0.7})
 
         mock_hpo.side_effect = hpo_side_effect
 
@@ -2278,7 +2381,7 @@ class TestMultiPhaseFailureExclusion:
         phase_results = ctx.working_set
 
         assert set(phase_results) == {"elasticnet"}
-        assert phase_results["elasticnet"] == (-0.5, {"alpha": 0.7})
+        assert phase_results["elasticnet"] == PhaseResult(score=-0.5, params={"alpha": 0.7})
         # Both candidates participated in refine (there is no narrowing)
         assert calls["random_forest"] == 2
         assert calls["elasticnet"] == 2
@@ -2508,7 +2611,7 @@ def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.module"
     with patch("importlib.import_module", return_value=FsAwareTuner()):
-        score, params = _run_hpo(
+        result = _run_hpo(
             algo_name="test_algo",
             algo_cfg=algo_cfg,
             X=pd.DataFrame({"a": [1, 2, 3]}),
@@ -2518,6 +2621,9 @@ def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
             validation_strategy=ValidationStrategy.k_fold,
             feature_selection_cfg=fs_cfg,
         )
+        score = result.score
+        params = result.params
+
 
     assert score == 0.95
     assert params == {"param": 1}
@@ -2549,7 +2655,7 @@ def test_run_hpo_skips_feature_selection_cfg_for_legacy_tuner():
             ),
         )
 
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert calls["fs_passed"] is False
 
 
@@ -2580,7 +2686,7 @@ def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
             )
 
     # The tuner is untouched, but the user is warned
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert calls["fs_passed"] is False
     assert "does not accept `feature_selection_cfg`" in caplog.text
     assert "will NOT be applied during HPO" in caplog.text
@@ -2634,7 +2740,7 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
     algo_cfg.tuner = "some.var_kwargs.module"
     with patch("importlib.import_module", return_value=VarKwargsTuner()):
         with caplog.at_level("WARNING", logger="training_engine"):
-            score, params = _run_hpo(
+            result = _run_hpo(
                 algo_name="test_algo",
                 algo_cfg=algo_cfg,
                 X=pd.DataFrame({"a": [1, 2, 3]}),
@@ -2644,6 +2750,9 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
                 validation_strategy=ValidationStrategy.k_fold,
                 feature_selection_cfg=fs_cfg,
             )
+            score = result.score
+            params = result.params
+
 
     assert score == 0.95
     assert params == {"param": 1}
@@ -2677,7 +2786,7 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
             feature_selection_cfg=FeatureSelectionCfg(),  # disabled by default
         )
 
-    assert result == (0.5, {})
+    assert result == PhaseResult(score=0.5, params={})
     assert isinstance(received["feature_selection_cfg"], FeatureSelectionCfg)
     assert received["feature_selection_cfg"].mode == FeatureSelectionMode.disabled
 
@@ -3050,14 +3159,14 @@ def test_refine_preserves_feature_selection_status_between_phases():
         call_count += 1
         if call_count == 1:
             # Phase 1: the candidate recorded use_feature_selection=True
-            return 0.8, {"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True}
+            return PhaseResult(score=0.8, params={"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True})
         # Phase 2 (refine): initial_params must contain the selection status from phase 1
         assert kwargs.get("initial_params") == {
             "alpha": 0.5,
             "l1_ratio": 0.3,
             "use_feature_selection": True,
         }, f"expected fs status in initial_params, got {kwargs.get('initial_params')}"
-        return 0.9, {"alpha": 0.6, "l1_ratio": 0.4, "use_feature_selection": True}
+        return PhaseResult(score=0.9, params={"alpha": 0.6, "l1_ratio": 0.4, "use_feature_selection": True})
 
     cfg, prepared = _hpo_only_cfg_and_prepared(
         config_dict["general"]["phases"], df, config_dict["algorithms"]
@@ -3070,7 +3179,7 @@ def test_refine_preserves_feature_selection_status_between_phases():
         phase_results = ctx.working_set
 
     # The refine output preserved the selection decision from the previous phase
-    assert phase_results["elasticnet"][1]["use_feature_selection"] is True
+    assert phase_results["elasticnet"].params["use_feature_selection"] is True
     assert mock_hpo.call_count == 2
 
 

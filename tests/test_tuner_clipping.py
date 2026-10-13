@@ -99,7 +99,7 @@ def test_optimize_integration_clipping(monkeypatch):
     )
 
     # Run the optimization
-    _, best_params, _ = optimize(
+    opt_res = optimize(
         "knn",
         X,
         y,
@@ -108,6 +108,9 @@ def test_optimize_integration_clipping(monkeypatch):
         validation_strategy="train_test_split",
         random_state=42,
     )
+    assert opt_res is not None
+    _, best_params, _ = opt_res.model, opt_res.params, opt_res.score
+
 
     # With 20 samples the n_neighbors limit is 19.
     # The original range [15, 100] must become [15, 19].

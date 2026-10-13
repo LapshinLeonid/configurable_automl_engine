@@ -36,6 +36,7 @@ import pytest
 import configurable_automl_engine.training_engine.component as component
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
+    PhaseResult,
     PreparedData,
     execute_phases,
     load_config,
@@ -355,9 +356,9 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return scores[kw["algo_name"]], {"p": 1}
+        return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
@@ -366,7 +367,7 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     # The terminal select (cv_best, winner) replaces the working set
     # with a single winner entry.
     assert set(ctx.working_set) == {"random_forest"}
-    assert ctx.working_set["random_forest"] == (0.9, {"p": 1})
+    assert ctx.working_set["random_forest"] == PhaseResult(score=0.9, params={"p": 1})
     assert ctx.winner_algo == "random_forest"
     assert ctx.disqualified_algorithms == {}
     assert ctx.sanity_gate_sections == {}
@@ -395,9 +396,9 @@ def test_execute_phases_select_cv_best_top_k_replaces_working_set():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return scores[kw["algo_name"]], {"p": 1}
+        return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -427,11 +428,11 @@ def test_execute_phases_refine_uses_initial_params_for_all_candidates():
 
     calls: list[tuple[str, Any]] = []
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         algo = kw["algo_name"]
         calls.append((algo, kw.get("initial_params")))
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return scores[algo], {"p": 1}
+        return PhaseResult(score=scores[algo], params={"p": 1})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -446,8 +447,8 @@ def test_execute_phases_refine_uses_initial_params_for_all_candidates():
     ]
     # Same names, updated records: the output replaces the working set.
     assert set(ctx.working_set) == {"random_forest", "extra_trees"}
-    assert ctx.working_set["random_forest"] == (0.9, {"p": 1})
-    assert ctx.working_set["extra_trees"] == (0.8, {"p": 1})
+    assert ctx.working_set["random_forest"] == PhaseResult(score=0.9, params={"p": 1})
+    assert ctx.working_set["extra_trees"] == PhaseResult(score=0.8, params={"p": 1})
     assert ctx.disqualified_algorithms == {}
 
 
@@ -476,11 +477,11 @@ def test_execute_phases_refine_after_select_warm_starts_from_select_output():
 
     calls: list[tuple[str, Any]] = []
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         algo = kw["algo_name"]
         calls.append((algo, kw.get("initial_params")))
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return scores[algo], {"p": 1}
+        return PhaseResult(score=scores[algo], params={"p": 1})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -511,7 +512,7 @@ def test_execute_phases_refine_empty_working_set_raises():
     cfg.algorithms.random_forest.enable = False
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(component, "_run_hpo", return_value=(0.9, {})):
+    with patch.object(component, "_run_hpo", return_value=PhaseResult(score=0.9, params={})):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -542,10 +543,10 @@ def test_execute_phases_filters_worst_score_sentinel():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         if kw["algo_name"] == "random_forest":
-            return HPO_WORST_SCORE, {"p": 1}  # sentinel -> excluded
-        return 0.7, {"p": 2}
+            return PhaseResult(score=HPO_WORST_SCORE, params={"p": 1})  # sentinel -> excluded
+        return PhaseResult(score=0.7, params={"p": 2})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -561,10 +562,10 @@ def test_execute_phases_disqualifies_invalid_algorithm():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    def fake_run_hpo(**kw: Any) -> tuple[float, dict[str, Any]]:
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
         if kw["algo_name"] == "random_forest":
             raise InvalidAlgorithmError("incompatible with data")
-        return 0.7, {"p": 2}
+        return PhaseResult(score=0.7, params={"p": 2})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -853,7 +854,7 @@ def test_train_best_model_orchestrates_steps_in_order():
     cfg = MagicMock()
     prepared = MagicMock()
     ctx = PhaseContext(
-        working_set={"rf": (0.9, {})},
+        working_set={"rf": PhaseResult(score=0.9, params={})},
         winner_algo="rf",
         pre_trained_trainer=None,
     )
@@ -918,7 +919,7 @@ def test_train_best_model_no_winner_skips_persist():
 def test_train_best_model_invalid_winner_score_raises():
     """Winner-score invariant: the sentinel never reaches the report."""
     sentinel = float(np.finfo(np.float32).min)
-    ctx = PhaseContext(working_set={"rf": (sentinel, {})}, winner_algo="rf")
+    ctx = PhaseContext(working_set={"rf": PhaseResult(score=sentinel, params={})}, winner_algo="rf")
     with (
         patch.object(component, "load_config", return_value=(MagicMock(), "target")),
         patch.object(component, "prepare_dataset", return_value=MagicMock()),
@@ -935,7 +936,7 @@ def test_train_best_model_passes_context_to_persist():
     """Disqualifications/trainer/context sections are forwarded to persist_artifact."""
     trainer = object()
     ctx = PhaseContext(
-        working_set={"ridge": (-0.25, {"alpha": 1.0})},
+        working_set={"ridge": PhaseResult(score=-0.25, params={"alpha": 1.0})},
         disqualified_algorithms={"elasticnet": "Circuit A"},
         sanity_gate_sections={"gate": {"pool": ["ridge"]}},
         winner_algo="ridge",
@@ -969,3 +970,109 @@ def mocker_patch_read_config():
     cfg_mock.general.log_to_file = None
     with patch.object(component, "read_config", return_value=cfg_mock) as read_mock:
         yield cfg_mock, read_mock
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Refine: TPE history transfer (previous_trials) + no-fallback contract
+# ──────────────────────────────────────────────────────────────────────────────
+def _completed_trial() -> Any:
+    """A single COMPLETED FrozenTrial to simulate the previous phase's history."""
+    from optuna.distributions import CategoricalDistribution
+    from optuna.trial import TrialState, create_trial
+
+    return create_trial(
+        value=0.9,
+        params={"p": 1},
+        distributions={"p": CategoricalDistribution(choices=[1])},
+        state=TrialState.COMPLETE,
+    )
+
+
+def test_execute_phases_refine_passes_previous_trials():
+    """refine after all_algorithms forwards the previous phase's own trials
+    as previous_trials (the TPE history warm-start), in addition to
+    initial_params (the monotonicity anchor)."""
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "fine", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest", "extra_trees"],
+    )
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+
+    calls: list[tuple[str, Any, Any]] = []
+    history = _completed_trial()
+
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
+        algo = kw["algo_name"]
+        prev = kw.get("previous_trials")
+        calls.append((algo, kw.get("initial_params"), None if prev is None else list(prev)))
+        return PhaseResult(score=0.9, params={"p": 1}, trials=[history])
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        execute_phases(cfg, prepared)
+
+    # Phase 1 (all_algorithms): no warm-start; phase 2 (refine): the previous
+    # phase's trials are passed as previous_trials.
+    assert calls == [
+        ("random_forest", None, None),
+        ("extra_trees", None, None),
+        ("random_forest", {"p": 1}, [history]),
+        ("extra_trees", {"p": 1}, [history]),
+    ]
+
+
+def test_execute_phases_refine_total_failure_raises_with_history():
+    """N1 (no fallback): if ALL NEW refine trials fail (produce no valid
+    score) while transferred COMPLETED history is present, the working set is
+    wiped out and RuntimeError is raised — no silent fallback to the
+    pre-refine parameters."""
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "fine", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest"],
+    )
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+
+    def fake_run_hpo(**kw: Any) -> Any:
+        if kw.get("initial_params") is None:
+            # phase 1 succeeds and produces a COMPLETED trial (transferred history).
+            return PhaseResult(score=0.9, params={"p": 1}, trials=[_completed_trial()])
+        # refine: all new trials fail (None) despite the transferred history.
+        return None
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
+            execute_phases(cfg, prepared)
+
+
+def test_hpo_phases_use_different_random_seeds():
+    """B6/per-phase seeds: the first HPO phase (all_algorithms) uses
+    RANDOM_STATE (42), and each following HPO phase (refine) gets the next
+    seed (43, 44, ...). Select steps are not counted."""
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "fine1", "n_trials": 1, "action": "refine"},
+            {"name": "gate", "n_trials": 1, "action": "select",
+             "strategy": "cv_best", "output": "top_k", "k": 1},
+            {"name": "fine2", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest", "extra_trees"],
+    )
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+    seeds: list[int] = []
+
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
+        seeds.append(kw["random_state"])
+        return PhaseResult(score=0.9, params={"p": 1})
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        execute_phases(cfg, prepared)
+
+    # coarse: 2 algos × seed 42; fine1 (refine): 2 algos × seed 43;
+    # the gate select (top_k, k=1) narrows to 1 algo; fine2 (refine): 1 × 44.
+    assert seeds == [42, 42, 43, 43, 44]
