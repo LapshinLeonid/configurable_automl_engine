@@ -718,6 +718,117 @@ def test_run_hpo_skips_test_size_for_legacy_tuner():
     assert calls["test_size_passed"] is False
 
 
+# issue #119: the data-split seed (random_state) and the TPE sampler seed
+# (sampler_seed) are forwarded separately to tuners.
+def test_run_hpo_forwards_sampler_seed_and_fixed_random_state():
+    """The engine forwards the fixed data-split seed as random_state and the
+    per-phase sampler seed as sampler_seed to tuners that accept both."""
+    received: dict[str, object] = {}
+
+    class TwoSeedTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            random_state=None,
+            sampler_seed=None,
+        ):
+            received["random_state"] = random_state
+            received["sampler_seed"] = sampler_seed
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=TwoSeedTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="r2",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            random_state=42,
+            sampler_seed=43,
+        )
+        score = result.score
+        params = result.params
+
+    assert score == 0.95
+    assert params == {"param": 1}
+    assert received["random_state"] == 42
+    assert received["sampler_seed"] == 43
+
+
+def test_run_hpo_skips_sampler_seed_for_legacy_tuner():
+    """A custom tuner without the sampler_seed argument does not receive it
+    (unaffected); it still gets the fixed data-split random_state."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            random_state=None,
+        ):
+            calls["sampler_seed_passed"] = "sampler_seed" in locals()
+            calls["random_state"] = random_state
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            random_state=42,
+            sampler_seed=43,
+        )
+
+    assert result == PhaseResult(score=0.5, params={})
+    assert calls["sampler_seed_passed"] is False
+    assert calls["random_state"] == 42
+
+
+def test_execute_phases_splits_sampler_and_split_seeds():
+    """issue #119: execute_phases passes the fixed RANDOM_STATE as the
+    data-split seed and RANDOM_STATE + phase_ordinal as the sampler seed."""
+    captured: list[tuple[Any, Any]] = []
+
+    def hpo_side_effect(**kwargs):
+        captured.append((kwargs.get("random_state"), kwargs.get("sampler_seed")))
+        return PhaseResult(score=0.5, params={"alpha": 0.5})
+
+    df = pd.DataFrame({"a": [1, 2, 3, 4], "target": [1.0, 2.0, 3.0, 4.0]})
+    phases = [
+        {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+        {"name": "fine", "n_trials": 1, "action": "refine"},
+    ]
+    cfg, prepared = _hpo_only_cfg_and_prepared(
+        phases, df, {"elasticnet": {"enable": True}}
+    )
+    with patch(f"{_MODULE}._run_hpo", side_effect=hpo_side_effect):
+        execute_phases(cfg, prepared)
+
+    # Phase 1 (all_algorithms): folds=42 (RANDOM_STATE), sampler=42.
+    # Phase 2 (refine): folds stay 42 (the same splits), sampler=43.
+    assert captured == [(42, 42), (42, 43)]
+
+
 # Early stopping (pruning): forwarding the settings to the tuner
 def test_run_hpo_passes_pruning_when_tuner_supports_it():
     """Early-stopping settings are passed to a tuner that supports `pruning`."""

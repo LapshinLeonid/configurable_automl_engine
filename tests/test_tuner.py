@@ -23,6 +23,8 @@ import yaml
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import FixedTrial
 from sklearn.datasets import make_regression
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler
 
 from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.common.hyperopt_defaults import (
@@ -1791,6 +1793,7 @@ def test_runner_dropped_features_recorded():
         n_folds=5,
         n_trials=2,
         random_state=0,
+        sampler_seed=None,
         train_test_split_test_size=0.2,
         space_overrides=None,
         initial_params=None,
@@ -1844,6 +1847,7 @@ def test_optimize_external_preprocessor_skips_cleaning():
         n_folds=5,
         n_trials=2,
         random_state=0,
+        sampler_seed=None,
         train_test_split_test_size=0.2,
         space_overrides=None,
         initial_params=None,
@@ -2076,3 +2080,152 @@ def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
     assert (result.model is not None) is expect_model
     assert isinstance(result.params, dict) and result.params
     assert isinstance(result.score, float) and np.isfinite(result.score)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  sampler_seed: separate the TPE sampler seed from the data-split seed
+#  (issue #119 — the phase seed must not change CV folds)
+# ──────────────────────────────────────────────────────────────────────────────
+def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
+    """Patch TPESampler to capture the seed while returning the real sampler."""
+    real_tpe = optuna.samplers.TPESampler
+    captured: dict[str, object] = {}
+
+    def capturing_tpe(*args, **kwargs):
+        captured["seed"] = kwargs.get("seed")
+        return real_tpe(*args, **kwargs)
+
+    return captured, patch(
+        "configurable_automl_engine.tuner.optuna.samplers.TPESampler",
+        side_effect=capturing_tpe,
+    )
+
+
+def test_optimize_sampler_seed_controls_tpe_only(toy_data):
+    """sampler_seed feeds the TPE sampler, while the CV object is built with
+    the fixed random_state (issue #119: the per-phase seed must not change
+    the folds)."""
+    X, y = toy_data
+    captured, tpe_patch = _capture_tpe_seed()
+    with (
+        tpe_patch,
+        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch(
+            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            return_value=np.array([0.5, 0.6, 0.7]),
+        ),
+    ):
+        mock_make_cv.return_value = (
+            "k_fold",
+            KFold(n_splits=3, shuffle=True, random_state=42),
+            None,
+        )
+        result = hyperopt.optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            random_state=42,
+            sampler_seed=43,
+            validation_strategy="k_fold",
+            n_folds=3,
+            space_overrides={"ridge": _ridge_space},
+        )
+
+    assert result is not None
+    # The TPE sampler runs with the per-phase sampler_seed...
+    assert captured["seed"] == 43
+    # ... while the folds are built with the fixed data-split seed.
+    _, make_cv_kwargs = mock_make_cv.call_args
+    assert make_cv_kwargs["random_state"] == 42
+
+
+def test_optimize_preprocessor_uses_random_state_not_sampler_seed(toy_data):
+    """The preprocessor (hashing / target-encoding cross-fit) is seeded with
+    random_state, not sampler_seed (issue #119)."""
+    X, y = toy_data
+    _, tpe_patch = _capture_tpe_seed()
+    with (
+        tpe_patch,
+        patch("configurable_automl_engine.tuner.build_preprocessor") as mock_bp,
+        patch(
+            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            return_value=np.array([0.5, 0.6]),
+        ),
+    ):
+        mock_bp.return_value = StandardScaler()
+        result = hyperopt.optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            random_state=42,
+            sampler_seed=43,
+            validation_strategy="k_fold",
+            n_folds=2,
+            numerical_features=list(X.columns),
+            space_overrides={"ridge": _ridge_space},
+        )
+
+    assert result is not None
+    _, bp_kwargs = mock_bp.call_args
+    assert bp_kwargs["random_state"] == 42
+
+
+def test_optimize_sampler_seed_none_falls_back_to_random_state(toy_data):
+    """Backward compatibility: without sampler_seed the TPE sampler uses
+    random_state exactly as before the split."""
+    X, y = toy_data
+    captured, tpe_patch = _capture_tpe_seed()
+    with (
+        tpe_patch,
+        patch(
+            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            return_value=np.array([0.5, 0.6]),
+        ),
+    ):
+        result = hyperopt.optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            random_state=42,
+            validation_strategy="k_fold",
+            n_folds=2,
+            space_overrides={"ridge": _ridge_space},
+        )
+
+    assert result is not None
+    assert captured["seed"] == 42
+
+
+def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
+    """issue #119: with a fixed random_state (the same folds across phases)
+    and a per-phase sampler_seed, the params enqueued from the previous phase
+    are re-evaluated on the SAME folds — refine can only improve the score."""
+    X, y = toy_data
+    first = hyperopt.optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        random_state=42,
+        sampler_seed=42,
+        fit_best_model=False,
+        space_overrides={"ridge": _ridge_space},
+    )
+    assert first is not None
+
+    second = hyperopt.optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        random_state=42,
+        sampler_seed=43,
+        initial_params=first.params,
+        fit_best_model=False,
+        space_overrides={"ridge": _ridge_space},
+    )
+    assert second is not None
+    assert second.score >= first.score

@@ -1049,10 +1049,12 @@ def test_execute_phases_refine_total_failure_raises_with_history():
             execute_phases(cfg, prepared)
 
 
-def test_hpo_phases_use_different_random_seeds():
-    """B6/per-phase seeds: the first HPO phase (all_algorithms) uses
-    RANDOM_STATE (42), and each following HPO phase (refine) gets the next
-    seed (43, 44, ...). Select steps are not counted."""
+def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
+    """B6/per-phase seeds: the TPE sampler seed of the first HPO phase
+    (all_algorithms) is RANDOM_STATE (42), and each following HPO phase
+    (refine) gets the next sampler seed (43, 44, ...). Select steps are not
+    counted. The data-split/preprocessor seed (random_state) stays the fixed
+    RANDOM_STATE for every phase (issue #119)."""
     cfg = _hpo_only_cfg(
         [
             {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
@@ -1064,15 +1066,19 @@ def test_hpo_phases_use_different_random_seeds():
         algorithms=["random_forest", "extra_trees"],
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
-    seeds: list[int] = []
+    sampler_seeds: list[int] = []
+    split_seeds: list[int] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        seeds.append(kw["random_state"])
+        sampler_seeds.append(kw["sampler_seed"])
+        split_seeds.append(kw["random_state"])
         return PhaseResult(score=0.9, params={"p": 1})
 
     with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
         execute_phases(cfg, prepared)
 
-    # coarse: 2 algos × seed 42; fine1 (refine): 2 algos × seed 43;
+    # coarse: 2 algos × sampler seed 42; fine1 (refine): 2 algos × 43;
     # the gate select (top_k, k=1) narrows to 1 algo; fine2 (refine): 1 × 44.
-    assert seeds == [42, 42, 43, 43, 44]
+    assert sampler_seeds == [42, 42, 43, 43, 44]
+    # The folds/preprocessor seed is the fixed RANDOM_STATE for every phase.
+    assert split_seeds == [42, 42, 42, 42, 42]

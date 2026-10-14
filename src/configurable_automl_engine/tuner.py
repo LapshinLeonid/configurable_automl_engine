@@ -685,6 +685,7 @@ class _OptimizeRunner:
         n_folds: int,
         n_trials: int,
         random_state: int | None,
+        sampler_seed: int | None,
         train_test_split_test_size: float,
         space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None,
         initial_params: dict[str, Any] | None,
@@ -718,6 +719,16 @@ class _OptimizeRunner:
         self.n_folds = n_folds
         self.n_trials = n_trials
         self.random_state = random_state
+        # The seed of the TPE sampler. Deliberately separate from
+        # ``random_state`` (which drives the data splits and the preprocessor):
+        # each HPO phase may use a different ``sampler_seed`` so that TPE
+        # startup points do not repeat, while the folds/splits stay the same
+        # (RANDOM_STATE) — otherwise every phase would re-evaluate models on
+        # other folds, breaking score monotonicity and mixing incomparable
+        # estimates in the transferred TPE history. ``None`` (the default for
+        # direct callers) falls back to ``random_state`` to preserve the old
+        # behavior.
+        self.sampler_seed = sampler_seed
         self.train_test_split_test_size = train_test_split_test_size
         self.space_overrides = space_overrides
         self.initial_params = initial_params
@@ -807,9 +818,16 @@ class _OptimizeRunner:
 
         # If early stopping is disabled, explicitly disable any pruner
         # (NopPruner) so that trials are guaranteed to run to completion.
+        # The TPE sampler uses ``sampler_seed`` (per-phase, so startup points
+        # do not repeat between HPO phases); the data splits and the
+        # preprocessor keep ``random_state`` (RANDOM_STATE from the engine),
+        # so every phase evaluates models on the same folds.
+        sampler_seed = (
+            self.sampler_seed if self.sampler_seed is not None else self.random_state
+        )
         self.study = optuna.create_study(
             direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=self.random_state),
+            sampler=optuna.samplers.TPESampler(seed=sampler_seed),
             pruner=self.pruner if self.pruning_active else optuna.pruners.NopPruner(),
         )
         # TPE history transfer BEFORE enqueue_trial/optimize: the transferred
@@ -1650,6 +1668,7 @@ def optimize(
     n_folds: int = 5,
     n_trials: int = 50,
     random_state: int | None = 42,
+    sampler_seed: int | None = None,
     train_test_split_test_size: float = 0.2,
     space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
     initial_params: dict[str, Any] | None = None,
@@ -1691,11 +1710,20 @@ def optimize(
             ``val_method`` (takes precedence).
         n_folds (int): Number of cross-validation folds. Defaults to 5.
         n_trials (int): Number of search iterations (trials). Defaults to 50.
-        random_state (int | None): Randomness state for reproducibility.
-            Defaults to 42. With ``None``, the Optuna randomness (TPE sampler,
-            splits) is not fixed; however, the feature selection step
-            (``FeatureSelector``) always uses the fixed seed 42 so that
-            selection stays reproducible across runs.
+        random_state (int | None): Randomness state for the data splits and
+            the preprocessor (CV folds, train_test_split, pruning folds,
+            hashing / target-encoding cross-fit). Defaults to 42. With
+            ``None``, the data splits are not fixed; however, the feature
+            selection step (``FeatureSelector``) always uses the fixed seed 42
+            so that selection stays reproducible across runs.
+        sampler_seed (int | None): Seed of the TPE sampler, separated from
+            ``random_state`` so that each HPO phase can use a different
+            sampler seed (e.g. ``RANDOM_STATE + phase_ordinal``) while the
+            data splits stay fixed across phases. This keeps CV evaluations
+            comparable between phases (score monotonicity of
+            ``enqueue_trial``, consistent TPE history). ``None`` (default) —
+            the sampler falls back to ``random_state`` (backward-compatible
+            behavior for direct callers).
         train_test_split_test_size (float): Test size for split validation.
             Defaults to 0.2.
         space_overrides (dict | None): Dict for overriding search spaces.
@@ -1809,6 +1837,7 @@ def optimize(
         n_folds=n_folds,
         n_trials=n_trials,
         random_state=random_state,
+        sampler_seed=sampler_seed,
         train_test_split_test_size=train_test_split_test_size,
         space_overrides=space_overrides,
         initial_params=initial_params,

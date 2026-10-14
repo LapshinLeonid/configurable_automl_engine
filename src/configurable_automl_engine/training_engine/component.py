@@ -1174,6 +1174,7 @@ def _run_hpo(
     initial_params: dict[str, Any] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
     random_state: int | None = None,
+    sampler_seed: int | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: str = "one_hot",
@@ -1228,11 +1229,19 @@ def _run_hpo(
             configuration error — ``HPOHistoryError`` is raised (fail fast),
             refine must not silently degrade to a cold run. An empty list is a
             no-op.
-        random_state (int | None): The random seed of the current HPO phase
-            (``RANDOM_STATE + hpo_phase_ordinal``). Always forwarded to tuners
-            that accept the argument — for the bundled
-            ``configurable_automl_engine.tuner`` it is mandatory so that each
-            phase uses a different seed and TPE startup points do not repeat.
+        random_state (int | None): The random seed of the data splits and the
+            preprocessor (CV folds, train_test_split, pruning folds, hashing /
+            target-encoding cross-fit). Always forwarded to tuners that accept
+            the argument — for the bundled
+            ``configurable_automl_engine.tuner`` it must be the fixed
+            ``RANDOM_STATE`` so that every HPO phase (and the final
+            ``ModelTrainer`` fit) evaluates models on the SAME folds.
+        sampler_seed (int | None): The seed of the TPE sampler, separated from
+            ``random_state``: it changes per HPO phase
+            (``RANDOM_STATE + hpo_phase_ordinal``) so that TPE startup points
+            do not repeat, while the data splits stay fixed. Forwarded to
+            tuners that accept the ``sampler_seed`` argument (the bundled
+            tuner); custom tuners without the argument are unaffected.
         categorical_features (list[str] | None): Categorical column names,
             detected once in ``train_best_model`` and passed to the tuner.
         numerical_features (list[str] | None): Numerical column names.
@@ -1303,10 +1312,17 @@ def _run_hpo(
         "validation_strategy": validation_strategy,
     }
 
-    # pass the phase random seed if the tuner supports it (mandatory for the
-    # bundled tuner: each HPO phase must use a different seed)
+    # pass the data-split seed if the tuner supports it (mandatory for the
+    # bundled tuner: every HPO phase and the final fit must use the same
+    # folds/preprocessor — RANDOM_STATE)
     if "random_state" in sig.parameters:
         kwargs["random_state"] = random_state
+
+    # pass the per-phase TPE sampler seed if the tuner supports it (mandatory
+    # for the bundled tuner: each HPO phase uses a different seed so that TPE
+    # startup points do not repeat, while the folds stay fixed)
+    if "sampler_seed" in sig.parameters:
+        kwargs["sampler_seed"] = sampler_seed
 
     # pass n_folds if the module supports it
     if (
@@ -1965,7 +1981,11 @@ class _HpoPhaseSpec:
         target_encoding_fallback (float | None): Target encoding fallback.
         feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
             selection configuration.
-        random_state (int | None): The random seed of the current HPO phase
+        random_state (int | None): The random seed of the data splits and the
+            preprocessor — the fixed ``RANDOM_STATE`` for every HPO phase
+            (so folds stay comparable between phases and with the final
+            ``ModelTrainer`` fit).
+        sampler_seed (int | None): The per-phase TPE sampler seed
             (``RANDOM_STATE + hpo_phase_ordinal`` — a different seed per HPO
             phase, so TPE random startup points do not repeat between phases).
     """
@@ -1992,6 +2012,7 @@ class _HpoPhaseSpec:
     target_encoding_fallback: float | None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
     random_state: int | None = None
+    sampler_seed: int | None = None
 
 
 def _prepare_search_space(
@@ -2036,6 +2057,7 @@ def _execute_hpo_phase(
     initial_params: dict[str, Any] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
     random_state: int | None = None,
+    sampler_seed: int | None = None,
 ) -> PhaseResult | None:
     """Run a specific HPO phase for an algorithm (module-level function).
 
@@ -2054,8 +2076,11 @@ def _execute_hpo_phase(
         initial_params (dict[str, Any] | None): Warm-start parameters (refine).
         previous_trials (list[FrozenTrial] | None): The TPE history of the
             previous phase (refine warm-start), forwarded to ``_run_hpo``.
-        random_state (int | None): The random seed of the current HPO phase,
-            forwarded to ``_run_hpo``.
+        random_state (int | None): The random seed of the data splits and the
+            preprocessor (the fixed ``RANDOM_STATE``), forwarded to
+            ``_run_hpo``.
+        sampler_seed (int | None): The per-phase TPE sampler seed
+            (``RANDOM_STATE + hpo_phase_ordinal``), forwarded to ``_run_hpo``.
 
     Returns:
         PhaseResult | None: The phase result (score, params, trials), or
@@ -2086,6 +2111,7 @@ def _execute_hpo_phase(
             initial_params=initial_params,
             previous_trials=previous_trials,
             random_state=random_state,
+            sampler_seed=sampler_seed,
             categorical_features=spec.categorical_features,
             numerical_features=spec.numerical_features,
             encoding=spec.encoding,
@@ -2181,6 +2207,7 @@ def _hpo_phase_worker(
             initial_params=init_params,
             previous_trials=previous_trials,
             random_state=spec.random_state,
+            sampler_seed=spec.sampler_seed,
         )
 
         if result is None:
@@ -2301,11 +2328,15 @@ def execute_phases(
     set, ``RuntimeError`` is raised — a silent fallback to pre-refine
     parameters would hide the regression (deliberate design decision).
 
-    Per-phase seeds: each HPO phase (``all_algorithms``/``refine``) runs with
-    its own random seed ``RANDOM_STATE + hpo_phase_ordinal`` (the first HPO
-    phase = 42, the second = 43, etc.; select steps do not count). Together
-    with the ``previous_trials`` transfer this guarantees that TPE startup
-    points do not repeat between phases.
+    Per-phase sampler seeds: each HPO phase (``all_algorithms``/``refine``)
+    runs the TPE sampler with its own seed ``RANDOM_STATE + hpo_phase_ordinal``
+    (the first HPO phase = 42, the second = 43, etc.; select steps do not
+    count). Together with the ``previous_trials`` transfer this guarantees that
+    TPE startup points do not repeat between phases. The data splits and the
+    preprocessor, in contrast, keep the FIXED ``RANDOM_STATE`` seed for every
+    phase: every phase (and the final ``ModelTrainer`` fit) evaluates models
+    on the same folds, so scores stay comparable and the monotonicity of
+    ``enqueue_trial`` holds.
 
     Args:
         cfg (Config): The configuration object.
@@ -2345,10 +2376,12 @@ def execute_phases(
     # candidates and results, the rest continue training.
     # living in ctx: populated by HPO failures and select steps.
     # HPO phase ordinal: incremented only for all_algorithms/refine phases
-    # (select steps are not counted). The per-phase seed is
+    # (select steps are not counted). The per-phase SAMPLER seed is
     # RANDOM_STATE + hpo_phase_ordinal: the first HPO phase keeps the
     # documented engine seed 42, every next HPO phase gets a different seed,
-    # so TPE random startup points never repeat between phases.
+    # so TPE random startup points never repeat between phases. The data
+    # splits / preprocessor seed stays RANDOM_STATE for every phase (see the
+    # _HpoPhaseSpec construction below).
     hpo_phase_ordinal = 0
     for phase in cfg.general.phases:
         if phase.action == "select":
@@ -2361,7 +2394,7 @@ def execute_phases(
         hpo_phase_ordinal += 1
         _LOG.info(
             f"--- Starting Phase: {phase.name} ({phase.n_trials}"
-            f" trials, action: {phase.action}, seed: {phase_seed}) ---"
+            f" trials, action: {phase.action}, sampler_seed: {phase_seed}) ---"
         )
 
         # Snapshot of the incoming working set. Used ONLY to pass
@@ -2462,7 +2495,11 @@ def execute_phases(
             target_encoding_smoothing=cfg.general.target_encoding_smoothing,
             target_encoding_fallback=cfg.general.target_encoding_fallback,
             feature_selection_cfg=cfg.general.feature_selection,
-            random_state=phase_seed,
+            # Data splits and preprocessor: the fixed engine seed, so every
+            # phase (and the final ModelTrainer fit) uses the same folds.
+            random_state=RANDOM_STATE,
+            # TPE sampler: a per-phase seed, so startup points do not repeat.
+            sampler_seed=phase_seed,
         )
 
         # Execution (parallel or sequential)
