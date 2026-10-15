@@ -37,6 +37,21 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# The wait loop polls the actual-start signals while there are tasks that
+# have not started yet: a task can start at any moment and its real deadline
+# (start + task_timeout) may then be much closer than the queue deadline
+# (submit + task_timeout + queue_budget). as_completed must not sleep longer
+# than this interval in that case, otherwise the timeout of an already-started
+# task is noticed with a delay of the whole queue budget.
+POLL_INTERVAL = 0.5
+
+# Layout of the _StartSignal shared memory segment: a float64 start timestamp
+# followed by an int64 worker PID. Both fields are written by the worker in a
+# single assignment (a structured-record write), so the parent cannot observe
+# a started timestamp with a still-empty PID. The PID is stored as int64, not
+# float64, to avoid precision loss for large PIDs.
+_START_SIGNAL_DTYPE = np.dtype([("start", np.float64), ("pid", np.int64)])
+
 
 class SharedDataFrame:
     """Wrapper for placing a DataFrame in shared memory.
@@ -285,27 +300,41 @@ class _StartSignal:
     moved to the pool's internal queue (capacity ``max_workers+1``), i.e.
     before the actual start.
 
-    ``_StartSignal`` is a shared memory segment (8 bytes, float64) into which
-    the worker writes ``time.time()`` right before calling the target
-    function, while the parent reads it in the wait loop. It is initialized
-    with ``-1.0`` (meaning "not started yet"); real timestamps are always
+    ``_StartSignal`` is a shared memory segment (16 bytes: a float64 start
+    timestamp and an int64 worker PID) into which the worker writes
+    ``time.time()`` and ``os.getpid()`` right before calling the target
+    function, while the parent reads them in the wait loop. The PID allows the
+    parent to terminate exactly the worker process that executes a hung task
+    (hard timeout). It is initialized with ``-1.0`` / ``0`` (meaning "not
+    started yet"); real timestamps are always positive and PIDs always
     positive. It is removed by the owner (the parent) via ``unlink``.
     """
 
     def __init__(self) -> None:
-        self._shm = shared_memory.SharedMemory(create=True, size=8)
+        self._shm = shared_memory.SharedMemory(create=True, size=16)
         self._owner = True
         self.name = self._shm.name
-        self._buf = np.ndarray((1,), dtype=np.float64, buffer=self._shm.buf)
-        self._buf[0] = -1.0
+        # A single structured view over the segment: the worker writes both
+        # the start timestamp and its PID in one assignment (see
+        # ``_mark_worker_start``), the parent reads them through typed fields.
+        self._signal = np.ndarray((1,), dtype=_START_SIGNAL_DTYPE, buffer=self._shm.buf)
+        self._signal[0] = (-1.0, 0)  # "not started yet"
 
     def mark_start(self, value: float) -> None:
         """Record the timestamp of the task's actual start."""
-        self._buf[0] = value
+        self._signal[0]["start"] = value
+
+    def mark_pid(self, pid: int) -> None:
+        """Record the PID of the worker process executing the task."""
+        self._signal[0]["pid"] = pid
 
     def read(self) -> float:
         """Return the start timestamp (``-1.0`` — the task has not started yet)."""
-        return float(self._buf[0])
+        return float(self._signal[0]["start"])
+
+    def read_pid(self) -> int:
+        """Return the worker PID (``0`` — the task has not started yet)."""
+        return int(self._signal[0]["pid"])
 
     def close(self) -> None:
         try:
@@ -323,7 +352,7 @@ class _StartSignal:
 
 
 def _mark_worker_start(start_signal_name: str) -> None:
-    """Record the actual start timestamp of the task in the shared-memory signal.
+    """Record the actual start timestamp and worker PID in the shared-memory signal.
 
     Called by the worker right before executing the target function.
 
@@ -333,8 +362,10 @@ def _mark_worker_start(start_signal_name: str) -> None:
     try:
         shm = shared_memory.SharedMemory(name=start_signal_name)
         try:
-            buf = np.ndarray((1,), dtype=np.float64, buffer=shm.buf)
-            buf[0] = time.time()
+            signal = np.ndarray((1,), dtype=_START_SIGNAL_DTYPE, buffer=shm.buf)
+            # One assignment writes both fields: the parent can never observe
+            # a started timestamp together with an empty PID.
+            signal[0] = (time.time(), os.getpid())
         finally:
             shm.close()
     except Exception as e:  # noqa: BLE001
@@ -476,6 +507,82 @@ def _force_shutdown_processes(pool: Any, shutdown_grace_period: float = 5.0) -> 
                 pass
 
 
+def _pid_exists(pid: int) -> bool:
+    """Check whether a process with the given PID is present in the OS.
+
+    Uses a zero-signal probe (``os.kill(pid, 0)``): a successful call means
+    the process exists, ``ProcessLookupError`` means it is gone, and
+    ``PermissionError`` still means it exists (it is simply owned by another
+    user). Used to distinguish an already-dead worker (nothing to terminate)
+    from a stale/foreign PID.
+
+    Args:
+        pid (int): The PID to probe.
+
+    Returns:
+        bool: True if the process exists.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_worker_by_pid(
+    pool: Any, pid: int, shutdown_grace_period: float = 5.0
+) -> bool:
+    """Terminate a specific worker process by its OS PID.
+
+    Used by the hard-timeout mechanism: when a task exceeds ``task_timeout``,
+    its result is discarded, but the worker process that executes it continues
+    running the hung function. The PID of the worker is recorded in the task's
+    ``_StartSignal`` at the moment the task really starts; terminating exactly
+    that process frees the worker right away, without waiting the full graceful
+    shutdown period for a process that will never exit on its own.
+
+    Args:
+        pool: The executor whose worker processes are inspected.
+        pid: The OS PID of the worker process to terminate.
+        shutdown_grace_period: Time in seconds allowed for the graceful exit
+            before SIGKILL is sent.
+
+    Returns:
+        bool: True if the worker with this PID was found and terminated, or
+            if it has already exited (a race: the process was reaped by the
+            executor's management thread before the lookup) — in both cases
+            the hung task is no longer running. False only if a live process
+            with this PID exists but is not a worker of this pool.
+    """
+    for proc in list(getattr(pool, "_processes", {}).values()):
+        if getattr(proc, "pid", None) != pid:
+            continue
+        try:
+            proc.terminate()
+        except Exception:  # noqa: S110, BLE001
+            pass
+        stop_time = time.time() + shutdown_grace_period
+        while time.time() < stop_time and proc.is_alive():
+            time.sleep(0.1)
+        if proc.is_alive():
+            try:
+                proc.kill()
+            except Exception:  # noqa: S110, BLE001
+                pass
+        return True
+    # The worker is no longer registered in the pool: this can only happen
+    # when it has already exited (the executor's management thread reaps
+    # finished/crashed workers) — e.g. a racing task timeout. There is
+    # nothing to terminate: the hung function is not running anymore, so the
+    # outcome is treated as success. A live but unregistered PID (foreign
+    # process / PID reuse) is reported as not handled.
+    return not _pid_exists(pid)
+
+
 def run_parallel(
     func: Callable[..., Any],
     args_seq: Iterable[Sequence[Any]] | None = None,
@@ -505,8 +612,15 @@ def run_parallel(
                with forced resource cleanup.
             6. Resource management: guarantees removal of memory segments and temporary
                files and the correct stop of all worker processes/threads.
-            7. Timeout semantics: in "processes" mode the timeout is hard: hung
-               workers are forcibly terminated via SIGTERM/SIGKILL (watchdog).
+            7. Timeout semantics: in "processes" mode the timeout is hard: when
+               a task exceeds ``task_timeout``, the worker process executing it
+               is terminated (identified by the PID recorded in the start
+               signal) and the pool is restarted for the remaining tasks — a
+               hung task no longer blocks the tasks queued behind it. While
+               there are tasks that have not started yet, the wait loop polls
+               the start signals with a short interval (POLL_INTERVAL), so the
+               timeout of a task that has already started is noticed promptly
+               and not at the queue deadline.
                Timeouts in "threads" mode are ignored: an already running Python
                function cannot be reliably interrupted, so a soft timeout did not
                save time and only forced the phase to wait for shutdown(wait=True)
@@ -542,7 +656,16 @@ def run_parallel(
                 due to a hung worker) does not hang forever, the deadline is bounded
                 from above by submit_time + task_timeout + queue_budget, where
                 queue_budget = ceil(number_of_tasks / max_workers) * task_timeout
-                (for the whole batch drain). Applies only in "processes" mode
+                (for the whole batch drain). When a started task exceeds its
+                deadline, the worker process executing it is terminated and the
+                pool is restarted for the remaining tasks (they are resubmitted
+                with a fresh submit deadline; the number of restarts is bounded
+                by the number of timed-out tasks, so the run still terminates).
+                A healthy task that is in-flight in another worker at the
+                restart moment is resubmitted from scratch too — its progress
+                is lost (the deliberate price of the hard timeout), so runtime
+                can multiply when several timeouts occur in a row.
+                Applies only in "processes" mode
                 (hard timeout). In "threads" mode ignored with a warning.
 
             Returns:
@@ -595,6 +718,8 @@ def run_parallel(
         # tasks is placed into shared memory only once (saves memory and
         # avoids name-collision risks).
         shm_cache: dict[int, SharedDataFrame] = {}
+        # The same applies to the disk fallback: one Parquet file per object.
+        disk_cache: dict[int, str] = {}
 
         for args, kwargs in zip(args_seq, kwargs_seq):
             new_args = list(args)
@@ -619,7 +744,11 @@ def run_parallel(
                         )
                         new_args[idx] = None  # We do not pass the object itself
                     else:
-                        path = persistence_manager.save_df(new_args[idx])
+                        df_obj = new_args[idx]
+                        path = disk_cache.get(id(df_obj))
+                        if path is None:
+                            path = persistence_manager.save_df(df_obj)
+                            disk_cache[id(df_obj)] = path
                         new_args[idx] = path
 
             curr_disk = [
@@ -656,23 +785,108 @@ def run_parallel(
         future_to_idx = {}
         submit_time_by_future: dict[Future[Any], float] = {}
         signal_by_future: dict[Future[Any], _StartSignal | None] = {}
-        for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
+
+        def submit_one(
+            pool_obj: Any,
+            idx: int,
+            args: Sequence[Any],
+            kwargs: Mapping[str, Any],
+            disk_idx: list[int],
+            shm_idx: dict[int, tuple[Any, ...]],
+        ) -> None:
+            """Submit one execution task and register its future.
+
+            In processes mode a side-channel of the actual start is created for
+            the task: the worker writes a timestamp and its PID into it, the
+            parent binds the deadline to the timestamp and uses the PID to kill
+            the worker on a hard timeout. ``future.running()`` is not suitable
+            — ProcessPoolExecutor marks a task as running already when it
+            enters the pool's internal queue.
+
+            Args:
+                pool_obj: The executor to submit to.
+                idx: The task index (also the results[] slot).
+                args: The positional arguments of the task.
+                kwargs: The keyword arguments of the task.
+                disk_idx: Indices of arguments restored from disk.
+                shm_idx: Metadata of the arguments restored from shared memory.
+            """
             if mode == "processes":
-                # For each task create a side-channel of the actual start: the
-                # worker writes a timestamp into it, the parent binds the
-                # deadline to it. It is impossible to assume the task has
-                # started based on future.running() — ProcessPoolExecutor
-                # marks a task as running already when it enters the pool's
-                # internal queue.
                 sig = _StartSignal()
                 start_signals.append(sig)
-                fut = pool.submit(_worker_proxy, func, a, kw, d_idx, s_idx, sig.name)
+                fut = pool_obj.submit(
+                    _worker_proxy, func, args, kwargs, disk_idx, shm_idx, sig.name
+                )
                 signal_by_future[fut] = sig
             else:
-                fut = pool.submit(func, *a, **kw)
+                fut = pool_obj.submit(func, *args, **kwargs)
                 signal_by_future[fut] = None
-            future_to_idx[fut] = i
+            future_to_idx[fut] = idx
             submit_time_by_future[fut] = time.time()
+
+        for i, (a, kw, d_idx, s_idx) in enumerate(execution_tasks):
+            submit_one(pool, i, a, kw, d_idx, s_idx)
+
+        def restart_pool(pool_obj: Any, hung_futures: list[Future[Any]]) -> Executor:
+            """Kill the hung workers and restart the pool for the remaining tasks.
+
+            A timed-out task does not free its worker: the result is discarded
+            but the process keeps running the hung function to completion, so
+            every task queued behind it never starts (with more tasks than
+            workers, one hung algorithm silently drops the whole queue). For a
+            hard timeout the worker processes executing the timed-out tasks are
+            terminated first (identified by the PID recorded in the start
+            signal), then the pool is forcibly shut down and rebuilt, and the
+            remaining tasks are resubmitted to the fresh pool.
+
+            Cost trade-off: the forced shutdown also kills the healthy tasks
+            that happen to be in-flight in other workers at that moment. Their
+            results are correct (they are resubmitted from scratch), but their
+            progress is lost, so runtime can multiply when several timeouts
+            occur in a row. This is the deliberate price of the hard per-task
+            timeout: without it a single hung algorithm would block the whole
+            queue.
+
+            Args:
+                pool_obj: The pool to kill.
+                hung_futures: The futures of the timed-out tasks.
+
+            Returns:
+                Executor: The restarted pool.
+            """
+            hung_pids: set[int] = set()
+            for fut in hung_futures:
+                sig = signal_by_future.get(fut)
+                if sig is not None:
+                    pid = sig.read_pid()
+                    if pid > 0:
+                        hung_pids.add(pid)
+            # All signals registered so far belong to the killed pool (both the
+            # timed-out futures and the remaining ones): they can be freed right
+            # away instead of accumulating one 16-byte segment per task until
+            # the final cleanup.
+            orphan_signals = [sig for sig in list(signal_by_future.values())]
+            for pid in hung_pids:
+                _terminate_worker_by_pid(pool_obj, pid, shutdown_grace_period)
+            _force_shutdown_processes(pool_obj, shutdown_grace_period)
+            for sig in orphan_signals:
+                if sig is not None:
+                    sig.close()
+                    sig.unlink()
+            new_pool = executor_cls(max_workers)
+            for old_fut, idx in list(future_to_idx.items()):
+                args, kwargs, disk_idx, shm_idx = execution_tasks[idx]
+                submit_time_by_future.pop(old_fut, None)
+                signal_by_future.pop(old_fut, None)
+                future_to_idx.pop(old_fut)
+                # The resubmitted tasks get a fresh submit deadline: keeping the
+                # original one would squeeze them against the batch absolute
+                # bound (submit + task_timeout + queue_budget) after several
+                # restarts and could kill the last queued tasks before they
+                # even run. The number of restarts is bounded by the number of
+                # timed-out tasks, so the loop still terminates.
+                submit_one(new_pool, idx, args, kwargs, disk_idx, shm_idx)
+            return new_pool
 
         # Upper bound on the time a task may spend in the queue before the
         # absolute (non-rollable) deadline kicks in. It covers the whole batch
@@ -725,12 +939,24 @@ def run_parallel(
                 else:
                     deadline_by_future[fut] = float("inf")
 
-            # Check: if the per-task timeout (task_timeout) has expired — exit
-            for fut, deadline in deadline_by_future.items():
-                if fut in future_to_idx and now >= deadline:
+            # Check: if the per-task timeout (task_timeout) has expired.
+            # In processes mode the timed-out task is discarded and its worker
+            # process is killed, then the pool is rebuilt for the remaining
+            # tasks — otherwise the hung process keeps occupying the worker
+            # and the tasks queued behind it never start.
+            timed_out_futures = [
+                fut
+                for fut, deadline in deadline_by_future.items()
+                if fut in future_to_idx and now >= deadline
+            ]
+            if timed_out_futures:
+                for fut in timed_out_futures:
                     idx = future_to_idx.pop(fut)
                     logger.error(f"Task {idx} timed out")
                     results[idx] = None
+                if mode == "processes" and future_to_idx:
+                    pool = restart_pool(pool, timed_out_futures)
+                    continue
             if not future_to_idx:
                 break
 
@@ -751,6 +977,24 @@ def run_parallel(
                     min_remaining = min(min_remaining, global_remaining)
                 else:
                     min_remaining = global_remaining  # pragma: no cover
+
+            # While a task has not started yet, cap the wait at POLL_INTERVAL:
+            # the start signal is written asynchronously by the worker and is
+            # not set on the first loop iterations, so the task's real deadline
+            # (start + task_timeout) may appear at any moment and be much
+            # closer than its queue deadline (submit + task_timeout +
+            # queue_budget). Without the cap as_completed sleeps up to the
+            # queue deadline and the timeout of an already-started task is
+            # noticed with a delay of the whole queue budget.
+            if task_timeout is not None:
+                has_unstarted = False
+                for fut in future_to_idx:
+                    sig = signal_by_future.get(fut)
+                    if sig is not None and sig.read() < 0:
+                        has_unstarted = True
+                        break
+                if has_unstarted and min_remaining is not None:
+                    min_remaining = min(min_remaining, POLL_INTERVAL)
 
             timeout_for_ac = (
                 min_remaining

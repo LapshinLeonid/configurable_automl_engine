@@ -1954,13 +1954,14 @@ class _HpoPhaseSpec:
     ``_hpo_phase_worker`` as an explicit argument. This keeps the worker a
     module-level function (not a closure), which can be serialized in the
     "processes" mode: a closure inside ``execute_phases`` cannot be
-    serialized.
+    serialized. The feature matrix ``X`` is NOT part of the snapshot: in the
+    "processes" mode it is transferred to the workers through ``run_parallel``
+    shared memory / disk, so it is not pickled for every algorithm.
 
     Attributes:
         phase (HPOPhaseCfg): Configuration of the current phase.
         prev_results (dict[str, PhaseResult]): Snapshot of the previous phase
             results (for warm-start refine: params + TPE trials).
-        X (pd.DataFrame): The feature matrix.
         y (pd.Series): The target vector.
         metric_sklearn (str): Metric name in sklearn semantics.
         resolved_validation (ValidationStrategy): The resolved validation
@@ -1992,7 +1993,6 @@ class _HpoPhaseSpec:
 
     phase: HPOPhaseCfg
     prev_results: dict[str, PhaseResult]
-    X: pd.DataFrame
     y: pd.Series
     metric_sklearn: str
     resolved_validation: ValidationStrategy
@@ -2053,6 +2053,7 @@ def _execute_hpo_phase(
     a_cfg: AlgoCfg,
     n_trials: int,
     spec: _HpoPhaseSpec,
+    X: pd.DataFrame,
     search_space: dict[str, Any] | None = None,
     initial_params: dict[str, Any] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
@@ -2064,7 +2065,10 @@ def _execute_hpo_phase(
     Provides phase logging and oversampling result processing. The function
     is module-level (not a closure): all phase data is passed through
     ``spec`` so that the ``_hpo_phase_worker`` worker is serializable in
-    the "processes" mode.
+    the "processes" mode. The feature matrix ``X`` is passed as a separate
+    argument (not inside ``spec``): in the processes mode ``run_parallel``
+    transfers it through shared memory / disk, so it is not pickled for
+    every algorithm.
 
     Args:
         phase_name (str): The current phase name (e.g. 'coarse').
@@ -2072,6 +2076,7 @@ def _execute_hpo_phase(
         a_cfg (AlgoCfg): The algorithm configuration.
         n_trials (int): The number of iterations in this phase.
         spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
+        X (pd.DataFrame): The feature matrix.
         search_space (dict[str, Any] | None): The search space for the phase.
         initial_params (dict[str, Any] | None): Warm-start parameters (refine).
         previous_trials (list[FrozenTrial] | None): The TPE history of the
@@ -2097,7 +2102,7 @@ def _execute_hpo_phase(
         result = _run_hpo(
             algo_name=algo,
             algo_cfg=a_cfg,
-            X=spec.X,
+            X=X,
             y=spec.y,
             metric_name_sklearn=spec.metric_sklearn,
             n_trials=n_trials,
@@ -2147,6 +2152,7 @@ def _hpo_phase_worker(
     algo_name: str,
     algo_cfg: AlgoCfg,
     spec: _HpoPhaseSpec,
+    X: pd.DataFrame,
 ) -> _HPOWorkerResult:
     """Worker for parallel or sequential execution of an HPO task.
 
@@ -2159,6 +2165,9 @@ def _hpo_phase_worker(
         algo_name (str): The algorithm name.
         algo_cfg (AlgoCfg): The algorithm configuration.
         spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
+        X (pd.DataFrame): The feature matrix (transferred through shared
+            memory / disk by ``run_parallel`` in the "processes" mode instead
+            of being pickled inside ``spec`` for every algorithm).
 
     Returns:
         _HPOWorkerResult: The task result: score/params/trials on success,
@@ -2203,6 +2212,7 @@ def _hpo_phase_worker(
             algo_cfg,
             spec.phase.n_trials,
             spec,
+            X,
             full_search_space,
             initial_params=init_params,
             previous_trials=previous_trials,
@@ -2303,8 +2313,10 @@ def execute_phases(
     synchronous select steps, circuit breaker disqualification, and filtering
     of invalid results. The HPO worker ``_hpo_phase_worker`` and the helpers
     ``_prepare_search_space`` / ``_execute_hpo_phase`` are module-level
-    functions: all phase data is passed through ``_HpoPhaseSpec`` so that the
-    worker is serializable in the "processes" mode.
+    functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
+    worker is serializable in the "processes" mode. The feature matrix ``X``
+    is passed as a separate argument and transferred via ``run_parallel``
+    shared memory / disk in that mode.
 
     Multi-phase semantics: the working set is not accumulated — each HPO phase
     rebuilds it from scratch, so an algorithm that failed in the current phase
@@ -2462,7 +2474,11 @@ def execute_phases(
         # worker is a module-level function and all phase data is passed to it
         # through ``spec`` explicitly so that the worker is serializable in
         # the "processes" mode (a closure inside ``execute_phases`` cannot be
-        # serialized).
+        # serialized). The feature matrix ``X`` is NOT put into the spec: in
+        # the processes mode it is transferred to the workers through
+        # ``run_parallel`` shared memory / disk (see the call below), so it is
+        # not pickled for every algorithm. The target vector ``y`` (a single
+        # column) stays in the spec.
         ovr = cfg.oversampling
         pruning_cfg: dict[str, Any] | None = None
         if cfg.general.pruning.enable:
@@ -2476,7 +2492,6 @@ def execute_phases(
         spec = _HpoPhaseSpec(
             phase=phase,
             prev_results=prev_results,
-            X=X,
             y=y,
             metric_sklearn=metric_sklearn,
             resolved_validation=resolved_validation,
@@ -2509,9 +2524,14 @@ def execute_phases(
         ):
             results = run_parallel(
                 _hpo_phase_worker,
-                args_seq=[(n, a, spec) for n, a in current_candidates.items()],
+                args_seq=[(n, a, spec, X) for n, a in current_candidates.items()],
                 max_workers=cfg.general.max_workers,
                 mode=cfg.general.parallel_mode,
+                # X is transferred through shared memory (or the disk cache)
+                # instead of being pickled inside the spec for every algorithm.
+                shared_args_indices=(
+                    [3] if cfg.general.parallel_mode == "processes" else None
+                ),
                 # Timeouts are supported only in processes mode.
                 # In threads mode config validation forbids them, and
                 # run_parallel ignores them with a warning on direct calls.
@@ -2533,7 +2553,7 @@ def execute_phases(
             _consume_worker_results(results, phase_results, ctx)
         else:
             for n, a in current_candidates.items():
-                res = _hpo_phase_worker(n, a, spec)
+                res = _hpo_phase_worker(n, a, spec, X)
                 _consume_worker_results([res], phase_results, ctx)
 
         # Disqualified algorithms (circuit breaker) are removed from the results and

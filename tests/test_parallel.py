@@ -21,6 +21,8 @@ from configurable_automl_engine.training_engine.thread_pool import (
     _worker_proxy,
     _perform_cleanup,
     _force_shutdown_processes,
+    _StartSignal,
+    _terminate_worker_by_pid,
 )
 
 MODULE_PATH = "configurable_automl_engine.training_engine.thread_pool"
@@ -1255,3 +1257,398 @@ def test_run_parallel_keyboard_interrupt_propagates_no_timeout(caplog):
             run_parallel(
                 raise_keyboard_interrupt_no_timeout, args_seq=[()], timeout=None
             )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Issue #120: hang detection delay + hung task not freeing worker
+# ═══════════════════════════════════════════════════════════════
+
+
+def choose_hang_or_fast(seconds):
+    """Return "fast-done" for short tasks, "hung-ended" for long (hang) tasks."""
+    if seconds >= 1:
+        return hang_task(seconds)
+    return slow_task(seconds)
+
+
+def test_run_parallel_processes_hung_task_frees_worker():
+    """A task that exceeds task_timeout must free its worker process.
+
+    Previously the result of the hung task was discarded, but the process kept
+    running the hung function to completion (until the final pool shutdown), so
+    with max_workers=1 and tasks [hang, 0.1, 0.1] the two fast tasks never
+    started and the call returned [None, None, None] after the whole queue
+    budget. Now the hung worker is killed and the pool is restarted for the
+    remaining tasks: the fast tasks run right after the hung one times out.
+    """
+    started = time.time()
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (0.1,), (0.1,)],
+        mode="processes",
+        max_workers=1,
+        task_timeout=2,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, "done", "done"]
+    # ~ task_timeout + pool restart + two 0.1s runs; the old behavior took the
+    # whole queue budget (submit + task_timeout + ceil(3/1)*task_timeout ≈ 8s).
+    assert elapsed < 8
+
+
+def test_run_parallel_processes_multiple_hung_tasks_each_restart():
+    """Every hung task frees its worker; the queued fast task still runs.
+
+    With max_workers=1 and three hung tasks ahead of a fast one, each hung
+    task consumes exactly its task_timeout and then the pool is restarted:
+    the last (fast) task still gets its turn.
+    """
+    started = time.time()
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (30.0,), (30.0,), (0.1,)],
+        mode="processes",
+        max_workers=1,
+        task_timeout=0.5,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, None, None, "done"]
+    # 3 waves x task_timeout + restart overhead.
+    assert elapsed < 5
+
+
+def test_run_parallel_processes_hang_detected_without_queue_delay():
+    """The timeout of an already-started task is noticed promptly.
+
+    On the first loop iteration the start signals are not written yet, so the
+    deadlines of all tasks equal the queue deadline
+    (submit + task_timeout + queue_budget). Previously as_completed slept up
+    to that deadline and the call took ~6s instead of ~2s: the fast tasks
+    finished in 0.2s but the loop did not wake up by the deadline of the
+    started hung task. Now the wait is capped at POLL_INTERVAL while unstarted
+    tasks exist, so the call returns right after the hung task times out.
+    """
+    started = time.time()
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (0.1,), (0.1,)],
+        mode="processes",
+        max_workers=2,
+        task_timeout=2,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, "done", "done"]
+    # ~ task_timeout + a few poll intervals; the old behavior took
+    # submit + task_timeout + ceil(3/2)*task_timeout ≈ 6s.
+    assert elapsed < 5
+
+
+def test_run_parallel_processes_restart_preserves_queued_tasks():
+    """After a restart the tasks that were still queued are resubmitted.
+
+    Two hung tasks occupy both workers; the two fast tasks are queued and must
+    run after the pool restart triggered by the first hung tasks' timeouts.
+    """
+    started = time.time()
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (30.0,), (0.1,), (0.1,)],
+        mode="processes",
+        max_workers=2,
+        task_timeout=2,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, None, "done", "done"]
+    assert elapsed < 8
+
+
+def test_run_parallel_processes_healthy_inflight_task_resubmitted():
+    """A healthy in-flight task, killed by a neighbor's timeout, is resubmitted.
+
+    A 0.9s filler occupies the second worker first; the 1.5s task starts after
+    it and is still running when the hung task times out. The restart kills it
+    mid-flight, but it is resubmitted to the fresh pool and runs to completion
+    ("hung-ended") — collateral progress loss, not a wrong result.
+    """
+    started = time.time()
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (0.9,), (1.5,)],
+        mode="processes",
+        max_workers=2,
+        task_timeout=2,
+        shutdown_grace_period=0.1,
+    )
+    elapsed = time.time() - started
+    assert results == [None, "done", "hung-ended"]
+    assert elapsed < 8
+
+
+def test_run_parallel_processes_poll_interval_caps_first_wait():
+    """as_completed must not sleep up to the queue deadline on the first wait.
+
+    While unstarted tasks exist (the start signals are written asynchronously
+    by the workers), the as_completed timeout is capped at POLL_INTERVAL — the
+    loop re-reads the signals and notices the deadline of a started task in
+    time instead of sleeping until submit + task_timeout + queue_budget.
+    """
+    recorded_timeouts = []
+    real_as_completed = thread_pool.as_completed
+
+    def recording_as_completed(fs, timeout=None):
+        recorded_timeouts.append(timeout)
+        yield from real_as_completed(fs, timeout=timeout)
+
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool.as_completed",
+            recording_as_completed,
+        ),
+        # Deterministic: the signals always report "not started yet", so every
+        # wait must be capped by the poll interval and never by the queue
+        # deadline (submit + task_timeout + queue_budget ≈ 4s). The tasks
+        # themselves still run and complete in the real workers.
+        patch.object(thread_pool._StartSignal, "read", return_value=-1.0),
+    ):
+        results = run_parallel(
+            slow_task,
+            args_seq=[(0.2,), (0.2,)],
+            mode="processes",
+            max_workers=2,
+            task_timeout=2.0,
+            shutdown_grace_period=0.1,
+        )
+
+    assert results == ["done", "done"]
+    assert recorded_timeouts, "as_completed was never called"
+    # With the signals always unset the cap is active on every iteration: no
+    # as_completed wait may exceed the polling interval.
+    for timeout in recorded_timeouts:
+        assert timeout is not None
+        assert timeout <= thread_pool.POLL_INTERVAL + 0.1
+
+
+def test_run_parallel_processes_completed_results_survive_restart():
+    """Results collected before a restart are preserved.
+
+    The fast task completes before the hung one times out; after the pool
+    restart caused by the hung task its result must stay in the output.
+    """
+    results = run_parallel(
+        choose_hang_or_fast,
+        args_seq=[(30.0,), (0.1,)],
+        mode="processes",
+        max_workers=2,
+        task_timeout=2,
+        shutdown_grace_period=0.1,
+    )
+    assert results == [None, "done"]
+
+
+# --- _StartSignal: the side-channel now records the worker PID ---
+
+
+def test_start_signal_records_pid():
+    """The side-channel stores the start timestamp AND the worker PID."""
+    sig = _StartSignal()
+    try:
+        assert sig.read() == -1.0  # not started yet
+        assert sig.read_pid() == 0
+        sig.mark_start(123.0)
+        sig.mark_pid(456)
+        assert sig.read() == 123.0
+        assert sig.read_pid() == 456
+        # The PID lives in an int64 buffer, not a float64 one: values above
+        # 2**53 are not exactly representable as float64 and would be
+        # rounded (review feedback on issue #120).
+        big_pid = 2**53 + 1
+        sig.mark_pid(big_pid)
+        assert sig.read_pid() == big_pid
+    finally:
+        sig.close()
+        sig.unlink()
+
+
+# --- _terminate_worker_by_pid ---
+
+
+def test_terminate_worker_by_pid_found_and_terminated():
+    """The worker with the given PID is terminated (dies on SIGTERM)."""
+    mock_worker = MagicMock()
+    mock_worker.pid = 4242
+    # The while-loop and the final is_alive() check both call is_alive().
+    mock_worker.is_alive.side_effect = [True, False, False]
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: mock_worker}
+
+    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
+        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.05)
+
+    assert found is True
+    mock_worker.terminate.assert_called_once()
+    mock_worker.kill.assert_not_called()
+
+
+def test_terminate_worker_by_pid_kill_fallback():
+    """If SIGTERM does not help, SIGKILL is sent."""
+    mock_worker = MagicMock()
+    mock_worker.pid = 4242
+    mock_worker.is_alive.return_value = True  # never exits gracefully
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: mock_worker}
+
+    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
+        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
+
+    assert found is True
+    mock_worker.terminate.assert_called_once()
+    mock_worker.kill.assert_called_once()
+
+
+def test_terminate_worker_by_pid_not_found():
+    """No worker with the given PID → False, nothing is terminated.
+
+    The pool has no worker with this PID and the OS probe reports a live
+    process elsewhere (a foreign process / PID reuse): the function reports
+    that it did not handle it.
+    """
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: MagicMock(pid=1111)}
+
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill"
+    ) as mock_kill:
+        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
+
+    assert found is False
+    mock_kill.assert_called_once_with(9999, 0)
+
+
+def test_terminate_worker_by_pid_already_dead_returns_true():
+    """A worker already exited (race) is reported as success.
+
+    The PID is not in the pool registry and the OS probe says the process is
+    gone: the hung task is not running anymore, so there is nothing to
+    terminate — the outcome is treated as success instead of a false
+    "not handled" (issue #120 review feedback).
+    """
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: MagicMock(pid=1111)}
+
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill",
+        side_effect=ProcessLookupError("No such process"),
+    ):
+        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
+
+    assert found is True
+
+
+def test_terminate_worker_by_pid_not_registered_but_alive_elsewhere():
+    """A live unregistered PID (foreign process / PID reuse) → False.
+
+    ``os.kill(pid, 0)`` succeeding means some process claimed the PID, but it
+    is not a worker of this pool: the function must not kill it.
+    """
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: MagicMock(pid=1111)}
+
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill"
+    ) as mock_kill:
+        mock_kill.return_value = None  # the OS probe finds a live process
+        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
+
+    assert found is False
+    mock_kill.assert_called_once_with(9999, 0)
+
+
+def test_pid_exists():
+    """The OS existence probe covers the success/PermissionError branches."""
+    from configurable_automl_engine.training_engine.thread_pool import _pid_exists
+
+    assert _pid_exists(0) is False
+    assert _pid_exists(-5) is False
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill"
+    ) as mock_kill:
+        assert _pid_exists(1234) is True  # exists
+        assert mock_kill.call_count == 1
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill",
+        side_effect=ProcessLookupError("gone"),
+    ):
+        assert _pid_exists(1234) is False
+    with patch(
+        "configurable_automl_engine.training_engine.thread_pool.os.kill",
+        side_effect=PermissionError("other user"),
+    ):
+        assert _pid_exists(1234) is True
+
+
+def test_terminate_worker_by_pid_terminate_error_is_swallowed():
+    """A failed terminate() call must not break the kill path."""
+    mock_worker = MagicMock()
+    mock_worker.pid = 4242
+    mock_worker.is_alive.return_value = True
+    mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: mock_worker}
+
+    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
+        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
+
+    assert found is True
+    mock_worker.kill.assert_called_once()
+
+
+def test_terminate_worker_by_pid_kill_error_is_swallowed():
+    """A failed kill() call must not propagate."""
+    mock_worker = MagicMock()
+    mock_worker.pid = 4242
+    mock_worker.is_alive.return_value = True
+    mock_worker.kill.side_effect = RuntimeError("Kill blocked")
+    mock_pool = MagicMock()
+    mock_pool._processes = {0: mock_worker}
+
+    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
+        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
+
+    assert found is True
+    mock_worker.terminate.assert_called_once()
+
+
+# --- disk fallback reuses one parquet file per df object ---
+
+
+def df_row_count(df):
+    return len(df)
+
+
+def test_run_parallel_disk_cache_reuses_file_for_same_df(monkeypatch):
+    """The disk fallback (a df incompatible with SHM) writes ONE parquet per
+    df object, not one per task: the same X passed to many algorithms is not
+    duplicated on disk.
+    """
+    df = pd.DataFrame({"label": ["a", "b", "c"], "val": [1, 2, 3]})
+    args = [(df,), (df,), (df,)]
+    saved = []
+
+    original_save = DiskPersistenceManager.save_df
+
+    def counting_save(self, dframe):
+        saved.append(dframe)
+        return original_save(self, dframe)
+
+    monkeypatch.setattr(DiskPersistenceManager, "save_df", counting_save)
+
+    results = run_parallel(
+        df_row_count, args_seq=args, mode="processes", shared_args_indices=[0]
+    )
+
+    assert results == [3, 3, 3]
+    assert len(saved) == 1  # one parquet file per df object

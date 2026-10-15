@@ -2030,6 +2030,60 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @patch(f"{_MODULE}._fit_and_save")
+    def test_processes_parallel_mode_shares_X_via_shared_memory(
+        self, mock_save, minimal_df, tmp_path
+    ):
+        """Processes mode: X is shared via run_parallel SHM, not pickled.
+
+        Previously X lived inside ``_HpoPhaseSpec`` and was copied to every
+        worker (issue #120, "мелочь"). Now X is passed as a separate argument
+        via ``shared_args_indices``: one shared memory segment serves all
+        algorithms of the phase.
+        """
+        from configurable_automl_engine.training_engine.thread_pool import (
+            SharedDataFrame,
+        )
+
+        created = []
+
+        class CountingSharedDataFrame(SharedDataFrame):
+            def __init__(self, *a, **kw):
+                if a and a[0] is not None:
+                    created.append(a[0])
+                elif kw.get("df") is not None:
+                    created.append(kw["df"])
+                super().__init__(*a, **kw)
+
+        config_dict = self._processes_config(str(tmp_path / "model.pkl"))
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+
+        rf_tuner = MagicMock()
+        rf_tuner.optimize.return_value = (None, {"n_estimators": 10}, -0.4)
+        en_tuner = MagicMock()
+        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.8)
+
+        with (
+            patch(
+                f"{_MODULE}._load_module",
+                side_effect=self._processes_fake_load(rf_tuner, en_tuner),
+            ),
+            patch(
+                "configurable_automl_engine.training_engine.thread_pool."
+                "SharedDataFrame",
+                CountingSharedDataFrame,
+            ),
+        ):
+            result = train_best_model(config=config_dict, df=df, target="target")
+
+        assert result["algorithm"] == "random_forest"
+        assert result["score"] == 0.4
+        # Exactly one SHM segment for X serves all algorithms of the phase
+        # (previously X was pickled into every worker via the spec).
+        assert len(created) == 1
+        assert created[0].shape == (4, 1)
+        mock_save.assert_called_once()
+
+    @patch(f"{_MODULE}._fit_and_save")
     def test_processes_parallel_disqualification_propagates(
         self, mock_save, minimal_df, tmp_path
     ):
@@ -2140,7 +2194,6 @@ class TestWorstScoreResultsExcluded:
         spec = _HpoPhaseSpec(
             phase=phase,
             prev_results={},
-            X=prepared.X,
             y=prepared.y,
             metric_sklearn=prepared.metric_sklearn,
             resolved_validation=prepared.resolved_validation,
@@ -2168,6 +2221,9 @@ class TestWorstScoreResultsExcluded:
         restored_spec = pickle.loads(pickle.dumps(spec))
         assert restored_spec.phase.name == phase.name
         assert restored_spec.metric_sklearn == prepared.metric_sklearn
+        # The feature matrix is NOT part of the spec: in the processes mode it
+        # travels through run_parallel shared memory / disk, not via pickle.
+        assert not hasattr(restored_spec, "X")
 
     @patch(f"{_MODULE}._fit_and_save")
     @patch(f"{_MODULE}._run_hpo")
