@@ -5,6 +5,7 @@ import logging
 import subprocess
 import sys
 import tempfile
+import itertools
 import concurrent.futures
 import pandas as pd
 import numpy as np
@@ -814,11 +815,15 @@ def test_is_compatible_all_branches():
     assert SharedDataFrame.is_compatible(df_invalid_index) is False
 
 
-def test_is_compatible_to_numpy_failure_returns_false():
-    """If df.to_numpy() raises, the frame is treated as incompatible.
+def test_is_compatible_does_not_call_to_numpy():
+    """is_compatible must not materialize the data via df.to_numpy().
 
-    Defensive branch: an exotic DataFrame whose materialization fails must
-    not crash is_compatible, but be routed to the disk/pickle path.
+    Previously the check called df.to_numpy() only to read the resulting
+    dtype: for a mixed-type frame that is a full in-memory copy, and
+    SharedDataFrame.__init__ makes a second copy right after — a transient
+    doubling of memory in the main process on every HPO phase (issue #122).
+    The dtype is now computed from column dtypes alone, so a frame whose
+    to_numpy would raise must still be checked without calling it.
     """
     df = pd.DataFrame({"a": [1, 2, 3]})
 
@@ -829,7 +834,8 @@ def test_is_compatible_to_numpy_failure_returns_false():
     broken = BrokenDF(df)
     with pytest.raises(RuntimeError):
         broken.to_numpy()  # the guard really triggers
-    assert SharedDataFrame.is_compatible(broken) is False
+    # The compatibility check must not trigger the broken method.
+    assert SharedDataFrame.is_compatible(broken) is True
 
 
 def test_get_view():
@@ -1980,3 +1986,540 @@ def test_run_parallel_preparation_failure_cleans_shm_segments(caplog, monkeypatc
         assert name is not None
         with pytest.raises((FileNotFoundError, OSError)):
             shared_memory.SharedMemory(name=name)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Issue #122: value-based SHM compatibility, dtype without a
+#  data copy, documented index contract
+# ═══════════════════════════════════════════════════════════
+
+
+def test_is_compatible_int64_float64_within_2_53():
+    """int64 + float64 with values up to 2**53 → SHM-compatible.
+
+    int64 is the default pandas dtype for integer columns: a typical numeric
+    dataset (int and float features) must go through SHM, not through a
+    parquet write (issue #122). 2**53 itself is representable in float64
+    exactly, so the boundary value is allowed.
+    """
+    df = pd.DataFrame({"a": [2**53, 3, 7], "b": [0.5, 1.5, 2.5]})
+    assert df.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df) is True
+    # Negative boundary: 2**53 + 1 is not representable in float64.
+    df_over = pd.DataFrame({"a": [2**53 + 1, 3], "b": [0.5, 1.5]})
+    assert SharedDataFrame.is_compatible(df_over) is False
+    # Negative values: -(2**53) is fine, -(2**53) - 1 is not.
+    df_neg_ok = pd.DataFrame({"a": [-(2**53), 3], "b": [0.5, 1.5]})
+    assert SharedDataFrame.is_compatible(df_neg_ok) is True
+    df_neg_over = pd.DataFrame({"a": [-(2**53) - 1, 3], "b": [0.5, 1.5]})
+    assert SharedDataFrame.is_compatible(df_neg_over) is False
+    # uint64: only the upper boundary matters (no negative values).
+    df_u_ok = pd.DataFrame(
+        {"a": np.array([2**53, 1], dtype=np.uint64), "b": [0.5, 1.5]}
+    )
+    assert SharedDataFrame.is_compatible(df_u_ok) is True
+    df_u_over = pd.DataFrame(
+        {"a": np.array([2**53 + 1, 1], dtype=np.uint64), "b": [0.5, 1.5]}
+    )
+    assert SharedDataFrame.is_compatible(df_u_over) is False
+    # abs(np.iinfo(np.int64).min) overflows int64: the check must not crash
+    # and must reject the frame (the magnitude exceeds 2**53).
+    df_int64_min = pd.DataFrame(
+        {"a": np.array([np.iinfo(np.int64).min], dtype=np.int64), "b": [0.5]}
+    )
+    assert SharedDataFrame.is_compatible(df_int64_min) is False
+    # Without a float neighbor there is no promotion: big int ids stay exact
+    # in the int64 array and the frame remains compatible.
+    df_big_alone = pd.DataFrame({"a": [2**53 + 999, np.iinfo(np.int64).max]})
+    assert df_big_alone.to_numpy().dtype.kind == "i"
+    assert SharedDataFrame.is_compatible(df_big_alone) is True
+
+
+def test_is_compatible_rejects_extension_dtypes_and_mixed_bool():
+    """Extension dtypes and bool mixed with non-bool → incompatible.
+
+    Regression guard on the find_common_type trap (issue #122): nullable
+    Int64/Float64/boolean have kinds i/f/b and would pass a purely
+    dtype-kind based check, while df.to_numpy() of such a frame (possibly
+    mixed with plain numeric columns) yields an object array of raw pointers
+    to parent-process Python objects — copying it into shared memory crashes
+    workers under forkserver/spawn (issue #121). Extension-typed frames must
+    always go through the disk/pickle path.
+    """
+    # Int64 + float64: to_numpy() → object, find_common_type would say Float64.
+    df = pd.DataFrame(
+        {"a": pd.array([1, 2], dtype="Int64"), "b": [1.5, 2.5]}
+    )
+    assert df.to_numpy().dtype.kind == "O"
+    assert SharedDataFrame.is_compatible(df) is False
+
+    # Nullable boolean with NA: to_numpy() → object.
+    df_bool = pd.DataFrame({"a": pd.array([True, None], dtype="boolean")})
+    assert df_bool.to_numpy().dtype.kind == "O"
+    assert SharedDataFrame.is_compatible(df_bool) is False
+
+    # Int64 with NA: to_numpy() → float64 (kind f), but the extension dtype
+    # must still be rejected.
+    df_intna = pd.DataFrame({"a": pd.array([1, None], dtype="Int64")})
+    assert df_intna.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_intna) is False
+
+    # Plain numpy bool mixed with numeric columns: to_numpy() → object.
+    df_mixed = pd.DataFrame(
+        {"a": [1, 2], "b": [1.5, 2.5], "c": [True, False]}
+    )
+    assert df_mixed.to_numpy().dtype.kind == "O"
+    assert SharedDataFrame.is_compatible(df_mixed) is False
+
+    # A single extension column without NA still promotes to a plain numpy
+    # array, but the extension semantics must not silently enter SHM.
+    df_int64 = pd.DataFrame({"a": pd.array([1, 2], dtype="Int64")})
+    assert df_int64.to_numpy().dtype.kind == "i"
+    assert SharedDataFrame.is_compatible(df_int64) is False
+
+
+def test_is_compatible_all_bool_columns():
+    """All-bool frames are SHM-compatible and arrive as bool."""
+    df = pd.DataFrame({"a": [True, False], "b": [False, True]})
+    assert df.to_numpy().dtype.kind == "b"
+    assert SharedDataFrame.is_compatible(df) is True
+
+
+def test_is_compatible_empty_frames_behavior_unchanged():
+    """Empty frames behave exactly as before (issue #122 edge cases).
+
+    A frame with no columns and a frame with zero rows must not crash or
+    change their compatibility status; the value check skips zero-row
+    int64/uint64 columns.
+    """
+    assert SharedDataFrame.is_compatible(pd.DataFrame()) is True
+    assert SharedDataFrame.is_compatible(pd.DataFrame(index=pd.RangeIndex(5))) is True
+    zero_rows = pd.DataFrame(
+        {"a": pd.Series(dtype="int64"), "b": pd.Series(dtype="float64")}
+    )
+    assert SharedDataFrame.is_compatible(zero_rows) is True
+    zero_rows_big = pd.DataFrame({"a": pd.Series(dtype="int64")})
+    assert SharedDataFrame.is_compatible(zero_rows_big) is True
+
+
+def test_is_compatible_duplicate_column_names_no_crash():
+    """Duplicate column names must not crash the value-based check.
+
+    With duplicate names df[name] returns a DataFrame, so min()/max() would
+    yield Series and the comparison would raise ValueError — the
+    compatibility check must never crash, it only decides SHM vs parquet
+    (issue #122 review B1). int-only and int+float duplicated frames are
+    checked; the big-value variant (int64+float with values beyond 2**53)
+    must be rejected, not crash.
+    """
+    df_int = pd.DataFrame({0: [1, 2], 1: [3, 4]}, dtype="int64")
+    df_int.columns = ["a", "a"]
+    assert SharedDataFrame.is_compatible(df_int) is True
+
+    df_mixed = pd.DataFrame({"a": [1, 2], "b": [3, 4], "c": [0.5, 1.5]})
+    df_mixed.columns = ["a", "a", "f"]
+    assert SharedDataFrame.is_compatible(df_mixed) is True
+
+    df_big = pd.DataFrame({"a": [2**53 + 1, 2], "b": [3, 4], "c": [0.5, 1.5]})
+    df_big.columns = ["a", "a", "f"]
+    assert df_big.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_big) is False
+
+    # Direct helper call on an int+float duplicated frame.
+    from configurable_automl_engine.training_engine.thread_pool import (
+        _ints_fit_float64,
+    )
+
+    assert _ints_fit_float64(df_mixed) is True
+    assert _ints_fit_float64(df_big) is False
+
+
+def test_numpy_result_dtype_helper():
+    """Direct coverage of _numpy_result_dtype (issue #122 decomposition)."""
+    from configurable_automl_engine.training_engine.thread_pool import (
+        _numpy_result_dtype,
+    )
+
+    assert _numpy_result_dtype(pd.DataFrame()) == np.dtype("float64")
+    assert _numpy_result_dtype(
+        pd.DataFrame({"a": [True, False]})
+    ) == np.dtype("bool")
+    assert _numpy_result_dtype(
+        pd.DataFrame({"a": [1, 2], "b": [0.5, 1.5]})
+    ) == np.dtype("float64")
+    assert _numpy_result_dtype(
+        pd.DataFrame({"a": [1, 2], "b": [True, False]})
+    ) == np.dtype("O")  # bool mixed with non-bool → object, like to_numpy()
+    # Extension dtype → None (not eligible).
+    assert _numpy_result_dtype(
+        pd.DataFrame({"a": pd.array([1, 2], dtype="Int64")})
+    ) is None
+    # dtype access raising → None (defensive branch).
+    class BrokenIndexDF(pd.DataFrame):
+        @property
+        def dtypes(self):
+            raise RuntimeError("cannot read dtypes")
+
+    assert _numpy_result_dtype(BrokenIndexDF({"a": [1]})) is None
+
+
+def test_ints_fit_float64_helper():
+    """Direct coverage of _ints_fit_float64 (issue #122 decomposition)."""
+    from configurable_automl_engine.training_engine.thread_pool import (
+        _ints_fit_float64,
+    )
+
+    assert _ints_fit_float64(pd.DataFrame({"a": [1, 2], "b": [0.5, 1.5]})) is True
+    assert _ints_fit_float64(
+        pd.DataFrame({"a": np.array([2**53, 1], dtype=np.int64), "b": [0.5, 1.5]})
+    ) is True
+    assert _ints_fit_float64(
+        pd.DataFrame({"a": np.array([2**53 + 1, 1], dtype=np.int64), "b": [0.5, 1.5]})
+    ) is False
+    assert _ints_fit_float64(
+        pd.DataFrame({"a": np.array([2**55], dtype=np.uint64), "b": [0.5]})
+    ) is False
+    # int32 columns are never checked (promotion is always lossless).
+    assert _ints_fit_float64(
+        pd.DataFrame({"a": np.array([2**31 - 1], dtype=np.int32), "b": [0.5]})
+    ) is True
+    # Zero-row int64 column is skipped, not crashed on.
+    assert _ints_fit_float64(
+        pd.DataFrame(
+            {
+                "a": pd.Series(dtype="int64"),
+                "b": pd.Series(dtype="float64"),
+            }
+        )
+    ) is True
+
+
+def test_is_compatible_does_not_materialize_data(monkeypatch):
+    """is_compatible must not call DataFrame.to_numpy (memory guard).
+
+    Previously the check called df.to_numpy() only to read the resulting
+    dtype: for a mixed-type frame that is a full in-memory copy, and
+    SharedDataFrame.__init__ makes a second copy right after — a transient
+    doubling of memory in the main process on every HPO phase (issue #122).
+    The dtype is now computed from column dtypes alone.
+    """
+    def boom(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("is_compatible must not call DataFrame.to_numpy()")
+
+    monkeypatch.setattr(pd.DataFrame, "to_numpy", boom)
+
+    df = pd.DataFrame(
+        {"a": np.arange(4, dtype=np.int64), "b": np.arange(4, dtype=np.float64)}
+    )
+    assert SharedDataFrame.is_compatible(df) is True
+    assert SharedDataFrame.is_compatible(pd.DataFrame({"a": [True, False]})) is True
+    # The extension-dtype rejection path also must not materialize data.
+    assert (
+        SharedDataFrame.is_compatible(
+            pd.DataFrame({"a": pd.array([1, 2], dtype="Int64")})
+        )
+        is False
+    )
+
+
+# Column builders for the equivalence matrix (issue #122 test plan).
+_MATRIX_TYPES = [
+    # plain numpy numeric/bool kinds (i/u/f/b)
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint64",
+    "float16",
+    "float32",
+    "float64",
+    "bool",
+    # extension dtypes that must never enter SHM
+    "Int64",
+    "Float64",
+    "boolean",
+    "category",
+    "object",
+    "str",
+]
+
+
+def _matrix_column(type_name: str) -> object:
+    """Build a length-3 column of the requested matrix type."""
+    return {
+        "int8": np.array([-5, 3, 7], dtype=np.int8),
+        "int16": np.array([-5, 3, 7], dtype=np.int16),
+        "int32": np.array([-5, 3, 7], dtype=np.int32),
+        "int64": np.array([-5, 3, 7], dtype=np.int64),
+        "uint8": np.array([1, 3, 7], dtype=np.uint8),
+        "uint16": np.array([1, 3, 7], dtype=np.uint16),
+        "uint64": np.array([1, 3, 7], dtype=np.uint64),
+        "float16": np.array([-0.5, 1.5, 2.25], dtype=np.float16),
+        "float32": np.array([-0.5, 1.5, 2.25], dtype=np.float32),
+        "float64": np.array([-0.5, 1.5, 2.25]),
+        "bool": np.array([True, False, True]),
+        "Int64": pd.array([-5, 3, 7], dtype="Int64"),
+        "Float64": pd.array([-0.5, 1.5, 2.25], dtype="Float64"),
+        "boolean": pd.array([True, False, True], dtype="boolean"),
+        "category": pd.Categorical(["a", "b", "c"]),
+        "object": np.array(["a", "b", "c"], dtype=object),
+        "str": pd.array(["a", "b", "c"], dtype="str"),
+    }[type_name]
+
+
+# Single columns, pairs and triples: the triple grading is the regression
+# guard against the object-array bool trap (bool mixed with any non-bool
+# column) for every combination, so the protection cannot silently rot when
+# pandas/numpy change their promotion rules (issue #122 review M2).
+_MATRIX_COMBOS = [
+    combo
+    for k in (1, 2, 3)
+    for combo in itertools.combinations_with_replacement(_MATRIX_TYPES, k)
+]
+
+
+@pytest.mark.parametrize("column_types", _MATRIX_COMBOS)
+def test_is_compatible_equivalence_with_to_numpy(column_types):
+    """For every SHM-compatible frame, to_numpy() is numeric and lossless.
+
+    The main regression guard of issue #122: for ANY combination of the
+    matrix column types (single columns and pairs), if is_compatible returns
+    True then df.to_numpy() must produce an int/uint/float/bool array (never
+    an object array of raw pointers), and the values must survive the
+    promotion to the common dtype unchanged.
+    """
+    df = pd.DataFrame(
+        {f"c{i}": _matrix_column(t) for i, t in enumerate(column_types)}
+    )
+    if not SharedDataFrame.is_compatible(df):
+        return
+    arr = df.to_numpy()
+    assert arr.dtype.kind in "iufb", (
+        f"compatible frame {column_types} promotes to object array"
+    )
+    for i, col in enumerate(df.columns):
+        orig = [
+            float(v) if not isinstance(v, bool) else v for v in df[col].tolist()
+        ]
+        new = [float(v) if not isinstance(v, bool) else v for v in arr[:, i].tolist()]
+        assert orig == new, f"values changed for {column_types} column {col}"
+
+
+def test_shared_dataframe_roundtrip_resets_index_to_range():
+    """SHM transfer restores RangeIndex(0, n), not the original index.
+
+    The index is passed positionally and silently reset (issue #122): a frame
+    with RangeIndex(100, 100+n) comes back as RangeIndex(0, n). Worker code
+    must not align X and y by index.
+    """
+    df = pd.DataFrame({"a": [10, 20, 30]}, index=pd.RangeIndex(100, 103))
+    wrapper = SharedDataFrame(df=df)
+    try:
+        restored = wrapper.to_df()
+        assert isinstance(restored.index, pd.RangeIndex)
+        assert list(restored.index) == [0, 1, 2]
+        assert list(restored["a"]) == [10, 20, 30]
+    finally:
+        wrapper.close()
+        wrapper.unlink()
+
+
+def test_run_parallel_typical_numeric_dataset_uses_shm(monkeypatch):
+    """A typical numeric dataset (int64 + float64, values ≤ 2**53) goes
+    through shared memory, not through a parquet write.
+
+    The compatibility of int64+float64 is now decided by VALUES, so the
+    default pandas integer dtype does not force every HPO phase into writing
+    parquet (issue #122). Absence of DiskPersistenceManager.save_df calls
+    proves the SHM path was taken.
+    """
+    df = pd.DataFrame(
+        {
+            "a": np.arange(100, dtype=np.int64),
+            "b": np.arange(100, dtype=np.float64) / 10,
+        }
+    )
+    assert SharedDataFrame.is_compatible(df) is True
+    saved: list[pd.DataFrame] = []
+    original_save = DiskPersistenceManager.save_df
+
+    def counting_save(self, dframe):
+        saved.append(dframe)
+        return original_save(self, dframe)
+
+    monkeypatch.setattr(DiskPersistenceManager, "save_df", counting_save)
+
+    results = run_parallel(
+        df_row_count, args_seq=[(df,)], mode="processes", shared_args_indices=[0]
+    )
+
+    assert results == [100]
+    assert saved == []  # no parquet write: the frame rode through SHM
+
+
+def test_run_parallel_value_safe_int64_float64_under_forkserver():
+    """int64 + float64 with values ≤ 2**53 survives forkserver/spawn SHM.
+
+    The worker receives the frame promoted to float64 (lossless within
+    2**53) and returns the same result as the plain pickle path (issue
+    #122). Runs each start method in its own subprocess, like the issue
+    #121 forkserver test.
+    """
+    if sys.platform != "linux":
+        pytest.skip("start-method probing below is Linux-specific")
+
+    script_template = """
+# -*- coding: utf-8 -*-
+import multiprocessing as mp
+
+import pandas as pd
+
+from configurable_automl_engine.training_engine.thread_pool import (
+    run_parallel,
+    SharedDataFrame,
+)
+
+
+def worker_int64_float64(df):
+    # Values must arrive losslessly — as int64 through pickle or as
+    # float64 through SHM; 2**53 is exactly representable in float64.
+    assert list(df["a"]) == [2**53, 3, 7]
+    assert list(df["b"]) == [0.5, 1.5, 2.5]
+    # The int64 column rides as float64 after the SHM promotion (issue
+    # #122) — documented behavior, lossless for values ≤ 2**53.
+    return int(df["a"].iloc[0])
+
+
+def worker_all_bool(df):
+    assert list(df["a"]) == [True, False, True]
+    assert str(df["a"].dtype) == "bool", df["a"].dtype
+    return str(df["a"].dtype)
+
+
+def main():
+    mp.set_start_method("{method}")
+    df = pd.DataFrame(
+        {{"a": [2**53, 3, 7], "b": [0.5, 1.5, 2.5]}}
+    )
+    assert SharedDataFrame.is_compatible(df) is True
+    via_shm = run_parallel(
+        worker_int64_float64, args_seq=[(df,)], mode="processes",
+        shared_args_indices=[0]
+    )
+    via_pickle = run_parallel(
+        worker_int64_float64, args_seq=[(df,)], mode="processes"
+    )
+    assert via_shm == via_pickle == [2**53], (via_shm, via_pickle)
+
+    df_bool = pd.DataFrame({{"a": [True, False, True]}})
+    assert SharedDataFrame.is_compatible(df_bool) is True
+    via_bool = run_parallel(
+        worker_all_bool, args_seq=[(df_bool,)], mode="processes",
+        shared_args_indices=[0]
+    )
+    assert via_bool == ["bool"], via_bool
+    print("OK")
+
+
+if __name__ == "__main__":
+    main()
+"""
+    for method in ("forkserver", "spawn"):
+        script = script_template.format(method=method)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
+            f.write(script)
+            script_path = f.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+        finally:
+            os.unlink(script_path)
+        assert proc.returncode == 0, (
+            f"{method} failed rc={proc.returncode}\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+        assert "OK" in proc.stdout
+
+
+def test_run_parallel_extension_int64_float64_under_forkserver():
+    """Int64 + float64 (nullable extension dtype) never enters SHM.
+
+    The frame is routed through the disk/pickle path and the worker gets the
+    same values as through pickle (issue #122 — regression guard on the
+    find_common_type trap: a naive dtype computation would declare this
+    frame SHM-compatible while to_numpy() yields an object array).
+    """
+    if sys.platform != "linux":
+        pytest.skip("start-method probing below is Linux-specific")
+
+    script_template = """
+# -*- coding: utf-8 -*-
+import multiprocessing as mp
+
+import pandas as pd
+
+from configurable_automl_engine.training_engine.thread_pool import (
+    run_parallel,
+    SharedDataFrame,
+)
+
+
+def worker_extension(df):
+    return (list(df["a"]), list(df["b"]))
+
+
+def main():
+    mp.set_start_method("{method}")
+    df = pd.DataFrame(
+        {{"a": pd.array([1, 2, 3], dtype="Int64"), "b": [0.5, 1.5, 2.5]}}
+    )
+    assert SharedDataFrame.is_compatible(df) is False, "Int64 must not enter SHM"
+    # shared_args_indices=[0]: the frame is rejected by is_compatible and
+    # routed through the parquet path instead of crashing a worker.
+    via_disk = run_parallel(
+        worker_extension, args_seq=[(df,)], mode="processes",
+        shared_args_indices=[0]
+    )
+    via_pickle = run_parallel(
+        worker_extension, args_seq=[(df,)], mode="processes"
+    )
+    assert via_disk == via_pickle == [([1, 2, 3], [0.5, 1.5, 2.5])], (
+        via_disk, via_pickle
+    )
+    print("OK")
+
+
+if __name__ == "__main__":
+    main()
+"""
+    for method in ("forkserver", "spawn"):
+        script = script_template.format(method=method)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
+            f.write(script)
+            script_path = f.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+        finally:
+            os.unlink(script_path)
+        assert proc.returncode == 0, (
+            f"{method} failed rc={proc.returncode}\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+        assert "OK" in proc.stdout

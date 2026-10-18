@@ -53,11 +53,115 @@ POLL_INTERVAL = 0.5
 _START_SIGNAL_DTYPE = np.dtype([("start", np.float64), ("pid", np.int64)])
 
 
+def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
+    """Return the dtype of an array that ``df.to_numpy()`` would produce.
+
+    Computed WITHOUT materializing the array itself: for a frame with mixed
+    column types ``to_numpy()`` copies the whole data into a new array, and
+    ``SharedDataFrame.__init__`` copies it a second time right after, causing
+    a transient doubling of memory in the main process on every HPO phase
+    (issue #122).
+
+    Only plain numpy column dtypes are accepted: extension dtypes (Int64,
+    Float64, boolean, string, category, ...) are rejected up front, because
+    pandas may promote them to a different dtype than their plain numpy
+    counterparts (issue #122): e.g. ``Int64 + float64`` → object, while
+    ``int64 + float64`` → float64. For plain numpy columns of the numeric
+    kinds i/u/f/b pandas promotes to a common dtype exactly like numpy's
+    ``np.result_type`` — except for bool: a bool column mixed with any
+    non-bool column yields object (an array of raw pointers to
+    parent-process Python objects), while ``np.result_type(bool, int64)``
+    returns int64. The bool case is therefore handled explicitly, without
+    relying on the internal pandas API ``pandas.core.dtypes``. Other plain
+    numpy kinds (datetime64/timedelta64, M/m) are out of scope: mixing them
+    with numeric columns, ``np.result_type`` raises or diverges from
+    ``df.to_numpy()`` (which yields object) — the caller's rule 1 already
+    rejects such frames before this helper is consulted.
+
+    Args:
+        df: The candidate DataFrame.
+
+    Returns:
+        The common plain numpy dtype of ``df.to_numpy()``, or None when the
+        frame is not eligible (extension dtype present, or some dtypes).
+    """
+    try:
+        dtypes = list(df.dtypes)
+    except Exception:  # noqa: BLE001
+        return None
+    if not all(isinstance(dt, np.dtype) for dt in dtypes):
+        return None
+    if not dtypes:
+        return np.dtype("float64")
+
+    bool_mask = [dt.kind == "b" for dt in dtypes]
+    if all(bool_mask):
+        return np.dtype("bool")
+    if any(bool_mask):
+        # bool mixed with a non-bool column: df.to_numpy() gives an object
+        # array, not a numeric one (unlike np.result_type) — the caller
+        # rejects object arrays (issue #121 / #122).
+        return np.dtype("O")
+    try:
+        return np.result_type(*dtypes)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ints_fit_float64(df: pd.DataFrame) -> bool:
+    """Whether every int64/uint64 column of ``df`` fits into float64 exactly.
+
+    A value can be converted to float64 without precision loss iff
+    ``abs(x) <= 2**53``: ``2**53`` itself is representable exactly, ``2**53+1``
+    is not. int32/uint32 → float64 is always lossless, and narrower integers
+    promote to float32/float64 losslessly as well, so only 8-byte integer
+    columns need a value check, and only when the frame actually promotes to
+    float (the caller checks that the result dtype is float). Only
+    int64/uint64 columns are inspected; non-8-byte and non-integer columns
+    (including float columns that may carry NaN) are skipped, so no NaN check
+    is needed.
+
+    Args:
+        df: The candidate DataFrame (plain numpy column types only).
+
+    Returns:
+        True when all int64/uint64 columns contain values representable in
+        float64 without loss. Empty or absent such columns return True.
+    """
+    columns = df.select_dtypes(include=["int64", "uint64"])
+    # Iterate positionally over the 8-byte integer columns only (the
+    # optimized subset): with duplicate column names df[name] would return a
+    # DataFrame and min()/max() would then produce Series (a ValueError in
+    # the comparison below). The compatibility check must never crash — it
+    # only decides SHM vs parquet (issue #122 review B1).
+    for i, dt in enumerate(columns.dtypes):
+        col = columns.iloc[:, i]
+        if len(col) == 0:
+            continue
+        if dt.kind == "u":
+            # uint64 has no negative values: only the upper boundary matters.
+            if int(col.max()) > 2**53:
+                return False
+        else:
+            # Use Python int / separate min-max bounds: abs of
+            # np.iinfo(np.int64).min overflows int64 (issue #122).
+            low, high = col.min(), col.max()
+            if high > 2**53 or low < -(2**53):
+                return False
+    return True
+
+
 class SharedDataFrame:
     """Wrapper for placing a DataFrame in shared memory.
 
     Allows passing large data volumes between processes without the overhead
     of serialization (pickle), using the POSIX Shared Memory mechanism.
+
+    Index contract (issue #122): the index is NOT transferred. The data is
+    passed positionally, and the restored frame always gets a RangeIndex(0,
+    n) — even when the original index was, e.g., RangeIndex(100, 100+n).
+    Worker code (tuner, preprocessing, oversampling, feature_selection,
+    validation) must not align X and y by index.
 
     Attributes:
         name (str | None): Unique name of the shared memory segment in the OS.
@@ -99,6 +203,11 @@ class SharedDataFrame:
 
         self.name: str | None = None
         self._owner = df is not None
+        # NOTE (issue #122): the index is NOT transferred through shared
+        # memory. to_df() always restores a RangeIndex(0, n): the data is
+        # passed positionally, and worker code (tuner, preprocessing,
+        # oversampling, feature_selection, validation) must not align X and y
+        # by index.
         self.columns: list[str] | None = None
 
         if df is not None:
@@ -174,58 +283,74 @@ class SharedDataFrame:
         """Check whether a DF can be placed into SHM.
 
         A DataFrame is compatible when its data can be copied into shared
-        memory as a single homogeneous numpy array of simple types
-        (int/uint/float/bool) without silently changing the values, and its
-        index is a RangeIndex.
+        memory as a single homogeneous numpy array of plain numpy types
+        (int/uint/float/bool) without silently changing the values.
+
+        The index is NOT transferred: to_df() restores RangeIndex(0, n).
+        Data is passed positionally — worker code must not align X and y by
+        index.
+
+        The check never calls df.to_numpy() (it would copy the whole data
+        just to learn the dtype): the result dtype is computed from the
+        column dtypes instead. Consequently a frame may be reported
+        compatible even when an actual to_numpy() call would raise (an
+        exotic frame whose materialization fails): the exception then
+        surfaces inside SharedDataFrame.__init__ and run_parallel's
+        preparation fallback routes the frame through pickle.
         """
         if SharedDataFrame.is_shared_array(df):
             return True
         if not isinstance(df, pd.DataFrame):
             return False
 
-        # 1. Every column must have a simple numeric/bool dtype (kinds
-        #    i/u/f/b). This rejects category/string/object columns even when
-        #    df.to_numpy() would promote them to a numeric array: a numeric
-        #    category promotes to float64, which silently changes the
-        #    astype(str) encoding ('10' → '10.0') and can collapse big int ids
-        #    into indistinguishable float64 values, while the earlier parquet
-        #    path preserved the exact int64 (issue #121 review).
+        # Rule 1: every column must have a plain numpy dtype with a simple
+        # numeric/bool kind (i/u/f/b). This rejects extension dtypes (Int64,
+        # Float64, boolean, string, category, ...) even when df.to_numpy()
+        # would promote them to a numeric array: extension dtypes carry
+        # semantics (nullable values, categorical encoding) that is silently
+        # lost in the SHM round-trip, and e.g. a numeric category promotes to
+        # float64, which changes the astype(str) encoding ('10' → '10.0') and
+        # can collapse big int ids into indistinguishable float64 values,
+        # while the earlier parquet path preserved the exact int64 (issue
+        # #121 review).
         allowed_kinds = {"i", "u", "f", "b"}
-        if not all(dt.kind in allowed_kinds for dt in df.dtypes):
+        if not all(
+            isinstance(dt, np.dtype) and dt.kind in allowed_kinds for dt in df.dtypes
+        ):
             return False
 
-        # 2. Check the dtype of the array produced by df.to_numpy(), not the
-        #    per-column dtypes: pandas promotes mixed column types to a common
-        #    one. int + float → float64 (safe, numeric), but bool mixed with
-        #    numeric columns (int + float + bool) → object, i.e. an array of
-        #    raw pointers to parent-process Python objects. Copying such
-        #    pointers into shared memory crashes workers under
-        #    forkserver/spawn (issue #121), so object arrays are rejected and
-        #    the frame goes through the disk/pickle path instead.
-        try:
-            array_dtype = df.to_numpy().dtype
-        except Exception:  # noqa: BLE001
+        # Rule 2: compute the dtype df.to_numpy() would produce WITHOUT
+        # materializing the array itself: for a mixed-type frame to_numpy()
+        # makes a full in-memory copy, and SharedDataFrame.__init__ makes a
+        # second one right after — a transient doubling of memory in the main
+        # process on every phase (issue #122). pandas promotes mixed plain
+        # numpy columns to a common dtype exactly like numpy's result_type,
+        # except that bool mixed with anything non-bool yields object (an
+        # array of raw pointers to parent-process Python objects; copying
+        # such pointers into shared memory crashes workers under
+        # forkserver/spawn — issue #121), so _numpy_result_dtype reports the
+        # object dtype for that case and the frame is rejected below.
+        array_dtype = _numpy_result_dtype(df)
+        if array_dtype is None:
             return False
         if array_dtype.kind not in allowed_kinds:
             return False
 
-        # 3. Reject precision-losing promotions: an int64/uint64 column mixed
-        #    with a float column promotes to float64, making integer values
-        #    above 2**53 indistinguishable (9007199254740999 and
-        #    9007199254741001 both become 9007199254741000.0). The frame then
-        #    goes through parquet instead, which preserves the exact integer
-        #    dtype (issue #121 review). int32/uint32 → float64 is always
-        #    lossless, so only 8-byte integer columns trigger this. The check
-        #    is purely dtype-based, no data materialization.
-        if array_dtype.kind == "f" and any(
-            dt.kind in {"i", "u"} and dt.itemsize >= 8 for dt in df.dtypes
-        ):
+        # Rule 3: reject precision-losing promotions: an int64/uint64 column
+        # mixed with a float column promotes to float64, making integer
+        # values above 2**53 indistinguishable (9007199254740993 and
+        # 9007199254741001 both become 9007199254741000.0). Whether the loss
+        # actually occurs depends on the VALUES, not the dtype: int64 is the
+        # default dtype of integer columns in pandas, and a typical numeric
+        # dataset (int + float features) only needs to go through parquet
+        # when an 8-byte integer column really contains values beyond 2**53
+        # (in practice almost only ID columns, issue #122).
+        if array_dtype.kind == "f" and not _ints_fit_float64(df):
             return False
 
-        # Check the index: the current SHM implementation does not support
-        # complex indices. If the index is not a RangeIndex, the object is
-        # considered incompatible with SHM and is automatically redirected to
-        # DiskPersistenceManager.
+        # The index itself is not transferred (see to_df): a non-RangeIndex
+        # is rejected because restoring the frame with RangeIndex(0, n)
+        # would silently change the label alignment of such an index.
         return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
@@ -238,6 +363,13 @@ class SharedDataFrame:
            stored column name list.
         3. Isolation: the resulting DataFrame is an independent object in the
            memory of the current process.
+
+        Index contract (issue #122): the index is NOT transferred. The data
+        is passed positionally, and the restored frame always gets a
+        RangeIndex(0, n) — even when the original index was, e.g.,
+        RangeIndex(100, 100+n). Worker code (tuner, preprocessing,
+        oversampling, feature_selection, validation) must not align X and y
+        by index.
         Returns:
             pd.DataFrame: The restored dataset.
         """
@@ -697,6 +829,14 @@ def run_parallel(
                 None — no global limit. In "threads" mode ignored
                 with a warning.
             shared_args_indices (list[int]): DataFrame indices for Shared Memory.
+                Data in shared memory is passed positionally and the index is
+                NOT transferred: the worker always receives the frame with a
+                RangeIndex(0, n), even when the original index differed (e.g.
+                RangeIndex(100, 100+n)) — worker code must not align X and y
+                by index (issue #122). Note that an int64/uint64 column mixed
+                with a float column is promoted to float64 for the worker,
+                which is lossless as long as no value exceeds 2**53 in
+                absolute value (issue #122).
             disk_args_indices (list[int]): DataFrame indices for the disk cache.
             shutdown_grace_period (float): Time in seconds allowed for the graceful shutdown
                 of workers before SIGTERM/SIGKILL is forcibly sent.
