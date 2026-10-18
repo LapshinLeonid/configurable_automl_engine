@@ -23,7 +23,13 @@ B. Unique Ratio (``check_unique``)
    Predictions are rounded to the scale of the target: the number of decimals
    is derived from ``std(y)`` (not a fixed 3 digits, which depend on the
    scale of y and break for discrete targets). Fails when
-   ``nunique < max(min_unique_count, min_unique_ratio * N)``.
+   ``nunique < max(min_unique_count, min_unique_ratio * N)``, where the
+   ``min_unique_ratio * N`` term is capped by ``nunique(y)`` — the number of
+   distinct target values on the valid rows at the same rounding granularity
+   applied to the predictions — and the final threshold never exceeds that
+   cap: the most expressive model (one predicting y exactly) always reaches
+   it, so a perfect model is never disqualified by circuit B on a
+   low-cardinality target (issue #125).
 
 C. Dead Feature Check (``check_dead_features``)
    * Linear models (Lasso, ElasticNet, SGDRegressor, ... — anything exposing
@@ -368,7 +374,11 @@ class ModelSanityGate:
                 absolute threshold is not applied).
             min_unique_count: Absolute lower bound for nunique (circuit B).
             min_unique_ratio: Lower bound for the share of unique predictions,
-                in (0, 1].
+                in (0, 1]. Applied as ``min_unique_ratio * N`` capped by the
+                number of distinct target values ``nunique(y)`` (at the
+                rounding granularity applied to predictions); the final
+                threshold never exceeds that ceiling — a perfect model always
+                reaches it (issue #125).
             max_dead_feature_ratio: Dead-feature share threshold (circuit C);
                 above it — a soft signal, and combined with a circuit A failure
                 (when ``dead_features_require_low_diversity``) — a disqualification.
@@ -435,7 +445,12 @@ class ModelSanityGate:
                         is not applied).
                     min_unique_count: absolute lower bound for nunique (circuit B).
                     min_unique_ratio: lower bound for the share of unique predictions,
-                        in (0, 1].
+                        in (0, 1]. Applied as ``min_unique_ratio * N`` capped by
+                        ``nunique(y)`` — the number of distinct target values on the
+                        valid rows at the rounding granularity applied to predictions
+                        (issue #125: a perfect model predicting y exactly can reach
+                        at most ``nunique(y)`` distinct predictions, so the threshold
+                        must never exceed that ceiling).
                     max_dead_feature_ratio: dead-feature share threshold (circuit C):
                         above it — a soft signal, and combined with a circuit A failure
                         (when ``dead_features_require_low_diversity``) — disqualification.
@@ -737,6 +752,20 @@ class ModelSanityGate:
         (``std(y)``), not of the predictions — fixed digits are inapplicable to
         differently scaled and discrete targets.
 
+        The required number of distinct predictions is
+        ``max(min_unique_count, min_unique_ratio * N)`` with the ratio term
+        capped by ``nunique(y)`` — the number of distinct target values on the
+        valid rows at the same rounding granularity that is applied to the
+        predictions (so a model predicting y exactly always reaches the cap).
+        Without the cap a high ``min_unique_ratio`` on a low-cardinality
+        target demands more distinct predictions than the most expressive
+        model (one predicting y exactly) can produce: e.g. 18 rows with 13
+        distinct y values and ``min_unique_ratio=0.9`` require 16.2 ≥ 17
+        distinct predictions — even a perfect model would be disqualified
+        (issue #125). The cap makes the ceiling equal to the expressing power
+        of a perfect model; the final threshold is additionally never allowed
+        to exceed the cap even when ``min_unique_count`` is set above it.
+
         Args:
             y: the target (source of the rounding scale).
             y_pred_oof: OOF predictions.
@@ -758,7 +787,13 @@ class ModelSanityGate:
         rounded = np.round(y_pred_oof[valid], decimals=decimals)
         nunique = len(np.unique(rounded))
         unique_ratio = nunique / n_valid
-        required = max(self.min_unique_count, self.min_unique_ratio * n_valid)
+        # Distinct target values on the valid rows at the same rounding
+        # granularity that is applied to the predictions — the natural
+        # ceiling for how many distinct predictions the most expressive
+        # model (one predicting y exactly) can produce.
+        n_unique_y = len(np.unique(np.round(y[valid], decimals=decimals)))
+        ratio_bound = min(self.min_unique_ratio * n_valid, n_unique_y)
+        required = min(max(self.min_unique_count, ratio_bound), n_unique_y)
         if _fails_below(nunique, required):
             return (
                 unique_ratio,
@@ -766,8 +801,9 @@ class ModelSanityGate:
                     (
                         f"Circuit B (unique): nunique={nunique} < "
                         f"max(min_unique_count={self.min_unique_count}, "
-                        f"min_unique_ratio*N={self.min_unique_ratio * n_valid:.3f}) "
-                        f"= {required:.3f}"
+                        f"min_unique_ratio*N={self.min_unique_ratio * n_valid:.3f} "
+                        f"capped by nunique(y)={n_unique_y} -> "
+                        f"{ratio_bound:.3f}) = {required:.3f}"
                     )
                 ],
                 [],

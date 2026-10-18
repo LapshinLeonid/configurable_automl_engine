@@ -292,6 +292,94 @@ def test_unique_min_unique_ratio_lower_bound_applies():
     assert "min_unique_ratio" in result.reasons[0]
 
 
+def test_unique_threshold_capped_by_nunique_y_issue_125():
+    """Issue #125: the unique threshold must not exceed nunique(y).
+
+    The reproduction from the issue: N=18 rows with 13 distinct target
+    values and ``min_unique_ratio=0.9`` demand 16.2 ≈ 17 distinct
+    predictions — more than even a perfect model (13) can produce, so the
+    old check disqualified it. The ratio bound is capped by the number of
+    distinct target values: a model predicting y exactly always reaches the
+    cap and passes.
+    """
+    y = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                 dtype=float)
+    assert len(y) == 18
+    assert len(np.unique(y)) == 13
+
+    gate = ModelSanityGate(
+        min_unique_ratio=0.9,
+        check_diversity=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    )
+    # A perfect model (predictions == y) must pass despite the 0.9 ratio.
+    result = gate.check(y=y, y_pred_oof=y)
+    assert result.is_valid
+    assert result.reasons == []
+    # The reached nunique (13) equals the cap; the ratio is reported as-is.
+    assert result.unique_ratio == pytest.approx(13 / 18)
+    # The reason, if ever emitted, names the cap.
+    # A model with fewer distinct predictions than the cap still fails.
+    below = gate.check(y=y, y_pred_oof=np.tile(y[:12], 2)[:18])
+    assert not below.is_valid
+    assert any("capped by nunique(y)" in r for r in below.reasons)
+
+
+def test_unique_threshold_capped_by_rounded_nunique_y_issue_125():
+    """The cap uses the same rounding granularity as the predictions.
+
+    Distinct target values are counted at the same ``np.round(decimals)``
+    granularity that is applied to the predictions: a model predicting y
+    exactly reaches exactly ``nunique(round(y))`` distinct rounded
+    predictions — the cap — and passes by construction. Here a large-scale
+    target (granularity 1000) collapses pairs of close values: 4 raw
+    distinct values become 2 rounded buckets; a perfect model (2 distinct
+    rounded predictions == the cap) passes, a constant prediction (1) does
+    not.
+    """
+    y = np.array([0.0, 0.001, 1_000_000.0, 1_000_000.001] * 5, dtype=float)
+    gate = ModelSanityGate(
+        min_unique_ratio=1.0,
+        check_diversity=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    )
+    # Perfect model: rounded nunique == rounded nunique(y) == the cap (2).
+    result = gate.check(y=y, y_pred_oof=y)
+    assert result.is_valid
+    assert result.reasons == []
+    assert result.unique_ratio == pytest.approx(2 / 20)
+    # A constant prediction (1 distinct) still fails: 1 < cap 2.
+    below = gate.check(y=y, y_pred_oof=np.full(20, 500_000.0))
+    assert not below.is_valid
+    assert any("capped by nunique(y)=2" in r for r in below.reasons)
+
+
+def test_unique_min_unique_count_also_capped_by_nunique_y_issue_125():
+    """min_unique_count above nunique(y) cannot disqualify a perfect model.
+
+    A static count higher than the number of distinct target values is
+    unreachable for the most expressive model; the final threshold is capped
+    by nunique(y) as well (not only the ratio term).
+    """
+    y = np.tile(np.arange(4, dtype=float), 10)  # nunique(y) = 4
+    gate = ModelSanityGate(
+        min_unique_count=10,
+        check_diversity=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    )
+    # Perfect model: 4 distinct predictions == the cap → passes.
+    result = gate.check(y=y, y_pred_oof=y)
+    assert result.is_valid
+    assert result.reasons == []
+    # A degenerate model (fewer than the cap) still fails.
+    const = gate.check(y=y, y_pred_oof=np.full(40, 1.0))
+    assert not const.is_valid
+    assert any("Circuit B" in r for r in const.reasons)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Circuit C — Dead Feature Check
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1428,15 +1516,27 @@ def test_gap_no_finite_pairs_for_rmse():
 
 
 def test_unique_constant_target_uses_fallback_precision():
-    # Constant y: std(y)=0 → fallback rounding precision; a constant
-    # prediction yields nunique=1 → Circuit B failure.
+    # Constant y: std(y)=0 → fallback rounding precision (6 decimals). The
+    # threshold is capped by nunique(y)=1, so a perfect model (a constant
+    # prediction matching the constant target) passes — the cap of issue
+    # #125 guarantees that a model predicting y exactly is never
+    # disqualified by circuit B.
     y = np.full(60, 7.0)
     gate = ModelSanityGate(
         check_diversity=False, check_dead_features=False, check_generalization_gap=False
     )
     result = gate.check(y=y, y_pred_oof=np.full(60, 7.0))
-    assert not result.is_valid
-    assert any("Circuit B" in r for r in result.reasons)
+    assert result.is_valid
+    assert result.reasons == []
+    assert result.unique_ratio == pytest.approx(1 / 60)
+
+    # The fallback granularity (1e-6) is in effect: predictions differing by
+    # less than the granularity collapse to a single rounded value, and the
+    # ratio is computed on the rounded values regardless of the cap.
+    jitter = 7.0 + np.linspace(0.0, 1e-9, 60)  # below the granularity
+    result_jitter = gate.check(y=y, y_pred_oof=jitter)
+    assert result_jitter.is_valid
+    assert result_jitter.unique_ratio == pytest.approx(1 / 60)
 
 
 def test_dead_features_empty_coef_is_reason():

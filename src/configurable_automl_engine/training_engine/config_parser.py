@@ -510,6 +510,8 @@ class SanityGateCfg(BaseModel):
                 adaptive_diversity (bool): Adaptive mode for circuit A.
                 min_unique_count (int): Absolute minimum nunique for circuit B (>= 1).
                 min_unique_ratio (float): Lower bound for the fraction of unique values (in (0, 1]).
+                    Applied as ``min_unique_ratio * N`` capped by the number of distinct
+                    target values (a perfect model always reaches the cap; issue #125).
                 max_dead_feature_ratio (float): Circuit C threshold (in [0, 1]) — a signal
                     for linear models; standalone disqualification only when
                     ``dead_features_require_low_diversity=true`` and diversity is low.
@@ -647,7 +649,11 @@ class SanityGateCfg(BaseModel):
         default=0.05,
         gt=0.0,
         le=1.0,
-        description="Lower bound for the fraction of unique predictions in circuit B (in (0, 1]).",
+        description=(
+            "Lower bound for the fraction of unique predictions in circuit B (in (0, 1]). "
+            "Applied as min_unique_ratio * N capped by the number of distinct target "
+            "values (a perfect model always reaches the cap; issue #125)."
+        ),
     )
     max_dead_feature_ratio: float = Field(
         default=0.4,
