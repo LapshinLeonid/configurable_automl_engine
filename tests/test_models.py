@@ -249,13 +249,68 @@ def test_create_model_unknown_algorithm():
 
 def test_create_model_gpr_default_kernel():
     """
-    Verify the specific logic for GaussianProcessRegressor (lines 114-115).
+    Verify the specific logic for GaussianProcessRegressor.
     """
     model = create_model("gpr")
     # Verify the RBF kernel was set by default
     assert hasattr(model, "kernel")
     # In sklearn GPR, the kernel is kept in the parameters after initialization
     assert "RBF" in str(model.get_params()["kernel"])
+
+
+def test_create_model_gpr_default_kernel_has_amplitude_and_noise():
+    """GPR default kernel = amplitude × RBF + white noise (not a bare RBF).
+
+    Regression for the issue: a bare RBF(1.0) without an output-scale
+    amplitude and without an explicit noise term behaves like the mean
+    predictor, while GPR is one of the most suitable models on small
+    samples and provides prediction intervals.
+    """
+    model = create_model("gpr")
+    kernel = model.get_params()["kernel"]
+    kernel_str = str(kernel)
+    # amplitude * base + white noise: ConstantKernel in the Product,
+    # WhiteKernel in the Sum.
+    assert "WhiteKernel" in kernel_str
+
+
+def test_create_model_gpr_defaults_normalize_and_restarts():
+    """GPR defaults: normalize_y=True, n_restarts_optimizer>0, random_state set.
+
+    Target normalization and several optimizer restarts with a fixed seed
+    are part of the default configuration, so the model is not a "mean
+    predictor" and reproducible across runs.
+    """
+    model = create_model("gpr")
+    assert model.normalize_y is True
+    assert model.n_restarts_optimizer >= 1
+    assert model.random_state is not None
+
+
+@pytest.mark.parametrize("kernel_type", ["rbf", "matern", "rational_quadratic"])
+def test_create_model_gpr_kernel_type(kernel_type):
+    """kernel_type selects the GPR kernel family (rbf/matern/rational_quadratic)."""
+    model = create_model("gpr", kernel_type=kernel_type)
+    kernel = model.get_params()["kernel"]
+    kernel_str = str(kernel)
+    if kernel_type == "rbf":
+        assert "RBF" in kernel_str
+    elif kernel_type == "matern":
+        assert "Matern" in kernel_str
+    else:
+        assert "RationalQuadratic" in kernel_str
+    # Every family keeps the amplitude (Product) and the noise component
+    # (WhiteKernel in the outer Sum).
+    assert "WhiteKernel" in kernel_str
+    assert hasattr(kernel, "k1") and hasattr(kernel, "k2")
+    assert type(kernel.k1).__name__ == "Product"
+    assert type(kernel.k1.k1).__name__ == "ConstantKernel"
+
+
+def test_create_model_gpr_kernel_type_not_in_params():
+    """kernel_type is a tuner-only hint and never a model parameter."""
+    model = create_model("gpr", kernel_type="matern")
+    assert "kernel_type" not in model.get_params()
 
 
 # --- get_allowed_hyperparameters (single source of truth for validation) ---

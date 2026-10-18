@@ -901,14 +901,34 @@ def test_hyperparameter_compatibility_nondefault_valid_params():
 def test_hyperparameter_compatibility_gpr_alpha():
     """alpha for gaussian_process_regression passes validation.
 
-    Regression test: DEFAULT_SPACES['gaussian_process_regression'] is empty,
-    but alpha is a standard GaussianProcessRegressor parameter.
+    alpha is a standard GaussianProcessRegressor constructor parameter, and
+    the non-empty DEFAULT_SPACES entry does not restrict user overrides.
     """
     cfg_data = BASE | {
         "algorithms": {
             "gaussian_process_regression": {
                 "enable": True,
                 "hyperparameters": {"alpha": [1e-10, 1.0]},
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, "gaussian_process_regression").enable is True
+
+
+def test_hyperparameter_compatibility_gpr_kernel_type():
+    """kernel_type (the GPR kernel selector) passes validation."""
+    cfg_data = BASE | {
+        "algorithms": {
+            "gaussian_process_regression": {
+                "enable": True,
+                "hyperparameters": {
+                    "kernel_type": [
+                        ["rbf", "matern", "rational_quadratic"],
+                        "categorical",
+                    ]
+                },
             }
         }
     }

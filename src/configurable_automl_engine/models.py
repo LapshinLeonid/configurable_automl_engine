@@ -18,7 +18,13 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF
+from sklearn.gaussian_process.kernels import (
+    RBF,
+    ConstantKernel,
+    Matern,
+    RationalQuadratic,
+    WhiteKernel,
+)
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import (
     ARDRegression,
@@ -114,6 +120,55 @@ SPARSE_UNSUPPORTED_ALGORITHMS: frozenset[str] = frozenset(
         "ardregression",
     }
 )
+
+
+#: Supported Gaussian process kernel families for the ``kernel_type``
+#: hyperparameter (the small HPO search space of GPR).
+GPR_KERNEL_TYPES: tuple[str, ...] = ("rbf", "matern", "rational_quadratic")
+
+_DEFAULT_BOUNDS = (1e-3, 1e3)
+
+
+def _make_gpr_kernel(kernel_type: str) -> Any:
+    """Build the GPR kernel for a given kernel family name.
+
+    Every kernel is composed as ``amplitude * base_kernel + white_noise``:
+    an explicit output-scale amplitude, a base kernel with an adjusted
+    length scale, and an explicit noise component. The default kernel is
+    ``ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(1e-5)``.
+
+    Args:
+        kernel_type: Kernel family name — one of ``'rbf'``, ``'matern'``
+            or ``'rational_quadratic'`` (any other name falls back to
+            RBF with a warning).
+
+    Returns:
+        A compound sklearn kernel (``Sum`` of a ``Product`` and a
+        ``WhiteKernel``).
+    """
+    base: Any
+    if kernel_type == "matern":
+        base = Matern(
+            length_scale=1.0,
+            length_scale_bounds=_DEFAULT_BOUNDS,
+            nu=1.5,
+        )
+    elif kernel_type == "rational_quadratic":
+        base = RationalQuadratic(
+            length_scale=1.0,
+            length_scale_bounds=_DEFAULT_BOUNDS,
+            alpha=1.0,
+            alpha_bounds=_DEFAULT_BOUNDS,
+        )
+    else:
+        if kernel_type != "rbf":
+            logger.warning(
+                "Unknown GPR kernel type %r, falling back to 'rbf'", kernel_type
+            )
+        base = RBF(length_scale=1.0, length_scale_bounds=_DEFAULT_BOUNDS)
+    return ConstantKernel(
+        1.0, constant_value_bounds=_DEFAULT_BOUNDS
+    ) * base + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-9, 1e1))
 
 
 def requires_dense_input(algorithm: str) -> bool:
@@ -343,6 +398,11 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     for legacy, target in LEGACY_PARAM_MAPPINGS.get(resolved, {}).items():
         if target in accepted_params:
             allowed.add(legacy)
+    # The kernel family selector of GaussianProcessRegressor: a
+    # tuner-level hint translated to a concrete kernel by
+    # ``create_model`` (not a constructor parameter).
+    if resolved == "gaussian_process_regression":
+        allowed.add("kernel_type")
     return frozenset(allowed)
 
 
@@ -390,9 +450,29 @@ def create_model(
             "Install it or exclude it from the list."
         )
 
-    # For GaussianProcessRegressor (gpr), set the RBF(1.0) kernel by default
-    if algo_key == "gaussian_process_regression" and "kernel" not in hyperparams:
-        hyperparams["kernel"] = RBF(1.0)
+    # For GaussianProcessRegressor (gpr), set a proper default kernel
+    # (amplitude × RBF + white noise), enable target normalization and
+    # several optimizer restarts with a fixed seed. A bare RBF(1.0) without
+    # an amplitude/noise component and without y-normalization produces a
+    # "mean predictor" (score ≈ std(y)), while GPR is one of the most
+    # suitable models on small samples and provides prediction intervals.
+    if algo_key == "gaussian_process_regression":
+        # The HPO search space exposes a categorical ``kernel_type``
+        # (rbf/matern/rational_quadratic) instead of a raw kernel object —
+        # Optuna stores only JSON-serializable categorical values, so the
+        # abstract name is translated into a concrete kernel here.
+        kernel_type = hyperparams.pop("kernel_type", "rbf")
+        if "kernel" not in hyperparams:
+            hyperparams["kernel"] = _make_gpr_kernel(kernel_type)
+    if algo_key == "gaussian_process_regression" and "normalize_y" not in hyperparams:
+        hyperparams["normalize_y"] = True
+    if (
+        algo_key == "gaussian_process_regression"
+        and "n_restarts_optimizer" not in hyperparams
+    ):
+        hyperparams["n_restarts_optimizer"] = 2
+    if algo_key == "gaussian_process_regression" and "random_state" not in hyperparams:
+        hyperparams["random_state"] = 42
 
     # If max_iter is not set, add a cap (e.g. 10,000 iterations) so that the
     # LibSVM C-code exits the loop by itself if it hangs

@@ -274,7 +274,17 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "isotonic_regression": {
         "increasing": SearchSpaceEntry.model_validate([[True, False], "categorical"]),
     },
-    "gaussian_process_regression": {},
+    "gaussian_process_regression": {
+        # The kernel family of the Gaussian process: translated into a
+        # concrete sklearn kernel (amplitude * base + white noise) by
+        # `models.create_model`. Kept as strings (not raw kernel objects)
+        # so that Optuna can persist categorical trials, the TPE history
+        # transfer between HPO phases works, and `trial.params` stays
+        # JSON-serializable.
+        "kernel_type": SearchSpaceEntry.model_validate(
+            [["rbf", "matern", "rational_quadratic"], "categorical"]
+        ),
+    },
 }
 
 # A projection of DEFAULT_SPACES keys. An informational summary of parameters
