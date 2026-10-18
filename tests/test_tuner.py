@@ -128,6 +128,53 @@ def test_space_override(toy_data):
     assert params["alpha"] <= 0.001
 
 
+def test_dict_space_override_remaps_legacy_names_once(toy_data):
+    """A dict-based space override with a legacy name is remapped once, before the trials.
+
+    The legacy ``n_iter`` key of ARDRegression must become ``max_iter`` in the
+    space: otherwise every trial would trigger the "Remapped ..." DEBUG line
+    inside ``clean_hyperparameters`` (~100 identical log entries per sweep).
+    """
+    X, y = toy_data
+    y = pd.Series(np.abs(y) + 1.0)
+
+    space_overrides = {
+        "ardregression": {
+            "n_iter": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
+            "alpha_1": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
+        }
+    }
+
+    with patch(
+        "configurable_automl_engine.tuner.create_model",
+        wraps=hyperopt.create_model,
+    ) as mock_create:
+        opt_res = hyperopt.optimize(
+            "ardregression",
+            X,
+            y,
+            n_trials=4,
+            random_state=0,
+            space_overrides=space_overrides,
+            validation_strategy="train_test_split",
+        )
+
+    assert opt_res is not None
+    params = opt_res.params
+    assert "n_iter" not in params
+    assert "max_iter" in params
+    assert 50 <= params["max_iter"] <= 500
+
+    # Every model instantiation that receives hyperparameters must use the
+    # modern name: the per-trial clean_hyperparameters has nothing left to
+    # remap (the bare existence check call has no hyperparams at all).
+    assert mock_create.call_args_list, "create_model was never called"
+    for args, kwargs in mock_create.call_args_list:
+        if args and args[0] == "ardregression" and kwargs:
+            assert "n_iter" not in kwargs
+            assert "max_iter" in kwargs
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 5. Negative scenarios
 # ──────────────────────────────────────────────────────────────────────────────

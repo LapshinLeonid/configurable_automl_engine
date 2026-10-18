@@ -12,6 +12,7 @@ from configurable_automl_engine.models import (
     clean_hyperparameters,
     create_model,
     get_allowed_hyperparameters,
+    remap_legacy_param_names,
 )
 
 
@@ -174,6 +175,38 @@ def test_clean_hyperparameters_logs_dropped(caplog):
         raw = {"alpha": 1.0, "fake_param": 99}
         clean_hyperparameters("elasticnet", ElasticNet, raw)
     assert any("Dropped" in record.message for record in caplog.records)
+
+
+def test_remap_legacy_param_names_renames_ard_n_iter():
+    """remap_legacy_param_names turns n_iter into max_iter for ardregression."""
+    raw = {"n_iter": 500, "tol": 1e-4}
+    remapped = remap_legacy_param_names("ardregression", raw)
+    assert remapped == {"max_iter": 500, "tol": 1e-4}
+    # The input dict is not mutated.
+    assert raw == {"n_iter": 500, "tol": 1e-4}
+
+
+def test_remap_legacy_param_names_alias_resolution():
+    """The 'ard' alias resolves to ardregression for the remap."""
+    raw = {"n_iter": 300}
+    assert remap_legacy_param_names("ard", raw) == {"max_iter": 300}
+
+
+def test_remap_legacy_param_names_modern_key_wins():
+    """If both n_iter and max_iter are present, the modern name wins."""
+    raw = {"n_iter": 300, "max_iter": 900}
+    assert remap_legacy_param_names("ardregression", raw) == {"max_iter": 900}
+
+
+def test_remap_legacy_param_names_other_algo_unchanged():
+    """Algorithms without legacy mappings are copied unchanged."""
+    raw = {"alpha": 1.0, "max_iter": 500}
+    assert remap_legacy_param_names("elasticnet", raw) == raw
+
+
+def test_remap_legacy_param_names_empty():
+    """An empty dict stays empty."""
+    assert remap_legacy_param_names("ardregression", {}) == {}
 
 
 def test_create_model_invalid_type():

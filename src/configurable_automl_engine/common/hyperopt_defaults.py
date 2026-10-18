@@ -258,7 +258,7 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "tweedieregressor": {**GLM_COMMON},
     "glm": {**GLM_COMMON},
     "ardregression": {
-        "n_iter": SearchSpaceEntry.model_validate([100, 1000, "int", 100]),
+        "max_iter": SearchSpaceEntry.model_validate([100, 1000, "int", 100]),
         "alpha_1": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
         "alpha_2": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
         "lambda_1": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),

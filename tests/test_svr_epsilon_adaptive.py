@@ -29,6 +29,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
     PreparedData,
+    _prepare_search_space,
     execute_phases,
     train_best_model,
 )
@@ -694,3 +695,40 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
     # The default ridge alpha is kept as before (nothing is omitted).
     assert "alpha" in space
     assert space["alpha"].dist_type == "float_log"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Legacy-name remap in _prepare_search_space (n_iter → max_iter for ARD)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_prepare_search_space_remaps_ard_default_n_iter():
+    """The default ARDRegression space exposes max_iter (not the legacy n_iter).
+
+    The default space itself uses the modern name, so a per-trial remap ---
+    and its repeated "Remapped ..." DEBUG log line --- is not needed.
+    """
+    space = _prepare_search_space("ardregression", None)
+    assert "max_iter" in space
+    assert "n_iter" not in space
+    assert space["max_iter"].low == 100
+    assert space["max_iter"].high == 1000
+
+
+def test_prepare_search_space_remaps_ard_user_legacy_n_iter():
+    """A user override with the legacy n_iter key is remapped once."""
+    space = _prepare_search_space(
+        "ardregression",
+        {"n_iter": SearchSpaceEntry.model_validate([50, 500, "int", 50])},
+    )
+    assert "max_iter" in space
+    assert "n_iter" not in space
+    assert space["max_iter"].low == 50
+    assert space["max_iter"].high == 500
+
+
+def test_prepare_search_space_other_algos_not_remapped():
+    """Algorithms without legacy mappings keep their keys untouched."""
+    space = _prepare_search_space("elasticnet", {"alpha": [1e-4, 1.0]})
+    assert "alpha" in space
+    assert "max_iter" not in space

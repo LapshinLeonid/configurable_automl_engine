@@ -56,6 +56,7 @@ from configurable_automl_engine.common.validation_utils import (
     prepare_X_y,
     validate_df_not_empty,
 )
+from configurable_automl_engine.models import remap_legacy_param_names
 from configurable_automl_engine.preprocessing import detect_feature_types
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -2024,6 +2025,11 @@ def _prepare_search_space(
     configuration. A module-level function (not a closure) so that the
     ``_hpo_phase_worker`` worker is serializable in the "processes" mode.
 
+    Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
+    ARDRegression) are remapped ONCE here, before the Optuna loop — not at
+    every model instantiation (which would log an identical "Remapped ..."
+    line for ~100 trials).
+
     Args:
         algo_name (str): The algorithm name used to look up defaults.
         user_overrides (dict[str, Any] | None): A dict of parameters to override.
@@ -2033,7 +2039,10 @@ def _prepare_search_space(
     """
     space = DEFAULT_SPACES.get(algo_name, {}).copy()
     if user_overrides:
-        space.update(user_overrides)
+        # Remap legacy names in the user overrides BEFORE the merge so that
+        # an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
+        # over the system default of the modern name.
+        space.update(remap_legacy_param_names(algo_name, user_overrides))
 
     # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
     # y_train spread at runtime (tuner.resolve_search_space), so the
@@ -2044,7 +2053,9 @@ def _prepare_search_space(
     if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
         space.pop("epsilon", None)
 
-    return space
+    # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
+    # so that per-trial clean_hyperparameters has nothing to remap/log.
+    return remap_legacy_param_names(algo_name, space)
 
 
 def _execute_hpo_phase(
