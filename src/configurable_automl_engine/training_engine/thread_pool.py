@@ -107,10 +107,24 @@ class SharedDataFrame:
             # concurrent creations never collide (no FileExistsError).
             self.shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
             self.name = self.shm.name
-            self.shared_array = np.ndarray(
-                data.shape, dtype=data.dtype, buffer=self.shm.buf
-            )
-            self.shared_array[:] = data[:]
+            try:
+                self.shared_array = np.ndarray(
+                    data.shape, dtype=data.dtype, buffer=self.shm.buf
+                )
+                self.shared_array[:] = data[:]
+            except Exception:
+                # Creation failed partway: free the OS segment immediately so
+                # it does not leak (issue #121 — a failure inside the
+                # preparation must not leak SHM segments). self.shm exists
+                # here: the failure is in the ndarray/copy step, which happens
+                # strictly after the segment was created.
+                if self.shm is not None:
+                    self.shm.close()
+                    try:
+                        self.shm.unlink()
+                    except (FileNotFoundError, OSError):
+                        pass
+                raise
             self.shape = data.shape
             self.dtype = data.dtype
             self.columns = df.columns.tolist()
@@ -157,23 +171,61 @@ class SharedDataFrame:
 
     @staticmethod
     def is_compatible(df: Any) -> bool:
-        """Check whether a DF can be placed into SHM
-        (only simple types and a RangeIndex)."""
-        """Check whether a DF can be placed into SHM 
-        (an already shared array, or a DF with simple types and a RangeIndex)."""
+        """Check whether a DF can be placed into SHM.
+
+        A DataFrame is compatible when its data can be copied into shared
+        memory as a single homogeneous numpy array of simple types
+        (int/uint/float/bool) without silently changing the values, and its
+        index is a RangeIndex.
+        """
         if SharedDataFrame.is_shared_array(df):
             return True
         if not isinstance(df, pd.DataFrame):
             return False
 
-        # Check data types (whitelist: int, uint, float, bool)
+        # 1. Every column must have a simple numeric/bool dtype (kinds
+        #    i/u/f/b). This rejects category/string/object columns even when
+        #    df.to_numpy() would promote them to a numeric array: a numeric
+        #    category promotes to float64, which silently changes the
+        #    astype(str) encoding ('10' → '10.0') and can collapse big int ids
+        #    into indistinguishable float64 values, while the earlier parquet
+        #    path preserved the exact int64 (issue #121 review).
         allowed_kinds = {"i", "u", "f", "b"}
         if not all(dt.kind in allowed_kinds for dt in df.dtypes):
             return False
 
-        # Check the index: the current SHM implementation does not support complex indices.
-        # If the index is not a RangeIndex, the object is considered incompatible with SHM
-        # and is automatically redirected to DiskPersistenceManager.
+        # 2. Check the dtype of the array produced by df.to_numpy(), not the
+        #    per-column dtypes: pandas promotes mixed column types to a common
+        #    one. int + float → float64 (safe, numeric), but bool mixed with
+        #    numeric columns (int + float + bool) → object, i.e. an array of
+        #    raw pointers to parent-process Python objects. Copying such
+        #    pointers into shared memory crashes workers under
+        #    forkserver/spawn (issue #121), so object arrays are rejected and
+        #    the frame goes through the disk/pickle path instead.
+        try:
+            array_dtype = df.to_numpy().dtype
+        except Exception:  # noqa: BLE001
+            return False
+        if array_dtype.kind not in allowed_kinds:
+            return False
+
+        # 3. Reject precision-losing promotions: an int64/uint64 column mixed
+        #    with a float column promotes to float64, making integer values
+        #    above 2**53 indistinguishable (9007199254740999 and
+        #    9007199254741001 both become 9007199254741000.0). The frame then
+        #    goes through parquet instead, which preserves the exact integer
+        #    dtype (issue #121 review). int32/uint32 → float64 is always
+        #    lossless, so only 8-byte integer columns trigger this. The check
+        #    is purely dtype-based, no data materialization.
+        if array_dtype.kind == "f" and any(
+            dt.kind in {"i", "u"} and dt.itemsize >= 8 for dt in df.dtypes
+        ):
+            return False
+
+        # Check the index: the current SHM implementation does not support
+        # complex indices. If the index is not a RangeIndex, the object is
+        # considered incompatible with SHM and is automatically redirected to
+        # DiskPersistenceManager.
         return isinstance(df.index, pd.RangeIndex)
 
     def to_df(self) -> pd.DataFrame:
@@ -270,8 +322,11 @@ class DiskPersistenceManager:
 
         fd, path = tempfile.mkstemp(suffix=".parquet", dir=self.tmp_dir)
         os.close(fd)
-        df.to_parquet(path, engine="pyarrow")
+        # Register the path right after creation: if to_parquet fails halfway
+        # (e.g. pyarrow rejects "dirty" data), the orphaned temp file must
+        # still be removed by cleanup (issue #121).
         self.created_files.append(path)
+        df.to_parquet(path, engine="pyarrow")
         return path
 
     def cleanup(self) -> None:
@@ -703,66 +758,89 @@ def run_parallel(
         task_timeout = None
 
     # Shared Memory preparation logic for processes
-    shm_refs = []
+    shm_refs: list[SharedDataFrame] = []
     persistence_manager = DiskPersistenceManager()
     # Start-signals of the actual task starts (only for processes)
     start_signals: list[_StartSignal] = []
 
     if mode == "processes" and (shared_args_indices or disk_args_indices):
-        task_payloads = []  # List of tuples
-        # (args, kwargs, actual_shm_idx, actual_disk_idx)
-        target_shm_indices = shared_args_indices or []
-        target_disk_indices = disk_args_indices or []
+        try:
+            task_payloads = []  # List of tuples
+            # (args, kwargs, actual_shm_idx, actual_disk_idx)
+            target_shm_indices = shared_args_indices or []
+            target_disk_indices = disk_args_indices or []
 
-        # One SHM segment per DataFrame object: the same df passed to several
-        # tasks is placed into shared memory only once (saves memory and
-        # avoids name-collision risks).
-        shm_cache: dict[int, SharedDataFrame] = {}
-        # The same applies to the disk fallback: one Parquet file per object.
-        disk_cache: dict[int, str] = {}
+            # One SHM segment per DataFrame object: the same df passed to several
+            # tasks is placed into shared memory only once (saves memory and
+            # avoids name-collision risks).
+            shm_cache: dict[int, SharedDataFrame] = {}
+            # The same applies to the disk fallback: one Parquet file per object.
+            disk_cache: dict[int, str] = {}
 
-        for args, kwargs in zip(args_seq, kwargs_seq):
-            new_args = list(args)
-            curr_shm_info = {}  # Index -> (name, shape, dtype, columns)
-            for idx in set(target_shm_indices) | set(target_disk_indices):
-                if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                    if idx in target_shm_indices and SharedDataFrame.is_compatible(
-                        new_args[idx]
-                    ):
-                        df_obj = new_args[idx]
-                        shm_wrapper = shm_cache.get(id(df_obj))
-                        if shm_wrapper is None:
-                            shm_wrapper = SharedDataFrame(df_obj)
-                            shm_cache[id(df_obj)] = shm_wrapper
-                            shm_refs.append(shm_wrapper)
-                        # Save the metadata for passing to the worker
-                        curr_shm_info[idx] = (
-                            shm_wrapper.name,
-                            shm_wrapper.shape,
-                            shm_wrapper.dtype,
-                            shm_wrapper.columns,
-                        )
-                        new_args[idx] = None  # We do not pass the object itself
-                    else:
-                        df_obj = new_args[idx]
-                        path = disk_cache.get(id(df_obj))
-                        if path is None:
-                            path = persistence_manager.save_df(df_obj)
-                            disk_cache[id(df_obj)] = path
-                        new_args[idx] = path
+            for args, kwargs in zip(args_seq, kwargs_seq):
+                new_args = list(args)
+                curr_shm_info = {}  # Index -> (name, shape, dtype, columns)
+                for idx in set(target_shm_indices) | set(target_disk_indices):
+                    if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
+                        if idx in target_shm_indices and SharedDataFrame.is_compatible(
+                            new_args[idx]
+                        ):
+                            df_obj = new_args[idx]
+                            shm_wrapper = shm_cache.get(id(df_obj))
+                            if shm_wrapper is None:
+                                shm_wrapper = SharedDataFrame(df_obj)
+                                shm_cache[id(df_obj)] = shm_wrapper
+                                shm_refs.append(shm_wrapper)
+                            # Save the metadata for passing to the worker
+                            curr_shm_info[idx] = (
+                                shm_wrapper.name,
+                                shm_wrapper.shape,
+                                shm_wrapper.dtype,
+                                shm_wrapper.columns,
+                            )
+                            new_args[idx] = None  # We do not pass the object itself
+                        else:
+                            df_obj = new_args[idx]
+                            path = disk_cache.get(id(df_obj))
+                            if path is None:
+                                path = persistence_manager.save_df(df_obj)
+                                disk_cache[id(df_obj)] = path
+                            new_args[idx] = path
 
-            curr_disk = [
-                i
-                for i in (set(target_shm_indices) | set(target_disk_indices))
-                if i < len(new_args)
-                and isinstance(new_args[i], str)
-                and new_args[i].endswith(".parquet")
+                curr_disk = [
+                    i
+                    for i in (set(target_shm_indices) | set(target_disk_indices))
+                    if i < len(new_args)
+                    and isinstance(new_args[i], str)
+                    and new_args[i].endswith(".parquet")
+                ]
+
+                task_payloads.append(
+                    (tuple(new_args), kwargs, curr_disk, curr_shm_info)
+                )
+
+            # Override the iterable for execution
+            execution_tasks = task_payloads
+        except Exception as e:  # noqa: BLE001
+            # SHM/parquet preparation failed (for example, pyarrow refuses to
+            # write "dirty" data, or shared memory is exhausted). Free the
+            # already-created segments and temp files, then pass the dataframes
+            # as ordinary pickled objects (the pre-SHM behaviour) instead of
+            # crashing run_parallel (issue #121). The original disk indices are
+            # kept: in _worker_proxy a non-string argument at a disk index is
+            # passed through untouched, so DataFrames still arrive intact
+            # (only real parquet paths are read from disk).
+            logger.warning(
+                "Shared memory / disk preparation failed (%s); "
+                "transferring dataframes through pickle instead",
+                e,
+            )
+            _perform_cleanup(shm_refs, persistence_manager)
+            shm_refs = []
+            execution_tasks = [
+                (tuple(a), kw, disk_args_indices or [], {})
+                for a, kw in zip(args_seq, kwargs_seq)
             ]
-
-            task_payloads.append((tuple(new_args), kwargs, curr_disk, curr_shm_info))
-
-        # Override the iterable for execution
-        execution_tasks = task_payloads
     else:
         # For threads or plain processes without SHM/Disk
         execution_tasks = [

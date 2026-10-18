@@ -2,6 +2,9 @@ import pytest
 import time
 import hashlib
 import logging
+import subprocess
+import sys
+import tempfile
 import concurrent.futures
 import pandas as pd
 import numpy as np
@@ -333,6 +336,41 @@ def test_disk_persistence_manager_save_df_uses_pyarrow_engine(monkeypatch):
             assert not os.path.exists(path)
 
 
+def test_disk_persistence_manager_registers_path_before_write(monkeypatch):
+    """An orphaned temp file from a failed to_parquet must be cleaned up.
+
+    save_df registers the path right after mkstemp: if pyarrow fails halfway
+    through the write, the temp file is still registered and removed by
+    cleanup (issue #121 review: the fallback path leaked .parquet files in
+    /dev/shm).
+    """
+    from configurable_automl_engine.training_engine.thread_pool import (
+        DiskPersistenceManager as DPM,
+    )
+
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    manager = DPM(use_shm=False)
+
+    def failing_to_parquet(self, path, *args, **kwargs):
+        # Simulate pyarrow aborting the write midway: the file exists but is
+        # not a valid parquet, and to_parquet raises.
+        with open(path, "wb") as f:
+            f.write(b"partial data")
+        raise RuntimeError("pyarrow write failed")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", failing_to_parquet)
+
+    with pytest.raises(RuntimeError, match="pyarrow write failed"):
+        manager.save_df(df)
+
+    # The created temp file must be registered even though the write failed.
+    assert len(manager.created_files) == 1
+    assert os.path.exists(manager.created_files[0])
+
+    manager.cleanup()
+    assert not os.path.exists(manager.created_files[0])
+
+
 def test_run_parallel_with_shared_memory():
     """Test Tasks 1.1 and 1.2: Passing data through Shared Memory in processes."""
     df = pd.DataFrame({"val": [10, 20, 30]})
@@ -602,7 +640,8 @@ def test_coverage_unlink_file_not_found():
 # 1. Testing SharedDataFrame.is_compatible (dtypes and Index)
 def test_shared_data_frame_is_compatible_coverage():
     """Covers the lines:
-    - if not all(dt.kind in allowed_kinds for dt in df.dtypes): return False
+    - if not isinstance(df, pd.DataFrame): return False
+    - array-dtype check of df.to_numpy()
     - if not isinstance(df.index, pd.RangeIndex): return False
     """
     # A. Test for an invalid type (Object/String)
@@ -758,8 +797,12 @@ def test_is_compatible_all_branches():
     assert SharedDataFrame.is_compatible("not a dataframe") is False
 
     # 3. Coverage: type check (dtypes)
-    # Only allowed types (int, float, bool)
-    df_valid = pd.DataFrame({"a": [1], "b": [1.5]}, index=pd.RangeIndex(0, 1))
+    # Only allowed types (int, float, bool). int32 + float64 promotes to
+    # float64 losslessly (int32 max ≪ 2**53), so the frame stays compatible.
+    df_valid = pd.DataFrame(
+        {"a": np.array([1], dtype=np.int32), "b": [1.5]},
+        index=pd.RangeIndex(0, 1),
+    )
     assert SharedDataFrame.is_compatible(df_valid) is True
 
     # Disallowed type (object/string)
@@ -769,6 +812,24 @@ def test_is_compatible_all_branches():
     # 4. Coverage: index check (not RangeIndex)
     df_invalid_index = pd.DataFrame({"a": [1]}, index=[10])  # Int64Index, not RangeIndex
     assert SharedDataFrame.is_compatible(df_invalid_index) is False
+
+
+def test_is_compatible_to_numpy_failure_returns_false():
+    """If df.to_numpy() raises, the frame is treated as incompatible.
+
+    Defensive branch: an exotic DataFrame whose materialization fails must
+    not crash is_compatible, but be routed to the disk/pickle path.
+    """
+    df = pd.DataFrame({"a": [1, 2, 3]})
+
+    class BrokenDF(pd.DataFrame):
+        def to_numpy(self, *args, **kwargs):
+            raise RuntimeError("cannot materialize")
+
+    broken = BrokenDF(df)
+    with pytest.raises(RuntimeError):
+        broken.to_numpy()  # the guard really triggers
+    assert SharedDataFrame.is_compatible(broken) is False
 
 
 def test_get_view():
@@ -1652,3 +1713,270 @@ def test_run_parallel_disk_cache_reuses_file_for_same_df(monkeypatch):
 
     assert results == [3, 3, 3]
     assert len(saved) == 1  # one parquet file per df object
+
+
+# ═══════════════════════════════════════════════════════════
+#  Issue #121: object-dtype SHM arrays crash workers under
+#  forkserver/spawn; dirty data must fall back to pickle
+# ═══════════════════════════════════════════════════════════
+
+
+def test_is_compatible_rejects_object_result_of_mixed_dtypes():
+    """int + float + bool df.to_numpy() → object: NOT compatible with SHM.
+
+    Copying raw pointers to parent-process Python objects into shared memory
+    crashes workers under forkserver/spawn (issue #121). The frame must be
+    routed through the disk/pickle path instead of SHM.
+    """
+    df_mixed = pd.DataFrame(
+        {"a": [1, 2, 3], "b": [1.5, 2.5, 3.5], "c": [True, False, True]}
+    )
+    assert df_mixed.to_numpy().dtype.kind == "O"  # kept honest by pandas
+    assert SharedDataFrame.is_compatible(df_mixed) is False
+
+    # int32 + float promotes to float64 (lossless, int32 max ≪ 2**53), so it
+    # stays SHM-compatible; int64 + float is rejected because big int values
+    # would collapse (see test_is_compatible_rejects_non_numeric_column_kinds).
+    df_num = pd.DataFrame(
+        {"a": np.array([1, 2, 3], dtype=np.int32), "b": [1.5, 2.5, 3.5]}
+    )
+    assert df_num.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_num) is True
+
+    # A single homogeneous object column must also be rejected.
+    df_obj = pd.DataFrame({"a": ["x", "y"]})
+    assert SharedDataFrame.is_compatible(df_obj) is False
+
+
+def test_is_compatible_rejects_non_numeric_column_kinds():
+    """Columns outside i/u/f/b are rejected even when to_numpy() is numeric.
+
+    A numeric category column (kind 'O') promotes to float64 through
+    to_numpy(): this silently changes the astype(str) encoding ('10' →
+    '10.0') and can collapse big int ids into float64 (values > 2**53 become
+    indistinguishable). Such frames used to go through parquet keeping exact
+    int64, so they must not be promoted into SHM (issue #121 review).
+    """
+    # Numeric categories with a float column: to_numpy() → float64.
+    df_numeric_cat = pd.DataFrame(
+        {"cat": pd.Categorical([10, 20, 30]), "x": [1.5, 2.5, 3.5]}
+    )
+    assert df_numeric_cat.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_numeric_cat) is False
+
+    # Numeric categories alone: to_numpy() → int64, still rejected (the
+    # categorical encoding is lost/rewritten by the SHM round-trip).
+    df_cat_alone = pd.DataFrame({"cat": pd.Categorical([10, 20, 30])})
+    assert df_cat_alone.to_numpy().dtype.kind == "i"
+    assert SharedDataFrame.is_compatible(df_cat_alone) is False
+
+    # Large int ids mixed with floats: to_numpy() → float64 loses precision
+    # beyond 2**53, so the frame must not go through SHM.
+    df_bigint = pd.DataFrame(
+        {"id": [9007199254740999, 9007199254741001], "x": [1.5, 2.5]}
+    )
+    assert df_bigint.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_bigint) is False
+
+    # Homogeneous simple numeric columns stay compatible.
+    df_int = pd.DataFrame({"id": [9007199254740999, 9007199254741001]})
+    assert df_int.to_numpy().dtype.kind == "i"
+    assert SharedDataFrame.is_compatible(df_int) is True
+
+    # Small-width ints (int32) mixed with floats promote to float64 losslessly
+    # (int32 max ≪ 2**53), so they may still go through SHM.
+    df_small_int = pd.DataFrame(
+        {"a": np.array([1, 2, 3], dtype=np.int32), "b": [1.5, 2.5, 3.5]}
+    )
+    assert df_small_int.to_numpy().dtype.kind == "f"
+    assert SharedDataFrame.is_compatible(df_small_int) is True
+
+
+def test_shared_dataframe_creation_failure_cleans_segment():
+    """A failure inside SharedDataFrame(df) must not leak the OS segment."""
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "shared_memory.SharedMemory"
+        ) as mock_shm,
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool.np.ndarray",
+            side_effect=RuntimeError("simulated buffer failure"),
+        ),
+    ):
+        mock_shm.return_value.name = "psm_leak_test"
+        mock_shm.return_value.buf = memoryview(bytearray(24))
+        with pytest.raises(RuntimeError):
+            SharedDataFrame(df=df)
+    mock_shm.return_value.close.assert_called_once()
+    mock_shm.return_value.unlink.assert_called_once()
+
+
+def test_run_parallel_mixed_dtypes_under_forkserver():
+    """int + float + bool X must not crash workers under forkserver.
+
+    On Linux CI with Python 3.11–3.13 the default start method is fork, which
+    masks the bug: the child happens to see a snapshot of the parent memory.
+    forkserver/spawn (the Python 3.14 Linux default and the macOS/Windows
+    default) expose the crash, so the test forces the method explicitly.
+    """
+    if sys.platform != "linux":
+        pytest.skip("start-method probing below is Linux-specific")
+
+    # A second, different start method breaks the shared forkserver state;
+    # run each method in its own subprocess instead. The worker is defined in
+    # a real module file, so both forkserver and spawn can import it.
+    script_template = """
+# -*- coding: utf-8 -*-
+import multiprocessing as mp
+
+import pandas as pd
+
+from configurable_automl_engine.training_engine.thread_pool import (
+    run_parallel,
+    SharedDataFrame,
+)
+
+
+def worker_mixed_dtypes(df):
+    return int(df.sum().sum())
+
+
+def main():
+    # Set the start method inside main(): the module top-level is also
+    # executed by the forkserver/spawn bootstrap in the child (where the
+    # context is already initialized), so calling set_start_method at module
+    # scope would raise "context has already been set".
+    mp.set_start_method("{method}")
+    df = pd.DataFrame(
+        {{"a": [1, 2, 3], "b": [1.5, 2.5, 3.5], "c": [True, False, True]}}
+    )
+    assert SharedDataFrame.is_compatible(df) is False
+    results = run_parallel(
+        worker_mixed_dtypes, args_seq=[(df,)], mode="processes",
+        shared_args_indices=[0]
+    )
+    assert results == [15], results
+    print("OK")
+
+
+if __name__ == "__main__":
+    main()
+"""
+    for method in ("forkserver", "spawn"):
+        script = script_template.format(method=method)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
+            f.write(script)
+            script_path = f.name
+        try:
+            proc = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+        finally:
+            os.unlink(script_path)
+        assert proc.returncode == 0, (
+            f"{method} failed rc={proc.returncode}\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+        assert "OK" in proc.stdout
+
+
+def test_run_parallel_parquet_write_failure_falls_back_to_pickle(caplog):
+    """A to_parquet failure during preparation must not crash run_parallel.
+
+    Preparation happens outside the pool: a write error used to kill the whole
+    run_parallel call (and leak the created SHM segments). Now the prepared
+    resources are released and the dataframes are sent through pickle with a
+    warning instead (issue #121). The original disk indices survive the
+    fallback: a DataFrame at such an index is passed through by _worker_proxy
+    untouched (only real .parquet paths are read from disk).
+    """
+    df = pd.DataFrame({"a": [1, 2, 3]})
+
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "SharedDataFrame.is_compatible",
+            return_value=False,
+        ),
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "DiskPersistenceManager.save_df",
+            side_effect=RuntimeError("disk full"),
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        results = run_parallel(
+            process_df_task,
+            args_seq=[(df, 1)],
+            mode="processes",
+            shared_args_indices=[0],
+            disk_args_indices=[1],  # a non-DataFrame index: must be preserved
+        )
+
+    assert results == [6]
+    assert "transferring dataframes through pickle instead" in caplog.text
+    assert "disk full" in caplog.text
+
+
+def test_run_parallel_preparation_failure_cleans_shm_segments(caplog, monkeypatch):
+    """SHM segments created before a failure are released, not leaked."""
+    df1 = pd.DataFrame({"a": [1, 2, 3]})
+    df2 = pd.DataFrame({"b": [4, 5, 6]})
+
+    imported_names: list[str] = []
+    real_is_compatible = SharedDataFrame.is_compatible
+
+    class TrackingSharedDataFrame(SharedDataFrame):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Creation passes the dataframe positionally; restoration never
+            # does (it passes name=/shape=/dtype=/columns=).
+            if args and isinstance(args[0], pd.DataFrame):
+                imported_names.append(self.name)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame",
+        TrackingSharedDataFrame,
+    )
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "DiskPersistenceManager.save_df",
+        lambda self, dframe: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+    # df1 is SHM-compatible (segment created), df2 is not → routed to disk,
+    # where save_df raises. Preparation aborts between the two. Patch the
+    # method on the tracking class itself so the lookup used by run_parallel
+    # (SharedDataFrame.is_compatible → TrackingSharedDataFrame) sees it.
+    monkeypatch.setattr(
+        TrackingSharedDataFrame,
+        "is_compatible",
+        lambda candidate: (
+            real_is_compatible(candidate) if candidate is df1 else False
+        ),
+    )
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            process_df_task,
+            args_seq=[(df1, 1), (df2, 2)],
+            mode="processes",
+            shared_args_indices=[0],
+        )
+
+    assert results == [6, 30]
+    assert "transferring dataframes through pickle instead" in caplog.text
+    assert len(imported_names) == 1  # only df1 was placed into SHM
+
+    # The SHM segment created for df1 must have been unlinked by the
+    # fallback cleanup: attaching to it by name must fail afterwards.
+    for name in imported_names:
+        assert name is not None
+        with pytest.raises((FileNotFoundError, OSError)):
+            shared_memory.SharedMemory(name=name)
