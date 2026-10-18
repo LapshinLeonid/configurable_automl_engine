@@ -253,6 +253,51 @@ def clean_hyperparameters(
     return cleaned
 
 
+def remap_legacy_param_names(
+    algo_key: str, hyperparams: dict[str, Any]
+) -> dict[str, Any]:
+    """Remap legacy hyperparameter names in a dict, once (before the Optuna loop).
+
+    Renames keys listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g. ``n_iter`` →
+    ``max_iter`` for ARDRegression) in a search-space / parameter dict.
+    Unlike :func:`clean_hyperparameters`, which runs on every model
+    instantiation and logs every remap, this function normalizes the names a
+    single time while the search space is being prepared — otherwise an Optuna
+    sweep of ~100 trials would emit ~100 identical "Remapped ..." DEBUG lines.
+
+    If both the legacy and the modern name are present, the legacy key is
+    dropped (the modern name wins), matching the priority used by
+    :func:`clean_hyperparameters`.
+
+    Args:
+        algo_key: Algorithm name or alias (e.g. ``'ard'``).
+        hyperparams: Parameter dict whose keys are hyperparameter names; the
+            values are passed through unchanged (``SearchSpaceEntry`` objects,
+            raw values, etc.).
+
+    Returns:
+        A new dict with legacy keys renamed to their modern equivalents.
+        The input dict is not mutated.
+    """
+    resolved = resolve_algorithm_name(algo_key)
+    mappings = LEGACY_PARAM_MAPPINGS.get(resolved, {})
+    if not mappings:
+        return dict(hyperparams)
+
+    remapped: dict[str, Any] = {}
+    for key, value in hyperparams.items():
+        if key in mappings:
+            new_key = mappings[key]
+            # The modern name wins: if it is already present, keep it and
+            # drop the legacy key (same priority as clean_hyperparameters).
+            if new_key in hyperparams:
+                continue
+            remapped[new_key] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
 # ----------------------------------------------------------------------------- #
 #                  Allowed hyperparameter lookup (validation)                   #
 # ----------------------------------------------------------------------------- #

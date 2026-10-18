@@ -55,6 +55,7 @@ from configurable_automl_engine.common.validation_utils import get_effective_tra
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
     create_model,
+    remap_legacy_param_names,
     requires_dense_input,
     resolve_algorithm_name,
 )
@@ -1082,7 +1083,10 @@ class _OptimizeRunner:
             space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
         # If a dict was passed (new YAML mechanism), create a wrapper
         elif isinstance(external_config, dict):
-            space_dict = external_config
+            # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
+            # BEFORE the Optuna loop: otherwise clean_hyperparameters would
+            # log an identical "Remapped ..." line for every trial.
+            space_dict = remap_legacy_param_names(self.algo, external_config)
             # SVR: adaptive epsilon bounds from the y_train spread, if the
             # user did not set epsilon explicitly (prepare_search_space omits
             # the default epsilon from DEFAULT_SPACES, so its absence in the
