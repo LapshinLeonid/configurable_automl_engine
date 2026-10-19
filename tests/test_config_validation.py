@@ -2140,3 +2140,137 @@ def test_k_exceeding_top_k_candidates_is_accepted():
     assert cfg.general.phases[1].k == 10
     assert cfg.general.sanity_gate.top_k_candidates == 3
     _ = data  # the sanity_gate section is valid on its own
+
+
+# ─────────────────── adaptive complexity guard ──────────────────── #
+def test_complexity_guard_defaults():
+    """The complexity_guard section defaults to apply/lossless/regularize."""
+    cfg = Config.model_validate(BASE)
+    guard = cfg.general.complexity_guard
+    assert guard.mode.value == "apply"
+    assert guard.lossless is True
+    assert guard.regularize is True
+    assert guard.user_range_policy.value == "user_wins"
+    assert guard.small_n_threshold == 50
+    assert guard.medium_n_threshold == 300
+    assert guard.size_basis.value == "rows"
+
+
+def test_complexity_guard_custom_values():
+    """A custom complexity_guard section is parsed."""
+    cfg = Config.model_validate(
+        BASE
+        | {
+            "general": {
+                **BASE["general"],
+                "complexity_guard": {
+                    "mode": "warn",
+                    "lossless": False,
+                    "regularize": True,
+                    "user_range_policy": "engine_wins",
+                    "small_n_threshold": 100,
+                    "small_np_ratio_threshold": 8.0,
+                    "medium_n_threshold": 500,
+                    "medium_np_ratio_threshold": 30.0,
+                    "size_basis": "rows",
+                },
+            }
+        }
+    )
+    guard = cfg.general.complexity_guard
+    assert guard.mode.value == "warn"
+    assert guard.lossless is False
+    assert guard.user_range_policy.value == "engine_wins"
+    assert guard.small_n_threshold == 100
+    assert guard.medium_n_threshold == 500
+    assert guard.size_basis.value == "rows"
+
+
+def test_complexity_guard_mode_off_valid():
+    """mode: off is a valid value."""
+    cfg = Config.model_validate(
+        BASE
+        | {"general": {**BASE["general"], "complexity_guard": {"mode": "off"}}}
+    )
+    assert cfg.general.complexity_guard.mode.value == "off"
+
+
+def test_complexity_guard_unknown_mode_rejected():
+    """An unknown mode value is rejected."""
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            BASE
+            | {"general": {**BASE["general"], "complexity_guard": {"mode": "nope"}}}
+        )
+
+
+def test_complexity_guard_unknown_field_rejected():
+    """extra='forbid': an unknown field in complexity_guard is rejected."""
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            BASE
+            | {
+                "general": {
+                    **BASE["general"],
+                    "complexity_guard": {"mode": "apply", "bogus": 1},
+                }
+            }
+        )
+
+
+def test_complexity_guard_thresholds_ordering_rejected():
+    """small_n_threshold must be less than medium_n_threshold."""
+    with pytest.raises(ValidationError, match="small_n_threshold"):
+        Config.model_validate(
+            BASE
+            | {
+                "general": {
+                    **BASE["general"],
+                    "complexity_guard": {
+                        "small_n_threshold": 300,
+                        "medium_n_threshold": 100,
+                    },
+                }
+            }
+        )
+
+
+def test_complexity_guard_ratio_thresholds_ordering_rejected():
+    """The small ratio threshold must be below the medium one."""
+    with pytest.raises(ValidationError, match="small_np_ratio_threshold"):
+        Config.model_validate(
+            BASE
+            | {
+                "general": {
+                    **BASE["general"],
+                    "complexity_guard": {
+                        "small_np_ratio_threshold": 20.0,
+                        "medium_np_ratio_threshold": 5.0,
+                    },
+                }
+            }
+        )
+
+
+def test_complexity_guard_non_positive_threshold_rejected():
+    """Thresholds must be positive."""
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            BASE
+            | {
+                "general": {
+                    **BASE["general"],
+                    "complexity_guard": {"small_n_threshold": 0},
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            BASE
+            | {
+                "general": {
+                    **BASE["general"],
+                    "complexity_guard": {"small_np_ratio_threshold": 0.0},
+                }
+            }
+        )

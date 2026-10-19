@@ -42,6 +42,11 @@ from sklearn.model_selection import (
     train_test_split,
 )
 
+from configurable_automl_engine.common.complexity_guard import (
+    ComplexityGuardConfig,
+    apply_complexity_guard,
+)
+
 # ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import (
@@ -54,6 +59,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
+    AVAILABLE_ALGORITHMS,
     create_model,
     remap_legacy_param_names,
     requires_dense_input,
@@ -137,12 +143,17 @@ class OptimizeResult:
             ``previous_trials`` are excluded. Always present on a non-``None``
             result; the list may contain COMPLETED/PRUNED/FAILED trials of
             the phase.
+        complexity_guard: Log records of the adaptive complexity guard for
+            the phase (one per restricted parameter, "before → after" with
+            the reason). ``None`` when the guard is disabled or produced no
+            records.
     """
 
     model: Any | None
     params: dict[str, Any] | None
     score: float | None
     trials: list[FrozenTrial]
+    complexity_guard: list[dict[str, Any]] | None = None
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
@@ -833,8 +844,9 @@ class _OptimizeRunner:
 
         run()
          ├─ resolve_validation()
+         ├─ build_trial_pipeline()               (before the search space:
+         │                                        the complexity guard needs p)
          ├─ resolve_search_space()
-         ├─ build_trial_pipeline()
          ├─ handle_pruning()
          ├─ transfer_previous_trials()        (TPE history warm-start)
          ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
@@ -889,6 +901,8 @@ class _OptimizeRunner:
         target_encoding_smoothing: float,
         target_encoding_fallback: float | None,
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
+        complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
+        user_hyperparameter_keys: list[str] | None = None,
         fit_best_model: bool = True,
     ) -> None:
         """Store the parameters of a single optimisation run.
@@ -938,6 +952,25 @@ class _OptimizeRunner:
         self.target_encoding_smoothing = target_encoding_smoothing
         self.target_encoding_fallback = target_encoding_fallback
         self.feature_selection_cfg = feature_selection_cfg
+        # The adaptive complexity guard config (trees/boosting on small data).
+        # ``None`` — the guard is disabled (defaults to the off behavior for
+        # direct ``optimize`` callers); the training engine passes the config
+        # from ``general.complexity_guard``.
+        if complexity_guard_cfg is None:
+            self.complexity_guard_cfg: ComplexityGuardConfig | None = None
+        elif isinstance(complexity_guard_cfg, ComplexityGuardConfig):
+            self.complexity_guard_cfg = complexity_guard_cfg
+        else:
+            self.complexity_guard_cfg = ComplexityGuardConfig.from_dict(
+                complexity_guard_cfg
+            )
+        # Names of parameters set explicitly by the user
+        # (``algo.hyperparameters``); the complexity guard treats them as
+        # "user ranges" (intersected, with ``user_range_policy`` on conflict).
+        self.user_hyperparameter_keys = list(user_hyperparameter_keys or [])
+        # Number of features after preprocessing (what the model sees).
+        # Filled in build_trial_pipeline (falls back to the raw column count).
+        self.n_features_eff: int = 1
         # Whether to train the best model on all data after the Optuna loop
         # (``_fit_best_model``). Set to False when the caller only needs the
         # best parameters and score (e.g. the training engine's HPO phase):
@@ -989,6 +1022,9 @@ class _OptimizeRunner:
         self.best_score: float
         self.clean_model_params: dict[str, Any]
         self.best_apply_fs: bool
+        # Log records of the adaptive complexity guard, filled in
+        # resolve_search_space; travels with OptimizeResult for the report.
+        self.complexity_guard_logs: list[dict[str, Any]] = []
 
     def run(self) -> OptimizeResult | None:
         """Run the full optimisation cycle, split into steps.
@@ -1005,8 +1041,11 @@ class _OptimizeRunner:
             return None
 
         self.resolve_validation()
-        self.resolve_search_space()
+        # The preprocessor must be built BEFORE the search space is resolved:
+        # the adaptive complexity guard needs ``p`` — the number of features
+        # after preprocessing (one-hot, missing-value indicators).
         self.build_trial_pipeline()
+        self.resolve_search_space()
         self.handle_pruning()
 
         # If early stopping is disabled, explicitly disable any pruner
@@ -1067,12 +1106,14 @@ class _OptimizeRunner:
                 params=self.best_params,
                 score=self.best_score,
                 trials=self.phase_trials,
+                complexity_guard=self.complexity_guard_logs or None,
             )
         return OptimizeResult(
             model=self._fit_best_model(),
             params=self.best_params,
             score=self.best_score,
             trials=self.phase_trials,
+            complexity_guard=self.complexity_guard_logs or None,
         )
 
     # ─────────────────── run steps ─────────────────────────────────────────
@@ -1249,6 +1290,126 @@ class _OptimizeRunner:
             # Explicit loo / train_test_split: the fold count is not used.
             self.effective_n_folds = self.n_folds
 
+    def _resolve_complexity_guard(
+        self, space: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Apply the adaptive complexity guard to a dict search space.
+
+        The guard depends on ``n`` (the effective training-fold rows,
+        ``self.n_samples_eff``) and ``p`` (the number of features after
+        preprocessing, ``self.n_features_eff``). Both are computed once per
+        phase and are the same in every HPO phase (deterministic between
+        phases) and in the subprocesses (identical inputs -> identical
+        results), so the TPE history transfer between phases stays valid.
+
+        When the guard is disabled (``complexity_guard_cfg is None``) the
+        space is returned unchanged and no records are produced — the exact
+        legacy behavior for direct ``optimize()`` callers.
+
+        Args:
+            space: The already physically-clipped search space.
+
+        Returns:
+            tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly
+                adjusted) space and the guard log records.
+        """
+        cfg = self.complexity_guard_cfg
+        if cfg is None or cfg.mode == "off":
+            return space, []
+        user_keys = set(self.user_hyperparameter_keys or ())
+        adjusted, logs = apply_complexity_guard(
+            space,
+            self.algo,
+            n=self.n_samples_eff,
+            p=self.n_features_eff,
+            config=cfg,
+            user_space_keys=user_keys,
+        )
+        return adjusted, logs
+
+    def _log_complexity_guard(self) -> None:
+        """Log the adaptive complexity guard records at INFO level.
+
+        One record per (algorithm, phase, parameter): "was → became" with
+        the reason, e.g. ``max_depth 3–20 → 2–3: n=15, p=5, mode=small,
+        leaf_min=2``.
+        """
+        cfg_mode = (
+            self.complexity_guard_cfg.mode if self.complexity_guard_cfg else "off"
+        )
+        cfg_policy = (
+            self.complexity_guard_cfg.user_range_policy
+            if self.complexity_guard_cfg
+            else "user_wins"
+        )
+        for record in self.complexity_guard_logs:
+            before = record["before"]
+            after = record["after"]
+
+            def fmt(v: Any) -> str:
+                if v is None:
+                    return "n/a"
+                return str(v) if isinstance(v, int) else f"{v:g}"
+
+            if record.get("applied"):
+                message = (
+                    f"[complexity_guard] {record['algo']} {record['param']} "
+                    f"{fmt(before[0])}–{fmt(before[1])} → "
+                    f"{fmt(after[0])}–{fmt(after[1])}: n={record['n']}, "
+                    f"p={record['p']}, mode={record['size_mode']}, "
+                    f"leaf_min={fmt(record['leaf_min'])}, level={record['level']}"
+                )
+                if record.get("conflict"):
+                    message += " (user range conflict, engine wins)"
+                if record.get("fixed"):
+                    message += " (parameter fixed)"
+                log.info("%s: %s", message, record["reason"])
+            elif record.get("conflict"):
+                rule_range = record.get("rule_range") or [None, None]
+                if cfg_mode == "warn":
+                    # In the warn mode nothing is applied at all — report the
+                    # conflict without claiming that the user range wins.
+                    log.warning(
+                        "[complexity_guard] %s %s user range %s–%s conflicts "
+                        "with the guard range %s–%s; computed but not applied "
+                        "(mode='warn', user_range_policy='%s')",
+                        record["algo"],
+                        record["param"],
+                        fmt(before[0]),
+                        fmt(before[1]),
+                        fmt(rule_range[0]),
+                        fmt(rule_range[1]),
+                        cfg_policy,
+                    )
+                else:
+                    log.warning(
+                        "[complexity_guard] %s %s user range %s–%s conflicts "
+                        "with the guard range %s–%s; keeping the user range "
+                        "(user_range_policy='%s')",
+                        record["algo"],
+                        record["param"],
+                        fmt(before[0]),
+                        fmt(before[1]),
+                        fmt(rule_range[0]),
+                        fmt(rule_range[1]),
+                        cfg_policy,
+                    )
+            else:
+                # Computed but not applied (e.g. mode='warn'): report the
+                # would-be change without claiming a conflict.
+                log.info(
+                    "[complexity_guard] %s %s %s–%s → %s–%s: computed but "
+                    "not applied (mode=%s): %s",
+                    record["algo"],
+                    record["param"],
+                    fmt(before[0]),
+                    fmt(before[1]),
+                    fmt(after[0]),
+                    fmt(after[1]),
+                    cfg_mode,
+                    record["reason"],
+                )
+
     def resolve_search_space(self) -> None:
         """Resolve the hyperparameter search space and the scorer (step 2).
 
@@ -1298,6 +1459,9 @@ class _OptimizeRunner:
                     "epsilon": _svr_adaptive_epsilon_entry(self.y),
                 }
             clipped_config = clip_search_space(space_dict, self.n_samples_eff)
+            clipped_config, guard_logs = self._resolve_complexity_guard(clipped_config)
+            self.complexity_guard_logs = guard_logs
+            self._log_complexity_guard()
             space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
         else:
             # SVR without an external config (including a direct
@@ -1354,6 +1518,14 @@ class _OptimizeRunner:
                         col for col in self.numerical_features if col in self.X.columns
                     ]
         if self.preprocessor is None:
+            # Guard for an unknown algorithm: the preprocessor cannot be
+            # assembled (``resolve_preprocessing_preset`` would raise). The
+            # search-space resolution raises the proper ``HyperoptError``
+            # afterwards; skipping the preprocessor here preserves the exact
+            # error contract for unknown algorithms.
+            if resolve_algorithm_name(self.algo) not in AVAILABLE_ALGORITHMS:
+                self.n_features_eff = max(1, int(self.X.shape[1]))
+                return
             encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
             # Automatic preset selection + application of an explicit override.
             # The preset is resolved once before training (performance) and
@@ -1424,6 +1596,78 @@ class _OptimizeRunner:
                     "numerical_features were not provided — categorical columns "
                     "(if any) will be treated as numeric."
                 )
+
+        # The number of features the model actually sees after preprocessing
+        # (including one-hot and missing-value indicators). Used by the
+        # adaptive complexity guard as ``p``. Computed deterministically once
+        # per phase — the same value in every HPO phase and in the
+        # subprocesses.
+        self.n_features_eff = self._estimate_n_features_after_preprocessing()
+
+    def _estimate_n_features_after_preprocessing(self) -> int:
+        """Estimate the number of features after the preprocessor.
+
+        The number of columns the model actually sees: numerical features
+        plus their missing-value indicators (``add_indicator=True``) plus the
+        encoded categorical features. The estimate is computed
+        deterministically from the data and the encoding settings — the same
+        value in every HPO phase and in the subprocesses (no fitting, no
+        randomness). It is used by the adaptive complexity guard as ``p``.
+
+        One-hot encoding expands each categorical column into its number of
+        unique categories; ordinal/target/frequency encoding keeps one column
+        per categorical column; hashing encoding expands into
+        ``n_components`` columns.
+
+        Returns:
+            int: The estimated feature count (>= 1).
+        """
+        if self.preprocessor is not None:
+            n_out = getattr(self.preprocessor, "n_features_out_", None)
+            if n_out is not None and int(n_out) >= 1:
+                return int(n_out)
+
+        # Explicitly passed column lists (the engine path) — the accurate
+        # source; otherwise fall back to auto-detected types.
+        cats = list(self.categorical_features or [])
+        nums = list(self.numerical_features or [])
+        if not cats and not nums and isinstance(self.X, pd.DataFrame):
+            cats, nums = detect_feature_types(self.X)
+
+        n = 0
+        if nums:
+            n += len(nums)
+            if self._missing_indicator_added():
+                # add_indicator=True: one binary column per numerical feature
+                # that has missing values in the training set.
+                try:
+                    n += int(self.X[nums].isna().any().sum())
+                except Exception:  # noqa: BLE001 — estimate only
+                    n += 0
+        if cats and isinstance(self.X, pd.DataFrame):
+            encoding = self.encoding or "one_hot"
+            for col in cats:
+                if col not in self.X.columns:
+                    continue
+                if encoding == "hashing":
+                    n += self.hashing_n_components
+                elif encoding == "one_hot":
+                    try:
+                        # NaN is kept as a separate category: the categorical
+                        # pipeline converts columns to strings first
+                        # (``_to_string_array``), so a missing value becomes
+                        # the literal "nan" category of OneHotEncoder.
+                        n += int(self.X[col].nunique(dropna=False))
+                    except Exception:  # noqa: BLE001 — estimate only
+                        n += 1
+                else:
+                    # ordinal / target / frequency: one column per column.
+                    n += 1
+        return max(1, n)
+
+    def _missing_indicator_added(self) -> bool:
+        """Whether missing-value indicators are added for numerical features."""
+        return _missing_indicator_enabled(self.algo)
 
     def assemble_estimator(self, model_impl: Any, apply_fs: bool = False) -> Any:
         """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
@@ -1913,6 +2157,8 @@ def optimize(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
+    user_hyperparameter_keys: list[str] | None = None,
     fit_best_model: bool = True,
 ) -> OptimizeResult | None:
     """Run the model hyperparameter optimisation process using Optuna.
@@ -2015,6 +2261,18 @@ def optimize(
             splits in competition with model hyperparameters. For
             ``isotonic_regression`` selection is forcibly disabled (a
             univariate algorithm).
+        complexity_guard_cfg (ComplexityGuardConfig | dict | None): Settings
+            of the adaptive complexity guard for tree/boosting search spaces
+            (from ``general.complexity_guard``). ``None`` — the guard is
+            disabled (the exact legacy behavior for direct callers). When
+            enabled, the dict-based search spaces of trees/boostings are
+            tightened depending on ``n`` (effective training-fold rows) and
+            ``p`` (features after preprocessing).
+        user_hyperparameter_keys (list[str] | None): Names of parameters set
+            explicitly by the user (``algo.hyperparameters``); the guard
+            intersects its ranges with these user ranges and applies
+            ``user_range_policy`` on an empty intersection. ``None`` — no
+            user-specified parameters.
         fit_best_model (bool): Whether to train the final model on all
             provided data after the search and return it in the ``model``
             field of the result. Defaults to True (the original behavior).
@@ -2082,5 +2340,7 @@ def optimize(
         target_encoding_smoothing=target_encoding_smoothing,
         target_encoding_fallback=target_encoding_fallback,
         feature_selection_cfg=feature_selection_cfg,
+        complexity_guard_cfg=complexity_guard_cfg,
+        user_hyperparameter_keys=user_hyperparameter_keys,
         fit_best_model=fit_best_model,
     ).run()

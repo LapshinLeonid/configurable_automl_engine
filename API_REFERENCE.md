@@ -33,6 +33,7 @@ The `general` section may include the following attributes:
 * `target_encoding_smoothing` — (optional, `>= 0`, default `20.0`) smoothing parameter `m` of target encoding.
 * `target_encoding_fallback` — (optional, default `null`) fallback value of target encoding for categories unseen in training; `null` means the global target mean.
 * `sanity_gate` — (optional) thresholds and settings of the Sanity Gate audit used by select phases with `strategy: "sanity_gate"`. The section is a pure source of thresholds — the global switch `mode` was removed. See [Sanity Gate configuration](#sanity-gate-configuration-sanity_gate).
+* `complexity_guard` — (optional) settings of the adaptive complexity guard for tree/boosting search spaces on small data. See [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard).
 
 ### Early stopping (`pruning`)
 
@@ -432,6 +433,150 @@ plain `int` (≥ 1) since v2; the old `null` ("no cap") form is replaced by
 skipped entirely. These changes apply to the pre-release schema only —
 no released configuration is affected.
 
+### Complexity Guard configuration (`complexity_guard`)
+
+The optional `general.complexity_guard` block is an **adaptive complexity
+guard** for the search spaces of trees and boosting on small data. It extends
+the existing data-dependent clipping layer (`clip_search_space` in
+`common/hyperopt_defaults.py`): on small data the default ranges of
+tree/boosting hyperparameters are too wide (e.g. `max_depth` 3–20 or 2–32 on
+a 15-row training fold), trials are spent on values that do not change the
+model, the TPE surface has flat regions and the search drifts toward overfit
+models. The guard tightens the ranges depending on the number of rows (`n` —
+the effective training-fold rows) and the number of features after
+preprocessing (`p` — what the model sees, including one-hot columns and
+missing-value indicators).
+
+Two independent levels of restrictions (each toggled separately):
+
+* **Level A — lossless clipping** (`lossless: true`): removes values that
+  cannot change the model on data of the given size. For example,
+  `max_depth=25` on 15 rows is equivalent to `max_depth=6`. Safe. Note: for
+  `min_samples_leaf` the level A cap (`≤ floor(n / 2)`) is a *physical*
+  bound — larger leaves are unreachable on that sample size — but the
+  remaining values below the cap still change the model, so the level is
+  "lossless" only in the sense that no reachable leaf size is removed.
+* **Level B — regularization** (`regularize: true`): deliberately shifts the
+  space toward simpler models on small data. A heuristic.
+* **Time-only caps** (e.g. `n_estimators` ≤ 300 in the small mode) are marked
+  explicitly as "for time", not "for regularization": more trees only reduce
+  the variance of the ensemble.
+
+The size mode is determined by `n` and the ratio `n / p`:
+
+* `"small"`: `n < small_n_threshold` or `n / p < small_np_ratio_threshold`;
+* `"medium"`: `n < medium_n_threshold` or `n / p < medium_np_ratio_threshold`
+  (and not small);
+* `"ordinary"`: everything else — the spaces are not changed.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `string` | `"apply"` | Operation mode: `"apply"` (default) — restrictions are computed and applied; `"warn"` — computed and logged but NOT applied (the spaces stay unchanged); `"off"` — the guard is disabled. |
+| `lossless` | `bool` | `true` | Enable level A (lossless clipping). |
+| `regularize` | `bool` | `true` | Enable level B (regularization heuristic). |
+| `user_range_policy` | `string` | `"user_wins"` | Policy for an **empty** intersection of a user range (`algo.hyperparameters`) with the guard range: `"user_wins"` (default) — the explicit user range stays and a warning is logged (an explicit setting beats the heuristic); `"engine_wins"` — the guard restriction is applied. |
+| `small_n_threshold` | `int` | `50` | Row threshold of the `"small"` mode (≥ 1). |
+| `small_np_ratio_threshold` | `float` | `5.0` | Ratio threshold of the `"small"` mode (> 0). |
+| `medium_n_threshold` | `int` | `300` | Row threshold of the `"medium"` mode (≥ 1). |
+| `medium_np_ratio_threshold` | `float` | `20.0` | Ratio threshold of the `"medium"` mode (> 0). |
+| `size_basis` | `string` | `"rows"` | Basis of `n`: `"rows"` (default) — independent rows; `"groups"` — reserved for group validation (repeats of one group carry less information than independent rows); only `"rows"` is used today. |
+
+Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
+
+* **Decision tree / Random forest / Extra trees**
+  * `min_samples_leaf`: level A — upper bound ≤ `floor(n / 2)`; level B —
+    lower bound 2, upper bound ≤ `floor(n / 4)` (example: 2–3);
+  * `max_depth`: level A — ≤ `floor(n / leaf_min) − 1`; level B —
+    ≤ `ceil(log2(n / leaf_min))` (example: A gives ≤ 6, B gives 2–3);
+  * `max_features` (a fraction): level A — lower bound ≥ `1 / p` (at least one
+    feature);
+  * `n_estimators`: capped only for time (e.g. 100–300).
+* **Gradient boosting / XGBoost**
+  * `max_depth`: level A — as for trees; level B — 1–3;
+  * `min_samples_leaf` (Gradient boosting): as for trees;
+  * `min_child_weight` (XGBoost): level B — lower bound 2–3;
+  * `subsample`: level B — lower bound ≥ 0.7;
+  * `colsample_bytree`: level A — lower bound ≥ `1 / p`;
+  * `reg_lambda` (XGBoost): level B — `[1, 100]` on the log scale;
+  * `n_estimators`: capped for time (50–300 trees). `learning_rate` is not
+    restricted by the guard.
+
+Rules of the `"medium"` mode — the same but softer:
+`min_samples_leaf` lower bound 2; `max_depth` ≤ `ceil(log2(n / leaf_min)) + 2`;
+XGBoost `max_depth` ≤ 5. In the `"ordinary"` mode the spaces are unchanged.
+
+Interaction with user ranges (`limit_hyperparameters` + `hyperparameters`):
+
+* The default spaces adapt automatically.
+* A range the user set explicitly is intersected with the guard range; on an
+  **empty** intersection the `user_range_policy` decides (by default the user
+  range stays and a warning is logged). The strict "engine wins" mode is
+  enabled via `user_range_policy: "engine_wins"`.
+* The result is never empty: `low <= high`, the int/float type and the log
+  scale are preserved; a range collapsed to one value fixes the parameter
+  (logged). Integer-like parameters (leaf sizes, depths, tree counts) never
+  go below their physical minimum of 1 — on extremely small `n` an empty
+  range is fixed at 1, never at 0 (sklearn rejects 0 with
+  `InvalidParameterError`; XGBoost silently overrides `max_depth=0`).
+
+Transparency:
+
+* Per (algorithm, phase, parameter) one INFO log record: "was → became" with
+  the reason, e.g. `max_depth 3–20 → 2–3: n=15, p=5, mode=small, leaf_min=2`.
+* The same records are aggregated into the `train_best_model` report under the
+  `complexity_guard` key: `{"parameters": [ ... ]}` — **one record per
+  restricted parameter** (the A/B rules of the same parameter are merged, and
+  identical records of repeated phases are not duplicated) with `algo`,
+  `param`, `before`, `after`, `levels` (the list of applied rule levels, e.g.
+  `["A", "B"]` or `["B"]`), `size_mode`, `n`, `p`, `leaf_min`, `reason`,
+  `applied`, `conflict`, `fixed`.
+
+Note on `max_features`: the parameter accepts both a float (a fraction of the
+features, clamped to `(0, 1]`) and an int (a plain feature count, physical
+minimum 1). The guard treats them accordingly — an int user range is never
+collapsed to a fixed `1`.
+
+Note on `min_samples_leaf`: sklearn also accepts a float in `(0, 1)` as a
+fraction of the sample size. The guard's rules are expressed in absolute rows,
+so a fractional range is converted to rows (`value × n`) before a rule applies
+and divided by `n` afterwards — a user fraction range stays in `(0, 1]` and is
+never widened to a row count (a float `>= 1` is a row count and is treated as
+integer-like).
+
+Determinism and parallelism:
+
+* The guard is computed from the same inputs (`n`, `p`, the config) in every
+  HPO phase, so the TPE history transfer between phases
+  (`_transfer_previous_trials`) stays valid — no `HPOHistoryError`.
+* In the subprocesses the restrictions are identical: the inputs are computed
+  deterministically and travel with the phase snapshot.
+
+Validation rules (rejected at config load with a clear message):
+
+* Unknown keys — the block has `extra="forbid"` (a typo is a hard error).
+* `small_n_threshold` must be `< medium_n_threshold`.
+* `small_np_ratio_threshold` must be `< medium_np_ratio_threshold`.
+* Thresholds must be positive; `mode` must be one of `off`/`warn`/`apply`;
+  `user_range_policy` — one of `user_wins`/`engine_wins`; `size_basis` — one
+  of `rows`/`groups`.
+
+Example:
+
+```yaml
+general:
+  phases: [...]
+  complexity_guard:
+    mode: "apply"
+    lossless: true
+    regularize: true
+    user_range_policy: "user_wins"
+    small_n_threshold: 50
+    small_np_ratio_threshold: 5.0
+    medium_n_threshold: 300
+    medium_np_ratio_threshold: 20.0
+    size_basis: "rows"
+```
+
 ### Additional metrics (`additional_metrics`)
 
 The optional `general.additional_metrics` parameter is a list of extra quality metrics whose values are computed for the **final trained model** (after the winner is selected) and returned together with the training results.
@@ -589,7 +734,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons.
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
@@ -623,9 +768,11 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
+| `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the guard is disabled (the exact legacy behavior for direct callers). When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and `p` (features after preprocessing). |
+| `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
 
-**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score` and `trials`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
+**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials` and `complexity_guard`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
 
 In `'auto'` mode `params` additionally contains the service key `use_feature_selection` (`True`/`False`) — the winner's decision about feature selection, which is preserved between multi-phase HPO runs (passed to the next phase via `initial_params`/`enqueue_trial`) and consumed by `train_best_model` for the final fit. The key is absent in `'always'`/`'disabled'` modes and for `isotonic_regression` (feature selection is forcibly turned off there). The key is never passed to the base model constructor.
 

@@ -30,6 +30,10 @@ designed to scale from local experimentation to large-scale data processing.
 * **Sanity Gate**: Protects the final winner selection from
 "degenerate" models: constant/flat predictions, step functions, unused
 features and overfit learners.
+* **Adaptive Complexity Guard**: Tightens the search ranges of trees and
+boosting on small data (lossless clipping + regularization), saving HPO
+budget and reducing overfitting on small samples. Disableable via
+`general.complexity_guard`.
 
 # Dependencies
 

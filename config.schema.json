@@ -310,6 +310,97 @@
       "title": "CategoricalSpace[Any]",
       "type": "object"
     },
+    "ComplexityGuardCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the adaptive complexity guard for tree/boosting spaces.\n\nExtends the data-dependent clipping layer (``clip_search_space``): on\nsmall data the search ranges of tree/boosting hyperparameters are too\nwide, trials are spent on values that do not change the model, the TPE\nsurface has flat regions and the search drifts toward overfit models.\nThis section tightens the ranges depending on the number of rows (``n``)\nand the number of features after preprocessing (``p``).\n\nTwo independent levels of restrictions:\n* level A — lossless clipping: removes values that cannot change the\n  model on data of the given size (``lossless``). For ``min_samples_leaf``\n  the cap is a physical bound (larger leaves are unreachable on the sample\n  size), not a claim about model quality;\n* level B — regularization: deliberately shifts the space toward simpler\n  models on small data (``regularize``).\n* level \"time\" — time-only caps (``n_estimators``): more trees only\n  reduce the variance of the ensemble.\n\nAttributes:\n    mode (ComplexityGuardMode): Operation mode: 'off' — disabled,\n        'warn' — restrictions are computed and logged but NOT applied,\n        'apply' — computed and applied.\n    lossless (bool): Enable level A (lossless clipping).\n    regularize (bool): Enable level B (regularization heuristic).\n    user_range_policy (ComplexityGuardUserRangePolicy): Policy for an\n        empty intersection of a user range (``algo.hyperparameters``)\n        with the guard range: 'user_wins' (default) — the user range\n        stays, 'engine_wins' — the guard restriction is applied.\n    small_n_threshold (int): ``n < threshold`` marks the 'small' mode.\n    small_np_ratio_threshold (float): ``n / p < threshold`` marks the\n        'small' mode.\n    medium_n_threshold (int): ``n < threshold`` marks the 'medium' mode.\n    medium_np_ratio_threshold (float): ``n / p < threshold`` marks the\n        'medium' mode.\n    size_basis (ComplexityGuardSizeBasis): Basis of ``n``: 'rows' (default)\n        — independent rows, 'groups' — reserved for group validation.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ComplexityGuardMode",
+          "default": "apply",
+          "description": "Operation mode of the adaptive complexity guard: 'apply' (default) — restrictions are computed and applied, 'warn' — computed and logged but NOT applied, 'off' — disabled (search spaces are unchanged)."
+        },
+        "lossless": {
+          "default": true,
+          "description": "Enable level A (lossless clipping): removes values that cannot change the model on data of the given size (e.g. max_depth=25 on 15 rows is equivalent to max_depth=6). Safe. For min_samples_leaf the cap is a physical bound (larger leaves are unreachable on the sample size), not a claim about model quality.",
+          "title": "Lossless",
+          "type": "boolean"
+        },
+        "regularize": {
+          "default": true,
+          "description": "Enable level B (regularization): deliberately shifts the space toward simpler models on small data. A heuristic.",
+          "title": "Regularize",
+          "type": "boolean"
+        },
+        "user_range_policy": {
+          "$ref": "#/$defs/ComplexityGuardUserRangePolicy",
+          "default": "user_wins",
+          "description": "Policy for an empty intersection of a user range (algo.hyperparameters) with the guard range: 'user_wins' (default) — the explicit user range stays (a warning is logged), 'engine_wins' — the guard restriction is applied."
+        },
+        "small_n_threshold": {
+          "default": 50,
+          "description": "Row threshold of the 'small' mode: n < threshold marks the data as small.",
+          "minimum": 1,
+          "title": "Small N Threshold",
+          "type": "integer"
+        },
+        "small_np_ratio_threshold": {
+          "default": 5.0,
+          "description": "Ratio threshold of the 'small' mode: n / p < threshold marks the data as small (wide data with few rows per feature).",
+          "exclusiveMinimum": 0.0,
+          "title": "Small Np Ratio Threshold",
+          "type": "number"
+        },
+        "medium_n_threshold": {
+          "default": 300,
+          "description": "Row threshold of the 'medium' mode: n < threshold marks the data as medium.",
+          "minimum": 1,
+          "title": "Medium N Threshold",
+          "type": "integer"
+        },
+        "medium_np_ratio_threshold": {
+          "default": 20.0,
+          "description": "Ratio threshold of the 'medium' mode: n / p < threshold marks the data as medium.",
+          "exclusiveMinimum": 0.0,
+          "title": "Medium Np Ratio Threshold",
+          "type": "number"
+        },
+        "size_basis": {
+          "$ref": "#/$defs/ComplexityGuardSizeBasis",
+          "default": "rows",
+          "description": "Basis of the row count n for the size mode: 'rows' (default) — independent rows, 'groups' — reserved for group validation (repeats of one group carry less information than independent rows); only 'rows' is used today."
+        }
+      },
+      "title": "ComplexityGuardCfg",
+      "type": "object"
+    },
+    "ComplexityGuardMode": {
+      "description": "Operation modes of the adaptive complexity guard.",
+      "enum": [
+        "off",
+        "warn",
+        "apply"
+      ],
+      "title": "ComplexityGuardMode",
+      "type": "string"
+    },
+    "ComplexityGuardSizeBasis": {
+      "description": "Basis of the row count ``n`` for the size mode.",
+      "enum": [
+        "rows",
+        "groups"
+      ],
+      "title": "ComplexityGuardSizeBasis",
+      "type": "string"
+    },
+    "ComplexityGuardUserRangePolicy": {
+      "description": "Policy for an empty intersection of a user range with the guard range.",
+      "enum": [
+        "user_wins",
+        "engine_wins"
+      ],
+      "title": "ComplexityGuardUserRangePolicy",
+      "type": "string"
+    },
     "FeatureSelectionCfg": {
       "additionalProperties": false,
       "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
@@ -638,6 +729,10 @@
         "sanity_gate": {
           "$ref": "#/$defs/SanityGateCfg",
           "description": "Thresholds and settings of the Sanity Gate audit for select steps with strategy: sanity_gate. The section is an optional source of thresholds (corridor, top_k_candidates, audit limits), not a behavioral flag: selection is performed only by explicit select phases in general.phases. Having the section without sanity select steps is valid"
+        },
+        "complexity_guard": {
+          "$ref": "#/$defs/ComplexityGuardCfg",
+          "description": "Settings of the adaptive complexity guard for tree/boosting search spaces on small data (mode: 'off'/'warn'/'apply', lossless/regularize levels, user_range_policy, size-mode thresholds, size_basis). See API_REFERENCE.md."
         }
       },
       "required": [

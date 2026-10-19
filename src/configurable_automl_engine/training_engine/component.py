@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
+from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 from configurable_automl_engine.common.validation_utils import (
     check_target_exists,
@@ -143,11 +144,16 @@ class PhaseResult:
             ONLY (transferred TPE history is excluded). Empty for custom
             tuners that do not expose trials; passed as ``previous_trials``
             to the next HPO phase (refine warm-start).
+        complexity_guard (list[dict[str, Any]]): Log records of the adaptive
+            complexity guard for the phase (one per restricted parameter,
+            "before → after" with the reason). Empty for custom tuners or
+            when the guard produced no records.
     """
 
     score: float
     params: dict[str, Any]
     trials: list[FrozenTrial] = field(default_factory=list)
+    complexity_guard: list[dict[str, Any]] = field(default_factory=list)
 
 
 def select_winner(results: dict[str, PhaseResult]) -> str:
@@ -1186,6 +1192,8 @@ def _run_hpo(
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
+    user_hyperparameter_keys: list[str] | None = None,
 ) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
     Workflow:
@@ -1434,6 +1442,14 @@ def _run_hpo(
             _feature_selection_mode(feature_selection_cfg),
         )
 
+    # pass the adaptive complexity guard settings if the tuner supports them;
+    # custom tuners without the arguments are unaffected
+    if complexity_guard_cfg is not None and "complexity_guard_cfg" in sig.parameters:
+        kwargs["complexity_guard_cfg"] = complexity_guard_cfg
+
+    if user_hyperparameter_keys and "user_hyperparameter_keys" in sig.parameters:
+        kwargs["user_hyperparameter_keys"] = user_hyperparameter_keys
+
     # The HPO phase needs only the best parameters and score — the final model
     # is trained later by the engine's own trainer. Ask a tuner that supports
     # skipping the final full-data fit to do so: otherwise one redundant full
@@ -1463,11 +1479,15 @@ def _run_hpo(
                 result.params,
                 list(result.trials),
             )
+            complexity_guard_logs: list[dict[str, Any]] = list(
+                result.complexity_guard or []
+            )
         else:
             # A legacy custom tuner returning the (model, params, score)
             # triple; the trials are unavailable (empty history).
             _, best_params, best_score = result
             trials = []
+            complexity_guard_logs = []
         if best_score is None or best_params is None:
             # Tuner couldn't get a valid result: either all trials failed
             # (optuna.TrialPruned) or it failed otherwise. Return None so the
@@ -1482,7 +1502,12 @@ def _run_hpo(
                 best_params,
             )
             return None
-        return PhaseResult(score=best_score, params=best_params, trials=trials)
+        return PhaseResult(
+            score=best_score,
+            params=best_params,
+            trials=trials,
+            complexity_guard=complexity_guard_logs,
+        )
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
@@ -1908,6 +1933,9 @@ class PhaseContext:
         pre_trained_trainer (Any | None): The winner's trainer of the terminal
             ``sanity_gate`` select step, trained on 100% of the data (no
             retraining of the winner required); ``None`` otherwise.
+        complexity_guard_records (list[dict[str, Any]]): The accumulated
+            "before → after" records of the adaptive complexity guard across
+            all HPO phases (one per restricted parameter), for the report.
     """
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
@@ -1916,6 +1944,7 @@ class PhaseContext:
     sanity_gate_sections: dict[str, dict[str, Any]] = field(default_factory=dict)
     winner_algo: str | None = None
     pre_trained_trainer: Any | None = None
+    complexity_guard_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1937,6 +1966,9 @@ class _HPOWorkerResult:
             serializable in the "processes" mode; the consumer re-raises the
             error in the main process — fail fast even in the parallel mode,
             where ``run_parallel`` otherwise swallows worker exceptions.
+        complexity_guard (list[dict[str, Any]]): The adaptive complexity
+            guard "before → after" records of the phase (serializable in the
+            "processes" mode).
     """
 
     name: str
@@ -1945,6 +1977,7 @@ class _HPOWorkerResult:
     trials: list[FrozenTrial] | None = None
     disqualify_reason: str | None = None
     history_error: str | None = None
+    complexity_guard: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -2012,6 +2045,8 @@ class _HpoPhaseSpec:
     target_encoding_smoothing: float
     target_encoding_fallback: float | None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    complexity_guard_cfg: Any = None
+    user_hyperparameter_keys: list[str] | None = None
     random_state: int | None = None
     sampler_seed: int | None = None
 
@@ -2070,6 +2105,7 @@ def _execute_hpo_phase(
     previous_trials: list[FrozenTrial] | None = None,
     random_state: int | None = None,
     sampler_seed: int | None = None,
+    user_hyperparameter_keys: list[str] | None = None,
 ) -> PhaseResult | None:
     """Run a specific HPO phase for an algorithm (module-level function).
 
@@ -2138,6 +2174,8 @@ def _execute_hpo_phase(
             target_encoding_smoothing=spec.target_encoding_smoothing,
             target_encoding_fallback=spec.target_encoding_fallback,
             feature_selection_cfg=spec.feature_selection_cfg,
+            complexity_guard_cfg=spec.complexity_guard_cfg,
+            user_hyperparameter_keys=user_hyperparameter_keys,
         )
 
         if result is None:
@@ -2216,6 +2254,10 @@ def _hpo_phase_worker(
         algo_name,
         algo_cfg.hyperparameters,  # this is the dict from config_parser
     )
+    # The names of parameters the user set explicitly (algo.hyperparameters):
+    # the complexity guard treats them as "user ranges" (intersected, with
+    # user_range_policy on an empty intersection).
+    user_keys = list(algo_cfg.hyperparameters or {})
     try:
         result = _execute_hpo_phase(
             spec.phase.name,
@@ -2229,6 +2271,7 @@ def _hpo_phase_worker(
             previous_trials=previous_trials,
             random_state=spec.random_state,
             sampler_seed=spec.sampler_seed,
+            user_hyperparameter_keys=user_keys,
         )
 
         if result is None:
@@ -2239,6 +2282,7 @@ def _hpo_phase_worker(
             score=result.score,
             params=result.params,
             trials=list(result.trials),
+            complexity_guard=list(result.complexity_guard or []),
         )
     except _CanonicalIAE as err:
         # Circuit breaker: the algorithm is disqualified after
@@ -2310,7 +2354,10 @@ def _consume_worker_results(
         if res.score is None or res.params is None:
             continue
         phase_results[res.name] = PhaseResult(
-            score=res.score, params=res.params, trials=list(res.trials or [])
+            score=res.score,
+            params=res.params,
+            trials=list(res.trials or []),
+            complexity_guard=list(res.complexity_guard or []),
         )
 
 
@@ -2521,6 +2568,7 @@ def execute_phases(
             target_encoding_smoothing=cfg.general.target_encoding_smoothing,
             target_encoding_fallback=cfg.general.target_encoding_fallback,
             feature_selection_cfg=cfg.general.feature_selection,
+            complexity_guard_cfg=cfg.general.complexity_guard,
             # Data splits and preprocessor: the fixed engine seed, so every
             # phase (and the final ModelTrainer fit) uses the same folds.
             random_state=RANDOM_STATE,
@@ -2615,6 +2663,17 @@ def execute_phases(
         # to contain only this phase's results.
         ctx.working_set = valid_results
 
+        # Accumulate the adaptive complexity guard records of the phase into
+        # the report section (one "before → after" record per restricted
+        # parameter across all algorithms and phases: the A/B rules of the
+        # same parameter are merged, and identical records of repeated
+        # phases are not duplicated).
+        for record in phase_results.values():
+            ctx.complexity_guard_records.extend(record.complexity_guard)
+        ctx.complexity_guard_records = _merge_complexity_guard_records(
+            ctx.complexity_guard_records
+        )
+
         if not valid_results:
             failed_algos = [n for n in phase_candidates if n not in valid_results]
             raise RuntimeError(
@@ -2622,6 +2681,60 @@ def execute_phases(
                 f"Failed algorithms: {failed_algos}"
             )
     return ctx
+
+
+def _merge_complexity_guard_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge per-(algo, param, level) guard records into one record per parameter.
+
+    The guard applies several rules to the same parameter (level A then
+    level B), producing one record per rule, and the same restrictions repeat
+    in every HPO phase (the guard is deterministic between phases). The report
+    documents "one record per restricted parameter", so the raw per-rule/per
+    -phase list is merged:
+
+    * the ``after`` range of a later rule (the final state of the parameter)
+      becomes the record's ``after``;
+    * the ``before`` of the first record and the final ``after`` span the
+      whole adaptation;
+    * the ``levels`` field lists all applied rule levels (e.g. ``["A", "B"]``);
+    * a record produced in an earlier phase is not duplicated by a later one
+      (identical (algo, param, before, after) collapses).
+
+    Args:
+        records: Raw guard records (per rule and per phase).
+
+    Returns:
+        list[dict[str, Any]]: One record per (algo, param) with ``levels``
+            aggregating the applied rule levels.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for rec in records:
+        key = (rec.get("algo", "?"), rec.get("param", "?"))
+        cur = merged.get(key)
+        if cur is None:
+            merged[key] = dict(rec)
+            cur = merged[key]
+            cur["levels"] = [rec["level"]] if rec.get("level") else []
+            continue
+        # Same parameter in a later phase or a later rule of the same phase:
+        # the final range of the parameter is the latest ``after``.
+        cur["after"] = rec["after"]
+        if rec.get("level") and rec["level"] not in cur["levels"]:
+            cur["levels"].append(rec["level"])
+        # The aggregate "before" is the earliest one (the starting range
+        # before any rule of the guard was applied).
+        if cur.get("before") == cur.get("after") and rec.get("before") != rec.get(
+            "after"
+        ):
+            cur["before"] = rec["before"]
+        # The guard restriction is "applied" if any rule actually applied it.
+        cur["applied"] = bool(cur.get("applied") or rec.get("applied"))
+        cur["fixed"] = bool(cur.get("fixed") or rec.get("fixed"))
+        if rec.get("conflict"):
+            cur["conflict"] = True
+    return list(merged.values())
 
 
 # --------------------------------------------------------------------------- #
@@ -3149,6 +3262,7 @@ def persist_artifact(
     disqualified_algorithms: dict[str, str],
     pre_trained_trainer: Any | None = None,
     sanity_gate_sections: dict[str, dict[str, Any]] | None = None,
+    complexity_guard_sections: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Final training of the winner, artifact persistence, and report assembly.
 
@@ -3182,6 +3296,12 @@ def persist_artifact(
             sections of the ``sanity_gate`` select steps (key — the phase
             name). The ``sanity_gate`` key is added to the result only when at
             least one section is present.
+        complexity_guard_sections (Dict[str, Any] | None): Aggregated report
+            section of the adaptive complexity guard: key ``"parameters"`` —
+            the list of "before → after" records (with the reason, size mode,
+            ``n``/``p``, ``leaf_min``, level, and the applied flag). The
+            ``complexity_guard`` key is added to the result only when the
+            guard produced at least one record.
 
     Returns:
         Dict[str, Any]: A dict with the training results.
@@ -3243,6 +3363,12 @@ def persist_artifact(
     # lists/dicts, and source mutations must not affect the report.
     if sanity_gate_sections:
         result["sanity_gate"] = copy.deepcopy(sanity_gate_sections)
+    # Report section of the adaptive complexity guard: the key is added only
+    # when the guard produced at least one record (the "before → after"
+    # parameter table with reasons). Deep-copied so that source mutations do
+    # not affect the report.
+    if complexity_guard_sections:
+        result["complexity_guard"] = copy.deepcopy(complexity_guard_sections)
     # Additional informational metrics of the final model. The key is added
     # only when metrics are present (after deduplication and exclusion of the
     # main comparison metric), otherwise the results are identical to the
@@ -3349,4 +3475,9 @@ def train_best_model(
         disqualified_algorithms=ctx.disqualified_algorithms,
         pre_trained_trainer=ctx.pre_trained_trainer,
         sanity_gate_sections=ctx.sanity_gate_sections or None,
+        complexity_guard_sections=(
+            {"parameters": ctx.complexity_guard_records}
+            if ctx.complexity_guard_records
+            else None
+        ),
     )
