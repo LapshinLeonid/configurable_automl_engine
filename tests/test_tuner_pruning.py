@@ -32,10 +32,12 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.model_selection import KFold
 
 from configurable_automl_engine import tuner
+from configurable_automl_engine.training_engine.metrics import get_scorer_object
 from configurable_automl_engine.tuner import (
     HPO_WORST_SCORE,
     HyperoptError,
     _build_pruner,
+    _evaluate_pooled_cv,
     _evaluate_with_intermediate_reports,
     _normalize_pruning_config,
     optimize,
@@ -205,6 +207,248 @@ def test_evaluate_with_intermediate_reports_returns_mean():
     )
     assert score == pytest.approx(0.7)
     assert trial.report.call_count == 3
+
+
+def test_evaluate_pooled_cv_returns_pooled_value():
+    """_evaluate_pooled_cv returns the metric over the whole OOF vector.
+
+    For a non-additive metric (r2) the pooled value differs from the mean of
+    the per-fold values; the per-fold scorer is NOT invoked on the common
+    path (no log noise for LOO+R²).
+    """
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class ConstantPred(BaseEstimator, RegressorMixin):
+        def __init__(self, offset: float = 0.5):
+            self.offset = offset
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), float(np.mean(y)) + self.offset)
+
+    scorer = get_scorer_object("r2")
+
+    class CountingScorer:
+        """Proxy exposing the raw scorer attributes; counts __call__ invocations."""
+
+        def __init__(self, inner):
+            self.__dict__["_inner"] = inner
+            self.calls = 0
+
+        def __call__(self, estimator, Xte, yte):
+            self.calls += 1
+            return self._inner(estimator, Xte, yte)
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+        def __setattr__(self, key, value):
+            if key == "calls":
+                object.__setattr__(self, key, value)
+            else:
+                setattr(self._inner, key, value)
+
+    counting = CountingScorer(scorer)
+    pooled = _evaluate_pooled_cv(
+        ConstantPred(),
+        X,
+        y,
+        method="k_fold",
+        n_folds=4,
+        test_size=0.2,
+        random_state=42,
+        scorer=counting,
+    )
+    # The per-fold scorer is never invoked on the common path (lazy fallback).
+    assert counting.calls == 0
+    expected = float(scorer._sign * scorer._score_func(y.to_numpy(), np.full(len(y), float(np.mean(y)) + 0.5)))
+    assert pooled == pytest.approx(expected, rel=1e-6)
+
+
+def test_evaluate_pooled_cv_masks_non_finite_predictions():
+    """_evaluate_pooled_cv masks non-finite predictions of individual folds."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class NaNOnFirstFold(BaseEstimator, RegressorMixin):
+        # Class-level counter: it survives clone() (which rebuilds fresh
+        # instances per fold), so only the first fold's predictions are NaN.
+        _folds_done = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            NaNOnFirstFold._folds_done += 1
+            if NaNOnFirstFold._folds_done == 1:
+                return np.full(len(Xte), np.nan)
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    pooled = _evaluate_pooled_cv(
+        NaNOnFirstFold(),
+        X,
+        y,
+        method="k_fold",
+        n_folds=4,
+        test_size=0.2,
+        random_state=42,
+        scorer=scorer,
+    )
+    # The first fold is masked out; the pooled RMSE is over the remaining rows.
+    assert np.isfinite(pooled)
+    # Recompute: the surviving rows are those whose fold prediction is 0.0.
+    # Re-run the splits to identify the first fold's rows.
+    first_fold_rows = set()
+    for i, (X_tr, X_te, y_tr, y_te, test_idx) in enumerate(
+        tuner.iter_splits(
+            X, y, method="k_fold", n_folds=4, test_size=0.2, random_state=42,
+            include_indices=True,
+        )
+    ):
+        if i == 0:
+            first_fold_rows = set(np.asarray(test_idx))
+            break
+    valid = ~np.asarray([i in first_fold_rows for i in range(len(y))])
+    expected = -float(np.sqrt(np.mean(y.to_numpy()[valid] ** 2)))
+    assert pooled == pytest.approx(expected, rel=1e-6)
+
+
+def test_evaluate_pooled_cv_fallback_on_unpoolable_scorer():
+    """_evaluate_pooled_cv falls back to the per-fold mean when the scorer
+    cannot be pooled (no raw metric function)."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class LambdaScorer:
+        """A scorer without _score_func: pooling is impossible."""
+
+        def __call__(self, estimator, Xte, yte):
+            return 0.7
+
+    pooled = _evaluate_pooled_cv(
+        FakeModel(),
+        X,
+        y,
+        method="k_fold",
+        n_folds=4,
+        test_size=0.2,
+        random_state=42,
+        scorer=LambdaScorer(),
+    )
+    assert pooled == pytest.approx(0.7)
+
+
+def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps():
+    """LOO + r2 + pruning: NaN intermediate values are NOT published.
+
+    On the first LOO fold the pooled r2 over a single pair is NaN (r2 is
+    undefined on <2 samples). Such steps must be skipped in trial.report —
+    Optuna pruners cannot compare NaN. Once the accumulated rows admit a
+    finite pooled r2 (from the 2nd pair on), the steps are published.
+    """
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(20, 3))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(20))
+
+    class LinearModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            import numpy.linalg as la
+
+            Xt = np.column_stack([np.ones(len(Xtr)), np.asarray(Xtr)])
+            self.coef_, _, _, _ = la.lstsq(Xt, np.asarray(ytr), rcond=None)
+            return self
+
+        def predict(self, Xte):
+            return np.column_stack([np.ones(len(Xte)), np.asarray(Xte)]) @ self.coef_
+
+    scorer = get_scorer_object("r2")
+    _evaluate_with_intermediate_reports(
+        trial,
+        LinearModel(),
+        X,
+        y,
+        method="loo",
+        n_folds=5,
+        test_size=0.2,
+        random_state=42,
+        scorer=scorer,
+        pool_metric=True,
+    )
+    # The first 1-row LOO step has an undefined pooled r2 (NaN) and must NOT
+    # be published; the remaining steps (>= 2 accumulated pairs) are finite.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert 1 not in steps
+    assert len(steps) == 19  # 20 LOO folds minus the first NaN step
+    assert steps == list(range(2, 21))
+    values = [call.args[0] for call in trial.report.call_args_list]
+    assert all(np.isfinite(v) for v in values)
+    # should_prune is still consulted on every fold.
+    assert trial.should_prune.call_count == 20
+
+
+def test_evaluate_with_intermediate_reports_pooled_publishes_finite_steps():
+    """k_fold + r2 + pruning: finite pooled steps are published per fold."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class LinearModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            import numpy.linalg as la
+
+            Xt = np.column_stack([np.ones(len(Xtr)), np.asarray(Xtr)])
+            self.coef_, _, _, _ = la.lstsq(Xt, np.asarray(ytr), rcond=None)
+            return self
+
+        def predict(self, Xte):
+            return np.column_stack([np.ones(len(Xte)), np.asarray(Xte)]) @ self.coef_
+
+    scorer = get_scorer_object("r2")
+    _evaluate_with_intermediate_reports(
+        trial,
+        LinearModel(),
+        X,
+        y,
+        method="k_fold",
+        n_folds=4,
+        test_size=0.2,
+        random_state=42,
+        scorer=scorer,
+        pool_metric=True,
+    )
+    # 4 folds → 4 published steps (all finite for k_fold).
+    assert trial.report.call_count == 4
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [1, 2, 3, 4]
+    values = [call.args[0] for call in trial.report.call_args_list]
+    assert all(np.isfinite(v) for v in values)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -479,9 +723,19 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
     X, y = toy_data
 
     def fake_evaluate(
-        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
     ):
-        del trial, estimator, X, y, method, n_folds, test_size, random_state, scorer
+        del trial, estimator, X, y, method, n_folds, test_size, random_state, scorer, pool_metric
         return np.nan
 
     with patch.object(tuner, "_evaluate_with_intermediate_reports", fake_evaluate):
@@ -845,7 +1099,17 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
         )
 
     def fake_evaluate(
-        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds
@@ -942,13 +1206,8 @@ def test_optimize_auto_pruning_parity_with_cross_val():
     X = pd.DataFrame(rng.random((150, 5)))  # auto -> k=7
     y = pd.Series(rng.random(150))
 
-    cross_val_folds: list[int] = []
     iter_splits_calls: list[tuple[str | None, int | None]] = []
     real_iter_splits = tuner.iter_splits
-
-    def spy_cross_val(est, Xt, yt, cv=None, scoring=None, n_jobs=1):
-        cross_val_folds.append(cv.get_n_splits())
-        return [0.5] * cv.get_n_splits()
 
     def spy_iter_splits(*args, **kwargs):
         iter_splits_calls.append((kwargs.get("method"), kwargs.get("n_folds")))
@@ -957,10 +1216,10 @@ def test_optimize_auto_pruning_parity_with_cross_val():
     with (
         patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(tuner, "_build_scorer", _quality_scorer_factory),
-        patch.object(tuner.model_selection, "cross_val_score", spy_cross_val),
         patch.object(tuner, "iter_splits", spy_iter_splits),
     ):
-        # Without pruning: evaluation via cross_val_score(cv=cv_obj from make_cv).
+        # Without pruning: evaluation via iter_splits(method='k_fold',
+        # n_folds=k) in the pooled path (r2 is non-additive).
         optimize(
             "ridge",
             X,
@@ -989,8 +1248,9 @@ def test_optimize_auto_pruning_parity_with_cross_val():
             },
         )
 
-    assert cross_val_folds == [7]
-    assert iter_splits_calls == [("k_fold", 7)]
+    # Both branches evaluate on the same folds (k=7): the scores do not
+    # diverge between the pruning and non-pruning paths.
+    assert iter_splits_calls == [("k_fold", 7), ("k_fold", 7)]
 
 
 def test_optimize_auto_no_features_fallback_clamps_n_folds():
@@ -1008,7 +1268,17 @@ def test_optimize_auto_no_features_fallback_clamps_n_folds():
     captured = {}
 
     def fake_evaluate(
-        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds
@@ -1060,7 +1330,17 @@ def test_optimize_auto_kfold_low_confidence_k2():
         )
 
     def fake_evaluate(
-        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
     ):
         captured["n_folds"] = n_folds
         return 0.9
@@ -1102,7 +1382,17 @@ def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
     captured = {}
 
     def fake_evaluate(
-        trial, estimator, X, y, *, method, n_folds, test_size, random_state, scorer
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds

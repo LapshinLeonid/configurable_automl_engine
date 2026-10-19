@@ -9,7 +9,9 @@ from configurable_automl_engine.training_engine.metrics import (
     get_metric,
     is_error_metric,
     is_greater_better,
+    is_non_additive_metric,
     get_scorer_object,
+    pooled_scorer_value,
     to_sklearn_name,
     to_user_value,
     user_direction,
@@ -364,3 +366,201 @@ def test_global_nrmse_coverage(caplog):
     expected_nrmse = expected_rmse / 2.0
 
     assert np.isclose(_global_nrmse(y_t, y_p, target_range=2.0), expected_nrmse)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pooled (non-additive) metric evaluation
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "rmse",
+        "mse",
+        "r2",
+        "nrmse",
+        "neg_root_mean_squared_error",
+        "neg_mean_squared_error",
+        "RMSE",
+        "R2",
+        # sklearn-fallback non-additive metrics (RMSLE, D², max error).
+        "neg_root_mean_squared_log_error",
+        "d2_absolute_error_score",
+        "neg_max_error",
+        # Fraction-of-variance score (like R²): under LOO every fold value is
+        # identically 1.0, so the fold mean would not depend on the model.
+        "explained_variance",
+        # Sample median, not a per-sample mean: under LOO the fold mean of
+        # single-row medians degenerates into MAE.
+        "neg_median_absolute_error",
+    ],
+)
+def test_non_additive_metric_detection(name):
+    """RMSE/MSE/R²/nRMSE (and their sklearn aliases) are non-additive."""
+    assert is_non_additive_metric(name) is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mae",
+        "mean_absolute_error",
+        "max_error",
+        "neg_mean_absolute_error",
+        "neg_mean_absolute_percentage_error",
+        "neg_log_loss",
+        "accuracy",
+        "unknown_metric",
+        "",
+    ],
+)
+def test_additive_metric_detection(name):
+    """MAE and similar per-sample means are additive (not pooled).
+
+    ``max_error`` (without the neg_ prefix) is not a valid sklearn scorer
+    name and never reaches the pooled path; the sklearn alias
+    ``neg_max_error`` IS non-additive (max over the sample) and is covered in
+    ``test_non_additive_metric_detection``.
+    """
+    assert is_non_additive_metric(name) is False
+
+
+def test_pooled_scorer_value_matches_raw_metric():
+    """pooled_scorer_value applies the raw metric with the scorer's sign."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.1, 1.9, 3.2, 4.0])
+    scorer = get_scorer_object("rmse")  # sign = -1 (neg_rmse)
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    expected_rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    # The raw scorer value is -RMSE (sign applied), like the per-fold scorer.
+    assert pooled == pytest.approx(-expected_rmse)
+
+
+def test_pooled_scorer_value_masks_non_finite_pairs():
+    """Non-finite pairs are dropped, as in oof_rmse."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([1.0, np.nan, 3.0, np.inf, 5.0])
+    scorer = get_scorer_object("rmse")
+    # Valid pairs: rows 0, 2, 4 — errors are zero.
+    assert pooled_scorer_value(scorer, y_true, y_pred) == pytest.approx(0.0)
+
+
+def test_pooled_scorer_value_r2_masks_nan_predictions():
+    """r2 over the pooled vector stays finite even when fold rows are NaN."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.5, np.nan, 3.5, np.nan])
+    scorer = get_scorer_object("r2")  # sign = +1
+    # Only rows 0 and 2 enter the calculation: r2 = 1 - SSE/SST over
+    # y=[1,3], pred=[1.5,3.5]: SSE=0.25+0.25=0.5, SST=(1-2)^2+(3-2)^2=2 → 0.75.
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    assert np.isfinite(pooled)
+    assert pooled == pytest.approx(0.75)
+
+
+def test_pooled_scorer_value_no_valid_pairs_raises():
+    """No valid pair → ValueError (the pooled estimate is impossible)."""
+    scorer = get_scorer_object("rmse")
+    with pytest.raises(ValueError, match="No valid"):
+        pooled_scorer_value(scorer, np.array([1.0, 2.0]), np.array([np.nan, np.nan]))
+
+
+def test_pooled_scorer_value_requires_raw_func():
+    """A scorer without a raw metric function cannot be pooled.
+
+    MagicMock exposes a truthy ``_score_func`` attribute, so it is treated as
+    a raw metric function and the pooling proceeds (the same contract as for a
+    real scorer). The failure path is covered by a scorer whose ``_score_func``
+    is explicitly None.
+    """
+    scorer = MagicMock()
+    scorer._score_func = None
+    with pytest.raises(ValueError, match="cannot be pooled"):
+        pooled_scorer_value(scorer, np.array([1.0]), np.array([1.0]))
+
+
+def test_pooled_scorer_value_passes_kwargs():
+    """Scorer kwargs (e.g. target_range for global_nrmse) are forwarded."""
+    y_full = np.array([10.0, 20.0, 30.0])  # range = 20.0
+    scorer = get_scorer_object("global_nrmse", global_y=y_full)
+    y_true = np.array([0.0, 2.0])
+    y_pred = np.array([0.0, 0.0])
+    # RMSE = sqrt(2), divided by the global range 20.0, sign = -1 (raw -NRMSE).
+    expected = -np.sqrt(2.0) / 20.0
+    assert pooled_scorer_value(scorer, y_true, y_pred) == pytest.approx(expected)
+
+
+def test_pooled_scorer_value_rmsle():
+    """RMSLE (sklearn-fallback) is pooled via its raw metric function."""
+    from sklearn.metrics import root_mean_squared_log_error
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.1, 1.8, 3.5, 4.4])
+    scorer = get_scorer_object("neg_root_mean_squared_log_error")
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    expected = -float(root_mean_squared_log_error(y_true, y_pred))
+    assert pooled == pytest.approx(expected, rel=1e-12)
+
+
+def test_pooled_scorer_value_d2():
+    """D² (sklearn-fallback) is pooled via its raw metric function."""
+    from sklearn.metrics import d2_absolute_error_score
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.2, 1.9, 3.4, 4.1])
+    scorer = get_scorer_object("d2_absolute_error_score")
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    assert pooled == pytest.approx(
+        float(d2_absolute_error_score(y_true, y_pred)), rel=1e-12
+    )
+
+
+def test_pooled_scorer_value_max_error():
+    """Max error (sklearn-fallback) is pooled — the max over the sample, not
+    the mean, so the pooled value differs from the fold-mean."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.05, 1.95, 3.02, 4.4])  # worst error 0.4 on the last row
+    scorer = get_scorer_object("neg_max_error")
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    # sign = -1: the raw pooled value is -max_abs_error.
+    assert pooled == pytest.approx(-0.4)
+    # The fold-average path would NOT produce -0.4 (mean of per-fold maxes
+    # over single-row folds = mean of per-fold errors, not the global max).
+    assert abs(pooled) != pytest.approx(float(np.mean(np.abs(y_true - y_pred))))
+
+
+def test_pooled_scorer_value_explained_variance():
+    """explained_variance (sklearn-fallback) is pooled via its raw metric
+    function, so under LOO the estimate is not silently stuck at 1.0."""
+    from sklearn.metrics import explained_variance_score
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.2, 1.9, 3.4, 4.1])
+    scorer = get_scorer_object("explained_variance")
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    assert pooled == pytest.approx(
+        float(explained_variance_score(y_true, y_pred)), rel=1e-12
+    )
+    # Under LOO every single-pair fold EV is identically 1.0 — the pooled
+    # value differs from that constant for any imperfect model.
+    assert pooled < 1.0
+
+
+def test_pooled_scorer_value_median_absolute_error():
+    """neg_median_absolute_error (sklearn-fallback) is pooled via its raw
+    metric function, so under LOO it does not degenerate into MAE."""
+    from sklearn.metrics import median_absolute_error
+
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.05, 1.95, 3.02, 4.4])
+    scorer = get_scorer_object("neg_median_absolute_error")
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    # sign = -1: the raw pooled value is -median_absolute_error.
+    assert pooled == pytest.approx(
+        -float(median_absolute_error(y_true, y_pred)), rel=1e-12
+    )
+    # Under LOO the fold mean of single-row medians equals MAE, not the
+    # pooled median — the pooled value differs from the per-sample mean.
+    assert abs(pooled) != pytest.approx(
+        float(np.mean(np.abs(y_true - y_pred))), rel=1e-6
+    )

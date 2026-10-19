@@ -80,7 +80,9 @@ from configurable_automl_engine.training_engine.metrics import (
     direction_label,
     get_scorer_object,
     is_error_metric,
+    is_non_additive_metric,
     oof_rmse,
+    pooled_scorer_value,
     to_user_value,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
@@ -219,11 +221,14 @@ class ModelTrainer:
         additional_metrics (Iterable[str] | None): Additional quality metrics
             computed for the trained model using the same validation method as
             the primary metric (``train_test_split`` — hold-out scoring,
-            ``k_fold``/``loo`` — mean across folds). Any iterable sequence of
-            strings is accepted (list, tuple, set, generator); the metric name
-            is normalized to lowercase. These metrics are informational only
-            and do not affect training. Values are stored in
-            ``additional_scores`` after calling fit().
+            ``k_fold``/``loo`` — mean across folds for additive metrics, the
+            pooled OOF value for non-additive ones (RMSE/MSE/R²/nRMSE/RMSLE/
+            D²/explained_variance/max error/median absolute error and their
+            aliases)). Any iterable sequence of strings is accepted
+            (list, tuple, set, generator); the metric name is normalized to
+            lowercase. These metrics are informational only and do not affect
+            training. Values are stored in ``additional_scores`` after calling
+            fit().
         preprocessing_override (PreprocessingOverride | dict | None): Explicit
             override of the feature preprocessing preset. It may be specified
             partially or fully and takes precedence over automatic selection.
@@ -232,11 +237,17 @@ class ModelTrainer:
         os_algorithm (str): Oversampling algorithm ('random', 'smote', 'adasyn').
         pipeline (Pipeline | None): Final pipeline object after calling fit().
         val_score (float | None): Value of the primary metric computed on the
-            hold-out part of the data or averaged over cross-validation folds —
+            hold-out part of the data (``train_test_split``) or — for
+            ``k_fold``/``loo`` — as the mean across folds for additive
+            metrics and as the pooled value over the OOF vector for
+            non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
+            explained_variance, max error, median absolute error and their
+            aliases) —
             using the same validation method that HPO uses to compare models
-            (``validation.iter_splits``). It is not a train score: the estimate
-            is always computed on data not used to train the pipeline of that
-            fold. For error metrics the value is positive (sign-corrected).
+            (``validation.iter_splits``). It is not a train score: the
+            estimate is always computed on data not used to train the pipeline
+            of that fold. For error metrics the value is positive
+            (sign-corrected).
         oof_score_ (float | None): ``RMSE_oof`` — an honest quality estimate on
             all rows without leakage: predictions from validation folds are
             concatenated into a single vector and the metric is computed on the
@@ -255,7 +266,8 @@ class ModelTrainer:
             ``train_test_split`` — the limitation is documented in the log).
         additional_scores (dict[str, float]): Values of the additional metrics
             computed using the same validation method as the primary metric
-            (empty dict if no metrics are configured).
+            (fold mean for additive metrics, the pooled OOF value for
+            non-additive ones; empty dict if no metrics are configured).
         validation_strategy (str): Validation strategy for the final model:
             ``'train_test_split'`` (default), ``'k_fold'``, ``'loo'`` or
             ``'auto'``. ``'auto'`` is resolved inside fit() via
@@ -1160,7 +1172,10 @@ class ModelTrainer:
         on held-out data using the same validation method that HPO uses to
         compare models (``validation.iter_splits``): ``train_test_split`` — a
         single hold-out split with scoring on the held-out part;
-        ``k_fold``/``loo`` — mean across folds. In addition, an OOF channel is
+        ``k_fold``/``loo`` — mean across folds for additive metrics, the
+        pooled value over the OOF vector for non-additive metrics (RMSE, MSE,
+        R², nRMSE, RMSLE, D², explained_variance, max error, median absolute
+        error and their aliases). In addition, an OOF channel is
         collected: predictions from validation folds are concatenated into
         ``y_pred_oof``, and ``RMSE_oof`` (``oof_score_``) is computed on the
         whole vector at once — an honest estimate on all rows without leakage,
@@ -1322,8 +1337,12 @@ class ModelTrainer:
            ``_assemble_steps``).
         2. Raw values of the primary metric and all additional metrics are
            computed on the fold's validation part.
-        3. ``val_score = to_user_value(metric, mean(raw))``;
-           ``additional_scores[m] = to_user_value(m, mean(raw_m))``.
+        3. ``val_score = to_user_value(metric, mean(raw))`` —
+           ``additional_scores[m] = to_user_value(m, mean(raw_m))`` — for
+           additive metrics; for non-additive metrics (RMSE, MSE, R², nRMSE,
+           RMSLE, D², explained_variance, max error, median absolute error
+           and their aliases) the value is the pooled estimate over the OOF
+           vector (each row enters the calculation exactly once).
         4. In parallel, an OOF channel is collected: predictions from the
            validation parts of the folds are accumulated into a single
            ``y_pred_oof`` vector aligned to the original row order, and
@@ -1436,9 +1455,16 @@ class ModelTrainer:
         fold_errors: list[str] = []
         # OOF channel buffers: filled by the positions of validation rows in
         # the original data; uncovered rows remain NaN and are discarded when
-        # computing RMSE_oof.
+        # computing the pooled metrics (RMSE_oof and, for non-additive
+        # metrics, val_score/additional_scores).
         oof_pred_buffer = np.full(n_samples, np.nan, dtype=float)
         oof_y_buffer = np.full(n_samples, np.nan, dtype=float)
+        # Whether the primary/additional metric is non-additive and therefore
+        # must be computed over the pooled OOF vector rather than averaged by
+        # folds (RMSE, MSE, R², nRMSE). MAE and similar per-sample means stay
+        # on the fold-average path (their fold mean equals the pooled value).
+        pool_primary = is_non_additive_metric(self.metric)
+        pool_additive = {mname: is_non_additive_metric(mname) for mname in add_scorers}
         for X_tr, X_te, y_tr, y_te, test_idx in splits:
             try:
                 # A fresh pipeline per fold: clones of preprocessor/base_model
@@ -1453,12 +1479,24 @@ class ModelTrainer:
                 )
                 fold_pipe.fit(X_tr, y_tr)
 
-                raw = scorer(fold_pipe, X_te, y_te)
-                if raw is None:
-                    raise TrainingError("Scorer returned None")
-                fold_raw.append(float(raw))
+                # For non-additive metrics the per-fold scorer is invoked only
+                # until the first successful value (a fail-fast check that the
+                # scorer works and does not return None): the final
+                # val_score/additional_scores come from the pooled OOF vector,
+                # so per-fold scoring noise (e.g. LOO+R², where every fold R²
+                # is undefined) must not pollute the logs on the common path.
+                # Additive metrics (MAE and similar per-sample means) keep
+                # per-fold scoring on every fold — their fold mean IS the
+                # estimate.
+                if not pool_primary or not fold_raw:
+                    raw = scorer(fold_pipe, X_te, y_te)
+                    if raw is None:
+                        raise TrainingError("Scorer returned None")
+                    fold_raw.append(float(raw))
 
                 for mname, m_scorer in add_scorers.items():
+                    if pool_additive[mname] and add_raw[mname]:
+                        continue
                     try:
                         m_raw = m_scorer(fold_pipe, X_te, y_te)
                         if m_raw is None:
@@ -1504,7 +1542,31 @@ class ModelTrainer:
             detail = "; ".join(dict.fromkeys(fold_errors)) or "unknown failure"
             raise TrainingError(f"Validation scoring failed for all folds: {detail}")
 
-        raw_mean = float(np.mean(fold_raw))
+        # Non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
+        # explained_variance, max error, median absolute error) are computed
+        # over the pooled OOF vector at once, not averaged by folds: each row
+        # enters the calculation exactly once. The pooled value is obtained
+        # from the already-collected OOF buffer when the vector covers the
+        # whole data (k_fold/loo); for train_test_split the buffer covers only
+        # the hold-out part, so the metric is estimated on that subset — the
+        # SAME subset as ``RMSE_oof`` (``_finalize_oof`` uses the identical
+        # buffers), so val_score and oof_score_ stay mutually consistent by
+        # construction. This is a documented limitation (identical to the OOF
+        # channel: rows from the train part have no honest out-of-fold
+        # prediction). The raw per-fold values still drive the fail-fast
+        # check above (no fold produced a valid score).
+        if pool_primary and np.any(
+            np.isfinite(oof_pred_buffer) & np.isfinite(oof_y_buffer)
+        ):
+            try:
+                raw_pooled = pooled_scorer_value(scorer, oof_y_buffer, oof_pred_buffer)
+                raw_mean = raw_pooled
+            except ValueError:
+                # The pooled value is impossible (no valid pairs); fall back to
+                # the fold mean (RMSE_oof handles its own None semantics).
+                raw_mean = float(np.mean(fold_raw))
+        else:
+            raw_mean = float(np.mean(fold_raw))
         self.val_score = to_user_value(self.metric, raw_mean)
         # User-facing semantics: val_score is a value in user representation,
         # so the direction in the log is user_direction ("min better" for
@@ -1521,9 +1583,19 @@ class ModelTrainer:
             if not raw_values:
                 # All folds failed for this metric — it was already skipped with a WARNING.
                 continue
-            self.additional_scores[mname] = to_user_value(
-                mname, float(np.mean(raw_values))
-            )
+            if pool_additive[mname] and np.any(
+                np.isfinite(oof_pred_buffer) & np.isfinite(oof_y_buffer)
+            ):
+                try:
+                    pooled = pooled_scorer_value(
+                        add_scorers[mname], oof_y_buffer, oof_pred_buffer
+                    )
+                    raw_values_agg = pooled
+                except ValueError:
+                    raw_values_agg = float(np.mean(raw_values))
+            else:
+                raw_values_agg = float(np.mean(raw_values))
+            self.additional_scores[mname] = to_user_value(mname, raw_values_agg)
 
         # OOF channel: RMSE_oof on the whole vector, warnings about
         # coverage/small N, and alignment of y_pred_oof to the original row order.
@@ -1821,7 +1893,9 @@ def train_model(
     """Provide backward compatibility with the legacy model training API.
     A facade function that accepts a configuration or a set of positional
     arguments, instantiates a ModelTrainer, and returns the metric value
-    computed on held-out data (hold-out or mean across CV folds) — using the
+    computed on held-out data (hold-out or the CV estimate — the fold mean
+    for additive metrics, the pooled OOF value for non-additive metrics such
+    as RMSE/MSE/R²/nRMSE) — using the
     same validation method used to assess quality in ``ModelTrainer.fit()``
     (not a train score).
 

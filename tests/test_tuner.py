@@ -574,6 +574,104 @@ def test_optimize_train_test_split_mode(toy_data):
     assert score is not None
 
 
+def test_optimize_hpo_score_matches_pooled_trainer_val_score():
+    """HPO and select use the same pooled value for non-additive metrics.
+
+    For r2 (non-additive) the tuner's trial evaluation pools the metric over
+    the OOF vector, so the HPO score matches the final ModelTrainer's pooled
+    val_score on the same folds (the select phase uses the trainer's estimate).
+    This is the "HPO and select use the same quantity" requirement of issue
+    #123 — the estimate is computed over the pooled OOF vector, not averaged
+    by folds.
+    """
+    from configurable_automl_engine.trainer import ModelTrainer
+
+    rng = np.random.RandomState(7)
+    X = pd.DataFrame(rng.randn(60, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(60))
+    space = {"ridge": lambda t: {"alpha": t.suggest_float("alpha", 0.05, 0.5)}}
+
+    opt_res = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=2,
+        metric="r2",
+        validation_strategy="k_fold",
+        n_folds=5,
+        random_state=42,
+        fit_best_model=False,
+        space_overrides=space,
+    )
+    assert opt_res is not None
+
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="r2",
+        validation_strategy="k_fold",
+        n_folds=5,
+        random_state=42,
+    )
+    # Use the best alpha found by HPO so the comparison is on the same model.
+    trainer.hyperparams = dict(opt_res.params)
+    trainer.fit(X, y)
+
+    assert trainer.val_score is not None
+    # Both estimates are pooled r2 over the same OOF vector/folds; only float
+    # noise separates them (the trainer re-fits the pipeline on the folds).
+    assert opt_res.score == pytest.approx(trainer.val_score, rel=1e-3)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    [
+        "neg_root_mean_squared_log_error",  # RMSLE
+        "d2_absolute_error_score",  # D²
+        "neg_max_error",  # max error
+    ],
+)
+def test_optimize_sklearn_non_additive_metrics_use_pooled_path(metric):
+    """sklearn-fallback non-additive metrics (RMSLE, D², max error) use the
+    pooled evaluation path, not the fold-average cross_val_score.
+
+    Previously these metrics were absent from the non-additive list and were
+    incorrectly averaged per fold (review feedback #2).
+    """
+    from configurable_automl_engine.trainer import ModelTrainer
+
+    rng = np.random.RandomState(7)
+    X = pd.DataFrame(rng.randn(60, 4))
+    # Positive-valued target: RMSLE (log-based) requires values > -1.
+    y = pd.Series(np.abs(X.iloc[:, 0] * 2.0 + rng.randn(60)) + 1.0)
+    space = {"ridge": lambda t: {"alpha": 0.1}}
+
+    with patch.object(hyperopt, "_evaluate_pooled_cv") as mock_pooled:
+        mock_pooled.return_value = 0.5
+        opt_res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            metric=metric,
+            validation_strategy="k_fold",
+            n_folds=5,
+            random_state=42,
+            fit_best_model=False,
+            space_overrides=space,
+        )
+    assert opt_res is not None
+    # The pooled path is used: _evaluate_pooled_cv was invoked.
+    assert mock_pooled.call_count == 1
+    # The trainer pools the metric too (same quantity).
+    trainer = ModelTrainer(
+        algorithm="ridge", metric=metric, validation_strategy="k_fold", n_folds=5
+    )
+    trainer.hyperparams = {"alpha": 0.1}
+    trainer.fit(X, y)
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+
+
 def test_optimize_raises_when_no_search_space(monkeypatch):
     """Checks that HyperoptError is raised when there is no search space for the algorithm."""
 
@@ -618,7 +716,7 @@ class TestTunerObjective:
         # 1. Patch the ENTIRE environment so no real function runs
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+                "configurable_automl_engine.tuner._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.tuner.create_model") as mock_create,
             patch(
@@ -632,8 +730,8 @@ class TestTunerObjective:
             # WE GUARANTEE:
             # 1. We are in the k-fold branch
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # 2. cross_val_score returns something
-            mock_cv.return_value = np.array([0.5])
+            # 2. The pooled evaluation returns something
+            mock_cv.return_value = 0.5
             # 3. CRITICAL POINT: Any number is NOT finite
             mock_finite.return_value = False
 
@@ -662,19 +760,16 @@ class TestTunerObjective:
         # Try patching mean in the tuner module's namespace
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
-            ) as mock_cv,
+                "configurable_automl_engine.tuner._evaluate_pooled_cv",
+                return_value=np.nan,
+            ),
             patch("configurable_automl_engine.tuner.create_model"),
             patch("configurable_automl_engine.tuner._build_scorer"),
             patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner.np.mean", return_value=np.nan),
             patch("configurable_automl_engine.tuner._validate_data"),
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            mock_cv.return_value = np.array(
-                [1.0]
-            )  # the value does not matter since mean will return nan
             opt_res = optimize(
                 algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
@@ -692,7 +787,7 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+                "configurable_automl_engine.tuner._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.tuner.create_model"),
             patch("configurable_automl_engine.tuner._build_scorer"),
@@ -701,7 +796,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.tuner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
-            # Each cross_val_score call raises RuntimeError
+            # Each pooled evaluation call raises RuntimeError
             mock_cv.side_effect = RuntimeError("fatal failure")
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
@@ -718,7 +813,7 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+                "configurable_automl_engine.tuner._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.tuner.create_model"),
             patch("configurable_automl_engine.tuner._build_scorer"),
@@ -733,7 +828,7 @@ class TestTunerObjective:
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
                 RuntimeError("fatal failure"),
-                np.array([0.85]),
+                0.85,
             ]
 
             opt_res = optimize(
@@ -943,7 +1038,7 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+                "configurable_automl_engine.tuner._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.tuner.create_model"),
             patch("configurable_automl_engine.tuner._build_scorer"),
@@ -960,7 +1055,7 @@ class TestTunerObjective:
                 RuntimeError("fatal failure"),  # trial 5
                 RuntimeError("fatal failure"),  # trial 6
                 RuntimeError("fatal failure"),  # trial 7
-                np.array([0.85]),  # trial 8
+                0.85,  # trial 8
             ]
 
             opt_res = optimize(

@@ -13,6 +13,7 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import make_scorer
 
 
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
@@ -1207,9 +1208,10 @@ def test_fit_extracts_metadata_as_fallback():
         mock_extract.return_value = ["a", "b"]
 
         # 3. Fix the MagicMock.__format__ error:
-        # Configure the scorer factory so that it returns a function
-        # that returns a number (float) instead of a mock object.
-        mock_scorer_func = MagicMock(return_value=0.85)
+        # Configure the scorer factory so that it returns a real scorer whose
+        # raw metric function returns a constant (a MagicMock would break the
+        # pooled path of the default r2 metric, which reads _score_func).
+        mock_scorer_func = make_scorer(lambda y_t, y_p: 0.85, greater_is_better=True)
         mock_scorer_factory.return_value = mock_scorer_func
 
         # We need self.feature_names to be None by "Stage 3" in the fit() method.

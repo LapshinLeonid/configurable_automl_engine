@@ -87,6 +87,105 @@ def oof_rmse(y_true: Any, y_pred: Any) -> float:
     return _rmse(yt[mask], yp[mask])
 
 
+# Metrics whose estimate cannot be obtained by averaging per-fold values:
+# the pooled value over the concatenated OOF vector is required. RMSE, MSE,
+# R² and nRMSE (including their sklearn aliases), RMSLE (sqrt of a mean —
+# non-additive like RMSE), D² and explained_variance (fraction-of-variance
+# scores, like R²), max error (max over the sample) and median absolute
+# error (a sample median, not a per-sample mean) are non-additive; MAE (and
+# similar per-sample means) remain additive — the fold mean equals the
+# pooled value, so they are intentionally excluded.
+_NON_ADDITIVE_METRICS = frozenset(
+    {
+        "rmse",
+        "neg_root_mean_squared_error",
+        "mse",
+        "neg_mean_squared_error",
+        "r2",
+        "nrmse",
+        "global_nrmse",
+        # RMSLE — the square root of the mean squared LOG error:
+        # non-additive in the same way as RMSE.
+        "neg_root_mean_squared_log_error",
+        # D² — a fraction-of-variance-explained score, like R².
+        "d2_absolute_error_score",
+        # explained_variance — a global fraction of variance explained
+        # (1 - Var(res)/Var(y)), non-additive like R². Under LOO every fold
+        # value is identically 1.0 (sklearn on a single pair), so the fold
+        # mean would silently not depend on the model at all.
+        "explained_variance",
+        # max absolute error — the max over the sample, not a per-sample mean.
+        "neg_max_error",
+        # median absolute error — the median over the sample, not a
+        # per-sample mean. Under LOO the fold mean of single-row medians
+        # degenerates into MAE, silently substituting the metric.
+        "neg_median_absolute_error",
+    }
+)
+
+
+def is_non_additive_metric(name: str) -> bool:
+    """Return whether a metric must be computed over the pooled OOF vector.
+
+    For non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
+    explained_variance, max error, median absolute error) the value over the
+    concatenated out-of-fold prediction vector differs from the average of
+    the per-fold values (e.g. pooled RMSE² = mean of per-fold MSE, not the
+    mean of per-fold RMSE; pooled R² is not the mean of fold R²; the nRMSE
+    normalization range also changes; under LOO the fold R²/EV are undefined
+    or constant, and the median degenerates into the mean). Such metrics are
+    therefore computed over the whole vector at once. Additive metrics (MAE
+    and similar per-sample means) stay on the fold-average path — their fold
+    mean equals the pooled value.
+
+    Args:
+        name (str): Metric name (user or sklearn alias, case-insensitive;
+            surrounding whitespace is ignored).
+
+    Returns:
+        bool: True for non-additive metrics, False for additive ones.
+    """
+    return name.lower().strip() in _NON_ADDITIVE_METRICS
+
+
+def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
+    """Compute a scorer value over the whole aligned vector at once.
+
+    Applies the raw metric function (with the scorer's sign and kwargs) over
+    the concatenated vector, dropping non-finite pairs — the same masking
+    contract as ``oof_rmse``. Used to estimate non-additive metrics (RMSE,
+    MSE, R², nRMSE) over the pooled OOF vector instead of averaging per-fold
+    values.
+
+    Args:
+        scorer (Any): A scikit-learn ``make_scorer`` object exposing
+            ``_score_func``, ``_sign`` and ``_kwargs``.
+        y_true (Any): True values aligned with ``y_pred`` by position.
+        y_pred (Any): Predictions aligned with ``y_true`` by position.
+
+    Returns:
+        float: The raw (sign-applied) metric value over all valid pairs.
+
+    Raises:
+        ValueError: If no valid pair remains after dropping non-finite pairs,
+            or if the scorer does not expose a raw ``_score_func`` (it cannot
+            be pooled).
+    """
+    yt = np.asarray(y_true, dtype=float)
+    yp = np.asarray(y_pred, dtype=float)
+    mask = np.isfinite(yt) & np.isfinite(yp)
+    if not np.any(mask):
+        raise ValueError("No valid (y_true, y_pred) pairs for the pooled metric.")
+    score_func = getattr(scorer, "_score_func", None)
+    if score_func is None:
+        raise ValueError(
+            "The scorer cannot be pooled: no raw metric function is exposed."
+        )
+    sign = getattr(scorer, "_sign", 1)
+    kwargs = getattr(scorer, "_kwargs", None) or {}
+    return float(sign * score_func(yt[mask], yp[mask], **kwargs))
+
+
 class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 

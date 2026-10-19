@@ -28,7 +28,7 @@ import pytest
 
 from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.base import clone
-from sklearn.metrics import r2_score
+from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import KFold, cross_val_score
 
 from configurable_automl_engine.models import create_model
@@ -39,6 +39,7 @@ from configurable_automl_engine.trainer import (
 from configurable_automl_engine.training_engine.component import PhaseResult, train_best_model
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
+    is_non_additive_metric,
     to_user_value,
 )
 from configurable_automl_engine.validation import iter_splits
@@ -78,6 +79,10 @@ def _manual_fold_score(
     Repeats the logic of ``ModelTrainer._score_on_validation_splits`` so that
     the equality is verified independently (not self-consistently).
 
+    For non-additive metrics (r2 here) the value is computed over the pooled
+    OOF vector (each row predicted by a model that did not see it), matching
+    the new ``val_score`` semantics — not the fold mean.
+
     ``feature_names`` is passed explicitly: the helper must not rely on
     trainer attributes that may not be set.
     """
@@ -85,13 +90,15 @@ def _manual_fold_score(
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     raw: list[float] = []
     scorer = get_scorer_object(trainer.metric)
-    for X_tr, X_te, y_tr, y_te in iter_splits(
+    oof = np.full(len(X), np.nan, dtype=float)
+    for X_tr, X_te, y_tr, y_te, test_idx in iter_splits(
         X,
         y,
         method=method,
         n_folds=n_folds,
         test_size=test_size,
         random_state=seed,
+        include_indices=True,
     ):
         fold_pipe = ImbPipeline(
             trainer._assemble_steps(
@@ -100,6 +107,13 @@ def _manual_fold_score(
         )
         fold_pipe.fit(X_tr, y_tr)
         raw.append(float(scorer(fold_pipe, X_te, y_te)))
+        oof[np.asarray(test_idx)] = np.asarray(fold_pipe.predict(X_te)).reshape(-1)
+    if is_non_additive_metric(trainer.metric):
+        mask = np.isfinite(y.to_numpy(dtype=float)) & np.isfinite(oof)
+        pooled = float(
+            scorer._sign * scorer._score_func(y.to_numpy(dtype=float)[mask], oof[mask], **scorer._kwargs)
+        )
+        return to_user_value(trainer.metric, pooled)
     return to_user_value(trainer.metric, float(np.mean(raw)))
 
 
@@ -176,13 +190,16 @@ def test_val_score_matches_manual_iter_splits_for_kfold():
 def test_val_score_matches_cross_val_score():
     """k_fold: val_score matches sklearn's cross_val_score (the same folds).
 
-    The fold index equality between ``iter_splits`` and ``KFold`` is also
-    checked: otherwise comparing with ``cross_val_score`` would be pointless.
+    For additive metrics only: r2 is non-additive, so this test is converted
+    to use 'mae' (a per-sample mean — the fold average equals the pooled
+    value). The fold index equality between ``iter_splits`` and ``KFold`` is
+    also checked: otherwise comparing with ``cross_val_score`` would be
+    pointless.
     """
     X, y = _noisy_regression(n=80, p=6, seed=5)
     trainer = ModelTrainer(
         algorithm="ridge",
-        metric="r2",
+        metric="mae",
         validation_strategy="k_fold",
         n_folds=4,
         random_state=7,
@@ -209,8 +226,10 @@ def test_val_score_matches_cross_val_score():
     pipe = ImbPipeline(
         trainer._assemble_steps(preprocessor, model, feature_selection_active=False)
     )
-    scores = cross_val_score(pipe, X, y, cv=cv, scoring=get_scorer_object("r2"))
-    assert trainer.val_score == pytest.approx(float(np.mean(scores)), rel=1e-6)
+    scores = cross_val_score(pipe, X, y, cv=cv, scoring=get_scorer_object("mae"))
+    # mae is an error metric: the raw scorer returns negative values, while
+    # val_score is sign-corrected to the natural (positive) representation.
+    assert trainer.val_score == pytest.approx(-float(np.mean(scores)), rel=1e-6)
 
 
 def test_additional_scores_use_same_validation_method():
@@ -711,3 +730,200 @@ def test_val_score_reset_between_fits():
     # (no comparison against a train score — this is about estimate semantics).
     assert isinstance(trainer.val_score, float)
     assert trainer.pipeline is not None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Non-additive metrics: pooled over the OOF vector (issue #123)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_loo_r2_val_score_is_pooled_not_nan():
+    """LOO + r2: val_score is the pooled r2 over the OOF vector (not NaN).
+
+    Before the change, per-fold r2 on single-row folds is undefined (NaN), so
+    the fold-mean val_score was NaN. The pooled value over the whole OOF
+    vector is a valid finite number — the motivating case of issue #123.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(12, 3))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(12))
+    trainer = ModelTrainer(
+        algorithm="ridge", metric="r2", validation_strategy="loo"
+    ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+    # The pooled r2 equals r2_score(y, y_pred_oof) over the full vector.
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.val_score == pytest.approx(float(r2_score(y, oof)), rel=1e-9)
+
+
+def test_kfold_rmse_val_score_equals_oof_rmse():
+    """k_fold + rmse: val_score is the pooled RMSE over the OOF vector.
+
+    The pooled value equals RMSE_oof (the same estimate the select phase
+    uses) — "HPO and select use the same value". Before the change val_score
+    was the mean of per-fold RMSE, which differs from the pooled RMSE.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(40))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="rmse",
+        validation_strategy="k_fold",
+        n_folds=5,
+        random_state=42,
+    ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert trainer.oof_score_ is not None
+    # val_score (pooled RMSE) equals the RMSE_oof channel exactly.
+    assert trainer.val_score == pytest.approx(trainer.oof_score_, rel=1e-9)
+    # The pooled value is not the mean of per-fold RMSE.
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.val_score == pytest.approx(
+        float(np.sqrt(mean_squared_error(y, oof))), rel=1e-9
+    )
+
+
+def test_mae_val_score_remains_fold_mean():
+    """MAE (additive): val_score stays the fold mean (equals the pooled value)."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(40))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="mae",
+        validation_strategy="k_fold",
+        n_folds=5,
+        random_state=42,
+    ).fit(X, y)
+
+    assert trainer.val_score is not None
+    # For a per-sample mean, the pooled value equals the fold mean: MAE_oof
+    # over the whole vector is the same as mean(MAE_fold).
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.val_score == pytest.approx(
+        float(np.mean(np.abs(y - oof))), rel=1e-9
+    )
+
+
+def test_kfold_non_additive_additional_metric_is_pooled():
+    """k_fold: a non-additive additional metric (r2) is pooled over the OOF
+    vector, not averaged by folds.
+
+    The pooled r2 over the OOF predictions equals r2_score(y, y_pred_oof) and
+    differs from the mean of per-fold r2 values.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(40))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="rmse",
+        additional_metrics=["r2", "mae"],
+        validation_strategy="k_fold",
+        n_folds=5,
+        random_state=42,
+    ).fit(X, y)
+
+    # r2 (non-additive): the additional score is the pooled value over the OOF
+    # vector — it equals r2_score(y, y_pred_oof) exactly.
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.additional_scores["r2"] == pytest.approx(
+        float(r2_score(y, oof)), rel=1e-9
+    )
+    # mae (additive): the pool equals the fold mean — still finite.
+    assert trainer.additional_scores["mae"] == pytest.approx(
+        float(np.mean(np.abs(y - oof))), rel=1e-9
+    )
+
+
+def test_loo_non_additive_additional_metric_is_finite():
+    """LOO + r2 as an additional metric: the pooled value is finite (not NaN).
+
+    Per-fold r2 on single-row folds is undefined (NaN); the pooled value over
+    the whole OOF vector is a valid finite number — the same fix as for
+    val_score, applied to additional_scores.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(12, 3))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(12))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="rmse",
+        additional_metrics=["r2"],
+        validation_strategy="loo",
+    ).fit(X, y)
+
+    assert np.isfinite(trainer.additional_scores["r2"])
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.additional_scores["r2"] == pytest.approx(
+        float(r2_score(y, oof)), rel=1e-9
+    )
+
+
+def test_loo_explained_variance_val_score_is_pooled_not_constant():
+    """LOO + explained_variance: val_score is the pooled EV, not the
+    degenerate fold-mean of 1.0.
+
+    Per-fold explained_variance on a single-row fold is identically 1.0
+    (sklearn on one pair), so the fold-mean would silently be 1.0 for any
+    model. The pooled value over the whole OOF vector is the correct global
+    estimate (the same class of bug this PR fixes for R², but silent).
+    """
+    from sklearn.metrics import explained_variance_score
+
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(12, 3))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(12))
+    trainer = ModelTrainer(
+        algorithm="ridge", metric="explained_variance", validation_strategy="loo"
+    ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+    # The pooled EV is the true global estimate over the OOF vector.
+    oof = np.asarray(trainer.oof_predictions_)
+    assert trainer.val_score == pytest.approx(
+        float(explained_variance_score(y, oof)), rel=1e-9
+    )
+    # The degenerate LOO fold-mean (1.0 for every fold) differs from the
+    # pooled value for an imperfect model.
+    assert trainer.val_score != pytest.approx(1.0)
+
+
+def test_loo_median_absolute_error_val_score_is_pooled_not_mae():
+    """LOO + neg_median_absolute_error: val_score is the pooled median, not
+    the MAE substitution.
+
+    Per-fold median absolute error on a single-row fold equals that row's
+    absolute error, so the fold-mean degenerates into MAE (the metric is
+    silently substituted). The pooled value over the whole OOF vector is the
+    correct global median.
+    """
+    from sklearn.metrics import median_absolute_error
+
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(12, 3))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(12))
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="neg_median_absolute_error",
+        validation_strategy="loo",
+    ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+    oof = np.asarray(trainer.oof_predictions_)
+    # val_score is sign-corrected to the natural positive representation
+    # (the median absolute error over the OOF vector).
+    assert trainer.val_score == pytest.approx(
+        float(median_absolute_error(y, oof)), rel=1e-9
+    )
+    # The degenerate LOO fold-mean equals MAE, which differs from the pooled
+    # median for asymmetric errors.
+    assert trainer.val_score != pytest.approx(
+        float(np.mean(np.abs(y - oof))), rel=1e-6
+    )

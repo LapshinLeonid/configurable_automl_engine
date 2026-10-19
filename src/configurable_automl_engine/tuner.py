@@ -75,7 +75,11 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
 )
-from configurable_automl_engine.training_engine.metrics import get_scorer_object
+from configurable_automl_engine.training_engine.metrics import (
+    get_scorer_object,
+    is_non_additive_metric,
+    pooled_scorer_value,
+)
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
 logging = _logging  # alias
@@ -532,13 +536,30 @@ def _evaluate_with_intermediate_reports(
     test_size: float,
     random_state: int | None,
     scorer: Any,
+    pool_metric: bool = False,
 ) -> float:
     """Evaluate the estimator fold by fold, publishing intermediate results.
 
-    Serves as the early stopping enabler: after each fold the cumulative mean
+    Serves as the early stopping enabler: after each fold the running estimate
     of the metric is published via ``trial.report``, followed by a call to
     ``trial.should_prune()``. A hopeless trial is interrupted by an
     ``optuna.TrialPruned`` exception before the full evaluation completes.
+
+    For non-additive metrics (``pool_metric=True``: RMSE, MSE, R², nRMSE,
+    RMSLE, D², explained_variance, max error, median absolute error) the
+    published intermediate value is the metric
+    computed over the predictions accumulated up to the current step (the
+    pooled value over the covered rows), not the cumulative mean of per-fold
+    values — each row enters the calculation exactly once, in the same way as
+    the final pooled estimate. Non-finite predictions of individual folds are
+    masked out of the pooled value (the same contract as
+    ``metrics.oof_rmse``). A running pooled value that is itself non-finite
+    (e.g. R² on a single LOO pair, which is undefined) is NOT published to
+    ``trial.report``: Optuna pruners cannot handle NaN and would emit
+    RuntimeWarnings and compare incorrectly. The step is skipped until the
+    accumulated rows admit a finite pooled estimate. Additive metrics (MAE and
+    similar per-sample means, ``pool_metric=False``) keep publishing the
+    cumulative fold mean (which equals the pooled value).
 
     Args:
         trial (Trial): The current Optuna trial.
@@ -551,13 +572,29 @@ def _evaluate_with_intermediate_reports(
             keep a uniform iter_splits call).
         random_state (int | None): Randomness seed.
         scorer (Any): sklearn metric object.
+        pool_metric (bool): Whether the metric is non-additive and must be
+            pooled over the accumulated OOF predictions. Defaults to False —
+            the legacy cumulative-fold-mean behavior.
     Returns:
-        float: The mean metric value across all folds.
+        float: The mean metric value across all folds (for additive metrics)
+            or the pooled value over all rows (for non-additive metrics).
     Raises:
         optuna.TrialPruned: If the pruner decides to prune the trial.
+        Exception: A genuine model fit/predict failure propagates (fatal or
+            non-fatal depending on the exception type, as before).
     """
     fold_scores: list[float] = []
-    for fold_idx, (X_tr, X_te, y_tr, y_te) in enumerate(
+    # Non-additive metrics (RMSE, MSE, R², nRMSE, ...) are pooled over the
+    # rows covered by the folds processed so far; the running pooled value is
+    # published as the intermediate result. The OOF rows are accumulated in
+    # pre-allocated full-size buffers (filled by positional indices) and
+    # pooled via ``pooled_scorer_value``, whose non-finite masking drops the
+    # not-yet-covered rows — no repeated array concatenation (O(k·n) copies
+    # on the old code, O(n²) for LOO).
+    n_rows = len(X)
+    pooled_y_buf = np.full(n_rows, np.nan, dtype=float)
+    pooled_pred_buf = np.full(n_rows, np.nan, dtype=float)
+    for fold_idx, (X_tr, X_te, y_tr, y_te, test_idx) in enumerate(
         iter_splits(
             X,
             y,
@@ -565,6 +602,7 @@ def _evaluate_with_intermediate_reports(
             n_folds=n_folds,
             test_size=test_size,
             random_state=random_state,
+            include_indices=True,
         ),
         start=1,
     ):
@@ -572,11 +610,42 @@ def _evaluate_with_intermediate_reports(
         # avoid state accumulating between folds.
         fold_estimator = clone(estimator)
         fold_estimator.fit(X_tr, y_tr)
-        fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
-        running_mean = float(np.mean(fold_scores))
-        # Publish the intermediate result: the cumulative mean estimates the
-        # final metric (the fold mean) more accurately than a single fold.
-        trial.report(running_mean, step=fold_idx)
+        fold_pred = np.asarray(fold_estimator.predict(X_te)).reshape(-1)
+        fold_true = np.asarray(y_te, dtype=float).reshape(-1)
+        if pool_metric:
+            # The per-fold scorer value is used only as the fallback when the
+            # pooled value cannot be computed; for non-additive metrics a fold
+            # with non-finite predictions must not abort the trial (those rows
+            # are masked out of the pooled value). The scorer is called lazily
+            # — only when the pooled value turns out to be impossible — so
+            # that per-fold scoring noise (e.g. LOO+R², where every fold R² is
+            # undefined) does not pollute the logs on the common path.
+            idx = np.asarray(test_idx)
+            pooled_y_buf[idx] = fold_true
+            pooled_pred_buf[idx] = fold_pred
+            try:
+                running_value = pooled_scorer_value(
+                    scorer, pooled_y_buf, pooled_pred_buf
+                )
+            except ValueError:
+                try:
+                    fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+                except Exception:  # noqa: BLE001, S110 — only a fallback for the pooled value
+                    pass
+                running_value = (
+                    float(np.mean(fold_scores)) if fold_scores else float("nan")
+                )
+            # Optuna pruners cannot compare NaN intermediate values (they
+            # produce RuntimeWarnings and incorrect decisions), so a
+            # non-finite pooled value (e.g. LOO+R² on the first single-row
+            # step) is not published — the step is skipped until the
+            # accumulated rows admit a finite estimate.
+            if np.isfinite(running_value):
+                trial.report(running_value, step=fold_idx)
+        else:
+            fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+            running_value = float(np.mean(fold_scores))
+            trial.report(running_value, step=fold_idx)
         if trial.should_prune():
             log.debug(
                 "Trial %d pruned by early stopping at step %d",
@@ -584,7 +653,124 @@ def _evaluate_with_intermediate_reports(
                 fold_idx,
             )
             raise optuna.TrialPruned()
-    return float(np.mean(fold_scores))
+    if pool_metric:
+        try:
+            return pooled_scorer_value(scorer, pooled_y_buf, pooled_pred_buf)
+        except ValueError:
+            return float(np.mean(fold_scores)) if fold_scores else float("nan")
+    return float(np.mean(fold_scores)) if fold_scores else float("nan")
+
+
+def _evaluate_pooled_cv(
+    estimator: Any,
+    X: Any,
+    y: Any,
+    *,
+    method: str,
+    n_folds: int,
+    test_size: float,
+    random_state: int | None,
+    scorer: Any,
+) -> float:
+    """Evaluate a trial pipeline over pooled OOF predictions (non-additive).
+
+    Iterates the folds (the same splits as ``cross_val_score(cv=cv_obj)`` via
+    ``iter_splits``), collects the out-of-fold prediction/target vectors, and
+    computes the metric over the whole vector at once — the same estimate the
+    final ``ModelTrainer`` and the select phase use. This is the required form
+    for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
+    explained_variance, max error, median absolute error): the pooled value
+    differs from the average of per-fold values.
+
+    Non-finite predictions of individual folds are masked out of the pooled
+    value (the same contract as ``metrics.oof_rmse``), so a fold producing NaN
+    (e.g. isotonic regression on a degenerate split) does not abort the trial.
+    A genuine model fit failure, however, propagates — fatal or non-fatal
+    depending on the exception type, as in the legacy ``cross_val_score`` path.
+
+    The per-fold scorer value is computed lazily — only when the pooled value
+    cannot be computed — so per-fold scoring noise (e.g. LOO+R², where every
+    fold R² is undefined on a single row) does not pollute the logs on the
+    common path.
+
+    If the pooled value cannot be computed (no valid pairs, or the scorer does
+    not expose a raw metric function), the mean of the available per-fold
+    values is returned as a defensive fallback.
+
+    Args:
+        estimator (Any): The estimator (possibly a pipeline) to evaluate.
+        X (Any): Feature matrix.
+        y (Any): Target variable vector.
+        method (str): Split strategy ('k_fold' or 'loo').
+        n_folds (int): Number of folds for k_fold.
+        test_size (float): Test fraction (unused for k_fold/loo; passed to
+            keep a uniform iter_splits call).
+        random_state (int | None): Randomness seed.
+        scorer (Any): sklearn metric object.
+
+    Returns:
+        float: The pooled metric value over all out-of-fold rows.
+    """
+    fold_scores: list[float] = []
+    n_rows = len(X)
+    # Whether the scorer exposes a raw metric function: if it does not, the
+    # pooled value is impossible and the per-fold path is taken inside the
+    # SAME loop (no double iteration of the splits).
+    poolable = getattr(scorer, "_score_func", None) is not None
+    # OOF rows are accumulated in pre-allocated full-size buffers (filled by
+    # positional indices); the pooled value is computed over the buffers with
+    # non-finite masking — no repeated array concatenation.
+    pooled_y = np.full(n_rows, np.nan, dtype=float)
+    pooled_pred = np.full(n_rows, np.nan, dtype=float)
+    # Per-fold (true, pred) pairs are retained so that the per-fold fallback
+    # (used when the pooled value is impossible) can be scored WITHOUT
+    # re-iterating the splits or re-training the folds.
+    fold_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    for X_tr, X_te, y_tr, y_te, test_idx in iter_splits(
+        X,
+        y,
+        method=method,
+        n_folds=n_folds,
+        test_size=test_size,
+        random_state=random_state,
+        include_indices=True,
+    ):
+        # Clone the estimator for every fold (as cross_val_score does) to
+        # avoid state accumulating between folds.
+        fold_estimator = clone(estimator)
+        fold_estimator.fit(X_tr, y_tr)
+        fold_pred = np.asarray(fold_estimator.predict(X_te)).reshape(-1)
+        fold_true = np.asarray(y_te, dtype=float).reshape(-1)
+        if not poolable:
+            # The scorer does not expose a raw metric function: pooling is
+            # impossible, collect the per-fold values as the fallback.
+            try:
+                fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+            except Exception:  # noqa: BLE001, S110 — only a fallback for the pooled value
+                pass
+            continue
+        idx = np.asarray(test_idx)
+        pooled_y[idx] = fold_true
+        pooled_pred[idx] = fold_pred
+        fold_pairs.append((fold_true, fold_pred))
+    if poolable:
+        try:
+            return pooled_scorer_value(scorer, pooled_y, pooled_pred)
+        except ValueError:
+            # The pooled value is impossible (all rows masked out, or the raw
+            # metric function raised on the pooled vector): fall back to the
+            # mean of the per-fold values, scored lazily from the RETAINED
+            # per-fold pairs. The scorer is invoked only now — not on the
+            # common path — so per-fold scoring noise (e.g. LOO+R², where
+            # every fold R² is undefined) does not pollute the logs, and NO
+            # split is iterated or fold re-trained a second time.
+            for yt, yp in fold_pairs:
+                try:
+                    fold_scores.append(pooled_scorer_value(scorer, yt, yp))
+                except ValueError:
+                    pass
+            return float(np.mean(fold_scores)) if fold_scores else float("nan")
+    return float(np.mean(fold_scores)) if fold_scores else float("nan")
 
 
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
@@ -715,6 +901,12 @@ class _OptimizeRunner:
         self.X = X
         self.y = y
         self.metric = metric
+        # Whether the metric is non-additive (RMSE, MSE, R², nRMSE) and must
+        # therefore be evaluated over the pooled out-of-fold vector instead of
+        # the average of per-fold values (required for LOO, applied everywhere
+        # with multiple folds). MAE and similar per-sample means stay on the
+        # fold-average path (their fold mean equals the pooled value).
+        self.pool_metric = is_non_additive_metric(metric)
         self.val_method = val_method
         self.validation_strategy = validation_strategy
         self.n_folds = n_folds
@@ -1337,9 +1529,33 @@ class _OptimizeRunner:
             return float(self.scorer(current_estimator, X_te, y_te))
         if self.pruning_active:
             # Early stopping: evaluate fold by fold and publish intermediate
-            # results for the Optuna pruner.
+            # results for the Optuna pruner. For non-additive metrics the
+            # published value is the pooled metric over the predictions
+            # accumulated up to the current step.
             avg_score = _evaluate_with_intermediate_reports(
                 trial,
+                current_estimator,
+                self.X,
+                self.y,
+                method=self.val_method_eff,
+                n_folds=self.effective_n_folds,
+                test_size=self.train_test_split_test_size,
+                random_state=self.random_state,
+                scorer=self.scorer,
+                pool_metric=self.pool_metric,
+            )
+            # If we got +inf (an nrmse error) or NaN, return the worst float
+            # (analog of the float32 minimum or float('-inf')).
+            if not np.isfinite(avg_score):
+                return HPO_WORST_SCORE
+            return avg_score
+        if self.pool_metric:
+            # Non-additive metrics (RMSE, MSE, R², nRMSE): evaluate over the
+            # pooled OOF vector at once (the same estimate the final
+            # ModelTrainer and the select phase use) instead of averaging
+            # per-fold values. The splits are the same as
+            # ``cross_val_score(cv=cv_obj)``.
+            avg_score = _evaluate_pooled_cv(
                 current_estimator,
                 self.X,
                 self.y,
@@ -1354,9 +1570,9 @@ class _OptimizeRunner:
             if not np.isfinite(avg_score):
                 return HPO_WORST_SCORE
             return avg_score
-        # cv_obj is guaranteed non-None here: a non-train_test_split and
-        # non-pruning branch means k_fold/loo, where make_cv always creates
-        # a cv object.
+        # Additive metrics: the legacy fold-average path. cv_obj is guaranteed
+        # non-None here: a non-train_test_split and non-pruning branch means
+        # k_fold/loo, where make_cv always creates a cv object.
         scores = model_selection.cross_val_score(
             current_estimator,
             self.X,
