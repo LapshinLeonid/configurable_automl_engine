@@ -1058,6 +1058,7 @@ def select_robust_winner(
                 y_pred_full=cand.y_pred_full,
                 X=X,
                 model=cand.model,
+                candidate_name=name,
             )
         except Exception as err:  # noqa: BLE001 — audit failure = disqualification
             _LOG.warning("Sanity audit failed for candidate %s: %s", name, err)

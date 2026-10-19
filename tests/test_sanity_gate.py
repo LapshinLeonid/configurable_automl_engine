@@ -1808,6 +1808,129 @@ def test_soft_warnings_logged_at_debug_not_warning(caplog):
     assert all(r.levelno < logging.WARNING for r in caplog.records)
 
 
+def test_soft_warning_log_reports_final_status_and_candidate_name(caplog):
+    """The 'N soft warning(s)' line reports the final status, not 'valid' by default.
+
+    A model with BOTH disqualification reasons and soft warnings must be
+    logged as 'disqualified', and the candidate name must prefix every audit
+    log line so the warning is attributed to the right candidate.
+    """
+    rng = np.random.RandomState(5)
+    n = 100
+    y = rng.randn(n)
+    # Diversity = 0 → Circuit A fails (a reason); 100% zero coefficients →
+    # a Circuit C signal (a soft warning). Both channels are populated.
+    model = _CoefModel(np.zeros(10))
+    gate = ModelSanityGate(check_unique=False, check_generalization_gap=False)
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.training_engine.sanity_gate"
+    ):
+        result = gate.check(
+            y=y,
+            y_pred_oof=np.full(n, y.mean()),
+            y_pred_full=np.full(n, y.mean()),
+            X=rng.randn(n, 10),
+            model=model,
+            candidate_name="lasso_alpha_0.1",
+        )
+    assert not result.is_valid
+    assert result.reasons
+    assert result.soft_warnings
+    # The final status is 'disqualified', not the unconditional 'valid'.
+    assert any(
+        "Sanity gate: disqualified with 1 soft warning(s)" in r.message
+        for r in caplog.records
+    )
+    assert not any("Sanity gate: valid with" in r.message for r in caplog.records)
+
+
+def test_soft_warning_log_uses_valid_status_for_passing_candidate(caplog):
+    """A passing candidate with only soft warnings is logged as 'valid'."""
+    rng = np.random.RandomState(11)
+    X = rng.randn(200, 30)
+    y = 2.0 * X[:, 0] + 1.0 * X[:, 1] + rng.randn(200)
+    lasso = Lasso(alpha=0.06, random_state=0).fit(X, y)
+    gate = ModelSanityGate()
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.training_engine.sanity_gate"
+    ):
+        result = gate.check(
+            y=y,
+            y_pred_oof=lasso.predict(X),
+            y_pred_full=lasso.predict(X),
+            X=X,
+            model=lasso,
+            candidate_name="lasso",
+        )
+    assert result.is_valid
+    assert any(
+        "Sanity gate: valid with" in r.message and "lasso: " in r.message
+        for r in caplog.records
+    )
+
+
+def test_audit_log_lines_prefixed_with_candidate_name(caplog):
+    """Every audit log line carries the candidate name prefix.
+
+    Without the name it is unclear which candidate a soft warning about dead
+    features belongs to; with it, each line is attributed.
+    """
+    rng = np.random.RandomState(5)
+    n = 100
+    y = rng.randn(n)
+    model = _CoefModel(np.zeros(10))
+    gate = ModelSanityGate(check_unique=False, check_generalization_gap=False)
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.training_engine.sanity_gate"
+    ):
+        gate.check(
+            y=y,
+            y_pred_oof=np.full(n, y.mean()),
+            y_pred_full=np.full(n, y.mean()),
+            X=rng.randn(n, 10),
+            model=model,
+            candidate_name="lasso_alpha_0.1",
+        )
+    # The reasons line, the status line, and the soft-warning details are all
+    # attributed to the candidate.
+    audit_records = [
+        r
+        for r in caplog.records
+        if "lasso_alpha_0.1:" in r.message
+    ]
+    assert audit_records
+    assert any("reason(s)" in r.message for r in audit_records)
+    assert any("soft warning" in r.message for r in audit_records)
+    # Without a candidate name no prefix is emitted (backward compatible).
+    caplog.clear()
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.training_engine.sanity_gate"
+    ):
+        gate.check(
+            y=y,
+            y_pred_oof=np.full(n, y.mean()),
+            y_pred_full=np.full(n, y.mean()),
+            X=rng.randn(n, 10),
+            model=model,
+        )
+    assert not any("None:" in r.message for r in caplog.records)
+
+
+def test_target_leakage_warning_prefixed_with_candidate_name(caplog):
+    """The deliberate WARNING (target leakage) is also attributed to the candidate."""
+    y = np.arange(100, dtype=float)
+    with caplog.at_level("WARNING", logger="configurable_automl_engine"):
+        _gap_only_gate(1.5, mode="warn").check(
+            y=y, y_pred_oof=y, y_pred_full=y, candidate_name="deep_tree"
+        )
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "deep_tree: Sanity gate soft warning" in r.message
+        and "target leakage" in r.message
+        for r in warning_records
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Golden scenarios on synthetic data N=10–30
 # ──────────────────────────────────────────────────────────────────────────────

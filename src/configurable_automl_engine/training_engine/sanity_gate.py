@@ -547,6 +547,7 @@ class ModelSanityGate:
         y_pred_full: Any | None = None,
         X: Any | None = None,
         model: Any = None,
+        candidate_name: str | None = None,
     ) -> SanityCheckResult:
         """Run the model through every enabled audit circuit.
 
@@ -560,6 +561,9 @@ class ModelSanityGate:
                 by the permutation path of circuit C for nonlinear models).
             model: the fitted model (needed by circuit C); pipelines are
                 unwrapped to the final estimator.
+            candidate_name: Name of the audited candidate. When provided, every
+                audit log line is prefixed with it, so a warning (e.g. about
+                dead features) is unambiguously attributed to a candidate.
 
         Returns:
             SanityCheckResult: the full audit result.
@@ -646,9 +650,15 @@ class ModelSanityGate:
             is_valid = True
         severity = _compute_severity(reasons, soft_warnings, self.warn_only)
 
+        # Candidate attribution: when a candidate name is supplied, every audit
+        # log line is prefixed with it so that soft warnings (e.g. about dead
+        # features) are unambiguously tied to the candidate they concern.
+        prefix = f"{candidate_name}: " if candidate_name else ""
+
         if reasons:
             logger.info(
-                "Sanity gate%s: %d reason(s): %s",
+                "%sSanity gate%s: %d reason(s): %s",
+                prefix,
                 " (warn_only)" if self.warn_only else "",
                 len(reasons),
                 reasons,
@@ -662,9 +672,14 @@ class ModelSanityGate:
             # warn mode is logged at the WARNING level — a silent
             # disqualification would swap the winner and hide the leak, so a
             # noticeable signal is needed.
+            if is_valid:
+                status = "valid"
+            else:
+                status = "disqualified"
             logger.info(
-                "Sanity gate: valid with %d soft warning(s) "
-                "(non-disqualifying signals)",
+                "%sSanity gate: %s with %d soft warning(s) (non-disqualifying signals)",
+                prefix,
+                status,
                 len(soft_warnings),
             )
             for warning in soft_warnings:
@@ -672,9 +687,9 @@ class ModelSanityGate:
                     self.generalization_gap_mode == "warn"
                     and "possible target leakage" in warning
                 ):
-                    logger.warning("Sanity gate soft warning: %s", warning)
+                    logger.warning("%sSanity gate soft warning: %s", prefix, warning)
                 else:
-                    logger.debug("Sanity gate soft warning: %s", warning)
+                    logger.debug("%sSanity gate soft warning: %s", prefix, warning)
 
         return SanityCheckResult(
             is_valid=is_valid,
