@@ -8,6 +8,7 @@ from typing import (
 
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 T = TypeVar("T", str, int, float, bool)
 
@@ -96,11 +97,20 @@ class SearchSpaceEntry(BaseModel):
     Attributes:
         config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated
             object of a concrete distribution type.
+
+    The internal ``explicit_type`` flag records whether the distribution type
+    was written explicitly in the source config (``[low, high, "float"]``) or
+    inferred from the boundary numbers. Inferred types are re-resolved
+    against the parameter type (the default search space or the model
+    signature) by :func:`normalize_hyperparameter_entry` — e.g. an
+    integral-looking ``[1, 50]`` for a real-valued parameter stays a real
+    range.
     """
 
     config: Annotated[
         CategoricalSpace[Any] | FloatSpace | IntSpace, Field(discriminator="type")
     ]
+    explicit_type: Annotated[bool, SkipJsonSchema()] = Field(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -115,6 +125,15 @@ class SearchSpaceEntry(BaseModel):
             when it is not explicitly specified.
         4. Builds the internal dict with `type`, `low`, `high`, `step` keys for
            subsequent model discrimination.
+
+        A dict-form entry (``{"config": {"type": "int", "low": 1, "high": 50}}``
+        — the canonical ``model_dump()`` output or a handwritten config) whose
+        config dict carries an explicit numeric ``type`` is marked as
+        ``explicit_type=True``: the type was written explicitly, so
+        :func:`normalize_hyperparameter_entry` must not re-resolve it. When
+        the flag is already present in the data (a round trip of an inferred
+        entry with ``explicit_type=False``), it is preserved as is.
+
         Args:
             data (Any): Original data from YAML (list or dict).
         Returns:
@@ -123,6 +142,14 @@ class SearchSpaceEntry(BaseModel):
             ValueError: If the list contains fewer than 2 elements.
         """
         if not isinstance(data, list):
+            if isinstance(data, dict):
+                cfg = data.get("config")
+                if (
+                    isinstance(cfg, dict)
+                    and cfg.get("type") in ("int", "float", "float_log")
+                    and "explicit_type" not in data
+                ):
+                    data = {**data, "explicit_type": True}
             return data
         # If this is a single value (string, number) — wrap it as categorical
         if len(data) == 1:
@@ -135,7 +162,7 @@ class SearchSpaceEntry(BaseModel):
             payload = {"type": dist_type, "low": data[0], "high": data[1]}
             if len(data) == 4:
                 payload["step"] = data[3]
-            return {"config": payload}
+            return {"config": payload, "explicit_type": True}
         # Infer type for 2-element numeric lists
         if isinstance(data[0], int) and isinstance(data[1], int):
             return {"config": {"type": "int", "low": data[0], "high": data[1]}}
@@ -456,3 +483,144 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
         clipped_space[param] = new_entry
 
     return clipped_space
+
+
+# Scale parameters: real-valued regularization/learning hyperparameters whose
+# magnitude spans orders of magnitude. When the user does not state the type
+# explicitly, they are searched on a logarithmic scale by default.
+SCALE_PARAMS: frozenset[str] = frozenset(
+    {"alpha", "C", "epsilon", "gamma", "learning_rate"}
+)
+
+
+def _default_dist_type(algo_name: str, param_name: str) -> str | None:
+    """Return the default distribution type of ``param_name`` for ``algo_name``.
+
+    Consults :data:`DEFAULT_SPACES`. ``None`` when the parameter has no
+    default entry or the default entry is categorical.
+    """
+    entry = DEFAULT_SPACES.get(algo_name, {}).get(param_name)
+    if entry is None or entry.dist_type == "categorical":
+        return None
+    return entry.dist_type
+
+
+def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
+    """Infer the numeric type (``'int'``/``'float'``) of a model parameter.
+
+    Falls back to the estimator constructor signature (the type of the
+    parameter's default value) when the parameter is absent from
+    :data:`DEFAULT_SPACES`. Returns ``None`` when the type cannot be
+    determined (unknown algorithm, missing dependency, ``**kwargs``
+    constructors, or a non-numeric default).
+
+    Args:
+        algo_name: Algorithm name or alias.
+        param_name: Hyperparameter name.
+
+    Returns:
+        ``'int'``, ``'float'``, or ``None`` when unknown.
+    """
+    default = _default_dist_type(algo_name, param_name)
+    if default in ("int", "float"):
+        return default
+    # Lazy import: the estimator factory is only needed for parameters not
+    # present in DEFAULT_SPACES, and this module stays lightweight otherwise.
+    from configurable_automl_engine.models import get_param_numeric_type
+
+    return get_param_numeric_type(algo_name, param_name)
+
+
+def resolve_implicit_range_type(
+    algo_name: str, param_name: str, low: float, high: float
+) -> str | None:
+    """Resolve the distribution type of an inferred (not explicit) range.
+
+    The type is taken from the parameter's type — the default search space
+    or the model signature — NOT from how the boundary numbers are written.
+    A real-valued parameter stays real-valued even when both bounds look like
+    integers (e.g. ``[1, 50]`` for ``C`` of an SVR).
+
+    Scale parameters (``alpha``, ``C``, ``epsilon``, ``gamma``,
+    ``learning_rate``) default to the logarithmic scale (``float_log``) when
+    the type is not stated explicitly and both bounds are positive; an
+    explicit type (``[1, 50, "int"]``) is always preserved by the caller.
+
+    Args:
+        algo_name: Algorithm name or alias.
+        param_name: Hyperparameter name.
+        low: Lower bound of the range.
+        high: Upper bound of the range.
+
+    Returns:
+        The resolved distribution type (``'int'``, ``'float'`` or
+        ``'float_log'``), or ``None`` when the type cannot be determined and
+        the inference from the boundary numbers must be kept.
+    """
+    numeric_type = infer_param_numeric_type(algo_name, param_name)
+    is_int_param = numeric_type == "int"
+    if not is_int_param and param_name in SCALE_PARAMS:
+        # A real scale parameter with an inferred type: prefer the
+        # logarithmic scale. If a bound is not strictly positive, the
+        # log scale is unavailable and a plain float range is used.
+        if low > 0 and high > 0:
+            return "float_log"
+        return "float"
+    if numeric_type in ("int", "float"):
+        return numeric_type
+    # The parameter type is unknown — keep the inference from the numbers.
+    return None
+
+
+def normalize_hyperparameter_entry(
+    algo_name: str, param_name: str, entry: SearchSpaceEntry
+) -> SearchSpaceEntry:
+    """Re-resolve the type of an inferred range against the parameter type.
+
+    Only ranges whose type was inferred from the boundary numbers
+    (``explicit_type=False``) are re-resolved; explicitly typed entries
+    (``[1, 50, "int"]``) are returned unchanged. Categorical entries are
+    passed through untouched.
+
+    Args:
+        algo_name: Algorithm name or alias.
+        param_name: Hyperparameter name.
+        entry: The parsed ``SearchSpaceEntry``.
+
+    Returns:
+        The possibly re-typed ``SearchSpaceEntry``. The original entry is
+        not mutated.
+    """
+    if entry.explicit_type or not isinstance(entry.config, (FloatSpace, IntSpace)):
+        return entry
+    low = float(entry.low)
+    high = float(entry.high)
+    resolved = resolve_implicit_range_type(algo_name, param_name, low, high)
+    if resolved is None or resolved == entry.dist_type:
+        return entry
+    if resolved == "int":
+        # An int range with fractional bounds is meaningless; silently
+        # truncating [1.5, 2.5] to [1, 2] would change the user's range.
+        # Keep the original (float) inference instead.
+        if low != int(low) or high != int(high):
+            return entry
+        new_config: FloatSpace | IntSpace = IntSpace(
+            type="int",
+            low=int(low),
+            high=int(high),
+            step=int(entry.step) if entry.step is not None else None,
+        )
+    elif resolved == "float_log":
+        # For a log-scale range a step is meaningless (rejected by the
+        # FloatSpace validator), so it is dropped.
+        new_config = FloatSpace(type="float_log", low=low, high=high)
+    else:  # 'float'
+        new_config = FloatSpace(
+            type="float",
+            low=low,
+            high=high,
+            step=float(entry.step) if entry.step is not None else None,
+        )
+    return SearchSpaceEntry.model_construct(
+        config=new_config, explicit_type=entry.explicit_type
+    )

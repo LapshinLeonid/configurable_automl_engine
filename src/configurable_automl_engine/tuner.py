@@ -25,6 +25,7 @@ from __future__ import annotations
 
 # ─────────────────────────────── stdlib
 import logging as _logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -55,6 +56,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     SearchSpaceEntry,
     clip_search_space,
     compute_svr_epsilon_bounds,
+    normalize_hyperparameter_entry,
 )
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.feature_selection import FeatureSelector
@@ -226,23 +228,21 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
     return SearchSpaceEntry.model_validate([low, high, "float_log"])
 
 
-def _make_svr_space(y: Any) -> Callable[[Trial], dict[str, Any]]:
-    """Create an SVR search space generator with adaptive epsilon.
+def _make_svr_space_dict(y: Any) -> dict[str, Any]:
+    """Build the default SVR search space dict with adaptive epsilon.
 
-    Used when the user has not overridden the search space (including a direct
-    ``optimize("svr", X, y)`` call without ``space_overrides``): the default
-    space is taken from ``DEFAULT_SPACES["svr"]``, and epsilon is replaced by
-    a float_log distribution within bounds derived from the spread of
-    ``y_train``.
+    The default space is taken from ``DEFAULT_SPACES["svr"]``, and epsilon is
+    replaced by a float_log distribution within bounds derived from the spread
+    of ``y_train``.
 
     Args:
         y (Any): Target variable vector.
     Returns:
-        Callable[[Trial], dict[str, Any]]: A trial parameter generator function.
+        dict[str, Any]: A dict of ``SearchSpaceEntry`` objects.
     """
     space = DEFAULT_SPACES["svr"].copy()
     space["epsilon"] = _svr_adaptive_epsilon_entry(y)
-    return partial(_apply_dynamic_space, space_dict=space)
+    return space
 
 
 # ═════════════════════════════ helper utilities ═════════════════════════════
@@ -1006,6 +1006,10 @@ class _OptimizeRunner:
         # in resolve_search_space(). run() always calls resolve_search_space
         # before the Optuna loop, so the real placeholder call is impossible.
         self.space_fn: Callable[[Trial], dict[str, Any]] = lambda trial: {}
+        # The resolved dict search space (parameter name -> SearchSpaceEntry or
+        # constant) for dict-based spaces; empty for function/callable spaces.
+        # Used to warn when the best trial lies at a range boundary.
+        self.search_space_dict: dict[str, Any] = {}
         self.scorer: Any = None
         self.pruner: optuna.pruners.BasePruner | None = None
         self.pruning_active = False
@@ -1410,6 +1414,45 @@ class _OptimizeRunner:
                     record["reason"],
                 )
 
+    def _normalize_space_dict(self, space_dict: dict[str, Any]) -> dict[str, Any]:
+        """Re-resolve inferred range types in a dict search space.
+
+        The same normalization the Config path applies (see
+        ``Config._normalize_hyperparameter_types``): a range whose type was
+        inferred from the boundary numbers (``[1, 50]`` in the list shorthand,
+        two-element lists passed directly to ``space_overrides``) is re-typed
+        against the parameter type (the default search space or the estimator
+        signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
+        ``C`` as a real range (``float_log``), not as an integer-only range —
+        the exact issue #127 bug. Raw lists (not yet parsed into
+        ``SearchSpaceEntry`` objects) are parsed first; explicitly typed
+        entries and constants pass through unchanged.
+
+        Args:
+            space_dict: The parameter name → value mapping (``SearchSpaceEntry``
+                objects, raw lists, or constants).
+
+        Returns:
+            dict[str, Any]: A new dict with the same structure: every numeric
+                key holds a ``SearchSpaceEntry`` (raw lists are parsed),
+                inferred range types re-resolved against the parameter type.
+        """
+        normalized: dict[str, Any] = {}
+        for param, value in space_dict.items():
+            if isinstance(value, SearchSpaceEntry):
+                entry = value
+            elif isinstance(value, list):
+                # A raw list from a direct call: parse it the same way the
+                # Config path does. Constants (scalars) are never lists, so a
+                # list here is always a search-space shorthand.
+                entry = SearchSpaceEntry.model_validate(value)
+            else:
+                # A constant value — no normalization possible.
+                normalized[param] = value
+                continue
+            normalized[param] = normalize_hyperparameter_entry(self.algo, param, entry)
+        return normalized
+
     def resolve_search_space(self) -> None:
         """Resolve the hyperparameter search space and the scorer (step 2).
 
@@ -1424,16 +1467,15 @@ class _OptimizeRunner:
                 algorithm.
         """
         base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
+        base_space_dict: dict[str, Any] | None = None
         if self.algo == "knn":
             base_space_fn = _make_knn_space(self.n_samples_eff)
         elif resolve_algorithm_name(self.algo) == "gaussian_process_regression":
             # GPR without an external config (including a direct
             # optimize("gpr", X, y) call): the DEFAULT_SPACES search space
             # (small: kernel family only).
-            base_space_fn = partial(
-                _apply_dynamic_space,
-                space_dict=DEFAULT_SPACES["gaussian_process_regression"].copy(),
-            )
+            base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
+            base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
 
         # Priority 1: Direct overrides (functions)
         # Priority 2: Dynamic config from YAML (dict with SearchSpaceEntry)
@@ -1447,7 +1489,9 @@ class _OptimizeRunner:
             # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
             # BEFORE the Optuna loop: otherwise clean_hyperparameters would
             # log an identical "Remapped ..." line for every trial.
-            space_dict = remap_legacy_param_names(self.algo, external_config)
+            space_dict = self._normalize_space_dict(
+                remap_legacy_param_names(self.algo, external_config)
+            )
             # SVR: adaptive epsilon bounds from the y_train spread, if the
             # user did not set epsilon explicitly (prepare_search_space omits
             # the default epsilon from DEFAULT_SPACES, so its absence in the
@@ -1463,18 +1507,24 @@ class _OptimizeRunner:
             self.complexity_guard_logs = guard_logs
             self._log_complexity_guard()
             space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
+            self.search_space_dict = clipped_config
         else:
             # SVR without an external config (including a direct
             # optimize("svr", X, y) call): the default space with adaptive
             # epsilon instead of the blind [1e-3, 1.0] range from
             # DEFAULT_SPACES.
             if self.algo == "svr":
-                base_space_fn = _make_svr_space(self.y)
+                base_space_dict = _make_svr_space_dict(self.y)
+                base_space_fn = partial(
+                    _apply_dynamic_space, space_dict=base_space_dict
+                )
             space_fn = base_space_fn
         if space_fn is None:
             raise HyperoptError(f"No search space for algorithm '{self.algo}'")
 
         self.space_fn = space_fn
+        if base_space_dict is not None:
+            self.search_space_dict = base_space_dict
         self.scorer = _build_scorer(self.metric)
 
     def build_trial_pipeline(self) -> None:
@@ -1940,6 +1990,58 @@ class _OptimizeRunner:
             ) from err
         raise optuna.TrialPruned() from err
 
+    def _warn_if_optimum_at_boundary(self, best_params: dict[str, Any]) -> None:
+        """Warn when the best trial's value lies at a range boundary.
+
+        An optimum that coincides with the lower or upper bound of the search
+        range means the search was cut off: the true optimum may lie beyond
+        the range, and the user should widen it. Only dict-based numeric
+        search spaces (with ``SearchSpaceEntry`` bounds) are checked;
+        categorical parameters and constant values are skipped.
+
+        Args:
+            best_params: The parameters of the best trial.
+        """
+        if not self.search_space_dict:
+            return
+        for name, entry in self.search_space_dict.items():
+            if not hasattr(entry, "dist_type"):
+                continue
+            dist_type = entry.dist_type
+            if dist_type not in ("int", "float", "float_log"):
+                continue
+            if name not in best_params:
+                continue
+            value = best_params[name]
+            try:
+                low = float(entry.low)
+                high = float(entry.high)
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            # Tolerance: 1e-6 of the range width (at least 1e-6 for tiny ranges).
+            # Exact equality is not enough because Optuna may return 1.0 vs
+            # a boundary 1.0000001. A relative tolerance is deliberately not
+            # used: on very wide ranges (e.g. [0, 1e9]) a rel_tol of 1e-9
+            # would already accept values ~1.0 away from the boundary — too
+            # coarse for a "widen the range" hint.
+            tolerance = 1e-6 * max(1.0, abs(high - low))
+            at_low = math.isclose(num, low, rel_tol=0.0, abs_tol=tolerance)
+            at_high = math.isclose(num, high, rel_tol=0.0, abs_tol=tolerance)
+            if at_low or at_high:
+                boundary = "low" if at_low else "high"
+                log.warning(
+                    "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                    "boundary of the search range [%.6g, %.6g] — the true "
+                    "optimum may lie beyond the range, widen it",
+                    self.algo,
+                    name,
+                    num,
+                    boundary,
+                    low,
+                    high,
+                )
+
     def select_best_trial(self) -> bool:
         """Select the best completed trial of the CURRENT phase (step 7).
 
@@ -2012,6 +2114,8 @@ class _OptimizeRunner:
         )
         self.best_score = float(cast(float, best_trial.value))
         best_params = dict(best_trial.params)
+
+        self._warn_if_optimum_at_boundary(best_params)
 
         # The feature selection decision comes from the best trial's params
         # (mode='auto': the "use_feature_selection" key is already fixed by
@@ -2201,6 +2305,16 @@ def optimize(
         train_test_split_test_size (float): Test size for split validation.
             Defaults to 0.2.
         space_overrides (dict | None): Dict for overriding search spaces.
+            Each value may be a callable (a custom ``space_fn``), a dict of
+            ``SearchSpaceEntry`` objects, or a dict whose values are the same
+            shorthands accepted by the Config path: a raw range list
+            (``[low, high]`` / ``[low, high, "int"|"float"|"float_log"]`` /
+            ``[options, "categorical"]``) is parsed and a range whose type was
+            not written explicitly is re-resolved against the parameter's
+            type (the default search space or the estimator signature), the
+            same way ``Config`` does it — so
+            ``space_overrides={"svr": {"C": [1, 50]}}`` searches ``C`` as a
+            real range, not an integer-only one.
         initial_params (dict[str, Any] | None): Hyperparameters from the
             previous phase for enqueue_trial. Keeps the improvement monotonic
             between HPO phases ("monotonicity anchor").

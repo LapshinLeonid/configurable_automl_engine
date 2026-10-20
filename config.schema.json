@@ -1213,7 +1213,7 @@
       "type": "object"
     },
     "SearchSpaceEntry": {
-      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated\n        object of a concrete distribution type.",
+      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated\n        object of a concrete distribution type.\n\nThe internal ``explicit_type`` flag records whether the distribution type\nwas written explicitly in the source config (``[low, high, \"float\"]``) or\ninferred from the boundary numbers. Inferred types are re-resolved\nagainst the parameter type (the default search space or the model\nsignature) by :func:`normalize_hyperparameter_entry` — e.g. an\nintegral-looking ``[1, 50]`` for a real-valued parameter stays a real\nrange.",
       "properties": {
         "config": {
           "discriminator": {

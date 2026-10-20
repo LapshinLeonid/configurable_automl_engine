@@ -40,7 +40,8 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
 )
 from configurable_automl_engine.tuner import (
-    _make_svr_space,
+    _apply_dynamic_space,
+    _make_svr_space_dict,
     optimize,
 )
 
@@ -157,9 +158,9 @@ def test_make_svr_space_uses_adaptive_epsilon_bounds():
     y = np.arange(50, dtype=float)
     low, high = compute_svr_epsilon_bounds(y)
 
-    space_fn = _make_svr_space(y)
+    space_dict = _make_svr_space_dict(y)
     trial = MagicMock()
-    space_fn(trial)
+    _apply_dynamic_space(trial, space_dict)
 
     trial.suggest_float.assert_any_call("epsilon", low, high, log=True)
 

@@ -1669,6 +1669,40 @@ class Config(BaseModel):
             raise ValueError("\n".join(errors))
         return self
 
+    @model_validator(mode="after")
+    def _normalize_hyperparameter_types(self) -> Config:
+        """Re-resolve the type of inferred (not explicitly typed) ranges.
+
+        The type of a range is taken from the parameter's type — the default
+        search space or the estimator signature — not from how the boundary
+        numbers are written. So ``[1, 50]`` for a real-valued parameter
+        (e.g. ``C`` of an SVR, ``alpha`` of a Tweedie) stays a real range
+        instead of silently becoming an integer range. Scale parameters
+        (``alpha``, ``C``, ``epsilon``, ``gamma``, ``learning_rate``)
+        without an explicit type default to the logarithmic scale.
+        Explicitly typed ranges (``[1, 50, "int"]``) are left untouched.
+        """
+        from configurable_automl_engine.common.hyperopt_defaults import (
+            normalize_hyperparameter_entry,
+        )
+
+        for name in type(self.algorithms).model_fields:
+            algo_cfg = getattr(self.algorithms, name)
+            if algo_cfg is None or not algo_cfg.enable:
+                continue
+            hyperparams = algo_cfg.hyperparameters
+            if not hyperparams:
+                continue
+            # Update the existing dict in place: the Config was built from the
+            # input data, and other code may hold a reference to the same
+            # hyperparameters mapping (e.g. through model_dump) — replacing
+            # the dict would silently detach those references.
+            for param, entry in list(hyperparams.items()):
+                normalized = normalize_hyperparameter_entry(name, param, entry)
+                if normalized is not entry:
+                    hyperparams[param] = normalized
+        return self
+
 
 # ────────────────── API ────────────────────── #
 def read_config(path: str | Path) -> Config:

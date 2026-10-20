@@ -353,6 +353,48 @@ def remap_legacy_param_names(
     return remapped
 
 
+@lru_cache(maxsize=128)
+def get_param_numeric_type(algo_key: str, param: str) -> str | None:
+    """Return ``'int'`` or ``'float'`` for a numeric constructor parameter.
+
+    The numeric type is inferred from the type of the parameter's default
+    value in the estimator constructor signature (sklearn models carry no
+    parameter annotations). ``None`` is returned when the type cannot be
+    determined:
+    - the algorithm is unknown or its optional dependency is missing
+      (estimator class is ``None``);
+    - the parameter is absent from the signature;
+    - the default is non-numeric (e.g. a string or ``None``);
+    - the default is a boolean (not a numeric range).
+
+    The result is cached per (algorithm, parameter) pair.
+
+    Args:
+        algo_key: Normalised or aliased algorithm key (e.g. ``'svr'``,
+            ``'xgboost'``).
+        param: Constructor parameter name.
+
+    Returns:
+        ``'int'``, ``'float'``, or ``None`` when the type is unknown.
+    """
+    resolved = resolve_algorithm_name(algo_key)
+    estimator_cls = _FACTORY.get(resolved)
+    if estimator_cls is None:
+        return None
+    signature = inspect.signature(estimator_cls)
+    p = signature.parameters.get(param)
+    if p is None or p.default is inspect.Parameter.empty:
+        return None
+    default = p.default
+    if isinstance(default, bool):
+        return None
+    if isinstance(default, int):
+        return "int"
+    if isinstance(default, float):
+        return "float"
+    return None
+
+
 # ----------------------------------------------------------------------------- #
 #                  Allowed hyperparameter lookup (validation)                   #
 # ----------------------------------------------------------------------------- #
