@@ -22,6 +22,7 @@ import pytest
 import yaml
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import FixedTrial
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.datasets import make_regression
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
@@ -2371,3 +2372,111 @@ def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
     )
     assert second is not None
     assert second.score >= first.score
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  issue #135: fold errors in the pooled/pruning evaluation are contained
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_typeerror_on_one_fold_does_not_abort_hpo(toy_data, caplog):
+    """An estimator raising TypeError on a single fold does NOT abort HPO.
+
+    Regression for issue #135: the pooled evaluation path (_evaluate_pooled_cv)
+    propagated any per-fold exception, so a TypeError (outside the handled
+    (ValueError, MemoryError, RuntimeError, InvalidDataError) set) would pass
+    through Optuna and kill the whole HPO run. With the legacy
+    cross_val_score(error_score=nan) such a fold was excluded from the
+    estimate. The affected fold's rows must be skipped with a warning, and the
+    trial must complete with the pooled metric over the surviving folds.
+    """
+    X, y = toy_data
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on first fold")
+            return self
+
+        def predict(self, Xte):
+            return np.zeros(len(Xte))
+
+    with (
+        patch.object(hyperopt, "create_model", return_value=TypeErrorOnFirstFold()),
+        patch.object(
+            hyperopt._OptimizeRunner,
+            "assemble_estimator",
+            side_effect=lambda model, apply_fs=False: model,
+        ),
+    ):
+        opt_res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            metric="rmse",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            fit_best_model=False,
+            space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+        )
+
+    # The HPO run survived the TypeError on one fold: a result is returned and
+    # its raw (negative) RMSE is finite.
+    assert opt_res is not None
+    assert np.isfinite(opt_res.score)
+    # The pooling path was used (rmse is non-additive) and the failed fold
+    # was skipped with a warning.
+    assert "failed to fit or predict" in caplog.text
+    assert "TypeError" in caplog.text
+
+
+def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
+    """Every fold raising LinAlgError → ValueError → the trial is pruned, not fatal.
+
+    LinAlgError is a ValueError subclass: with the legacy cross_val_score a
+    completely failed evaluation aborted the trial without disqualifying the
+    algorithm. The circuit breaker must NOT trip (no InvalidAlgorithmError),
+    and the whole HPO attempt must not raise.
+    """
+    X, y = toy_data
+
+    class AlwaysLinAlgFail(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            raise np.linalg.LinAlgError("singular matrix")
+
+        def predict(self, Xte):
+            return np.zeros(len(Xte))
+
+    with (
+        patch.object(hyperopt, "create_model", return_value=AlwaysLinAlgFail()),
+        patch.object(
+            hyperopt._OptimizeRunner,
+            "assemble_estimator",
+            side_effect=lambda model, apply_fs=False: model,
+        ),
+    ):
+        opt_res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=3,
+            metric="rmse",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            fit_best_model=False,
+            space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+        )
+
+    # No completed trial → "no valid result" (None), without the fatal-failure
+    # disqualification or an exception escaping Optuna.
+    assert opt_res is None
