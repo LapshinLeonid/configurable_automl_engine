@@ -536,6 +536,50 @@ def test_evaluate_pooled_cv_failed_fold_fallback_mean(caplog):
     assert "excluded from the evaluation" in caplog.text
 
 
+def test_evaluate_pooled_cv_failed_scoring_fallback_mean(caplog):
+    """On the non-poolable path a fold whose SCORING fails is excluded too."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class FailingScorer:
+        """A scorer without _score_func failing on its first call."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, estimator, Xte, yte):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyError("boom on fold 1 scoring")
+            return 0.7
+
+    scorer = FailingScorer()
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    # The failed fold is excluded from the mean — the surviving folds all
+    # score 0.7.
+    assert pooled == pytest.approx(0.7)
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+
+
 def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps():
     """LOO + r2 + pruning: NaN intermediate values are NOT published.
 
