@@ -1195,6 +1195,7 @@ def _run_hpo(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
     user_hyperparameter_keys: list[str] | None = None,
+    phase_name: str | None = None,
 ) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
     Workflow:
@@ -1266,6 +1267,10 @@ def _run_hpo(
             Passed only to tuners that support the ``feature_selection_cfg``
             argument or accept ``**kwargs`` (the signature is checked via
             ``inspect.signature``); custom tuners are unaffected.
+        phase_name (str | None): The name of the HPO phase (e.g. 'coarse').
+            Forwarded to tuners that accept the argument and used to
+            deduplicate the WARNING about the pooled-metric fallback (once
+            per algorithm and phase).
     Returns:
         PhaseResult | None: The phase result — score, params and the phase's
             own Optuna trials; or ``None`` if an error occurred during HPO
@@ -1458,6 +1463,12 @@ def _run_hpo(
     # below).
     if "fit_best_model" in sig.parameters:
         kwargs["fit_best_model"] = False
+
+    # pass the HPO phase name if the tuner supports it: the bundled tuner
+    # uses it to deduplicate the WARNING about the pooled-metric fallback
+    # (emitted once per algorithm and phase).
+    if phase_name is not None and "phase_name" in sig.parameters:
+        kwargs["phase_name"] = phase_name
 
     try:
         result = tuner.optimize(**kwargs)
@@ -2177,6 +2188,7 @@ def _execute_hpo_phase(
             feature_selection_cfg=spec.feature_selection_cfg,
             complexity_guard_cfg=spec.complexity_guard_cfg,
             user_hyperparameter_keys=user_hyperparameter_keys,
+            phase_name=phase_name,
         )
 
         if result is None:
