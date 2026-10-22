@@ -95,6 +95,66 @@ def test_e2e_small_data_guard_off_spaces_unchanged():
     assert "complexity_guard" not in res
 
 
+def _wide_one_hot_frame(
+    n: int = 4000, n_cat: int = 50, n_categories: int = 5, seed: int = 42
+) -> pd.DataFrame:
+    """Wide frame: n rows, n_cat categorical columns with n_categories
+    levels each -> n_cat * n_categories = 250 one-hot columns after encoding."""
+    rng = np.random.RandomState(seed)
+    X = pd.DataFrame(
+        {
+            f"c{i}": rng.randint(0, n_categories, size=n).astype(str)
+            for i in range(n_cat)
+        }
+    )
+    y = pd.Series(
+        rng.randn(n) + 0.1 * rng.randint(0, n_categories, size=n) * 1.0,
+        name="target",
+    )
+    return pd.concat([X, y], axis=1)
+
+
+def test_e2e_large_wide_one_hot_spaces_unchanged():
+    """Large-but-wide data (n=4000, 250 one-hot columns / 50 original)
+    must NOT trigger the 'medium' mode (issue #134).
+
+    With the size-mode ratio computed from the one-hot-expanded p, n/p =
+    4000/250 = 16 < 20 resolved 'medium' and restricted the spaces: XGBoost
+    max_depth <= 5 / subsample >= 0.7, RF min_samples_leaf >= 2 / max_depth
+    <= 13. With the ORIGINAL column count (50) the ratio is 4000/50 = 80, so
+    the mode is 'ordinary' and the spaces stay unchanged — the guard
+    produces no records.
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.tuner import optimize
+
+    df = _wide_one_hot_frame()
+    X, y = df.drop(columns=["target"]), df["target"]
+    for algo in ("random_forest", "xgboosting"):
+        res = optimize(
+            algo,
+            X,
+            y,
+            n_trials=2,
+            random_state=42,
+            # 2-fold CV: n_samples_eff = 4000/2 = 2000 >= 300, so the
+            # 'medium' mode can fire ONLY via the n/p ratio — the
+            # one-hot-expanded p (250) gives 8 < 20, the original column
+            # count (50) gives 40 >= 20.
+            validation_strategy="k_fold",
+            n_folds=2,
+            space_overrides={algo: dict(DEFAULT_SPACES[algo])},
+            complexity_guard_cfg={"mode": "apply"},
+            fit_best_model=False,
+        )
+        assert res is not None, f"{algo}: no valid result"
+        # The guard produced NO restrictions: the spaces were unchanged.
+        assert not res.complexity_guard, (
+            f"{algo}: guard unexpectedly restricted the space: "
+            f"{res.complexity_guard}"
+        )
+
+
 def test_e2e_user_range_conflict_does_not_crash():
     """A user range conflicting with the guard does not crash the search.
 

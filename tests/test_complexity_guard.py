@@ -64,6 +64,22 @@ def test_resolve_size_mode(n, p, expected):
     assert resolve_size_mode(n, p, _default_cfg()) == expected
 
 
+def test_resolve_size_mode_uses_original_columns():
+    """The size-mode ratio uses the ORIGINAL column count, not p after one-hot.
+
+    Regression (issue #134): p was counted after the one-hot expansion, so
+    n=4000 rows with 250 one-hot columns (only 50 original columns) gave
+    n/p = 16 < 20 and the "medium" mode — restricted spaces on large data.
+    With the original column count the ratio is 4000/50 = 80 >= 20 and the
+    mode is "ordinary".
+    """
+    cfg = _default_cfg()
+    # 250 one-hot-expanded columns: the old code resolved "medium".
+    assert resolve_size_mode(4000, 250, cfg) == "medium"
+    # 50 ORIGINAL columns (250 = 50 * 5 one-hot categories): "ordinary".
+    assert resolve_size_mode(4000, 50, cfg) == "ordinary"
+
+
 @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
 def test_resolve_size_mode_extreme_small_n(n):
     """Edge cases: tiny n is always 'small' regardless of p."""
@@ -444,6 +460,69 @@ def test_ordinary_mode_space_unchanged():
     assert logs == []
     assert adjusted["max_depth"].config.high == 32
     assert adjusted["min_samples_leaf"].config.high == 10
+
+
+def test_ordinary_mode_with_one_hot_p_size():
+    """Large-but-wide data (one-hot) stays 'ordinary' via p_size.
+
+    Regression (issue #134): n=4000 rows, 250 one-hot columns (50 original)
+    gave n/p = 16 < 20 -> "medium" and restricted spaces. With ``p_size``
+    the size mode uses the ORIGINAL column count (50), so spaces do not
+    change — the post-preprocessing ``p`` (250) is still used by the rules
+    that depend on the feature count (``max_features``, ``colsample_bytree``).
+    """
+    tree_space = {
+        "max_depth": _entry(2, 32, "int"),
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "max_features": _entry(0.1, 1.0, "float"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        tree_space,
+        "decision_tree",
+        n=4000,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs == []
+    assert adjusted["max_depth"].config.high == 32
+    assert adjusted["min_samples_leaf"].config.high == 10
+    # max_features does not change either: the mode is ordinary, so even the
+    # feature-count rules are not applied.
+    assert adjusted["max_features"].config.low == pytest.approx(0.1)
+
+    # The same data WITHOUT p_size falls back to p: the old behavior, which
+    # resolved "medium" (restricted spaces).
+    adjusted_old, logs_old = apply_complexity_guard(
+        tree_space,
+        "decision_tree",
+        n=4000,
+        p=250,
+        config=_default_cfg(),
+    )
+    assert logs_old
+    # medium: max_depth <= ceil(log2(4000/2)) + 2 = 13
+    assert adjusted_old["max_depth"].config.high == 13
+    assert adjusted_old["min_samples_leaf"].config.low == 2
+
+    # Boosting: XGBoost max_depth <= 5 / subsample >= 0.7 would fire in the
+    # medium mode; with p_size they stay unchanged.
+    xgb_space = {
+        "max_depth": _entry(3, 10, "int"),
+        "subsample": _entry(0.5, 1.0, "float"),
+        "colsample_bytree": _entry(0.5, 1.0, "float"),
+    }
+    adjusted_xgb, logs_xgb = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=4000,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs_xgb == []
+    assert (adjusted_xgb["max_depth"].config.low, adjusted_xgb["max_depth"].config.high) == (3, 10)
+    assert adjusted_xgb["subsample"].config.low == pytest.approx(0.5)
 
 
 def test_off_mode_space_unchanged():

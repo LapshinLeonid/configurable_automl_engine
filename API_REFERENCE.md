@@ -443,9 +443,17 @@ tree/boosting hyperparameters are too wide (e.g. `max_depth` 3–20 or 2–32 on
 a 15-row training fold), trials are spent on values that do not change the
 model, the TPE surface has flat regions and the search drifts toward overfit
 models. The guard tightens the ranges depending on the number of rows (`n` —
-the effective training-fold rows) and the number of features after
-preprocessing (`p` — what the model sees, including one-hot columns and
-missing-value indicators).
+the effective training-fold rows) and the feature count.
+
+Two feature counts are used deliberately:
+
+* The size-mode ratio `n / p` uses the **original column count** (a
+  categorical column counts as 1, before the one-hot expansion): the
+  one-hot expansion must not push large-but-wide data into a smaller size
+  mode (issue #134).
+* The rules that depend on the feature count — `max_features` and
+  `colsample_bytree` — use **`p` after preprocessing** (what the model
+  sees, including one-hot columns and missing-value indicators).
 
 Two independent levels of restrictions (each toggled separately):
 
@@ -462,12 +470,19 @@ Two independent levels of restrictions (each toggled separately):
   explicitly as "for time", not "for regularization": more trees only reduce
   the variance of the ensemble.
 
-The size mode is determined by `n` and the ratio `n / p`:
+The size mode is determined by `n` and the ratio `n / p`, where `p` is the
+**original column count** (a categorical column counts as 1, before the
+one-hot expansion):
 
 * `"small"`: `n < small_n_threshold` or `n / p < small_np_ratio_threshold`;
 * `"medium"`: `n < medium_n_threshold` or `n / p < medium_np_ratio_threshold`
   (and not small);
 * `"ordinary"`: everything else — the spaces are not changed.
+
+For example, `n = 4000` rows and 50 original columns (250 one-hot expanded)
+give `n / p = 80 >= 20` — the `"ordinary"` mode and unchanged spaces,
+while the old `p`-after-preprocessing counting produced `16 < 20` and the
+`"medium"` restrictions.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -476,9 +491,9 @@ The size mode is determined by `n` and the ratio `n / p`:
 | `regularize` | `bool` | `true` | Enable level B (regularization heuristic). |
 | `user_range_policy` | `string` | `"user_wins"` | Policy for an **empty** intersection of a user range (`algo.hyperparameters`) with the guard range: `"user_wins"` (default) — the explicit user range stays and a warning is logged (an explicit setting beats the heuristic); `"engine_wins"` — the guard restriction is applied. |
 | `small_n_threshold` | `int` | `50` | Row threshold of the `"small"` mode (≥ 1). |
-| `small_np_ratio_threshold` | `float` | `5.0` | Ratio threshold of the `"small"` mode (> 0). |
+| `small_np_ratio_threshold` | `float` | `5.0` | Ratio threshold of the `"small"` mode (> 0). `p` is the original column count (a categorical column counts as 1, before one-hot). |
 | `medium_n_threshold` | `int` | `300` | Row threshold of the `"medium"` mode (≥ 1). |
-| `medium_np_ratio_threshold` | `float` | `20.0` | Ratio threshold of the `"medium"` mode (> 0). |
+| `medium_np_ratio_threshold` | `float` | `20.0` | Ratio threshold of the `"medium"` mode (> 0). `p` is the original column count (a categorical column counts as 1, before one-hot). |
 | `size_basis` | `string` | `"rows"` | Basis of `n`: `"rows"` (default) — independent rows; `"groups"` — reserved for group validation (repeats of one group carry less information than independent rows); only `"rows"` is used today. |
 
 Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
@@ -772,7 +787,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
-| `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the guard is disabled (the exact legacy behavior for direct callers). When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and `p` (features after preprocessing). |
+| `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the guard is disabled (the exact legacy behavior for direct callers). When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
 | `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
 

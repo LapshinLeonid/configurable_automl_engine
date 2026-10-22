@@ -1965,6 +1965,62 @@ def test_runner_dropped_features_recorded():
     assert runner.preprocessor is not None
 
 
+def test_runner_n_features_size_uses_original_columns():
+    """n_features_size counts ORIGINAL columns; n_features_eff is post-one-hot.
+
+    Regression (issue #134): the complexity guard resolved the size mode
+    from the one-hot-expanded feature count, so large-but-wide data fell
+    into the 'medium' mode. The runner must track both counts:
+    n_features_size (original columns, a categorical column = 1) for the
+    size-mode ratio and n_features_eff (what the model sees) for the rules.
+    """
+    rng = np.random.default_rng(13)
+    n = 120
+    cats = pd.DataFrame(
+        {f"c{i}": rng.integers(0, 10, size=n).astype(str) for i in range(4)}
+    )
+    X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
+    y = pd.Series(rng.normal(size=n))
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # 5 original columns (4 categorical + 1 numerical).
+    assert runner.n_features_size == 5
+    # After one-hot: 4 categorical * 10 categories + 1 numerical = 41.
+    assert runner.n_features_eff == 41
+
+
 def test_optimize_external_preprocessor_skips_cleaning():
     """If a ready preprocessor is provided, self.X is not cleaned:
     the user has fixed the feature set themselves."""

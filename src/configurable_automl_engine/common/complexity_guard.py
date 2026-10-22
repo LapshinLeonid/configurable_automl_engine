@@ -5,8 +5,16 @@ The module extends the existing data-dependent clipping layer
 the search ranges of tree/boosting hyperparameters are too wide, trials are
 spent on values that do not change the model, the TPE surface has flat
 regions and the search drifts toward overfit models. This guard tightens the
-ranges depending on the number of rows (``n``) and the number of features
-after preprocessing (``p``).
+ranges depending on the number of rows (``n``) and the feature count.
+
+Two feature counts are used deliberately:
+
+* **Original columns** (a categorical column counts as 1) drive the
+  size-mode ratio ``n / p``: the one-hot expansion must not push
+  large-but-wide data into a smaller size mode;
+* **Features after preprocessing** (what the model sees, including one-hot
+  columns and missing-value indicators) feed the rules that depend on the
+  feature count — ``max_features`` and ``colsample_bytree``.
 
 Two independent levels of restrictions:
 
@@ -63,10 +71,12 @@ class ComplexityGuardConfig:
             heuristic); ``"engine_wins"`` — the guard restriction is applied.
         small_n_threshold: ``n < threshold`` marks the "small" mode.
         small_np_ratio_threshold: ``n / p < threshold`` marks the "small"
-            mode.
+            mode. The ratio uses the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         medium_n_threshold: ``n < threshold`` marks the "medium" mode.
         medium_np_ratio_threshold: ``n / p < threshold`` marks the "medium"
-            mode.
+            mode. The ratio uses the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         size_basis: ``"rows"`` — ``n`` counts rows; ``"groups"`` — reserved
             for group-based validation (repeats of one group carry less
             information than independent rows). Only ``"rows"`` is used
@@ -111,8 +121,15 @@ class ComplexityGuardConfig:
 # ─────────────────────────────── size mode ─────────────────────────────────── #
 
 
-def resolve_size_mode(n: int, p: int, cfg: ComplexityGuardConfig) -> str:
+def resolve_size_mode(n: int, p_ratio: int, cfg: ComplexityGuardConfig) -> str:
     """Resolve the data-size mode by ``n`` and the ratio ``n / p``.
+
+    The ratio uses the ORIGINAL column count (a categorical column counts
+    as 1, i.e. before the one-hot expansion): the number of features the
+    model sees after preprocessing is intentionally NOT used here, so that
+    large-but-wide data (one-hot expanded) is not pushed into a smaller size
+    mode. The post-preprocessing feature count still feeds the rules that
+    depend on it (``max_features``, ``colsample_bytree``).
 
     Rules:
     * ``"small"``: ``n < small_n_threshold`` or ``n / p < small_np_ratio_threshold``;
@@ -122,15 +139,16 @@ def resolve_size_mode(n: int, p: int, cfg: ComplexityGuardConfig) -> str:
 
     Args:
         n: Number of rows in the training fold (``n_samples_eff``).
-        p: Number of features after preprocessing (what the model sees).
+        p_ratio: Number of ORIGINAL columns for the ratio (a categorical
+            column counts as 1).
         cfg: The guard configuration (holds the thresholds).
 
     Returns:
         str: ``"small"``, ``"medium"`` or ``"ordinary"``.
     """
-    if n < cfg.small_n_threshold or _ratio(n, p) < cfg.small_np_ratio_threshold:
+    if n < cfg.small_n_threshold or _ratio(n, p_ratio) < cfg.small_np_ratio_threshold:
         return "small"
-    if n < cfg.medium_n_threshold or _ratio(n, p) < cfg.medium_np_ratio_threshold:
+    if n < cfg.medium_n_threshold or _ratio(n, p_ratio) < cfg.medium_np_ratio_threshold:
         return "medium"
     return "ordinary"
 
@@ -959,11 +977,22 @@ def apply_complexity_guard(
     p: int,
     config: ComplexityGuardConfig | None = None,
     user_space_keys: Iterable[str] | None = None,
+    p_size: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Apply the adaptive complexity guard to a search space.
 
     Extends ``clip_search_space``: physical restrictions stay there, this
-    guard tightens the tree/boosting ranges based on ``n`` and ``p``.
+    guard tightens the tree/boosting ranges based on ``n`` and the feature
+    count.
+
+    The size mode (``small``/``medium``/``ordinary``) is resolved from the
+    ratio ``n / p_size``, where ``p_size`` is the number of ORIGINAL columns
+    (a categorical column counts as 1, before the one-hot expansion): the
+    one-hot expansion must not push large-but-wide data into a smaller size
+    mode. When ``p_size`` is not given, it falls back to ``p`` (the
+    pre-fix behavior, kept for direct callers). The rules that depend on the
+    feature count (``max_features``, ``colsample_bytree``) always use ``p`` —
+    the number of features after preprocessing (what the model sees).
 
     Args:
         space: The search space dict (parameter name -> ``SearchSpaceEntry``).
@@ -973,6 +1002,9 @@ def apply_complexity_guard(
         config: The guard configuration; ``None`` — the defaults.
         user_space_keys: Names of parameters set explicitly by the user
             (``algo.hyperparameters``). Defaults to an empty set.
+        p_size: Number of ORIGINAL columns (a categorical column counts as
+            1) used only for the size-mode ratio ``n / p``. ``None`` — fall
+            back to ``p``.
 
     Returns:
         tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly adjusted)
@@ -990,7 +1022,7 @@ def apply_complexity_guard(
         return dict(space), []
 
     is_boosting = algo in BOOSTING_ALGORITHMS
-    size_mode = resolve_size_mode(n, p, cfg)
+    size_mode = resolve_size_mode(n, p_size if p_size is not None else p, cfg)
     if size_mode == "ordinary":
         return dict(space), []
 
@@ -1026,6 +1058,7 @@ def apply_complexity_guard(
                 "size_mode": size_mode,
                 "n": n,
                 "p": p,
+                "p_size": p_size if p_size is not None else p,
                 "leaf_min": leaf_min,
                 "reason": rule.reason,
                 "user_range_policy": cfg.user_range_policy,

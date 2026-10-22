@@ -782,7 +782,14 @@ class ComplexityGuardCfg(BaseModel):
     wide, trials are spent on values that do not change the model, the TPE
     surface has flat regions and the search drifts toward overfit models.
     This section tightens the ranges depending on the number of rows (``n``)
-    and the number of features after preprocessing (``p``).
+    and the feature count.
+
+    Two feature counts are used deliberately: the size-mode ratio ``n / p``
+    uses the ORIGINAL column count (a categorical column counts as 1, before
+    the one-hot expansion), so that large-but-wide data (one-hot expanded)
+    is not pushed into a smaller size mode; the rules that depend on the
+    feature count (``max_features``, ``colsample_bytree``) use ``p`` after
+    preprocessing — what the model sees.
 
     Two independent levels of restrictions:
     * level A — lossless clipping: removes values that cannot change the
@@ -806,10 +813,12 @@ class ComplexityGuardCfg(BaseModel):
             stays, 'engine_wins' — the guard restriction is applied.
         small_n_threshold (int): ``n < threshold`` marks the 'small' mode.
         small_np_ratio_threshold (float): ``n / p < threshold`` marks the
-            'small' mode.
+            'small' mode. ``p`` is the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         medium_n_threshold (int): ``n < threshold`` marks the 'medium' mode.
         medium_np_ratio_threshold (float): ``n / p < threshold`` marks the
-            'medium' mode.
+            'medium' mode. ``p`` is the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         size_basis (ComplexityGuardSizeBasis): Basis of ``n``: 'rows' (default)
             — independent rows, 'groups' — reserved for group validation.
     """
@@ -864,7 +873,9 @@ class ComplexityGuardCfg(BaseModel):
         gt=0.0,
         description=(
             "Ratio threshold of the 'small' mode: n / p < threshold marks "
-            "the data as small (wide data with few rows per feature)."
+            "the data as small (wide data with few rows per feature). "
+            "p is the ORIGINAL column count (a categorical column counts "
+            "as 1, before the one-hot expansion)."
         ),
     )
     medium_n_threshold: int = Field(
@@ -880,7 +891,8 @@ class ComplexityGuardCfg(BaseModel):
         gt=0.0,
         description=(
             "Ratio threshold of the 'medium' mode: n / p < threshold marks "
-            "the data as medium."
+            "the data as medium. p is the ORIGINAL column count (a "
+            "categorical column counts as 1, before the one-hot expansion)."
         ),
     )
     size_basis: ComplexityGuardSizeBasis = Field(

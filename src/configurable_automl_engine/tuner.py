@@ -971,6 +971,10 @@ class _OptimizeRunner:
         # Number of features after preprocessing (what the model sees).
         # Filled in build_trial_pipeline (falls back to the raw column count).
         self.n_features_eff: int = 1
+        # Number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used only by the complexity guard
+        # for the size-mode ratio ``n / p``; filled in build_trial_pipeline.
+        self.n_features_size: int = 1
         # Whether to train the best model on all data after the Optuna loop
         # (``_fit_best_model``). Set to False when the caller only needs the
         # best parameters and score (e.g. the training engine's HPO phase):
@@ -1300,9 +1304,12 @@ class _OptimizeRunner:
         """Apply the adaptive complexity guard to a dict search space.
 
         The guard depends on ``n`` (the effective training-fold rows,
-        ``self.n_samples_eff``) and ``p`` (the number of features after
-        preprocessing, ``self.n_features_eff``). Both are computed once per
-        phase and are the same in every HPO phase (deterministic between
+        ``self.n_samples_eff``) and the feature counts: the size-mode ratio
+        uses ``self.n_features_size`` — the number of ORIGINAL columns (a
+        categorical column counts as 1, before one-hot), while the rules for
+        ``max_features``/``colsample_bytree`` use ``self.n_features_eff`` —
+        the number of features after preprocessing. Both are computed once
+        per phase and are the same in every HPO phase (deterministic between
         phases) and in the subprocesses (identical inputs -> identical
         results), so the TPE history transfer between phases stays valid.
 
@@ -1328,6 +1335,7 @@ class _OptimizeRunner:
             p=self.n_features_eff,
             config=cfg,
             user_space_keys=user_keys,
+            p_size=self.n_features_size,
         )
         return adjusted, logs
 
@@ -1575,6 +1583,7 @@ class _OptimizeRunner:
             # error contract for unknown algorithms.
             if resolve_algorithm_name(self.algo) not in AVAILABLE_ALGORITHMS:
                 self.n_features_eff = max(1, int(self.X.shape[1]))
+                self.n_features_size = max(1, int(self.X.shape[1]))
                 return
             encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
             # Automatic preset selection + application of an explicit override.
@@ -1649,10 +1658,15 @@ class _OptimizeRunner:
 
         # The number of features the model actually sees after preprocessing
         # (including one-hot and missing-value indicators). Used by the
-        # adaptive complexity guard as ``p``. Computed deterministically once
-        # per phase — the same value in every HPO phase and in the
-        # subprocesses.
+        # adaptive complexity guard as ``p`` for the rules that depend on
+        # the feature count (``max_features``, ``colsample_bytree``).
+        # Computed deterministically once per phase — the same value in every
+        # HPO phase and in the subprocesses.
         self.n_features_eff = self._estimate_n_features_after_preprocessing()
+        # The number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used by the adaptive complexity
+        # guard for the size-mode ratio ``n / p`` only.
+        self.n_features_size = max(1, int(self.X.shape[1]))
 
     def _estimate_n_features_after_preprocessing(self) -> int:
         """Estimate the number of features after the preprocessor.
@@ -1662,7 +1676,10 @@ class _OptimizeRunner:
         encoded categorical features. The estimate is computed
         deterministically from the data and the encoding settings — the same
         value in every HPO phase and in the subprocesses (no fitting, no
-        randomness). It is used by the adaptive complexity guard as ``p``.
+        randomness). It is used by the adaptive complexity guard as ``p`` for
+        the rules that depend on the feature count (``max_features``,
+        ``colsample_bytree``); the size-mode ratio ``n / p`` uses the
+        original column count instead (``n_features_size``).
 
         One-hot encoding expands each categorical column into its number of
         unique categories; ordinal/target/frequency encoding keeps one column
