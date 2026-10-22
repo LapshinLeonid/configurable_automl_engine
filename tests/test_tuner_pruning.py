@@ -383,8 +383,7 @@ def test_evaluate_pooled_cv_fallback_warns_once_per_algo_phase(
         def __call__(self, estimator, Xte, yte):
             return 0.7
 
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "coarse"))
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "refine"))
+    metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
             pooled = _evaluate_pooled_cv(
@@ -577,7 +576,7 @@ def test_evaluate_with_intermediate_reports_fallback_warns_once(caplog):
         def __call__(self, estimator, Xte, yte):
             return 0.7
 
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "coarse"))
+    metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
             pooled = _evaluate_with_intermediate_reports(
@@ -616,7 +615,7 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
         # impossible, the per-fold fallback is used.
         return lambda est, Xv, yv: 0.7
 
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "coarse"))
+    metrics_mod.reset_pooled_fallback_warnings()
     with (
         caplog.at_level(logging.WARNING),
         patch.object(tuner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),

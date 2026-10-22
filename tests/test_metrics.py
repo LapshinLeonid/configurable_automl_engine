@@ -646,8 +646,7 @@ def test_warn_pooled_fallback_once_warns_first_time(caplog):
     """The first fallback for an (algorithm, phase) pair emits a WARNING."""
     from configurable_automl_engine.training_engine import metrics as metrics_mod
 
-    key = ("ridge", "coarse")
-    metrics_mod._pooled_fallback_warned.discard(key)
+    metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
         metrics_mod.warn_pooled_fallback_once(
             algo_name="ridge",
@@ -663,8 +662,7 @@ def test_warn_pooled_fallback_once_silent_after_first(caplog):
     """Subsequent fallbacks for the same (algorithm, phase) pair stay silent."""
     from configurable_automl_engine.training_engine import metrics as metrics_mod
 
-    key = ("ridge", "coarse")
-    metrics_mod._pooled_fallback_warned.discard(key)
+    metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
         metrics_mod.warn_pooled_fallback_once(
             algo_name="ridge",
@@ -683,8 +681,7 @@ def test_warn_pooled_fallback_once_again_for_other_phase(caplog):
     """A different phase (or algorithm) triggers the WARNING again."""
     from configurable_automl_engine.training_engine import metrics as metrics_mod
 
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "coarse"))
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "refine"))
+    metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
         metrics_mod.warn_pooled_fallback_once(
             algo_name="ridge",

@@ -951,7 +951,7 @@ def test_trainer_pooled_fallback_warns_once_per_algorithm(caplog):
         def __call__(self, estimator, Xv, yv):
             return 0.5
 
-    metrics_mod._pooled_fallback_warned.discard(("ridge", "final_fit"))
+    metrics_mod.reset_pooled_fallback_warnings()
     with (
         caplog.at_level(logging.WARNING),
         patch(
