@@ -246,9 +246,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "n_estimators": SearchSpaceEntry.model_validate([100, 800, "int", 100]),
         "learning_rate": SearchSpaceEntry.model_validate([0.01, 0.3, "float_log"]),
         "max_depth": SearchSpaceEntry.model_validate([3, 10, "int"]),
+        "min_child_weight": SearchSpaceEntry.model_validate([1, 10, "float"]),
         "subsample": SearchSpaceEntry.model_validate([0.5, 1.0, "float"]),
         "colsample_bytree": SearchSpaceEntry.model_validate([0.5, 1.0, "float"]),
         "gamma": SearchSpaceEntry.model_validate([0.0, 5.0, "float"]),
+        "reg_lambda": SearchSpaceEntry.model_validate([1e-3, 100.0, "float_log"]),
     },
     "sgdregressor": {
         "loss": SearchSpaceEntry.model_validate(

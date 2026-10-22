@@ -81,6 +81,16 @@ def test_e2e_small_data_guard_applies_and_reports(caplog):
     # XGBoost max_depth was regularized to [1, 3].
     xgb_depth = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "max_depth"))
     assert xgb_depth["after"] == [1.0, 3.0]
+    # XGBoost min_child_weight and reg_lambda are restricted on the defaults
+    # (issue #132 regression: the parameters were absent from
+    # DEFAULT_SPACES['xgboosting'], so their guard rules never fired).
+    xgb_mcw = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "min_child_weight"))
+    assert xgb_mcw["before"] == [1.0, 10.0]
+    assert xgb_mcw["after"][0] == pytest.approx(2.0)
+    xgb_reg = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "reg_lambda"))
+    assert xgb_reg["before"] == [1e-3, 100.0]
+    assert xgb_reg["after"][0] == pytest.approx(1.0)
+    assert xgb_reg["after"][1] == pytest.approx(100.0)
     # The adapted ranges are visible in the log ("was → became").
     assert any("max_depth" in rec.message and "→" in rec.message for rec in caplog.records)
 

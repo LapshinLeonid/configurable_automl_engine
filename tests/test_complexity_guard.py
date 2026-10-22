@@ -23,6 +23,7 @@ from configurable_automl_engine.common.complexity_guard import (
     resolve_size_mode,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
+    DEFAULT_SPACES,
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,
@@ -413,6 +414,108 @@ def test_small_gradient_boosting_min_samples_leaf():
         space, "gradient_boosting", n=15, p=5, config=_default_cfg()
     )
     assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
+
+
+# ─────────────────────── default XGBoost space (issue #132) ───────────────── #
+
+
+def test_default_xgboost_space_has_min_child_weight_and_reg_lambda():
+    """The default XGBoost space exposes min_child_weight and reg_lambda.
+
+    Regression for issue #132: the guard's ``min_child_weight`` and
+    ``reg_lambda`` rules never fired on the defaults because the parameters
+    were absent from ``DEFAULT_SPACES['xgboosting']`` — only max_depth,
+    subsample and n_estimators were restricted.
+    """
+    space = DEFAULT_SPACES["xgboosting"]
+    assert "min_child_weight" in space
+    assert "reg_lambda" in space
+
+    mcw = space["min_child_weight"].config
+    assert isinstance(mcw, FloatSpace)
+    assert mcw.type == "float"
+    assert (mcw.low, mcw.high) == (1.0, 10.0)
+
+    reg = space["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1e-3)
+    assert reg.high == pytest.approx(100.0)
+
+
+def test_default_xgboost_space_guard_restricts_new_params():
+    """On small data the guard restricts min_child_weight and reg_lambda
+    from the DEFAULT_SPACES['xgboosting'].
+
+    Regression for issue #132: previously the guard rules for these
+    parameters could never fire on defaults. Now the default space carries
+    them, so the level B rules tighten min_child_weight to [2, 10] and
+    reg_lambda to [1, 100] (log scale).
+    """
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    adjusted, logs = apply_complexity_guard(
+        space, "xgboosting", n=15, p=5, config=_default_cfg()
+    )
+    mcw = adjusted["min_child_weight"].config
+    assert isinstance(mcw, FloatSpace)
+    assert mcw.type == "float"
+    assert mcw.low == pytest.approx(2.0)
+    assert mcw.high == pytest.approx(10.0)
+    reg = adjusted["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(100.0)
+    restricted = {(log["algo"], log["param"]) for log in logs}
+    assert ("xgboosting", "min_child_weight") in restricted
+    assert ("xgboosting", "reg_lambda") in restricted
+
+
+def test_default_xgboost_space_user_ranges_intersect_new_params():
+    """A user range of min_child_weight/reg_lambda is intersected with the guard.
+
+    The new default parameters behave like every other default: an explicit
+    user range narrower than the guard target keeps its values when it does
+    not conflict (user_wins).
+    """
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    space["min_child_weight"] = _entry(1, 3, "float")
+    space["reg_lambda"] = _entry(1e-2, 5.0, "float_log")
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "xgboosting",
+        n=15,
+        p=5,
+        config=_default_cfg(user_range_policy="user_wins"),
+        user_space_keys=["min_child_weight", "reg_lambda"],
+    )
+    mcw = adjusted["min_child_weight"].config
+    # Guard target [2, 10] ∩ user [1, 3] -> [2, 3] (no conflict).
+    assert mcw.low == pytest.approx(2.0)
+    assert mcw.high == pytest.approx(3.0)
+    reg = adjusted["reg_lambda"].config
+    # Guard target [1, 100] ∩ user [0.01, 5] -> [1, 5].
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(5.0)
+    assert not any(log.get("conflict") for log in logs)
+
+
+def test_default_xgboost_space_medium_mode_new_params():
+    """In the medium mode reg_lambda is capped and min_child_weight raised."""
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    adjusted, logs = apply_complexity_guard(
+        space, "xgboosting", n=100, p=5, config=_default_cfg()
+    )
+    mcw = adjusted["min_child_weight"].config
+    assert mcw.low == pytest.approx(2.0)
+    reg = adjusted["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(100.0)
+    restricted = {(log["algo"], log["param"]) for log in logs}
+    assert ("xgboosting", "min_child_weight") in restricted
+    assert ("xgboosting", "reg_lambda") in restricted
 
 
 # ─────────────────────────── medium mode ───────────────────────────────────── #

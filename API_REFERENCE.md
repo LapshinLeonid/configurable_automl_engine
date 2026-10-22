@@ -522,7 +522,13 @@ XGBoost `max_depth` ≤ 5. In the `"ordinary"` mode the spaces are unchanged.
 
 Interaction with user ranges (`limit_hyperparameters` + `hyperparameters`):
 
-* The default spaces adapt automatically.
+* The default spaces adapt automatically. The default XGBoost space
+  (`DEFAULT_SPACES['xgboosting']`) includes `min_child_weight` (1–10, float)
+  and `reg_lambda` (1e-3–100, log scale), so the level B rules of the guard
+  fire on the defaults (both are tightened to `≥ 2` / `[1, 100]` on small
+  data) and are reported in the log and the `complexity_guard` report — they
+  are not restricted only when the user overrides them with a conflicting
+  range and `user_range_policy: "user_wins"` keeps the override.
 * A range the user set explicitly is intersected with the guard range; on an
   **empty** intersection the `user_range_policy` decides (by default the user
   range stays and a warning is logged). The strict "engine wins" mode is
