@@ -575,9 +575,13 @@ def _evaluate_with_intermediate_reports(
     similar per-sample means, ``pool_metric=False``) keep publishing the
     cumulative fold mean (which equals the pooled value).
 
-    When the pooled value is impossible (the scorer exposes no raw metric
-    function, or no finite pair remains), a WARNING about the fallback to the
-    per-fold mean is logged once per (``algo_name``, ``phase_name``) pair.
+    When the pooled value is impossible FINALLY (the scorer exposes no raw
+    metric function, or no finite pair remains by the end of the evaluation),
+    a WARNING about the fallback to the per-fold mean is logged once per
+    (``algo_name``, ``phase_name``) pair. A TRANSIENT pooled failure inside
+    the fold loop (e.g. the first fold predicted all-NaN) is not a metric
+    degradation — the final pooled value may still be valid — so no WARNING
+    is emitted there.
 
     Args:
         trial (Trial): The current Optuna trial.
@@ -650,13 +654,13 @@ def _evaluate_with_intermediate_reports(
                     scorer, pooled_y_buf, pooled_pred_buf
                 )
             except ValueError:
-                warn_pooled_fallback_once(
-                    algo_name=algo_name or "unknown",
-                    phase_name=phase_name or "untitled_phase",
-                    reason="the pooled value over the accumulated OOF rows "
-                    "cannot be computed (no raw scorer metric function or no "
-                    "valid pairs)",
-                )
+                # A transient pooled failure (e.g. the first fold predicted
+                # all-NaN, so the accumulated buffer has no valid pair yet)
+                # is NOT a metric degradation: later folds may still produce a
+                # valid pooled value. Only the per-fold fallback value is used
+                # to publish the intermediate step; no WARNING is emitted here
+                # (the warning is reserved for the final return point, where a
+                # real fallback decision is made).
                 try:
                     fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
                 except Exception:  # noqa: BLE001, S110 — only a fallback for the pooled value

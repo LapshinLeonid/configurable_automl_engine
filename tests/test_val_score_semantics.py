@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 
 from imblearn.pipeline import Pipeline as ImbPipeline
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, RegressorMixin, clone
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import KFold, cross_val_score
 
@@ -988,3 +988,148 @@ def test_trainer_no_fallback_warning_on_pooled_path(caplog):
         ).fit(X, y)
     assert trainer.val_score is not None
     assert "Pooled evaluation of the metric is not available" not in caplog.text
+
+
+class _NaNPredictingModel(BaseEstimator, RegressorMixin):
+    """A regressor whose predictions are all NaN (empty OOF vector)."""
+
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X):
+        return np.full(len(X), np.nan)
+
+
+class _NoRawScorer:
+    """A scorers without the private raw-metric attributes (unpoolable)."""
+
+    def __call__(self, estimator, Xv, yv):
+        return 0.5
+
+
+def test_trainer_primary_no_finite_oof_pairs_warns(caplog):
+    """Primary metric: an empty finite OOF buffer warns about the fallback.
+
+    Regression for issue #136 review (trainer.py 'no finite pairs' branch):
+    when the model predicts all-NaN, the OOF buffer stays empty and the
+    pooled estimate is impossible — the engine falls back to the per-fold
+    mean with exactly one WARNING per (algorithm, metric, 'final_fit').
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    X, y = _noisy_regression(n=60, p=4, seed=1)
+
+    metrics_mod.reset_pooled_fallback_warnings()
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=_NoRawScorer(),
+        ),
+        patch(
+            "configurable_automl_engine.trainer.create_model",
+            lambda algo, **kw: _NaNPredictingModel(),
+        ),
+    ):
+        trainer = ModelTrainer(
+            algorithm="ridge",
+            metric="r2",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+        ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+    assert "final_fit:r2" in caplog.text
+    assert "no finite (y_true, y_pred) pairs" in caplog.text
+    # Once per (algorithm, metric, phase), not once per fold.
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+
+
+def test_trainer_additional_metric_pooled_fallback_warns(caplog):
+    """Additional non-additive metric: an unpoolable scorer warns on fallback.
+
+    The primary metric 'r2' pools successfully; the additional metric 'rmse'
+    gets a scorer without raw-metric attributes, so its pooled value is
+    impossible and the engine falls back to the fold mean with a WARNING.
+    The deduplication key includes the metric ('final_fit:rmse'), so primary
+    and additional metrics do not collapse into one warning.
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    X, y = _noisy_regression(n=60, p=4, seed=1)
+
+    real_scorer_factory = __import__(
+        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+    ).get_scorer_object
+
+    def flaky(name: str, global_y=None):
+        if name == "rmse":
+            return _NoRawScorer()
+        return real_scorer_factory(name, global_y)
+
+    metrics_mod.reset_pooled_fallback_warnings()
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object", side_effect=flaky
+        ),
+    ):
+        trainer = ModelTrainer(
+            algorithm="ridge",
+            metric="r2",
+            additional_metrics=["rmse"],
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+        ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert "rmse" in trainer.additional_scores
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+    assert "final_fit:rmse" in caplog.text
+    assert "final_fit:r2" not in caplog.text
+    # Exactly one WARNING: only the additional metric fell back.
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+
+
+def test_trainer_additional_metric_no_finite_oof_pairs_warns(caplog):
+    """Additional metric: an empty finite OOF buffer warns about the fallback.
+
+    Regression for issue #136 review (trainer additional 'no finite pairs'
+    branch): the model predicts all-NaN, so the OOF buffer is empty and the
+    pooled value of the non-additive additional metric is impossible.
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    X, y = _noisy_regression(n=60, p=4, seed=1)
+
+    metrics_mod.reset_pooled_fallback_warnings()
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=_NoRawScorer(),
+        ),
+        patch(
+            "configurable_automl_engine.trainer.create_model",
+            lambda algo, **kw: _NaNPredictingModel(),
+        ),
+    ):
+        trainer = ModelTrainer(
+            algorithm="ridge",
+            metric="r2",
+            additional_metrics=["rmse"],
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+        ).fit(X, y)
+
+    assert "rmse" in trainer.additional_scores
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+    assert "final_fit:rmse" in caplog.text
+    assert "no finite (y_true, y_pred) pairs for additional metric" in caplog.text
+    # Once per (algorithm, metric, phase): the primary ('final_fit:r2') and
+    # the additional ('final_fit:rmse') metrics keep separate keys.
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 2

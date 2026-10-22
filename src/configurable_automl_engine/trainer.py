@@ -1565,10 +1565,10 @@ class ModelTrainer:
             except ValueError:
                 # The pooled value is impossible (no valid pairs); fall back to
                 # the fold mean (RMSE_oof handles its own None semantics). The
-                # WARNING is emitted once per (algorithm, 'final_fit').
+                # WARNING is emitted once per (algorithm, metric, 'final_fit').
                 warn_pooled_fallback_once(
                     algo_name=self.algorithm,
-                    phase_name="final_fit",
+                    phase_name=f"final_fit:{self.metric}",
                     reason="the pooled value over the OOF buffer cannot be "
                     "computed (no raw scorer metric function or no valid "
                     "pairs)",
@@ -1578,7 +1578,7 @@ class ModelTrainer:
             if pool_primary:
                 warn_pooled_fallback_once(
                     algo_name=self.algorithm,
-                    phase_name="final_fit",
+                    phase_name=f"final_fit:{self.metric}",
                     reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
                 )
             raw_mean = float(np.mean(fold_raw))
@@ -1609,7 +1609,7 @@ class ModelTrainer:
                 except ValueError:
                     warn_pooled_fallback_once(
                         algo_name=self.algorithm,
-                        phase_name="final_fit",
+                        phase_name=f"final_fit:{mname}",
                         reason=f"the pooled value for additional metric "
                         f"'{mname}' cannot be computed (no raw scorer metric "
                         f"function or no valid pairs)",
@@ -1619,7 +1619,7 @@ class ModelTrainer:
                 if pool_additive[mname]:
                     warn_pooled_fallback_once(
                         algo_name=self.algorithm,
-                        phase_name="final_fit",
+                        phase_name=f"final_fit:{mname}",
                         reason=f"the OOF buffer contains no finite "
                         f"(y_true, y_pred) pairs for additional metric "
                         f"'{mname}'",

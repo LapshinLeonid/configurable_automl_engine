@@ -450,13 +450,84 @@ def test_evaluate_pooled_cv_fallback_no_warning_on_pooled_path(caplog):
     assert "Pooled evaluation of the metric is not available" not in caplog.text
 
 
-def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps():
+def test_evaluate_pooled_cv_poolable_scorer_raising_on_pooled_vector_warns(
+    caplog,
+):
+    """A poolable scorer whose raw metric raises on the pooled vector falls
+    back to the per-fold mean AND emits the WARNING (issue #136 review).
+
+    The scorer exposes ``_score_func``/``_sign``/``_kwargs`` (so the pooled
+    path is attempted) but the raw function raises on the concatenated
+    vector — the pooled estimate is impossible, and the engine must fall back
+    to the per-fold mean with a trace in the log.
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    def _raise_on_pooled(y_true, y_pred):
+        # Per-fold pairs (a handful of rows) can be pooled; the FULL pooled
+        # vector (all OOF rows) makes the raw metric fail.
+        if len(y_true) > 20:
+            raise ValueError("raw metric failed on the pooled vector")
+        return float(np.mean(y_pred))
+
+    class RaisingPooledScorer:
+        """A poolable scorer whose raw metric raises on the pooled vector.
+
+        Per-fold scoring (on single-fold rows) succeeds, so the per-fold
+        fallback values are available.
+        """
+
+        _score_func = staticmethod(_raise_on_pooled)
+        _sign = -1
+        _kwargs = {}
+
+        def __call__(self, estimator, Xte, yte):
+            return -0.5
+
+    metrics_mod.reset_pooled_fallback_warnings()
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=RaisingPooledScorer(),
+            algo_name="ridge",
+            phase_name="coarse",
+        )
+    # The per-fold mean is returned: each per-fold pair is pooled through the
+    # sign-applied raw metric (-mean(0.7) = -0.7 for every fold).
+    assert pooled == pytest.approx(-0.7)
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+    assert "ridge" in caplog.text
+    assert "coarse" in caplog.text
+
+
+def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps(caplog):
     """LOO + r2 + pruning: NaN intermediate values are NOT published.
 
     On the first LOO fold the pooled r2 over a single pair is NaN (r2 is
     undefined on <2 samples). Such steps must be skipped in trial.report —
     Optuna pruners cannot compare NaN. Once the accumulated rows admit a
     finite pooled r2 (from the 2nd pair on), the steps are published.
+
+    Regression for issue #136 review: the transient pooled failure on the
+    first fold must NOT emit the fallback WARNING — the final pooled value
+    is valid, so no metric degradation happened.
     """
     trial = MagicMock()
     trial.number = 0
@@ -479,18 +550,21 @@ def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps():
             return np.column_stack([np.ones(len(Xte)), np.asarray(Xte)]) @ self.coef_
 
     scorer = get_scorer_object("r2")
-    _evaluate_with_intermediate_reports(
-        trial,
-        LinearModel(),
-        X,
-        y,
-        method="loo",
-        n_folds=5,
-        test_size=0.2,
-        random_state=42,
-        scorer=scorer,
-        pool_metric=True,
-    )
+    with caplog.at_level(logging.WARNING):
+        _evaluate_with_intermediate_reports(
+            trial,
+            LinearModel(),
+            X,
+            y,
+            method="loo",
+            n_folds=5,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+            algo_name="ridge",
+            phase_name="coarse",
+        )
     # The first 1-row LOO step has an undefined pooled r2 (NaN) and must NOT
     # be published; the remaining steps (>= 2 accumulated pairs) are finite.
     steps = [call.kwargs["step"] for call in trial.report.call_args_list]
@@ -501,6 +575,8 @@ def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps():
     assert all(np.isfinite(v) for v in values)
     # should_prune is still consulted on every fold.
     assert trial.should_prune.call_count == 20
+    # No fallback WARNING: the final pooled value is valid.
+    assert "Pooled evaluation of the metric is not available" not in caplog.text
 
 
 def test_evaluate_with_intermediate_reports_pooled_publishes_finite_steps():
@@ -594,6 +670,64 @@ def test_evaluate_with_intermediate_reports_fallback_warns_once(caplog):
                 phase_name="coarse",
             )
             assert pooled == pytest.approx(0.7)
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+
+
+def test_evaluate_with_intermediate_reports_per_fold_fallback_scorer_raises(
+    caplog,
+):
+    """A per-fold fallback scorer exception is swallowed; WARNING still fires.
+
+    Covers the ``except Exception: pass`` branch inside the fold loop (issue
+    #136 review): the per-fold scorer used as the fallback may itself raise
+    (e.g. an unpoolable scorer that breaks on a degenerate fold). The step is
+    skipped (nothing published), and the FINAL return point emits the single
+    fallback WARNING because the pooled value remains impossible.
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(30, 3))
+    y = pd.Series(rng.randn(30))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class ExplodingScorer:
+        """Neither poolable nor per-fold scorable: everything raises."""
+
+        def __call__(self, estimator, Xte, yte):
+            raise RuntimeError("per-fold scoring exploded")
+
+    metrics_mod.reset_pooled_fallback_warnings()
+    with caplog.at_level(logging.WARNING):
+        result = _evaluate_with_intermediate_reports(
+            trial,
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=3,
+            test_size=0.2,
+            random_state=42,
+            scorer=ExplodingScorer(),
+            pool_metric=True,
+            algo_name="ridge",
+            phase_name="coarse",
+        )
+    # No intermediate step could be published (running value stays NaN), and
+    # the final pooled value is impossible too → NaN + one fallback WARNING.
+    assert np.isnan(result)
+    assert trial.report.call_count == 0
     assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
 
 
