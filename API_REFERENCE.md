@@ -847,7 +847,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 
 **Attributes after `fit()`:**
 
-* `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected).
+* `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
 * `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set).
 
 **Categorical encoding**

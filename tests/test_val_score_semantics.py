@@ -927,3 +927,64 @@ def test_loo_median_absolute_error_val_score_is_pooled_not_mae():
     assert trainer.val_score != pytest.approx(
         float(np.mean(np.abs(y - oof))), rel=1e-6
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pooled-fallback WARNING in the final fit (issue #136)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_trainer_pooled_fallback_warns_once_per_algorithm(caplog):
+    """The final-fit pooled fallback emits one WARNING per algorithm.
+
+    With a scorer that exposes no raw metric function the ModelTrainer
+    silently falls back to the per-fold mean — the WARNING must appear once
+    per algorithm (the 'final_fit' phase label), not once per fold.
+    """
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    X, y = _noisy_regression(n=60, p=4, seed=1)
+
+    class NoRawScorer:
+        """A scorer without the private _score_func attributes."""
+
+        def __call__(self, estimator, Xv, yv):
+            return 0.5
+
+    metrics_mod._pooled_fallback_warned.discard(("ridge", "final_fit"))
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "configurable_automl_engine.trainer.get_scorer_object",
+            return_value=NoRawScorer(),
+        ),
+    ):
+        trainer = ModelTrainer(
+            algorithm="ridge",
+            metric="r2",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+        ).fit(X, y)
+
+    assert trainer.val_score is not None
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+    assert "ridge" in caplog.text
+    assert "final_fit" in caplog.text
+    # Once per algorithm and phase, not once per fold.
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+
+
+def test_trainer_no_fallback_warning_on_pooled_path(caplog):
+    """The pooled path of the final fit emits no fallback WARNING."""
+    X, y = _noisy_regression(n=60, p=4, seed=1)
+    with caplog.at_level(logging.WARNING):
+        trainer = ModelTrainer(
+            algorithm="ridge",
+            metric="r2",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+        ).fit(X, y)
+    assert trainer.val_score is not None
+    assert "Pooled evaluation of the metric is not available" not in caplog.text

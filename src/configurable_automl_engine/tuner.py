@@ -87,6 +87,7 @@ from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_non_additive_metric,
     pooled_scorer_value,
+    warn_pooled_fallback_once,
 )
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
@@ -548,6 +549,8 @@ def _evaluate_with_intermediate_reports(
     random_state: int | None,
     scorer: Any,
     pool_metric: bool = False,
+    algo_name: str = "",
+    phase_name: str = "",
 ) -> float:
     """Evaluate the estimator fold by fold, publishing intermediate results.
 
@@ -572,6 +575,10 @@ def _evaluate_with_intermediate_reports(
     similar per-sample means, ``pool_metric=False``) keep publishing the
     cumulative fold mean (which equals the pooled value).
 
+    When the pooled value is impossible (the scorer exposes no raw metric
+    function, or no finite pair remains), a WARNING about the fallback to the
+    per-fold mean is logged once per (``algo_name``, ``phase_name``) pair.
+
     Args:
         trial (Trial): The current Optuna trial.
         estimator (Any): The estimator (possibly a pipeline) to evaluate.
@@ -586,6 +593,10 @@ def _evaluate_with_intermediate_reports(
         pool_metric (bool): Whether the metric is non-additive and must be
             pooled over the accumulated OOF predictions. Defaults to False —
             the legacy cumulative-fold-mean behavior.
+        algo_name (str): The algorithm being evaluated, for the fallback
+            WARNING deduplication.
+        phase_name (str): The pipeline phase, for the fallback WARNING
+            deduplication.
     Returns:
         float: The mean metric value across all folds (for additive metrics)
             or the pooled value over all rows (for non-additive metrics).
@@ -639,6 +650,13 @@ def _evaluate_with_intermediate_reports(
                     scorer, pooled_y_buf, pooled_pred_buf
                 )
             except ValueError:
+                warn_pooled_fallback_once(
+                    algo_name=algo_name or "unknown",
+                    phase_name=phase_name or "untitled_phase",
+                    reason="the pooled value over the accumulated OOF rows "
+                    "cannot be computed (no raw scorer metric function or no "
+                    "valid pairs)",
+                )
                 try:
                     fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
                 except Exception:  # noqa: BLE001, S110 — only a fallback for the pooled value
@@ -668,6 +686,13 @@ def _evaluate_with_intermediate_reports(
         try:
             return pooled_scorer_value(scorer, pooled_y_buf, pooled_pred_buf)
         except ValueError:
+            warn_pooled_fallback_once(
+                algo_name=algo_name or "unknown",
+                phase_name=phase_name or "untitled_phase",
+                reason="the pooled value over the accumulated OOF rows "
+                "cannot be computed (no raw scorer metric function or no "
+                "valid pairs)",
+            )
             return float(np.mean(fold_scores)) if fold_scores else float("nan")
     return float(np.mean(fold_scores)) if fold_scores else float("nan")
 
@@ -682,6 +707,8 @@ def _evaluate_pooled_cv(
     test_size: float,
     random_state: int | None,
     scorer: Any,
+    algo_name: str = "",
+    phase_name: str = "",
 ) -> float:
     """Evaluate a trial pipeline over pooled OOF predictions (non-additive).
 
@@ -706,7 +733,8 @@ def _evaluate_pooled_cv(
 
     If the pooled value cannot be computed (no valid pairs, or the scorer does
     not expose a raw metric function), the mean of the available per-fold
-    values is returned as a defensive fallback.
+    values is returned as a defensive fallback, and a WARNING about the
+    fallback is logged once per (``algo_name``, ``phase_name``) pair.
 
     Args:
         estimator (Any): The estimator (possibly a pipeline) to evaluate.
@@ -718,6 +746,10 @@ def _evaluate_pooled_cv(
             keep a uniform iter_splits call).
         random_state (int | None): Randomness seed.
         scorer (Any): sklearn metric object.
+        algo_name (str): The algorithm being evaluated, for the fallback
+            WARNING deduplication.
+        phase_name (str): The pipeline phase, for the fallback WARNING
+            deduplication.
 
     Returns:
         float: The pooled metric value over all out-of-fold rows.
@@ -775,12 +807,25 @@ def _evaluate_pooled_cv(
             # common path — so per-fold scoring noise (e.g. LOO+R², where
             # every fold R² is undefined) does not pollute the logs, and NO
             # split is iterated or fold re-trained a second time.
+            warn_pooled_fallback_once(
+                algo_name=algo_name or "unknown",
+                phase_name=phase_name or "untitled_phase",
+                reason="the pooled value over the collected OOF rows cannot "
+                "be computed (no valid pairs, or the raw metric function "
+                "raised on the pooled vector)",
+            )
             for yt, yp in fold_pairs:
                 try:
                     fold_scores.append(pooled_scorer_value(scorer, yt, yp))
                 except ValueError:
                     pass
             return float(np.mean(fold_scores)) if fold_scores else float("nan")
+    warn_pooled_fallback_once(
+        algo_name=algo_name or "unknown",
+        phase_name=phase_name or "untitled_phase",
+        reason="the scorer does not expose a raw metric function "
+        "(_score_func/_sign/_kwargs)",
+    )
     return float(np.mean(fold_scores)) if fold_scores else float("nan")
 
 
@@ -904,6 +949,7 @@ class _OptimizeRunner:
         complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
         user_hyperparameter_keys: list[str] | None = None,
         fit_best_model: bool = True,
+        phase_name: str | None = None,
     ) -> None:
         """Store the parameters of a single optimisation run.
 
@@ -977,6 +1023,9 @@ class _OptimizeRunner:
         # the full-data fit is then skipped and the ``model`` field of the
         # returned ``OptimizeResult`` is None.
         self.fit_best_model = fit_best_model
+        # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
+        # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
+        self.phase_name = phase_name
 
         # Names of columns dropped by cleaning uninformative features.
         # Filled in build_trial_pipeline for diagnostics; empty by default.
@@ -1837,6 +1886,8 @@ class _OptimizeRunner:
                 random_state=self.random_state,
                 scorer=self.scorer,
                 pool_metric=self.pool_metric,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
             )
             # If we got +inf (an nrmse error) or NaN, return the worst float
             # (analog of the float32 minimum or float('-inf')).
@@ -1858,6 +1909,8 @@ class _OptimizeRunner:
                 test_size=self.train_test_split_test_size,
                 random_state=self.random_state,
                 scorer=self.scorer,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
             )
             # If we got +inf (an nrmse error) or NaN, return the worst float
             # (analog of the float32 minimum or float('-inf')).
@@ -2264,6 +2317,7 @@ def optimize(
     complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
     user_hyperparameter_keys: list[str] | None = None,
     fit_best_model: bool = True,
+    phase_name: str | None = None,
 ) -> OptimizeResult | None:
     """Run the model hyperparameter optimisation process using Optuna.
 
@@ -2394,6 +2448,11 @@ def optimize(
             (e.g. the training engine's HPO phases — the final model is
             trained by its own trainer): the redundant full-data fit is
             skipped and the ``model`` field of the result is None.
+        phase_name (str | None): The name of the pipeline phase (e.g.
+            'coarse'/'refine') used to deduplicate the WARNING about the
+            fallback from the pooled metric to the per-fold mean (emitted
+            once per algorithm and phase). ``None`` for direct callers — the
+            warning falls back to a generic phase label.
 
     Returns:
         OptimizeResult: The result of the phase — ``model`` (the trained
@@ -2457,4 +2516,5 @@ def optimize(
         complexity_guard_cfg=complexity_guard_cfg,
         user_hyperparameter_keys=user_hyperparameter_keys,
         fit_best_model=fit_best_model,
+        phase_name=phase_name,
     ).run()

@@ -84,6 +84,7 @@ from configurable_automl_engine.training_engine.metrics import (
     oof_rmse,
     pooled_scorer_value,
     to_user_value,
+    warn_pooled_fallback_once,
 )
 from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
 from configurable_automl_engine.validation import (
@@ -1563,9 +1564,23 @@ class ModelTrainer:
                 raw_mean = raw_pooled
             except ValueError:
                 # The pooled value is impossible (no valid pairs); fall back to
-                # the fold mean (RMSE_oof handles its own None semantics).
+                # the fold mean (RMSE_oof handles its own None semantics). The
+                # WARNING is emitted once per (algorithm, 'final_fit').
+                warn_pooled_fallback_once(
+                    algo_name=self.algorithm,
+                    phase_name="final_fit",
+                    reason="the pooled value over the OOF buffer cannot be "
+                    "computed (no raw scorer metric function or no valid "
+                    "pairs)",
+                )
                 raw_mean = float(np.mean(fold_raw))
         else:
+            if pool_primary:
+                warn_pooled_fallback_once(
+                    algo_name=self.algorithm,
+                    phase_name="final_fit",
+                    reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
+                )
             raw_mean = float(np.mean(fold_raw))
         self.val_score = to_user_value(self.metric, raw_mean)
         # User-facing semantics: val_score is a value in user representation,
@@ -1592,8 +1607,23 @@ class ModelTrainer:
                     )
                     raw_values_agg = pooled
                 except ValueError:
+                    warn_pooled_fallback_once(
+                        algo_name=self.algorithm,
+                        phase_name="final_fit",
+                        reason=f"the pooled value for additional metric "
+                        f"'{mname}' cannot be computed (no raw scorer metric "
+                        f"function or no valid pairs)",
+                    )
                     raw_values_agg = float(np.mean(raw_values))
             else:
+                if pool_additive[mname]:
+                    warn_pooled_fallback_once(
+                        algo_name=self.algorithm,
+                        phase_name="final_fit",
+                        reason=f"the OOF buffer contains no finite "
+                        f"(y_true, y_pred) pairs for additional metric "
+                        f"'{mname}'",
+                    )
                 raw_values_agg = float(np.mean(raw_values))
             self.additional_scores[mname] = to_user_value(mname, raw_values_agg)
 

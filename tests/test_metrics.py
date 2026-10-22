@@ -15,6 +15,7 @@ from configurable_automl_engine.training_engine.metrics import (
     to_sklearn_name,
     to_user_value,
     user_direction,
+    warn_pooled_fallback_once,
     NRMSEZeroRangeError,
     _global_nrmse,
     get_global_nrmse_scorer,
@@ -564,3 +565,145 @@ def test_pooled_scorer_value_median_absolute_error():
     assert abs(pooled) != pytest.approx(
         float(np.mean(np.abs(y_true - y_pred))), rel=1e-6
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pooled path availability for every supported comparison_metric (issue #136)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # The full allowed comparison_metric set (API_REFERENCE.md):
+        "nrmse",
+        "rmse",
+        "neg_root_mean_squared_error",
+        "mae",
+        "mse",
+        "r2",
+    ],
+)
+def test_pooled_path_works_for_supported_comparison_metric(name):
+    """Every supported comparison_metric can be pooled on the current sklearn.
+
+    The pooled path reads the private sklearn scorer attributes
+    (``_score_func``, ``_sign``, ``_kwargs``): on the current sklearn version
+    every supported metric produces a ``make_scorer``-compatible object with
+    these attributes, so ``pooled_scorer_value`` never falls back to the
+    per-fold mean for the supported set. Regression guard for issue #136 —
+    a silent metric switch would change the reported value without a trace
+    in the log.
+    """
+    scorer = get_scorer_object(name)
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.2, 1.9, 3.4, 4.1])
+    # The scorer must expose the raw metric function so that the pooled
+    # estimate is possible (otherwise the engine silently falls back).
+    assert getattr(scorer, "_score_func", None) is not None
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    assert np.isfinite(pooled)
+    # The pooled value equals the sign-applied raw metric over the vector.
+    sign = getattr(scorer, "_sign", 1)
+    kwargs = getattr(scorer, "_kwargs", None) or {}
+    raw = scorer._score_func(y_true, y_pred, **kwargs)
+    assert pooled == pytest.approx(float(sign * raw), rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # sklearn-fallback non-additive metrics supported as comparison
+        # metrics through the shared registry (documented in the config).
+        "neg_root_mean_squared_log_error",
+        "d2_absolute_error_score",
+        "neg_max_error",
+        "explained_variance",
+        "neg_median_absolute_error",
+    ],
+)
+def test_pooled_path_works_for_sklearn_non_additive_metrics(name):
+    """Sklearn-fallback non-additive metrics are poolable on the current sklearn.
+
+    Same regression guard as for the explicit registry: the pooled path must
+    not silently degrade to the per-fold mean for any metric that the engine
+    treats as non-additive.
+    """
+    y_true = np.array([1.0, 2.0, 3.0, 4.0])
+    y_pred = np.array([1.2, 1.9, 3.4, 4.1])
+    scorer = get_scorer_object(name)
+    assert getattr(scorer, "_score_func", None) is not None
+    pooled = pooled_scorer_value(scorer, y_true, y_pred)
+    assert np.isfinite(pooled)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pooled-fallback WARNING de-duplication (issue #136)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_warn_pooled_fallback_once_warns_first_time(caplog):
+    """The first fallback for an (algorithm, phase) pair emits a WARNING."""
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    key = ("ridge", "coarse")
+    metrics_mod._pooled_fallback_warned.discard(key)
+    with caplog.at_level(logging.WARNING):
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="coarse",
+            reason="no raw scorer metric function",
+        )
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+    assert "ridge" in caplog.text
+    assert "coarse" in caplog.text
+
+
+def test_warn_pooled_fallback_once_silent_after_first(caplog):
+    """Subsequent fallbacks for the same (algorithm, phase) pair stay silent."""
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    key = ("ridge", "coarse")
+    metrics_mod._pooled_fallback_warned.discard(key)
+    with caplog.at_level(logging.WARNING):
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="coarse",
+            reason="no raw scorer metric function",
+        )
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="coarse",
+            reason="no raw scorer metric function",
+        )
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 1
+
+
+def test_warn_pooled_fallback_once_again_for_other_phase(caplog):
+    """A different phase (or algorithm) triggers the WARNING again."""
+    from configurable_automl_engine.training_engine import metrics as metrics_mod
+
+    metrics_mod._pooled_fallback_warned.discard(("ridge", "coarse"))
+    metrics_mod._pooled_fallback_warned.discard(("ridge", "refine"))
+    with caplog.at_level(logging.WARNING):
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="coarse",
+            reason="r1",
+        )
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="coarse",
+            reason="r2",
+        )
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="ridge",
+            phase_name="refine",
+            reason="r3",
+        )
+        metrics_mod.warn_pooled_fallback_once(
+            algo_name="svr",
+            phase_name="coarse",
+            reason="r4",
+        )
+    assert caplog.text.count("Pooled evaluation of the metric is not available") == 3
