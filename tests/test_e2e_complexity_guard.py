@@ -31,9 +31,7 @@ def _small_frame(n: int = 18, p: int = 5, seed: int = 42) -> pd.DataFrame:
     """Synthetic small regression frame (n rows, p features)."""
     rng = np.random.RandomState(seed)
     X = pd.DataFrame(rng.randn(n, p), columns=[f"f{i}" for i in range(p)])
-    y = pd.Series(
-        2.0 * X["f0"] + 0.5 * X["f1"] + rng.randn(n) * 0.5, name="target"
-    )
+    y = pd.Series(2.0 * X["f0"] + 0.5 * X["f1"] + rng.randn(n) * 0.5, name="target")
     return pd.concat([X, y], axis=1)
 
 
@@ -79,28 +77,36 @@ def test_e2e_small_data_guard_applies_and_reports(caplog):
     assert ("decision_tree", "min_samples_leaf") in params
     assert ("decision_tree", "max_depth") in params
     # XGBoost max_depth was regularized to [1, 3].
-    xgb_depth = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "max_depth"))
+    xgb_depth = next(
+        r for r in records if (r["algo"], r["param"]) == ("xgboosting", "max_depth")
+    )
     assert xgb_depth["after"] == [1.0, 3.0]
     # XGBoost min_child_weight and reg_lambda are restricted on the defaults
     # (issue #132 regression: the parameters were absent from
     # DEFAULT_SPACES['xgboosting'], so their guard rules never fired).
-    xgb_mcw = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "min_child_weight"))
+    xgb_mcw = next(
+        r
+        for r in records
+        if (r["algo"], r["param"]) == ("xgboosting", "min_child_weight")
+    )
     assert xgb_mcw["before"] == [1.0, 10.0]
     assert xgb_mcw["after"][0] == pytest.approx(2.0)
-    xgb_reg = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "reg_lambda"))
+    xgb_reg = next(
+        r for r in records if (r["algo"], r["param"]) == ("xgboosting", "reg_lambda")
+    )
     assert xgb_reg["before"] == [1e-3, 100.0]
     assert xgb_reg["after"][0] == pytest.approx(1.0)
     assert xgb_reg["after"][1] == pytest.approx(100.0)
     # The adapted ranges are visible in the log ("was → became").
-    assert any("max_depth" in rec.message and "→" in rec.message for rec in caplog.records)
+    assert any(
+        "max_depth" in rec.message and "→" in rec.message for rec in caplog.records
+    )
 
 
 def test_e2e_small_data_guard_off_spaces_unchanged():
     """mode='off': the report is absent and XGBoost keeps its wide range."""
     df = _small_frame()
-    cfg = _single_phase_config(
-        {"mode": "off", "lossless": True, "regularize": True}
-    )
+    cfg = _single_phase_config({"mode": "off", "lossless": True, "regularize": True})
     res = train_best_model(cfg, df, target="target")
     assert "complexity_guard" not in res
 
@@ -160,8 +166,7 @@ def test_e2e_large_wide_one_hot_spaces_unchanged():
         assert res is not None, f"{algo}: no valid result"
         # The guard produced NO restrictions: the spaces were unchanged.
         assert not res.complexity_guard, (
-            f"{algo}: guard unexpectedly restricted the space: "
-            f"{res.complexity_guard}"
+            f"{algo}: guard unexpectedly restricted the space: {res.complexity_guard}"
         )
 
 
@@ -407,6 +412,73 @@ def test_e2e_float_min_samples_leaf_engine_wins_does_not_crash(algo):
     # algorithm (HPO completed with a valid score).
     disqualified = res.get("disqualified_algorithms") or {}
     assert algo not in disqualified, f"{algo} disqualified: {disqualified}"
+
+
+def test_e2e_max_depth_uses_resolved_leaf_min_engine_wins():
+    """engine_wins: max_depth is consistent with the resolved leaf range (issue #137).
+
+    With ``user_range_policy='engine_wins'`` a user ``min_samples_leaf=[1, 1]``
+    resolves to the guard range, and the ``max_depth`` rules must use the
+    resolved ``leaf_min`` (not the user's 1), so that ``max_depth`` shrinks
+    to 3–3 rather than the too-wide 3–4 on a tiny dataset. Regression for
+    issue #137: ``_effective_leaf_min`` applied the rules to the user range
+    and ignored ``user_range_policy``.
+    """
+    rng = np.random.RandomState(5)
+    # n=14 (k_fold 5 -> Neff = floor(14*0.8) = 11, small mode).
+    n, p = 14, 5
+    X = pd.DataFrame(rng.randn(n, p), columns=[f"f{i}" for i in range(p)])
+    y = pd.Series(2.0 * X["f0"] + rng.randn(n) * 0.5, name="target")
+    df = pd.concat([X, y], axis=1)
+
+    cfg = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 3, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {
+                "mode": "apply",
+                "user_range_policy": "engine_wins",
+            },
+        },
+        "algorithms": {
+            "decision_tree": {
+                "enable": True,
+                "hyperparameters": {
+                    "min_samples_leaf": [1, 1, "int"],
+                    "max_depth": [3, 20, "int"],
+                },
+            },
+            "ridge": {"enable": True},
+        },
+    }
+    res = train_best_model(cfg, df, target="target")
+    # The guard conflict resolves via engine_wins; neither algorithm is disqualified.
+    disqualified = res.get("disqualified_algorithms") or {}
+    assert "decision_tree" not in disqualified
+
+    # The report documents the resolved ranges and the leaf_min feeding max_depth.
+    records = res.get("complexity_guard", {}).get("parameters", [])
+    dt_records = {r["param"]: r for r in records if r["algo"] == "decision_tree"}
+    if "min_samples_leaf" in dt_records:
+        msl = dt_records["min_samples_leaf"]["after"]
+        # n=11: guard leaf range resolves to [2, floor(11/4)=2].
+        assert msl == [2.0, 2.0], f"min_samples_leaf resolved to {msl}"
+        assert dt_records["min_samples_leaf"].get("leaf_min") == 2.0
+    if "max_depth" in dt_records:
+        md = dt_records["max_depth"]
+        # neff=11, leaf_min=2 -> B: ceil(log2(11/2)) = 3, so max_depth [3, 3].
+        assert md["after"] == [3.0, 3.0], f"max_depth resolved to {md['after']}"
+        assert md.get("leaf_min") == 2.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
