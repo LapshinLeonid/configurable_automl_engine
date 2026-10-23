@@ -937,7 +937,7 @@ Executes a function in parallel across multiple workers with shared memory and d
 | `mode` | `str` | `"threads"` | `"threads"` or `"processes"`. |
 | `timeout` | `float` or `None` | `None` | Global timeout in seconds. Used only in `"processes"` mode (hard: hung workers are force-terminated). `None` — no limit. In `"threads"` mode it is ignored with a warning — a running Python function cannot be interrupted, so a soft timeout did not save time and only discarded ready results. |
 | `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds. Used only in `"processes"` mode. In `"threads"` mode it is ignored with a warning: the deadline counted from submit made queued tasks "expire" before starting. |
-| `shared_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to share via shared memory. |
+| `shared_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to share via shared memory. Data is passed positionally and the index is NOT transferred (the worker always receives a `RangeIndex(0, n)`); worker code must not align `X`/`y` by index. When the free space of the shared-memory file system is insufficient (in Docker/Kubernetes `/dev/shm` defaults to 64 MB), the frame is automatically routed through the disk cache (Parquet, falling back to the system temp directory) or pickle instead of crashing the process with a Bus error (SIGBUS, exit 135). |
 | `disk_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to persist to disk. |
 
 **Returns:** `list[Any]` — results in the same order as inputs; failed tasks return `None`.

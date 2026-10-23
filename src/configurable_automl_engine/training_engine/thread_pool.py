@@ -52,6 +52,21 @@ POLL_INTERVAL = 0.5
 # float64, to avoid precision loss for large PIDs.
 _START_SIGNAL_DTYPE = np.dtype([("start", np.float64), ("pid", np.int64)])
 
+# Free-space safety margin for POSIX shared memory (issue #146). A segment is
+# created with ftruncate and pages are only touched later (by the np.ndarray
+# copy at creation or by a worker's reads): on a tmpfs file system (Docker,
+# Kubernetes and CI default /dev/shm to a 64MB ramdisk; desktop Linux usually
+# gives it half of RAM) an ftruncate that exceeds the available space succeeds
+# and the first touch of a page past the end of the backing store kills the
+# process with SIGBUS (Bus error, exit code 135) — a signal, not a Python
+# exception, so it cannot be caught or handled by the threads-mode fallback.
+# The only reliable protection is a free-space check BEFORE the segment is
+# created (os.statvfs on the file system backing the shared memory) with a
+# conservative margin for the already-used portion of /dev/shm and for page
+# granularity. When the check fails the DataFrame is routed through the disk
+# cache (parquet) or pickle instead.
+_SHM_FREE_SPACE_MARGIN = 0.3  # 30% of a segment's size must remain free
+
 
 def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
     """Return the dtype of an array that ``df.to_numpy()`` would produce.
@@ -150,6 +165,65 @@ def _ints_fit_float64(df: pd.DataFrame) -> bool:
     return True
 
 
+def _shm_backing_path() -> str | None:
+    """Return the path of the file system backing POSIX shared memory.
+
+    POSIX shared memory segments are anonymous tmpfs files mounted at
+    /dev/shm on Linux (the shared_memory module's ``_make_filename`` only
+    exposes the OS-generated random name; the directory comes from the
+    shm_open(3) implementation). macOS lacks the directory-level API
+    entirely, and Windows uses a different mechanism. For the free-space
+    check (issue #146) the closest observable approximation is /dev/shm
+    when it exists, otherwise None (no check possible).
+
+    Returns:
+        str | None: The backing directory (/dev/shm), or None when it
+        cannot be determined.
+    """
+    # A mock /dev/shm in tests is a regular directory: still a valid target
+    # for the check.
+    if os.path.exists("/dev/shm"):
+        return "/dev/shm"
+    return None
+
+
+def _shm_has_free_space(size: int) -> bool:
+    """Whether an SHM segment of ``size`` bytes fits the free space.
+
+    Checks ``os.statvfs`` on the file system backing the shared memory
+    (issue #146): a segment larger than the free space on a tmpfs would be
+    created successfully by ftruncate but kill the process with SIGBUS on
+    the first touch of a page past the end of the backing store (Bus error,
+    exit code 135 — a signal, not a catchable exception). A conservative
+    30% margin is kept free so that this segment never exhausts the tmpfs
+    for the segments still to be created.
+
+    When the backing path cannot be determined (non-Linux POSIX systems),
+    no check is possible and True is returned: the existing behaviour (an
+    attempt that may or may not fail with ENOMEM) is preserved there.
+
+    Args:
+        size: The requested segment size in bytes.
+
+    Returns:
+        bool: True when the segment safely fits (or the check is
+        impossible), False when it must not be created.
+    """
+    path = _shm_backing_path()
+    if path is None:
+        return True
+    try:
+        st = os.statvfs(path)
+    except (OSError, ValueError):
+        # A broken/not-mounted /dev/shm (e.g. a container without the ramdisk
+        # mounted) must not crash the caller: report "no room" so the data
+        # is routed through the disk cache, which can then fall back to
+        # pickle with a warning.
+        return False
+    free = st.f_bavail * st.f_frsize
+    return free >= size * (1.0 + _SHM_FREE_SPACE_MARGIN)
+
+
 class SharedDataFrame:
     """Wrapper for placing a DataFrame in shared memory.
 
@@ -211,6 +285,20 @@ class SharedDataFrame:
 
         if df is not None:
             data = df.to_numpy()
+            # Free-space pre-check (issue #146): on a tmpfs /dev/shm (Docker/
+            # Kubernetes default 64MB) ftruncate succeeds even beyond the
+            # available space and the first touch of the data then kills the
+            # process with SIGBUS (Bus error, exit 135) — a signal that
+            # cannot be caught or handled by the threads-mode fallback. The
+            # check must run before the segment is created; on failure the
+            # caller (run_parallel) routes the frame through the disk cache.
+            if not _shm_has_free_space(data.nbytes):
+                raise OSError(
+                    "not enough free space in shared memory "
+                    f"(need {data.nbytes} bytes, margin "
+                    f"{_SHM_FREE_SPACE_MARGIN:.0%}); "
+                    "use the disk cache or pickle instead"
+                )
             # name=None makes the OS generate a unique segment name, so
             # concurrent creations never collide (no FileExistsError).
             self.shm = shared_memory.SharedMemory(create=True, size=data.nbytes)
@@ -434,8 +522,37 @@ class DiskPersistenceManager:
 
     def __init__(self, use_shm: bool = True):
         # Use /dev/shm on Linux if available, otherwise the standard temp dir
+        # (issue #146: a /dev/shm that cannot hold the file, e.g. the 64MB
+        # Docker default, is detected by free_parquet_space before the Parquet
+        # write; save_df then falls back to the system temp directory).
         self.tmp_dir = "/dev/shm" if use_shm and os.path.exists("/dev/shm") else None
         self.created_files: list[str] = []
+
+    def free_parquet_space(self) -> int:
+        """Free space (bytes) available on the Parquet temp file system.
+
+        Used to decide whether the Parquet cache can fit the data without
+        exhausting the file system (issue #146): on a tmpfs /dev/shm (the
+        Docker/Kubernetes default is 64MB) writing a large Parquet file can
+        otherwise raise a catchable OSError (ENOSPC on write) — unlike the
+        SIGBUS of the SHM path — but the pre-check keeps the disk cache on
+        /dev/shm only when it safely fits.
+
+        Returns:
+            int: Free bytes on the file system of ``tmp_dir``, or 0 when the
+            directory is not usable (e.g. /dev/shm is missing or a broken
+            mount).
+        """
+        if self.tmp_dir is None:
+            # The standard temp directory is always considered usable: the
+            # system temp dir is not a tiny ramdisk, and even a full disk
+            # raises a catchable OSError instead of crashing the process.
+            return 1 << 62
+        try:
+            st = os.statvfs(self.tmp_dir)
+        except (OSError, ValueError):
+            return 0
+        return st.f_bavail * st.f_frsize
 
     def save_df(self, df: pd.DataFrame) -> str:
         """Save a DataFrame to a temporary Parquet file.
@@ -449,8 +566,29 @@ class DiskPersistenceManager:
         Returns:
             str: Absolute path to the created temporary file.
         """
+        # A conservative size estimate: 8 bytes per element + 1KB of Parquet
+        # metadata. Files exceeding the free space on /dev/shm (a 64MB
+        # default in Docker/Kubernetes — issue #146) go to the system temp
+        # directory instead: on a full tmpfs the write would either raise a
+        # catchable ENOSPC (a warning and pickle fallback) or, for the SHM
+        # path, kill the process with SIGBUS.
+        if self.tmp_dir == "/dev/shm":
+            approx = df.shape[0] * df.shape[1] * 8 + 1024
+            if approx > self.free_parquet_space():
+                logger.warning(
+                    "Not enough free space in /dev/shm for the Parquet cache "
+                    f"(~{approx} bytes needed, "
+                    f"{self.free_parquet_space()} available); "
+                    "writing the temporary file to the system temp directory "
+                    "instead"
+                )
+                target_dir = None  # the standard system temporary directory
+            else:
+                target_dir = self.tmp_dir
+        else:
+            target_dir = self.tmp_dir
 
-        fd, path = tempfile.mkstemp(suffix=".parquet", dir=self.tmp_dir)
+        fd, path = tempfile.mkstemp(suffix=".parquet", dir=target_dir)
         os.close(fd)
         # Register the path right after creation: if to_parquet fails halfway
         # (e.g. pyarrow rejects "dirty" data), the orphaned temp file must
@@ -914,19 +1052,49 @@ def run_parallel(
             shm_cache: dict[int, SharedDataFrame] = {}
             # The same applies to the disk fallback: one Parquet file per object.
             disk_cache: dict[int, str] = {}
+            # DataFrames that are SHM-compatible but cannot be placed into shared
+            # memory (not enough free space — issue #146) are routed through the
+            # disk cache: remembered so that the failed attempt is not repeated
+            # for every task that shares the same object.
+            shm_failed: set[int] = set()
 
             for args, kwargs in zip(args_seq, kwargs_seq):
                 new_args = list(args)
                 curr_shm_info = {}  # Index -> (name, shape, dtype, columns)
                 for idx in set(target_shm_indices) | set(target_disk_indices):
                     if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                        if idx in target_shm_indices and SharedDataFrame.is_compatible(
-                            new_args[idx]
+                        df_obj = new_args[idx]
+                        if (
+                            idx in target_shm_indices
+                            and id(df_obj) not in shm_failed
+                            and SharedDataFrame.is_compatible(df_obj)
                         ):
-                            df_obj = new_args[idx]
                             shm_wrapper = shm_cache.get(id(df_obj))
                             if shm_wrapper is None:
-                                shm_wrapper = SharedDataFrame(df_obj)
+                                try:
+                                    shm_wrapper = SharedDataFrame(df_obj)
+                                except OSError as shm_err:
+                                    # Not enough free space in the SHM file
+                                    # system (issue #146): creating the segment
+                                    # here would later kill the process with
+                                    # SIGBUS (Bus error, exit 135) when the
+                                    # data pages are touched. Route this frame
+                                    # through the disk cache instead — save_df
+                                    # itself moves the file to the system temp
+                                    # directory when /dev/shm cannot hold it.
+                                    shm_failed.add(id(df_obj))
+                                    logger.warning(
+                                        "Shared memory transfer unavailable "
+                                        "(%s); routing the dataframe through "
+                                        "the disk cache instead",
+                                        shm_err,
+                                    )
+                                    path = disk_cache.get(id(df_obj))
+                                    if path is None:
+                                        path = persistence_manager.save_df(df_obj)
+                                        disk_cache[id(df_obj)] = path
+                                    new_args[idx] = path
+                                    continue
                                 shm_cache[id(df_obj)] = shm_wrapper
                                 shm_refs.append(shm_wrapper)
                             # Save the metadata for passing to the worker
@@ -938,7 +1106,6 @@ def run_parallel(
                             )
                             new_args[idx] = None  # We do not pass the object itself
                         else:
-                            df_obj = new_args[idx]
                             path = disk_cache.get(id(df_obj))
                             if path is None:
                                 path = persistence_manager.save_df(df_obj)

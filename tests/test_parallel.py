@@ -2523,3 +2523,404 @@ if __name__ == "__main__":
             f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
         )
         assert "OK" in proc.stdout
+
+
+# ═══════════════════════════════════════════════════════════
+#  Issue #146: SHM free-space pre-check (os.statvfs) — data
+#  bigger than the /dev/shm tmpfs must not crash the main
+#  process with SIGBUS (Bus error, exit 135)
+# ═══════════════════════════════════════════════════════════
+
+
+def test_shm_backing_path_uses_dev_shm(monkeypatch):
+    """The check targets /dev/shm when it exists (Linux layout)."""
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool.os.path.exists",
+        lambda path: path == "/dev/shm",
+    )
+    assert thread_pool._shm_backing_path() == "/dev/shm"
+
+
+def test_shm_backing_path_missing_dev_shm_returns_none(monkeypatch):
+    """No /dev/shm (e.g. a minimal container without the mount) → None."""
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool.os.path.exists",
+        lambda path: False,
+    )
+    assert thread_pool._shm_backing_path() is None
+
+
+def test_shm_has_free_space_no_backing_path_returns_true(monkeypatch):
+    """No resolvable backing directory → no check possible → allow SHM.
+
+    On platforms where the shared-memory backing directory cannot be
+    determined (e.g. macOS), the pre-check must not block SHM: the existing
+    behaviour (an attempt that may fail with ENOMEM) is preserved.
+    """
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: None,
+    )
+    assert thread_pool._shm_has_free_space(10**9) is True
+
+
+def test_shm_has_free_space_enough_room(monkeypatch):
+    """A segment smaller than the free space (with margin) fits."""
+    st = MagicMock()
+    # 1 GiB free, 4096-byte fragment size
+    st.f_bavail = 262144
+    st.f_frsize = 4096
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: "/dev/shm",
+    )
+    monkeypatch.setattr(os, "statvfs", lambda path: st)
+    assert thread_pool._shm_has_free_space(256 * 1024 * 1024) is True
+
+
+def test_shm_has_free_space_not_enough_room(monkeypatch):
+    """A segment larger than the free space must be rejected."""
+    st = MagicMock()
+    st.f_bavail = 16  # 64 KiB free
+    st.f_frsize = 4096
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: "/dev/shm",
+    )
+    monkeypatch.setattr(os, "statvfs", lambda path: st)
+    # 1 MiB > 64 KiB free → rejected even without the margin
+    assert thread_pool._shm_has_free_space(1024 * 1024) is False
+
+
+def test_shm_has_free_space_margin_enforced(monkeypatch):
+    """The 30% margin is applied: a segment close to the free space is rejected."""
+    st = MagicMock()
+    # Exactly 100 bytes free
+    st.f_bavail = 25
+    st.f_frsize = 4
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: "/dev/shm",
+    )
+    monkeypatch.setattr(os, "statvfs", lambda path: st)
+    # 80 bytes would fit without a margin but not with the 30% margin
+    assert thread_pool._shm_has_free_space(80) is False
+    # 40 bytes fits with the margin (40 * 1.3 = 52 <= 100)
+    assert thread_pool._shm_has_free_space(40) is True
+
+
+def test_shm_has_free_space_statvfs_error_rejects(monkeypatch):
+    """A broken /dev/shm statvfs must report no room (data → disk fallback)."""
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: "/dev/shm",
+    )
+    monkeypatch.setattr(
+        os, "statvfs", lambda path: (_ for _ in ()).throw(OSError("broken mount"))
+    )
+    assert thread_pool._shm_has_free_space(1) is False
+
+
+def test_shared_dataframe_creation_no_room_raises_oserror(monkeypatch):
+    """SharedDataFrame(df) on a full /dev/shm raises OSError, not SIGBUS.
+
+    The pre-check must run BEFORE the segment is created: creating the
+    segment on a tmpfs that cannot hold the data would not fail (ftruncate
+    succeeds) and the process would die with SIGBUS (Bus error, exit 135)
+    on the first touch of the data.
+    """
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_has_free_space",
+        lambda size: False,
+    )
+    with pytest.raises(OSError, match="not enough free space in shared memory"):
+        SharedDataFrame(df=df)
+
+
+def test_run_parallel_no_room_routes_frame_to_disk(caplog, monkeypatch):
+    """A frame that does not fit into SHM goes through the disk cache.
+
+    run_parallel must not raise and must not die with SIGBUS: the frame is
+    routed through parquet (which may itself fall back to the system temp
+    directory) and the worker receives the same values (issue #146).
+    """
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
+    assert SharedDataFrame.is_compatible(df) is True
+
+    real_has_free_space = thread_pool._shm_has_free_space
+
+    def fake_has_free_space(size: int) -> bool:
+        if size == df.to_numpy().nbytes:
+            return False  # the df does not fit into SHM
+        return real_has_free_space(size)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_has_free_space",
+        fake_has_free_space,
+    )
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            process_df_task,
+            args_seq=[(df, 2)],
+            mode="processes",
+            shared_args_indices=[0],
+        )
+
+    assert results == [42]  # (1+2+3+4+5+6) * 2
+    assert "routing the dataframe through the disk cache instead" in caplog.text
+
+
+def test_run_parallel_broken_shm_statvfs_routes_frame_to_disk(caplog, monkeypatch):
+    """A broken /dev/shm statvfs must not crash the run.
+
+    When statvfs cannot be read (e.g. a container without the /dev/shm
+    mount), _shm_has_free_space reports no room; the frame goes through the
+    disk cache and the results stay correct (issue #146).
+    """
+
+    def broken_statvfs(path):
+        raise OSError("broken mount")
+
+    monkeypatch.setattr("os.statvfs", broken_statvfs)
+    df = pd.DataFrame({"a": [2, 4, 6]})
+    results = run_parallel(
+        process_df_task,
+        args_seq=[(df, 2)],
+        mode="processes",
+        shared_args_indices=[0],
+    )
+    assert results == [24]  # (2+4+6) * 2
+
+
+def test_run_parallel_no_room_disk_full_falls_back_to_pickle(caplog, monkeypatch):
+    """Full SHM + failing disk write → the pickle fallback still works.
+
+    The 64MB /dev/shm can be too small for both the SHM segment and the
+    Parquet cache; the disk write then fails with a catchable error and the
+    whole preparation falls back to passing the dataframes through pickle
+    (the pre-SHM behaviour), so run_parallel never crashes (issue #146).
+    """
+    df = pd.DataFrame({"a": [1, 5]})
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_has_free_space",
+        lambda size: False,
+    )
+
+    def failing_save_df(self, dframe):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "DiskPersistenceManager.save_df",
+        failing_save_df,
+    )
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            process_df_task,
+            args_seq=[(df, 3)],
+            mode="processes",
+            shared_args_indices=[0],
+        )
+
+    assert results == [18]  # (1+5) * 3
+    assert "transferring dataframes through pickle instead" in caplog.text
+    assert "disk full" in caplog.text
+
+
+def test_run_parallel_shm_segment_created_before_failure_still_cleaned(
+    caplog, monkeypatch
+):
+    """SHM segments created before a free-space failure are not leaked.
+
+    When the no-room frame appears after an SHM-compatible one (which
+    already created its segment), the later failure must not leak the
+    earlier segment: the finally-block cleanup unlinks it (issue #146).
+    """
+    df1 = pd.DataFrame({"a": [1, 2, 3]})  # fits → SHM segment created (24 B)
+    df2 = pd.DataFrame({"b": [4, 5, 6], "c": [7, 8, 9]})  # 48 B → no room
+
+    real_has_free_space = thread_pool._shm_has_free_space
+
+    def fake_has_free_space(size: int) -> bool:
+        if size == df2.to_numpy().nbytes:
+            return False
+        return real_has_free_space(size)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_has_free_space",
+        fake_has_free_space,
+    )
+
+    imported_names: list[str] = []
+
+    class TrackingSharedDataFrame(SharedDataFrame):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if args and isinstance(args[0], pd.DataFrame):
+                imported_names.append(self.name)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame",
+        TrackingSharedDataFrame,
+    )
+
+    results = run_parallel(
+        mixed_task_global,
+        args_seq=[(df1, df2)],
+        mode="processes",
+        shared_args_indices=[0, 1],
+    )
+    assert results == [5]  # df1.iloc[0,0] + df2.iloc[0,0] == 1 + 4
+    assert len(imported_names) == 1  # only df1 entered SHM
+
+    # The SHM segment created for df1 is unlinked by the cleanup: attaching
+    # to it by name must fail afterwards.
+    for name in imported_names:
+        assert name is not None
+        with pytest.raises((FileNotFoundError, OSError)):
+            shared_memory.SharedMemory(name=name)
+
+
+def test_disk_persistence_manager_free_parquet_space_no_tmp_dir():
+    """No tmp_dir (system temp) → considered always usable."""
+    manager = DiskPersistenceManager(use_shm=False)
+    assert manager.tmp_dir is None
+    assert manager.free_parquet_space() == 1 << 62
+
+
+def test_disk_persistence_manager_free_parquet_space_dev_shm(monkeypatch):
+    """free_parquet_space reads os.statvfs on /dev/shm."""
+    st = MagicMock()
+    st.f_bavail = 100
+    st.f_frsize = 4096
+    monkeypatch.setattr(os, "statvfs", lambda path: st)
+    manager = DiskPersistenceManager(use_shm=True)
+    assert manager.tmp_dir == "/dev/shm"
+    assert manager.free_parquet_space() == 409600
+
+
+def test_disk_persistence_manager_free_parquet_space_statvfs_error(monkeypatch):
+    """A broken /dev/shm statvfs → free_parquet_space returns 0."""
+    monkeypatch.setattr(
+        os, "statvfs", lambda path: (_ for _ in ()).throw(OSError("broken"))
+    )
+    manager = DiskPersistenceManager(use_shm=True)
+    assert manager.free_parquet_space() == 0
+
+
+def test_disk_persistence_manager_full_dev_shm_uses_system_tmp(monkeypatch):
+    """A parquet bigger than the /dev/shm free space goes to the system tmp.
+
+    The parquet cache must not exhaust the tiny 64MB /dev/shm of Docker/
+    Kubernetes: the file is written to the system temp directory instead
+    and the result is readable (issue #146).
+    """
+    df = pd.DataFrame({"a": range(100), "b": np.arange(100.0)})
+
+    real_tempfile_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        nonlocal_holder["dir"] = kwargs.get("dir")
+        return real_tempfile_mkstemp(*args, **kwargs)
+
+    nonlocal_holder: dict[str, object] = {}
+
+    manager = DiskPersistenceManager(use_shm=True)
+    manager.tmp_dir = "/dev/shm"
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            side_effect=recording_mkstemp,
+        ),
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "DiskPersistenceManager.free_parquet_space",
+            lambda self: 1024,  # only 1 KiB free on /dev/shm
+        ),
+    ):
+        path = manager.save_df(df)
+        try:
+            assert nonlocal_holder["dir"] is None  # system temp directory
+            assert os.path.exists(path)
+            assert not path.startswith("/dev/shm/")
+            recovered = pd.read_parquet(path)
+            pd.testing.assert_frame_equal(recovered, df)
+        finally:
+            manager.cleanup()
+
+
+def test_disk_persistence_manager_dev_shm_small_file_stays_on_dev_shm(
+    monkeypatch,
+):
+    """A parquet that fits into /dev/shm stays there."""
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    real_tempfile_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        nonlocal_holder["dir"] = kwargs.get("dir")
+        return real_tempfile_mkstemp(*args, **kwargs)
+
+    nonlocal_holder: dict[str, object] = {}
+
+    manager = DiskPersistenceManager(use_shm=True)
+    manager.tmp_dir = "/dev/shm"
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            side_effect=recording_mkstemp,
+        ),
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "DiskPersistenceManager.free_parquet_space",
+            lambda self: 1 << 30,  # plenty of room on /dev/shm
+        ),
+    ):
+        path = manager.save_df(df)
+        try:
+            assert nonlocal_holder["dir"] == "/dev/shm"
+            assert path.startswith("/dev/shm/")
+        finally:
+            manager.cleanup()
+
+
+def test_run_parallel_large_processes_with_forced_no_disk_uses_pickle(
+    caplog, monkeypatch
+):
+    """SHM free-space failure + parquet failing → pickle fallback with warning.
+
+    End-to-end check that the run completes (no SIGBUS) when neither SHM nor
+    the disk cache can hold the data: the frames are passed through pickle
+    and the results are identical (issue #146).
+    """
+    df = pd.DataFrame({"a": [10, 20, 30]})
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_has_free_space",
+        lambda size: False,
+    )
+
+    def failing_save_df(self, dframe):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "DiskPersistenceManager.save_df",
+        failing_save_df,
+    )
+    with caplog.at_level(logging.WARNING):
+        results = run_parallel(
+            df_row_count, args_seq=[(df,)], mode="processes",
+            shared_args_indices=[0]
+        )
+    assert results == [3]
+    assert "transferring dataframes through pickle instead" in caplog.text
