@@ -336,6 +336,12 @@ def _validate_data(X: Any, y: Any) -> None:
             "y must be a numeric vector (a numpy.ndarray, pandas.Series or "
             "pandas.DataFrame of numbers)"
         ) from err
+    if y_float.size != len(X):
+        raise InvalidDataError(
+            "y must be a single-column target vector (a numpy.ndarray of "
+            f"shape (n,), a pandas.Series or a one-column pandas.DataFrame); "
+            f"got {y_float.size} values for {len(X)} rows"
+        )
     if not np.all(np.isfinite(y_float)):
         n_non_finite = int(np.sum(~np.isfinite(y_float)))
         raise InvalidDataError(

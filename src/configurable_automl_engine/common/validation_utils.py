@@ -350,6 +350,11 @@ def check_target_numeric(y: Any) -> None:
         raise ValueError(
             f"Target column '{getattr(y, 'name', 'y')}' must be numeric"
         ) from err
+    if y_float.size != len(y):
+        raise ValueError(
+            f"Target column '{getattr(y, 'name', 'y')}' must be a single "
+            f"column of numbers; got {y_float.size} values for {len(y)} rows"
+        )
     if not np.all(np.isfinite(y_float)):
         n_non_finite = int(np.sum(~np.isfinite(y_float)))
         raise ValueError(

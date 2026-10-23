@@ -342,6 +342,25 @@ def test_validate_data_y_dataframe_column_is_validated():
         hyperopt._validate_data(X, y_bad)
 
 
+def test_validate_data_multi_column_y_rejected():
+    """A multi-column y (2D ndarray / 2-column DataFrame) is rejected.
+
+    Such a target passes the type/size checks but would silently break the
+    per-fold evaluation (the folds receive a matrix instead of a vector) with
+    an unclear error — fail fast with a clear message instead.
+    """
+    X = np.zeros((5, 2))
+    y_2d = np.zeros((5, 2))
+    with pytest.raises(hyperopt.InvalidDataError, match="single-column target"):
+        hyperopt._validate_data(X, y_2d)
+
+    y_2col = pd.DataFrame(
+        {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+    with pytest.raises(hyperopt.InvalidDataError, match="single-column target"):
+        hyperopt._validate_data(X, y_2col)
+
+
 def test_optimize_rejects_nan_in_y_before_any_trial(toy_data):
     """optimize() fails fast on a NaN target instead of spending the HPO budget.
 

@@ -355,6 +355,19 @@ def test_prepare_dataset_rejects_non_numeric_target():
         prepare_dataset(cfg, df, "target")
 
 
+def test_prepare_dataset_rejects_multi_column_target():
+    """prepare_dataset fails fast when the target column is not a single vector."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    df = _df(n_rows=10)
+    # A duplicated column name: indexing "target" returns a 2-column DataFrame.
+    data = np.column_stack([df.to_numpy(), df["target"].to_numpy()])
+    df_dup = pd.DataFrame(
+        data, columns=["f0", "f1", "target", "target"]
+    )
+    with pytest.raises(ValueError, match="single column"):
+        prepare_dataset(cfg, df_dup, "target")
+
+
 def test_prepare_dataset_detects_feature_types():
     df = pd.DataFrame(
         {
