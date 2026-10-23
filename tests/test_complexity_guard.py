@@ -861,3 +861,84 @@ def test_merge_complexity_guard_records_one_per_parameter():
     assert sorted(by_key[("decision_tree", "max_depth")]["levels"]) == ["A", "B"]
     assert by_key[("xgboosting", "max_depth")]["after"] == [1.0, 3.0]
     assert by_key[("xgboosting", "max_depth")]["levels"] == ["B"]
+
+
+# ─────────────────── step-grid alignment (issue #139) ──────────────────────── #
+
+
+def test_guard_n_estimators_aligns_high_to_step_grid():
+    """A stepped n_estimators range is aligned to its step grid (issue #139).
+
+    The time cap tightens [50, 800] (step 50) to [50, 300]: 300 lies on the
+    step-50 grid, so the range stays. Regression scenario: with a step of 100
+    the same cap produces [50, 300] whose width is not divisible by 100 —
+    Optuna silently narrows the range to [50, 250]. The guard must store the
+    aligned range [50, 250] and document it in the log record.
+    """
+    space = {"n_estimators": _entry(50, 800, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    # (300 - 50) % 100 != 0 -> aligned to low + 2*100 = 250.
+    assert (entry.config.low, entry.config.high) == (50, 250)
+    assert any(log["after"] == [50.0, 250.0] for log in logs)
+
+
+def test_guard_already_divisible_step_unchanged():
+    """A capped high that lies on the step grid stays unchanged."""
+    space = {"n_estimators": _entry(50, 800, "int", 50)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    # (300 - 50) % 50 == 0 -> high stays 300.
+    assert (entry.config.low, entry.config.high) == (50, 300)
+
+
+def test_guard_empty_step_grid_fixes_value():
+    """An empty step grid after a rule collapses to a single grid value.
+
+    The user range [250, 800] with a step of 100 is capped to [250, 300] by
+    the time rule. The step-100 grid anchored at 250 contains no value above
+    250 within the range (the next grid value 350 exceeds the cap), so the
+    parameter is fixed at 250 — the only value Optuna could sample.
+    """
+    space = {"n_estimators": _entry(250, 800, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    assert (entry.config.low, entry.config.high) == (250, 250)
+    assert any(log.get("fixed") for log in logs)
+
+
+def test_guard_step_grid_alignment_preserves_type_and_scale():
+    """Alignment keeps the int type and does not touch log-scale floats."""
+    space = {
+        "n_estimators": _entry(100, 800, "int", 100),
+        "reg_lambda": _entry(1e-3, 100.0, "float_log"),
+    }
+    adjusted, _ = apply_complexity_guard(
+        space, "xgboosting", n=15, p=5, config=_default_cfg()
+    )
+    n_est = adjusted["n_estimators"]
+    assert isinstance(n_est.config, IntSpace)
+    # (300 - 100) % 100 == 0 -> stays 300.
+    assert (n_est.config.low, n_est.config.high) == (100, 300)
+    reg = adjusted["reg_lambda"]
+    assert isinstance(reg.config, FloatSpace)
+    assert reg.config.type == "float_log"
+    assert reg.config.low == pytest.approx(1.0)
+    assert reg.config.high == pytest.approx(100.0)
+
+
+def test_guard_step_alignment_does_not_mutate_input():
+    """Step alignment inside the guard never mutates the source entry."""
+    space = {"n_estimators": _entry(50, 800, "int", 100)}
+    original = space["n_estimators"]
+    apply_complexity_guard(space, "random_forest", n=15, p=5, config=_default_cfg())
+    assert (original.config.low, original.config.high) == (50, 800)
+    assert original.config.step == 100

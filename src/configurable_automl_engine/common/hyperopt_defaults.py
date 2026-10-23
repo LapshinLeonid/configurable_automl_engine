@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import (
     Annotated,
     Any,
@@ -193,6 +194,80 @@ class SearchSpaceEntry(BaseModel):
         if self.step is not None:
             res.append(self.step)
         return res
+
+
+def align_high_to_step(low: float, high: float, step: float) -> float:
+    """Align ``high`` to the step grid anchored at ``low``.
+
+    Optuna computes the effective upper bound of a stepped distribution as
+    ``low + floor((high - low) / step) * step`` using exact decimal
+    arithmetic (``suggest_int``/``suggest_float`` with a step). A range whose
+    ``(high - low)`` is not divisible by ``step`` is silently narrowed by
+    Optuna, which skews the search away from the configured range. This
+    helper applies the same alignment so that the bounds stored in a
+    ``SearchSpaceEntry`` always describe the grid Optuna actually searches.
+
+    Args:
+        low: The lower bound (the grid anchor; itself stays on the grid).
+        high: The upper bound to align.
+        step: The grid step; must be positive.
+
+    Returns:
+        float: ``low + floor((high - low) / step) * step`` computed with
+            exact decimal arithmetic (mirrors Optuna's internal adjustment).
+    """
+    d_high = Decimal(str(high))
+    d_low = Decimal(str(low))
+    d_step = Decimal(str(step))
+    d_r = d_high - d_low
+    d_aligned = (d_r // d_step) * d_step + d_low
+    return float(d_aligned)
+
+
+def align_entry_bounds(entry: SearchSpaceEntry) -> SearchSpaceEntry:
+    """Return a deep copy of ``entry`` whose bounds are aligned to the step grid.
+
+    After the bounds of a stepped numeric range are changed (clipping,
+    the complexity guard), the upper bound may no longer lie on the step
+    grid anchored at the lower bound: e.g. ``n_estimators`` 50–1000 with a
+    step of 100 clipped to 50–300 yields ``(300 - 50) % 100 != 0`` and
+    Optuna silently shifts the upper bound to 250. This helper re-aligns
+    ``high`` to the grid (``high = low + floor((high - low) / step) * step``)
+    exactly as Optuna does. When the aligned range becomes empty
+    (``aligned_high < low``), the range collapses to the single grid value
+    ``low`` — the parameter is fixed, which is the value Optuna would
+    otherwise sample for such a degenerate range.
+
+    Entries without a step, categorical entries and constant values are
+    returned as a deep copy unchanged (no alignment applies). The original
+    entry is never mutated.
+
+    Args:
+        entry: The ``SearchSpaceEntry`` (or any object) to align.
+
+    Returns:
+        SearchSpaceEntry: A deep copy with the upper bound aligned to the
+            step grid (or unchanged for step-less/categorical entries).
+    """
+    config = entry.config
+    if not isinstance(config, (IntSpace, FloatSpace)) or config.step is None:
+        return entry.model_copy(deep=True)
+
+    low = float(config.low)
+    high = float(config.high)
+    step = float(config.step)
+    # An empty grid collapses to the anchor value: the range is fixed at the
+    # single grid point (the only value Optuna could ever sample).
+    aligned_high = max(float(align_high_to_step(low, high, step)), low)
+
+    new_entry = entry.model_copy(deep=True)
+    if isinstance(config, IntSpace):
+        new_entry.config = config.model_copy(
+            update={"low": int(low), "high": int(aligned_high)}
+        )
+    else:
+        new_entry.config = config.model_copy(update={"low": low, "high": aligned_high})
+    return new_entry
 
 
 # Common parameters for Poisson, Gamma and Tweedie regressors
@@ -439,6 +514,10 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
     1. Avoids mutating global state through a deep copy (Pydantic model_copy).
     2. Guarantees that both low and high do not exceed the physical limit of the data.
     3. Preserves data types (int/float) according to the original configuration.
+    4. Re-aligns the clipped upper bound to the step grid of a stepped range
+       (e.g. an int step) so that the stored range is exactly the grid Optuna
+       searches; an empty grid collapses to a single value (the parameter is
+       fixed).
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive. Got {n_samples}")
@@ -481,6 +560,10 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
                 new_entry.config = config.model_copy(
                     update={"low": new_low, "high": new_high}
                 )
+
+            # 5. Re-align the upper bound to the step grid (a clipped high may
+            #    no longer lie on the grid; Optuna would silently narrow it).
+            new_entry = align_entry_bounds(new_entry)
 
         clipped_space[param] = new_entry
 

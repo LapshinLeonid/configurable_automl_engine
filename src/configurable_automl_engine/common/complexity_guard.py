@@ -51,6 +51,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,
+    align_entry_bounds,
 )
 
 # ─────────────────────────────── configuration ─────────────────────────────── #
@@ -790,6 +791,12 @@ def _build_entry(
 ) -> SearchSpaceEntry:
     """Build a deep-copied entry with the new bounds preserving type/log scale.
 
+    The upper bound is re-aligned to the step grid of a stepped range (e.g.
+    an int step): a rule may compute ``high`` that does not lie on the grid,
+    and Optuna would silently narrow such a range (``high`` is shifted down
+    to the last grid point). When the aligned grid becomes empty, the range
+    collapses to a single grid value — the parameter is fixed.
+
     Args:
         entry: The source entry.
         low: The new lower bound.
@@ -806,7 +813,7 @@ def _build_entry(
         low_i, high_i = round(low), round(high)
         low_i = min(low_i, high_i)
         new_entry.config = config.model_copy(update={"low": low_i, "high": high_i})
-    return new_entry
+    return align_entry_bounds(new_entry)
 
 
 def _domain_for_param(
@@ -945,12 +952,22 @@ def _apply_rule_to_entry(
         if not changed and not conflict:
             return entry, None
         new_entry = _build_entry(entry, *after)
+        # The record documents the FINAL bounds of the parameter: for a
+        # stepped range the upper bound may be re-aligned to the step grid
+        # inside ``_build_entry`` (``after`` would otherwise claim a range
+        # Optuna silently narrows).
+        final_config = new_entry.config
+        if isinstance(final_config, (IntSpace, FloatSpace)):
+            final_after = (float(final_config.low), float(final_config.high))
+        else:
+            # Unreachable: ``_build_entry`` is only called on numeric ranges.
+            final_after = after
         return new_entry, {
             "before": list(before),
-            "after": list(after),
+            "after": list(final_after),
             "conflict": conflict,
             "applied": True,
-            "fixed": after[0] == after[1],
+            "fixed": final_after[0] == final_after[1],
         }
 
     # Default parameter: the target range replaces the default one. If the
@@ -960,12 +977,20 @@ def _apply_rule_to_entry(
     if before == after:
         return entry, None
     new_entry = _build_entry(entry, *after)
+    # The record documents the FINAL bounds (the upper bound may be
+    # re-aligned to the step grid inside ``_build_entry``).
+    final_config = new_entry.config
+    if isinstance(final_config, (IntSpace, FloatSpace)):
+        final_after = (float(final_config.low), float(final_config.high))
+    else:
+        # Unreachable: ``_build_entry`` is only called on numeric ranges.
+        final_after = after
     return new_entry, {
         "before": list(before),
-        "after": list(after),
+        "after": list(final_after),
         "conflict": False,
         "applied": True,
-        "fixed": after[0] == after[1],
+        "fixed": final_after[0] == final_after[1],
     }
 
 
