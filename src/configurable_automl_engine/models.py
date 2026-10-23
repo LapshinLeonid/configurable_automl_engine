@@ -408,7 +408,10 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     derived from the estimator constructor signature (same criterion as
     :func:`clean_hyperparameters`) plus the legacy parameter names from
     :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to a still-existing
-    constructor parameter.
+    constructor parameter. Tuner-level data-adapter hints are added as
+    documented exceptions: ``kernel_type`` for
+    ``gaussian_process_regression``, ``feature_index`` for
+    ``isotonic_regression``.
 
     Returns ``None`` when validation must be skipped:
     - the algorithm is unknown or its optional dependency is missing

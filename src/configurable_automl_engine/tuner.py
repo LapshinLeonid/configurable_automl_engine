@@ -2314,8 +2314,15 @@ class _OptimizeRunner:
             low = 1.0
         elif param == "feature_index":
             # The ordinal column index consumed by IsotonicDataTransformer:
-            # the natural lower bound is 0 (the first feature).
+            # the natural domain spans [0, n_features - 1] — neither side can
+            # be pushed beyond it even by widening the search range.
             low = 0.0
+            n_features = int(
+                self.n_features_eff
+                if self.preprocessor is not None
+                else getattr(self.X, "shape", (0, 1))[1]
+            )
+            high = float(max(0, n_features - 1))
         return low, high
 
     def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
