@@ -22,11 +22,13 @@ import logging
 import sys
 from pathlib import Path
 
+import optuna
+
 # Repository root — so that imports of benchmarks.* work regardless of the
 # current working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.complexity_guard_benchmark import (  # noqa: E402
+from benchmarks.complexity_guard_benchmark import (
     SMALL_DATASETS,
     check_acceptance,
     render_table,
@@ -37,8 +39,10 @@ from benchmarks.complexity_guard_benchmark import (  # noqa: E402
 def main() -> int:
     """Run the benchmark, print the table, and return the result code."""
     # Optuna INFO logs (every trial) clutter the table — keep only warnings
-    # and errors.
+    # and errors. The engine may reset the optuna logger verbosity during
+    # optimize(), so mute both the stdlib logger and optuna's own verbosity.
     logging.getLogger("optuna").setLevel(logging.WARNING)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     print("Complexity Guard: regression benchmark on small datasets")
     print("Variants: baseline = guard off; target   = guard apply\n")
@@ -58,4 +62,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

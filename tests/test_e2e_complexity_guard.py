@@ -6,13 +6,15 @@ Covers the acceptance criteria:
 2. The final report of ``train_best_model`` contains the ``complexity_guard``
    section with the adapted parameter table.
 3. XGBoost training time with the guard is markedly lower than without it
-   (fewer, shallower trees).
+   (fewer, shallower trees): the best-of-three guard run is at most 75% of
+   the unguarded one.
 4. Multi-phase configs (TPE history transfer between phases) work without
    ``HPOHistoryError`` — the guard is deterministic between phases.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -283,22 +285,45 @@ def test_e2e_user_int_max_features_not_collapsed():
 
 @pytest.mark.skipif(not is_installed("xgboost"), reason="xgboost not installed")
 def test_e2e_xgboost_time_with_guard_markedly_lower():
-    """XGBoost HPO time on small data is not worse with the guard.
+    """XGBoost HPO time on small data is markedly lower with the guard.
 
     With the guard, XGBoost searches max_depth in [1, 3] and caps
     n_estimators at 300, so the trained models are cheaper than without
     the guard (deep trees up to depth 10, up to 800 estimators). The
-    assertion is on the best-of-two runs of each mode (short runs are
-    noisy) and bounds the guard run at 1.5x of the unguarded one — a
-    "markedly lower" budget in practice, while still leaving headroom
-    for CI noise.
+    assertion is on the best-of-three runs of each mode (short runs are
+    noisy) and requires a REAL reduction: ``time_on <= 0.75 * time_off``,
+    not just "no slowdown" (the old 1.5x bound allowed a 50% slowdown).
+    The 0.75 bound is calibrated on the current XGBoost default space
+    (min_child_weight/reg_lambda included): measured best-of-3 ratios
+    0.57-0.68 across seeds, margin ~7-18%.
     """
-    df = _small_frame(n=60, p=5)
+    df = _small_frame(n=40, p=5)
+    # XGBoost-only config with a longer search: the time comparison must
+    # measure XGBoost HPO (not the other algorithms' share of the pipeline),
+    # and with 16 trials the per-trial savings accumulate, giving a stable
+    # and clearly measurable reduction.
+    cfg_off = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 16, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {"mode": "off"},
+        },
+        "algorithms": {"xgboosting": {"enable": True}},
+    }
+    cfg_on = json.loads(json.dumps(cfg_off))
+    cfg_on["general"]["complexity_guard"]["mode"] = "apply"
 
-    cfg_off = _single_phase_config({"mode": "off"})
-    cfg_on = _single_phase_config({"mode": "apply"})
-
-    def _best_run(cfg: dict, repeats: int = 2) -> float:
+    def _best_run(cfg: dict, repeats: int = 3) -> float:
         best = float("inf")
         for _ in range(repeats):
             start = time.monotonic()
@@ -309,12 +334,12 @@ def test_e2e_xgboost_time_with_guard_markedly_lower():
     time_off = _best_run(cfg_off)
     time_on = _best_run(cfg_on)
 
-    # The guard run must stay within 1.5x of the unguarded one (with the
-    # guard the adapted max_depth/n_estimators ranges make the trials
-    # cheaper — the point is that the guard never makes HPO dramatically
-    # slower).
-    assert time_on <= time_off * 1.5, (
-        f"guard run {time_on:.3f}s > 1.5x of unguarded {time_off:.3f}s"
+    # With the guard the adapted max_depth/n_estimators ranges make the
+    # trials cheaper. The best-of-three runs must show a real reduction:
+    # the guard run is at most 75% of the unguarded one.
+    assert time_on <= 0.75 * time_off, (
+        f"guard run {time_on:.3f}s is not markedly lower than the unguarded "
+        f"{time_off:.3f}s (ratio {time_on / time_off:.3f} > 0.75)"
     )
 
 

@@ -132,3 +132,6 @@ src/configurable_automl_engine/_version.py
 .gigacode/
 
 plan.json
+
+# Generated benchmark reports (outside-CI acceptance runs)
+benchmarks/full_benchmark_report.json
