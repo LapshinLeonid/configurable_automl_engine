@@ -2066,6 +2066,130 @@ class _OptimizeRunner:
             ) from err
         raise optuna.TrialPruned() from err
 
+    def _natural_domain_bounds(
+        self, param: str, entry: SearchSpaceEntry
+    ) -> tuple[float | None, float | None]:
+        """Natural (physical) domain bounds of a parameter.
+
+        Returns ``(low, high)``; a side is ``None`` when the domain is
+        unbounded there. A boundary that coincides with a natural bound is not
+        actionable: the value cannot be pushed beyond it even by widening the
+        search range, so the "widen it" hint would be a false signal. Bounds
+        that depend on the data (leaf sizes, neighbor counts) are derived from
+        ``n_samples_eff`` / ``n_features_eff`` — these are the same physical
+        limits that ``clip_search_space`` enforces.
+
+        Args:
+            param: The hyperparameter name.
+            entry: The search-space entry (its distribution type decides the
+                fraction-vs-count interpretation of ``min_samples_leaf`` and
+                ``max_features``).
+
+        Returns:
+            tuple[float | None, float | None]: Natural ``(low, high)`` bounds.
+        """
+        low: float | None = None
+        high: float | None = None
+        dist_type = entry.dist_type
+        if param in {"subsample", "colsample_bytree"}:
+            # A row/feature sampling fraction: (0, 1].
+            high = 1.0
+        elif param == "min_samples_leaf":
+            if (
+                dist_type == "float"
+                and float(entry.low) < 1.0
+                and float(entry.high) <= 1.0
+            ):
+                # A fraction of the sample size: (0, 1].
+                high = 1.0
+            else:
+                # An absolute row count: at least 1 and at most n.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "min_samples_split":
+            low = 2.0
+            high = float(max(2, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "n_neighbors":
+            low = 1.0
+            high = float(max(1, int(getattr(self, "n_samples_eff", 0)) - 1))
+        elif param == "max_features":
+            if dist_type == "float":
+                # A fraction of the features: (0, 1].
+                high = 1.0
+            else:
+                # An absolute feature count.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_features_eff", 1))))
+        elif param == "l1_ratio":
+            low = 0.0
+            high = 1.0
+        elif param == "max_depth":
+            low = 1.0
+        elif param in {"min_child_weight", "gamma"}:
+            low = 0.0
+        elif param == "n_estimators":
+            low = 1.0
+        elif param == "p":
+            # The Minkowski power of the KNN space.
+            low = 1.0
+        return low, high
+
+    def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
+        """Whether ``value`` lies on a bound introduced by the complexity guard.
+
+        The guard records the "before → after" bounds of every range it
+        actually narrowed. A bound is guard-introduced when the guard moved
+        that side of the range: the "after" bound differs from "before" (the
+        other side may be the user's or the default bound and stays a normal
+        "widen it" candidate). An optimum on a guard-moved bound is expected —
+        the range was tightened deliberately (e.g. ``max_depth`` 2–3 on small
+        data) — so the "widen it" warning would be a false signal.
+
+        Args:
+            param: The hyperparameter name.
+            value: The boundary value of the best trial.
+            tolerance: The same absolute tolerance the boundary check uses.
+
+        Returns:
+            bool: ``True`` when the value is a guard-introduced bound.
+        """
+        algo = resolve_algorithm_name(self.algo)
+        for record in getattr(self, "complexity_guard_logs", []):
+            if record.get("param") != param:
+                continue
+            if resolve_algorithm_name(str(record.get("algo", ""))) != algo:
+                continue
+            if not record.get("applied"):
+                continue
+            before = record.get("before")
+            after = record.get("after")
+            if not isinstance(before, list) or len(before) != 2:
+                continue
+            if not isinstance(after, list) or len(after) != 2:
+                continue
+            try:
+                before = [float(before[0]), float(before[1])]
+                after = [float(after[0]), float(after[1])]
+            except (TypeError, ValueError):
+                continue
+            # A side introduced by the guard: the after bound differs from
+            # the before one on that side.
+            moved_low = not math.isclose(
+                after[0], before[0], rel_tol=0.0, abs_tol=tolerance
+            )
+            moved_high = not math.isclose(
+                after[1], before[1], rel_tol=0.0, abs_tol=tolerance
+            )
+            if (
+                moved_low
+                and math.isclose(value, after[0], rel_tol=0.0, abs_tol=tolerance)
+            ) or (
+                moved_high
+                and math.isclose(value, after[1], rel_tol=0.0, abs_tol=tolerance)
+            ):
+                return True
+        return False
+
     def _warn_if_optimum_at_boundary(self, best_params: dict[str, Any]) -> None:
         """Warn when the best trial's value lies at a range boundary.
 
@@ -2074,6 +2198,18 @@ class _OptimizeRunner:
         the range, and the user should widen it. Only dict-based numeric
         search spaces (with ``SearchSpaceEntry`` bounds) are checked;
         categorical parameters and constant values are skipped.
+
+        The warning is suppressed when the boundary is not actionable:
+        * a fixed parameter (``low == high``) — e.g. a user
+          ``min_samples_leaf [1, 1]`` or an XGBoost ``max_depth`` collapsed
+          to 3–3 — the optimum sits at the only possible value;
+        * a bound introduced by the adaptive complexity guard — the range
+          was narrowed deliberately (e.g. ``max_depth`` 2–3) and the optimum
+          is expected on it (an INFO line is logged instead);
+        * a natural (physical) domain boundary of the parameter —
+          ``subsample=1.0``, ``colsample_bytree=1.0``, ``min_samples_leaf=1``,
+          ``l1_ratio=0/1`` — the value cannot be pushed beyond it even by
+          widening the range.
 
         Args:
             best_params: The parameters of the best trial.
@@ -2095,6 +2231,10 @@ class _OptimizeRunner:
                 num = float(value)
             except (TypeError, ValueError):
                 continue
+            if low == high:
+                # A fixed parameter: the optimum is at the only possible
+                # value, the "widen it" hint is meaningless.
+                continue
             # Tolerance: 1e-6 of the range width (at least 1e-6 for tiny ranges).
             # Exact equality is not enough because Optuna may return 1.0 vs
             # a boundary 1.0000001. A relative tolerance is deliberately not
@@ -2104,12 +2244,19 @@ class _OptimizeRunner:
             tolerance = 1e-6 * max(1.0, abs(high - low))
             at_low = math.isclose(num, low, rel_tol=0.0, abs_tol=tolerance)
             at_high = math.isclose(num, high, rel_tol=0.0, abs_tol=tolerance)
-            if at_low or at_high:
-                boundary = "low" if at_low else "high"
-                log.warning(
+            if not (at_low or at_high):
+                continue
+            boundary = "low" if at_low else "high"
+            bound_value = low if at_low else high
+
+            # A guard-introduced bound: the range was narrowed deliberately,
+            # the optimum on it is expected — INFO instead of a warning.
+            if self._is_guard_boundary(name, bound_value, tolerance):
+                log.info(
                     "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
-                    "boundary of the search range [%.6g, %.6g] — the true "
-                    "optimum may lie beyond the range, widen it",
+                    "boundary of [%.6g, %.6g], set by the complexity_guard — "
+                    "expected, the range is narrowed deliberately, no 'widen "
+                    "it' warning",
                     self.algo,
                     name,
                     num,
@@ -2117,6 +2264,39 @@ class _OptimizeRunner:
                     low,
                     high,
                 )
+                continue
+
+            # A natural (physical) domain boundary of the parameter: the value
+            # cannot be pushed beyond it even by widening the range.
+            natural_low, natural_high = self._natural_domain_bounds(name, entry)
+            natural_bound = natural_low if at_low else natural_high
+            if natural_bound is not None and math.isclose(
+                bound_value, natural_bound, rel_tol=0.0, abs_tol=tolerance
+            ):
+                log.info(
+                    "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                    "boundary of [%.6g, %.6g] — the natural domain boundary "
+                    "of the parameter, no 'widen it' warning",
+                    self.algo,
+                    name,
+                    num,
+                    boundary,
+                    low,
+                    high,
+                )
+                continue
+
+            log.warning(
+                "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                "boundary of the search range [%.6g, %.6g] — the true "
+                "optimum may lie beyond the range, widen it",
+                self.algo,
+                name,
+                num,
+                boundary,
+                low,
+                high,
+            )
 
     def select_best_trial(self) -> bool:
         """Select the best completed trial of the CURRENT phase (step 7).

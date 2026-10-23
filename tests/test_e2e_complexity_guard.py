@@ -407,3 +407,98 @@ def test_e2e_float_min_samples_leaf_engine_wins_does_not_crash(algo):
     # algorithm (HPO completed with a valid score).
     disqualified = res.get("disqualified_algorithms") or {}
     assert algo not in disqualified, f"{algo} disqualified: {disqualified}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# E2E: the "optimum at boundary" warning is suppressed for non-actionable
+# boundaries (issue #131)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_e2e_fixed_param_no_boundary_warning(caplog):
+    """A user-fixed parameter (low == high) produces no "widen it" warning.
+
+    The exact issue #131 report: a user ``min_samples_leaf [1, 1]`` is a
+    fixed parameter; the optimum is always at its only value, so the "widen
+    it" warning would be a false signal on every phase.
+    """
+    df = _small_frame()
+    cfg = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 4, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {"mode": "apply"},
+        },
+        "algorithms": {
+            "decision_tree": {
+                "enable": True,
+                "hyperparameters": {"min_samples_leaf": [1, 1, "int"]},
+            },
+            "ridge": {"enable": True},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+        res = train_best_model(cfg, df, target="target")
+    assert res["algorithm"] in {"decision_tree", "ridge"}
+    # The fixed min_samples_leaf must never appear in a "widen it" warning
+    # (other parameters may warn on their legitimate default boundaries).
+    for line in caplog.text.splitlines():
+        if "may lie beyond the range" in line:
+            assert "min_samples_leaf" not in line, line
+
+
+def test_e2e_guard_narrowed_range_no_boundary_warning(caplog):
+    """A guard-introduced bound produces no "widen it" warning.
+
+    The exact issue #131 report: after the guard tightening (e.g. XGBoost
+    ``max_depth`` 3–10 → 1–3 on small data), the optimum almost always lies
+    on a guard-introduced bound, and the old code warned on every phase for
+    every tree — although the narrowing was deliberate.
+
+    The precise contract: a guard-moved bound is silent (INFO instead); only
+    user/default-space boundaries may still warn. For ``decision_tree`` the
+    guard moves the HIGH bound of ``max_depth`` (32 → 3) while the low bound
+    2 stays the default-space one — so a warning may appear at the LOW bound
+    only, never at the guard-set HIGH bound.
+    """
+    df = _small_frame(n=18, p=5)
+    cfg = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 8, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {"mode": "apply"},
+        },
+        "algorithms": {
+            "xgboosting": {"enable": True},
+            "decision_tree": {"enable": True},
+            "ridge": {"enable": True},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+        res = train_best_model(cfg, df, target="target")
+    assert res["algorithm"] in {"xgboosting", "decision_tree", "ridge"}
+    # Any max_depth warning may only reference the default-space LOW bound
+    # (2); a warning on the guard-introduced HIGH bound (3) is forbidden.
+    for line in caplog.text.splitlines():
+        if "may lie beyond the range" in line and "max_depth" in line:
+            assert "low boundary" in line, line

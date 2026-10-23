@@ -17,9 +17,6 @@ Coverage:
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock
-
-import pytest
 
 from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
@@ -315,6 +312,9 @@ def _runner_with_space(space: dict) -> _OptimizeRunner:
     runner = _OptimizeRunner.__new__(_OptimizeRunner)
     runner.algo = "ridge"
     runner.search_space_dict = space
+    runner.complexity_guard_logs = []
+    runner.n_samples_eff = 100
+    runner.n_features_eff = 5
     return runner
 
 
@@ -365,6 +365,477 @@ def test_warn_skips_empty_space(caplog):
     with caplog.at_level(logging.WARNING):
         runner._warn_if_optimum_at_boundary({"alpha": 0.1})
     assert "may lie beyond the range" not in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5a. Fixed parameters (low == high) never warn (issue #131)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_no_warn_on_fixed_parameter(caplog):
+    """A user min_samples_leaf [1, 1]: the only possible value must not warn."""
+    runner = _runner_with_space(
+        {"min_samples_leaf": SearchSpaceEntry.model_validate([1, 1, "int"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_leaf": 1})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_fixed_float_parameter(caplog):
+    """A fixed float range (low == high) never warns either."""
+    runner = _runner_with_space(
+        {"alpha": SearchSpaceEntry.model_validate([0.5, 0.5, "float"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"alpha": 0.5})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_skips_non_numeric_best_value(caplog):
+    """A best value that cannot be cast to float is skipped silently."""
+    runner = _runner_with_space(
+        {"alpha": SearchSpaceEntry.model_validate([0.1, 1.0, "float"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"alpha": "not-a-number"})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_skips_param_missing_from_best_params(caplog):
+    """A param absent from best_params never triggers a warning."""
+    runner = _runner_with_space(
+        {"alpha": SearchSpaceEntry.model_validate([0.1, 1.0, "float"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"other": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5b. Guard-introduced bounds never warn, INFO is logged instead (issue #131)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _runner_with_guard(space: dict, logs: list[dict]) -> _OptimizeRunner:
+    runner = _runner_with_space(space)
+    runner.complexity_guard_logs = logs
+    return runner
+
+
+GUARD_LOG_MAX_DEPTH = [
+    {
+        "algo": "xgboosting",
+        "param": "max_depth",
+        "before": [3.0, 10.0],
+        "after": [2.0, 3.0],
+        "applied": True,
+    }
+]
+
+
+def test_no_warn_on_guard_moved_bound(caplog):
+    """max_depth narrowed by the guard to 2–3: the optimum on 3 must not
+    warn, an INFO "set by the complexity_guard" line is logged instead."""
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        GUARD_LOG_MAX_DEPTH,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.INFO):
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" not in caplog.text
+    assert "set by the complexity_guard" in caplog.text
+
+
+def test_no_warn_on_guard_moved_low_bound(caplog):
+    """A guard-raised lower bound (e.g. min_samples_leaf >= 2) is silent too."""
+    logs = [
+        {
+            "algo": "decision_tree",
+            "param": "min_samples_leaf",
+            "before": [1.0, 10.0],
+            "after": [2.0, 6.0],
+            "applied": True,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"min_samples_leaf": SearchSpaceEntry.model_validate([2, 6, "int"])},
+        logs,
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.INFO):
+        runner._warn_if_optimum_at_boundary({"min_samples_leaf": 2})
+    assert "may lie beyond the range" not in caplog.text
+    assert "set by the complexity_guard" in caplog.text
+
+
+def test_warn_on_side_not_moved_by_guard(caplog):
+    """Only the guard-moved side is suppressed: the unmoved side is still a
+    genuine "widen it" candidate (the user/default bound).
+
+    Here the guard moved only the high side (10 → 5); the low bound 3 is the
+    user's own (not a natural minimum of max_depth=1), so an optimum on 3
+    must still warn.
+    """
+    logs = [
+        {
+            "algo": "xgboosting",
+            "param": "max_depth",
+            "before": [3.0, 10.0],
+            "after": [3.0, 5.0],
+            "applied": True,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([3, 5, "int"])},
+        logs,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        # The low bound 3 was NOT moved by the guard and is not a natural
+        # boundary of max_depth (natural minimum is 1) — warn.
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        # The high bound 5 WAS moved by the guard (10 → 5) — no warn.
+        runner._warn_if_optimum_at_boundary({"max_depth": 5})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_warn_when_only_one_side_guard_moved_and_optimum_on_other(caplog):
+    """The guard moved only the high side (10 → 6); the low bound (2) is the
+    user's own (not a guard move, not the natural minimum of 1) — an optimum
+    on it must still warn."""
+    logs = [
+        {
+            "algo": "decision_tree",
+            "param": "min_samples_leaf",
+            "before": [2.0, 10.0],
+            "after": [2.0, 6.0],
+            "applied": True,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"min_samples_leaf": SearchSpaceEntry.model_validate([2, 6, "int"])},
+        logs,
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_leaf": 2})
+    assert "may lie beyond the range" in caplog.text
+
+
+def test_guard_logs_for_other_param_do_not_suppress(caplog):
+    """A guard log for a different parameter must not suppress this one."""
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        GUARD_LOG_MAX_DEPTH,  # param=max_depth, applied=False anyway for alpha
+    )
+    runner.algo = "xgboosting"
+    # A non-guard parameter at its boundary still warns.
+    runner.search_space_dict = {
+        "alpha": SearchSpaceEntry.model_validate([0.1, 1.0, "float"])
+    }
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"alpha": 1.0})
+    assert "may lie beyond the range" in caplog.text
+
+
+def test_guard_log_not_applied_does_not_suppress(caplog):
+    """A guard record with applied=False (e.g. mode='warn') is not a real
+    restriction: the optimum on that bound must still warn."""
+    logs = [
+        {
+            "algo": "xgboosting",
+            "param": "max_depth",
+            "before": [3.0, 10.0],
+            "after": [2.0, 3.0],
+            "applied": False,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        logs,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5c. Natural (physical) domain boundaries never warn (issue #131)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_no_warn_on_natural_unit_high_bound(caplog):
+    """subsample=1.0 is the natural upper bound of the (0, 1] domain."""
+    runner = _runner_with_space(
+        {"subsample": SearchSpaceEntry.model_validate([0.5, 1.0, "float"])}
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.INFO):
+        runner._warn_if_optimum_at_boundary({"subsample": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+    assert "natural domain boundary" in caplog.text
+
+
+def test_no_warn_on_natural_colsample_high_bound(caplog):
+    """colsample_bytree=1.0 is the natural upper bound of the (0, 1] domain."""
+    runner = _runner_with_space(
+        {"colsample_bytree": SearchSpaceEntry.model_validate([0.5, 1.0, "float"])}
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"colsample_bytree": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_l1_ratio_bounds(caplog):
+    """l1_ratio=0 and l1_ratio=1 are the natural bounds of [0, 1]."""
+    runner = _runner_with_space(
+        {"l1_ratio": SearchSpaceEntry.model_validate([0.0, 1.0, "float"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"l1_ratio": 0.0})
+        runner._warn_if_optimum_at_boundary({"l1_ratio": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_min_samples_leaf_one(caplog):
+    """min_samples_leaf=1 is the physical minimum of the row-count domain."""
+    runner = _runner_with_space(
+        {"min_samples_leaf": SearchSpaceEntry.model_validate([1, 10, "int"])}
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_leaf": 1})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_max_depth_one(caplog):
+    """max_depth=1 is the physical minimum (a stump)."""
+    runner = _runner_with_space(
+        {"max_depth": SearchSpaceEntry.model_validate([1, 5, "int"])}
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_depth": 1})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_min_child_weight_zero(caplog):
+    """min_child_weight=0 is the physical lower bound of XGBoost."""
+    runner = _runner_with_space(
+        {"min_child_weight": SearchSpaceEntry.model_validate([0.0, 10.0, "float"])}
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_child_weight": 0.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_warn_on_non_natural_high_bound(caplog):
+    """alpha=1.0 on [0.1, 1.0] is not a natural bound of alpha — warns."""
+    runner = _runner_with_space(
+        {"alpha": SearchSpaceEntry.model_validate([0.1, 1.0, "float"])}
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"alpha": 1.0})
+    assert "may lie beyond the range" in caplog.text
+
+
+def test_no_warn_on_natural_n_neighbors_high_bound(caplog):
+    """n_neighbors at n-1 is the physical upper bound (KNN)."""
+    runner = _runner_with_space(
+        {"n_neighbors": SearchSpaceEntry.model_validate([1, 30, "int"])}
+    )
+    runner.n_samples_eff = 30  # physical max = 29
+    runner.algo = "knn"
+    with caplog.at_level(logging.INFO):
+        runner.search_space_dict = {
+            "n_neighbors": SearchSpaceEntry.model_validate([1, 29, "int"])
+        }
+        runner._warn_if_optimum_at_boundary({"n_neighbors": 29})
+    assert "may lie beyond the range" not in caplog.text
+    assert "natural domain boundary" in caplog.text
+
+
+def test_no_warn_on_natural_min_samples_leaf_fraction(caplog):
+    """A float min_samples_leaf in (0, 1] has the fraction domain high=1.0."""
+    runner = _runner_with_space(
+        {"min_samples_leaf": SearchSpaceEntry.model_validate([0.05, 1.0, "float"])}
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_leaf": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_min_samples_split_low(caplog):
+    """min_samples_split=2 is the physical minimum."""
+    runner = _runner_with_space(
+        {"min_samples_split": SearchSpaceEntry.model_validate([2, 10, "int"])}
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_split": 2})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_min_samples_split_high(caplog):
+    """min_samples_split at n (the sample size) is the physical maximum."""
+    runner = _runner_with_space(
+        {"min_samples_split": SearchSpaceEntry.model_validate([2, 100, "int"])}
+    )
+    runner.algo = "decision_tree"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"min_samples_split": 100})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_max_features_float_high(caplog):
+    """A float max_features at 1.0 is the fraction-domain upper bound."""
+    runner = _runner_with_space(
+        {"max_features": SearchSpaceEntry.model_validate([0.1, 1.0, "float"])}
+    )
+    runner.algo = "random_forest"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_features": 1.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_max_features_int_boundaries(caplog):
+    """An int max_features has the count domain [1, p]."""
+    runner = _runner_with_space(
+        {"max_features": SearchSpaceEntry.model_validate([1, 5, "int"])}
+    )
+    runner.n_features_eff = 5
+    runner.algo = "random_forest"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_features": 1})
+        runner._warn_if_optimum_at_boundary({"max_features": 5})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_gamma_low(caplog):
+    """gamma=0.0 is the physical lower bound of XGBoost gamma."""
+    runner = _runner_with_space(
+        {"gamma": SearchSpaceEntry.model_validate([0.0, 5.0, "float"])}
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"gamma": 0.0})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_natural_n_estimators_low(caplog):
+    """n_estimators=1 is the physical minimum."""
+    runner = _runner_with_space(
+        {"n_estimators": SearchSpaceEntry.model_validate([1, 500, "int", 50])}
+    )
+    runner.algo = "random_forest"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"n_estimators": 1})
+    assert "may lie beyond the range" not in caplog.text
+
+
+def test_no_warn_on_knn_p_low(caplog):
+    """The KNN p (Minkowski power) has the physical minimum 1."""
+    runner = _runner_with_space(
+        {"p": SearchSpaceEntry.model_validate([1, 2, "int"])}
+    )
+    runner.algo = "knn"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"p": 1})
+    assert "may lie beyond the range" not in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5d. Guard-log robustness: malformed/foreign records are ignored
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_guard_log_malformed_records_ignored(caplog):
+    """Malformed guard records (non-list before/after, non-numeric bounds)
+    must not raise and do not suppress the warning."""
+    logs = [
+        {"param": "max_depth", "algo": "xgboosting", "applied": True},  # no before/after
+        {
+            "param": "max_depth",
+            "algo": "xgboosting",
+            "applied": True,
+            "before": [3.0],
+            "after": [2.0, 3.0],  # before has 1 element
+        },
+        {
+            "param": "max_depth",
+            "algo": "xgboosting",
+            "applied": True,
+            "before": ["x", 10.0],
+            "after": [2.0, 3.0],  # before not numeric
+        },
+        {
+            "param": "max_depth",
+            "algo": "xgboosting",
+            "applied": True,
+            "before": [3.0, 10.0],
+            "after": [2.0],  # after has 1 element
+        },
+    ]
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        logs,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" in caplog.text
+
+
+def test_guard_log_for_other_algo_ignored(caplog):
+    """A guard record for another algorithm must not suppress the warning."""
+    logs = [
+        {
+            "algo": "random_forest",
+            "param": "max_depth",
+            "before": [2.0, 32.0],
+            "after": [1.0, 3.0],
+            "applied": True,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        logs,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" in caplog.text
+
+
+def test_guard_log_alias_algo_matches(caplog):
+    """A guard record under the alias ('xgboost') matches the resolved algo."""
+    logs = [
+        {
+            "algo": "xgboost",
+            "param": "max_depth",
+            "before": [3.0, 10.0],
+            "after": [2.0, 3.0],
+            "applied": True,
+        }
+    ]
+    runner = _runner_with_guard(
+        {"max_depth": SearchSpaceEntry.model_validate([2, 3, "int"])},
+        logs,
+    )
+    runner.algo = "xgboosting"
+    with caplog.at_level(logging.INFO):
+        runner._warn_if_optimum_at_boundary({"max_depth": 3})
+    assert "may lie beyond the range" not in caplog.text
+    assert "set by the complexity_guard" in caplog.text
 
 
 def test_warn_at_boundary_with_tolerance(caplog):
