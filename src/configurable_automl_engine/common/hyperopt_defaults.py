@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import (
     Annotated,
     Any,
@@ -195,6 +196,80 @@ class SearchSpaceEntry(BaseModel):
         return res
 
 
+def align_high_to_step(low: float, high: float, step: float) -> float:
+    """Align ``high`` to the step grid anchored at ``low``.
+
+    Optuna computes the effective upper bound of a stepped distribution as
+    ``low + floor((high - low) / step) * step`` using exact decimal
+    arithmetic (``suggest_int``/``suggest_float`` with a step). A range whose
+    ``(high - low)`` is not divisible by ``step`` is silently narrowed by
+    Optuna, which skews the search away from the configured range. This
+    helper applies the same alignment so that the bounds stored in a
+    ``SearchSpaceEntry`` always describe the grid Optuna actually searches.
+
+    Args:
+        low: The lower bound (the grid anchor; itself stays on the grid).
+        high: The upper bound to align.
+        step: The grid step; must be positive.
+
+    Returns:
+        float: ``low + floor((high - low) / step) * step`` computed with
+            exact decimal arithmetic (mirrors Optuna's internal adjustment).
+    """
+    d_high = Decimal(str(high))
+    d_low = Decimal(str(low))
+    d_step = Decimal(str(step))
+    d_r = d_high - d_low
+    d_aligned = (d_r // d_step) * d_step + d_low
+    return float(d_aligned)
+
+
+def align_entry_bounds(entry: SearchSpaceEntry) -> SearchSpaceEntry:
+    """Return a deep copy of ``entry`` whose bounds are aligned to the step grid.
+
+    After the bounds of a stepped numeric range are changed (clipping,
+    the complexity guard), the upper bound may no longer lie on the step
+    grid anchored at the lower bound: e.g. ``n_estimators`` 50–1000 with a
+    step of 100 clipped to 50–300 yields ``(300 - 50) % 100 != 0`` and
+    Optuna silently shifts the upper bound to 250. This helper re-aligns
+    ``high`` to the grid (``high = low + floor((high - low) / step) * step``)
+    exactly as Optuna does. When the aligned range becomes empty
+    (``aligned_high < low``), the range collapses to the single grid value
+    ``low`` — the parameter is fixed, which is the value Optuna would
+    otherwise sample for such a degenerate range.
+
+    Entries without a step, categorical entries and constant values are
+    returned as a deep copy unchanged (no alignment applies). The original
+    entry is never mutated.
+
+    Args:
+        entry: The ``SearchSpaceEntry`` (or any object) to align.
+
+    Returns:
+        SearchSpaceEntry: A deep copy with the upper bound aligned to the
+            step grid (or unchanged for step-less/categorical entries).
+    """
+    config = entry.config
+    if not isinstance(config, (IntSpace, FloatSpace)) or config.step is None:
+        return entry.model_copy(deep=True)
+
+    low = float(config.low)
+    high = float(config.high)
+    step = float(config.step)
+    # An empty grid collapses to the anchor value: the range is fixed at the
+    # single grid point (the only value Optuna could ever sample).
+    aligned_high = max(float(align_high_to_step(low, high, step)), low)
+
+    new_entry = entry.model_copy(deep=True)
+    if isinstance(config, IntSpace):
+        new_entry.config = config.model_copy(
+            update={"low": int(low), "high": int(aligned_high)}
+        )
+    else:
+        new_entry.config = config.model_copy(update={"low": low, "high": aligned_high})
+    return new_entry
+
+
 # Common parameters for Poisson, Gamma and Tweedie regressors
 GLM_COMMON = {
     "alpha": SearchSpaceEntry.model_validate([1e-6, 1e-1, "float_log"]),
@@ -246,9 +321,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "n_estimators": SearchSpaceEntry.model_validate([100, 800, "int", 100]),
         "learning_rate": SearchSpaceEntry.model_validate([0.01, 0.3, "float_log"]),
         "max_depth": SearchSpaceEntry.model_validate([3, 10, "int"]),
+        "min_child_weight": SearchSpaceEntry.model_validate([1, 10, "float"]),
         "subsample": SearchSpaceEntry.model_validate([0.5, 1.0, "float"]),
         "colsample_bytree": SearchSpaceEntry.model_validate([0.5, 1.0, "float"]),
         "gamma": SearchSpaceEntry.model_validate([0.0, 5.0, "float"]),
+        "reg_lambda": SearchSpaceEntry.model_validate([1e-3, 100.0, "float_log"]),
     },
     "sgdregressor": {
         "loss": SearchSpaceEntry.model_validate(
@@ -437,6 +514,10 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
     1. Avoids mutating global state through a deep copy (Pydantic model_copy).
     2. Guarantees that both low and high do not exceed the physical limit of the data.
     3. Preserves data types (int/float) according to the original configuration.
+    4. Re-aligns the clipped upper bound to the step grid of a stepped range
+       (e.g. an int step) so that the stored range is exactly the grid Optuna
+       searches; an empty grid collapses to a single value (the parameter is
+       fixed).
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be positive. Got {n_samples}")
@@ -480,6 +561,10 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
                     update={"low": new_low, "high": new_high}
                 )
 
+            # 5. Re-align the upper bound to the step grid (a clipped high may
+            #    no longer lie on the grid; Optuna would silently narrow it).
+            new_entry = align_entry_bounds(new_entry)
+
         clipped_space[param] = new_entry
 
     return clipped_space
@@ -506,11 +591,12 @@ def _default_dist_type(algo_name: str, param_name: str) -> str | None:
 
 
 def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
-    """Infer the numeric type (``'int'``/``'float'``) of a model parameter.
+    """Infer the numeric type of a model parameter.
 
-    Falls back to the estimator constructor signature (the type of the
-    parameter's default value) when the parameter is absent from
-    :data:`DEFAULT_SPACES`. Returns ``None`` when the type cannot be
+    The type is taken from the parameter's entry in :data:`DEFAULT_SPACES`
+    when present (``'int'``, ``'float'`` or ``'float_log'``); otherwise it
+    falls back to the estimator constructor signature (the type of the
+    parameter's default value). Returns ``None`` when the type cannot be
     determined (unknown algorithm, missing dependency, ``**kwargs``
     constructors, or a non-numeric default).
 
@@ -519,10 +605,10 @@ def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
         param_name: Hyperparameter name.
 
     Returns:
-        ``'int'``, ``'float'``, or ``None`` when unknown.
+        ``'int'``, ``'float'``, ``'float_log'``, or ``None`` when unknown.
     """
     default = _default_dist_type(algo_name, param_name)
-    if default in ("int", "float"):
+    if default in ("int", "float", "float_log"):
         return default
     # Lazy import: the estimator factory is only needed for parameters not
     # present in DEFAULT_SPACES, and this module stays lightweight otherwise.
@@ -541,10 +627,14 @@ def resolve_implicit_range_type(
     A real-valued parameter stays real-valued even when both bounds look like
     integers (e.g. ``[1, 50]`` for ``C`` of an SVR).
 
-    Scale parameters (``alpha``, ``C``, ``epsilon``, ``gamma``,
-    ``learning_rate``) default to the logarithmic scale (``float_log``) when
-    the type is not stated explicitly and both bounds are positive; an
-    explicit type (``[1, 50, "int"]``) is always preserved by the caller.
+    The logarithmic scale (``float_log``) is preferred when the parameter is
+    searched on a log scale BY DEFAULT — the default space entry is
+    ``float_log`` (e.g. ``alpha_1``/``lambda_1`` of an ARD) or the parameter
+    is a scale parameter (``alpha``, ``C``, ``epsilon``, ``gamma``,
+    ``learning_rate``) — and both bounds are positive. An explicit type
+    (``[1, 50, "int"]``) is always preserved by the caller; with a
+    non-positive bound the log scale is unavailable and a plain float range
+    is used.
 
     Args:
         algo_name: Algorithm name or alias.
@@ -559,10 +649,14 @@ def resolve_implicit_range_type(
     """
     numeric_type = infer_param_numeric_type(algo_name, param_name)
     is_int_param = numeric_type == "int"
-    if not is_int_param and param_name in SCALE_PARAMS:
-        # A real scale parameter with an inferred type: prefer the
-        # logarithmic scale. If a bound is not strictly positive, the
-        # log scale is unavailable and a plain float range is used.
+    wants_log = not is_int_param and (
+        param_name in SCALE_PARAMS or numeric_type == "float_log"
+    )
+    if wants_log:
+        # A real parameter with a logarithmic default (either a scale
+        # parameter or a default 'float_log' entry from DEFAULT_SPACES):
+        # prefer the logarithmic scale. If a bound is not strictly positive,
+        # the log scale is unavailable and a plain float range is used.
         if low > 0 and high > 0:
             return "float_log"
         return "float"

@@ -359,3 +359,92 @@ def test_clip_search_space_raises_on_zero_samples():
 
     with pytest.raises(ValueError, match="must be positive"):
         clip_search_space(space, n_samples=0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Step-grid alignment after clipping (issue #139)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_clip_aligns_high_to_step_grid():
+    """A clipped upper bound is re-aligned to the step grid (issue #139).
+
+    Regression: ``n_estimators`` 50–1000 with a step of 100 clipped to
+    50–300 produced ``(300 - 50) % 100 != 0``; Optuna silently shifted the
+    upper bound to 250. The stored range must describe the grid Optuna
+    actually searches — ``high`` is aligned to
+    ``low + floor((high - low) / step) * step``.
+    """
+    space = {"min_samples_leaf": SearchSpaceEntry.model_validate([50, 1000, "int", 100])}
+    clipped = clip_search_space(space, n_samples=300)
+    entry = clipped["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    assert (entry.config.low, entry.config.high) == (50, 250)
+
+
+def test_clip_preserves_aligned_high_when_divisible():
+    """A clipped high that already lies on the step grid stays unchanged."""
+    space = {"min_samples_leaf": SearchSpaceEntry.model_validate([50, 1000, "int", 50])}
+    clipped = clip_search_space(space, n_samples=300)
+    entry = clipped["min_samples_leaf"]
+    # (300 - 50) % 50 == 0 -> high stays 300.
+    assert (entry.config.low, entry.config.high) == (50, 300)
+
+
+def test_clip_empty_step_grid_fixes_value():
+    """A clipped range whose grid is empty collapses to a single value (fixed).
+
+    The grid anchored at 50 with a step of 100 contains no value in (50, 130];
+    Optuna could only ever sample 50, so the parameter must be fixed at 50
+    instead of storing a misleading range.
+    """
+    space = {"min_samples_leaf": SearchSpaceEntry.model_validate([50, 130, "int", 100])}
+    clipped = clip_search_space(space, n_samples=300)
+    entry = clipped["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    assert (entry.config.low, entry.config.high) == (50, 50)
+
+
+def test_clip_aligns_float_step_grid():
+    """Float ranges with a step are aligned too (exact decimal arithmetic)."""
+    space = {
+        "min_samples_leaf": SearchSpaceEntry.model_validate([0.1, 1.0, "float", 0.3])
+    }
+    # n=300: the physical limit is far above the range, so only the alignment
+    # applies: (1.0 - 0.1) / 0.3 = 3 exactly -> high stays 1.0.
+    clipped = clip_search_space(space, n_samples=300)
+    entry = clipped["min_samples_leaf"]
+    assert isinstance(entry.config, FloatSpace)
+    assert entry.config.low == pytest.approx(0.1)
+    assert entry.config.high == pytest.approx(1.0)
+
+
+def test_clip_align_does_not_mutate_original_entry():
+    """Step alignment must not mutate the source space (deep copy)."""
+    original = SearchSpaceEntry.model_validate([50, 1000, "int", 100])
+    space = {"min_samples_leaf": original}
+    _ = clip_search_space(space, n_samples=300)
+    assert (original.config.low, original.config.high) == (50, 1000)
+    assert original.config.step == 100
+
+
+def test_align_high_to_step_matches_optuna():
+    """``align_high_to_step`` matches Optuna's internal high adjustment.
+
+    Optuna narrows a stepped distribution whose range is not divisible by the
+    step: ``high = low + floor((high - low) / step) * step``. The helper must
+    reproduce the same values so the stored bounds describe the real search
+    grid.
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import (
+        align_high_to_step,
+    )
+
+    # The issue's exact scenario: 50-300 with a step of 100 -> 250.
+    assert align_high_to_step(50, 300, 100) == 250
+    # Divisible ranges stay unchanged.
+    assert align_high_to_step(50, 300, 50) == 300
+    # An empty grid collapses to the anchor value.
+    assert align_high_to_step(50, 130, 100) == 50
+    # Float steps use exact decimal arithmetic.
+    assert align_high_to_step(0.1, 1.0, 0.3) == 1.0

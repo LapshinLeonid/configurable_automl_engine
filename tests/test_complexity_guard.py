@@ -23,6 +23,7 @@ from configurable_automl_engine.common.complexity_guard import (
     resolve_size_mode,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
+    DEFAULT_SPACES,
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,
@@ -62,6 +63,22 @@ def _default_cfg(**overrides) -> ComplexityGuardConfig:
 )
 def test_resolve_size_mode(n, p, expected):
     assert resolve_size_mode(n, p, _default_cfg()) == expected
+
+
+def test_resolve_size_mode_uses_original_columns():
+    """The size-mode ratio uses the ORIGINAL column count, not p after one-hot.
+
+    Regression (issue #134): p was counted after the one-hot expansion, so
+    n=4000 rows with 250 one-hot columns (only 50 original columns) gave
+    n/p = 16 < 20 and the "medium" mode — restricted spaces on large data.
+    With the original column count the ratio is 4000/50 = 80 >= 20 and the
+    mode is "ordinary".
+    """
+    cfg = _default_cfg()
+    # 250 one-hot-expanded columns: the old code resolved "medium".
+    assert resolve_size_mode(4000, 250, cfg) == "medium"
+    # 50 ORIGINAL columns (250 = 50 * 5 one-hot categories): "ordinary".
+    assert resolve_size_mode(4000, 50, cfg) == "ordinary"
 
 
 @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
@@ -122,6 +139,85 @@ def test_extreme_small_n_xgb_ranges_never_zero(n):
     md = adjusted["max_depth"].config
     assert md.low >= 1 and md.high >= 1 and md.low <= md.high
     assert adjusted["n_estimators"].config.high == 300
+
+
+# ──────────────── leaf regularization on n < 8 (issue #138) ────────────────── #
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
+def test_small_n_leaf_regularization_never_collapses_to_one(n):
+    """Regression (issue #138): on n < 8 the level B range [2, floor(n/4)]
+    is empty and used to collapse to min_samples_leaf = 1.
+
+    Now the lower bound 2 is kept, capped by the physical limit
+    floor(n / 2). On n=4..7 the leaf never collapses to 1; on n=2..3 the
+    physical limit floor(n/2) < 2 legitimately keeps the leaf at 1 (a leaf
+    of 2 rows is unreachable on 2-3 rows).
+    """
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted, logs = apply_complexity_guard(
+        space, "decision_tree", n=n, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    physical = min(math.floor(n / 2), 10)
+    expected = (min(2, physical), physical) if physical < 2 else (2, physical)
+    assert (entry.config.low, entry.config.high) == expected
+    if physical >= 2:
+        levels = [log["level"] for log in logs]
+        assert "B" in levels
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
+def test_small_n_leaf_regularization_boosting_same_rule(n):
+    """GradientBoosting shares the tree min_samples_leaf rules (issue #138)."""
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted, _ = apply_complexity_guard(
+        space, "gradient_boosting", n=n, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    physical = min(math.floor(n / 2), 10)
+    expected = (min(2, physical), physical) if physical < 2 else (2, physical)
+    assert (entry.config.low, entry.config.high) == expected
+
+
+def test_small_n_leaf_regularization_monotonic_issue_example():
+    """The issue's example: n=5 gives leaf 2 (not 1), n=8 gives leaf 2.
+
+    Before the fix the behavior was non-monotonic: n=5 collapsed to
+    min_samples_leaf=1 while n=8 already kept [2, 2].
+    """
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted_5, _ = apply_complexity_guard(
+        space, "decision_tree", n=5, p=5, config=_default_cfg()
+    )
+    adjusted_8, _ = apply_complexity_guard(
+        space, "decision_tree", n=8, p=5, config=_default_cfg()
+    )
+    leaf_5 = adjusted_5["min_samples_leaf"].config
+    leaf_8 = adjusted_8["min_samples_leaf"].config
+    assert (leaf_5.low, leaf_5.high) == (2, 2)
+    assert (leaf_8.low, leaf_8.high) == (2, 2)
+
+
+def test_small_n_leaf_regularization_float_fraction_preserved():
+    """A float min_samples_leaf fraction on n < 8 stays a fraction.
+
+    The fallback (lower bound 2 rows) must not leak into fraction units:
+    the row bounds are divided back by n, so on n=5 the guard range is
+    [2/5, floor(5/2)/5] = [0.4, 0.4], never a row count.
+    """
+    space = {"min_samples_leaf": _entry(0.1, 1.0, "float")}
+    adjusted, logs = apply_complexity_guard(
+        space, "decision_tree", n=5, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, FloatSpace)
+    assert entry.config.low == pytest.approx(2 / 5, abs=1e-6)
+    assert entry.config.high == pytest.approx(2 / 5, abs=1e-6)
+    levels = [log["level"] for log in logs]
+    assert "B" in levels
 
 
 # ─────────────────────────── small mode: trees ─────────────────────────────── #
@@ -399,6 +495,108 @@ def test_small_gradient_boosting_min_samples_leaf():
     assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
 
 
+# ─────────────────────── default XGBoost space (issue #132) ───────────────── #
+
+
+def test_default_xgboost_space_has_min_child_weight_and_reg_lambda():
+    """The default XGBoost space exposes min_child_weight and reg_lambda.
+
+    Regression for issue #132: the guard's ``min_child_weight`` and
+    ``reg_lambda`` rules never fired on the defaults because the parameters
+    were absent from ``DEFAULT_SPACES['xgboosting']`` — only max_depth,
+    subsample and n_estimators were restricted.
+    """
+    space = DEFAULT_SPACES["xgboosting"]
+    assert "min_child_weight" in space
+    assert "reg_lambda" in space
+
+    mcw = space["min_child_weight"].config
+    assert isinstance(mcw, FloatSpace)
+    assert mcw.type == "float"
+    assert (mcw.low, mcw.high) == (1.0, 10.0)
+
+    reg = space["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1e-3)
+    assert reg.high == pytest.approx(100.0)
+
+
+def test_default_xgboost_space_guard_restricts_new_params():
+    """On small data the guard restricts min_child_weight and reg_lambda
+    from the DEFAULT_SPACES['xgboosting'].
+
+    Regression for issue #132: previously the guard rules for these
+    parameters could never fire on defaults. Now the default space carries
+    them, so the level B rules tighten min_child_weight to [2, 10] and
+    reg_lambda to [1, 100] (log scale).
+    """
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    adjusted, logs = apply_complexity_guard(
+        space, "xgboosting", n=15, p=5, config=_default_cfg()
+    )
+    mcw = adjusted["min_child_weight"].config
+    assert isinstance(mcw, FloatSpace)
+    assert mcw.type == "float"
+    assert mcw.low == pytest.approx(2.0)
+    assert mcw.high == pytest.approx(10.0)
+    reg = adjusted["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(100.0)
+    restricted = {(log["algo"], log["param"]) for log in logs}
+    assert ("xgboosting", "min_child_weight") in restricted
+    assert ("xgboosting", "reg_lambda") in restricted
+
+
+def test_default_xgboost_space_user_ranges_intersect_new_params():
+    """A user range of min_child_weight/reg_lambda is intersected with the guard.
+
+    The new default parameters behave like every other default: an explicit
+    user range narrower than the guard target keeps its values when it does
+    not conflict (user_wins).
+    """
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    space["min_child_weight"] = _entry(1, 3, "float")
+    space["reg_lambda"] = _entry(1e-2, 5.0, "float_log")
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "xgboosting",
+        n=15,
+        p=5,
+        config=_default_cfg(user_range_policy="user_wins"),
+        user_space_keys=["min_child_weight", "reg_lambda"],
+    )
+    mcw = adjusted["min_child_weight"].config
+    # Guard target [2, 10] ∩ user [1, 3] -> [2, 3] (no conflict).
+    assert mcw.low == pytest.approx(2.0)
+    assert mcw.high == pytest.approx(3.0)
+    reg = adjusted["reg_lambda"].config
+    # Guard target [1, 100] ∩ user [0.01, 5] -> [1, 5].
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(5.0)
+    assert not any(log.get("conflict") for log in logs)
+
+
+def test_default_xgboost_space_medium_mode_new_params():
+    """In the medium mode reg_lambda is capped and min_child_weight raised."""
+    space = dict(DEFAULT_SPACES["xgboosting"])
+    adjusted, logs = apply_complexity_guard(
+        space, "xgboosting", n=100, p=5, config=_default_cfg()
+    )
+    mcw = adjusted["min_child_weight"].config
+    assert mcw.low == pytest.approx(2.0)
+    reg = adjusted["reg_lambda"].config
+    assert isinstance(reg, FloatSpace)
+    assert reg.type == "float_log"
+    assert reg.low == pytest.approx(1.0)
+    assert reg.high == pytest.approx(100.0)
+    restricted = {(log["algo"], log["param"]) for log in logs}
+    assert ("xgboosting", "min_child_weight") in restricted
+    assert ("xgboosting", "reg_lambda") in restricted
+
+
 # ─────────────────────────── medium mode ───────────────────────────────────── #
 
 
@@ -444,6 +642,69 @@ def test_ordinary_mode_space_unchanged():
     assert logs == []
     assert adjusted["max_depth"].config.high == 32
     assert adjusted["min_samples_leaf"].config.high == 10
+
+
+def test_ordinary_mode_with_one_hot_p_size():
+    """Large-but-wide data (one-hot) stays 'ordinary' via p_size.
+
+    Regression (issue #134): n=4000 rows, 250 one-hot columns (50 original)
+    gave n/p = 16 < 20 -> "medium" and restricted spaces. With ``p_size``
+    the size mode uses the ORIGINAL column count (50), so spaces do not
+    change — the post-preprocessing ``p`` (250) is still used by the rules
+    that depend on the feature count (``max_features``, ``colsample_bytree``).
+    """
+    tree_space = {
+        "max_depth": _entry(2, 32, "int"),
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "max_features": _entry(0.1, 1.0, "float"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        tree_space,
+        "decision_tree",
+        n=4000,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs == []
+    assert adjusted["max_depth"].config.high == 32
+    assert adjusted["min_samples_leaf"].config.high == 10
+    # max_features does not change either: the mode is ordinary, so even the
+    # feature-count rules are not applied.
+    assert adjusted["max_features"].config.low == pytest.approx(0.1)
+
+    # The same data WITHOUT p_size falls back to p: the old behavior, which
+    # resolved "medium" (restricted spaces).
+    adjusted_old, logs_old = apply_complexity_guard(
+        tree_space,
+        "decision_tree",
+        n=4000,
+        p=250,
+        config=_default_cfg(),
+    )
+    assert logs_old
+    # medium: max_depth <= ceil(log2(4000/2)) + 2 = 13
+    assert adjusted_old["max_depth"].config.high == 13
+    assert adjusted_old["min_samples_leaf"].config.low == 2
+
+    # Boosting: XGBoost max_depth <= 5 / subsample >= 0.7 would fire in the
+    # medium mode; with p_size they stay unchanged.
+    xgb_space = {
+        "max_depth": _entry(3, 10, "int"),
+        "subsample": _entry(0.5, 1.0, "float"),
+        "colsample_bytree": _entry(0.5, 1.0, "float"),
+    }
+    adjusted_xgb, logs_xgb = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=4000,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs_xgb == []
+    assert (adjusted_xgb["max_depth"].config.low, adjusted_xgb["max_depth"].config.high) == (3, 10)
+    assert adjusted_xgb["subsample"].config.low == pytest.approx(0.5)
 
 
 def test_off_mode_space_unchanged():
@@ -679,3 +940,84 @@ def test_merge_complexity_guard_records_one_per_parameter():
     assert sorted(by_key[("decision_tree", "max_depth")]["levels"]) == ["A", "B"]
     assert by_key[("xgboosting", "max_depth")]["after"] == [1.0, 3.0]
     assert by_key[("xgboosting", "max_depth")]["levels"] == ["B"]
+
+
+# ─────────────────── step-grid alignment (issue #139) ──────────────────────── #
+
+
+def test_guard_n_estimators_aligns_high_to_step_grid():
+    """A stepped n_estimators range is aligned to its step grid (issue #139).
+
+    The time cap tightens [50, 800] (step 50) to [50, 300]: 300 lies on the
+    step-50 grid, so the range stays. Regression scenario: with a step of 100
+    the same cap produces [50, 300] whose width is not divisible by 100 —
+    Optuna silently narrows the range to [50, 250]. The guard must store the
+    aligned range [50, 250] and document it in the log record.
+    """
+    space = {"n_estimators": _entry(50, 800, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    # (300 - 50) % 100 != 0 -> aligned to low + 2*100 = 250.
+    assert (entry.config.low, entry.config.high) == (50, 250)
+    assert any(log["after"] == [50.0, 250.0] for log in logs)
+
+
+def test_guard_already_divisible_step_unchanged():
+    """A capped high that lies on the step grid stays unchanged."""
+    space = {"n_estimators": _entry(50, 800, "int", 50)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    # (300 - 50) % 50 == 0 -> high stays 300.
+    assert (entry.config.low, entry.config.high) == (50, 300)
+
+
+def test_guard_empty_step_grid_fixes_value():
+    """An empty step grid after a rule collapses to a single grid value.
+
+    The user range [250, 800] with a step of 100 is capped to [250, 300] by
+    the time rule. The step-100 grid anchored at 250 contains no value above
+    250 within the range (the next grid value 350 exceeds the cap), so the
+    parameter is fixed at 250 — the only value Optuna could sample.
+    """
+    space = {"n_estimators": _entry(250, 800, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, "random_forest", n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    assert (entry.config.low, entry.config.high) == (250, 250)
+    assert any(log.get("fixed") for log in logs)
+
+
+def test_guard_step_grid_alignment_preserves_type_and_scale():
+    """Alignment keeps the int type and does not touch log-scale floats."""
+    space = {
+        "n_estimators": _entry(100, 800, "int", 100),
+        "reg_lambda": _entry(1e-3, 100.0, "float_log"),
+    }
+    adjusted, _ = apply_complexity_guard(
+        space, "xgboosting", n=15, p=5, config=_default_cfg()
+    )
+    n_est = adjusted["n_estimators"]
+    assert isinstance(n_est.config, IntSpace)
+    # (300 - 100) % 100 == 0 -> stays 300.
+    assert (n_est.config.low, n_est.config.high) == (100, 300)
+    reg = adjusted["reg_lambda"]
+    assert isinstance(reg.config, FloatSpace)
+    assert reg.config.type == "float_log"
+    assert reg.config.low == pytest.approx(1.0)
+    assert reg.config.high == pytest.approx(100.0)
+
+
+def test_guard_step_alignment_does_not_mutate_input():
+    """Step alignment inside the guard never mutates the source entry."""
+    space = {"n_estimators": _entry(50, 800, "int", 100)}
+    original = space["n_estimators"]
+    apply_complexity_guard(space, "random_forest", n=15, p=5, config=_default_cfg())
+    assert (original.config.low, original.config.high) == (50, 800)
+    assert original.config.step == 100

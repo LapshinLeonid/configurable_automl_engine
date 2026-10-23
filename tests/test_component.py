@@ -942,6 +942,69 @@ def test_run_hpo_asks_tuner_to_skip_final_fit():
     assert received["fit_best_model"] is False
 
 
+def test_run_hpo_forwards_phase_name_to_tuner():
+    """The HPO phase name is forwarded to tuners that support it."""
+    received: dict[str, object] = {}
+
+    class PhaseAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            phase_name=None,
+        ):
+            received["phase_name"] = phase_name
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=PhaseAwareTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            phase_name="coarse",
+        )
+
+    assert result == PhaseResult(score=0.95, params={"param": 1})
+    assert received["phase_name"] == "coarse"
+
+
+def test_run_hpo_skips_phase_name_for_legacy_tuner():
+    """A custom tuner without `phase_name` does not receive the argument."""
+    calls: dict[str, object] = {}
+
+    class LegacyTuner:
+        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
+            calls["phase_name_passed"] = "phase_name" in locals()
+            return ("model", {}, 0.5)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.legacy.module"
+    with patch("importlib.import_module", return_value=LegacyTuner()):
+        result = _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1]}),
+            y=pd.Series([1]),
+            metric_name_sklearn="mae",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.k_fold,
+            phase_name="coarse",
+        )
+
+    assert result == PhaseResult(score=0.5, params={})
+    assert calls["phase_name_passed"] is False
+
+
 def test_run_hpo_skips_fit_best_model_for_legacy_tuner():
     """A custom tuner without the `fit_best_model` argument does not receive it."""
     calls: dict[str, object] = {}

@@ -373,6 +373,9 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     assert ctx.sanity_gate_sections == {}
     assert ctx.pre_trained_trainer is None
     assert mock_hpo.call_count == 2
+    # The HPO phase name travels to _run_hpo → tuner.optimize(phase_name=...)
+    # for the pooled-fallback WARNING deduplication (issue #136).
+    assert all(call.kwargs["phase_name"] == "coarse" for call in mock_hpo.call_args_list)
 
 
 def test_execute_phases_select_cv_best_top_k_replaces_working_set():

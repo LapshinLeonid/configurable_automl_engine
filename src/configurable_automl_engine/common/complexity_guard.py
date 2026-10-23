@@ -5,8 +5,16 @@ The module extends the existing data-dependent clipping layer
 the search ranges of tree/boosting hyperparameters are too wide, trials are
 spent on values that do not change the model, the TPE surface has flat
 regions and the search drifts toward overfit models. This guard tightens the
-ranges depending on the number of rows (``n``) and the number of features
-after preprocessing (``p``).
+ranges depending on the number of rows (``n``) and the feature count.
+
+Two feature counts are used deliberately:
+
+* **Original columns** (a categorical column counts as 1) drive the
+  size-mode ratio ``n / p``: the one-hot expansion must not push
+  large-but-wide data into a smaller size mode;
+* **Features after preprocessing** (what the model sees, including one-hot
+  columns and missing-value indicators) feed the rules that depend on the
+  feature count — ``max_features`` and ``colsample_bytree``.
 
 Two independent levels of restrictions:
 
@@ -43,6 +51,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,
+    align_entry_bounds,
 )
 
 # ─────────────────────────────── configuration ─────────────────────────────── #
@@ -63,10 +72,12 @@ class ComplexityGuardConfig:
             heuristic); ``"engine_wins"`` — the guard restriction is applied.
         small_n_threshold: ``n < threshold`` marks the "small" mode.
         small_np_ratio_threshold: ``n / p < threshold`` marks the "small"
-            mode.
+            mode. The ratio uses the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         medium_n_threshold: ``n < threshold`` marks the "medium" mode.
         medium_np_ratio_threshold: ``n / p < threshold`` marks the "medium"
-            mode.
+            mode. The ratio uses the ORIGINAL column count (a categorical
+            column counts as 1, before one-hot expansion).
         size_basis: ``"rows"`` — ``n`` counts rows; ``"groups"`` — reserved
             for group-based validation (repeats of one group carry less
             information than independent rows). Only ``"rows"`` is used
@@ -111,8 +122,15 @@ class ComplexityGuardConfig:
 # ─────────────────────────────── size mode ─────────────────────────────────── #
 
 
-def resolve_size_mode(n: int, p: int, cfg: ComplexityGuardConfig) -> str:
+def resolve_size_mode(n: int, p_ratio: int, cfg: ComplexityGuardConfig) -> str:
     """Resolve the data-size mode by ``n`` and the ratio ``n / p``.
+
+    The ratio uses the ORIGINAL column count (a categorical column counts
+    as 1, i.e. before the one-hot expansion): the number of features the
+    model sees after preprocessing is intentionally NOT used here, so that
+    large-but-wide data (one-hot expanded) is not pushed into a smaller size
+    mode. The post-preprocessing feature count still feeds the rules that
+    depend on it (``max_features``, ``colsample_bytree``).
 
     Rules:
     * ``"small"``: ``n < small_n_threshold`` or ``n / p < small_np_ratio_threshold``;
@@ -122,15 +140,16 @@ def resolve_size_mode(n: int, p: int, cfg: ComplexityGuardConfig) -> str:
 
     Args:
         n: Number of rows in the training fold (``n_samples_eff``).
-        p: Number of features after preprocessing (what the model sees).
+        p_ratio: Number of ORIGINAL columns for the ratio (a categorical
+            column counts as 1).
         cfg: The guard configuration (holds the thresholds).
 
     Returns:
         str: ``"small"``, ``"medium"`` or ``"ordinary"``.
     """
-    if n < cfg.small_n_threshold or _ratio(n, p) < cfg.small_np_ratio_threshold:
+    if n < cfg.small_n_threshold or _ratio(n, p_ratio) < cfg.small_np_ratio_threshold:
         return "small"
-    if n < cfg.medium_n_threshold or _ratio(n, p) < cfg.medium_np_ratio_threshold:
+    if n < cfg.medium_n_threshold or _ratio(n, p_ratio) < cfg.medium_np_ratio_threshold:
         return "medium"
     return "ordinary"
 
@@ -170,6 +189,10 @@ _MIN_SAMPLES_LEAF_B_LOW = 2.0
 # Upper bound for ``min_samples_leaf`` on level B in the small mode.
 # ``floor(n / 4)`` with the leaf bound is used as a base multiplier.
 _MIN_SAMPLES_LEAF_B_DIVISOR = 4.0
+# On ``n < 8`` the level B range ``[2, floor(n / 4)]`` is empty; it collapses
+# to the lower bound 2 (regularization must not vanish), capped by the
+# physical limit ``floor(n / 2)`` of level A.
+_MIN_SAMPLES_LEAF_B_PHYSICAL_DIVISOR = 2.0
 
 # Lower bound for XGBoost ``min_child_weight`` on level B (for a squared loss
 # this is roughly the minimum number of rows in a leaf).
@@ -242,9 +265,10 @@ def _apply_rule(
     """Apply a rule to a range, converting fraction ranges to rows.
 
     The leaf rules of ``min_samples_leaf`` are expressed in absolute rows
-    (``floor(n / 2)``, ``[2, floor(n / 4)]``). When the range is a fraction
-    of the sample size (float in (0, 1)), the bounds are converted to rows
-    (``value * n``) before the rule applies and divided back afterwards.
+    (``floor(n / 2)``, ``[2, floor(n / 4)]`` with a fallback to 2 on an empty
+    range). When the range is a fraction of the sample size (float in (0, 1)),
+    the bounds are converted to rows (``value * n``) before the rule applies
+    and divided back afterwards.
 
     Args:
         rule: The rule to apply.
@@ -280,10 +304,10 @@ def _clamp_for_param(
     value — the parameter is fixed), preserves the int/float type and the log
     scale. Integer-like parameters (leaf sizes, depths, tree counts) never go
     below their physical minimum of 1: on extremely small ``n`` a rule may
-    compute an empty range whose bounds would collapse to 0 (e.g.
-    ``min_samples_leaf`` level B on ``n=2`` yields ``[2, 0]``) — such a range
-    is fixed at 1, never at 0, because sklearn/XGBoost reject 0
-    (``InvalidParameterError`` / silently overridden depth).
+    compute an empty or inverted range whose bounds would collapse to 0 (e.g.
+    on ``n=1`` a leaf rule yields at most 0 rows) — such a range is fixed at
+    1, never at 0, because sklearn/XGBoost reject 0 (``InvalidParameterError``
+    / silently overridden depth).
 
     Args:
         param: The hyperparameter name.
@@ -338,7 +362,13 @@ def _rule_min_samples_leaf_a() -> Rule:
 
 
 def _rule_min_samples_leaf_b() -> Rule:
-    """Level B: ``min_samples_leaf`` in ``[2, floor(n / 4)]``."""
+    """Level B: ``min_samples_leaf`` in ``[2, floor(n / 4)]``.
+
+    On ``n < 8`` the range ``[2, floor(n / 4)]`` is empty; instead of
+    collapsing it to the top (``min_samples_leaf = 1``, which drops the leaf
+    regularization entirely) the lower bound 2 is kept, capped by the
+    physical limit ``floor(n / 2)`` of level A.
+    """
 
     def _apply(
         orig_low: float,
@@ -348,15 +378,25 @@ def _rule_min_samples_leaf_b() -> Rule:
         leaf_min: float,
     ) -> tuple[float, float]:
         low = max(orig_low, _MIN_SAMPLES_LEAF_B_LOW)
-        high = min(orig_high, math.floor(n / _MIN_SAMPLES_LEAF_B_DIVISOR))
+        b_high = math.floor(n / _MIN_SAMPLES_LEAF_B_DIVISOR)
+        if b_high < _MIN_SAMPLES_LEAF_B_LOW:
+            # The regularization range [2, floor(n/4)] itself is empty
+            # (n < 8): keep the lower bound 2, capped by the physical
+            # limit floor(n / 2) — the leaf regularization must not
+            # silently vanish on tiny data.
+            high = min(orig_high, math.floor(n / _MIN_SAMPLES_LEAF_B_PHYSICAL_DIVISOR))
+        else:
+            high = min(orig_high, b_high)
         return low, high
 
     return Rule(
         level="B",
         reason=(
-            f"min_samples_leaf in [{_MIN_SAMPLES_LEAF_B_LOW:g}, "
-            f"floor(n / {_MIN_SAMPLES_LEAF_B_DIVISOR:g})]: regularization on "
-            "small data"
+            f"min_samples_leaf >= {_MIN_SAMPLES_LEAF_B_LOW:g}: on n < 8 the "
+            f"range [{_MIN_SAMPLES_LEAF_B_LOW:g}, "
+            f"floor(n / {_MIN_SAMPLES_LEAF_B_DIVISOR:g})] is empty, so the "
+            "lower bound is capped by the physical limit floor(n / 2) "
+            "instead of collapsing the leaf regularization"
         ),
         apply=_apply,
     )
@@ -772,6 +812,12 @@ def _build_entry(
 ) -> SearchSpaceEntry:
     """Build a deep-copied entry with the new bounds preserving type/log scale.
 
+    The upper bound is re-aligned to the step grid of a stepped range (e.g.
+    an int step): a rule may compute ``high`` that does not lie on the grid,
+    and Optuna would silently narrow such a range (``high`` is shifted down
+    to the last grid point). When the aligned grid becomes empty, the range
+    collapses to a single grid value — the parameter is fixed.
+
     Args:
         entry: The source entry.
         low: The new lower bound.
@@ -788,7 +834,7 @@ def _build_entry(
         low_i, high_i = round(low), round(high)
         low_i = min(low_i, high_i)
         new_entry.config = config.model_copy(update={"low": low_i, "high": high_i})
-    return new_entry
+    return align_entry_bounds(new_entry)
 
 
 def _domain_for_param(
@@ -927,12 +973,22 @@ def _apply_rule_to_entry(
         if not changed and not conflict:
             return entry, None
         new_entry = _build_entry(entry, *after)
+        # The record documents the FINAL bounds of the parameter: for a
+        # stepped range the upper bound may be re-aligned to the step grid
+        # inside ``_build_entry`` (``after`` would otherwise claim a range
+        # Optuna silently narrows).
+        final_config = new_entry.config
+        if isinstance(final_config, (IntSpace, FloatSpace)):
+            final_after = (float(final_config.low), float(final_config.high))
+        else:
+            # Unreachable: ``_build_entry`` is only called on numeric ranges.
+            final_after = after
         return new_entry, {
             "before": list(before),
-            "after": list(after),
+            "after": list(final_after),
             "conflict": conflict,
             "applied": True,
-            "fixed": after[0] == after[1],
+            "fixed": final_after[0] == final_after[1],
         }
 
     # Default parameter: the target range replaces the default one. If the
@@ -942,12 +998,20 @@ def _apply_rule_to_entry(
     if before == after:
         return entry, None
     new_entry = _build_entry(entry, *after)
+    # The record documents the FINAL bounds (the upper bound may be
+    # re-aligned to the step grid inside ``_build_entry``).
+    final_config = new_entry.config
+    if isinstance(final_config, (IntSpace, FloatSpace)):
+        final_after = (float(final_config.low), float(final_config.high))
+    else:
+        # Unreachable: ``_build_entry`` is only called on numeric ranges.
+        final_after = after
     return new_entry, {
         "before": list(before),
-        "after": list(after),
+        "after": list(final_after),
         "conflict": False,
         "applied": True,
-        "fixed": after[0] == after[1],
+        "fixed": final_after[0] == final_after[1],
     }
 
 
@@ -959,11 +1023,22 @@ def apply_complexity_guard(
     p: int,
     config: ComplexityGuardConfig | None = None,
     user_space_keys: Iterable[str] | None = None,
+    p_size: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Apply the adaptive complexity guard to a search space.
 
     Extends ``clip_search_space``: physical restrictions stay there, this
-    guard tightens the tree/boosting ranges based on ``n`` and ``p``.
+    guard tightens the tree/boosting ranges based on ``n`` and the feature
+    count.
+
+    The size mode (``small``/``medium``/``ordinary``) is resolved from the
+    ratio ``n / p_size``, where ``p_size`` is the number of ORIGINAL columns
+    (a categorical column counts as 1, before the one-hot expansion): the
+    one-hot expansion must not push large-but-wide data into a smaller size
+    mode. When ``p_size`` is not given, it falls back to ``p`` (the
+    pre-fix behavior, kept for direct callers). The rules that depend on the
+    feature count (``max_features``, ``colsample_bytree``) always use ``p`` —
+    the number of features after preprocessing (what the model sees).
 
     Args:
         space: The search space dict (parameter name -> ``SearchSpaceEntry``).
@@ -973,6 +1048,9 @@ def apply_complexity_guard(
         config: The guard configuration; ``None`` — the defaults.
         user_space_keys: Names of parameters set explicitly by the user
             (``algo.hyperparameters``). Defaults to an empty set.
+        p_size: Number of ORIGINAL columns (a categorical column counts as
+            1) used only for the size-mode ratio ``n / p``. ``None`` — fall
+            back to ``p``.
 
     Returns:
         tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly adjusted)
@@ -990,7 +1068,7 @@ def apply_complexity_guard(
         return dict(space), []
 
     is_boosting = algo in BOOSTING_ALGORITHMS
-    size_mode = resolve_size_mode(n, p, cfg)
+    size_mode = resolve_size_mode(n, p_size if p_size is not None else p, cfg)
     if size_mode == "ordinary":
         return dict(space), []
 
@@ -1026,6 +1104,7 @@ def apply_complexity_guard(
                 "size_mode": size_mode,
                 "n": n,
                 "p": p,
+                "p_size": p_size if p_size is not None else p,
                 "leaf_min": leaf_min,
                 "reason": rule.reason,
                 "user_range_policy": cfg.user_range_policy,

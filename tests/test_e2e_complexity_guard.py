@@ -81,6 +81,16 @@ def test_e2e_small_data_guard_applies_and_reports(caplog):
     # XGBoost max_depth was regularized to [1, 3].
     xgb_depth = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "max_depth"))
     assert xgb_depth["after"] == [1.0, 3.0]
+    # XGBoost min_child_weight and reg_lambda are restricted on the defaults
+    # (issue #132 regression: the parameters were absent from
+    # DEFAULT_SPACES['xgboosting'], so their guard rules never fired).
+    xgb_mcw = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "min_child_weight"))
+    assert xgb_mcw["before"] == [1.0, 10.0]
+    assert xgb_mcw["after"][0] == pytest.approx(2.0)
+    xgb_reg = next(r for r in records if (r["algo"], r["param"]) == ("xgboosting", "reg_lambda"))
+    assert xgb_reg["before"] == [1e-3, 100.0]
+    assert xgb_reg["after"][0] == pytest.approx(1.0)
+    assert xgb_reg["after"][1] == pytest.approx(100.0)
     # The adapted ranges are visible in the log ("was → became").
     assert any("max_depth" in rec.message and "→" in rec.message for rec in caplog.records)
 
@@ -93,6 +103,66 @@ def test_e2e_small_data_guard_off_spaces_unchanged():
     )
     res = train_best_model(cfg, df, target="target")
     assert "complexity_guard" not in res
+
+
+def _wide_one_hot_frame(
+    n: int = 4000, n_cat: int = 50, n_categories: int = 5, seed: int = 42
+) -> pd.DataFrame:
+    """Wide frame: n rows, n_cat categorical columns with n_categories
+    levels each -> n_cat * n_categories = 250 one-hot columns after encoding."""
+    rng = np.random.RandomState(seed)
+    X = pd.DataFrame(
+        {
+            f"c{i}": rng.randint(0, n_categories, size=n).astype(str)
+            for i in range(n_cat)
+        }
+    )
+    y = pd.Series(
+        rng.randn(n) + 0.1 * rng.randint(0, n_categories, size=n) * 1.0,
+        name="target",
+    )
+    return pd.concat([X, y], axis=1)
+
+
+def test_e2e_large_wide_one_hot_spaces_unchanged():
+    """Large-but-wide data (n=4000, 250 one-hot columns / 50 original)
+    must NOT trigger the 'medium' mode (issue #134).
+
+    With the size-mode ratio computed from the one-hot-expanded p, n/p =
+    4000/250 = 16 < 20 resolved 'medium' and restricted the spaces: XGBoost
+    max_depth <= 5 / subsample >= 0.7, RF min_samples_leaf >= 2 / max_depth
+    <= 13. With the ORIGINAL column count (50) the ratio is 4000/50 = 80, so
+    the mode is 'ordinary' and the spaces stay unchanged — the guard
+    produces no records.
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.tuner import optimize
+
+    df = _wide_one_hot_frame()
+    X, y = df.drop(columns=["target"]), df["target"]
+    for algo in ("random_forest", "xgboosting"):
+        res = optimize(
+            algo,
+            X,
+            y,
+            n_trials=2,
+            random_state=42,
+            # 2-fold CV: n_samples_eff = 4000/2 = 2000 >= 300, so the
+            # 'medium' mode can fire ONLY via the n/p ratio — the
+            # one-hot-expanded p (250) gives 8 < 20, the original column
+            # count (50) gives 40 >= 20.
+            validation_strategy="k_fold",
+            n_folds=2,
+            space_overrides={algo: dict(DEFAULT_SPACES[algo])},
+            complexity_guard_cfg={"mode": "apply"},
+            fit_best_model=False,
+        )
+        assert res is not None, f"{algo}: no valid result"
+        # The guard produced NO restrictions: the spaces were unchanged.
+        assert not res.complexity_guard, (
+            f"{algo}: guard unexpectedly restricted the space: "
+            f"{res.complexity_guard}"
+        )
 
 
 def test_e2e_user_range_conflict_does_not_crash():
@@ -337,3 +407,98 @@ def test_e2e_float_min_samples_leaf_engine_wins_does_not_crash(algo):
     # algorithm (HPO completed with a valid score).
     disqualified = res.get("disqualified_algorithms") or {}
     assert algo not in disqualified, f"{algo} disqualified: {disqualified}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# E2E: the "optimum at boundary" warning is suppressed for non-actionable
+# boundaries (issue #131)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_e2e_fixed_param_no_boundary_warning(caplog):
+    """A user-fixed parameter (low == high) produces no "widen it" warning.
+
+    The exact issue #131 report: a user ``min_samples_leaf [1, 1]`` is a
+    fixed parameter; the optimum is always at its only value, so the "widen
+    it" warning would be a false signal on every phase.
+    """
+    df = _small_frame()
+    cfg = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 4, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {"mode": "apply"},
+        },
+        "algorithms": {
+            "decision_tree": {
+                "enable": True,
+                "hyperparameters": {"min_samples_leaf": [1, 1, "int"]},
+            },
+            "ridge": {"enable": True},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+        res = train_best_model(cfg, df, target="target")
+    assert res["algorithm"] in {"decision_tree", "ridge"}
+    # The fixed min_samples_leaf must never appear in a "widen it" warning
+    # (other parameters may warn on their legitimate default boundaries).
+    for line in caplog.text.splitlines():
+        if "may lie beyond the range" in line:
+            assert "min_samples_leaf" not in line, line
+
+
+def test_e2e_guard_narrowed_range_no_boundary_warning(caplog):
+    """A guard-introduced bound produces no "widen it" warning.
+
+    The exact issue #131 report: after the guard tightening (e.g. XGBoost
+    ``max_depth`` 3–10 → 1–3 on small data), the optimum almost always lies
+    on a guard-introduced bound, and the old code warned on every phase for
+    every tree — although the narrowing was deliberate.
+
+    The precise contract: a guard-moved bound is silent (INFO instead); only
+    user/default-space boundaries may still warn. For ``decision_tree`` the
+    guard moves the HIGH bound of ``max_depth`` (32 → 3) while the low bound
+    2 stays the default-space one — so a warning may appear at the LOW bound
+    only, never at the guard-set HIGH bound.
+    """
+    df = _small_frame(n=18, p=5)
+    cfg = {
+        "general": {
+            "phases": [
+                {"name": "search", "n_trials": 8, "action": "all_algorithms"},
+                {
+                    "name": "select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+            "validation_strategy": "k_fold",
+            "n_folds": 5,
+            "complexity_guard": {"mode": "apply"},
+        },
+        "algorithms": {
+            "xgboosting": {"enable": True},
+            "decision_tree": {"enable": True},
+            "ridge": {"enable": True},
+        },
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+        res = train_best_model(cfg, df, target="target")
+    assert res["algorithm"] in {"xgboosting", "decision_tree", "ridge"}
+    # Any max_depth warning may only reference the default-space LOW bound
+    # (2); a warning on the guard-introduced HIGH bound (3) is forbidden.
+    for line in caplog.text.splitlines():
+        if "may lie beyond the range" in line and "max_depth" in line:
+            assert "low boundary" in line, line

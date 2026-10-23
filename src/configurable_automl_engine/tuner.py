@@ -87,6 +87,7 @@ from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_non_additive_metric,
     pooled_scorer_value,
+    warn_pooled_fallback_once,
 )
 from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
 
@@ -548,6 +549,8 @@ def _evaluate_with_intermediate_reports(
     random_state: int | None,
     scorer: Any,
     pool_metric: bool = False,
+    algo_name: str = "",
+    phase_name: str = "",
 ) -> float:
     """Evaluate the estimator fold by fold, publishing intermediate results.
 
@@ -564,11 +567,15 @@ def _evaluate_with_intermediate_reports(
     values — each row enters the calculation exactly once, in the same way as
     the final pooled estimate. Non-finite predictions of individual folds are
     masked out of the pooled value (the same contract as
-    ``metrics.oof_rmse``). A fold whose fit/predict raises an exception is
-    skipped the same way: its rows do not enter the pooled value and a warning
-    is logged — the semantics of the legacy
-    ``cross_val_score(error_score=np.nan)`` (a failed fold must not abort the
-    trial). If EVERY fold fails, a ``ValueError`` is raised — the same
+    ``metrics.oof_rmse``). A fold whose fit/predict raises a NON-FATAL
+    exception (e.g. ``TypeError``, ``KeyError``, ``IndexError``,
+    ``ValueError``/``numpy.linalg.LinAlgError``) is skipped the same way: its
+    rows do not enter the pooled value and a warning is logged — the semantics
+    of the legacy ``cross_val_score(error_score=np.nan)`` (a failed fold must
+    not abort the trial). Fatal exceptions (``MemoryError``, ``RuntimeError``,
+    ``InvalidDataError``) are NOT swallowed — they propagate to
+    ``handle_failure`` so the circuit breaker stays active. If EVERY fold
+    fails, a ``ValueError`` is raised — the same
     "no valid result" contract as before. A running pooled value that is
     itself non-finite
     (e.g. R² on a single LOO pair, which is undefined) is NOT published to
@@ -578,6 +585,14 @@ def _evaluate_with_intermediate_reports(
     similar per-sample means, ``pool_metric=False``) keep publishing the
     cumulative fold mean (which equals the pooled value); a failed fold is
     skipped with a warning and does not contribute to the cumulative mean.
+
+    When the pooled value is impossible FINALLY (the scorer exposes no raw
+    metric function, or no finite pair remains by the end of the evaluation),
+    a WARNING about the fallback to the per-fold mean is logged once per
+    (``algo_name``, ``phase_name``) pair. A TRANSIENT pooled failure inside
+    the fold loop (e.g. the first fold predicted all-NaN) is not a metric
+    degradation — the final pooled value may still be valid — so no WARNING
+    is emitted there.
 
     Args:
         trial (Trial): The current Optuna trial.
@@ -593,6 +608,10 @@ def _evaluate_with_intermediate_reports(
         pool_metric (bool): Whether the metric is non-additive and must be
             pooled over the accumulated OOF predictions. Defaults to False —
             the legacy cumulative-fold-mean behavior.
+        algo_name (str): The algorithm being evaluated, for the fallback
+            WARNING deduplication.
+        phase_name (str): The pipeline phase, for the fallback WARNING
+            deduplication.
     Returns:
         float: The mean metric value across all folds (for additive metrics)
             or the pooled value over all rows (for non-additive metrics).
@@ -600,6 +619,8 @@ def _evaluate_with_intermediate_reports(
         optuna.TrialPruned: If the pruner decides to prune the trial.
         ValueError: If every fold fails during evaluation (fit/predict) — the
             estimate is impossible.
+        MemoryError, RuntimeError, InvalidDataError: A fatal per-fold failure —
+            propagated so the circuit breaker stays active.
         Exception: A genuine failure outside a single fold (e.g. split
             iteration) propagates (fatal or non-fatal depending on the
             exception type, as before).
@@ -632,13 +653,17 @@ def _evaluate_with_intermediate_reports(
         n_folds_total += 1
         # Clone the estimator for every fold (as cross_val_score does) to
         # avoid state accumulating between folds. A fold whose fit/predict
-        # raises is skipped — it does not contribute to the estimate or to
-        # the intermediate reports, and a warning is logged (the
-        # ``cross_val_score(error_score=np.nan)`` contract: a failed fold
-        # must not abort the trial).
+        # raises a NON-FATAL exception is skipped — it does not contribute to
+        # the estimate or to the intermediate reports, and a warning is logged
+        # (the ``cross_val_score(error_score=np.nan)`` contract: a failed fold
+        # must not abort the trial). Fatal exception types (MemoryError /
+        # RuntimeError / InvalidDataError) are NOT swallowed here — they
+        # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
             fold_estimator = clone(estimator)
             fold_estimator.fit(X_tr, y_tr)
+        except (MemoryError, RuntimeError, InvalidDataError):
+            raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
             log.warning(
@@ -651,6 +676,8 @@ def _evaluate_with_intermediate_reports(
             continue
         try:
             fold_pred = np.asarray(fold_estimator.predict(X_te)).reshape(-1)
+        except (MemoryError, RuntimeError, InvalidDataError):
+            raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
             log.warning(
@@ -678,6 +705,13 @@ def _evaluate_with_intermediate_reports(
                     scorer, pooled_y_buf, pooled_pred_buf
                 )
             except ValueError:
+                # A transient pooled failure (e.g. the first fold predicted
+                # all-NaN, so the accumulated buffer has no valid pair yet)
+                # is NOT a metric degradation: later folds may still produce a
+                # valid pooled value. Only the per-fold fallback value is used
+                # to publish the intermediate step; no WARNING is emitted here
+                # (the warning is reserved for the final return point, where a
+                # real fallback decision is made).
                 try:
                     fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
                 except Exception:  # noqa: BLE001, S110 — only a fallback for the pooled value
@@ -695,6 +729,8 @@ def _evaluate_with_intermediate_reports(
         else:
             try:
                 fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+            except (MemoryError, RuntimeError, InvalidDataError):
+                raise
             except Exception as err:  # noqa: BLE001 — per-fold scoring, same cross_val_score(error_score=nan) semantics
                 n_failed_folds += 1
                 log.warning(
@@ -723,6 +759,13 @@ def _evaluate_with_intermediate_reports(
         try:
             return pooled_scorer_value(scorer, pooled_y_buf, pooled_pred_buf)
         except ValueError:
+            warn_pooled_fallback_once(
+                algo_name=algo_name or "unknown",
+                phase_name=phase_name or "untitled_phase",
+                reason="the pooled value over the accumulated OOF rows "
+                "cannot be computed (no raw scorer metric function or no "
+                "valid pairs)",
+            )
             return float(np.mean(fold_scores)) if fold_scores else float("nan")
     return float(np.mean(fold_scores)) if fold_scores else float("nan")
 
@@ -737,6 +780,8 @@ def _evaluate_pooled_cv(
     test_size: float,
     random_state: int | None,
     scorer: Any,
+    algo_name: str = "",
+    phase_name: str = "",
 ) -> float:
     """Evaluate a trial pipeline over pooled OOF predictions (non-additive).
 
@@ -752,10 +797,14 @@ def _evaluate_pooled_cv(
     value (the same contract as ``metrics.oof_rmse``), so a fold producing NaN
     (e.g. isotonic regression on a degenerate split) does not abort the trial.
     A fold whose fit/predict (or per-fold scoring, on the non-poolable path)
-    raises an exception is skipped the same way: its rows do not enter the
-    pooled estimate and a warning is logged — the semantics of the legacy
-    ``cross_val_score(error_score=np.nan)`` (a failed fold became NaN and was
-    excluded from the estimate instead of aborting the trial). If EVERY fold
+    raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
+    ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is skipped the
+    same way: its rows do not enter the pooled estimate and a warning is
+    logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
+    (a failed fold became NaN and was excluded from the estimate instead of
+    aborting the trial). Fatal exceptions (``MemoryError``, ``RuntimeError``,
+    ``InvalidDataError``) are NOT swallowed — they propagate to
+    ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails, the evaluation is impossible and a ``ValueError`` is raised — the
     same "no valid result" contract as before.
 
@@ -766,7 +815,8 @@ def _evaluate_pooled_cv(
 
     If the pooled value cannot be computed (no valid pairs, or the scorer does
     not expose a raw metric function), the mean of the available per-fold
-    values is returned as a defensive fallback.
+    values is returned as a defensive fallback, and a WARNING about the
+    fallback is logged once per (``algo_name``, ``phase_name``) pair.
 
     Args:
         estimator (Any): The estimator (possibly a pipeline) to evaluate.
@@ -778,6 +828,10 @@ def _evaluate_pooled_cv(
             keep a uniform iter_splits call).
         random_state (int | None): Randomness seed.
         scorer (Any): sklearn metric object.
+        algo_name (str): The algorithm being evaluated, for the fallback
+            WARNING deduplication.
+        phase_name (str): The pipeline phase, for the fallback WARNING
+            deduplication.
 
     Returns:
         float: The pooled metric value over all out-of-fold rows.
@@ -785,6 +839,8 @@ def _evaluate_pooled_cv(
     Raises:
         ValueError: If every fold fails during evaluation (fit/predict or the
             per-fold scoring fallback) — the pooled estimate is impossible.
+        MemoryError, RuntimeError, InvalidDataError: A fatal per-fold failure —
+            propagated so the circuit breaker stays active.
     """
     fold_scores: list[float] = []
     n_rows = len(X)
@@ -815,13 +871,18 @@ def _evaluate_pooled_cv(
         n_folds_total += 1
         # Clone the estimator for every fold (as cross_val_score does) to
         # avoid state accumulating between folds. A fold whose fit/predict
-        # raises is skipped — its rows do not enter the pooled estimate, a
-        # warning is logged (the ``cross_val_score(error_score=np.nan)``
-        # contract: a failed fold must not abort the trial).
+        # raises a NON-FATAL exception is skipped — its rows do not enter the
+        # pooled estimate, a warning is logged (the
+        # ``cross_val_score(error_score=np.nan)`` contract: a failed fold must
+        # not abort the trial). Fatal exception types (MemoryError /
+        # RuntimeError / InvalidDataError) are NOT swallowed here — they
+        # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
             fold_estimator = clone(estimator)
             fold_estimator.fit(X_tr, y_tr)
             fold_pred = np.asarray(fold_estimator.predict(X_te)).reshape(-1)
+        except (MemoryError, RuntimeError, InvalidDataError):
+            raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
             log.warning(
@@ -836,9 +897,11 @@ def _evaluate_pooled_cv(
         if not poolable:
             # The scorer does not expose a raw metric function: pooling is
             # impossible, collect the per-fold values as the fallback. A
-            # scoring failure excludes the fold, like a fit failure.
+            # non-fatal scoring failure excludes the fold, like a fit failure.
             try:
                 fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
+            except (MemoryError, RuntimeError, InvalidDataError):
+                raise
             except Exception as err:  # noqa: BLE001 — per-fold scoring, same cross_val_score(error_score=nan) semantics
                 n_failed_folds += 1
                 log.warning(
@@ -869,12 +932,25 @@ def _evaluate_pooled_cv(
             # common path — so per-fold scoring noise (e.g. LOO+R², where
             # every fold R² is undefined) does not pollute the logs, and NO
             # split is iterated or fold re-trained a second time.
+            warn_pooled_fallback_once(
+                algo_name=algo_name or "unknown",
+                phase_name=phase_name or "untitled_phase",
+                reason="the pooled value over the collected OOF rows cannot "
+                "be computed (no valid pairs, or the raw metric function "
+                "raised on the pooled vector)",
+            )
             for yt, yp in fold_pairs:
                 try:
                     fold_scores.append(pooled_scorer_value(scorer, yt, yp))
                 except ValueError:
                     pass
             return float(np.mean(fold_scores)) if fold_scores else float("nan")
+    warn_pooled_fallback_once(
+        algo_name=algo_name or "unknown",
+        phase_name=phase_name or "untitled_phase",
+        reason="the scorer does not expose a raw metric function "
+        "(_score_func/_sign/_kwargs)",
+    )
     return float(np.mean(fold_scores)) if fold_scores else float("nan")
 
 
@@ -998,6 +1074,7 @@ class _OptimizeRunner:
         complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
         user_hyperparameter_keys: list[str] | None = None,
         fit_best_model: bool = True,
+        phase_name: str | None = None,
     ) -> None:
         """Store the parameters of a single optimisation run.
 
@@ -1065,12 +1142,19 @@ class _OptimizeRunner:
         # Number of features after preprocessing (what the model sees).
         # Filled in build_trial_pipeline (falls back to the raw column count).
         self.n_features_eff: int = 1
+        # Number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used only by the complexity guard
+        # for the size-mode ratio ``n / p``; filled in build_trial_pipeline.
+        self.n_features_size: int = 1
         # Whether to train the best model on all data after the Optuna loop
         # (``_fit_best_model``). Set to False when the caller only needs the
         # best parameters and score (e.g. the training engine's HPO phase):
         # the full-data fit is then skipped and the ``model`` field of the
         # returned ``OptimizeResult`` is None.
         self.fit_best_model = fit_best_model
+        # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
+        # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
+        self.phase_name = phase_name
 
         # Names of columns dropped by cleaning uninformative features.
         # Filled in build_trial_pipeline for diagnostics; empty by default.
@@ -1394,9 +1478,12 @@ class _OptimizeRunner:
         """Apply the adaptive complexity guard to a dict search space.
 
         The guard depends on ``n`` (the effective training-fold rows,
-        ``self.n_samples_eff``) and ``p`` (the number of features after
-        preprocessing, ``self.n_features_eff``). Both are computed once per
-        phase and are the same in every HPO phase (deterministic between
+        ``self.n_samples_eff``) and the feature counts: the size-mode ratio
+        uses ``self.n_features_size`` — the number of ORIGINAL columns (a
+        categorical column counts as 1, before one-hot), while the rules for
+        ``max_features``/``colsample_bytree`` use ``self.n_features_eff`` —
+        the number of features after preprocessing. Both are computed once
+        per phase and are the same in every HPO phase (deterministic between
         phases) and in the subprocesses (identical inputs -> identical
         results), so the TPE history transfer between phases stays valid.
 
@@ -1422,6 +1509,7 @@ class _OptimizeRunner:
             p=self.n_features_eff,
             config=cfg,
             user_space_keys=user_keys,
+            p_size=self.n_features_size,
         )
         return adjusted, logs
 
@@ -1518,9 +1606,11 @@ class _OptimizeRunner:
         against the parameter type (the default search space or the estimator
         signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
         ``C`` as a real range (``float_log``), not as an integer-only range —
-        the exact issue #127 bug. Raw lists (not yet parsed into
-        ``SearchSpaceEntry`` objects) are parsed first; explicitly typed
-        entries and constants pass through unchanged.
+        the exact issue #127 bug. A parameter whose default space entry is
+        ``float_log`` (e.g. ``alpha_1`` of an ARD regression) is likewise
+        searched on a logarithmic scale without an explicit type. Raw lists
+        (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;
+        explicitly typed entries and constants pass through unchanged.
 
         Args:
             space_dict: The parameter name → value mapping (``SearchSpaceEntry``
@@ -1669,6 +1759,7 @@ class _OptimizeRunner:
             # error contract for unknown algorithms.
             if resolve_algorithm_name(self.algo) not in AVAILABLE_ALGORITHMS:
                 self.n_features_eff = max(1, int(self.X.shape[1]))
+                self.n_features_size = max(1, int(self.X.shape[1]))
                 return
             encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
             # Automatic preset selection + application of an explicit override.
@@ -1743,10 +1834,15 @@ class _OptimizeRunner:
 
         # The number of features the model actually sees after preprocessing
         # (including one-hot and missing-value indicators). Used by the
-        # adaptive complexity guard as ``p``. Computed deterministically once
-        # per phase — the same value in every HPO phase and in the
-        # subprocesses.
+        # adaptive complexity guard as ``p`` for the rules that depend on
+        # the feature count (``max_features``, ``colsample_bytree``).
+        # Computed deterministically once per phase — the same value in every
+        # HPO phase and in the subprocesses.
         self.n_features_eff = self._estimate_n_features_after_preprocessing()
+        # The number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used by the adaptive complexity
+        # guard for the size-mode ratio ``n / p`` only.
+        self.n_features_size = max(1, int(self.X.shape[1]))
 
     def _estimate_n_features_after_preprocessing(self) -> int:
         """Estimate the number of features after the preprocessor.
@@ -1756,7 +1852,10 @@ class _OptimizeRunner:
         encoded categorical features. The estimate is computed
         deterministically from the data and the encoding settings — the same
         value in every HPO phase and in the subprocesses (no fitting, no
-        randomness). It is used by the adaptive complexity guard as ``p``.
+        randomness). It is used by the adaptive complexity guard as ``p`` for
+        the rules that depend on the feature count (``max_features``,
+        ``colsample_bytree``); the size-mode ratio ``n / p`` uses the
+        original column count instead (``n_features_size``).
 
         One-hot encoding expands each categorical column into its number of
         unique categories; ordinal/target/frequency encoding keeps one column
@@ -1931,6 +2030,8 @@ class _OptimizeRunner:
                 random_state=self.random_state,
                 scorer=self.scorer,
                 pool_metric=self.pool_metric,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
             )
             # If we got +inf (an nrmse error) or NaN, return the worst float
             # (analog of the float32 minimum or float('-inf')).
@@ -1952,6 +2053,8 @@ class _OptimizeRunner:
                 test_size=self.train_test_split_test_size,
                 random_state=self.random_state,
                 scorer=self.scorer,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
             )
             # If we got +inf (an nrmse error) or NaN, return the worst float
             # (analog of the float32 minimum or float('-inf')).
@@ -2084,6 +2187,130 @@ class _OptimizeRunner:
             ) from err
         raise optuna.TrialPruned() from err
 
+    def _natural_domain_bounds(
+        self, param: str, entry: SearchSpaceEntry
+    ) -> tuple[float | None, float | None]:
+        """Natural (physical) domain bounds of a parameter.
+
+        Returns ``(low, high)``; a side is ``None`` when the domain is
+        unbounded there. A boundary that coincides with a natural bound is not
+        actionable: the value cannot be pushed beyond it even by widening the
+        search range, so the "widen it" hint would be a false signal. Bounds
+        that depend on the data (leaf sizes, neighbor counts) are derived from
+        ``n_samples_eff`` / ``n_features_eff`` — these are the same physical
+        limits that ``clip_search_space`` enforces.
+
+        Args:
+            param: The hyperparameter name.
+            entry: The search-space entry (its distribution type decides the
+                fraction-vs-count interpretation of ``min_samples_leaf`` and
+                ``max_features``).
+
+        Returns:
+            tuple[float | None, float | None]: Natural ``(low, high)`` bounds.
+        """
+        low: float | None = None
+        high: float | None = None
+        dist_type = entry.dist_type
+        if param in {"subsample", "colsample_bytree"}:
+            # A row/feature sampling fraction: (0, 1].
+            high = 1.0
+        elif param == "min_samples_leaf":
+            if (
+                dist_type == "float"
+                and float(entry.low) < 1.0
+                and float(entry.high) <= 1.0
+            ):
+                # A fraction of the sample size: (0, 1].
+                high = 1.0
+            else:
+                # An absolute row count: at least 1 and at most n.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "min_samples_split":
+            low = 2.0
+            high = float(max(2, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "n_neighbors":
+            low = 1.0
+            high = float(max(1, int(getattr(self, "n_samples_eff", 0)) - 1))
+        elif param == "max_features":
+            if dist_type == "float":
+                # A fraction of the features: (0, 1].
+                high = 1.0
+            else:
+                # An absolute feature count.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_features_eff", 1))))
+        elif param == "l1_ratio":
+            low = 0.0
+            high = 1.0
+        elif param == "max_depth":
+            low = 1.0
+        elif param in {"min_child_weight", "gamma"}:
+            low = 0.0
+        elif param == "n_estimators":
+            low = 1.0
+        elif param == "p":
+            # The Minkowski power of the KNN space.
+            low = 1.0
+        return low, high
+
+    def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
+        """Whether ``value`` lies on a bound introduced by the complexity guard.
+
+        The guard records the "before → after" bounds of every range it
+        actually narrowed. A bound is guard-introduced when the guard moved
+        that side of the range: the "after" bound differs from "before" (the
+        other side may be the user's or the default bound and stays a normal
+        "widen it" candidate). An optimum on a guard-moved bound is expected —
+        the range was tightened deliberately (e.g. ``max_depth`` 2–3 on small
+        data) — so the "widen it" warning would be a false signal.
+
+        Args:
+            param: The hyperparameter name.
+            value: The boundary value of the best trial.
+            tolerance: The same absolute tolerance the boundary check uses.
+
+        Returns:
+            bool: ``True`` when the value is a guard-introduced bound.
+        """
+        algo = resolve_algorithm_name(self.algo)
+        for record in getattr(self, "complexity_guard_logs", []):
+            if record.get("param") != param:
+                continue
+            if resolve_algorithm_name(str(record.get("algo", ""))) != algo:
+                continue
+            if not record.get("applied"):
+                continue
+            before = record.get("before")
+            after = record.get("after")
+            if not isinstance(before, list) or len(before) != 2:
+                continue
+            if not isinstance(after, list) or len(after) != 2:
+                continue
+            try:
+                before = [float(before[0]), float(before[1])]
+                after = [float(after[0]), float(after[1])]
+            except (TypeError, ValueError):
+                continue
+            # A side introduced by the guard: the after bound differs from
+            # the before one on that side.
+            moved_low = not math.isclose(
+                after[0], before[0], rel_tol=0.0, abs_tol=tolerance
+            )
+            moved_high = not math.isclose(
+                after[1], before[1], rel_tol=0.0, abs_tol=tolerance
+            )
+            if (
+                moved_low
+                and math.isclose(value, after[0], rel_tol=0.0, abs_tol=tolerance)
+            ) or (
+                moved_high
+                and math.isclose(value, after[1], rel_tol=0.0, abs_tol=tolerance)
+            ):
+                return True
+        return False
+
     def _warn_if_optimum_at_boundary(self, best_params: dict[str, Any]) -> None:
         """Warn when the best trial's value lies at a range boundary.
 
@@ -2092,6 +2319,18 @@ class _OptimizeRunner:
         the range, and the user should widen it. Only dict-based numeric
         search spaces (with ``SearchSpaceEntry`` bounds) are checked;
         categorical parameters and constant values are skipped.
+
+        The warning is suppressed when the boundary is not actionable:
+        * a fixed parameter (``low == high``) — e.g. a user
+          ``min_samples_leaf [1, 1]`` or an XGBoost ``max_depth`` collapsed
+          to 3–3 — the optimum sits at the only possible value;
+        * a bound introduced by the adaptive complexity guard — the range
+          was narrowed deliberately (e.g. ``max_depth`` 2–3) and the optimum
+          is expected on it (an INFO line is logged instead);
+        * a natural (physical) domain boundary of the parameter —
+          ``subsample=1.0``, ``colsample_bytree=1.0``, ``min_samples_leaf=1``,
+          ``l1_ratio=0/1`` — the value cannot be pushed beyond it even by
+          widening the range.
 
         Args:
             best_params: The parameters of the best trial.
@@ -2113,6 +2352,10 @@ class _OptimizeRunner:
                 num = float(value)
             except (TypeError, ValueError):
                 continue
+            if low == high:
+                # A fixed parameter: the optimum is at the only possible
+                # value, the "widen it" hint is meaningless.
+                continue
             # Tolerance: 1e-6 of the range width (at least 1e-6 for tiny ranges).
             # Exact equality is not enough because Optuna may return 1.0 vs
             # a boundary 1.0000001. A relative tolerance is deliberately not
@@ -2122,12 +2365,19 @@ class _OptimizeRunner:
             tolerance = 1e-6 * max(1.0, abs(high - low))
             at_low = math.isclose(num, low, rel_tol=0.0, abs_tol=tolerance)
             at_high = math.isclose(num, high, rel_tol=0.0, abs_tol=tolerance)
-            if at_low or at_high:
-                boundary = "low" if at_low else "high"
-                log.warning(
+            if not (at_low or at_high):
+                continue
+            boundary = "low" if at_low else "high"
+            bound_value = low if at_low else high
+
+            # A guard-introduced bound: the range was narrowed deliberately,
+            # the optimum on it is expected — INFO instead of a warning.
+            if self._is_guard_boundary(name, bound_value, tolerance):
+                log.info(
                     "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
-                    "boundary of the search range [%.6g, %.6g] — the true "
-                    "optimum may lie beyond the range, widen it",
+                    "boundary of [%.6g, %.6g], set by the complexity_guard — "
+                    "expected, the range is narrowed deliberately, no 'widen "
+                    "it' warning",
                     self.algo,
                     name,
                     num,
@@ -2135,6 +2385,39 @@ class _OptimizeRunner:
                     low,
                     high,
                 )
+                continue
+
+            # A natural (physical) domain boundary of the parameter: the value
+            # cannot be pushed beyond it even by widening the range.
+            natural_low, natural_high = self._natural_domain_bounds(name, entry)
+            natural_bound = natural_low if at_low else natural_high
+            if natural_bound is not None and math.isclose(
+                bound_value, natural_bound, rel_tol=0.0, abs_tol=tolerance
+            ):
+                log.info(
+                    "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                    "boundary of [%.6g, %.6g] — the natural domain boundary "
+                    "of the parameter, no 'widen it' warning",
+                    self.algo,
+                    name,
+                    num,
+                    boundary,
+                    low,
+                    high,
+                )
+                continue
+
+            log.warning(
+                "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                "boundary of the search range [%.6g, %.6g] — the true "
+                "optimum may lie beyond the range, widen it",
+                self.algo,
+                name,
+                num,
+                boundary,
+                low,
+                high,
+            )
 
     def select_best_trial(self) -> bool:
         """Select the best completed trial of the CURRENT phase (step 7).
@@ -2358,6 +2641,7 @@ def optimize(
     complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
     user_hyperparameter_keys: list[str] | None = None,
     fit_best_model: bool = True,
+    phase_name: str | None = None,
 ) -> OptimizeResult | None:
     """Run the model hyperparameter optimisation process using Optuna.
 
@@ -2488,6 +2772,11 @@ def optimize(
             (e.g. the training engine's HPO phases — the final model is
             trained by its own trainer): the redundant full-data fit is
             skipped and the ``model`` field of the result is None.
+        phase_name (str | None): The name of the pipeline phase (e.g.
+            'coarse'/'refine') used to deduplicate the WARNING about the
+            fallback from the pooled metric to the per-fold mean (emitted
+            once per algorithm and phase). ``None`` for direct callers — the
+            warning falls back to a generic phase label.
 
     Returns:
         OptimizeResult: The result of the phase — ``model`` (the trained
@@ -2551,4 +2840,5 @@ def optimize(
         complexity_guard_cfg=complexity_guard_cfg,
         user_hyperparameter_keys=user_hyperparameter_keys,
         fit_best_model=fit_best_model,
+        phase_name=phase_name,
     ).run()

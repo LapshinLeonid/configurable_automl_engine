@@ -24,6 +24,7 @@ Key features:
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, Literal, cast
@@ -184,6 +185,64 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
     sign = getattr(scorer, "_sign", 1)
     kwargs = getattr(scorer, "_kwargs", None) or {}
     return float(sign * score_func(yt[mask], yp[mask], **kwargs))
+
+
+# Fallback-warning deduplication: when a scorer cannot be pooled (no raw
+# ``_score_func`` exposed, or the pooled value is impossible), the engine
+# falls back to the per-fold mean. The WARNING is emitted exactly once per
+# (algorithm, phase) pair — added to the set on first emission — so the
+# metric degradation leaves a trace in the log without spamming one message
+# per trial/fold (issue #136). The set is guarded by a lock: the fallback
+# paths run concurrently in the "processes"/threads parallel mode.
+_pooled_fallback_lock = threading.Lock()
+_pooled_fallback_warned: set[tuple[str, str]] = set()
+
+
+def warn_pooled_fallback_once(*, algo_name: str, phase_name: str, reason: str) -> None:
+    """Log a WARNING once per (algorithm, phase) about the pooled fallback.
+
+    When the pooled evaluation of a non-additive metric is impossible (the
+    scorer does not expose the private ``_score_func``/``_sign``/``_kwargs``
+    attributes, or no valid OOF pairs remain), the engine silently returns
+    the per-fold mean instead of the pooled value — the reported metric
+    changes without a trace in the log. This helper emits a single WARNING
+    for the first occurrence per (``algo_name``, ``phase_name``) pair and
+    stays silent for the subsequent occurrences of the same pair.
+
+    Args:
+        algo_name (str): The algorithm being evaluated (e.g. 'ridge').
+        phase_name (str): The pipeline phase (e.g. an HPO phase name, or
+            'final_fit' for the final ``ModelTrainer`` fit).
+        reason (str): The human-readable cause of the fallback.
+
+    Returns:
+        None
+    """
+    key = (algo_name, phase_name)
+    with _pooled_fallback_lock:
+        if key in _pooled_fallback_warned:
+            return
+        _pooled_fallback_warned.add(key)
+    logger.warning(
+        "Pooled evaluation of the metric is not available for algorithm "
+        "'%s' in phase '%s': %s. Falling back to the per-fold mean — the "
+        "reported value may differ from the pooled estimate.",
+        algo_name,
+        phase_name,
+        reason,
+    )
+
+
+def reset_pooled_fallback_warnings() -> None:
+    """Clear the warn-once deduplication state (test helper).
+
+    ``warn_pooled_fallback_once`` logs at most once per (algorithm, phase)
+    pair for the whole process lifetime. Tests exercise the fallback with
+    different pairs, so they call this helper (e.g. in an autouse fixture)
+    to reset the recorded pairs between tests.
+    """
+    with _pooled_fallback_lock:
+        _pooled_fallback_warned.clear()
 
 
 class NRMSEZeroRangeError(ValueError):

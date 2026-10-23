@@ -1966,6 +1966,62 @@ def test_runner_dropped_features_recorded():
     assert runner.preprocessor is not None
 
 
+def test_runner_n_features_size_uses_original_columns():
+    """n_features_size counts ORIGINAL columns; n_features_eff is post-one-hot.
+
+    Regression (issue #134): the complexity guard resolved the size mode
+    from the one-hot-expanded feature count, so large-but-wide data fell
+    into the 'medium' mode. The runner must track both counts:
+    n_features_size (original columns, a categorical column = 1) for the
+    size-mode ratio and n_features_eff (what the model sees) for the rules.
+    """
+    rng = np.random.default_rng(13)
+    n = 120
+    cats = pd.DataFrame(
+        {f"c{i}": rng.integers(0, 10, size=n).astype(str) for i in range(4)}
+    )
+    X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
+    y = pd.Series(rng.normal(size=n))
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # 5 original columns (4 categorical + 1 numerical).
+    assert runner.n_features_size == 5
+    # After one-hot: 4 categorical * 10 categories + 1 numerical = 41.
+    assert runner.n_features_eff == 41
+
+
 def test_optimize_external_preprocessor_skips_cleaning():
     """If a ready preprocessor is provided, self.X is not cleaned:
     the user has fixed the feature set themselves."""
@@ -2480,3 +2536,48 @@ def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
     # No completed trial → "no valid result" (None), without the fatal-failure
     # disqualification or an exception escaping Optuna.
     assert opt_res is None
+
+
+def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
+    """A MemoryError from a fold still trips the circuit breaker.
+
+    Issue #135 review: fatal exception types (MemoryError/RuntimeError/
+    InvalidDataError) must NOT be swallowed by the fold-skip treatment —
+    otherwise the consecutive-fatal-failures counter and
+    ``InvalidAlgorithmError`` would stop working on the pooled path (the
+    default RMSE metric). MAX_FATAL_FAILURES=5 consecutive MemoryErrors →
+    InvalidAlgorithmError.
+    """
+    X, y = toy_data
+
+    class AlwaysOOM(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            raise MemoryError("oom in fit")
+
+        def predict(self, Xte):
+            return np.zeros(len(Xte))
+
+    with (
+        patch.object(hyperopt, "create_model", return_value=AlwaysOOM()),
+        patch.object(
+            hyperopt._OptimizeRunner,
+            "assemble_estimator",
+            side_effect=lambda model, apply_fs=False: model,
+        ),
+    ):
+        with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
+            optimize(
+                "ridge",
+                X,
+                y,
+                n_trials=10,
+                metric="rmse",
+                validation_strategy="k_fold",
+                n_folds=3,
+                random_state=42,
+                fit_best_model=False,
+                space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+            )
