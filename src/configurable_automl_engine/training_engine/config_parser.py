@@ -797,9 +797,13 @@ class ComplexityGuardCfg(BaseModel):
       the cap is a physical bound (larger leaves are unreachable on the sample
       size), not a claim about model quality;
     * level B — regularization: deliberately shifts the space toward simpler
-      models on small data (``regularize``).
-    * level "time" — time-only caps (``n_estimators``): more trees only
-      reduce the variance of the ensemble.
+      models on small data (``regularize``). For boosting this includes the
+      ``n_estimators`` budget — the tree count together with
+      ``learning_rate`` is the main complexity regulator of a boosting
+      ensemble;
+    * level "time" — time-only caps of bagging ensembles (``n_estimators``
+      of random forest / extra trees): more trees only reduce the variance
+      of the ensemble.
 
     Attributes:
         mode (ComplexityGuardMode): Operation mode: 'off' — disabled,

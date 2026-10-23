@@ -3,8 +3,9 @@
 Covers:
 1. Size-mode resolution by (n, p) including edge cases (n = 2..5, p = 1).
 2. Rule application per algorithm/family for the small and medium modes:
-   min_samples_leaf, max_depth, max_features, n_estimators (time-only),
-   min_child_weight, subsample, colsample_bytree, reg_lambda.
+   min_samples_leaf, max_depth, max_features, n_estimators (bagging
+   time-only / boosting level B budget), min_child_weight, subsample,
+   colsample_bytree, reg_lambda.
 3. User-range conflicts in both policies (user_wins / engine_wins).
 4. Range collapse to a single value (parameter fixed).
 5. Preservation of the int/float type and the log scale.
@@ -138,7 +139,9 @@ def test_extreme_small_n_xgb_ranges_never_zero(n):
     assert mcw.low >= 1.0 and mcw.high >= 1.0 and mcw.low <= mcw.high
     md = adjusted["max_depth"].config
     assert md.low >= 1 and md.high >= 1 and md.low <= md.high
-    assert adjusted["n_estimators"].config.high == 300
+    # Boosting n_estimators: level B regularization cap (200), not the
+    # bagging time-only cap (300).
+    assert adjusted["n_estimators"].config.high == 200
 
 
 # ──────────────── leaf regularization on n < 8 (issue #138) ────────────────── #
@@ -440,6 +443,97 @@ def test_small_tree_n_estimators_time_only():
     assert all(log["level"] == "time" for log in logs)
 
 
+@pytest.mark.parametrize("algo", ["gradient_boosting", "xgboosting"])
+def test_small_boosting_n_estimators_level_b_budget(algo):
+    """Boosting n_estimators is a level B REGULARIZATION rule, disabled with
+    ``regularize`` (issue #133).
+
+    For a boosting ensemble the tree count together with learning_rate is
+    the main complexity regulator, so the cap is not a time-only restriction:
+    the level is "B", the cap is 200 (stricter than the bagging time cap of
+    300), and with ``regularize=False`` the range stays unchanged. Without
+    ``learning_rate`` in the space the default lr upper bound 0.3 is assumed
+    (cap = 60 / 0.3 = 200).
+    """
+    space = {"n_estimators": _entry(100, 1000, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, algo, n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    # (200 - 100) % 100 == 0 -> the cap stays at 200 on the step grid.
+    assert (entry.config.low, entry.config.high) == (100, 200)
+    for log in logs:
+        if log["param"] == "n_estimators":
+            assert log["level"] == "B"
+
+    # regularize=False disables level B: the boosting n_estimators cap is
+    # NOT applied (the time-only rule is not in the boosting rule table).
+    adjusted_off, logs_off = apply_complexity_guard(
+        space, algo, n=15, p=5, config=_default_cfg(regularize=False)
+    )
+    assert (
+        adjusted_off["n_estimators"].config.low,
+        adjusted_off["n_estimators"].config.high,
+    ) == (100, 1000)
+    assert not any(log["param"] == "n_estimators" for log in logs_off), (
+        f"{algo} n_estimators restricted with regularize=False: {logs_off}"
+    )
+
+
+@pytest.mark.parametrize("algo", ["gradient_boosting", "xgboosting"])
+def test_small_boosting_n_estimators_cap_depends_on_lr(algo):
+    """The boosting n_estimators cap depends on the learning_rate UPPER bound
+    (issue #133: "верхней границей n_estimators, зависящей от learning_rate").
+
+    ``cap = budget / lr_high``: the budget 60 is fixed; a default lr range
+    [0.01, 0.3] caps n_estimators at 200, a wider lr range [0.01, 1.0] caps
+    it at 60 = 60 / 1.0, a narrower one [0.01, 0.1] at 600. In every case
+    the product n_estimators × learning_rate never exceeds 60 for any
+    sampled pair. Step 10 keeps every cap on the int grid.
+    """
+    base = {"n_estimators": _entry(50, 1000, "int", 10)}
+    # Default lr upper bound 0.3 (the parameter absent) -> cap 200.
+    adjusted, _ = apply_complexity_guard(base, algo, n=15, p=5, config=_default_cfg())
+    assert adjusted["n_estimators"].config.high == 200
+
+    # lr [0.01, 1.0] -> cap 60/1.0 = 60.
+    space_wide = {**base, "learning_rate": _entry(0.01, 1.0, "float_log")}
+    adjusted_wide, logs_wide = apply_complexity_guard(
+        space_wide, algo, n=15, p=5, config=_default_cfg()
+    )
+    assert adjusted_wide["n_estimators"].config.high == 60
+    lr_records = [r for r in logs_wide if r["param"] == "n_estimators"]
+    assert lr_records
+    assert "learning_rate upper bound 1" in lr_records[0]["reason"]
+
+    # lr [0.01, 0.1] -> cap 60/0.1 = 600.
+    space_narrow = {**base, "learning_rate": _entry(0.01, 0.1, "float_log")}
+    adjusted_narrow, _ = apply_complexity_guard(
+        space_narrow, algo, n=15, p=5, config=_default_cfg()
+    )
+    assert adjusted_narrow["n_estimators"].config.high == 600
+
+
+@pytest.mark.parametrize("algo", ["gradient_boosting", "xgboosting"])
+def test_small_boosting_n_estimators_low_above_cap_fixed(algo):
+    """A boosting n_estimators range whose low lies above the level B cap
+    collapses to the cap value (the parameter is fixed).
+
+    With the default [250, 800] range (step 100) the cap 200 is below the
+    lower bound, so the range collapses to [200, 200] — n_estimators is
+    fixed at the cap and the log records ``fixed=True``.
+    """
+    space = {"n_estimators": _entry(250, 800, "int", 100)}
+    adjusted, logs = apply_complexity_guard(
+        space, algo, n=15, p=5, config=_default_cfg()
+    )
+    entry = adjusted["n_estimators"]
+    assert isinstance(entry.config, IntSpace)
+    assert (entry.config.low, entry.config.high) == (200, 200)
+    assert any(log.get("fixed") for log in logs)
+
+
 # ─────────────────────────── small mode: boosting ──────────────────────────── #
 
 
@@ -470,8 +564,10 @@ def test_small_boosting_rules():
     assert reg.config.type == "float_log"
     assert reg.config.low == pytest.approx(1.0)
     assert reg.config.high == pytest.approx(100.0)
-    # n_estimators: time cap
-    assert adjusted["n_estimators"].config.high == 300
+    # n_estimators: level B regularization cap (200), not the bagging
+    # time-only cap (300).
+    assert adjusted["n_estimators"].config.high == 200
+    assert any(r["level"] == "B" for r in logs if r["param"] == "n_estimators")
 
 
 def test_small_boosting_min_child_weight_leaf_min():
@@ -1249,8 +1345,8 @@ def test_guard_step_grid_alignment_preserves_type_and_scale():
     )
     n_est = adjusted["n_estimators"]
     assert isinstance(n_est.config, IntSpace)
-    # (300 - 100) % 100 == 0 -> stays 300.
-    assert (n_est.config.low, n_est.config.high) == (100, 300)
+    # Boosting level B cap 200 on the step-100 grid anchored at 100.
+    assert (n_est.config.low, n_est.config.high) == (100, 200)
     reg = adjusted["reg_lambda"]
     assert isinstance(reg.config, FloatSpace)
     assert reg.config.type == "float_log"

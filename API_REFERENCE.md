@@ -465,10 +465,14 @@ Two independent levels of restrictions (each toggled separately):
   remaining values below the cap still change the model, so the level is
   "lossless" only in the sense that no reachable leaf size is removed.
 * **Level B — regularization** (`regularize: true`): deliberately shifts the
-  space toward simpler models on small data. A heuristic.
-* **Time-only caps** (e.g. `n_estimators` ≤ 300 in the small mode) are marked
-  explicitly as "for time", not "for regularization": more trees only reduce
-  the variance of the ensemble.
+  space toward simpler models on small data. A heuristic. For boosting this
+  includes the `n_estimators` budget (see below) — the tree count together
+  with `learning_rate` is the main complexity regulator of a boosting
+  ensemble.
+* **Time-only caps** (`n_estimators` ≤ 300 in the small mode) apply to the
+  **bagging** ensembles only (random forest, extra trees) and are marked
+  explicitly as "for time", not "for regularization": bagging averages
+  independent trees, so more trees only reduce the variance of the ensemble.
 
 The size mode is determined by `n` and the ratio `n / p`, where `p` is the
 **original column count** (a categorical column counts as 1, before the
@@ -508,7 +512,9 @@ Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
     ≤ `ceil(log2(n / leaf_min))` (example: A gives ≤ 6, B gives 2–3);
   * `max_features` (a fraction): level A — lower bound ≥ `1 / p` (at least one
     feature);
-  * `n_estimators`: capped only for time (e.g. 100–300).
+  * `n_estimators` (RF / Extra trees): capped only for time (e.g. 100–300) —
+    bagging averages independent trees, so more trees only reduce variance,
+    not a regularization.
 * **Gradient boosting / XGBoost**
   * `max_depth`: level A — as for trees; level B — 1–3;
   * `min_samples_leaf` (Gradient boosting): as for trees;
@@ -516,8 +522,21 @@ Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
   * `subsample`: level B — lower bound ≥ 0.7;
   * `colsample_bytree`: level A — lower bound ≥ `1 / p`;
   * `reg_lambda` (XGBoost): level B — `[1, 100]` on the log scale;
-  * `n_estimators`: capped for time (50–300 trees). `learning_rate` is not
-    restricted by the guard.
+  * `n_estimators`: level B — the upper bound is derived from the space's
+    `learning_rate` upper bound: `cap = 60 / lr_high`. For a boosting ensemble
+    the number of trees together with `learning_rate` is the main complexity
+    regulator (every tree is fitted on the residual of the previous ones), so
+    this is a *regularization* restriction: it is disabled together with
+    `regularize`, unlike the RF/Extra trees time-only cap. The cap depends on
+    the `learning_rate` upper bound so that the product `n_estimators ×
+    learning_rate` never exceeds the budget 60 for any sampled pair — e.g. with
+    the default lr range `[0.01, 0.3]` the cap is `60 / 0.3 = 200`, with
+    `[0.01, 1.0]` it is `60`, with `[0.01, 0.1]` it is `600`. A strict
+    per-trial budget (sampling one parameter conditionally on the other) is not
+    supported by the guard's per-parameter rules; the upper-bound derivation
+    above is the closest the space mechanism allows. When `learning_rate` is
+    absent from the space, the default upper bound 0.3 is assumed.
+    `learning_rate` itself is not restricted by the guard.
 
 Rules of the `"medium"` mode — the same but softer:
 `min_samples_leaf` lower bound 2; `max_depth` ≤ `ceil(log2(n / leaf_min)) + 2`;

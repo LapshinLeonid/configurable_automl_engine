@@ -288,14 +288,14 @@ def test_e2e_xgboost_time_with_guard_markedly_lower():
     """XGBoost HPO time on small data is markedly lower with the guard.
 
     With the guard, XGBoost searches max_depth in [1, 3] and caps
-    n_estimators at 300, so the trained models are cheaper than without
-    the guard (deep trees up to depth 10, up to 800 estimators). The
-    assertion is on the best-of-three runs of each mode (short runs are
-    noisy) and requires a REAL reduction: ``time_on <= 0.75 * time_off``,
-    not just "no slowdown" (the old 1.5x bound allowed a 50% slowdown).
-    The 0.75 bound is calibrated on the current XGBoost default space
-    (min_child_weight/reg_lambda included): measured best-of-3 ratios
-    0.57-0.68 across seeds, margin ~7-18%.
+    n_estimators at 200 (the level B budget), so the trained models are
+    cheaper than without the guard (deep trees up to depth 10, up to 800
+    estimators). The assertion is on the best-of-three runs of each mode
+    (short runs are noisy) and requires a REAL reduction:
+    ``time_on <= 0.75 * time_off``, not just "no slowdown" (the old 1.5x
+    bound allowed a 50% slowdown). The 0.75 bound is calibrated on the
+    current XGBoost default space (min_child_weight/reg_lambda included):
+    measured best-of-3 ratios 0.57-0.68 across seeds, margin ~7-18%.
     """
     df = _small_frame(n=40, p=5)
     # XGBoost-only config with a longer search: the time comparison must

@@ -26,10 +26,13 @@ Two independent levels of restrictions:
   values below the cap still change the model.
 * **Level B — regularization.** Deliberately shifts the space toward simpler
   models on small data. A heuristic, enabled by default and switched off
-  independently.
-* **Time-only restrictions** (``n_estimators`` caps) are marked explicitly as
-  "for time" rather than "for regularization": more trees only reduce the
-  variance of the ensemble.
+  independently. For boosting this includes the ``n_estimators`` budget
+  (``n_estimators`` x ``learning_rate`` is the main complexity knob of a
+  boosting ensemble — see :func:`_rule_boost_n_estimators_b`).
+* **Time-only restrictions** (``n_estimators`` caps of the BAGGING ensembles:
+  RF and Extra trees) are marked explicitly as "for time" rather than "for
+  regularization": bagging averages independent trees, so more trees only
+  reduce the variance of the ensemble.
 
 The rules are declared declaratively (a rule table per algorithm and
 parameter) so that future rules (kNN ``k=1`` on small data, an upper bound on
@@ -170,7 +173,8 @@ class Rule:
 
     Attributes:
         level: ``"A"`` — lossless clipping, ``"B"`` — regularization,
-            ``"time"`` — time-only restriction.
+            ``"time"`` — time-only restriction (bagging ensembles, for
+            which more trees only reduce variance).
         reason: Human-readable reason for logs and reports.
         apply: Callable that computes the TARGET range ``(low, high)`` of the
             parameter from the original bounds ``(orig_low, orig_high)`` and
@@ -213,9 +217,30 @@ _BOOST_MAX_DEPTH_B_HIGH = 3.0
 # Upper bound of XGBoost ``max_depth`` in the medium mode.
 _XGB_MAX_DEPTH_MEDIUM_HIGH = 5.0
 
-# Time-only upper bound of ``n_estimators`` in the small mode (the issue's
-# "100–300"; only the upper bound is capped — more trees reduce variance).
+# Time-only upper bound of ``n_estimators`` in the small mode for BAGGING
+# ensembles (RF, Extra trees): only the upper bound is capped — more trees
+# reduce variance, not a regularization (the issue's "100–300").
 _N_ESTIMATORS_TIME_HIGH = 300.0
+
+# Level B budget of ``n_estimators`` for BOOSTING in the small mode.
+# For a boosting ensemble the number of trees together with ``learning_rate``
+# is the main complexity regulator, so the cap is a regularization rule
+# (disabled together with ``regularize``), not a time-only restriction.
+#
+# A strict per-trial ``n_estimators * learning_rate`` budget cannot be
+# enforced: the guard's declarative rules are per-parameter and Optuna samples
+# the two ranges independently. Instead the UPPER BOUND of ``n_estimators``
+# depends on the upper bound of ``learning_rate`` in the space:
+# ``cap = budget / lr_high`` (see :func:`_boost_n_estimators_cap`). With the
+# default ``learning_rate`` range [0.01, 0.3] of GradientBoosting/XGBoost the
+# cap is ``200 = 60 / 0.3``; a higher lr upper bound tightens the cap, a lower
+# one loosens it. Documented in API_REFERENCE.md.
+_BOOST_N_ESTIMATORS_BUDGET = 60.0
+
+# Default ``learning_rate`` upper bound assumed when the parameter is absent
+# from the space: matches ``DEFAULT_SPACES`` of GradientBoosting/XGBoost
+# ([0.01, 0.3]).
+_BOOST_DEFAULT_LR_HIGH = 0.3
 
 # ``+2`` slack added to ``ceil(log2(n / leaf_min))`` in the medium mode.
 _MEDIUM_DEPTH_SLACK = 2
@@ -537,7 +562,14 @@ def _rule_max_features_a() -> Rule:
 
 
 def _rule_n_estimators_time() -> Rule:
-    """Time-only: ``n_estimators`` upper bound capped at 300."""
+    """Time-only (bagging, RF/Extra trees): ``n_estimators`` upper bound
+    capped at 300.
+
+    Bagging ensembles (RF, Extra trees) average independent trees: more trees
+    only reduce the variance of the ensemble, so the cap is a time-only
+    restriction, NOT a regularization. Boosting uses its own level B rule
+    (:func:`_rule_boost_n_estimators_b`).
+    """
 
     def _apply(
         orig_low: float,
@@ -552,7 +584,112 @@ def _rule_n_estimators_time() -> Rule:
         level="time",
         reason=(
             f"n_estimators <= {_N_ESTIMATORS_TIME_HIGH:g}: capped for time "
-            "only (more trees reduce variance, not a regularization)"
+            "only — bagging averages independent trees, more trees reduce "
+            "variance, not a regularization"
+        ),
+        apply=_apply,
+    )
+
+
+def _boost_n_estimators_cap(lr_high: float | None) -> float:
+    """Level B upper bound of ``n_estimators`` for boosting.
+
+    ``cap = budget / lr_high`` where ``lr_high`` is the upper bound of
+    ``learning_rate`` in the space: because every sampled ``learning_rate``
+    is at most ``lr_high``, the product ``n_estimators * learning_rate``
+    never exceeds the budget. A missing/non-positive ``lr_high`` falls back
+    to :data:`_BOOST_DEFAULT_LR_HIGH`, which yields the default cap 200.
+
+    Args:
+        lr_high: The upper bound of ``learning_rate`` in the space, or
+            ``None`` when the parameter is absent.
+
+    Returns:
+        float: The derived cap (>= 1).
+    """
+    effective_lr_high = (
+        lr_high if lr_high is not None and lr_high > 0 else _BOOST_DEFAULT_LR_HIGH
+    )
+    return max(1.0, _BOOST_N_ESTIMATORS_BUDGET / effective_lr_high)
+
+
+def _learning_rate_high(space: dict[str, Any]) -> float | None:
+    """Upper bound of ``learning_rate`` in a space, or ``None``.
+
+    ``learning_rate`` of GradientBoosting/XGBoost is a positive float range;
+    anything else (absent, categorical, int-like) returns ``None`` and the
+    default :data:`_BOOST_DEFAULT_LR_HIGH` is used by
+    :func:`_boost_n_estimators_cap`.
+
+    Args:
+        space: The search space dict (parameter name -> entry).
+
+    Returns:
+        float | None: The upper bound, or ``None`` when it cannot be read.
+    """
+    entry = space.get("learning_rate")
+    if not isinstance(entry, SearchSpaceEntry):
+        return None
+    config = entry.config
+    if not isinstance(config, (IntSpace, FloatSpace)):
+        return None
+    return float(config.high)
+
+
+def _rule_boost_n_estimators_b(lr_high: float | None = None) -> Rule:
+    """Level B (boosting): ``n_estimators`` upper bound capped by the budget.
+
+    For a boosting ensemble the number of trees together with
+    ``learning_rate`` is the main complexity regulator: every tree is fitted
+    on the residual of the previous ones, so more trees (and a higher
+    learning rate) aggressively increase the model's capacity to overfit.
+    On small data the budget ``n_estimators * learning_rate`` is limited:
+    the rule caps ``n_estimators`` at ``budget / lr_high``, where
+    ``lr_high`` is the UPPER bound of ``learning_rate`` in the space (see
+    :func:`_boost_n_estimators_cap`). Because ``learning_rate <= lr_high``
+    holds for every sampled value, the product ``n_estimators *
+    learning_rate`` never exceeds the budget. With the default
+    ``learning_rate`` range [0.01, 0.3] of GradientBoosting/XGBoost the cap
+    is ``200 = 60 / 0.3``; a higher lr upper bound tightens the cap, a lower
+    one loosens it. The rule is switched off together with ``regularize``
+    (level B).
+
+    A strict per-trial budget (sampling one parameter conditionally on the
+    other) is not supported by the guard's per-parameter rules; the
+    upper-bound derivation above is the closest the space mechanism allows
+    and still bounds the product for ALL sampled pairs (documented in
+    API_REFERENCE.md).
+
+    Args:
+        lr_high: The upper bound of ``learning_rate`` in the space. ``None``
+            (or a non-positive value) — the default
+            :data:`_BOOST_DEFAULT_LR_HIGH`.
+
+    Returns:
+        Rule: The level B ``n_estimators`` rule with the derived cap.
+    """
+    cap = _boost_n_estimators_cap(lr_high)
+    effective_lr_high = (
+        lr_high if lr_high is not None and lr_high > 0 else _BOOST_DEFAULT_LR_HIGH
+    )
+
+    def _apply(
+        orig_low: float,
+        orig_high: float,
+        n: int,
+        p: int,
+        leaf_min: float,
+    ) -> tuple[float, float]:
+        return orig_low, min(orig_high, cap)
+
+    return Rule(
+        level="B",
+        reason=(
+            f"n_estimators <= {cap:g} (= budget "
+            f"{_BOOST_N_ESTIMATORS_BUDGET:g} / learning_rate upper bound "
+            f"{effective_lr_high:g}): boosting regularization on small data "
+            "— tree count and learning_rate are the main complexity "
+            "regulator of a boosting ensemble"
         ),
         apply=_apply,
     )
@@ -683,21 +820,45 @@ _SMALL_TREE_RULES: list[tuple[str, Rule]] = [
     ("max_depth", _rule_max_depth_a()),
     ("max_depth", _rule_max_depth_b()),
     ("max_features", _rule_max_features_a()),
+    # Bagging (RF/Extra trees): the n_estimators cap is time-only — more
+    # trees only reduce variance, not a regularization.
     ("n_estimators", _rule_n_estimators_time()),
 ]
 
-_SMALL_BOOSTING_RULES: list[tuple[str, Rule]] = [
-    # min_samples_leaf (GradientBoosting only) — the same rules as for trees.
-    ("min_samples_leaf", _rule_min_samples_leaf_a()),
-    ("min_samples_leaf", _rule_min_samples_leaf_b()),
-    ("max_depth", _rule_max_depth_a()),
-    ("max_depth", _rule_boost_max_depth_b()),
-    ("min_child_weight", _rule_min_child_weight_b()),
-    ("subsample", _rule_subsample_b()),
-    ("colsample_bytree", _rule_colsample_a()),
-    ("reg_lambda", _rule_reg_lambda_b()),
-    ("n_estimators", _rule_n_estimators_time()),
-]
+
+def _small_boosting_rules(lr_high: float | None = None) -> list[tuple[str, Rule]]:
+    """Rules of the small boosting mode.
+
+    The ``n_estimators`` level B cap depends on the UPPER bound of
+    ``learning_rate`` in the space (``budget / lr_high``, see
+    :func:`_rule_boost_n_estimators_b`), so the rule table is built per run
+    with the space's ``learning_rate``.
+
+    Args:
+        lr_high: The upper bound of ``learning_rate`` in the space (``None``
+            — the default :data:`_BOOST_DEFAULT_LR_HIGH`).
+
+    Returns:
+        list[tuple[str, Rule]]: The small boosting rule table.
+    """
+    return [
+        # min_samples_leaf (GradientBoosting only) — the same rules as for trees.
+        ("min_samples_leaf", _rule_min_samples_leaf_a()),
+        ("min_samples_leaf", _rule_min_samples_leaf_b()),
+        ("max_depth", _rule_max_depth_a()),
+        ("max_depth", _rule_boost_max_depth_b()),
+        ("min_child_weight", _rule_min_child_weight_b()),
+        ("subsample", _rule_subsample_b()),
+        ("colsample_bytree", _rule_colsample_a()),
+        ("reg_lambda", _rule_reg_lambda_b()),
+        # Boosting: the n_estimators cap is a level B REGULARIZATION rule —
+        # the tree count together with learning_rate is the main complexity
+        # regulator of a boosting ensemble (disabled with ``regularize``).
+        ("n_estimators", _rule_boost_n_estimators_b(lr_high)),
+    ]
+
+
+_SMALL_BOOSTING_RULES_DEFAULT = _small_boosting_rules()
 
 _MEDIUM_TREE_RULES: list[tuple[str, Rule]] = [
     ("min_samples_leaf", _rule_min_samples_leaf_a()),
@@ -719,7 +880,7 @@ _MEDIUM_BOOSTING_RULES: list[tuple[str, Rule]] = [
 
 _RULE_TABLE: dict[tuple[str, bool], list[tuple[str, Rule]]] = {
     ("small", False): _SMALL_TREE_RULES,
-    ("small", True): _SMALL_BOOSTING_RULES,
+    ("small", True): _SMALL_BOOSTING_RULES_DEFAULT,
     ("medium", False): _MEDIUM_TREE_RULES,
     ("medium", True): _MEDIUM_BOOSTING_RULES,
 }
@@ -1053,6 +1214,11 @@ def apply_complexity_guard(
         return dict(space), []
 
     rules = _RULE_TABLE[(size_mode, is_boosting)]
+    if is_boosting and size_mode == "small":
+        # The boosting n_estimators level B cap depends on the space's
+        # learning_rate upper bound — rebuild the small boosting table with
+        # the actual lr range of this run.
+        rules = _small_boosting_rules(_learning_rate_high(space))
     user_keys = set(user_space_keys or ())
     result = dict(space)
     logs: list[dict[str, Any]] = []
