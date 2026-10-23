@@ -870,6 +870,21 @@ def _evaluate_pooled_cv(
     values is returned as a defensive fallback, and a WARNING about the
     fallback is logged once per (``algo_name``, ``phase_name``) pair.
 
+    Args:
+        estimator (Any): The estimator (possibly a pipeline) to evaluate.
+        X (Any): Feature matrix.
+        y (Any): Target variable vector.
+        method (str): Split strategy ('k_fold' or 'loo').
+        n_folds (int): Number of folds for k_fold.
+        test_size (float): Test fraction (unused for k_fold/loo; passed to
+            keep a uniform iter_splits call).
+        random_state (int | None): Randomness seed.
+        scorer (Any): sklearn metric object.
+        algo_name (str): The algorithm being evaluated, for the fallback
+            WARNING deduplication.
+        phase_name (str): The pipeline phase, for the fallback WARNING
+            deduplication.
+
     Returns:
         float: The pooled metric value over all out-of-fold rows. NaN
             whenever at least one fold failed during evaluation — the caller
