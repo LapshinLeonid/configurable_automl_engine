@@ -79,6 +79,7 @@ from configurable_automl_engine.preprocessing_presets import (
     requires_missing_indicator,
     resolve_preprocessing_preset,
 )
+from configurable_automl_engine.trainer import IsotonicDataTransformer
 from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
@@ -1659,6 +1660,31 @@ class _OptimizeRunner:
             # (small: kernel family only).
             base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
             base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
+        elif resolve_algorithm_name(self.algo) == "isotonic_regression":
+            # Isotonic without an external config (including a direct
+            # optimize("isotonic_regression", X, y) call): a data-dependent
+            # space. ``feature_index`` selects the column fed to the strictly
+            # univariate model (consumed by ``IsotonicDataTransformer``) and
+            # must cover the post-preprocessing feature count; ``increasing``
+            # is the single IsotonicRegression constructor parameter searched.
+            max_feature_index = max(
+                0,
+                int(
+                    self.n_features_eff
+                    if self.preprocessor is not None
+                    else self.X.shape[1]
+                )
+                - 1,
+            )
+            base_space_dict = {
+                "feature_index": SearchSpaceEntry.model_validate(
+                    [0, max_feature_index, "int"]
+                ),
+                "increasing": SearchSpaceEntry.model_validate(
+                    [[True, False], "categorical"]
+                ),
+            }
+            base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
 
         # Priority 1: Direct overrides (functions)
         # Priority 2: Dynamic config from YAML (dict with SearchSpaceEntry)
@@ -1921,7 +1947,12 @@ class _OptimizeRunner:
         """Whether missing-value indicators are added for numerical features."""
         return _missing_indicator_enabled(self.algo)
 
-    def assemble_estimator(self, model_impl: Any, apply_fs: bool = False) -> Any:
+    def assemble_estimator(
+        self,
+        model_impl: Any,
+        apply_fs: bool = False,
+        feature_index: int | None = None,
+    ) -> Any:
         """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
         Oversampling receives already-encoded numerical features (one-hot), so
@@ -1930,13 +1961,30 @@ class _OptimizeRunner:
         synthetic rows are generated only for informative features (the order
         is consistent with ModelTrainer).
 
+        For ``isotonic_regression`` an ``IsotonicDataTransformer`` step is
+        inserted right after the preprocessor (before selection/oversampling):
+        the algorithm is strictly univariate and the adapter reduces the
+        preprocessed matrix to the single column selected via
+        ``feature_index`` (0 by default).
+
         Args:
             model_impl: The base regressor.
             apply_fs: Flag to enable the ``feature_selector`` step.
+            feature_index: The ordinal feature index for the isotonic data
+                adapter (``None`` — 0).
         """
         steps: list[tuple[str, Any]] = []
         if self.preprocessor is not None:
             steps.append(("preprocessor", self.preprocessor))
+        if self.is_isotonic:
+            steps.append(
+                (
+                    "isotonic_selector",
+                    IsotonicDataTransformer(
+                        feature_index=feature_index if feature_index is not None else 0
+                    ),
+                )
+            )
         # New step: feature selection is activated strictly between the
         # preprocessor and the oversampler.
         if apply_fs:
@@ -2147,7 +2195,9 @@ class _OptimizeRunner:
         params = self.space_fn(trial)
         model = create_model(self.algo, **params)
         current_estimator = self.assemble_estimator(
-            model, apply_fs=self._resolve_apply_fs(trial)
+            model,
+            apply_fs=self._resolve_apply_fs(trial),
+            feature_index=params.get("feature_index"),
         )
 
         fatal_failure = False
@@ -2262,6 +2312,10 @@ class _OptimizeRunner:
         elif param == "p":
             # The Minkowski power of the KNN space.
             low = 1.0
+        elif param == "feature_index":
+            # The ordinal column index consumed by IsotonicDataTransformer:
+            # the natural lower bound is 0 (the first feature).
+            low = 0.0
         return low, high
 
     def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
@@ -2560,6 +2614,7 @@ class _OptimizeRunner:
         best_model = self.assemble_estimator(
             create_model(self.algo, **self.clean_model_params),
             apply_fs=self.best_apply_fs,
+            feature_index=self.clean_model_params.get("feature_index"),
         )
         best_model.fit(self.X, self.y)
 

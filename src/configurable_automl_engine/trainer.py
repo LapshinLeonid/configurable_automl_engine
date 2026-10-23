@@ -1049,6 +1049,31 @@ class ModelTrainer:
             )
             return False
 
+    def _resolve_isotonic_feature_index(self) -> int:
+        """Resolve the feature selected by the isotonic data adapter.
+
+        The ``feature_index`` value is a user/HPO hyperparameter (not an
+        ``IsotonicRegression`` constructor parameter): it is popped from the
+        model kwargs before ``create_model`` and consumed here by
+        ``IsotonicDataTransformer``. Although the preprocessor may output any
+        number of columns (one-hot expansion, imputation), the adapter reduces
+        them to a single feature — the input contract of the isotonic
+        algorithm.
+
+        Returns:
+            The ordinal index of the feature to feed to ``IsotonicRegression``.
+
+        Raises:
+            TrainingError: If ``feature_index`` is not a non-negative integer.
+        """
+        raw = self.hyperparams.get("feature_index", 0)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise TrainingError(
+                "feature_index must be a non-negative integer for "
+                f"IsotonicRegression, got {raw!r}"
+            )
+        return raw
+
     def _assemble_steps(
         self,
         preprocessor: ColumnTransformer,
@@ -1059,7 +1084,13 @@ class ModelTrainer:
         """Assemble the list of training pipeline steps.
 
         Strict step order:
-        ``preprocessor → [feature_selector] → [oversampler] → model``.
+        ``preprocessor → [isotonic_selector] → [feature_selector] → [oversampler] → model``.
+
+        For ``isotonic_regression`` a data adapter step
+        (:class:`IsotonicDataTransformer`) is inserted right after the
+        preprocessor: the algorithm is strictly univariate and accepts exactly
+        one feature, so even a multi-column preprocessed matrix is reduced to
+        the single column selected via the ``feature_index`` hyperparameter.
         The feature selector is inserted strictly between the preprocessor and
         the oversampler so that synthetic rows are generated only for
         informative features.
@@ -1073,6 +1104,15 @@ class ModelTrainer:
             A list of ``(name, transformer)`` tuples for building the Pipeline.
         """
         steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
+        if resolve_algorithm_name(self.algorithm) == "isotonic_regression":
+            steps.append(
+                (
+                    "isotonic_selector",
+                    IsotonicDataTransformer(
+                        feature_index=self._resolve_isotonic_feature_index()
+                    ),
+                )
+            )
         if feature_selection_active:
             # Backward compatibility with old pickles: the configuration is read
             # via getattr (similar to encoding_strategy in _build_preprocessor);
