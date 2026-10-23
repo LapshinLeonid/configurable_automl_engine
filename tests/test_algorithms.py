@@ -46,18 +46,15 @@ def test_every_algorithm_can_fit_and_predict(algo, small_dataset):
     target_column = "target"
     X = small_dataset.drop(columns=[target_column])
     y = small_dataset[target_column]
-    # 2. Isotonic-specific: requires exactly 1 feature
-    if algo in ["isotonic", "isotonic_regression"]:
-        X = X[["feature_0"]]
-    # 3. Initialize the trainer
+    # 2. Initialize the trainer
     # IMPORTANT: Make sure ModelTrainer accepts the 'algorithm' argument
     trainer = ModelTrainer(algorithm=algo)
-    # 4. Train
+    # 3. Train
     trainer.fit(X, y)
-    # 5. Predict
+    # 4. Predict
     preds = trainer.predict(X)
-    # 6. Checks (Assertions)
-    # 6. Checks (Assertions)
+    # 5. Checks (Assertions)
+    # 5. Checks (Assertions)
     assert preds.shape[0] == y.shape[0], (
         f"Algorithm {algo}: prediction size mismatch"
     )

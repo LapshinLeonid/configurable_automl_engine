@@ -71,9 +71,6 @@ def toy_data() -> tuple[pd.DataFrame, pd.Series]:
 # ──────────────────────────────────────────────────────────────────────────────
 def _prepare_data(algo: str, X: pd.DataFrame, y: pd.Series):
     """Adapt the shape and range to the requirements of specific algorithms."""
-    # IsotonicRegression needs exactly one feature
-    if algo == "isotonicregression":
-        X = X.iloc[:, [0]]
     # The GLM family requires y > 0
     if algo in {"poissonregressor", "gammaregressor", "tweedieregressor"}:
         y = np.abs(y) + 1.0
@@ -1498,48 +1495,112 @@ def test_auto_mode_initial_params_preserves_fs_decision(noisy_fs_data):
     assert "use_feature_selection" in params
 
 
-def test_isotonic_regression_ignores_feature_selection(toy_data):
-    """Isotonic regression: tuning does not fail, selection is forcibly disabled."""
+def test_isotonic_optimize_multifeature_default_space(toy_data):
+    """Isotonic HPO runs on multi-feature data without a space override.
+
+    Previously ``optimize()`` raised "No search space for algorithm
+    'isotonic_regression'" for a direct call, and the trials failed because
+    the single-feature adapter was not connected (issue #150). The default
+    data-dependent space must include ``feature_index`` (within range) and
+    ``increasing``, and the resulting pipeline must contain the
+    ``isotonic_selector`` step.
+    """
     X, y = toy_data
-    X_iso = X.iloc[:, [0]]
+    assert X.shape[1] > 1
 
-    # mode='always' — even forced mode does not break the univariate algorithm
     opt_res = hyperopt.optimize(
         "isotonic_regression",
-        X_iso,
+        X,
         y,
         n_trials=3,
         random_state=42,
-        feature_selection_cfg={"mode": "always"},
-        space_overrides=_FS_ISOTONIC_SPACE,
     )
     assert opt_res is not None
-    model_always, _, _ = opt_res.model, opt_res.params, opt_res.score
+    assert opt_res.score is not None and np.isfinite(opt_res.score)
 
-    assert hasattr(model_always, "predict")
-    steps_always = [name for name, _ in getattr(model_always, "steps", [])]
-    assert "feature_selector" not in steps_always
+    assert "increasing" in opt_res.params
+    assert "feature_index" in opt_res.params
+    assert 0 <= opt_res.params["feature_index"] <= X.shape[1] - 1
 
-    # mode='auto' — even if Optuna picks True, the selector does not enter the model
+    model = opt_res.model
+    assert hasattr(model, "predict")
+    steps = [name for name, _ in getattr(model, "steps", [])]
+    assert "isotonic_selector" in steps
+    assert "feature_selector" not in steps
+
+    preds = model.predict(X.head(5))
+    assert np.isfinite(preds).all()
+
+
+def test_isotonic_optimize_dict_space_default_feature_index(toy_data):
+    """The engine path (dict ``space_overrides`` without feature_index) works.
+
+    The feature selection is forcibly disabled; the isotonic adapter defaults
+    to feature_index=0, so the multi-feature data does not need truncation.
+    """
+    X, y = toy_data
+    space = {
+        "isotonic_regression": {
+            "increasing": SearchSpaceEntry.model_validate(
+                [[True, False], "categorical"]
+            )
+        }
+    }
     opt_res = hyperopt.optimize(
         "isotonic_regression",
-        X_iso,
+        X,
         y,
         n_trials=3,
         random_state=42,
-        feature_selection_cfg={"mode": "auto"},
-        space_overrides=_FS_ISOTONIC_SPACE,
+        space_overrides=space,
     )
     assert opt_res is not None
-    model_auto, params_auto, _ = opt_res.model, opt_res.params, opt_res.score
+    assert np.isfinite(opt_res.score)
+    model = opt_res.model
+    steps = [name for name, _ in getattr(model, "steps", [])]
+    assert "isotonic_selector" in steps
 
-    assert hasattr(model_auto, "predict")
-    steps_auto = [name for name, _ in getattr(model_auto, "steps", [])]
-    assert "feature_selector" not in steps_auto
-    # For isotonic, the use_feature_selection category is not offered to Optuna
-    # (the flag is forcibly False), so the service key does not reach
-    # best_params even in 'auto' mode.
-    assert "use_feature_selection" not in params_auto
+
+def test_isotonic_optimize_feature_index_from_params(toy_data):
+    """``feature_index`` suggested by Optuna reaches the isotonic adapter."""
+    X, y = toy_data
+
+    # Only feature_index is searched: the best trial must pick the column the
+    # strongest signal is built on. Here the target depends on feature 1.
+    rng = np.random.RandomState(3)
+    X_custom = pd.DataFrame(
+        {
+            "noise": rng.rand(80),
+            "signal": rng.permutation(np.linspace(0, 1, 80)),
+        }
+    )
+    y_custom = pd.Series(X_custom["signal"] * 3.0 + rng.randn(80) * 0.05)
+
+    space = {
+        "isotonic_regression": {
+            "feature_index": SearchSpaceEntry.model_validate([0, 1, "int"]),
+            "increasing": SearchSpaceEntry.model_validate(
+                [[True, False], "categorical"]
+            ),
+        }
+    }
+    opt_res = hyperopt.optimize(
+        "isotonic_regression",
+        X_custom,
+        y_custom,
+        n_trials=6,
+        random_state=42,
+        space_overrides=space,
+    )
+    assert opt_res is not None
+    assert opt_res.params["feature_index"] in (0, 1)
+    # The informative feature must win the competition.
+    assert opt_res.params["feature_index"] == 1
+    model = opt_res.model
+    steps = [name for name, _ in getattr(model, "steps", [])]
+    assert "isotonic_selector" in steps
+    adapter = model.named_steps["isotonic_selector"]
+    assert adapter.feature_index == 1
 
 
 def test_invalid_feature_selection_cfg_rejected(toy_data):

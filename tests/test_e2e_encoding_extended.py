@@ -484,6 +484,28 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
     assert np.isfinite(preds).all()
 
 
+def test_model_trainer_isotonic_multifeature_end_to_end() -> None:
+    """IsotonicRegression trains end-to-end on a multi-feature DataFrame with
+    categorical columns: the IsotonicDataTransformer step reduces the
+    preprocessed matrix to a single feature (issue #150)."""
+    df = _make_regression_df(n=120, seed=23)
+    X = df.drop(columns=["target"])
+    trainer = ModelTrainer(
+        algorithm="isotonic_regression",
+        hyperparams={"feature_index": 3, "out_of_bounds": "clip"},
+        metric="r2",
+        encoding_strategy="one_hot",
+    )
+    trainer.fit(X, df["target"])
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+    assert trainer.pipeline is not None
+    assert "isotonic_selector" in trainer.pipeline.named_steps
+
+    preds = trainer.predict(X.head(5))
+    assert np.isfinite(preds).all()
+
+
 def test_hashing_preprocessor_output_is_sparse() -> None:
     """End-to-end check of the OOM fix: the preprocessor with hashing returns a
     csr_matrix (not a dense float64 matrix), saving memory on large tables."""

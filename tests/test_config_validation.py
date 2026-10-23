@@ -868,6 +868,29 @@ def test_hyperparameter_compatibility_valid_hyperparameters_pass():
     assert getattr(cfg.algorithms, algo_name).enable is True
 
 
+def test_isotonic_feature_index_accepted_by_config_validation():
+    """``feature_index`` is a valid isotonic hyperparameter in Config.
+
+    The value is not an ``IsotonicRegression`` constructor parameter but a
+    data-adapter hint consumed by ``IsotonicDataTransformer``, so the
+    compatibility check must accept it (issue #150).
+    """
+    cfg_data = BASE | {
+        "algorithms": {
+            "isotonic_regression": {
+                "enable": True,
+                "hyperparameters": {
+                    "feature_index": [0, 3],
+                    "increasing": [[True, False], "categorical"],
+                },
+            }
+        }
+    }
+
+    cfg = Config.model_validate(cfg_data)
+    assert getattr(cfg.algorithms, "isotonic_regression").enable is True
+
+
 def test_hyperparameter_compatibility_nondefault_valid_params():
     """Non-default but estimator-valid parameters pass validation.
 
