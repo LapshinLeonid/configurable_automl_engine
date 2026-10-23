@@ -999,6 +999,58 @@ def test_evaluate_pooled_cv_failed_scoring_fallback_mean(caplog):
     assert "excluded from the evaluation" in caplog.text
 
 
+def test_evaluate_pooled_cv_scoring_all_folds_failed_returns_nan(caplog):
+    """All folds failing at the SCORING stage returns NaN (not ValueError).
+
+    Documented asymmetry (issue #135 review): a fatal ``cross_val_score``
+    raises ``ValueError`` only when every FIT fails. When the fits succeed
+    but every score is impossible (e.g. a scorer whose raw metric fails on
+    every per-fold vector), the legacy behavior is an all-NaN estimate — the
+    trial completes with the worst score (``HPO_WORST_SCORE`` at the caller),
+    not a pruned trial. ``_evaluate_pooled_cv`` mirrors exactly that: the
+    per-fold pile-up of scoring failures returns NaN.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class AlwaysFailingRawMetric:
+        """Poolable scorer whose raw metric raises on ANY input vector."""
+
+        _score_func = staticmethod(lambda yt, yp: (_ for _ in ()).throw(ValueError("raw metric boom")))
+        _sign = -1
+        _kwargs = {}
+
+        def __call__(self, estimator, Xte, yte):
+            return -0.5
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=AlwaysFailingRawMetric(),
+            algo_name="ridge",
+            phase_name="unique-phase-135-scoring-asymmetry",
+        )
+    # The pooled vector AND every per-fold pair fail → NaN (the caller turns
+    # it into HPO_WORST_SCORE, exactly like the legacy all-NaN cross_val_score).
+    assert np.isnan(pooled)
+    # The fallback WARNING is emitted (the pooled value is impossible).
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+
+
 def test_evaluate_with_intermediate_reports_pooled_skips_failed_fold(caplog):
     """Pruning + non-additive metric: a fold raising TypeError is skipped.
 
@@ -1050,6 +1102,54 @@ def test_evaluate_with_intermediate_reports_pooled_skips_failed_fold(caplog):
     assert "TypeError" in caplog.text
     assert "excluded from the evaluation" in caplog.text
     # The surviving folds (2..4) are still published as intermediate steps.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+
+
+def test_evaluate_with_intermediate_reports_pooled_predict_error_skips_fold(caplog):
+    """Pruning + non-additive metric: a fold raising in PREDICT is skipped."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class PredictErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_predicted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            PredictErrorOnFirstFold._folds_predicted += 1
+            if PredictErrorOnFirstFold._folds_predicted == 1:
+                raise KeyError("boom on fold 1 predict")
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("r2")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            PredictErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+        )
+    assert np.isfinite(pooled)
+    assert pooled < 0.0
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
     steps = [call.kwargs["step"] for call in trial.report.call_args_list]
     assert steps == [2, 3, 4]
 

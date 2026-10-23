@@ -537,6 +537,31 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
     )
 
 
+def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
+    """Log the exclusion of a failed fold at the given evaluation stage.
+
+    Shared by the per-fold evaluation loops (``_evaluate_with_intermediate_
+    reports`` and ``_evaluate_pooled_cv``) so the warning text stays uniform:
+    a fold whose fit/predict/scoring raised a non-fatal exception is skipped,
+    its rows do not enter the (pooled) estimate, and the trial continues — the
+    semantics of ``cross_val_score(error_score=np.nan)``.
+
+    Args:
+        fold_idx (int): 1-based fold number.
+        err (Exception): The raised exception (the message is logged with its
+            type name).
+        stage (str): One of 'fit or predict' / 'score' — the operation that
+            failed for this fold.
+    """
+    log.warning(
+        "Fold %d failed to %s: %s: %s — the fold is excluded from the evaluation",
+        fold_idx,
+        stage,
+        type(err).__name__,
+        err,
+    )
+
+
 def _evaluate_with_intermediate_reports(
     trial: Trial,
     estimator: Any,
@@ -666,13 +691,7 @@ def _evaluate_with_intermediate_reports(
             raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
-            log.warning(
-                "Fold %d failed to fit or predict: %s: %s — the fold's rows "
-                "are excluded from the evaluation",
-                fold_idx,
-                type(err).__name__,
-                err,
-            )
+            _warn_failed_fold(fold_idx, err, "fit or predict")
             continue
         try:
             fold_pred = np.asarray(fold_estimator.predict(X_te)).reshape(-1)
@@ -680,13 +699,7 @@ def _evaluate_with_intermediate_reports(
             raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
-            log.warning(
-                "Fold %d failed to fit or predict: %s: %s — the fold's rows "
-                "are excluded from the evaluation",
-                fold_idx,
-                type(err).__name__,
-                err,
-            )
+            _warn_failed_fold(fold_idx, err, "fit or predict")
             continue
         fold_true = np.asarray(y_te, dtype=float).reshape(-1)
         if pool_metric:
@@ -733,13 +746,7 @@ def _evaluate_with_intermediate_reports(
                 raise
             except Exception as err:  # noqa: BLE001 — per-fold scoring, same cross_val_score(error_score=nan) semantics
                 n_failed_folds += 1
-                log.warning(
-                    "Fold %d failed to score: %s: %s — the fold is excluded "
-                    "from the evaluation",
-                    fold_idx,
-                    type(err).__name__,
-                    err,
-                )
+                _warn_failed_fold(fold_idx, err, "score")
                 continue
             running_value = float(np.mean(fold_scores))
             trial.report(running_value, step=fold_idx)
@@ -805,8 +812,11 @@ def _evaluate_pooled_cv(
     aborting the trial). Fatal exceptions (``MemoryError``, ``RuntimeError``,
     ``InvalidDataError``) are NOT swallowed — they propagate to
     ``handle_failure`` so the circuit breaker stays active. If EVERY fold
-    fails, the evaluation is impossible and a ``ValueError`` is raised — the
-    same "no valid result" contract as before.
+    fails at the fit/predict stage, the evaluation is impossible and a
+    ``ValueError`` is raised — the same "no valid result" contract as before
+    (mirroring ``cross_val_score``, which raises ``ValueError`` when every
+    fit fails, and returns an all-NaN array when the fits succeed but every
+    score is impossible).
 
     The per-fold scorer value is computed lazily — only when the pooled value
     cannot be computed — so per-fold scoring noise (e.g. LOO+R², where every
@@ -885,13 +895,7 @@ def _evaluate_pooled_cv(
             raise
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
-            log.warning(
-                "Fold %d failed to fit or predict: %s: %s — the fold's rows "
-                "are excluded from the evaluation",
-                n_folds_total,
-                type(err).__name__,
-                err,
-            )
+            _warn_failed_fold(n_folds_total, err, "fit or predict")
             continue
         fold_true = np.asarray(y_te, dtype=float).reshape(-1)
         if not poolable:
@@ -904,13 +908,7 @@ def _evaluate_pooled_cv(
                 raise
             except Exception as err:  # noqa: BLE001 — per-fold scoring, same cross_val_score(error_score=nan) semantics
                 n_failed_folds += 1
-                log.warning(
-                    "Fold %d failed to score: %s: %s — the fold is excluded "
-                    "from the evaluation",
-                    n_folds_total,
-                    type(err).__name__,
-                    err,
-                )
+                _warn_failed_fold(n_folds_total, err, "score")
             continue
         idx = np.asarray(test_idx)
         pooled_y[idx] = fold_true
