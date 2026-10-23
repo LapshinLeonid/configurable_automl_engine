@@ -2022,6 +2022,61 @@ def test_runner_n_features_size_uses_original_columns():
     assert runner.n_features_eff == 41
 
 
+def test_runner_n_features_eff_ignores_missing_categories():
+    """Missing values do not add a separate one-hot category in the estimate.
+
+    Regression (issue #143): after the imputer fix, NaN/None are imputed with
+    the most-frequent value instead of becoming literal "nan"/"None" one-hot
+    columns. The feature-count estimate must use the non-missing unique values,
+    otherwise estimates diverge from the real preprocessor output.
+    """
+    rng = np.random.default_rng(1)
+    n = 60
+    cats = pd.DataFrame(
+        {"c0": rng.integers(0, 3, size=n).astype(str), "c1": rng.integers(0, 3, size=n).astype(str)}
+    )
+    # Inject a NaN into c1: it must not count as a category.
+    cats.loc[0:4, "c1"] = np.nan
+    X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
+    y = pd.Series(rng.normal(size=n))
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # c0: 3 categories, c1: 3 non-missing categories + 1 numerical = 7.
+    assert runner.n_features_eff == 7
+
+
 def test_runner_n_features_size_aligned_without_preprocessor():
     """Without a preprocessor (np.ndarray input) n_features_size aligns with
     n_features_eff.

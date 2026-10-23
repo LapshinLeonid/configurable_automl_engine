@@ -1905,11 +1905,12 @@ class _OptimizeRunner:
                     n += self.hashing_n_components
                 elif encoding == "one_hot":
                     try:
-                        # NaN is kept as a separate category: the categorical
-                        # pipeline converts columns to strings first
-                        # (``_to_string_array``), so a missing value becomes
-                        # the literal "nan" category of OneHotEncoder.
-                        n += int(self.X[col].nunique(dropna=False))
+                        # Missing values are imputed before encoding
+                        # (``_to_string_array`` preserves NaN, the imputer fills
+                        # it with the most frequent category), so NaN is NOT a
+                        # separate one-hot category: the column expands into its
+                        # non-missing unique values only.
+                        n += int(self.X[col].nunique(dropna=True))
                     except Exception:  # noqa: BLE001 — estimate only
                         n += 1
                 else:

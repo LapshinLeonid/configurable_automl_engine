@@ -101,13 +101,26 @@ _VALID_ENCODING_STRATEGIES = (
 
 
 def _to_string_array(X: Any) -> np.ndarray:
-    """Convert a categorical matrix to a string object array.
+    """Convert a categorical matrix to a string object array, keeping missing values.
 
     ``np.ndarray.astype(str)`` produces fixed-width unicode (``<U``), while
     ``SimpleImputer`` only accepts ``object`` arrays, so after converting to
     strings the result is cast back to the ``object`` dtype.
+
+    Missing values must stay missing: otherwise ``NaN`` becomes the literal
+    ``"nan"`` and ``None`` (e.g. from a JSON payload) becomes ``"None"``, so
+    the ``most_frequent`` imputer never sees a gap — the two spellings of "no
+    value" turn into two different categories and produce different
+    predictions at inference. The missing mask (``pd.isna``) is therefore
+    restored on the string array for every dtype, including float columns
+    whose missing ``NaN`` values would otherwise stringify to ``"nan"``.
     """
-    return np.asarray(X).astype(str).astype(object)
+    arr = np.asarray(X)
+    string_arr = arr.astype(str).astype(object)
+    missing = pd.isna(arr)
+    if missing.any():
+        string_arr[missing] = np.nan
+    return string_arr
 
 
 def _as_2d(X: Any) -> np.ndarray:
@@ -1340,8 +1353,23 @@ def build_preprocessor(
             # strategy="most_frequent" fails on numpy-bool ("SimpleImputer does
             # not support data with dtype bool"), so bool features are converted
             # to strings ("True"/"False") and encoded as regular categories.
-            ("to_string", FunctionTransformer(_to_string_array)),
-            ("imputer", SimpleImputer(strategy="most_frequent")),
+            # Missing values (NaN/None) are preserved by _to_string_array, so the
+            # imputer below actually fills them (instead of treating "nan"/"None"
+            # as distinct unknown categories). feature_names_out="one-to-one"
+            # registers get_feature_names_out on this step, so the preprocessor's
+            # get_feature_names_out works.
+            (
+                "to_string",
+                FunctionTransformer(_to_string_array, feature_names_out="one-to-one"),
+            ),
+            # keep_empty_features=True: a fully-missing categorical column would
+            # otherwise be dropped by SimpleImputer (an empty feature), the
+            # pipeline would then stop matching the preprocessor's get_feature_names_out
+            # and the encoder dimensionality.
+            (
+                "imputer",
+                SimpleImputer(strategy="most_frequent", keep_empty_features=True),
+            ),
             (
                 "encoder",
                 SplitCategoricalEncoder(

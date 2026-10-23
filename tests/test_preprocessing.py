@@ -20,6 +20,7 @@ from sklearn.preprocessing import (
 from configurable_automl_engine.preprocessing import (
     ColumnNameSelector,
     _clean_uninformative_features,
+    _to_string_array,
     build_preprocessor,
     detect_feature_types,
 )
@@ -322,6 +323,147 @@ def test_build_preprocessor_ordinal_all_missing_after_impute():
     out = preprocessor.fit_transform(df)
     assert out.shape == (3, 2)
     assert np.isfinite(out).all()
+
+
+def test_to_string_array_preserves_missing_values():
+    """_to_string_array keeps NaN/None as missing values (not as 'nan'/'None' strings).
+
+    Regression (issue #143): missing values were stringified before the
+    SimpleImputer ran, so the imputer never saw a gap. NaN became the literal
+    "nan" category and None (e.g. from a JSON payload) became "None" — the
+    same "unknown city" row produced different predictions depending on how
+    the missing value was represented.
+    """
+    cases = [
+        np.array([["a"], ["b"], [np.nan]], dtype=object),
+        np.array([["a"], ["b"], [None]], dtype=object),
+        np.array([[np.nan], [1.0]], dtype=float),
+        pd.DataFrame({"x": ["a", "b", None]}),
+        pd.DataFrame({"x": [np.nan, np.nan]}),
+    ]
+    for X in cases:
+        out = _to_string_array(X)
+        assert out.dtype == object
+        expected_missing = int(pd.isna(np.asarray(X)).sum())
+        assert int(pd.isna(out).sum()) == expected_missing, f"missing lost for {X!r}"
+    # Non-missing values are still stringified.
+    out = _to_string_array(pd.DataFrame({"x": [True, False]}))
+    assert set(out.ravel().tolist()) == {"True", "False"}
+
+
+def test_build_preprocessor_missing_categorical_imputed_consistently():
+    """NaN and None in categorical columns are imputed identically.
+
+    Regression (issue #143): the categorical pipeline converts columns to
+    strings, but the imputer must see the gaps. After the fix, a missing value
+    is filled with the most-frequent category during fitting, and the one-hot
+    matrix contains no "nan"/"None" category — NaN/None rows map to the same
+    columns.
+    """
+    df = pd.DataFrame(
+        {
+            "city": ["msk", "spb", np.nan, "msk", np.nan, "spb"],
+            "num": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["city"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    out = preprocessor.fit_transform(df)
+    assert out.shape == (6, 3)  # msk, spb + num — no "nan" column
+    assert np.isfinite(out).all()
+
+    enc = preprocessor.named_transformers_["cat"].named_steps["encoder"]
+    cats = enc.default_encoder_.categories_[0]
+    assert "nan" not in cats
+    assert "None" not in cats
+    # "msk" appears twice, NaN rows get imputed with "msk" (most frequent).
+    assert out[:3, 0].tolist() == [1.0, 0.0, 1.0]
+
+    # Inference: None and NaN (float-typed column) both resolve identically.
+    nan_row = preprocessor.transform(pd.DataFrame({"city": [np.nan], "num": [1.0]}))
+    none_row = preprocessor.transform(pd.DataFrame({"city": [None], "num": [1.0]}))
+    known_row = preprocessor.transform(pd.DataFrame({"city": ["msk"], "num": [1.0]}))
+    np.testing.assert_array_equal(nan_row, known_row)
+    np.testing.assert_array_equal(none_row, known_row)
+
+
+def test_build_preprocessor_missing_categorical_trained_on_none():
+    """A column trained on None (e.g. from JSON) imputes None with the most-frequent value."""
+    df = pd.DataFrame(
+        {
+            "city": ["msk", "spb", None, "msk", None, "spb"],
+            "num": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["city"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    out = preprocessor.fit_transform(df)
+    assert out.shape == (6, 3)
+    enc = preprocessor.named_transformers_["cat"].named_steps["encoder"]
+    assert "nan" not in enc.default_encoder_.categories_[0]
+
+    none_row = preprocessor.transform(pd.DataFrame({"city": [None], "num": [1.0]}))
+    known_row = preprocessor.transform(pd.DataFrame({"city": ["msk"], "num": [1.0]}))
+    np.testing.assert_array_equal(none_row, known_row)
+
+
+def test_get_feature_names_out_with_category_missing_values():
+    """get_feature_names_out works on a preprocessor with missing categorical values.
+
+    Regression (issue #143): the "to_string" step had no get_feature_names_out,
+    so calling it on the preprocessor raised AttributeError.
+    """
+    df = pd.DataFrame(
+        {
+            "city": ["msk", "spb", np.nan, "msk"],
+            "num": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    for enc in ("one_hot", "ordinal", "frequency", "hashing"):
+        preprocessor = build_preprocessor(
+            list(df.columns),
+            categorical_features=["city"],
+            numerical_features=["num"],
+            encoding=enc,
+        )
+        preprocessor.fit(df)
+        names = preprocessor.get_feature_names_out()
+        assert len(names) == preprocessor.transform(df.head(1)).shape[1]
+        assert "city" in " | ".join(names)
+        assert all(isinstance(n, str) for n in names)
+
+
+def test_build_preprocessor_all_missing_categorical_imputed():
+    """A fully-missing categorical column is imputed (kept) instead of being dropped.
+
+    Regression (issue #143): SimpleImputer(keep_empty_features=True) preserves
+    the column, so the preprocessor keeps a stable dimensionality and
+    get_feature_names_out stays consistent.
+    """
+    df = pd.DataFrame({"cat": [None, None, None], "num": [1.0, 2.0, 3.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["cat"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    out = preprocessor.fit_transform(df)
+    assert out.shape == (3, 2)
+    assert np.isfinite(out).all()
+    names = preprocessor.get_feature_names_out()
+    assert len(names) == out.shape[1]
+    # Inference with a non-missing value hits the single learned category.
+    inf = preprocessor.transform(pd.DataFrame({"cat": ["msk"], "num": [1.0]}))
+    assert inf.shape == (1, 2)
+    assert np.isfinite(inf).all()
 
 
 def test_build_preprocessor_ordinal_empty_features_passthrough():
