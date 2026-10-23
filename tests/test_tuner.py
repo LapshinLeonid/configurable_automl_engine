@@ -2021,6 +2021,60 @@ def test_runner_n_features_size_uses_original_columns():
     assert runner.n_features_eff == 41
 
 
+def test_runner_n_features_size_aligned_without_preprocessor():
+    """Without a preprocessor (np.ndarray input) n_features_size aligns with
+    n_features_eff (issue #134 review remark 1).
+
+    For np.ndarray the estimate falls back to n_features_eff=1 (no column
+    names to expand); previously n_features_size kept the raw width
+    X.shape[1], so wide ndarray inputs entered the 'medium' mode via the
+    ratio for the first time. Both counts must be identical so that direct
+    optimize(numpy) calls keep the legacy guard behavior.
+    """
+    rng = np.random.default_rng(3)
+    X_arr = rng.normal(size=(100, 8))
+    y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X_arr,
+        y=y_arr,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # No preprocessor was assembled for an ndarray without column lists.
+    assert runner.preprocessor is None
+    # Both counts coincide: the guard sees the same p it always did.
+    assert runner.n_features_eff == 1
+    assert runner.n_features_size == runner.n_features_eff
+
+
 def test_optimize_external_preprocessor_skips_cleaning():
     """If a ready preprocessor is provided, self.X is not cleaned:
     the user has fixed the feature set themselves."""

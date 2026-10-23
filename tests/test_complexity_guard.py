@@ -716,6 +716,83 @@ def test_ordinary_mode_with_one_hot_p_size():
     assert adjusted_xgb["subsample"].config.low == pytest.approx(0.5)
 
 
+def test_medium_mode_feature_count_rules_use_p_not_p_size():
+    """In the medium mode the feature-count rules use the post-preprocessing
+    ``p``, NOT ``p_size`` (issue #134, review remark).
+
+    ``max_features`` lower bound is ``1 / p``: with ``p = 250`` (after
+    one-hot) the bound is 0.004, with ``p_size = 50`` (original columns) it
+    would be 0.02. The medium mode here fires via ``n < medium_n_threshold``
+    (n=100), not via the ratio, so the ONLY observable distinction between
+    using ``p`` and ``p_size`` is exactly the ``max_features`` /
+    ``colsample_bytree`` bound.
+    """
+    tree_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "max_features": _entry(0.001, 1.0, "float"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        tree_space,
+        "random_forest",
+        n=100,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs
+    # max_features >= 1/p = 1/250 = 0.004 (NOT 1/p_size = 0.02).
+    assert adjusted["max_features"].config.low == pytest.approx(1.0 / 250)
+
+    # The same for boosting: colsample_bytree >= 1/p = 1/250, not 1/50.
+    xgb_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "colsample_bytree": _entry(0.001, 1.0, "float"),
+    }
+    adjusted_xgb, logs_xgb = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=100,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs_xgb
+    assert adjusted_xgb["colsample_bytree"].config.low == pytest.approx(1.0 / 250)
+
+
+def test_medium_mode_rule_bounds_do_not_use_p_size():
+    """No rule uses ``p_size`` for its bound: with a fixed ``n`` and ``p``,
+    changing ``p_size`` alone changes only the size-mode decision
+    (via the ``n / p`` ratio), never the applied rule bounds."""
+    xgb_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "colsample_bytree": _entry(0.001, 1.0, "float"),
+    }
+    # p_size=50 and p_size=5 resolve DIFFERENT modes for the same n/p
+    # (300/50=6 < 20 -> medium; 300/5=60 >= 20 -> ordinary).
+    med, med_logs = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=300,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert med_logs
+    assert med["colsample_bytree"].config.low == pytest.approx(1.0 / 250)
+
+    ord_space, ord_logs = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=300,
+        p=250,
+        p_size=5,
+        config=_default_cfg(),
+    )
+    assert ord_logs == []
+    assert ord_space["colsample_bytree"].config.low == pytest.approx(0.001)
+
+
 def test_off_mode_space_unchanged():
     """mode='off': no changes, no logs."""
     space = {"max_depth": _entry(2, 32, "int")}
