@@ -2581,7 +2581,7 @@ def test_optimize_typeerror_on_one_fold_does_not_abort_hpo(toy_data, caplog):
         patch.object(
             hyperopt._OptimizeRunner,
             "assemble_estimator",
-            side_effect=lambda model, apply_fs=False: model,
+            side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
     ):
         opt_res = optimize(
@@ -2632,7 +2632,7 @@ def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
         patch.object(
             hyperopt._OptimizeRunner,
             "assemble_estimator",
-            side_effect=lambda model, apply_fs=False: model,
+            side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
     ):
         opt_res = optimize(
@@ -2680,7 +2680,7 @@ def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
         patch.object(
             hyperopt._OptimizeRunner,
             "assemble_estimator",
-            side_effect=lambda model, apply_fs=False: model,
+            side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
     ):
         with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
