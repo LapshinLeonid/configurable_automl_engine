@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     IntSpace,
