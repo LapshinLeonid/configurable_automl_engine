@@ -40,6 +40,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
 )
 from configurable_automl_engine.tuner import (
+    InvalidDataError,
     _apply_dynamic_space,
     _make_svr_space_dict,
     optimize,
@@ -392,31 +393,23 @@ def test_tuner_svr_constant_y_falls_back(monkeypatch):
 
 
 def test_tuner_svr_nan_y_falls_back(monkeypatch):
-    """y with NaN → fallback, without exceptions."""
+    """y with NaN is rejected by the tuner before the search starts.
+
+    A non-finite target must fail fast (``InvalidDataError``) instead of
+    spending the HPO budget on randomly "clean" folds. The fallback behavior
+    of ``compute_svr_epsilon_bounds`` itself is covered separately by
+    ``test_helper_fallback_for_constant_or_non_finite_y``.
+    """
     X = pd.DataFrame(np.random.randn(60, 5))
     y = pd.Series([1.0, np.nan] + list(np.random.randn(58)))
 
-    class _FitOnlyEstimator:
-        """Stub instead of a real regressor: Ridge fails on y with NaN."""
-
-        def fit(self, *args, **kwargs):
-            return self
-
-        def predict(self, X):
-            return np.zeros(len(X))
-
     seen: list[float] = []
-    _mock_optimize_infra(monkeypatch, seen, model_factory=lambda algo, **p: _FitOnlyEstimator())
+    _mock_optimize_infra(monkeypatch, seen)
 
-    opt_res = optimize("svr", X, y, n_trials=4, random_state=42)
-    assert opt_res is not None
-    _, params, _ = opt_res.model, opt_res.params, opt_res.score
-
-
-    assert seen
-    for eps in seen:
-        assert SVR_EPSILON_FALLBACK[0] <= eps <= SVR_EPSILON_FALLBACK[1]
-    assert SVR_EPSILON_FALLBACK[0] <= params["epsilon"] <= SVR_EPSILON_FALLBACK[1]
+    with pytest.raises(InvalidDataError, match="non-finite"):
+        optimize("svr", X, y, n_trials=4, random_state=42)
+    # No trial ran: the validation happens before the search.
+    assert not seen
 
 
 def test_tuner_other_algorithms_unaffected(monkeypatch):

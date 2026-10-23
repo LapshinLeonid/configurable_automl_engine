@@ -277,6 +277,133 @@ def test_validate_data_invalid_y_type():
         hyperopt._validate_data(X, y)
 
 
+def test_validate_data_non_numeric_y():
+    """A non-numeric target y is rejected before the search starts.
+
+    Two NaN values in the target made the HPO budget run on randomly
+    "clean" folds, and the final full-data fit crashed. A target that cannot
+    be interpreted as a numeric vector must fail fast.
+    """
+    X = np.zeros((5, 2))
+    bad_y = np.array(["a", "b", "c", "d", "e"])
+    with pytest.raises(hyperopt.InvalidDataError, match="numeric"):
+        hyperopt._validate_data(X, bad_y)
+
+
+def test_validate_data_none_in_object_y_rejected_as_non_finite():
+    """None values in an object target are rejected as non-finite.
+
+    An object array containing None converts to NaN under a float
+    interpretation — a non-finite target must fail fast.
+    """
+    X = np.zeros((5, 2))
+    bad_y = np.array([1, 2, None, 4, 5], dtype=object)
+    with pytest.raises(hyperopt.InvalidDataError, match="non-finite"):
+        hyperopt._validate_data(X, bad_y)
+
+
+@pytest.mark.parametrize(
+    ("bad_y", "fragment"),
+    [
+        (np.array([1.0, np.nan, 3.0, 4.0, 5.0]), "NaN"),
+        (np.array([1.0, 2.0, np.inf, 4.0, 5.0]), "inf"),
+        (np.array([1.0, 2.0, -np.inf, 4.0, 5.0]), "inf"),
+        (np.array([1.0, np.nan, 3.0, np.inf, 5.0]), "non-finite"),
+    ],
+)
+def test_validate_data_non_finite_y(bad_y, fragment):
+    """NaN/±inf in the target y are rejected before the search starts.
+
+    With NaN in the target, HPO evaluated trials only on the folds that
+    happened to be "clean" and the final training crashed with an unclear
+    error. The validation must fail fast instead.
+    """
+    X = np.zeros((5, 2))
+    with pytest.raises(hyperopt.InvalidDataError, match=fragment):
+        hyperopt._validate_data(X, bad_y)
+
+
+def test_validate_data_non_finite_y_pandas_series():
+    """The same non-finite guard works for a pandas Series target."""
+    X = np.zeros((5, 2))
+    y = pd.Series([1.0, np.nan, 3.0, 4.0, 5.0])
+    with pytest.raises(hyperopt.InvalidDataError, match="NaN"):
+        hyperopt._validate_data(X, y)
+
+
+def test_validate_data_y_dataframe_column_is_validated():
+    """A single-column DataFrame y is allowed and checked for finiteness."""
+    X = np.zeros((5, 2))
+    y_good = pd.DataFrame({"t": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    hyperopt._validate_data(X, y_good)  # must not raise
+
+    y_bad = pd.DataFrame({"t": [1.0, np.nan, 3.0, 4.0, 5.0]})
+    with pytest.raises(hyperopt.InvalidDataError, match="NaN"):
+        hyperopt._validate_data(X, y_bad)
+
+
+def test_validate_data_multi_column_y_rejected():
+    """A multi-column y (2D ndarray / 2-column DataFrame) is rejected.
+
+    Such a target passes the type/size checks but would silently break the
+    per-fold evaluation (the folds receive a matrix instead of a vector) with
+    an unclear error — fail fast with a clear message instead.
+    """
+    X = np.zeros((5, 2))
+    y_2d = np.zeros((5, 2))
+    with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
+        hyperopt._validate_data(X, y_2d)
+
+    y_2col = pd.DataFrame(
+        {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+    with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
+        hyperopt._validate_data(X, y_2col)
+
+
+def test_optimize_rejects_nan_in_y_before_any_trial(toy_data):
+    """optimize() fails fast on a NaN target instead of spending the HPO budget.
+
+    Two NaN values in the target used to let HPO run on randomly "clean"
+    folds and crash only at the final fit.
+    """
+    X, y = toy_data
+    y_bad = y.copy()
+    y_bad.iloc[0] = np.nan
+    y_bad.iloc[1] = np.nan
+
+    with pytest.raises(hyperopt.InvalidDataError, match="non-finite"):
+        hyperopt.optimize(
+            "ridge",
+            X,
+            y_bad,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+        )
+
+
+def test_optimize_rejects_inf_in_y_before_any_trial(toy_data):
+    """optimize() fails fast on an infinite target value."""
+    X, y = toy_data
+    y_bad = y.copy()
+    y_bad.iloc[0] = np.inf
+
+    with pytest.raises(hyperopt.InvalidDataError, match="inf"):
+        hyperopt.optimize(
+            "ridge",
+            X,
+            y_bad,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+        )
+
+
 def test_optimize_with_oversampling(toy_data):
     """
     Covers the logic of enabling oversampling in the Pipeline.

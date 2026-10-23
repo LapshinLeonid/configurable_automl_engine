@@ -58,7 +58,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     compute_svr_epsilon_bounds,
     normalize_hyperparameter_entry,
 )
-from configurable_automl_engine.common.validation_utils import get_effective_train_size
+from configurable_automl_engine.common.validation_utils import (
+    check_target_numeric,
+    get_effective_train_size,
+)
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
     AVAILABLE_ALGORITHMS,
@@ -304,13 +307,23 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
 def _validate_data(X: Any, y: Any) -> None:
     """Validate the types and sizes of the input data X and y.
 
+    The target ``y`` is additionally required to be a NUMERIC vector
+    without NaN/±inf: a non-finite target makes per-fold evaluations depend
+    on which rows happen to land in which fold (the folds containing the
+    values crash, the rest look "clean"), so the HPO budget is spent on
+    randomly clean folds and the final full-data fit fails with an unclear
+    error. The numeric/finite/shape checks are shared with the pipeline
+    entry point (``check_target_numeric``) so both callers reject a bad
+    target identically.
+
     Args:
         X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
         y (Any): Target variable vector
             (expected np.ndarray, pd.Series or pd.DataFrame).
     Raises:
         InvalidDataError: If the data types are not supported
-            or the sizes of X and y do not match.
+            or the sizes of X and y do not match, or the target y is
+            non-numeric or contains NaN/±inf.
     """
     ok_types = (np.ndarray, pd.DataFrame)
     if not isinstance(X, ok_types):
@@ -321,6 +334,10 @@ def _validate_data(X: Any, y: Any) -> None:
         )
     if len(X) != len(y):
         raise InvalidDataError(f"Size mismatch: X={len(X)} and y={len(y)}")
+    try:
+        check_target_numeric(y)
+    except ValueError as err:
+        raise InvalidDataError(str(err)) from err
 
 
 def _get_estimator(algo: str) -> Any:
@@ -538,13 +555,14 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
 
 
 def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
-    """Log the exclusion of a failed fold at the given evaluation stage.
+    """Log the penalty of a failed fold at the given evaluation stage.
 
     Shared by the per-fold evaluation loops (``_evaluate_with_intermediate_
     reports`` and ``_evaluate_pooled_cv``) so the warning text stays uniform:
-    a fold whose fit/predict/scoring raised a non-fatal exception is skipped,
-    its rows do not enter the (pooled) estimate, and the trial continues — the
-    semantics of ``cross_val_score(error_score=np.nan)``.
+    a fold whose fit/predict/scoring raised a non-fatal exception makes the
+    trial's estimate NaN — the ``cross_val_score(error_score=np.nan)``
+    contract (a failed fold became NaN, i.e. the worst possible outcome), so
+    a model that crashes on most folds cannot win over an honest one.
 
     Args:
         fold_idx (int): 1-based fold number.
@@ -554,7 +572,8 @@ def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
             failed for this fold.
     """
     log.warning(
-        "Fold %d failed to %s: %s: %s — the fold is excluded from the evaluation",
+        "Fold %d failed to %s: %s: %s — the fold is penalized: the trial "
+        "estimate becomes NaN (the worst outcome)",
         fold_idx,
         stage,
         type(err).__name__,
@@ -592,14 +611,19 @@ def _evaluate_with_intermediate_reports(
     values — each row enters the calculation exactly once, in the same way as
     the final pooled estimate. Non-finite predictions of individual folds are
     masked out of the pooled value (the same contract as
-    ``metrics.oof_rmse``). A fold whose fit/predict raises a NON-FATAL
-    exception (e.g. ``TypeError``, ``KeyError``, ``IndexError``,
-    ``ValueError``/``numpy.linalg.LinAlgError``) is skipped the same way: its
-    rows do not enter the pooled value and a warning is logged — the semantics
-    of the legacy ``cross_val_score(error_score=np.nan)`` (a failed fold must
-    not abort the trial). Fatal exceptions (``MemoryError``, ``RuntimeError``,
-    ``InvalidDataError``) are NOT swallowed — they propagate to
-    ``handle_failure`` so the circuit breaker stays active. If EVERY fold
+    ``metrics.oof_rmse`` and the final ``ModelTrainer`` OOF channel): a model
+    that merely predicts NaN on some rows is NOT penalized — only its
+    non-finite rows are excluded from the estimate. A fold whose fit/predict
+    raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
+    ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
+    its rows are
+    marked with NaN (they cannot enter the pooled estimate) and a warning is
+    logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
+    (a failed fold became NaN, i.e. the worst possible outcome; it must not
+    abort the trial, and a model that crashes on most folds must not win over
+    an honest one). Fatal exceptions (``MemoryError``,
+    ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
+    to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails, a ``ValueError`` is raised — the same
     "no valid result" contract as before. A running pooled value that is
     itself non-finite
@@ -609,7 +633,8 @@ def _evaluate_with_intermediate_reports(
     accumulated rows admit a finite pooled estimate. Additive metrics (MAE and
     similar per-sample means, ``pool_metric=False``) keep publishing the
     cumulative fold mean (which equals the pooled value); a failed fold is
-    skipped with a warning and does not contribute to the cumulative mean.
+    penalized with NaN in the cumulative mean, so the trial's FINAL estimate
+    is NaN — the worst outcome.
 
     When the pooled value is impossible FINALLY (the scorer exposes no raw
     metric function, or no finite pair remains by the end of the evaluation),
@@ -637,9 +662,13 @@ def _evaluate_with_intermediate_reports(
             WARNING deduplication.
         phase_name (str): The pipeline phase, for the fallback WARNING
             deduplication.
+
     Returns:
         float: The mean metric value across all folds (for additive metrics)
             or the pooled value over all rows (for non-additive metrics).
+            NaN whenever at least one fold failed during evaluation — the
+            caller turns it into ``HPO_WORST_SCORE`` (the worst outcome), so
+            a failing model cannot win over an honest one.
     Raises:
         optuna.TrialPruned: If the pruner decides to prune the trial.
         ValueError: If every fold fails during evaluation (fit/predict) — the
@@ -678,11 +707,14 @@ def _evaluate_with_intermediate_reports(
         n_folds_total += 1
         # Clone the estimator for every fold (as cross_val_score does) to
         # avoid state accumulating between folds. A fold whose fit/predict
-        # raises a NON-FATAL exception is skipped — it does not contribute to
-        # the estimate or to the intermediate reports, and a warning is logged
-        # (the ``cross_val_score(error_score=np.nan)`` contract: a failed fold
-        # must not abort the trial). Fatal exception types (MemoryError /
-        # RuntimeError / InvalidDataError) are NOT swallowed here — they
+        # raises a NON-FATAL exception is PENALIZED: its rows stay NaN in the
+        # pooled buffers (they cannot enter the estimate), the intermediate
+        # reports of the surviving folds are still published, and a warning is
+        # logged (the ``cross_val_score(error_score=np.nan)`` contract: a
+        # failed fold became NaN — the worst possible outcome — and must not
+        # abort the trial, but a model that crashes on most folds must not win
+        # over an honest one). Fatal exception types (MemoryError
+        # / RuntimeError / InvalidDataError) are NOT swallowed here — they
         # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
             fold_estimator = clone(estimator)
@@ -762,6 +794,14 @@ def _evaluate_with_intermediate_reports(
             f"All {n_folds_total} fold(s) failed during evaluation — the "
             "estimate is impossible"
         )
+    # A failed fold is a guaranteed worst outcome: its rows could not enter
+    # the pooled estimate (pooled path) or its score is NaN in the additive
+    # fold mean — the trial estimate becomes NaN, exactly like the legacy
+    # ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned the
+    # mean. A model that crashes on part of the folds must not win over an
+    # honest one.
+    if n_failed_folds > 0:
+        return float("nan")
     if pool_metric:
         try:
             return pooled_scorer_value(scorer, pooled_y_buf, pooled_pred_buf)
@@ -801,17 +841,20 @@ def _evaluate_pooled_cv(
     differs from the average of per-fold values.
 
     Non-finite predictions of individual folds are masked out of the pooled
-    value (the same contract as ``metrics.oof_rmse``), so a fold producing NaN
-    (e.g. isotonic regression on a degenerate split) does not abort the trial.
-    A fold whose fit/predict (or per-fold scoring, on the non-poolable path)
+    value (the same contract as ``metrics.oof_rmse`` and the final
+    ``ModelTrainer`` OOF channel): a model that merely predicts NaN on some
+    rows is NOT penalized — only its non-finite rows are excluded from the
+    estimate (e.g. isotonic regression on a degenerate split does not abort
+    the trial). A fold whose fit/predict (or per-fold scoring, on the
+    non-poolable path)
     raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
-    ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is skipped the
-    same way: its rows do not enter the pooled estimate and a warning is
-    logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
-    (a failed fold became NaN and was excluded from the estimate instead of
-    aborting the trial). Fatal exceptions (``MemoryError``, ``RuntimeError``,
-    ``InvalidDataError``) are NOT swallowed — they propagate to
-    ``handle_failure`` so the circuit breaker stays active. If EVERY fold
+    ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
+    the trial's estimate becomes NaN — the semantics of the legacy
+    ``cross_val_score(error_score=np.nan)`` (a failed fold became NaN, i.e.
+    the worst possible outcome), so a model that crashes on most folds cannot
+    win over an honest one. Fatal exceptions (``MemoryError``,
+    ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
+    to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails at the fit/predict stage, the evaluation is impossible and a
     ``ValueError`` is raised — the same "no valid result" contract as before
     (mirroring ``cross_val_score``, which raises ``ValueError`` when every
@@ -844,7 +887,10 @@ def _evaluate_pooled_cv(
             deduplication.
 
     Returns:
-        float: The pooled metric value over all out-of-fold rows.
+        float: The pooled metric value over all out-of-fold rows. NaN
+            whenever at least one fold failed during evaluation — the caller
+            turns it into ``HPO_WORST_SCORE`` (the worst outcome), so a
+            failing model cannot win over an honest one.
 
     Raises:
         ValueError: If every fold fails during evaluation (fit/predict or the
@@ -881,11 +927,13 @@ def _evaluate_pooled_cv(
         n_folds_total += 1
         # Clone the estimator for every fold (as cross_val_score does) to
         # avoid state accumulating between folds. A fold whose fit/predict
-        # raises a NON-FATAL exception is skipped — its rows do not enter the
-        # pooled estimate, a warning is logged (the
-        # ``cross_val_score(error_score=np.nan)`` contract: a failed fold must
-        # not abort the trial). Fatal exception types (MemoryError /
-        # RuntimeError / InvalidDataError) are NOT swallowed here — they
+        # raises a NON-FATAL exception is PENALIZED: the trial's estimate
+        # becomes NaN, and a warning is logged (the
+        # ``cross_val_score(error_score=np.nan)`` contract: a failed fold
+        # became NaN — the worst possible outcome — and must not abort the
+        # trial, but a model that crashes on part of the folds must not win
+        # over an honest one). Fatal exception types (MemoryError
+        # / RuntimeError / InvalidDataError) are NOT swallowed here — they
         # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
             fold_estimator = clone(estimator)
@@ -901,7 +949,8 @@ def _evaluate_pooled_cv(
         if not poolable:
             # The scorer does not expose a raw metric function: pooling is
             # impossible, collect the per-fold values as the fallback. A
-            # non-fatal scoring failure excludes the fold, like a fit failure.
+            # non-fatal scoring failure is penalized the same way as a fit
+            # failure.
             try:
                 fold_scores.append(float(scorer(fold_estimator, X_te, y_te)))
             except (MemoryError, RuntimeError, InvalidDataError):
@@ -919,6 +968,12 @@ def _evaluate_pooled_cv(
             f"All {n_folds_total} fold(s) failed during evaluation — the "
             "pooled estimate is impossible"
         )
+    # A failed fold is a guaranteed worst outcome — the semantics of the
+    # legacy ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned
+    # the estimate. A model that crashes on part of the folds must not win
+    # over an honest one.
+    if n_failed_folds > 0:
+        return float("nan")
     if poolable:
         try:
             return pooled_scorer_value(scorer, pooled_y, pooled_pred)

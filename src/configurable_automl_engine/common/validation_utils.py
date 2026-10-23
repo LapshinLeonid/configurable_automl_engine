@@ -4,6 +4,7 @@ import math
 from math import sqrt
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
@@ -323,7 +324,43 @@ def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Ser
     """
     X = df.drop(columns=[target_col])
     y = df[target_col]
+    check_target_numeric(y)
     return X, y
+
+
+def check_target_numeric(y: Any) -> None:
+    """
+    Verify that the target vector is numeric and free of NaN/±inf.
+
+    A non-finite target makes per-fold evaluations depend on which rows
+    happen to land in which fold (the folds containing the bad values
+    crash/fail, the rest look "clean"), so the HPO budget is spent on
+    randomly clean folds and the final full-data fit fails with an unclear
+    error. The check fails fast on the pipeline entry point.
+
+    Args:
+        y (Any): The target vector (pd.Series or any array-like of numbers).
+
+    Raises:
+        ValueError: If the target is non-numeric or contains NaN/±inf.
+    """
+    try:
+        y_float = np.asarray(y, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f"Target column '{getattr(y, 'name', 'y')}' must be numeric"
+        ) from err
+    if y_float.size != len(y):
+        raise ValueError(
+            f"Target column '{getattr(y, 'name', 'y')}' must be a single "
+            f"column of numbers; got {y_float.size} values for {len(y)} rows"
+        )
+    if not np.all(np.isfinite(y_float)):
+        n_non_finite = int(np.sum(~np.isfinite(y_float)))
+        raise ValueError(
+            f"Target column '{getattr(y, 'name', 'y')}' must not contain NaN "
+            f"or infinite values; found {n_non_finite} non-finite value(s)"
+        )
 
 
 def get_effective_train_size(
