@@ -1895,6 +1895,152 @@ def test_feature_selection_isotonic_forced_disabled(caplog):
     assert len(preds) == len(y)
 
 
+def test_isotonic_multifeature_default_feature_index():
+    """IsotonicRegression trains on multi-column data without pre-truncation.
+
+    The ``IsotonicDataTransformer`` step must be present in the pipeline and
+    reduce the preprocessed matrix to a single feature, so a multi-column
+    input does not fail with the "input X should be a 1d array or 2d array
+    with 1 feature" error (issue #150).
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(
+        {
+            "noise": rng.rand(80),
+            "signal": rng.permutation(np.linspace(0, 1, 80)),
+        }
+    )
+    y = pd.Series(X["signal"] * 3.0 + rng.randn(80) * 0.05)
+
+    trainer = ModelTrainer(
+        algorithm="isotonic", hyperparams={"out_of_bounds": "clip"}
+    ).fit(X, y)
+
+    assert trainer.pipeline is not None
+    step_names = [name for name, _ in trainer.pipeline.steps]
+    assert step_names == ["preprocessor", "isotonic_selector", "model"]
+    assert isinstance(
+        trainer.pipeline.named_steps["isotonic_selector"], IsotonicDataTransformer
+    )
+    # The adapter selects the first feature by default (feature_index=0).
+    assert trainer.pipeline.named_steps["isotonic_selector"].feature_index == 0
+
+    preds = trainer.predict(X)
+    assert preds.shape[0] == len(y)
+    assert np.isfinite(preds).all()
+    assert trainer.val_score is not None
+
+
+def test_isotonic_multifeature_feature_index_selection():
+    """``feature_index`` chooses the feature fed to IsotonicRegression.
+
+    A signal feature must produce a high R2 while a pure noise feature must
+    not: the adapter must really switch the column, not always use the first
+    one. ``out_of_bounds='clip'`` keeps hold-out predictions finite (the
+    default 'nan' would poison the r2 score whenever a hold-out value lies
+    outside the training range).
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(
+        {
+            "noise": rng.rand(100),
+            "signal": rng.permutation(np.linspace(0, 1, 100)),
+        }
+    )
+    y = pd.Series(X["signal"] * 3.0 + rng.randn(100) * 0.1)
+
+    trainer_signal = ModelTrainer(
+        algorithm="isotonic",
+        hyperparams={"feature_index": 1, "out_of_bounds": "clip"},
+    ).fit(X, y)
+    assert trainer_signal.val_score is not None
+    assert trainer_signal.pipeline is not None
+    assert trainer_signal.pipeline.named_steps["isotonic_selector"].feature_index == 1
+
+    trainer_noise = ModelTrainer(
+        algorithm="isotonic",
+        hyperparams={"feature_index": 0, "out_of_bounds": "clip"},
+    ).fit(X, y)
+    assert trainer_noise.val_score is not None
+    # The signal feature correlates with y, the noise feature does not.
+    assert trainer_signal.val_score > trainer_noise.val_score
+
+
+def test_isotonic_invalid_feature_index_rejected():
+    """A non-integer or negative ``feature_index`` fails with a clear error."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame({"a": rng.rand(30), "b": rng.rand(30)})
+    y = pd.Series(X["a"] * 2.0 + rng.randn(30) * 0.05)
+
+    with pytest.raises(
+        TrainingError, match="feature_index must be a non-negative integer"
+    ):
+        ModelTrainer(
+            algorithm="isotonic", hyperparams={"feature_index": "first"}
+        ).fit(X, y)
+
+    with pytest.raises(
+        TrainingError, match="feature_index must be a non-negative integer"
+    ):
+        ModelTrainer(
+            algorithm="isotonic", hyperparams={"feature_index": -1}
+        ).fit(X, y)
+
+
+def test_isotonic_feature_index_out_of_bounds_fails():
+    """An out-of-range ``feature_index`` fails during training with the
+    transformer error (no silent fallback to the first feature)."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame({"a": rng.rand(30), "b": rng.rand(30)})
+    y = pd.Series(X["a"] * 2.0 + rng.randn(30) * 0.05)
+
+    with pytest.raises(TrainingError, match="out of bounds"):
+        ModelTrainer(
+            algorithm="isotonic", hyperparams={"feature_index": 5}
+        ).fit(X, y)
+
+
+def test_isotonic_ndarray_multifeature():
+    """IsotonicRegression works with a multi-column np.ndarray input."""
+    rng = np.random.RandomState(0)
+    X = rng.rand(60, 3)
+    y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
+
+    trainer = ModelTrainer(algorithm="isotonic", hyperparams={"feature_index": 1}).fit(
+        X, y
+    )
+    assert trainer.pipeline is not None
+    assert "isotonic_selector" in trainer.pipeline.named_steps
+    preds = trainer.predict(X)
+    assert preds.shape[0] == len(y)
+    assert np.isfinite(preds).all()
+
+
+def test_isotonic_feature_index_survives_save_load(tmp_path):
+    """The isotonic adapter (with its feature_index) survives save/load."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(
+        {
+            "noise": rng.rand(60),
+            "signal": rng.permutation(np.linspace(0, 1, 60)),
+        }
+    )
+    y = pd.Series(X["signal"] * 2.0 + rng.randn(60) * 0.05)
+
+    trainer = ModelTrainer(
+        algorithm="isotonic", hyperparams={"feature_index": 1}
+    ).fit(X, y)
+    pkl = tmp_path / "isotonic.pkl"
+    trainer.save(pkl)
+    restored = ModelTrainer.load(pkl)
+
+    y_pred1 = trainer.predict(X)
+    y_pred2 = restored.predict(X)
+    assert np.allclose(y_pred1, y_pred2)
+    assert restored.pipeline is not None
+    assert restored.pipeline.named_steps["isotonic_selector"].feature_index == 1
+
+
 def test_feature_selection_step_order_with_oversampler():
     """Step order: preprocessor -> feature_selector -> oversampler -> model."""
     rng = np.random.default_rng(0)

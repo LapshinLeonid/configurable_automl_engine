@@ -341,6 +341,18 @@ def test_get_allowed_hyperparameters_legacy_names_included():
     assert "n_iter" in allowed  # remapped to max_iter
 
 
+def test_get_allowed_hyperparameters_isotonic_feature_index_included():
+    """``feature_index`` (an IsotonicDataTransformer hint, not a constructor
+    parameter) counts as an allowed isotonic hyperparameter (issue #150)."""
+    allowed = get_allowed_hyperparameters("isotonic_regression")
+    assert "feature_index" in allowed
+    assert "increasing" in allowed
+    assert "out_of_bounds" in allowed
+
+    alias_allowed = get_allowed_hyperparameters("isotonic")
+    assert "feature_index" in alias_allowed
+
+
 def test_get_allowed_hyperparameters_alias_resolution():
     """Algorithm aliases give the same set as the canonical name."""
     assert get_allowed_hyperparameters("rf") == get_allowed_hyperparameters(

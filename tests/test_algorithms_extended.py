@@ -41,7 +41,7 @@ X_nan.iloc[0:20, 0] = np.nan
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize("algo", ALGORITHMS)
 def test_fit_and_score_with_nan(algo):
-    X = X_nan.iloc[:, [0]] if algo == "isotonic" else X_nan
+    X = X_nan
     trainer = ModelTrainer(algorithm=algo).fit(X, y_full)
     preds = trainer.predict(X)
     score = r2_score(y_full, preds)
@@ -95,9 +95,7 @@ def test_too_few_records(algo):
 # ---------------------------------------------------------------------
 @pytest.mark.parametrize("algo", ALGORITHMS)
 def test_save_and_load(tmp_path: Path, algo):
-    trainer = ModelTrainer(algorithm=algo).fit(
-        X_nan.iloc[:, [0]] if algo == "isotonic" else X_nan, y_full
-    )
+    trainer = ModelTrainer(algorithm=algo).fit(X_nan, y_full)
     pkl = tmp_path / f"{algo}.pkl"
     trainer.save(pkl)
     restored = ModelTrainer.load(pkl)

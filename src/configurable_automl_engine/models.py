@@ -417,7 +417,10 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     derived from the estimator constructor signature (same criterion as
     :func:`clean_hyperparameters`) plus the legacy parameter names from
     :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to a still-existing
-    constructor parameter.
+    constructor parameter. Tuner-level data-adapter hints are added as
+    documented exceptions: ``kernel_type`` for
+    ``gaussian_process_regression``, ``feature_index`` for
+    ``isotonic_regression``.
 
     Returns ``None`` when validation must be skipped:
     - the algorithm is unknown or its optional dependency is missing
@@ -454,6 +457,11 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     # ``create_model`` (not a constructor parameter).
     if resolved == "gaussian_process_regression":
         allowed.add("kernel_type")
+    # ``feature_index`` of IsotonicRegression: not a constructor parameter
+    # but a data-adapter hint consumed by ``IsotonicDataTransformer`` (the
+    # algorithmic feature chosen for the strictly univariate isotonic model).
+    if resolved == "isotonic_regression":
+        allowed.add("feature_index")
     return frozenset(allowed)
 
 
