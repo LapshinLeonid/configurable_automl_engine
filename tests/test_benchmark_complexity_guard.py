@@ -9,8 +9,8 @@ Coverage:
    trees/boosting.
 2. The aggregate mean CV score with the guard is NOT worse than without it.
 3. Smoke: the «dataset × algorithm × mean_off × mean_on» table renders;
-   the acceptance checks (check_acceptance) agree with the tests.
-4. The FULL acceptance profile (``FULL_DATASETS``) has the required shape
+   the checks (check_acceptance) agree with the tests.
+4. The FULL profile (``FULL_DATASETS``) has the required shape
    (>= 5 datasets, >= 5 seeds, >= 30 trials) and
    ``check_full_acceptance`` enforces the criteria on synthetic results
    (score not worse, seed scatter not larger, XGBoost time markedly lower).
@@ -77,11 +77,11 @@ def test_check_acceptance_matches_test_semantics(benchmark_results):
     assert passed, f"Acceptance criteria violated: {errors}"
 
 
-# ─────────────────── FULL acceptance profile (outside CI) ──────────────────── #
+# ─────────────────── FULL profile (outside CI) ──────────────────── #
 
 
 def test_full_dataset_profile_shape():
-    """The FULL profile matches the task: >= 5 datasets, >= 5 seeds, 30-50 trials."""
+    """The FULL profile has the required shape: >= 5 datasets, >= 5 seeds, 30-50 trials."""
     assert check_full_profile_shape(FULL_DATASETS) == [], (
         f"FULL profile violations: {check_full_profile_shape(FULL_DATASETS)}"
     )
@@ -112,7 +112,7 @@ def _guard_result_with(
 
 
 def test_check_full_acceptance_passes_on_good_results():
-    """The full-acceptance checker passes on clearly good results."""
+    """The full checker passes on clearly good results."""
     results = [
         _guard_result_with(
             algo="xgboosting", scores_off=[0.8, 0.7], scores_on=[0.82, 0.72]
@@ -126,7 +126,7 @@ def test_check_full_acceptance_passes_on_good_results():
 
 
 def test_check_full_acceptance_rejects_degraded_mean():
-    """The full-acceptance checker rejects a degraded aggregate mean score."""
+    """The full checker rejects a degraded aggregate mean score."""
     results = [
         _guard_result_with(
             algo="xgboosting", scores_off=[0.9, 0.9], scores_on=[0.5, 0.5]
@@ -138,7 +138,7 @@ def test_check_full_acceptance_rejects_degraded_mean():
 
 
 def test_check_full_acceptance_rejects_larger_seed_scatter():
-    """The full-acceptance checker rejects a grown std over seeds."""
+    """The full checker rejects a grown std over seeds."""
     results = [
         _guard_result_with(
             algo="xgboosting",
@@ -182,7 +182,7 @@ def test_check_full_acceptance_rejects_per_cell_scatter_growth():
 
 
 def test_check_full_acceptance_rejects_slow_guard():
-    """The full-acceptance checker rejects an XGBoost guard time NOT lower."""
+    """The full checker rejects an XGBoost guard time NOT lower."""
     results = [
         _guard_result_with(
             algo="xgboosting",
@@ -223,7 +223,7 @@ def test_check_full_acceptance_noisy_cell_drop_is_not_regression():
 
 
 def test_check_full_profile_shape_rejects_bad_profile():
-    """The profile-shape validator rejects every violation of the task shape."""
+    """The profile-shape validator rejects every violation of the profile shape."""
     bad = Dataset(
         name="dup", generator=lambda *_: (None, None), seeds=(1, 2), n_trials=10
     )
@@ -238,7 +238,7 @@ def test_check_full_profile_shape_rejects_bad_profile():
 def test_full_benchmark_is_reproducible():
     """Two identical FULL-profile runs produce IDENTICAL scores.
 
-    Regression for the review finding: the benchmark compared unseeded
+    Regression: the benchmark compared unseeded
     models — ``DEFAULT_SPACES`` carries no ``random_state``, so identical
     hyperparameters scored differently across reruns (bootstrap/boosting/
     XGBoost randomness) and the acceptance gates measured seed noise

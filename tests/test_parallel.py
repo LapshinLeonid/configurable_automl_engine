@@ -342,7 +342,7 @@ def test_disk_persistence_manager_registers_path_before_write(monkeypatch):
 
     save_df registers the path right after mkstemp: if pyarrow fails halfway
     through the write, the temp file is still registered and removed by
-    cleanup (issue #121 review: the fallback path leaked .parquet files in
+    cleanup (the fallback path leaked .parquet files in
     /dev/shm).
     """
     from configurable_automl_engine.training_engine.thread_pool import (
@@ -821,7 +821,7 @@ def test_is_compatible_does_not_call_to_numpy():
     Previously the check called df.to_numpy() only to read the resulting
     dtype: for a mixed-type frame that is a full in-memory copy, and
     SharedDataFrame.__init__ makes a second copy right after — a transient
-    doubling of memory in the main process on every HPO phase (issue #122).
+    doubling of memory in the main process on every HPO phase.
     The dtype is now computed from column dtypes alone, so a frame whose
     to_numpy would raise must still be checked without calling it.
     """
@@ -1327,7 +1327,7 @@ def test_run_parallel_keyboard_interrupt_propagates_no_timeout(caplog):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Issue #120: hang detection delay + hung task not freeing worker
+#  Hang detection delay + hung task not freeing worker
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -1531,7 +1531,7 @@ def test_start_signal_records_pid():
         assert sig.read_pid() == 456
         # The PID lives in an int64 buffer, not a float64 one: values above
         # 2**53 are not exactly representable as float64 and would be
-        # rounded (review feedback on issue #120).
+        # rounded.
         big_pid = 2**53 + 1
         sig.mark_pid(big_pid)
         assert sig.read_pid() == big_pid
@@ -1601,7 +1601,7 @@ def test_terminate_worker_by_pid_already_dead_returns_true():
     The PID is not in the pool registry and the OS probe says the process is
     gone: the hung task is not running anymore, so there is nothing to
     terminate — the outcome is treated as success instead of a false
-    "not handled" (issue #120 review feedback).
+    "not handled".
     """
     mock_pool = MagicMock()
     mock_pool._processes = {0: MagicMock(pid=1111)}
@@ -1722,7 +1722,7 @@ def test_run_parallel_disk_cache_reuses_file_for_same_df(monkeypatch):
 
 
 # ═══════════════════════════════════════════════════════════
-#  Issue #121: object-dtype SHM arrays crash workers under
+#  Object-dtype SHM arrays crash workers under
 #  forkserver/spawn; dirty data must fall back to pickle
 # ═══════════════════════════════════════════════════════════
 
@@ -1731,7 +1731,7 @@ def test_is_compatible_rejects_object_result_of_mixed_dtypes():
     """int + float + bool df.to_numpy() → object: NOT compatible with SHM.
 
     Copying raw pointers to parent-process Python objects into shared memory
-    crashes workers under forkserver/spawn (issue #121). The frame must be
+    crashes workers under forkserver/spawn. The frame must be
     routed through the disk/pickle path instead of SHM.
     """
     df_mixed = pd.DataFrame(
@@ -1761,7 +1761,7 @@ def test_is_compatible_rejects_non_numeric_column_kinds():
     to_numpy(): this silently changes the astype(str) encoding ('10' →
     '10.0') and can collapse big int ids into float64 (values > 2**53 become
     indistinguishable). Such frames used to go through parquet keeping exact
-    int64, so they must not be promoted into SHM (issue #121 review).
+    int64, so they must not be promoted into SHM.
     """
     # Numeric categories with a float column: to_numpy() → float64.
     df_numeric_cat = pd.DataFrame(
@@ -1900,7 +1900,7 @@ def test_run_parallel_parquet_write_failure_falls_back_to_pickle(caplog):
     Preparation happens outside the pool: a write error used to kill the whole
     run_parallel call (and leak the created SHM segments). Now the prepared
     resources are released and the dataframes are sent through pickle with a
-    warning instead (issue #121). The original disk indices survive the
+    warning instead. The original disk indices survive the
     fallback: a DataFrame at such an index is passed through by _worker_proxy
     untouched (only real .parquet paths are read from disk).
     """
@@ -1989,8 +1989,8 @@ def test_run_parallel_preparation_failure_cleans_shm_segments(caplog, monkeypatc
 
 
 # ═══════════════════════════════════════════════════════════
-#  Issue #122: value-based SHM compatibility, dtype without a
-#  data copy, documented index contract
+#  Value-based SHM compatibility, dtype without a data copy,
+#  documented index contract
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1999,7 +1999,7 @@ def test_is_compatible_int64_float64_within_2_53():
 
     int64 is the default pandas dtype for integer columns: a typical numeric
     dataset (int and float features) must go through SHM, not through a
-    parquet write (issue #122). 2**53 itself is representable in float64
+    parquet write. 2**53 itself is representable in float64
     exactly, so the boundary value is allowed.
     """
     df = pd.DataFrame({"a": [2**53, 3, 7], "b": [0.5, 1.5, 2.5]})
@@ -2038,12 +2038,12 @@ def test_is_compatible_int64_float64_within_2_53():
 def test_is_compatible_rejects_extension_dtypes_and_mixed_bool():
     """Extension dtypes and bool mixed with non-bool → incompatible.
 
-    Regression guard on the find_common_type trap (issue #122): nullable
+    Regression guard on the find_common_type trap: nullable
     Int64/Float64/boolean have kinds i/f/b and would pass a purely
     dtype-kind based check, while df.to_numpy() of such a frame (possibly
     mixed with plain numeric columns) yields an object array of raw pointers
     to parent-process Python objects — copying it into shared memory crashes
-    workers under forkserver/spawn (issue #121). Extension-typed frames must
+    workers under forkserver/spawn. Extension-typed frames must
     always go through the disk/pickle path.
     """
     # Int64 + float64: to_numpy() → object, find_common_type would say Float64.
@@ -2086,7 +2086,7 @@ def test_is_compatible_all_bool_columns():
 
 
 def test_is_compatible_empty_frames_behavior_unchanged():
-    """Empty frames behave exactly as before (issue #122 edge cases).
+    """Empty frames behave exactly as before (edge cases).
 
     A frame with no columns and a frame with zero rows must not crash or
     change their compatibility status; the value check skips zero-row
@@ -2107,8 +2107,8 @@ def test_is_compatible_duplicate_column_names_no_crash():
 
     With duplicate names df[name] returns a DataFrame, so min()/max() would
     yield Series and the comparison would raise ValueError — the
-    compatibility check must never crash, it only decides SHM vs parquet
-    (issue #122 review B1). int-only and int+float duplicated frames are
+    compatibility check must never crash, it only decides SHM vs parquet.
+    int-only and int+float duplicated frames are
     checked; the big-value variant (int64+float with values beyond 2**53)
     must be rejected, not crash.
     """
@@ -2135,7 +2135,7 @@ def test_is_compatible_duplicate_column_names_no_crash():
 
 
 def test_numpy_result_dtype_helper():
-    """Direct coverage of _numpy_result_dtype (issue #122 decomposition)."""
+    """Direct coverage of _numpy_result_dtype (decomposition)."""
     from configurable_automl_engine.training_engine.thread_pool import (
         _numpy_result_dtype,
     )
@@ -2164,7 +2164,7 @@ def test_numpy_result_dtype_helper():
 
 
 def test_ints_fit_float64_helper():
-    """Direct coverage of _ints_fit_float64 (issue #122 decomposition)."""
+    """Direct coverage of _ints_fit_float64 (decomposition)."""
     from configurable_automl_engine.training_engine.thread_pool import (
         _ints_fit_float64,
     )
@@ -2200,7 +2200,7 @@ def test_is_compatible_does_not_materialize_data(monkeypatch):
     Previously the check called df.to_numpy() only to read the resulting
     dtype: for a mixed-type frame that is a full in-memory copy, and
     SharedDataFrame.__init__ makes a second copy right after — a transient
-    doubling of memory in the main process on every HPO phase (issue #122).
+    doubling of memory in the main process on every HPO phase.
     The dtype is now computed from column dtypes alone.
     """
     def boom(*args, **kwargs):  # noqa: ARG001
@@ -2222,7 +2222,7 @@ def test_is_compatible_does_not_materialize_data(monkeypatch):
     )
 
 
-# Column builders for the equivalence matrix (issue #122 test plan).
+# Column builders for the equivalence matrix.
 _MATRIX_TYPES = [
     # plain numpy numeric/bool kinds (i/u/f/b)
     "int8",
@@ -2272,7 +2272,7 @@ def _matrix_column(type_name: str) -> object:
 # Single columns, pairs and triples: the triple grading is the regression
 # guard against the object-array bool trap (bool mixed with any non-bool
 # column) for every combination, so the protection cannot silently rot when
-# pandas/numpy change their promotion rules (issue #122 review M2).
+# pandas/numpy change their promotion rules.
 _MATRIX_COMBOS = [
     combo
     for k in (1, 2, 3)
@@ -2284,7 +2284,7 @@ _MATRIX_COMBOS = [
 def test_is_compatible_equivalence_with_to_numpy(column_types):
     """For every SHM-compatible frame, to_numpy() is numeric and lossless.
 
-    The main regression guard of issue #122: for ANY combination of the
+    The main regression guard: for ANY combination of the
     matrix column types (single columns and pairs), if is_compatible returns
     True then df.to_numpy() must produce an int/uint/float/bool array (never
     an object array of raw pointers), and the values must survive the
@@ -2310,7 +2310,7 @@ def test_is_compatible_equivalence_with_to_numpy(column_types):
 def test_shared_dataframe_roundtrip_resets_index_to_range():
     """SHM transfer restores RangeIndex(0, n), not the original index.
 
-    The index is passed positionally and silently reset (issue #122): a frame
+    The index is passed positionally and silently reset: a frame
     with RangeIndex(100, 100+n) comes back as RangeIndex(0, n). Worker code
     must not align X and y by index.
     """
@@ -2332,7 +2332,7 @@ def test_run_parallel_typical_numeric_dataset_uses_shm(monkeypatch):
 
     The compatibility of int64+float64 is now decided by VALUES, so the
     default pandas integer dtype does not force every HPO phase into writing
-    parquet (issue #122). Absence of DiskPersistenceManager.save_df calls
+    parquet. Absence of DiskPersistenceManager.save_df calls
     proves the SHM path was taken.
     """
     df = pd.DataFrame(
@@ -2363,9 +2363,9 @@ def test_run_parallel_value_safe_int64_float64_under_forkserver():
     """int64 + float64 with values ≤ 2**53 survives forkserver/spawn SHM.
 
     The worker receives the frame promoted to float64 (lossless within
-    2**53) and returns the same result as the plain pickle path (issue
-    #122). Runs each start method in its own subprocess, like the issue
-    #121 forkserver test.
+    2**53) and returns the same result as the plain pickle path.
+    Runs each start method in its own subprocess, like the
+    forkserver test above.
     """
     if sys.platform != "linux":
         pytest.skip("start-method probing below is Linux-specific")
@@ -2387,8 +2387,8 @@ def worker_int64_float64(df):
     # float64 through SHM; 2**53 is exactly representable in float64.
     assert list(df["a"]) == [2**53, 3, 7]
     assert list(df["b"]) == [0.5, 1.5, 2.5]
-    # The int64 column rides as float64 after the SHM promotion (issue
-    # #122) — documented behavior, lossless for values ≤ 2**53.
+    # The int64 column rides as float64 after the SHM promotion —
+    # documented behavior, lossless for values ≤ 2**53.
     return int(df["a"].iloc[0])
 
 
@@ -2454,7 +2454,7 @@ def test_run_parallel_extension_int64_float64_under_forkserver():
     """Int64 + float64 (nullable extension dtype) never enters SHM.
 
     The frame is routed through the disk/pickle path and the worker gets the
-    same values as through pickle (issue #122 — regression guard on the
+    same values as through pickle (regression guard on the
     find_common_type trap: a naive dtype computation would declare this
     frame SHM-compatible while to_numpy() yields an object array).
     """

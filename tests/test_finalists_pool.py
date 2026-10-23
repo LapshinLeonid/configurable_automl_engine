@@ -46,7 +46,7 @@ FAMILIES = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Positive: example from the specification and basic corridors
 # ──────────────────────────────────────────────────────────────────────────────
-def test_positive_example_from_issue_statement():
+def test_positive_example_from_specification_statement():
     """ElasticNet (0.081), SVR (0.085), Random Forest (0.089) → pool at δ=0.15.
 
     The rmse metric (min-better) in auto mode → multiplicative:

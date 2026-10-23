@@ -187,8 +187,8 @@ class Rule:
     apply: Callable[[float, float, int, int, float], tuple[float, float]]
 
 
-# Lower bound for ``min_samples_leaf`` on level B (the issue's "2–3"; the
-# documented default is 2).
+# Lower bound for ``min_samples_leaf`` on level B (the "2–3" target range;
+# the documented default is 2).
 _MIN_SAMPLES_LEAF_B_LOW = 2.0
 # Upper bound for ``min_samples_leaf`` on level B in the small mode.
 # ``floor(n / 4)`` with the leaf bound is used as a base multiplier.
@@ -210,7 +210,7 @@ _REG_LAMBDA_B_LOW = 1.0
 _REG_LAMBDA_B_HIGH = 100.0
 
 # Target range of ``max_depth`` on level B for boosting in the small mode
-# (the issue's "1–3").
+# (the "1–3" target range).
 _BOOST_MAX_DEPTH_B_LOW = 1.0
 _BOOST_MAX_DEPTH_B_HIGH = 3.0
 
@@ -219,7 +219,7 @@ _XGB_MAX_DEPTH_MEDIUM_HIGH = 5.0
 
 # Time-only upper bound of ``n_estimators`` in the small mode for BAGGING
 # ensembles (RF, Extra trees): only the upper bound is capped — more trees
-# reduce variance, not a regularization (the issue's "100–300").
+# reduce variance, not a regularization (the "100–300" target range).
 _N_ESTIMATORS_TIME_HIGH = 300.0
 
 # Level B budget of ``n_estimators`` for BOOSTING in the small mode.

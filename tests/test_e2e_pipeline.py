@@ -89,7 +89,7 @@ _SLOW_ALGORITHMS: frozenset[str] = frozenset(
 )
 
 # Algorithms that need more samples (not noise reduction)
-# noise=0.05 for all — the issue is sample count, not noise
+# noise=0.05 for all — the deciding factor is the sample count, not noise
 _MORE_SAMPLES: dict[str, int] = {
     "random_forest": 200,
     "nearest_neighbors_regression": 300,

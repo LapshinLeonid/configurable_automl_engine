@@ -280,9 +280,9 @@ def test_validate_data_invalid_y_type():
 def test_validate_data_non_numeric_y():
     """A non-numeric target y is rejected before the search starts.
 
-    Regression for issue #145: two NaN values in the target made the HPO
-    budget run on randomly "clean" folds, and the final full-data fit crashed.
-    A target that cannot be interpreted as a numeric vector must fail fast.
+    Two NaN values in the target made the HPO budget run on randomly
+    "clean" folds, and the final full-data fit crashed. A target that cannot
+    be interpreted as a numeric vector must fail fast.
     """
     X = np.zeros((5, 2))
     bad_y = np.array(["a", "b", "c", "d", "e"])
@@ -294,7 +294,7 @@ def test_validate_data_none_in_object_y_rejected_as_non_finite():
     """None values in an object target are rejected as non-finite.
 
     An object array containing None converts to NaN under a float
-    interpretation — a non-finite target must fail fast (issue #145).
+    interpretation — a non-finite target must fail fast.
     """
     X = np.zeros((5, 2))
     bad_y = np.array([1, 2, None, 4, 5], dtype=object)
@@ -314,9 +314,9 @@ def test_validate_data_none_in_object_y_rejected_as_non_finite():
 def test_validate_data_non_finite_y(bad_y, fragment):
     """NaN/±inf in the target y are rejected before the search starts.
 
-    Regression for issue #145: with NaN in the target, HPO evaluated trials
-    only on the folds that happened to be "clean" and the final training
-    crashed with an unclear error. The validation must fail fast instead.
+    With NaN in the target, HPO evaluated trials only on the folds that
+    happened to be "clean" and the final training crashed with an unclear
+    error. The validation must fail fast instead.
     """
     X = np.zeros((5, 2))
     with pytest.raises(hyperopt.InvalidDataError, match=fragment):
@@ -345,8 +345,8 @@ def test_validate_data_y_dataframe_column_is_validated():
 def test_optimize_rejects_nan_in_y_before_any_trial(toy_data):
     """optimize() fails fast on a NaN target instead of spending the HPO budget.
 
-    Regression for issue #145: two NaN values in the target used to let HPO
-    run on randomly "clean" folds and crash only at the final fit.
+    Two NaN values in the target used to let HPO run on randomly "clean"
+    folds and crash only at the final fit.
     """
     X, y = toy_data
     y_bad = y.copy()
@@ -689,8 +689,8 @@ def test_optimize_hpo_score_matches_pooled_trainer_val_score():
     For r2 (non-additive) the tuner's trial evaluation pools the metric over
     the OOF vector, so the HPO score matches the final ModelTrainer's pooled
     val_score on the same folds (the select phase uses the trainer's estimate).
-    This is the "HPO and select use the same quantity" requirement of issue
-    #123 — the estimate is computed over the pooled OOF vector, not averaged
+    This is the "HPO and select use the same quantity" requirement —
+    the estimate is computed over the pooled OOF vector, not averaged
     by folds.
     """
     from configurable_automl_engine.trainer import ModelTrainer
@@ -1742,6 +1742,43 @@ def test_fs_reproducible_with_random_state_none(noisy_fs_data):
     assert np.allclose(model1.predict(X), model2.predict(X))
 
 
+def test_stochastic_estimator_runs_reproducible(toy_data):
+    """Identical optimize() runs of a stochastic estimator give the same result.
+
+    Regression for issue #144: the random_state was not forwarded to the
+    models (models.py), so three identical train_best_model runs produced
+    different scores (0.7558/0.7593/0.7586) and different best params. With
+    the fixed seed injected by create_model, identical runs must yield the
+    same score and the same best parameters.
+    """
+    X, y = toy_data
+    space = {
+        "random_forest": lambda t: {
+            "n_estimators": t.suggest_int("n_estimators", 10, 60, step=10),
+            "max_depth": t.suggest_int("max_depth", 2, 8),
+            "min_samples_leaf": t.suggest_int("min_samples_leaf", 1, 5),
+        }
+    }
+    run_kwargs = dict(
+        n_trials=4,
+        random_state=42,
+        validation_strategy="train_test_split",
+        space_overrides=space,
+    )
+
+    res1 = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res1 is not None
+    res2 = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res2 is not None
+
+    assert res1.score == res2.score
+    assert res1.params == res2.params
+    # Both fitted models use the fixed seed injected by create_model.
+    model1 = res1.model
+    rf1 = model1.named_steps["model"] if hasattr(model1, "named_steps") else model1
+    assert rf1.get_params(deep=False).get("random_state") == 42
+
+
 def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
     """The service key use_feature_selection does not reach the model constructor.
 
@@ -2077,7 +2114,7 @@ def test_runner_dropped_features_recorded():
 def test_runner_n_features_size_uses_original_columns():
     """n_features_size counts ORIGINAL columns; n_features_eff is post-one-hot.
 
-    Regression (issue #134): the complexity guard resolved the size mode
+    Regression: the complexity guard resolved the size mode
     from the one-hot-expanded feature count, so large-but-wide data fell
     into the 'medium' mode. The runner must track both counts:
     n_features_size (original columns, a categorical column = 1) for the
@@ -2130,9 +2167,64 @@ def test_runner_n_features_size_uses_original_columns():
     assert runner.n_features_eff == 41
 
 
+def test_runner_n_features_eff_ignores_missing_categories():
+    """Missing values do not add a separate one-hot category in the estimate.
+
+    Regression (issue #143): after the imputer fix, NaN/None are imputed with
+    the most-frequent value instead of becoming literal "nan"/"None" one-hot
+    columns. The feature-count estimate must use the non-missing unique values,
+    otherwise estimates diverge from the real preprocessor output.
+    """
+    rng = np.random.default_rng(1)
+    n = 60
+    cats = pd.DataFrame(
+        {"c0": rng.integers(0, 3, size=n).astype(str), "c1": rng.integers(0, 3, size=n).astype(str)}
+    )
+    # Inject a NaN into c1: it must not count as a category.
+    cats.loc[0:4, "c1"] = np.nan
+    X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
+    y = pd.Series(rng.normal(size=n))
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=None,
+        high_cardinality_encoding=None,
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # c0: 3 categories, c1: 3 non-missing categories + 1 numerical = 7.
+    assert runner.n_features_eff == 7
+
+
 def test_runner_n_features_size_aligned_without_preprocessor():
     """Without a preprocessor (np.ndarray input) n_features_size aligns with
-    n_features_eff (issue #134 review remark 1).
+    n_features_eff.
 
     For np.ndarray the estimate falls back to n_features_eff=1 (no column
     names to expand); previously n_features_size kept the raw width
@@ -2445,7 +2537,7 @@ def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  sampler_seed: separate the TPE sampler seed from the data-split seed
-#  (issue #119 — the phase seed must not change CV folds)
+#  (the phase seed must not change CV folds)
 # ──────────────────────────────────────────────────────────────────────────────
 def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
     """Patch TPESampler to capture the seed while returning the real sampler."""
@@ -2464,7 +2556,7 @@ def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
 
 def test_optimize_sampler_seed_controls_tpe_only(toy_data):
     """sampler_seed feeds the TPE sampler, while the CV object is built with
-    the fixed random_state (issue #119: the per-phase seed must not change
+    the fixed random_state (the per-phase seed must not change
     the folds)."""
     X, y = toy_data
     captured, tpe_patch = _capture_tpe_seed()
@@ -2503,7 +2595,7 @@ def test_optimize_sampler_seed_controls_tpe_only(toy_data):
 
 def test_optimize_preprocessor_uses_random_state_not_sampler_seed(toy_data):
     """The preprocessor (hashing / target-encoding cross-fit) is seeded with
-    random_state, not sampler_seed (issue #119)."""
+    random_state, not sampler_seed."""
     X, y = toy_data
     _, tpe_patch = _capture_tpe_seed()
     with (
@@ -2561,7 +2653,7 @@ def test_optimize_sampler_seed_none_falls_back_to_random_state(toy_data):
 
 
 def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
-    """issue #119: with a fixed random_state (the same folds across phases)
+    """With a fixed random_state (the same folds across phases)
     and a per-phase sampler_seed, the params enqueued from the previous phase
     are re-evaluated on the SAME folds — refine can only improve the score."""
     X, y = toy_data
@@ -2593,12 +2685,12 @@ def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  issue #135: fold errors in the pooled/pruning evaluation are contained
+#  Fold errors in the pooled/pruning evaluation are contained
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_typeerror_on_one_fold_does_not_abort_hpo(toy_data, caplog):
     """An estimator raising TypeError on a single fold does NOT abort HPO.
 
-    Regression for issue #135: the pooled evaluation path (_evaluate_pooled_cv)
+    Regression: the pooled evaluation path (_evaluate_pooled_cv)
     propagated any per-fold exception, so a TypeError (outside the handled
     (ValueError, MemoryError, RuntimeError, InvalidDataError) set) would pass
     through Optuna and kill the whole HPO run. With the legacy
@@ -2703,7 +2795,7 @@ def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
 def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
     """A MemoryError from a fold still trips the circuit breaker.
 
-    Issue #135 review: fatal exception types (MemoryError/RuntimeError/
+    Fatal exception types (MemoryError/RuntimeError/
     InvalidDataError) must NOT be swallowed by the fold-skip treatment —
     otherwise the consecutive-fatal-failures counter and
     ``InvalidAlgorithmError`` would stop working on the pooled path (the

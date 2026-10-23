@@ -733,7 +733,7 @@ def test_val_score_reset_between_fits():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Non-additive metrics: pooled over the OOF vector (issue #123)
+#  Non-additive metrics: pooled over the OOF vector
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -742,7 +742,7 @@ def test_loo_r2_val_score_is_pooled_not_nan():
 
     Before the change, per-fold r2 on single-row folds is undefined (NaN), so
     the fold-mean val_score was NaN. The pooled value over the whole OOF
-    vector is a valid finite number — the motivating case of issue #123.
+    vector is a valid finite number — the motivating case.
     """
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(12, 3))
@@ -930,7 +930,7 @@ def test_loo_median_absolute_error_val_score_is_pooled_not_mae():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pooled-fallback WARNING in the final fit (issue #136)
+#  Pooled-fallback WARNING in the final fit
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1010,7 +1010,7 @@ class _NoRawScorer:
 def test_trainer_primary_no_finite_oof_pairs_warns(caplog):
     """Primary metric: an empty finite OOF buffer warns about the fallback.
 
-    Regression for issue #136 review (trainer.py 'no finite pairs' branch):
+    Regression (trainer.py 'no finite pairs' branch):
     when the model predicts all-NaN, the OOF buffer stays empty and the
     pooled estimate is impossible — the engine falls back to the per-fold
     mean with exactly one WARNING per (algorithm, metric, 'final_fit').
@@ -1097,7 +1097,7 @@ def test_trainer_additional_metric_pooled_fallback_warns(caplog):
 def test_trainer_additional_metric_no_finite_oof_pairs_warns(caplog):
     """Additional metric: an empty finite OOF buffer warns about the fallback.
 
-    Regression for issue #136 review (trainer additional 'no finite pairs'
+    Regression (trainer additional 'no finite pairs'
     branch): the model predicts all-NaN, so the OOF buffer is empty and the
     pooled value of the non-additive additional metric is impossible.
     """

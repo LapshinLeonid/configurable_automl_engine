@@ -55,7 +55,7 @@ These distributions are essential for the core functionality and will be install
 
 ## Optional Dependencies
 
-These distributions will not be installed automatically. You can install them using the bracket syntax (e.g., pip install "automl-engine[xgboost]").
+These distributions will not be installed automatically. You can install them using the bracket syntax (e.g., pip install "configurable-automl-engine[xgboost]").
 
 * **XGBoost**: Adds support for high-performance gradient boosting models.
 

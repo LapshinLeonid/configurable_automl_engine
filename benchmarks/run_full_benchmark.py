@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI of the FULL complexity guard acceptance benchmark (outside CI).
 
-The acceptance profile of the task: 5 small datasets x 5+ seeds x 30 trials,
+The acceptance profile: 5 small datasets, 5+ seeds, 30 trials each,
 with the guard off and on — mean OOF and std over seeds for every algorithm,
 plus the XGBoost HPO time. Run this script separately (NOT in CI) and post
 its report to the pull request:
@@ -51,7 +51,7 @@ def main() -> int:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     # Fail fast on a malformed FULL profile BEFORE the ~1-2 h run: the
-    # acceptance gates are only meaningful on the task's profile (>= 5
+    # acceptance gates are only meaningful on the intended profile (>= 5
     # datasets, >= 5 seeds, 30-50 trials).
     profile_errors = check_full_profile_shape(FULL_DATASETS)
     if profile_errors:

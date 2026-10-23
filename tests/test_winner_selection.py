@@ -405,7 +405,7 @@ def test_boundary_pool_exactly_top_k_candidates():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_issue_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
+def test_case_elasticnet_svr_rf_delta_015_winner_not_elasticnet():
     """ElasticNet CV=0.081, SVR=0.085, RF=0.089, δ=0.15 → a pool of three.
 
     ElasticNet with zeroed coefficients is disqualified; the RMSE_oof winner

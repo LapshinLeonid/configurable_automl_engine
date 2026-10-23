@@ -29,7 +29,7 @@ B. Unique Ratio (``check_unique``)
    applied to the predictions — and the final threshold never exceeds that
    cap: the most expressive model (one predicting y exactly) always reaches
    it, so a perfect model is never disqualified by circuit B on a
-   low-cardinality target (issue #125).
+   low-cardinality target.
 
 C. Dead Feature Check (``check_dead_features``)
    * Linear models (Lasso, ElasticNet, SGDRegressor, ... — anything exposing
@@ -54,8 +54,7 @@ C. Dead Feature Check (``check_dead_features``)
      the linear ``coef_`` path is unaffected.
 
 D. Generalization Gap (``check_generalization_gap``)
-   ``RMSE_oof / RMSE_full`` (the formula written as ``RMSE_full / RMSE_oof``
-   in the issue is equivalent to requiring this ratio below
+   ``RMSE_oof / RMSE_full`` (requiring this ratio below
    ``1 / max_generalization_gap``; the stored value grows with overfitting).
    A finite gap strictly exceeding ``max_generalization_gap`` (default 1.5)
    is routed by ``generalization_gap_mode``: the default
@@ -378,7 +377,7 @@ class ModelSanityGate:
                 number of distinct target values ``nunique(y)`` (at the
                 rounding granularity applied to predictions); the final
                 threshold never exceeds that ceiling — a perfect model always
-                reaches it (issue #125).
+                reaches it.
             max_dead_feature_ratio: Dead-feature share threshold (circuit C);
                 above it — a soft signal, and combined with a circuit A failure
                 (when ``dead_features_require_low_diversity``) — a disqualification.
@@ -448,7 +447,7 @@ class ModelSanityGate:
                         in (0, 1]. Applied as ``min_unique_ratio * N`` capped by
                         ``nunique(y)`` — the number of distinct target values on the
                         valid rows at the rounding granularity applied to predictions
-                        (issue #125: a perfect model predicting y exactly can reach
+                        (a perfect model predicting y exactly can reach
                         at most ``nunique(y)`` distinct predictions, so the threshold
                         must never exceed that ceiling).
                     max_dead_feature_ratio: dead-feature share threshold (circuit C):
@@ -776,8 +775,8 @@ class ModelSanityGate:
         target demands more distinct predictions than the most expressive
         model (one predicting y exactly) can produce: e.g. 18 rows with 13
         distinct y values and ``min_unique_ratio=0.9`` require 16.2 ≥ 17
-        distinct predictions — even a perfect model would be disqualified
-        (issue #125). The cap makes the ceiling equal to the expressing power
+        distinct predictions — even a perfect model would be disqualified.
+        The cap makes the ceiling equal to the expressing power
         of a perfect model; the final threshold is additionally never allowed
         to exceed the cap even when ``min_unique_count`` is set above it.
 

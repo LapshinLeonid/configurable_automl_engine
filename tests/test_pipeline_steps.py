@@ -333,7 +333,7 @@ def test_prepare_dataset_resolves_auto_large_to_train_test_split():
     [np.nan, np.inf, -np.inf],
 )
 def test_prepare_dataset_rejects_non_finite_target(bad_value):
-    """prepare_dataset fails fast on a non-finite target (issue #145).
+    """prepare_dataset fails fast on a non-finite target.
 
     A NaN/±inf target must be rejected at the pipeline entry point: otherwise
     the HPO budget is spent on randomly "clean" folds and the final training
@@ -401,7 +401,7 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     assert ctx.pre_trained_trainer is None
     assert mock_hpo.call_count == 2
     # The HPO phase name travels to _run_hpo → tuner.optimize(phase_name=...)
-    # for the pooled-fallback WARNING deduplication (issue #136).
+    # for the pooled-fallback WARNING deduplication.
     assert all(call.kwargs["phase_name"] == "coarse" for call in mock_hpo.call_args_list)
 
 
@@ -1084,7 +1084,7 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
     (all_algorithms) is RANDOM_STATE (42), and each following HPO phase
     (refine) gets the next sampler seed (43, 44, ...). Select steps are not
     counted. The data-split/preprocessor seed (random_state) stays the fixed
-    RANDOM_STATE for every phase (issue #119)."""
+    RANDOM_STATE for every phase."""
     cfg = _hpo_only_cfg(
         [
             {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},

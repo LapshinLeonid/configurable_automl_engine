@@ -46,6 +46,15 @@ Algorithm = str
 
 logger = logging.getLogger("configurable_automl_engine.models")
 
+#: Default random seed injected into stochastic estimators by
+#: :func:`create_model` (trees, forests, boosting, elasticnet, ridge, ...).
+#: Mirrors ``validation.RANDOM_STATE`` so that the models evaluated during HPO
+#: and the final ``ModelTrainer`` fit are reproducible: without a fixed seed
+#: every ``fit()`` would sample fresh trees/bootstraps/feature subsets and
+#: identical ``train_best_model`` runs would yield different scores and
+#: different best parameters.
+MODEL_RANDOM_STATE = 42
+
 # ----------------------------------------------------------------------------- #
 #                           Algorithm map (long keys)                           #
 # ----------------------------------------------------------------------------- #
@@ -492,6 +501,22 @@ def create_model(
             "Install it or exclude it from the list."
         )
 
+    # Deterministic seeding of stochastic estimators. Trees, forests, boosting
+    # and the randomized linear models draw randomness at fit time; with a
+    # fresh default RNG every fit() is different, so identical
+    # ``train_best_model`` runs would produce different scores/parameters
+    # (and the refine monotonicity promise would break). A fixed seed is
+    # injected for every estimator that accepts ``random_state`` (including
+    # XGBoost, whose constructor accepts **kwargs), unless the caller set the
+    # parameter explicitly — an explicit value always wins.
+    if "random_state" in hyperparams:
+        if hyperparams["random_state"] is None:
+            hyperparams["random_state"] = MODEL_RANDOM_STATE
+    else:
+        accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
+        if "random_state" in accepted_params or accepts_var_kwargs:
+            hyperparams["random_state"] = MODEL_RANDOM_STATE
+
     # For GaussianProcessRegressor (gpr), set a proper default kernel
     # (amplitude × RBF + white noise), enable target normalization and
     # several optimizer restarts with a fixed seed. A bare RBF(1.0) without
@@ -513,8 +538,6 @@ def create_model(
         and "n_restarts_optimizer" not in hyperparams
     ):
         hyperparams["n_restarts_optimizer"] = 2
-    if algo_key == "gaussian_process_regression" and "random_state" not in hyperparams:
-        hyperparams["random_state"] = 42
 
     # If max_iter is not set, add a cap (e.g. 10,000 iterations) so that the
     # LibSVM C-code exits the loop by itself if it hangs

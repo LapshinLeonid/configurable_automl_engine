@@ -219,8 +219,7 @@ def test_oof_rmse_approx_mean_fold_rmse_equal_folds():
     """Equal folds: RMSE_oof ≈ the average fold RMSE.
 
     The exact relation is pooled: oof² = mean(MSE_fold) (equal fold sizes);
-    approximately (within ~5%) RMSE_oof ≈ mean(RMSE_fold) — the statement
-    from the issue.
+    approximately (within ~5%) RMSE_oof ≈ mean(RMSE_fold).
     """
     X, y = _noisy_regression(n=60, p=6, seed=7)
     trainer = ModelTrainer(

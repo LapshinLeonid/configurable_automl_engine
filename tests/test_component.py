@@ -718,7 +718,7 @@ def test_run_hpo_skips_test_size_for_legacy_tuner():
     assert calls["test_size_passed"] is False
 
 
-# issue #119: the data-split seed (random_state) and the TPE sampler seed
+# The data-split seed (random_state) and the TPE sampler seed
 # (sampler_seed) are forwarded separately to tuners.
 def test_run_hpo_forwards_sampler_seed_and_fixed_random_state():
     """The engine forwards the fixed data-split seed as random_state and the
@@ -805,7 +805,7 @@ def test_run_hpo_skips_sampler_seed_for_legacy_tuner():
 
 
 def test_execute_phases_splits_sampler_and_split_seeds():
-    """issue #119: execute_phases passes the fixed RANDOM_STATE as the
+    """execute_phases passes the fixed RANDOM_STATE as the
     data-split seed and RANDOM_STATE + phase_ordinal as the sampler seed."""
     captured: list[tuple[Any, Any]] = []
 
@@ -2099,7 +2099,7 @@ class TestWorstScoreResultsExcluded:
         """Processes mode: X is shared via run_parallel SHM, not pickled.
 
         Previously X lived inside ``_HpoPhaseSpec`` and was copied to every
-        worker (issue #120, "мелочь"). Now X is passed as a separate argument
+        worker. Now X is passed as a separate argument
         via ``shared_args_indices``: one shared memory segment serves all
         algorithms of the phase.
         """
@@ -3654,7 +3654,7 @@ def test_e2e_two_selects_report_per_phase(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
-#  E2E acceptance criteria: warn does not disqualify gap=∞/large
+#  E2E behavior: warn does not disqualify gap=∞/large
 # --------------------------------------------------------------------------- #
 
 # Trees with min_samples_leaf=1 (and GBM with max_depth=10) fit the train set
@@ -3741,7 +3741,7 @@ def _run_acceptance(
 
 
 def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
-    """Acceptance criterion: the warn mode on make_friedman3.
+    """The warn mode on make_friedman3.
 
     Default config with extra_trees / random_forest / gradient_boosting /
     ridge and a terminal sanity_gate select. In the warn mode no candidate is
@@ -3770,7 +3770,7 @@ def test_e2e_warn_mode_winner_is_min_rmse_oof_friedman3(tmp_path: Path):
 
 
 def test_e2e_warn_mode_winner_is_min_rmse_oof_diabetes(tmp_path: Path):
-    """Acceptance criterion: the warn mode on load_diabetes.
+    """The warn mode on load_diabetes.
 
     The same scenario: the winner is the minimum RMSE_oof among all
     finalists, including overfit trees with zero train error.
@@ -3789,7 +3789,7 @@ def test_e2e_warn_mode_winner_is_min_rmse_oof_diabetes(tmp_path: Path):
 
 
 def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
-    """Acceptance criterion: the reject mode reproduces the old behavior.
+    """The reject mode reproduces the old behavior.
 
     The same overfit trees (RMSE_full ≈ 0 at min_samples_leaf=1) in the
     reject mode are rejected by circuit D: Circuit D reasons appear in
@@ -3813,3 +3813,62 @@ def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
     winner_audit = sg["audit"][res["algorithm"]]
     assert winner_audit["is_valid"] is True
     assert winner_audit["reasons"] == []
+
+
+def test_train_best_model_reproducible_with_stochastic_models(tmp_path: Path):
+    """Two identical train_best_model runs return the same score and params.
+
+    Regression for issue #144: the random_state was not forwarded to the
+    models, so three identical runs produced different scores (0.7558,
+    0.7593, 0.7586) and different best parameters. With create_model now
+    injecting a fixed seed, the end-to-end pipeline result is reproducible.
+    """
+    df = _sanity_e2e_df(n=80, seed=0)
+    config_dict = {
+        "general": {
+            "comparison_metric": "rmse",
+            "path_to_model": str(tmp_path / "model.pkl"),
+            "validation_strategy": "train_test_split",
+            "n_folds": 2,
+            "phases": [
+                {"name": "search", "n_trials": 3, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+        },
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {
+                    "n_estimators": [20],
+                    "max_depth": [4],
+                    "min_samples_leaf": [2],
+                },
+            },
+            "ridge": {"enable": True},
+        },
+        "oversampling": {"enable": False},
+    }
+
+    res1 = train_best_model(
+        config=config_dict,
+        df=df,
+        target="target",
+        model_path_override=tmp_path / "m1.pkl",
+    )
+    res2 = train_best_model(
+        config=config_dict,
+        df=df,
+        target="target",
+        model_path_override=tmp_path / "m2.pkl",
+    )
+
+    assert res1["algorithm"] == res2["algorithm"]
+    assert res1["score"] == res2["score"]
+    assert res1["params"] == res2["params"]

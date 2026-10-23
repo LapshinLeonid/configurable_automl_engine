@@ -5,7 +5,7 @@ Compares the HPO results of trees/boosting with the guard disabled
 ``tuner.optimize`` — the CV (OOF-like) score of each algorithm, plus the
 XGBoost HPO time.
 
-Acceptance criteria (matching the task):
+Acceptance criteria:
 
 1. On a set of small datasets the mean CV score of trees/boosting with the
    guard is NOT worse than without it (within a tolerance that absorbs the
@@ -161,13 +161,13 @@ SMALL_DATASETS: list[Dataset] = [
     ),
 ]
 
-#: Seeds of the FULL (acceptance) benchmark runs (>= 5 per the task).
+#: Seeds of the FULL (acceptance) benchmark runs (>= 5).
 FULL_SEEDS: tuple[int, ...] = (42, 7, 11, 99, 3, 17)
 
 #: Full acceptance dataset suite: 5 small datasets x 5+ seeds x 30 trials.
 #:
-#: This is the "5+ small datasets, 5+ seeds, 30–50 trials" acceptance profile
-#: of the issue. The run is heavy (~1–2 h on a single core) and is
+#: This is the "5+ small datasets, 5+ seeds, 30–50 trials" acceptance profile.
+#: The run is heavy (~1–2 h on a single core) and is
 #: intentionally NOT part of CI — it is launched separately (outside CI) and
 #: its report is posted to the pull request. ``SMALL_DATASETS`` above stays
 #: the CI smoke profile.
@@ -440,7 +440,7 @@ _FULL_CELL_SIGMA = 2.0
 
 
 def check_full_profile_shape(datasets: list[Dataset]) -> list[str]:
-    """Validate the FULL acceptance profile shape against the task.
+    """Validate the FULL acceptance profile shape.
 
     The acceptance run is expected to be 5+ small datasets, 5+ seeds per
     dataset and 30-50 trials, with unique dataset names (the report table

@@ -336,7 +336,7 @@ def check_target_numeric(y: Any) -> None:
     happen to land in which fold (the folds containing the bad values
     crash/fail, the rest look "clean"), so the HPO budget is spent on
     randomly clean folds and the final full-data fit fails with an unclear
-    error (issue #145). The check fails fast on the pipeline entry point.
+    error. The check fails fast on the pipeline entry point.
 
     Args:
         y (Any): The target vector (pd.Series or any array-like of numbers).

@@ -6,14 +6,14 @@ Run from the repository root:
     python benchmarks/run_sanity_gate_benchmark.py
 
 Prints a table "dataset × variant (baseline/target) × winner × whether the
-gate triggered" and checks the acceptance criteria:
+gate triggered" and checks the stated conditions:
 
 * reference datasets (noisy R²≈0.3, wide, small N) — the target DAG winner
   matches the CV leader, the gate does not trigger;
 * degenerate datasets (flat shelf, tanh plateau, overfitting) — 100% of
   winner changes: the degenerate CV leader is disqualified by the gate.
 
-Return code: 0 — criteria met; 1 — violation (CI blocks acceptance).
+Return code: 0 — conditions met; 1 — violation (CI blocks the run).
 
 Datasets are fixed (seed, generator): the run is reproducible and sensitive
 real data is not added to git.

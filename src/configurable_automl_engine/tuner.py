@@ -309,7 +309,7 @@ def _validate_data(X: Any, y: Any) -> None:
     on which rows happen to land in which fold (the folds containing the
     values crash, the rest look "clean"), so the HPO budget is spent on
     randomly clean folds and the final full-data fit fails with an unclear
-    error (issue #145).
+    error.
 
     Args:
         X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
@@ -566,8 +566,7 @@ def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
     a fold whose fit/predict/scoring raised a non-fatal exception makes the
     trial's estimate NaN — the ``cross_val_score(error_score=np.nan)``
     contract (a failed fold became NaN, i.e. the worst possible outcome), so
-    a model that crashes on most folds cannot win over an honest one
-    (issue #145).
+    a model that crashes on most folds cannot win over an honest one.
 
     Args:
         fold_idx (int): 1-based fold number.
@@ -623,7 +622,7 @@ def _evaluate_with_intermediate_reports(
     logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
     (a failed fold became NaN, i.e. the worst possible outcome; it must not
     abort the trial, and a model that crashes on most folds must not win over
-    an honest one, issue #145). Fatal exceptions (``MemoryError``,
+    an honest one). Fatal exceptions (``MemoryError``,
     ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
     to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails, a ``ValueError`` is raised — the same
@@ -636,7 +635,7 @@ def _evaluate_with_intermediate_reports(
     similar per-sample means, ``pool_metric=False``) keep publishing the
     cumulative fold mean (which equals the pooled value); a failed fold is
     penalized with NaN in the cumulative mean, so the trial's FINAL estimate
-    is NaN — the worst outcome (issue #145).
+    is NaN — the worst outcome.
 
     When the pooled value is impossible FINALLY (the scorer exposes no raw
     metric function, or no finite pair remains by the end of the evaluation),
@@ -670,7 +669,7 @@ def _evaluate_with_intermediate_reports(
             or the pooled value over all rows (for non-additive metrics).
             NaN whenever at least one fold failed during evaluation — the
             caller turns it into ``HPO_WORST_SCORE`` (the worst outcome), so
-            a failing model cannot win over an honest one (issue #145).
+            a failing model cannot win over an honest one.
     Raises:
         optuna.TrialPruned: If the pruner decides to prune the trial.
         ValueError: If every fold fails during evaluation (fit/predict) — the
@@ -715,7 +714,7 @@ def _evaluate_with_intermediate_reports(
         # logged (the ``cross_val_score(error_score=np.nan)`` contract: a
         # failed fold became NaN — the worst possible outcome — and must not
         # abort the trial, but a model that crashes on most folds must not win
-        # over an honest one, issue #145). Fatal exception types (MemoryError
+        # over an honest one). Fatal exception types (MemoryError
         # / RuntimeError / InvalidDataError) are NOT swallowed here — they
         # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
@@ -801,7 +800,7 @@ def _evaluate_with_intermediate_reports(
     # fold mean — the trial estimate becomes NaN, exactly like the legacy
     # ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned the
     # mean. A model that crashes on part of the folds must not win over an
-    # honest one (issue #145).
+    # honest one.
     if n_failed_folds > 0:
         return float("nan")
     if pool_metric:
@@ -851,7 +850,7 @@ def _evaluate_pooled_cv(
     the trial's estimate becomes NaN — the semantics of the legacy
     ``cross_val_score(error_score=np.nan)`` (a failed fold became NaN, i.e.
     the worst possible outcome), so a model that crashes on most folds cannot
-    win over an honest one (issue #145). Fatal exceptions (``MemoryError``,
+    win over an honest one. Fatal exceptions (``MemoryError``,
     ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
     to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails at the fit/predict stage, the evaluation is impossible and a
@@ -889,7 +888,7 @@ def _evaluate_pooled_cv(
         float: The pooled metric value over all out-of-fold rows. NaN
             whenever at least one fold failed during evaluation — the caller
             turns it into ``HPO_WORST_SCORE`` (the worst outcome), so a
-            failing model cannot win over an honest one (issue #145).
+            failing model cannot win over an honest one.
 
     Raises:
         ValueError: If every fold fails during evaluation (fit/predict or the
@@ -931,7 +930,7 @@ def _evaluate_pooled_cv(
         # ``cross_val_score(error_score=np.nan)`` contract: a failed fold
         # became NaN — the worst possible outcome — and must not abort the
         # trial, but a model that crashes on part of the folds must not win
-        # over an honest one, issue #145). Fatal exception types (MemoryError
+        # over an honest one). Fatal exception types (MemoryError
         # / RuntimeError / InvalidDataError) are NOT swallowed here — they
         # propagate to ``handle_failure`` and keep the circuit breaker active.
         try:
@@ -970,7 +969,7 @@ def _evaluate_pooled_cv(
     # A failed fold is a guaranteed worst outcome — the semantics of the
     # legacy ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned
     # the estimate. A model that crashes on part of the folds must not win
-    # over an honest one (issue #145).
+    # over an honest one.
     if n_failed_folds > 0:
         return float("nan")
     if poolable:
@@ -1364,7 +1363,7 @@ class _OptimizeRunner:
         - when the current search space cannot be reproduced by the
           distribution pre-check (an exotic custom ``space_fn``) — the
           transfer cannot be validated, and silently dropping the history
-          would degrade refine to a cold run (the issue this feature fixes);
+          would degrade refine to a cold run;
         - an empty list is a no-op (``previous_trials=[]`` is allowed).
         """
         if not self.previous_trials:
@@ -1658,8 +1657,8 @@ class _OptimizeRunner:
         two-element lists passed directly to ``space_overrides``) is re-typed
         against the parameter type (the default search space or the estimator
         signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
-        ``C`` as a real range (``float_log``), not as an integer-only range —
-        the exact issue #127 bug. A parameter whose default space entry is
+        ``C`` as a real range (``float_log``), not as an integer-only range.
+        A parameter whose default space entry is
         ``float_log`` (e.g. ``alpha_1`` of an ARD regression) is likewise
         searched on a logarithmic scale without an explicit type. Raw lists
         (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;
@@ -1959,11 +1958,12 @@ class _OptimizeRunner:
                     n += self.hashing_n_components
                 elif encoding == "one_hot":
                     try:
-                        # NaN is kept as a separate category: the categorical
-                        # pipeline converts columns to strings first
-                        # (``_to_string_array``), so a missing value becomes
-                        # the literal "nan" category of OneHotEncoder.
-                        n += int(self.X[col].nunique(dropna=False))
+                        # Missing values are imputed before encoding
+                        # (``_to_string_array`` preserves NaN, the imputer fills
+                        # it with the most frequent category), so NaN is NOT a
+                        # separate one-hot category: the column expands into its
+                        # non-missing unique values only.
+                        n += int(self.X[col].nunique(dropna=True))
                     except Exception:  # noqa: BLE001 — estimate only
                         n += 1
                 else:

@@ -395,10 +395,10 @@ def test_tuner_svr_constant_y_falls_back(monkeypatch):
 def test_tuner_svr_nan_y_falls_back(monkeypatch):
     """y with NaN is rejected by the tuner before the search starts.
 
-    Issue #145: a non-finite target must fail fast (``InvalidDataError``)
-    instead of spending the HPO budget on randomly "clean" folds. The
-    fallback behavior of ``compute_svr_epsilon_bounds`` itself is covered
-    separately by ``test_helper_fallback_for_constant_or_non_finite_y``.
+    A non-finite target must fail fast (``InvalidDataError``) instead of
+    spending the HPO budget on randomly "clean" folds. The fallback behavior
+    of ``compute_svr_epsilon_bounds`` itself is covered separately by
+    ``test_helper_fallback_for_constant_or_non_finite_y``.
     """
     X = pd.DataFrame(np.random.randn(60, 5))
     y = pd.Series([1.0, np.nan] + list(np.random.randn(58)))

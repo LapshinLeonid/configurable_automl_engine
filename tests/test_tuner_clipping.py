@@ -362,12 +362,12 @@ def test_clip_search_space_raises_on_zero_samples():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Step-grid alignment after clipping (issue #139)
+# 4. Step-grid alignment after clipping
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_clip_aligns_high_to_step_grid():
-    """A clipped upper bound is re-aligned to the step grid (issue #139).
+    """A clipped upper bound is re-aligned to the step grid.
 
     Regression: ``n_estimators`` 50–1000 with a step of 100 clipped to
     50–300 produced ``(300 - 50) % 100 != 0``; Optuna silently shifted the
@@ -440,7 +440,7 @@ def test_align_high_to_step_matches_optuna():
         align_high_to_step,
     )
 
-    # The issue's exact scenario: 50-300 with a step of 100 -> 250.
+    # The exact scenario covered: 50-300 with a step of 100 -> 250.
     assert align_high_to_step(50, 300, 100) == 250
     # Divisible ranges stay unchanged.
     assert align_high_to_step(50, 300, 50) == 300

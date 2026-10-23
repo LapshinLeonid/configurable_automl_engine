@@ -113,7 +113,7 @@ def test_is_greater_better(metric_name, expected):
     assert is_greater_better(metric_name) == expected
 
 
-def test_is_greater_better_contract_from_issue():
+def test_is_greater_better_contract():
     """Contract: the direction is determined by the scorer object."""
     assert is_greater_better("neg_root_mean_squared_error") is True
     assert is_greater_better("r2") is True
@@ -568,7 +568,7 @@ def test_pooled_scorer_value_median_absolute_error():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pooled path availability for every supported comparison_metric (issue #136)
+#  Pooled path availability for every supported comparison_metric
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -591,7 +591,7 @@ def test_pooled_path_works_for_supported_comparison_metric(name):
     (``_score_func``, ``_sign``, ``_kwargs``): on the current sklearn version
     every supported metric produces a ``make_scorer``-compatible object with
     these attributes, so ``pooled_scorer_value`` never falls back to the
-    per-fold mean for the supported set. Regression guard for issue #136 —
+    per-fold mean for the supported set. Regression guard —
     a silent metric switch would change the reported value without a trace
     in the log.
     """
@@ -638,7 +638,7 @@ def test_pooled_path_works_for_sklearn_non_additive_metrics(name):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pooled-fallback WARNING de-duplication (issue #136)
+#  Pooled-fallback WARNING de-duplication
 # ══════════════════════════════════════════════════════════════════════════════
 
 

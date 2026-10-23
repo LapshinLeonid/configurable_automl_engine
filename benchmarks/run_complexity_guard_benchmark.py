@@ -6,14 +6,14 @@ Run from the repository root:
     python benchmarks/run_complexity_guard_benchmark.py
 
 Prints a table "dataset × algorithm × mean_off × mean_on × std × xgb_time"
-and checks the acceptance criteria:
+and checks the stated conditions:
 
 * the mean CV score of trees/boosting with the guard is NOT worse than
   without it;
 * the scatter between seeds is not dramatically larger with the guard;
 * the guard restricts at least one parameter on every dataset.
 
-Return code: 0 — criteria met; 1 — violation (CI blocks acceptance).
+Return code: 0 — conditions met; 1 — violation (CI blocks the run).
 """
 
 from __future__ import annotations

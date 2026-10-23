@@ -1,6 +1,6 @@
 """E2E tests of the adaptive complexity guard on a synthetic small dataset.
 
-Covers the acceptance criteria:
+Covers:
 1. On a small dataset (~18 rows, 5 features) the log shows the adapted
    tree/boosting ranges ("was → became" with the reason).
 2. The final report of ``train_best_model`` contains the ``complexity_guard``
@@ -84,7 +84,7 @@ def test_e2e_small_data_guard_applies_and_reports(caplog):
     )
     assert xgb_depth["after"] == [1.0, 3.0]
     # XGBoost min_child_weight and reg_lambda are restricted on the defaults
-    # (issue #132 regression: the parameters were absent from
+    # (regression: the parameters were absent from
     # DEFAULT_SPACES['xgboosting'], so their guard rules never fired).
     xgb_mcw = next(
         r
@@ -134,7 +134,7 @@ def _wide_one_hot_frame(
 
 def test_e2e_large_wide_one_hot_spaces_unchanged():
     """Large-but-wide data (n=4000, 250 one-hot columns / 50 original)
-    must NOT trigger the 'medium' mode (issue #134).
+    must NOT trigger the 'medium' mode.
 
     With the size-mode ratio computed from the one-hot-expanded p, n/p =
     4000/250 = 16 < 20 resolved 'medium' and restricted the spaces: XGBoost
@@ -440,13 +440,13 @@ def test_e2e_float_min_samples_leaf_engine_wins_does_not_crash(algo):
 
 
 def test_e2e_max_depth_uses_resolved_leaf_min_engine_wins():
-    """engine_wins: max_depth is consistent with the resolved leaf range (issue #137).
+    """engine_wins: max_depth is consistent with the resolved leaf range.
 
     With ``user_range_policy='engine_wins'`` a user ``min_samples_leaf=[1, 1]``
     resolves to the guard range, and the ``max_depth`` rules must use the
     resolved ``leaf_min`` (not the user's 1), so that ``max_depth`` shrinks
-    to 3–3 rather than the too-wide 3–4 on a tiny dataset. Regression for
-    issue #137: ``_effective_leaf_min`` applied the rules to the user range
+    to 3–3 rather than the too-wide 3–4 on a tiny dataset. Regression:
+    ``_effective_leaf_min`` applied the rules to the user range
     and ignored ``user_range_policy``.
     """
     rng = np.random.RandomState(5)
@@ -508,14 +508,14 @@ def test_e2e_max_depth_uses_resolved_leaf_min_engine_wins():
 
 # ──────────────────────────────────────────────────────────────────────────────
 # E2E: the "optimum at boundary" warning is suppressed for non-actionable
-# boundaries (issue #131)
+# boundaries
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_e2e_fixed_param_no_boundary_warning(caplog):
     """A user-fixed parameter (low == high) produces no "widen it" warning.
 
-    The exact issue #131 report: a user ``min_samples_leaf [1, 1]`` is a
+    A user ``min_samples_leaf [1, 1]`` is a
     fixed parameter; the optimum is always at its only value, so the "widen
     it" warning would be a false signal on every phase.
     """
@@ -557,7 +557,7 @@ def test_e2e_fixed_param_no_boundary_warning(caplog):
 def test_e2e_guard_narrowed_range_no_boundary_warning(caplog):
     """A guard-introduced bound produces no "widen it" warning.
 
-    The exact issue #131 report: after the guard tightening (e.g. XGBoost
+    After the guard tightening (e.g. XGBoost
     ``max_depth`` 3–10 → 1–3 on small data), the optimum almost always lies
     on a guard-introduced bound, and the old code warned on every phase for
     every tree — although the narrowing was deliberate.

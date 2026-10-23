@@ -16,7 +16,7 @@ Coverage:
    the winner changed, the degenerate CV leader was disqualified, and the
    honest candidate wins in the target DAG.
 3. Smoke: the table «dataset × variant × winner × gate» renders;
-   the acceptance checks (check_acceptance) agree with the tests.
+   the checks (check_acceptance) agree with the tests.
 
 Runtime is bounded (CI): n_trials=1, N ≤ 300, 6 datasets.
 """
@@ -85,7 +85,7 @@ def test_degenerate_winner_changes():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Smoke: table and acceptance checks
+#  Smoke: table and checks
 # ──────────────────────────────────────────────────────────────────────────────
 
 

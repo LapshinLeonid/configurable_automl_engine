@@ -69,7 +69,7 @@ def test_resolve_size_mode(n, p, expected):
 def test_resolve_size_mode_uses_original_columns():
     """The size-mode ratio uses the ORIGINAL column count, not p after one-hot.
 
-    Regression (issue #134): p was counted after the one-hot expansion, so
+    Regression: p was counted after the one-hot expansion, so
     n=4000 rows with 250 one-hot columns (only 50 original columns) gave
     n/p = 16 < 20 and the "medium" mode — restricted spaces on large data.
     With the original column count the ratio is 4000/50 = 80 >= 20 and the
@@ -144,12 +144,12 @@ def test_extreme_small_n_xgb_ranges_never_zero(n):
     assert adjusted["n_estimators"].config.high == 200
 
 
-# ──────────────── leaf regularization on n < 8 (issue #138) ────────────────── #
+# ──────────────── leaf regularization on n < 8 ────────────────── #
 
 
 @pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
 def test_small_n_leaf_regularization_never_collapses_to_one(n):
-    """Regression (issue #138): on n < 8 the level B range [2, floor(n/4)]
+    """Regression: on n < 8 the level B range [2, floor(n/4)]
     is empty and used to collapse to min_samples_leaf = 1.
 
     Now the lower bound 2 is kept, capped by the physical limit
@@ -173,7 +173,7 @@ def test_small_n_leaf_regularization_never_collapses_to_one(n):
 
 @pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
 def test_small_n_leaf_regularization_boosting_same_rule(n):
-    """GradientBoosting shares the tree min_samples_leaf rules (issue #138)."""
+    """GradientBoosting shares the tree min_samples_leaf rules."""
     space = {"min_samples_leaf": _entry(1, 10, "int")}
     adjusted, _ = apply_complexity_guard(
         space, "gradient_boosting", n=n, p=5, config=_default_cfg()
@@ -185,8 +185,8 @@ def test_small_n_leaf_regularization_boosting_same_rule(n):
     assert (entry.config.low, entry.config.high) == expected
 
 
-def test_small_n_leaf_regularization_monotonic_issue_example():
-    """The issue's example: n=5 gives leaf 2 (not 1), n=8 gives leaf 2.
+def test_small_n_leaf_regularization_monotonic_example():
+    """The motivating example: n=5 gives leaf 2 (not 1), n=8 gives leaf 2.
 
     Before the fix the behavior was non-monotonic: n=5 collapsed to
     min_samples_leaf=1 while n=8 already kept [2, 2].
@@ -446,7 +446,7 @@ def test_small_tree_n_estimators_time_only():
 @pytest.mark.parametrize("algo", ["gradient_boosting", "xgboosting"])
 def test_small_boosting_n_estimators_level_b_budget(algo):
     """Boosting n_estimators is a level B REGULARIZATION rule, disabled with
-    ``regularize`` (issue #133).
+    ``regularize``.
 
     For a boosting ensemble the tree count together with learning_rate is
     the main complexity regulator, so the cap is not a time-only restriction:
@@ -483,8 +483,7 @@ def test_small_boosting_n_estimators_level_b_budget(algo):
 
 @pytest.mark.parametrize("algo", ["gradient_boosting", "xgboosting"])
 def test_small_boosting_n_estimators_cap_depends_on_lr(algo):
-    """The boosting n_estimators cap depends on the learning_rate UPPER bound
-    (issue #133: "верхней границей n_estimators, зависящей от learning_rate").
+    """The boosting n_estimators cap depends on the learning_rate UPPER bound.
 
     ``cap = budget / lr_high``: the budget 60 is fixed; a default lr range
     [0.01, 0.3] caps n_estimators at 200, a wider lr range [0.01, 1.0] caps
@@ -597,13 +596,13 @@ def test_small_gradient_boosting_min_samples_leaf():
     ) == (2, 3)
 
 
-# ─────────────────────── default XGBoost space (issue #132) ───────────────── #
+# ─────────────────────── default XGBoost space ───────────────── #
 
 
 def test_default_xgboost_space_has_min_child_weight_and_reg_lambda():
     """The default XGBoost space exposes min_child_weight and reg_lambda.
 
-    Regression for issue #132: the guard's ``min_child_weight`` and
+    Regression: the guard's ``min_child_weight`` and
     ``reg_lambda`` rules never fired on the defaults because the parameters
     were absent from ``DEFAULT_SPACES['xgboosting']`` — only max_depth,
     subsample and n_estimators were restricted.
@@ -628,7 +627,7 @@ def test_default_xgboost_space_guard_restricts_new_params():
     """On small data the guard restricts min_child_weight and reg_lambda
     from the DEFAULT_SPACES['xgboosting'].
 
-    Regression for issue #132: previously the guard rules for these
+    Regression: previously the guard rules for these
     parameters could never fire on defaults. Now the default space carries
     them, so the level B rules tighten min_child_weight to [2, 10] and
     reg_lambda to [1, 100] (log scale).
@@ -749,7 +748,7 @@ def test_ordinary_mode_space_unchanged():
 def test_ordinary_mode_with_one_hot_p_size():
     """Large-but-wide data (one-hot) stays 'ordinary' via p_size.
 
-    Regression (issue #134): n=4000 rows, 250 one-hot columns (50 original)
+    Regression: n=4000 rows, 250 one-hot columns (50 original)
     gave n/p = 16 < 20 -> "medium" and restricted spaces. With ``p_size``
     the size mode uses the ORIGINAL column count (50), so spaces do not
     change — the post-preprocessing ``p`` (250) is still used by the rules
@@ -814,7 +813,7 @@ def test_ordinary_mode_with_one_hot_p_size():
 
 def test_medium_mode_feature_count_rules_use_p_not_p_size():
     """In the medium mode the feature-count rules use the post-preprocessing
-    ``p``, NOT ``p_size`` (issue #134, review remark).
+    ``p``, NOT ``p_size``.
 
     ``max_features`` lower bound is ``1 / p``: with ``p = 250`` (after
     one-hot) the bound is 0.004, with ``p_size = 50`` (original columns) it
@@ -1045,13 +1044,13 @@ def test_user_range_non_conflicting_intersection():
     assert not any(log.get("conflict") for log in logs)
 
 
-# ───────────── leaf_min from the resolved leaf range (issue #137) ──────────── #
+# ───────────── leaf_min from the resolved leaf range ──────────── #
 
 
 def test_engine_wins_max_depth_uses_resolved_leaf_min():
     """engine_wins: max_depth rules use leaf_min from the resolved leaf range.
 
-    Regression for issue #137: with engine_wins a user ``min_samples_leaf``
+    Regression: with engine_wins a user ``min_samples_leaf``
     ``[1, 1]`` resolves to the guard range ``[2, floor(n/4)]``, but the
     ``max_depth`` rules were computed with ``leaf_min=1`` (from the raw user
     range), so on n=14 max_depth became 3–4 instead of 3–3.
@@ -1137,7 +1136,7 @@ def test_float_fraction_resolved_leaf_min_feeds_max_depth():
 
     ``_effective_leaf_min`` converts the resolved fraction to rows
     (``low * n``) and the ``max_depth`` rules must consume that absolute
-    value (issue #137 for the fractional case): with engine_wins the user
+    value (the fractional case): with engine_wins the user
     fraction range resolves to the guard range, leaf_min becomes 2 rows,
     and max_depth B = ceil(log2(15 / 2)) = 3 — not ceil(log2(15 / 1)).
     """
@@ -1282,11 +1281,11 @@ def test_merge_complexity_guard_records_one_per_parameter():
     assert by_key[("xgboosting", "max_depth")]["levels"] == ["B"]
 
 
-# ─────────────────── step-grid alignment (issue #139) ──────────────────────── #
+# ─────────────────── step-grid alignment ──────────────────────── #
 
 
 def test_guard_n_estimators_aligns_high_to_step_grid():
-    """A stepped n_estimators range is aligned to its step grid (issue #139).
+    """A stepped n_estimators range is aligned to its step grid.
 
     The time cap tightens [50, 800] (step 50) to [50, 300]: 300 lies on the
     step-50 grid, so the range stays. Regression scenario: with a step of 100

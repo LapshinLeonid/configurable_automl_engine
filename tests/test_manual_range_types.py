@@ -1,4 +1,4 @@
-"""Tests for manual range handling (issue #127).
+"""Tests for manual range handling.
 
 Coverage:
 - A range whose type is inferred from the boundary numbers is re-resolved
@@ -9,7 +9,7 @@ Coverage:
   ``learning_rate``) without an explicit type default to the logarithmic
   scale.
 - A parameter whose DEFAULT_SPACES entry is ``float_log`` (e.g. ``alpha_1``
-  of an ARD regression) also defaults to the logarithmic scale (issue #140).
+  of an ARD regression) also defaults to the logarithmic scale.
 - An explicitly typed range (``[1, 50, "int"]``) is never rewritten.
 - The tuner warns when the best trial lies at a range boundary.
 """
@@ -134,8 +134,8 @@ def test_learning_rate_integer_bounds_log():
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2a. Parameters with a float_log DEFAULT_SPACES entry default to log scale
-#     (issue #140: ARD alpha_1/alpha_2/lambda_1/lambda_2 are not in
-#     SCALE_PARAMS, so their inferred [1e-6, 0.1] became a linear range)
+#     (ARD alpha_1/alpha_2/lambda_1/lambda_2 are not in SCALE_PARAMS, so
+#     their inferred [1e-6, 0.1] became a linear range)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -370,7 +370,7 @@ def test_warn_skips_empty_space(caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5a. Fixed parameters (low == high) never warn (issue #131)
+# 5a. Fixed parameters (low == high) never warn
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -415,7 +415,7 @@ def test_skips_param_missing_from_best_params(caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5b. Guard-introduced bounds never warn, INFO is logged instead (issue #131)
+# 5b. Guard-introduced bounds never warn, INFO is logged instead
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -568,7 +568,7 @@ def test_guard_log_not_applied_does_not_suppress(caplog):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5c. Natural (physical) domain boundaries never warn (issue #131)
+# 5c. Natural (physical) domain boundaries never warn
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -1021,7 +1021,7 @@ def test_normalize_space_dict_retypes_inferred_entry():
 def test_normalize_space_dict_retypes_float_log_default_param():
     """_normalize_space_dict re-resolves ARD alpha_1 [1e-6, 0.1] to float_log.
 
-    The direct optimize() path (issue #140): alpha_1 is absent from
+    The direct optimize() path: alpha_1 is absent from
     SCALE_PARAMS, but its DEFAULT_SPACES entry is float_log, so an inferred
     range must be searched on a logarithmic scale.
     """
@@ -1067,7 +1067,7 @@ def test_normalize_space_dict_int_param_stays_int():
 def test_optimize_direct_dict_override_retypes_C(monkeypatch):
     """A raw list [1, 50] through space_overrides searches C as float_log.
 
-    The exact issue #127 bug: before the fix, ``space_overrides`` with a raw
+    The exact bug covered: before the fix, ``space_overrides`` with a raw
     list treated C as an integer-only range (and a two-element list was even
     handled as a constant by the dynamic space).
     """
