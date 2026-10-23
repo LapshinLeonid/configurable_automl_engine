@@ -774,6 +774,631 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
     assert "coarse" in caplog.text
 
 
+def test_evaluate_pooled_cv_skips_failed_fold_rows(caplog):
+    """A fold raising TypeError in fit does NOT abort the trial.
+
+    The regression of issue #135: with the legacy cross_val_score
+    (error_score=np.nan) a failed fold became NaN and was excluded from the
+    estimate; _evaluate_pooled_cv propagated any exception instead. Now the
+    failed fold's rows are excluded from the pooled value and a warning is
+    logged.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        # Class-level counter survives clone() (which rebuilds fresh
+        # instances per fold), so only the first fold raises.
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    # The trial completes with the pooled RMSE over the surviving folds.
+    assert np.isfinite(pooled)
+    assert "excluded from the evaluation" in caplog.text
+    assert "TypeError" in caplog.text
+    # Recompute the expectation: the surviving rows are the folds after the
+    # first one (prediction 0.0); the pooled RMSE is over those rows only.
+    first_fold_rows = set()
+    for i, (X_tr, X_te, y_tr, y_te, test_idx) in enumerate(
+        tuner.iter_splits(
+            X, y, method="k_fold", n_folds=4, test_size=0.2, random_state=42,
+            include_indices=True,
+        )
+    ):
+        if i == 0:
+            first_fold_rows = set(np.asarray(test_idx))
+            break
+    valid = ~np.asarray([i in first_fold_rows for i in range(len(y))])
+    expected = -float(np.sqrt(np.mean(y.to_numpy()[valid] ** 2)))
+    assert pooled == pytest.approx(expected, rel=1e-6)
+
+
+def test_evaluate_pooled_cv_predict_error_skips_fold(caplog):
+    """A fold raising in predict (not fit) is excluded the same way."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class KeyErrorOnSecondFold(BaseEstimator, RegressorMixin):
+        _folds_predicted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            KeyErrorOnSecondFold._folds_predicted += 1
+            if KeyErrorOnSecondFold._folds_predicted == 2:
+                raise KeyError("boom on fold 2")
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            KeyErrorOnSecondFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    assert np.isfinite(pooled)
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+
+
+def test_evaluate_pooled_cv_all_folds_failed_raises_valueerror(caplog):
+    """Every fold failing → ValueError (the "no valid result" contract).
+
+    The ValueError is non-fatal in the tuner: the trial is pruned instead of
+    aborting the whole HPO run (matching the legacy cross_val_score behavior
+    when the estimate is impossible).
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class AlwaysFails(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            raise IndexError("always boom")
+
+    scorer = get_scorer_object("rmse")
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match=r"All 4 fold\(s\) failed"):
+            _evaluate_pooled_cv(
+                AlwaysFails(),
+                X,
+                y,
+                method="k_fold",
+                n_folds=4,
+                test_size=0.2,
+                random_state=42,
+                scorer=scorer,
+            )
+    # Each failing fold is reported with a warning.
+    assert caplog.text.count("excluded from the evaluation") == 4
+
+
+def test_evaluate_pooled_cv_failed_fold_fallback_mean(caplog):
+    """On the non-poolable path a failing fold is excluded from the mean."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            FakeModel._folds_fitted += 1
+            if FakeModel._folds_fitted == 1:
+                raise ValueError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class LambdaScorer:
+        """A scorer without _score_func: pooling is impossible."""
+
+        def __call__(self, estimator, Xte, yte):
+            return 0.7
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=LambdaScorer(),
+        )
+    assert pooled == pytest.approx(0.7)
+    assert "excluded from the evaluation" in caplog.text
+
+
+def test_evaluate_pooled_cv_failed_scoring_fallback_mean(caplog):
+    """On the non-poolable path a fold whose SCORING fails is excluded too."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class FailingScorer:
+        """A scorer without _score_func failing on its first call."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, estimator, Xte, yte):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyError("boom on fold 1 scoring")
+            return 0.7
+
+    scorer = FailingScorer()
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    # The failed fold is excluded from the mean — the surviving folds all
+    # score 0.7.
+    assert pooled == pytest.approx(0.7)
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+
+
+def test_evaluate_pooled_cv_scoring_all_folds_failed_returns_nan(caplog):
+    """All folds failing at the SCORING stage returns NaN (not ValueError).
+
+    Documented asymmetry (issue #135 review): a fatal ``cross_val_score``
+    raises ``ValueError`` only when every FIT fails. When the fits succeed
+    but every score is impossible (e.g. a scorer whose raw metric fails on
+    every per-fold vector), the legacy behavior is an all-NaN estimate — the
+    trial completes with the worst score (``HPO_WORST_SCORE`` at the caller),
+    not a pruned trial. ``_evaluate_pooled_cv`` mirrors exactly that: the
+    per-fold pile-up of scoring failures returns NaN.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class AlwaysFailingRawMetric:
+        """Poolable scorer whose raw metric raises on ANY input vector."""
+
+        _score_func = staticmethod(lambda yt, yp: (_ for _ in ()).throw(ValueError("raw metric boom")))
+        _sign = -1
+        _kwargs = {}
+
+        def __call__(self, estimator, Xte, yte):
+            return -0.5
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=AlwaysFailingRawMetric(),
+            algo_name="ridge",
+            phase_name="unique-phase-135-scoring-asymmetry",
+        )
+    # The pooled vector AND every per-fold pair fail → NaN (the caller turns
+    # it into HPO_WORST_SCORE, exactly like the legacy all-NaN cross_val_score).
+    assert np.isnan(pooled)
+    # The fallback WARNING is emitted (the pooled value is impossible).
+    assert "Pooled evaluation of the metric is not available" in caplog.text
+
+
+def test_evaluate_with_intermediate_reports_pooled_skips_failed_fold(caplog):
+    """Pruning + non-additive metric: a fold raising TypeError is skipped.
+
+    The regression of issue #135 in the pruning branch: the fold's rows do
+    not enter the pooled value, a warning is logged, and the remaining folds
+    are still published (no abort of the trial).
+    """
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("r2")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+        )
+    # The trial completes: the pooled r2 over the surviving folds.
+    assert np.isfinite(pooled)
+    assert pooled < 0.0  # constant 0.0 predictions on non-zero y → bad r2
+    assert "TypeError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+    # The surviving folds (2..4) are still published as intermediate steps.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+
+
+def test_evaluate_with_intermediate_reports_pooled_predict_error_skips_fold(caplog):
+    """Pruning + non-additive metric: a fold raising in PREDICT is skipped."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class PredictErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_predicted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            PredictErrorOnFirstFold._folds_predicted += 1
+            if PredictErrorOnFirstFold._folds_predicted == 1:
+                raise KeyError("boom on fold 1 predict")
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("r2")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            PredictErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+        )
+    assert np.isfinite(pooled)
+    assert pooled < 0.0
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+
+
+def test_evaluate_with_intermediate_reports_additive_skips_failed_fold(caplog):
+    """Pruning + additive metric: a failing fold is excluded from the mean."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(rng.randn(120))
+
+    class ConstantPredict(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    def scorer(est, Xte, yte):
+        """Fails on the first fold's scoring call, then succeeds."""
+        if not hasattr(scorer, "_calls"):
+            scorer._calls = 0
+        scorer._calls += 1
+        if scorer._calls == 1:
+            raise TypeError("boom on fold 1 scoring")
+        return float(np.mean(est.predict(Xte)))
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            ConstantPredict(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    assert pooled == pytest.approx(0.7)
+    assert "TypeError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+    # The failed fold is skipped; the mean over the surviving folds is 0.7.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+    assert all(call.args[0] == pytest.approx(0.7) for call in trial.report.call_args_list)
+
+
+def test_evaluate_with_intermediate_reports_all_folds_failed_raises_valueerror(caplog):
+    """Pruning branch: every fold failing → ValueError (non-fatal)."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(rng.randn(120))
+
+    class AlwaysFails(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            raise KeyError("always boom")
+
+    scorer = get_scorer_object("r2")
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match=r"All 4 fold\(s\) failed"):
+            _evaluate_with_intermediate_reports(
+                trial,
+                AlwaysFails(),
+                X,
+                y,
+                method="k_fold",
+                n_folds=4,
+                test_size=0.2,
+                random_state=42,
+                scorer=scorer,
+                pool_metric=True,
+            )
+    assert caplog.text.count("excluded from the evaluation") == 4
+    # Failing folds publish nothing: no intermediate report, no prune query.
+    trial.report.assert_not_called()
+
+
+def test_evaluate_pooled_cv_fatal_fold_exception_propagates():
+    """A fold raising MemoryError propagates — the circuit breaker stays active.
+
+    Issue #135 review: the fold-skip treatment applies ONLY to non-fatal
+    exception types (TypeError/KeyError/IndexError/ValueError). Fatal types
+    (MemoryError/RuntimeError/InvalidDataError) must reach ``handle_failure``
+    so the consecutive-fatal-failures counter keeps working on the
+    pooled/pruning paths — they are NOT silently swallowed like legacy
+    ``cross_val_score(error_score=nan)`` did.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class AlwaysOOM(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            raise MemoryError("oom on every fold")
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with pytest.raises(MemoryError, match="oom on every fold"):
+        _evaluate_pooled_cv(
+            AlwaysOOM(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+
+
+def test_evaluate_pooled_cv_runtimeerror_fold_propagates():
+    """A partial-fold RuntimeError propagates from _evaluate_pooled_cv."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class BoomOnFirstFit(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            BoomOnFirstFit._folds_fitted += 1
+            if BoomOnFirstFit._folds_fitted == 1:
+                raise RuntimeError("runtime boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with pytest.raises(RuntimeError, match="runtime boom on fold 1"):
+        _evaluate_pooled_cv(
+            BoomOnFirstFit(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+
+
+def test_evaluate_with_intermediate_reports_fatal_fold_exception_propagates():
+    """The pruning branch also lets fatal fold exceptions through."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(rng.randn(120))
+
+    class BoomOnFirstFit(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            BoomOnFirstFit._folds_fitted += 1
+            if BoomOnFirstFit._folds_fitted == 1:
+                raise RuntimeError("runtime boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("r2")
+    with pytest.raises(RuntimeError, match="runtime boom on fold 1"):
+        _evaluate_with_intermediate_reports(
+            trial,
+            BoomOnFirstFit(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+        )
+
+
+def test_evaluate_with_intermediate_reports_additive_fatal_scorer_exception_propagates():
+    """A fatal exception from the per-fold SCORER also propagates (additive)."""
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(rng.randn(120))
+
+    class ConstantPredict(BaseEstimator, RegressorMixin):
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    def scorer(est, Xte, yte):
+        raise MemoryError("oom in scoring")
+
+    with pytest.raises(MemoryError, match="oom in scoring"):
+        _evaluate_with_intermediate_reports(
+            trial,
+            ConstantPredict(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # End-to-end tests of optimize() with real Optuna pruners
 # ──────────────────────────────────────────────────────────────────────────────
