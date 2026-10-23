@@ -376,3 +376,67 @@ def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
         {"flex": _FlexibleEstimator},
     )
     assert get_allowed_hyperparameters("flex") is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Deterministic seeding of stochastic estimators (issue #144)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_create_model_seeds_stochastic_estimators():
+    """Stochastic estimators get a fixed random_state by default.
+
+    Trees/forests/boosting and randomized linear models draw randomness at
+    fit time; without a fixed seed identical ``train_best_model`` runs
+    produced different scores/best parameters (issue #144). ``create_model``
+    must inject the engine seed for every estimator accepting
+    ``random_state``.
+    """
+    from sklearn.ensemble import RandomForestRegressor
+
+    model = create_model("random_forest", n_estimators=10)
+    assert isinstance(model, RandomForestRegressor)
+    assert model.random_state == 42
+
+
+def test_create_model_respects_explicit_random_state():
+    """An explicit random_state always wins over the injected default."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    model = create_model("random_forest", n_estimators=10, random_state=7)
+    assert isinstance(model, RandomForestRegressor)
+    assert model.random_state == 7
+
+
+def test_create_model_none_random_state_normalized_to_default():
+    """random_state=None is normalized to the fixed engine seed.
+
+    ``None`` requests a fresh RNG per fit (sklearn semantics), which would
+    break reproducibility exactly like an omitted seed — the explicit-none
+    case is treated as "no seed set" and normalized.
+    """
+    model = create_model("random_forest", n_estimators=10, random_state=None)
+    assert model.random_state == 42
+
+
+def test_create_model_estimators_without_random_state_unaffected():
+    """Estimators that do not accept random_state are left untouched.
+
+    Non-stochastic algorithms (kNN, SVR, isotonic, ARD, ...) have no
+    ``random_state`` parameter — the seeding must not add one (and must not
+    break the constructor).
+    """
+    model = create_model("knn", n_neighbors=5)
+    assert model.get_params(deep=False).get("random_state") is None
+    model = create_model("svr", C=1.0)
+    assert model.get_params(deep=False).get("random_state") is None
+
+
+def test_create_model_xgboost_gets_seeded_when_installed():
+    """XGBoost accepts **kwargs; the default seed is injected for it too."""
+    from configurable_automl_engine.models import _FACTORY
+
+    if _FACTORY.get("xgboosting") is None:
+        pytest.skip("xgboost is not installed")
+    model = create_model("xgboosting", n_estimators=10)
+    assert model.get_params().get("random_state") == 42

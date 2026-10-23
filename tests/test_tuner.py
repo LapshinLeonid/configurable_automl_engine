@@ -1634,6 +1634,43 @@ def test_fs_reproducible_with_random_state_none(noisy_fs_data):
     assert np.allclose(model1.predict(X), model2.predict(X))
 
 
+def test_stochastic_estimator_runs_reproducible(toy_data):
+    """Identical optimize() runs of a stochastic estimator give the same result.
+
+    Regression for issue #144: the random_state was not forwarded to the
+    models (models.py), so three identical train_best_model runs produced
+    different scores (0.7558/0.7593/0.7586) and different best params. With
+    the fixed seed injected by create_model, identical runs must yield the
+    same score and the same best parameters.
+    """
+    X, y = toy_data
+    space = {
+        "random_forest": lambda t: {
+            "n_estimators": t.suggest_int("n_estimators", 10, 60, step=10),
+            "max_depth": t.suggest_int("max_depth", 2, 8),
+            "min_samples_leaf": t.suggest_int("min_samples_leaf", 1, 5),
+        }
+    }
+    run_kwargs = dict(
+        n_trials=4,
+        random_state=42,
+        validation_strategy="train_test_split",
+        space_overrides=space,
+    )
+
+    res1 = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res1 is not None
+    res2 = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res2 is not None
+
+    assert res1.score == res2.score
+    assert res1.params == res2.params
+    # Both fitted models use the fixed seed injected by create_model.
+    model1 = res1.model
+    rf1 = model1.named_steps["model"] if hasattr(model1, "named_steps") else model1
+    assert rf1.get_params(deep=False).get("random_state") == 42
+
+
 def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
     """The service key use_feature_selection does not reach the model constructor.
 
