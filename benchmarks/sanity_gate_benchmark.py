@@ -259,9 +259,14 @@ DEGENERATE_CASES: list[DegenerateCase] = [
             "ridge": {"enable": True, "limit_hyperparameters": True},
         },
         stub_hpo=lambda name: {
+            # gamma=0.0 — the true tanh plateau: almost constant predictions
+            # (R²_oof < 0, worse than the constant model). The historically
+            # used gamma=0.001 is now honestly better than the constant
+            # baseline (R²_oof ≈ +0.04) and is NOT a degenerate case under
+            # the adaptive diversity circuit.
             "svr": PhaseResult(
                 score=-0.08,
-                params={"kernel": "sigmoid", "gamma": 0.001, "coef0": 0.0, "C": 1.0},
+                params={"kernel": "sigmoid", "gamma": 0.0, "coef0": 0.0, "C": 1.0},
             ),
             "ridge": PhaseResult(score=-0.09, params={"alpha": 1.0}),
         }[name],

@@ -585,7 +585,7 @@ def test_warn_mode_extra_trees_with_infinite_gap_wins_by_rmse_oof():
 def test_negative_svr_sigmoid_plateau_rejected_by_circuit_a():
     """SVR-sigmoid on the tanh plateau is cut off by Circuit A (diversity on OOF)."""
     X, y = _dataset(n=150, seed=11)
-    sigmoid = SVR(kernel="sigmoid", gamma=0.001, coef0=0.0).fit(X, y)
+    sigmoid = SVR(kernel="sigmoid", gamma=0.0, coef0=0.0).fit(X, y)
     pred = sigmoid.predict(X)
     assert pred.std() < 0.1 * y.std()  # precondition: the tanh plateau
     cand = _candidate(
@@ -926,6 +926,7 @@ def test_sanity_gate_config_empty_block_is_valid_thresholds_only():
     assert "mode" not in SanityGateCfg.model_fields
     assert sg.corridor_delta == 0.15
     assert sg.min_prediction_diversity == 0.15
+    assert sg.adaptive_diversity is True  # the constant-model baseline default
     assert sg.max_dead_feature_ratio == 0.4
     assert sg.max_generalization_gap == 1.5
 

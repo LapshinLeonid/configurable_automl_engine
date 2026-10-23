@@ -181,9 +181,14 @@ def make_degenerate_flat_shelf(n: int = 150, p: int = 10, seed: int = 42):
 def make_degenerate_tanh_plateau(n: int = 200, p: int = 6, seed: int = 42):
     """Degenerate "tanh plateau" dataset: SVR-sigmoid hits a plateau.
 
-    Linear signal with noise: SVR(kernel='sigmoid', gamma=0.001, coef0=0.0)
-    produces almost constant predictions (scatter ≪ scatter of y) — the gate
-    must fire (contour A). An honest SVR-RBF (C=1.0) passes.
+    Linear signal with noise: SVR(kernel='sigmoid', gamma=0.0, coef0=0.0)
+    produces almost constant predictions (scatter ≪ scatter of y), so its
+    R²_oof is negative — the model is worse than a constant prediction and
+    the gate must fire (contour A, the adaptive negative-R² test). An honest
+    SVR-RBF (C=1.0) passes. Note: a slightly non-zero gamma (e.g. 0.001)
+    yields a small positive R²_oof and is thus NOT degenerate anymore —
+    under the adaptive diversity circuit such a model is honestly better
+    than the constant baseline.
 
     Args:
         n: Number of rows.

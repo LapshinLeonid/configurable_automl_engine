@@ -2,9 +2,12 @@
 
 Coverage:
     1. Circuit A (Diversity Ratio): an honest model passes; a constant
-       prediction fails; the 'ratio equals threshold' boundary passes;
-       a constant target is skipped with a soft_warning; the adaptive
-       mode relative to the constant model.
+       prediction fails; the 'ratio equals threshold' boundary passes in the
+       explicit non-adaptive mode; a constant target is skipped with a
+       soft_warning; the adaptive mode relative to the constant model (the
+       default); a model worse than the constant prediction (R²_oof < 0) is
+       rejected explicitly; a model with an honest weakly positive R²
+       (e.g. a plateau SVR with R² ≈ 0.08) passes.
     2. Circuit B (Unique Ratio): rounding scale driven by std(y); the
        lower nunique bound; the 'nunique == min_unique_count' boundary
        passes.
@@ -20,7 +23,8 @@ Coverage:
        'reject' (the strict old-default behavior, parity; division by zero
        → reasons).
     5. Modes and edge cases: warn_only; circuit toggling; NaN masking;
-       severity; parameter validation; distinct reasons/soft_warnings.
+       severity; parameter validation; distinct reasons/soft_warnings;
+       the adaptive_diversity default is True.
 """
 
 from __future__ import annotations
@@ -155,10 +159,13 @@ def test_diversity_constant_predictions_fail():
 
 
 def test_diversity_boundary_equality_passes():
-    # y = arange → exact variance; pred = c*y → ratio equals c².
+    # The fixed-threshold boundary semantics: pred = c*y → ratio equals c².
+    # Tested in the explicit non-adaptive mode (the default adaptive mode
+    # compares against the constant model instead).
     y = np.arange(200, dtype=float)
     c = np.sqrt(0.15)
     gate = ModelSanityGate(
+        adaptive_diversity=False,
         min_prediction_diversity=0.15,
         check_unique=False,
         check_dead_features=False,
@@ -169,6 +176,7 @@ def test_diversity_boundary_equality_passes():
     assert result.diversity_ratio == pytest.approx(0.15, abs=1e-9)
 
     below = ModelSanityGate(
+        adaptive_diversity=False,
         min_prediction_diversity=0.15,
         check_unique=False,
         check_dead_features=False,
@@ -190,6 +198,18 @@ def test_diversity_constant_target_skips_with_warning():
     assert not any("Circuit A" in r for r in result.reasons)
     # The ratio is undefined (division by zero) — NaN, not 0.0.
     assert np.isnan(result.diversity_ratio)
+    # The adaptive mode degrades identically on a constant target: the
+    # R²_oof baseline is undefined (NaN) and the circuit still skips.
+    adaptive = ModelSanityGate(
+        adaptive_diversity=True,
+        check_unique=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    )
+    adaptive_result = adaptive.check(y=y, y_pred_oof=np.full(50, 5.0))
+    assert adaptive_result.is_valid
+    assert np.isnan(adaptive_result.diversity_ratio)
+    assert any("target variance is zero" in w for w in adaptive_result.soft_warnings)
 
 
 def test_diversity_adaptive_mode_relative_to_constant_model():
@@ -208,6 +228,120 @@ def test_diversity_adaptive_mode_relative_to_constant_model():
     const = gate.check(y=y, y_pred_oof=np.full(100, y.mean()))
     assert not const.is_valid
     assert any("Circuit A" in r for r in const.reasons)
+    # A near-zero prediction spread within the numeric tolerance (a model
+    # fitting the constant baseline within floating-point noise) → failure.
+    near_const = gate.check(y=y, y_pred_oof=np.full(100, y.mean()) + 1e-14 * y)
+    assert not near_const.is_valid
+    assert any("Circuit A" in r for r in near_const.reasons)
+
+
+def test_diversity_adaptive_mode_is_default():
+    """The constant-model baseline is the DEFAULT circuit A behavior.
+
+    An honest model with R² ≈ 0.1 (below the fixed 0.15 threshold) must NOT
+    be disqualified by default — the divergence from the constant baseline
+    is what matters, not the absolute diversity.
+    """
+    rng = np.random.RandomState(3)
+    n = 200
+    X = rng.randn(n, 4)
+    # Manual y scaling so that a scaled copy of y has R² ≈ 0.1.
+    signal = X[:, 0]
+    noise_std = np.sqrt(np.var(signal) * (1.0 / 0.1 - 1.0))
+    y = signal + rng.randn(n) * noise_std
+    pred = 0.316227766 * signal  # perfect signal recovery → R² ≈ 0.1
+    result = ModelSanityGate(
+        check_unique=False, check_dead_features=False, check_generalization_gap=False
+    ).check(y=y, y_pred_oof=pred)
+    assert result.is_valid
+    assert result.reasons == []
+    assert result.diversity_ratio < 0.15  # below the legacy fixed threshold
+    # The same input under the legacy fixed threshold fails.
+    legacy = ModelSanityGate(
+        adaptive_diversity=False,
+        check_unique=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    ).check(y=y, y_pred_oof=pred)
+    assert not legacy.is_valid
+    assert any("Circuit A" in r for r in legacy.reasons)
+
+
+def test_diversity_adaptive_negative_r2_oof_rejected():
+    """Models worse than the constant prediction (R²_oof < 0) are rejected.
+
+    The diversity ratio alone is ambiguous (round-off for an almost constant
+    vector), so the adaptive mode uses the explicit R²_oof test: a clearly
+    negative R² — e.g. the inverse of the signal — must disqualify even when
+    the prediction variance is non-zero.
+    """
+    rng = np.random.RandomState(5)
+    n = 300
+    y = rng.randn(n)
+    pred = -0.5 * y + rng.randn(n) * 0.05  # anti-correlated: R²_oof < 0
+    gate = ModelSanityGate(
+        check_unique=False, check_dead_features=False, check_generalization_gap=False
+    )
+    result = gate.check(y=y, y_pred_oof=pred)
+    assert not result.is_valid
+    assert any("R²_oof" in r and "worse than the constant" in r for r in result.reasons)
+    assert result.diversity_ratio > 0.0  # the ratio alone would not fail
+    # The legacy fixed threshold does not see the negative R² (0.25 > 0.15).
+    legacy = ModelSanityGate(
+        adaptive_diversity=False,
+        check_unique=False,
+        check_dead_features=False,
+        check_generalization_gap=False,
+    ).check(y=y, y_pred_oof=pred)
+    assert legacy.is_valid
+
+
+def test_diversity_adaptive_weak_positive_r2_passes():
+    """An honest weak-signal model (R² ∈ (0, 0.15)) passes the adaptive circuit.
+
+    The issue reproduction: a plateau SVR whose predictions have a small but
+    honest positive R² (≈ 0.08) must NOT be treated as degenerate — it is
+    better than the constant model and keeps its chance to win by RMSE_oof.
+    """
+    X, y = _dataset(n=150)
+    sigmoid = SVR(kernel="sigmoid", gamma=0.001, coef0=0.0).fit(X, y)
+    pred = sigmoid.predict(X)
+    assert pred.std() < 0.1 * y.std()  # the plateau precondition
+    result = ModelSanityGate(
+        check_unique=False, check_dead_features=False, check_generalization_gap=False
+    ).check(y=y, y_pred_oof=pred)
+    assert result.is_valid
+    assert result.reasons == []
+    # The legacy fixed threshold would have disqualified it (diversity ≈ 0.08).
+    assert result.diversity_ratio < 0.15
+
+
+def test_diversity_adaptive_deep_tree_negative_oof_r2_rejected():
+    """Issue regression: a deep tree with R²_oof < 0 must be rejected.
+
+    The reported case: on weak data a depth-20 tree overfits each fold so
+    badly that its out-of-fold predictions are worse than a constant
+    prediction (R²_oof ≈ −0.87), while the fixed diversity threshold saw a
+    huge prediction variance (the OOF predictions follow the noise) and let
+    the model pass the audit. Under the adaptive mode the explicit R²_oof
+    test catches it.
+    """
+    rng = np.random.RandomState(0)
+    n = 200
+    X = rng.randn(n, 3)
+    y = 0.05 * X[:, 0] + rng.randn(n)  # very weak signal
+    kf = KFold(n_splits=5, shuffle=True, random_state=0)
+    oof = np.full(n, np.nan)
+    for tr, te in kf.split(X):
+        tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X[tr], y[tr])
+        oof[te] = tree.predict(X[te])
+    tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
+    assert 1.0 - np.var(y - oof) / np.var(y) < 0.0  # precondition: R²_oof < 0
+    result = ModelSanityGate(check_dead_features=False, check_generalization_gap=False).check(
+        y=y, y_pred_oof=oof, y_pred_full=tree.predict(X), X=X, model=tree
+    )
+    assert not result.is_valid
+    assert any("R²_oof" in r and "worse than the constant" in r for r in result.reasons)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1277,12 +1411,13 @@ def test_negative_elasticnet_zero_weights_and_zero_diversity():
 
 
 def test_negative_svr_sigmoid_tanh_plateau():
-    # Scenario: SVR with a sigmoid kernel, small gamma and coef0=0 hits the
-    # tanh plateau and produces almost constant predictions. First we check
-    # the precondition (prediction spread ≪ y spread), then that Circuit A
-    # detects it.
+    # Scenario: SVR with a sigmoid kernel, tiny gamma and coef0=0 hits the
+    # tanh plateau and produces almost constant predictions. In the adaptive
+    # mode of circuit A the plateau is detected by the explicit negative-R²
+    # test (a model worse than the constant prediction), not by the old
+    # fixed-diversity threshold.
     X, y = _dataset(n=150)
-    sigmoid = SVR(kernel="sigmoid", gamma=0.001, coef0=0.0).fit(X, y)
+    sigmoid = SVR(kernel="sigmoid", gamma=0.0, coef0=0.0).fit(X, y)
     pred = sigmoid.predict(X)
     assert pred.std() < 0.1 * y.std()  # tanh plateau: predictions are almost constant
     result = ModelSanityGate(check_generalization_gap=False).check(
@@ -1387,8 +1522,18 @@ def test_nan_in_y_is_masked():
         check_dead_features=False,
         check_generalization_gap=False,
     )
-    result = gate.check(y=y, y_pred_oof=rng.randn(60))
-    assert result.is_valid  # computed over finite pairs, without raising
+    # Zero variance in predictions (masked rows do not affect the constant
+    # baseline) → Circuit A fails; computed over finite pairs, without raising.
+    result = gate.check(y=y, y_pred_oof=np.full(60, 0.0))
+    assert result.reasons  # constant predictions fail circuit A
+    assert any("Circuit A" in r for r in result.reasons)
+    # An honest prediction vector (a scaled copy of y) passes on the finite
+    # pairs — the NaN rows are masked, not leaking into the ratio.
+    pred = y * rng.rand(1)[0]  # a scaled copy; NaN rows stay NaN
+    pred = pred.copy()
+    pred[np.isfinite(y)] = y[np.isfinite(y)] * 0.5
+    honest = gate.check(y=y, y_pred_oof=pred)
+    assert honest.is_valid
 
 
 def test_severity_mapping():
@@ -1725,6 +1870,14 @@ def test_dead_features_column_permutation_failure_is_reason():
 
 def test_core_estimator_unwraps_nested_pipeline_objects():
     from configurable_automl_engine.training_engine.sanity_gate import _core_estimator
+    from configurable_automl_engine.training_engine.sanity_gate import _r2_oof
+
+    # R²_oof baseline: NaN for a constant target (undefined), a positive
+    # value for a recovered signal, negative for anti-correlated predictions.
+    assert np.isnan(_r2_oof(np.full(10, 3.0), np.full(10, 3.0)))
+    y = np.arange(20, dtype=float)
+    assert _r2_oof(y, y) == pytest.approx(1.0)
+    assert _r2_oof(y, -y) < 0.0
 
     class Step:
         def __init__(self, name: str, obj: Any) -> None:

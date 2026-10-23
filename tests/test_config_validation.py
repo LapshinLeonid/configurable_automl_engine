@@ -1506,6 +1506,7 @@ def test_sanity_gate_v2_defaults():
     assert sg.corridor_delta == 0.15
     assert sg.corridor_mode == "auto"
     assert sg.min_prediction_diversity == 0.15
+    assert sg.adaptive_diversity is True  # constant-model baseline by default
     assert sg.min_unique_count == 5
     assert sg.min_unique_ratio == 0.05
     assert sg.max_dead_feature_ratio == 0.4
@@ -1738,6 +1739,7 @@ def test_sanity_gate_v2_empty_block_is_valid_thresholds_only():
     assert "mode" not in SanityGateCfg.model_fields
     assert sg.corridor_delta == 0.15
     assert sg.min_prediction_diversity == 0.15
+    assert sg.adaptive_diversity is True
     assert sg.max_generalization_gap == 1.5
     assert sg.generalization_gap_mode == "warn"
 

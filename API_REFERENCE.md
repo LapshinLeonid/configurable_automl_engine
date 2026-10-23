@@ -214,7 +214,14 @@ Select phases with `strategy: "sanity_gate"` replace the
 3. **Audit** — each finalist is checked by `ModelSanityGate`: circuits A/B
    (diversity / unique) are computed on the **OOF vector**, circuit D
    (generalization gap) uses the full-fit predictions, circuit C (dead
-features) inspects the model. Circuit D violations are routed by
+features) inspects the model. Circuit A runs in the **adaptive mode by
+   default**: the reference is the constant model — only a zero prediction
+   variance (a tie with the constant baseline) and models **worse than the
+   constant prediction** (`R²_oof < 0`, e.g. a deep tree with an honestly
+   negative OOF R²) are disqualified, so an honest model with a weak signal
+   (R² between 0 and 0.15) keeps its chance to win by `RMSE_oof`; an explicit
+   `adaptive_diversity: false` restores the legacy fixed
+   `min_prediction_diversity` threshold. Circuit D violations are routed by
    `general.sanity_gate.generalization_gap_mode`: the default
    `"warn"` records them in `soft_warnings` (no disqualification — the
    candidate keeps its chance to win by `RMSE_oof`), `"reject"` turns them
@@ -316,8 +323,8 @@ disqualification.
 | `algorithm_families` | `dict[str, str] \| null` | `null` | «algorithm → family» map for the family-diversity rule. |
 | `allowed_families` | `list[str] \| null` | `null` | Families participating in the top-up (`null` — all allowed). |
 | `family_diversity_multiplier` | `float` | `1.5` | Extended-corridor multiplier for the family top-up (> 0). |
-| `min_prediction_diversity` | `float` | `0.15` | Circuit A threshold: `Var(y_pred_oof) / Var(y) >=` threshold, computed on **OOF predictions**, strictly in `(0, 1]`. Too strict values (e.g. `1.0` on noisy data) are not rejected by validation but cause false positives — documented consequence. |
-| `adaptive_diversity` | `bool` | `false` | Adaptive mode of circuit A (comparison against the constant model). |
+| `min_prediction_diversity` | `float` | `0.15` | Circuit A threshold: `Var(y_pred_oof) / Var(y) >=` threshold, computed on **OOF predictions**, strictly in `(0, 1]`. Applied only in the **non-adaptive** mode (`adaptive_diversity: false`). Too strict values (e.g. `1.0` on noisy data) are not rejected by validation but cause false positives — documented consequence. |
+| `adaptive_diversity` | `bool` | `true` | Adaptive mode of circuit A (comparison against the constant model, **default `true`**): only a zero prediction variance (a tie with the constant baseline) and models **worse than the constant prediction** (`R²_oof < 0`) fail; the absolute `min_prediction_diversity` threshold is not applied. `false` restores the legacy fixed-threshold behavior. |
 | `min_unique_count` | `int` | `5` | Absolute lower bound of `nunique` for circuit B (≥ 1). The final threshold never exceeds the number of distinct target values. |
 | `min_unique_ratio` | `float` | `0.05` | Lower bound of the unique-prediction share for circuit B, in `(0, 1]`. Applied as `min_unique_ratio * N` **capped by the number of distinct target values** (a perfect model always reaches the cap). |
 | `max_dead_feature_ratio` | `float` | `0.4` | Dead-feature share threshold of circuit C, in `[0, 1]` — a **signal** for linear models; standalone disqualification only when `dead_features_require_low_diversity=true` and diversity is low. |
@@ -388,6 +395,8 @@ general:
   sanity_gate:
     top_k_candidates: 3        # pool size cap
     corridor_delta: 0.15       # relative corridor from the CV leader
+    # adaptive_diversity: true (default) — constant-model baseline;
+    # min_prediction_diversity applies only with adaptive_diversity: false
     min_prediction_diversity: 0.15
     min_unique_count: 5
     min_unique_ratio: 0.05
@@ -416,6 +425,12 @@ Boundary behavior:
   predicting `y` exactly always reaches the cap and passes, so a
   low-cardinality target with a high `min_unique_ratio` cannot disqualify a
   perfect model.
+* **Weak signal (R² < 0.15)** — circuit A runs in the adaptive mode by
+  default, so an honest model whose diversity ≈ R² is below the fixed 0.15
+  threshold is NOT disqualified anymore (the divergence between the diversity
+  ratio and the constant baseline is what matters). Models with `R²_oof < 0`
+  (worse than predicting the mean, e.g. a deep overfit tree on weak data) are
+  rejected explicitly — previously they could pass the audit.
 * **Correlated features** — the permutation path may report "false-dead"
   features on correlated columns (the model borrows the information from a
   neighbour column): a high dead-feature share produces a soft warning, never

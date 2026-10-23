@@ -510,8 +510,12 @@ class SanityGateCfg(BaseModel):
                 allowed_families (list[str] | None): Families taking part in the complementation.
                 family_diversity_multiplier (float): Expanded corridor multiplier.
                 min_prediction_diversity (float): Circuit A threshold (in (0, 1]);
-                    computed on OOF predictions.
-                adaptive_diversity (bool): Adaptive mode for circuit A.
+                    computed on OOF predictions. Applied only in the
+                    non-adaptive mode (adaptive_diversity=false).
+                adaptive_diversity (bool): Adaptive mode for circuit A
+                    (default True): comparison with the constant model —
+                    zero prediction variance and models worse than the
+                    constant prediction (R²_oof < 0) fail.
                 min_unique_count (int): Absolute minimum nunique for circuit B (>= 1).
                 min_unique_ratio (float): Lower bound for the fraction of unique values (in (0, 1]).
                     Applied as ``min_unique_ratio * N`` capped by the number of distinct
@@ -634,14 +638,18 @@ class SanityGateCfg(BaseModel):
         le=1.0,
         description=(
             "Circuit A (diversity) threshold: Var(y_pred_oof)/Var(y) >= threshold; "
-            "computed on OOF predictions (strictly in (0, 1], default 0.15)."
+            "computed on OOF predictions (strictly in (0, 1], default 0.15). "
+            "Applied only in the non-adaptive mode (adaptive_diversity=false)."
         ),
     )
     adaptive_diversity: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Adaptive mode for circuit A: comparison with a constant model "
-            "(zero variance in predictions — failure)."
+            "Adaptive mode for circuit A (default True): comparison with a "
+            "constant model — zero variance in predictions (a tie with the "
+            "constant baseline) and models worse than the constant prediction "
+            "(R²_oof < 0) fail; the absolute min_prediction_diversity "
+            "threshold is not applied."
         ),
     )
     min_unique_count: int = Field(
