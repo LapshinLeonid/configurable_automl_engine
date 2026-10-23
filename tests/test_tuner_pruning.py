@@ -2574,3 +2574,402 @@ def test_optimize_pruning_with_transferred_history(toy_data, quality_patches):
     # Only the current phase's own trials (numbers >= the transferred count).
     assert len(second.trials) == 4
     assert all(t.number >= 4 for t in second.trials)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  issue #145: failed folds are PENALIZED, not silently excluded
+# ──────────────────────────────────────────────────────────────────────────────
+def test_evaluate_pooled_cv_failed_fold_makes_pooled_value_nan(caplog):
+    """A fold failing in fit/predict now PENALIZES the trial.
+
+    Regression for issue #145: with the legacy ``cross_val_score(
+    error_score=np.nan)`` a failed fold became NaN — the worst possible
+    outcome — instead of being excluded from the estimate. A model that
+    failed on 4 of 5 folds used to score over the single "clean" fold and
+    could beat an honest Ridge. The pooled estimate must be NaN whenever any
+    fold fails.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    # The trial must NOT complete with a finite score over the surviving
+    # folds: the caller turns the NaN into HPO_WORST_SCORE (the worst
+    # outcome). A warning about the failed fold is still logged.
+    assert np.isnan(pooled)
+    assert "excluded from the evaluation" in caplog.text
+    assert "TypeError" in caplog.text
+
+
+def test_evaluate_pooled_cv_predict_error_makes_pooled_value_nan(caplog):
+    """A fold raising in predict (not fit) penalizes the trial the same way."""
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class KeyErrorOnSecondFold(BaseEstimator, RegressorMixin):
+        _folds_predicted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            KeyErrorOnSecondFold._folds_predicted += 1
+            if KeyErrorOnSecondFold._folds_predicted == 2:
+                raise KeyError("boom on fold 2")
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("rmse")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            KeyErrorOnSecondFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    assert np.isnan(pooled)
+    assert "KeyError" in caplog.text
+
+
+def test_evaluate_pooled_cv_failed_scoring_makes_pooled_value_nan(caplog):
+    """On the non-poolable path a failing fold makes the mean NaN.
+
+    A fold whose SCORING fails (non-poolable scorer) is penalized as well:
+    the per-fold mean over ``[NaN, 0.7, 0.7, 0.7]`` is NaN, so the caller
+    turns the trial into the worst outcome instead of letting the surviving
+    folds win.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class FakeModel(BaseEstimator, RegressorMixin):
+        def fit(self, Xtr, ytr):
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    class FailingScorer:
+        """A scorer without _score_func failing on its first call."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, estimator, Xte, yte):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyError("boom on fold 1 scoring")
+            return 0.7
+
+    scorer = FailingScorer()
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            FakeModel(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+        )
+    # [NaN, 0.7, 0.7, 0.7] → NaN mean: the failed fold penalizes the trial.
+    assert np.isnan(pooled)
+    assert "KeyError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+
+
+def test_evaluate_pooled_cv_failed_fold_non_poolable_path_fallback_nan(caplog):
+    """Non-poolable scorer + pooled fallback: a failed fold's rows are NaN.
+
+    ``fold_pairs`` is used only when the pooled value is impossible. When a
+    fold failed, its pair must be (NaN, NaN) so that the per-fold fallback
+    mean is NaN — a failed fold cannot be rewarded with a 0.7 score.
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    class LambdaScorer:
+        """A scorer without _score_func: pooling is impossible."""
+
+        def __call__(self, estimator, Xte, yte):
+            return 0.7
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=LambdaScorer(),
+        )
+    assert np.isnan(pooled)
+
+
+def test_evaluate_pooled_cv_failed_fold_poolable_scorer_raising_on_pooled_vector(caplog):
+    """Poolable scorer raising on the pooled vector: NaN, not a fold reward.
+
+    The retained per-fold pairs must include the failed fold's (NaN, NaN)
+    pair: scoring the pairs must yield NaN (a ValueError on the NaN pair is
+    swallowed, so the failed fold cannot produce a finite score).
+    """
+    rng = np.random.RandomState(0)
+    X = pd.DataFrame(rng.randn(40, 3))
+    y = pd.Series(rng.randn(40))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    class AlwaysFailingRawMetric:
+        """Poolable scorer whose raw metric raises on ANY input vector."""
+
+        _score_func = staticmethod(
+            lambda yt, yp: (_ for _ in ()).throw(ValueError("raw metric boom"))
+        )
+        _sign = -1
+        _kwargs = {}
+
+        def __call__(self, estimator, Xte, yte):
+            return -0.5
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=AlwaysFailingRawMetric(),
+            algo_name="ridge",
+            phase_name="unique-phase-145-nan-pair",
+        )
+    assert np.isnan(pooled)
+
+
+def test_evaluate_with_intermediate_reports_failed_fold_pooled_returns_nan(caplog):
+    """Pruning + pooled metric: a failed fold makes the final value NaN.
+
+    The intermediate steps of the surviving folds are still published
+    (pruning keeps working), but the FINAL returned value must be NaN —
+    the caller turns it into HPO_WORST_SCORE. Without the penalty the
+    trial would complete with the pooled value over the surviving folds
+    (issue #145).
+    """
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(X.iloc[:, 0] * 2.0 + rng.randn(120))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.0)
+
+    scorer = get_scorer_object("r2")
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=scorer,
+            pool_metric=True,
+        )
+    # The final pooled value is penalized to NaN...
+    assert np.isnan(pooled)
+    assert "TypeError" in caplog.text
+    assert "excluded from the evaluation" in caplog.text
+    # ...while the surviving folds are still published for the pruner.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+    assert all(np.isfinite(call.args[0]) for call in trial.report.call_args_list)
+
+
+def test_evaluate_with_intermediate_reports_additive_failed_fold_nan_mean(caplog):
+    """Pruning + additive metric: a failed fold makes the final mean NaN.
+
+    The per-fold mean over ``[NaN, 0.7, 0.7, 0.7]`` is NaN — the additive
+    path is penalized exactly like the pooled one.
+    """
+    trial = MagicMock()
+    trial.number = 0
+    trial.report = MagicMock()
+    trial.should_prune = MagicMock(return_value=False)
+
+    rng = np.random.RandomState(42)
+    X = pd.DataFrame(rng.randn(120, 4))
+    y = pd.Series(rng.randn(120))
+
+    class TypeErrorOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            TypeErrorOnFirstFold._folds_fitted += 1
+            if TypeErrorOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on fold 1")
+            return self
+
+        def predict(self, Xte):
+            return np.full(len(Xte), 0.7)
+
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_with_intermediate_reports(
+            trial,
+            TypeErrorOnFirstFold(),
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
+            scorer=lambda est, Xte, yte: float(np.mean(est.predict(Xte))),
+        )
+    assert np.isnan(pooled)
+    assert "TypeError" in caplog.text
+    # The surviving folds are still published for the pruner.
+    steps = [call.kwargs["step"] for call in trial.report.call_args_list]
+    assert steps == [2, 3, 4]
+
+
+def test_optimize_model_failing_one_fold_gets_worst_score(toy_data, caplog):
+    """End-to-end: a model failing on one fold completes with the WORST score.
+
+    Regression for issue #145: a model that crashed on 4 of 5 folds used to
+    get a finite score over the surviving folds (0.795) and could beat an
+    honest Ridge (0.793). Now the trial must complete with HPO_WORST_SCORE,
+    so such a model is guaranteed to lose to every honest model.
+    """
+    X, y = toy_data
+
+    class FailsOnFirstFold(BaseEstimator, RegressorMixin):
+        _folds_fitted = 0
+
+        def __init__(self):
+            pass
+
+        def fit(self, Xtr, ytr):
+            FailsOnFirstFold._folds_fitted += 1
+            if FailsOnFirstFold._folds_fitted == 1:
+                raise TypeError("boom on first fold")
+            return self
+
+        def predict(self, Xte):
+            return np.zeros(len(Xte))
+
+    with (
+        patch.object(tuner, "create_model", return_value=FailsOnFirstFold()),
+        patch.object(
+            tuner._OptimizeRunner,
+            "assemble_estimator",
+            side_effect=lambda model, apply_fs=False: model,
+        ),
+    ):
+        opt_res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            metric="rmse",
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            fit_best_model=False,
+            space_overrides={"ridge": lambda t: {"alpha": 0.1}},
+        )
+
+    # The trial completes with the worst score sentinel — it is guaranteed to
+    # lose the comparison against every honest model (the orchestrator drops
+    # any score <= WORST_SCORE_THRESHOLD as invalid).
+    assert opt_res is not None
+    assert opt_res.score == HPO_WORST_SCORE
+    assert "failed to fit or predict" in caplog.text
+    assert "TypeError" in caplog.text
