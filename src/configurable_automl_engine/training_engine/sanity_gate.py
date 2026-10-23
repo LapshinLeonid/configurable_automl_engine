@@ -10,14 +10,21 @@ a constructor parameter:
 
 A. Diversity Ratio (``check_diversity``)
    ``Var(y_pred_oof) / Var(y)`` computed on **out-of-fold** predictions, not
-   on a full fit. Fails when the ratio is strictly below
-   ``min_prediction_diversity`` (default 0.15 — deliberately soft: on noisy
-   data an honest model with R2 ≈ 0.3 yields a ratio of ≈ 0.3 by definition
-   and must not be disqualified). A constant target (``Var(y) == 0``) skips
-   the check with a soft warning — the unique-ratio circuit takes over.
-   Optional adaptive mode (``adaptive_diversity``) compares against the
-   constant-model baseline: any model with zero prediction variance ties the
-   constant model and fails, any strictly positive variance passes.
+   on a full fit. For an honest model the ratio approximately equals R²_oof
+   (the fraction of variance explained), so a fixed absolute threshold
+   disqualifies honest models with R² ∈ (0, 0.15) — precisely the models a
+   weak signal produces. By default the circuit therefore works in the
+   **adaptive** mode (``adaptive_diversity=True``): the reference is the
+   constant model; any visibly positive prediction variance (above the
+   numerical tolerance ``_ZERO_VAR_EPS``) passes and only a model with a
+   (numerically) zero spread — a tie with the constant baseline, which means
+   R²_oof ≈ 0 — fails. Additionally, in the adaptive mode a model **worse than
+   the constant prediction** (``R²_oof < 0``) is rejected explicitly. The
+   fixed threshold ``min_prediction_diversity`` (default
+   0.15) is still available for the opt-out non-adaptive mode
+   (``adaptive_diversity=False``): the circuit then fails on a strict
+   shortfall, like before. A constant target (``Var(y) == 0``) skips the
+   check with a soft warning — the unique-ratio circuit takes over.
 
 B. Unique Ratio (``check_unique``)
    Predictions are rounded to the scale of the target: the number of decimals
@@ -80,8 +87,10 @@ Threshold comparison sides are fixed in one place (module-level helpers
 * circuits C and D fail on a strict excess (``value > threshold``);
 * circuit A in the adaptive mode is the only documented exception: the
   reference is the constant model whose prediction spread is exactly zero, so
-  a tie with it (``diversity <= 0``) fails — the model is not strictly better
-  than the constant baseline (see ``_diversity_fails``).
+  a tie with it (``diversity`` at the numerical zero tolerance
+  ``_ZERO_VAR_EPS``) fails — the model is not strictly better
+  than the constant baseline — and a model strictly worse than it
+  (``R²_oof < 0``) fails as well (see ``_diversity_fails``).
 
 Equality with a threshold never fails (boundary tests rely on this).
 
@@ -151,26 +160,60 @@ def _fails_above(value: float, threshold: float) -> bool:
     return value > threshold
 
 
-def _diversity_fails(diversity: float, threshold: float, adaptive: bool) -> bool:
+def _diversity_fails(
+    diversity: float, threshold: float, adaptive: bool, r2_oof: float
+) -> bool:
     """Fail side of circuit A, fixed in one place (module level).
 
     Non-adaptive mode: strict shortfall — ``diversity < threshold``, equality
     with the threshold passes. Adaptive mode is the only documented exception
     to the strict-``<`` convention: the reference is the constant model whose
-    prediction spread is exactly zero, so a tie with it (``diversity <= 0``)
-    fails — the model is not strictly better than the constant baseline.
+    prediction spread is exactly zero, so a tie with it (``diversity`` at the
+    numerical zero tolerance ``_ZERO_VAR_EPS``) fails — the model is not
+    strictly better than the constant baseline. In
+    the adaptive mode a model with a negative ``R²_oof`` (strictly worse than
+    the constant prediction) fails even when numerical round-off makes
+    ``diversity`` a tiny positive number.
 
     Args:
         diversity: ``Var(y_pred_oof) / Var(y)``.
         threshold: effective threshold (``min_prediction_diversity``).
         adaptive: whether the adaptive constant-model baseline is used.
+        r2_oof: out-of-fold R² of the predictions (used in the adaptive
+            mode only).
 
     Returns:
         bool: True when circuit A must fail for the given values.
     """
     if adaptive:
-        return diversity <= 0.0
+        return diversity <= _ZERO_VAR_EPS or (np.isfinite(r2_oof) and r2_oof < 0.0)
     return diversity < threshold
+
+
+def _r2_oof(y: np.ndarray, y_pred: np.ndarray) -> float:
+    """Out-of-fold R² of the predictions (constant-model baseline).
+
+    ``1 - Var(y - pred) / Var(y)`` — the fraction of variance explained.
+    Used by circuit A in the adaptive mode to reject models that are worse
+    than a constant prediction: a negative R² means the residual variance
+    exceeds the target variance, i.e. the model is strictly worse than
+    predicting the mean. The diversity ratio (``Var(pred) / Var(y)``) is
+    subject to round-off and may come out as a tiny positive number when the
+    predictions are numerically constant while R² is clearly negative, so
+    the explicit R² test is the authoritative negative-signal detector.
+
+    Args:
+        y: the target (on the valid pairs).
+        y_pred: the OOF predictions (on the same valid pairs).
+
+    Returns:
+        float: R²_oof, or NaN when ``Var(y) == 0`` (undefined).
+    """
+    var_y = float(np.var(y))
+    if var_y <= _ZERO_VAR_EPS:
+        return float("nan")
+    residual = y - y_pred
+    return float(1.0 - np.var(residual) / var_y)
 
 
 # Numerical tolerances and rounding constants.
@@ -367,10 +410,13 @@ class ModelSanityGate:
 
         Attributes:
             min_prediction_diversity: Circuit A threshold — ``Var(y_pred_oof) /
-                Var(y)`` (default 0.15, soft).
+                Var(y)`` (default 0.15, soft). Applied only in the
+                non-adaptive mode.
             adaptive_diversity: Adaptive mode of circuit A relative to the
-                constant model: fails only for a zero prediction spread (the
-                absolute threshold is not applied).
+                constant model (default True): fails only for a zero
+                prediction spread (the absolute threshold is not applied) and
+                for models worse than the constant prediction (``R²_oof < 0``);
+                ``min_prediction_diversity`` is ignored.
             min_unique_count: Absolute lower bound for nunique (circuit B).
             min_unique_ratio: Lower bound for the share of unique predictions,
                 in (0, 1]. Applied as ``min_unique_ratio * N`` capped by the
@@ -414,7 +460,7 @@ class ModelSanityGate:
         self,
         *,
         min_prediction_diversity: float = 0.15,
-        adaptive_diversity: bool = False,
+        adaptive_diversity: bool = True,
         min_unique_count: int = 5,
         min_unique_ratio: float = 0.05,
         max_dead_feature_ratio: float = 0.4,
@@ -438,10 +484,14 @@ class ModelSanityGate:
 
                 Args:
                     min_prediction_diversity: circuit A threshold, in (0, 1]
-                        (default 0.15 — soft).
-                    adaptive_diversity: adaptive mode A relative to the constant model:
-                        fails only for a zero prediction spread (the absolute threshold
-                        is not applied).
+                        (default 0.15 — soft). Applied only in the
+                        non-adaptive mode.
+                    adaptive_diversity: adaptive mode A relative to the constant
+                        model (default True): fails only for a zero prediction
+                        spread (the absolute threshold is not applied) and for
+                        models worse than the constant prediction
+                        (``R²_oof < 0``, i.e. the residual variance exceeds
+                        the target variance).
                     min_unique_count: absolute lower bound for nunique (circuit B).
                     min_unique_ratio: lower bound for the share of unique predictions,
                         in (0, 1]. Applied as ``min_unique_ratio * N`` capped by
@@ -739,14 +789,26 @@ class ModelSanityGate:
                 ],
             )
         diversity = float(np.var(y_pred_oof[valid]) / var_y)
+        # In the adaptive mode the fraction of explained variance
+        # (R²_oof ≈ diversity for an honest model) is the decisive signal:
+        # a model worse than the constant prediction is rejected explicitly.
+        r2_oof = (
+            _r2_oof(y[valid], y_pred_oof[valid]) if self.adaptive_diversity else 0.0
+        )
         threshold = 0.0 if self.adaptive_diversity else self.min_prediction_diversity
-        if not _diversity_fails(diversity, threshold, self.adaptive_diversity):
+        if not _diversity_fails(diversity, threshold, self.adaptive_diversity, r2_oof):
             return diversity, [], []
         if self.adaptive_diversity:
-            reason = (
-                "Circuit A (diversity): ratio=0.0000 equals the "
-                "constant-model baseline — no expressiveness"
-            )
+            if np.isfinite(r2_oof) and r2_oof < 0.0:
+                reason = (
+                    f"Circuit A (diversity): R²_oof={r2_oof:.4f} < 0 — "
+                    "model is worse than the constant prediction"
+                )
+            else:
+                reason = (
+                    "Circuit A (diversity): ratio=0.0000 equals the "
+                    "constant-model baseline — no expressiveness"
+                )
         else:
             reason = (
                 f"Circuit A (diversity): ratio={diversity:.4f} < "
