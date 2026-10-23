@@ -328,6 +328,33 @@ def test_prepare_dataset_resolves_auto_large_to_train_test_split():
     assert prepared.resolved_test_size == 500
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    [np.nan, np.inf, -np.inf],
+)
+def test_prepare_dataset_rejects_non_finite_target(bad_value):
+    """prepare_dataset fails fast on a non-finite target (issue #145).
+
+    A NaN/±inf target must be rejected at the pipeline entry point: otherwise
+    the HPO budget is spent on randomly "clean" folds and the final training
+    crashes with an unclear error.
+    """
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    df = _df()
+    df.loc[0, "target"] = bad_value
+    with pytest.raises(ValueError, match="non-finite"):
+        prepare_dataset(cfg, df, "target")
+
+
+def test_prepare_dataset_rejects_non_numeric_target():
+    """prepare_dataset fails fast on a non-numeric target column."""
+    cfg = Config.model_validate(_cfg_dict(phases=[]))
+    df = _df()
+    df["target"] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    with pytest.raises(ValueError, match="numeric"):
+        prepare_dataset(cfg, df, "target")
+
+
 def test_prepare_dataset_detects_feature_types():
     df = pd.DataFrame(
         {

@@ -285,13 +285,21 @@ def test_validate_data_non_numeric_y():
     A target that cannot be interpreted as a numeric vector must fail fast.
     """
     X = np.zeros((5, 2))
-    for bad_y in (
-        np.array(["a", "b", "c", "d", "e"]),
-        ["a", "b", "c", "d", "e"],
-        np.array([1, 2, None, 4, 5], dtype=object),
-    ):
-        with pytest.raises(hyperopt.InvalidDataError, match="numeric"):
-            hyperopt._validate_data(X, bad_y)
+    bad_y = np.array(["a", "b", "c", "d", "e"])
+    with pytest.raises(hyperopt.InvalidDataError, match="numeric"):
+        hyperopt._validate_data(X, bad_y)
+
+
+def test_validate_data_none_in_object_y_rejected_as_non_finite():
+    """None values in an object target are rejected as non-finite.
+
+    An object array containing None converts to NaN under a float
+    interpretation — a non-finite target must fail fast (issue #145).
+    """
+    X = np.zeros((5, 2))
+    bad_y = np.array([1, 2, None, 4, 5], dtype=object)
+    with pytest.raises(hyperopt.InvalidDataError, match="non-finite"):
+        hyperopt._validate_data(X, bad_y)
 
 
 @pytest.mark.parametrize(
