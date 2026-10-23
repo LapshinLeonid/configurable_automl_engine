@@ -37,11 +37,11 @@ jobs:
         run: pytest --cov=src --cov-report=xml
 
       # Regression benchmark of the Sanity Gate on the target pipeline — a mandatory
-      # acceptance check. Compares pipeline variants (baseline:
+      # gate. Compares pipeline variants (baseline:
       # all_algorithms + select(cv_best, winner); target:
       # all_algorithms + select(sanity_gate, top_k) + refine +
       # select(sanity_gate, winner)), prints the table
-      # «dataset x variant x winner x gate» and blocks acceptance when
+      # «dataset x variant x winner x gate» and blocks the run when the
       # thresholds are violated: 0 winner changes on reference datasets,
       # 100% changes on degenerate ones.
       - name: Run Sanity Gate pipeline-variant benchmark

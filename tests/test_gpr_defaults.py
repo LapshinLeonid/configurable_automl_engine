@@ -1,4 +1,4 @@
-"""Regression tests for the GPR default parameters (issue #128).
+"""Regression tests for the GPR default parameters.
 
 Covers:
 - the default kernel (amplitude × RBF + white noise) set by
@@ -12,7 +12,7 @@ Covers:
   ``space_overrides`` (was failing with "No search space" — the space is
   now taken from ``DEFAULT_SPACES``);
 - the GPR model actually beating the constant baseline on a small sample
-  (the issue's motivating problem: bare RBF ≈ std(y)).
+  (the motivating problem: bare RBF ≈ std(y)).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from configurable_automl_engine.tuner import (
 
 
 def _small_frame() -> tuple[pd.DataFrame, pd.Series]:
-    """A small noisy regression sample (the use case from the issue)."""
+    """A small noisy regression sample (the motivating use case)."""
     X, y = make_regression(
         n_samples=25,
         n_features=5,

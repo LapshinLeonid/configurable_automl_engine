@@ -1310,7 +1310,7 @@ class _OptimizeRunner:
         - when the current search space cannot be reproduced by the
           distribution pre-check (an exotic custom ``space_fn``) — the
           transfer cannot be validated, and silently dropping the history
-          would degrade refine to a cold run (the issue this feature fixes);
+          would degrade refine to a cold run;
         - an empty list is a no-op (``previous_trials=[]`` is allowed).
         """
         if not self.previous_trials:
@@ -1604,8 +1604,8 @@ class _OptimizeRunner:
         two-element lists passed directly to ``space_overrides``) is re-typed
         against the parameter type (the default search space or the estimator
         signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
-        ``C`` as a real range (``float_log``), not as an integer-only range —
-        the exact issue #127 bug. A parameter whose default space entry is
+        ``C`` as a real range (``float_log``), not as an integer-only range.
+        A parameter whose default space entry is
         ``float_log`` (e.g. ``alpha_1`` of an ARD regression) is likewise
         searched on a logarithmic scale without an explicit type. Raw lists
         (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;

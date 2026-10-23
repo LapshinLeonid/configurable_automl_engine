@@ -292,10 +292,10 @@ def test_unique_min_unique_ratio_lower_bound_applies():
     assert "min_unique_ratio" in result.reasons[0]
 
 
-def test_unique_threshold_capped_by_nunique_y_issue_125():
-    """Issue #125: the unique threshold must not exceed nunique(y).
+def test_unique_threshold_capped_by_nunique_y():
+    """The unique threshold must not exceed nunique(y).
 
-    The reproduction from the issue: N=18 rows with 13 distinct target
+    The reproduction case: N=18 rows with 13 distinct target
     values and ``min_unique_ratio=0.9`` demand 16.2 ≈ 17 distinct
     predictions — more than even a perfect model (13) can produce, so the
     old check disqualified it. The ratio bound is capped by the number of
@@ -326,7 +326,7 @@ def test_unique_threshold_capped_by_nunique_y_issue_125():
     assert any("capped by nunique(y)" in r for r in below.reasons)
 
 
-def test_unique_threshold_capped_by_rounded_nunique_y_issue_125():
+def test_unique_threshold_capped_by_rounded_nunique_y():
     """The cap uses the same rounding granularity as the predictions.
 
     Distinct target values are counted at the same ``np.round(decimals)``
@@ -356,7 +356,7 @@ def test_unique_threshold_capped_by_rounded_nunique_y_issue_125():
     assert any("capped by nunique(y)=2" in r for r in below.reasons)
 
 
-def test_unique_min_unique_count_also_capped_by_nunique_y_issue_125():
+def test_unique_min_unique_count_also_capped_by_nunique_y():
     """min_unique_count above nunique(y) cannot disqualify a perfect model.
 
     A static count higher than the number of distinct target values is
@@ -764,7 +764,7 @@ def test_gap_honest_model_passes():
     assert 1.0 <= result.generalization_gap <= 1.5
 
 
-def test_gap_issue_example_0_1_vs_0_19_fails_at_1_5_passes_at_2_0():
+def test_gap_example_0_1_vs_0_19_fails_at_1_5_passes_at_2_0():
     # Example: RMSE_full=0.1, RMSE_oof=0.19 — clear overfitting.
     rng = np.random.RandomState(1)
     y = rng.randn(500) * 10.0
@@ -1518,8 +1518,8 @@ def test_gap_no_finite_pairs_for_rmse():
 def test_unique_constant_target_uses_fallback_precision():
     # Constant y: std(y)=0 → fallback rounding precision (6 decimals). The
     # threshold is capped by nunique(y)=1, so a perfect model (a constant
-    # prediction matching the constant target) passes — the cap of issue
-    # #125 guarantees that a model predicting y exactly is never
+    # prediction matching the constant target) passes — the cap
+    # guarantees that a model predicting y exactly is never
     # disqualified by circuit B.
     y = np.full(60, 7.0)
     gate = ModelSanityGate(

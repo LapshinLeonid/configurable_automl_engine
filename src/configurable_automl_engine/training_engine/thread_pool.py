@@ -59,13 +59,12 @@ def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
     Computed WITHOUT materializing the array itself: for a frame with mixed
     column types ``to_numpy()`` copies the whole data into a new array, and
     ``SharedDataFrame.__init__`` copies it a second time right after, causing
-    a transient doubling of memory in the main process on every HPO phase
-    (issue #122).
+    a transient doubling of memory in the main process on every HPO phase.
 
     Only plain numpy column dtypes are accepted: extension dtypes (Int64,
     Float64, boolean, string, category, ...) are rejected up front, because
     pandas may promote them to a different dtype than their plain numpy
-    counterparts (issue #122): e.g. ``Int64 + float64`` → object, while
+    counterparts: e.g. ``Int64 + float64`` → object, while
     ``int64 + float64`` → float64. For plain numpy columns of the numeric
     kinds i/u/f/b pandas promotes to a common dtype exactly like numpy's
     ``np.result_type`` — except for bool: a bool column mixed with any
@@ -100,7 +99,7 @@ def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
     if any(bool_mask):
         # bool mixed with a non-bool column: df.to_numpy() gives an object
         # array, not a numeric one (unlike np.result_type) — the caller
-        # rejects object arrays (issue #121 / #122).
+        # rejects object arrays.
         return np.dtype("O")
     try:
         return np.result_type(*dtypes)
@@ -133,7 +132,7 @@ def _ints_fit_float64(df: pd.DataFrame) -> bool:
     # optimized subset): with duplicate column names df[name] would return a
     # DataFrame and min()/max() would then produce Series (a ValueError in
     # the comparison below). The compatibility check must never crash — it
-    # only decides SHM vs parquet (issue #122 review B1).
+    # only decides SHM vs parquet.
     for i, dt in enumerate(columns.dtypes):
         col = columns.iloc[:, i]
         if len(col) == 0:
@@ -144,7 +143,7 @@ def _ints_fit_float64(df: pd.DataFrame) -> bool:
                 return False
         else:
             # Use Python int / separate min-max bounds: abs of
-            # np.iinfo(np.int64).min overflows int64 (issue #122).
+            # np.iinfo(np.int64).min overflows int64.
             low, high = col.min(), col.max()
             if high > 2**53 or low < -(2**53):
                 return False
@@ -157,7 +156,7 @@ class SharedDataFrame:
     Allows passing large data volumes between processes without the overhead
     of serialization (pickle), using the POSIX Shared Memory mechanism.
 
-    Index contract (issue #122): the index is NOT transferred. The data is
+    Index contract: the index is NOT transferred. The data is
     passed positionally, and the restored frame always gets a RangeIndex(0,
     n) — even when the original index was, e.g., RangeIndex(100, 100+n).
     Worker code (tuner, preprocessing, oversampling, feature_selection,
@@ -203,7 +202,7 @@ class SharedDataFrame:
 
         self.name: str | None = None
         self._owner = df is not None
-        # NOTE (issue #122): the index is NOT transferred through shared
+        # NOTE: the index is NOT transferred through shared
         # memory. to_df() always restores a RangeIndex(0, n): the data is
         # passed positionally, and worker code (tuner, preprocessing,
         # oversampling, feature_selection, validation) must not align X and y
@@ -223,7 +222,7 @@ class SharedDataFrame:
                 self.shared_array[:] = data[:]
             except Exception:
                 # Creation failed partway: free the OS segment immediately so
-                # it does not leak (issue #121 — a failure inside the
+                # it does not leak (a failure inside the
                 # preparation must not leak SHM segments). self.shm exists
                 # here: the failure is in the ndarray/copy step, which happens
                 # strictly after the segment was created.
@@ -311,8 +310,7 @@ class SharedDataFrame:
         # lost in the SHM round-trip, and e.g. a numeric category promotes to
         # float64, which changes the astype(str) encoding ('10' → '10.0') and
         # can collapse big int ids into indistinguishable float64 values,
-        # while the earlier parquet path preserved the exact int64 (issue
-        # #121 review).
+        # while the earlier parquet path preserved the exact int64.
         allowed_kinds = {"i", "u", "f", "b"}
         if not all(
             isinstance(dt, np.dtype) and dt.kind in allowed_kinds for dt in df.dtypes
@@ -323,12 +321,12 @@ class SharedDataFrame:
         # materializing the array itself: for a mixed-type frame to_numpy()
         # makes a full in-memory copy, and SharedDataFrame.__init__ makes a
         # second one right after — a transient doubling of memory in the main
-        # process on every phase (issue #122). pandas promotes mixed plain
+        # process on every phase. pandas promotes mixed plain
         # numpy columns to a common dtype exactly like numpy's result_type,
         # except that bool mixed with anything non-bool yields object (an
         # array of raw pointers to parent-process Python objects; copying
         # such pointers into shared memory crashes workers under
-        # forkserver/spawn — issue #121), so _numpy_result_dtype reports the
+        # forkserver/spawn), so _numpy_result_dtype reports the
         # object dtype for that case and the frame is rejected below.
         array_dtype = _numpy_result_dtype(df)
         if array_dtype is None:
@@ -344,7 +342,7 @@ class SharedDataFrame:
         # default dtype of integer columns in pandas, and a typical numeric
         # dataset (int + float features) only needs to go through parquet
         # when an 8-byte integer column really contains values beyond 2**53
-        # (in practice almost only ID columns, issue #122).
+        # (in practice almost only ID columns).
         if array_dtype.kind == "f" and not _ints_fit_float64(df):
             return False
 
@@ -364,7 +362,7 @@ class SharedDataFrame:
         3. Isolation: the resulting DataFrame is an independent object in the
            memory of the current process.
 
-        Index contract (issue #122): the index is NOT transferred. The data
+        Index contract: the index is NOT transferred. The data
         is passed positionally, and the restored frame always gets a
         RangeIndex(0, n) — even when the original index was, e.g.,
         RangeIndex(100, 100+n). Worker code (tuner, preprocessing,
@@ -456,7 +454,7 @@ class DiskPersistenceManager:
         os.close(fd)
         # Register the path right after creation: if to_parquet fails halfway
         # (e.g. pyarrow rejects "dirty" data), the orphaned temp file must
-        # still be removed by cleanup (issue #121).
+        # still be removed by cleanup.
         self.created_files.append(path)
         df.to_parquet(path, engine="pyarrow")
         return path
@@ -833,10 +831,10 @@ def run_parallel(
                 NOT transferred: the worker always receives the frame with a
                 RangeIndex(0, n), even when the original index differed (e.g.
                 RangeIndex(100, 100+n)) — worker code must not align X and y
-                by index (issue #122). Note that an int64/uint64 column mixed
+                by index. Note that an int64/uint64 column mixed
                 with a float column is promoted to float64 for the worker,
                 which is lossless as long as no value exceeds 2**53 in
-                absolute value (issue #122).
+                absolute value.
             disk_args_indices (list[int]): DataFrame indices for the disk cache.
             shutdown_grace_period (float): Time in seconds allowed for the graceful shutdown
                 of workers before SIGTERM/SIGKILL is forcibly sent.
@@ -966,7 +964,7 @@ def run_parallel(
             # write "dirty" data, or shared memory is exhausted). Free the
             # already-created segments and temp files, then pass the dataframes
             # as ordinary pickled objects (the pre-SHM behaviour) instead of
-            # crashing run_parallel (issue #121). The original disk indices are
+            # crashing run_parallel. The original disk indices are
             # kept: in _worker_proxy a non-string argument at a disk index is
             # passed through untouched, so DataFrames still arrive intact
             # (only real parquet paths are read from disk).

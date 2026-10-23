@@ -360,7 +360,7 @@ def test_evaluate_pooled_cv_fallback_warns_once_per_algo_phase(
 ):
     """The pooled fallback WARNING is emitted once per (algorithm, phase).
 
-    Regression for issue #136: the silent switch from the pooled metric to
+    Regression: the silent switch from the pooled metric to
     the per-fold mean must leave exactly one trace in the log per algorithm
     and phase (deduplication), no matter how many trials hit the fallback.
     """
@@ -454,7 +454,7 @@ def test_evaluate_pooled_cv_poolable_scorer_raising_on_pooled_vector_warns(
     caplog,
 ):
     """A poolable scorer whose raw metric raises on the pooled vector falls
-    back to the per-fold mean AND emits the WARNING (issue #136 review).
+    back to the per-fold mean AND emits the WARNING.
 
     The scorer exposes ``_score_func``/``_sign``/``_kwargs`` (so the pooled
     path is attempted) but the raw function raises on the concatenated
@@ -525,7 +525,7 @@ def test_evaluate_with_intermediate_reports_pooled_masks_nan_steps(caplog):
     Optuna pruners cannot compare NaN. Once the accumulated rows admit a
     finite pooled r2 (from the 2nd pair on), the steps are published.
 
-    Regression for issue #136 review: the transient pooled failure on the
+    Regression: the transient pooled failure on the
     first fold must NOT emit the fallback WARNING — the final pooled value
     is valid, so no metric degradation happened.
     """
@@ -626,7 +626,7 @@ def test_evaluate_with_intermediate_reports_fallback_warns_once(caplog):
     """The pruning-path pooled fallback emits one WARNING per (algo, phase).
 
     Run twice with the same (algorithm, phase) pair: the WARNING is logged
-    only on the first occurrence (issue #136 deduplication).
+    only on the first occurrence (deduplication).
     """
     from configurable_automl_engine.training_engine import metrics as metrics_mod
 
@@ -678,8 +678,8 @@ def test_evaluate_with_intermediate_reports_per_fold_fallback_scorer_raises(
 ):
     """A per-fold fallback scorer exception is swallowed; WARNING still fires.
 
-    Covers the ``except Exception: pass`` branch inside the fold loop (issue
-    #136 review): the per-fold scorer used as the fallback may itself raise
+    Covers the ``except Exception: pass`` branch inside the fold loop:
+    the per-fold scorer used as the fallback may itself raise
     (e.g. an unpoolable scorer that breaks on a degenerate fold). The step is
     skipped (nothing published), and the FINAL return point emits the single
     fallback WARNING because the pooled value remains impossible.
@@ -777,7 +777,7 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
 def test_evaluate_pooled_cv_skips_failed_fold_rows(caplog):
     """A fold raising TypeError in fit does NOT abort the trial.
 
-    The regression of issue #135: with the legacy cross_val_score
+    The regression covered: with the legacy cross_val_score
     (error_score=np.nan) a failed fold became NaN and was excluded from the
     estimate; _evaluate_pooled_cv propagated any exception instead. Now the
     failed fold's rows are excluded from the pooled value and a warning is
@@ -1002,7 +1002,7 @@ def test_evaluate_pooled_cv_failed_scoring_fallback_mean(caplog):
 def test_evaluate_pooled_cv_scoring_all_folds_failed_returns_nan(caplog):
     """All folds failing at the SCORING stage returns NaN (not ValueError).
 
-    Documented asymmetry (issue #135 review): a fatal ``cross_val_score``
+    Documented asymmetry: a fatal ``cross_val_score``
     raises ``ValueError`` only when every FIT fails. When the fits succeed
     but every score is impossible (e.g. a scorer whose raw metric fails on
     every per-fold vector), the legacy behavior is an all-NaN estimate — the
@@ -1054,7 +1054,7 @@ def test_evaluate_pooled_cv_scoring_all_folds_failed_returns_nan(caplog):
 def test_evaluate_with_intermediate_reports_pooled_skips_failed_fold(caplog):
     """Pruning + non-additive metric: a fold raising TypeError is skipped.
 
-    The regression of issue #135 in the pruning branch: the fold's rows do
+    The regression in the pruning branch: the fold's rows do
     not enter the pooled value, a warning is logged, and the remaining folds
     are still published (no abort of the trial).
     """
@@ -1249,7 +1249,7 @@ def test_evaluate_with_intermediate_reports_all_folds_failed_raises_valueerror(c
 def test_evaluate_pooled_cv_fatal_fold_exception_propagates():
     """A fold raising MemoryError propagates — the circuit breaker stays active.
 
-    Issue #135 review: the fold-skip treatment applies ONLY to non-fatal
+    The fold-skip treatment applies ONLY to non-fatal
     exception types (TypeError/KeyError/IndexError/ValueError). Fatal types
     (MemoryError/RuntimeError/InvalidDataError) must reach ``handle_failure``
     so the consecutive-fatal-failures counter keeps working on the

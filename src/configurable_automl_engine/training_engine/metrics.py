@@ -192,7 +192,7 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
 # falls back to the per-fold mean. The WARNING is emitted exactly once per
 # (algorithm, phase) pair — added to the set on first emission — so the
 # metric degradation leaves a trace in the log without spamming one message
-# per trial/fold (issue #136). The set is guarded by a lock: the fallback
+# per trial/fold. The set is guarded by a lock: the fallback
 # paths run concurrently in the "processes"/threads parallel mode.
 _pooled_fallback_lock = threading.Lock()
 _pooled_fallback_warned: set[tuple[str, str]] = set()

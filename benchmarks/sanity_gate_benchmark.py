@@ -48,7 +48,7 @@ Run time is limited (CI): 6 datasets, n_trials=1, N ≤ 300 — about 10–20
 seconds in total.
 
 Output format — a table "dataset × variant × winner × whether the gate
-triggered" (see ``render_table``); acceptance criteria — ``check_acceptance``.
+triggered" (see ``render_table``); the acceptance criteria — ``check_acceptance``.
 """
 
 from __future__ import annotations

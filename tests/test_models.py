@@ -261,7 +261,7 @@ def test_create_model_gpr_default_kernel():
 def test_create_model_gpr_default_kernel_has_amplitude_and_noise():
     """GPR default kernel = amplitude × RBF + white noise (not a bare RBF).
 
-    Regression for the issue: a bare RBF(1.0) without an output-scale
+    Regression: a bare RBF(1.0) without an output-scale
     amplitude and without an explicit noise term behaves like the mean
     predictor, while GPR is one of the most suitable models on small
     samples and provides prediction intervals.

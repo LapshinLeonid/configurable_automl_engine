@@ -581,8 +581,8 @@ def test_optimize_hpo_score_matches_pooled_trainer_val_score():
     For r2 (non-additive) the tuner's trial evaluation pools the metric over
     the OOF vector, so the HPO score matches the final ModelTrainer's pooled
     val_score on the same folds (the select phase uses the trainer's estimate).
-    This is the "HPO and select use the same quantity" requirement of issue
-    #123 — the estimate is computed over the pooled OOF vector, not averaged
+    This is the "HPO and select use the same quantity" requirement —
+    the estimate is computed over the pooled OOF vector, not averaged
     by folds.
     """
     from configurable_automl_engine.trainer import ModelTrainer
@@ -1969,7 +1969,7 @@ def test_runner_dropped_features_recorded():
 def test_runner_n_features_size_uses_original_columns():
     """n_features_size counts ORIGINAL columns; n_features_eff is post-one-hot.
 
-    Regression (issue #134): the complexity guard resolved the size mode
+    Regression: the complexity guard resolved the size mode
     from the one-hot-expanded feature count, so large-but-wide data fell
     into the 'medium' mode. The runner must track both counts:
     n_features_size (original columns, a categorical column = 1) for the
@@ -2024,7 +2024,7 @@ def test_runner_n_features_size_uses_original_columns():
 
 def test_runner_n_features_size_aligned_without_preprocessor():
     """Without a preprocessor (np.ndarray input) n_features_size aligns with
-    n_features_eff (issue #134 review remark 1).
+    n_features_eff.
 
     For np.ndarray the estimate falls back to n_features_eff=1 (no column
     names to expand); previously n_features_size kept the raw width
@@ -2337,7 +2337,7 @@ def test_optimize_fit_best_model_flag(toy_data, fit_best_model, expect_model):
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  sampler_seed: separate the TPE sampler seed from the data-split seed
-#  (issue #119 — the phase seed must not change CV folds)
+#  (the phase seed must not change CV folds)
 # ──────────────────────────────────────────────────────────────────────────────
 def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
     """Patch TPESampler to capture the seed while returning the real sampler."""
@@ -2356,7 +2356,7 @@ def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
 
 def test_optimize_sampler_seed_controls_tpe_only(toy_data):
     """sampler_seed feeds the TPE sampler, while the CV object is built with
-    the fixed random_state (issue #119: the per-phase seed must not change
+    the fixed random_state (the per-phase seed must not change
     the folds)."""
     X, y = toy_data
     captured, tpe_patch = _capture_tpe_seed()
@@ -2395,7 +2395,7 @@ def test_optimize_sampler_seed_controls_tpe_only(toy_data):
 
 def test_optimize_preprocessor_uses_random_state_not_sampler_seed(toy_data):
     """The preprocessor (hashing / target-encoding cross-fit) is seeded with
-    random_state, not sampler_seed (issue #119)."""
+    random_state, not sampler_seed."""
     X, y = toy_data
     _, tpe_patch = _capture_tpe_seed()
     with (
@@ -2453,7 +2453,7 @@ def test_optimize_sampler_seed_none_falls_back_to_random_state(toy_data):
 
 
 def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
-    """issue #119: with a fixed random_state (the same folds across phases)
+    """With a fixed random_state (the same folds across phases)
     and a per-phase sampler_seed, the params enqueued from the previous phase
     are re-evaluated on the SAME folds — refine can only improve the score."""
     X, y = toy_data
@@ -2485,12 +2485,12 @@ def test_optimize_fixed_folds_restore_enqueue_monotonicity(toy_data):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  issue #135: fold errors in the pooled/pruning evaluation are contained
+#  Fold errors in the pooled/pruning evaluation are contained
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_typeerror_on_one_fold_does_not_abort_hpo(toy_data, caplog):
     """An estimator raising TypeError on a single fold does NOT abort HPO.
 
-    Regression for issue #135: the pooled evaluation path (_evaluate_pooled_cv)
+    Regression: the pooled evaluation path (_evaluate_pooled_cv)
     propagated any per-fold exception, so a TypeError (outside the handled
     (ValueError, MemoryError, RuntimeError, InvalidDataError) set) would pass
     through Optuna and kill the whole HPO run. With the legacy
@@ -2595,7 +2595,7 @@ def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
 def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
     """A MemoryError from a fold still trips the circuit breaker.
 
-    Issue #135 review: fatal exception types (MemoryError/RuntimeError/
+    Fatal exception types (MemoryError/RuntimeError/
     InvalidDataError) must NOT be swallowed by the fold-skip treatment —
     otherwise the consecutive-fatal-failures counter and
     ``InvalidAlgorithmError`` would stop working on the pooled path (the

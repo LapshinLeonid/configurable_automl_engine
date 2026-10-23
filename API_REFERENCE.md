@@ -318,8 +318,8 @@ disqualification.
 | `family_diversity_multiplier` | `float` | `1.5` | Extended-corridor multiplier for the family top-up (> 0). |
 | `min_prediction_diversity` | `float` | `0.15` | Circuit A threshold: `Var(y_pred_oof) / Var(y) >=` threshold, computed on **OOF predictions**, strictly in `(0, 1]`. Too strict values (e.g. `1.0` on noisy data) are not rejected by validation but cause false positives — documented consequence. |
 | `adaptive_diversity` | `bool` | `false` | Adaptive mode of circuit A (comparison against the constant model). |
-| `min_unique_count` | `int` | `5` | Absolute lower bound of `nunique` for circuit B (≥ 1). The final threshold never exceeds the number of distinct target values (issue #125). |
-| `min_unique_ratio` | `float` | `0.05` | Lower bound of the unique-prediction share for circuit B, in `(0, 1]`. Applied as `min_unique_ratio * N` **capped by the number of distinct target values** (a perfect model always reaches the cap; issue #125). |
+| `min_unique_count` | `int` | `5` | Absolute lower bound of `nunique` for circuit B (≥ 1). The final threshold never exceeds the number of distinct target values. |
+| `min_unique_ratio` | `float` | `0.05` | Lower bound of the unique-prediction share for circuit B, in `(0, 1]`. Applied as `min_unique_ratio * N` **capped by the number of distinct target values** (a perfect model always reaches the cap). |
 | `max_dead_feature_ratio` | `float` | `0.4` | Dead-feature share threshold of circuit C, in `[0, 1]` — a **signal** for linear models; standalone disqualification only when `dead_features_require_low_diversity=true` and diversity is low. |
 | `dead_features_require_low_diversity` | `bool` | `true` | Combination rule of circuit C: disqualify only when "many dead features AND low diversity". |
 | `zero_coef_tolerance` | `float` | `1e-12` | Coefficients with `abs(coef) <=` threshold count as zero (circuit C, linear path; ≥ 0). |
@@ -415,7 +415,7 @@ Boundary behavior:
   distinct target values at the prediction rounding granularity: a model
   predicting `y` exactly always reaches the cap and passes, so a
   low-cardinality target with a high `min_unique_ratio` cannot disqualify a
-  perfect model (issue #125).
+  perfect model.
 * **Correlated features** — the permutation path may report "false-dead"
   features on correlated columns (the model borrows the information from a
   neighbour column): a high dead-feature share produces a soft warning, never
@@ -450,7 +450,7 @@ Two feature counts are used deliberately:
 * The size-mode ratio `n / p` uses the **original column count** (a
   categorical column counts as 1, before the one-hot expansion): the
   one-hot expansion must not push large-but-wide data into a smaller size
-  mode (issue #134).
+  mode.
 * The rules that depend on the feature count — `max_features` and
   `colsample_bytree` — use **`p` after preprocessing** (what the model
   sees, including one-hot columns and missing-value indicators).
