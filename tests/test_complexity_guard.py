@@ -141,6 +141,85 @@ def test_extreme_small_n_xgb_ranges_never_zero(n):
     assert adjusted["n_estimators"].config.high == 300
 
 
+# ──────────────── leaf regularization on n < 8 (issue #138) ────────────────── #
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
+def test_small_n_leaf_regularization_never_collapses_to_one(n):
+    """Regression (issue #138): on n < 8 the level B range [2, floor(n/4)]
+    is empty and used to collapse to min_samples_leaf = 1.
+
+    Now the lower bound 2 is kept, capped by the physical limit
+    floor(n / 2). On n=4..7 the leaf never collapses to 1; on n=2..3 the
+    physical limit floor(n/2) < 2 legitimately keeps the leaf at 1 (a leaf
+    of 2 rows is unreachable on 2-3 rows).
+    """
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted, logs = apply_complexity_guard(
+        space, "decision_tree", n=n, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    physical = min(math.floor(n / 2), 10)
+    expected = (min(2, physical), physical) if physical < 2 else (2, physical)
+    assert (entry.config.low, entry.config.high) == expected
+    if physical >= 2:
+        levels = [log["level"] for log in logs]
+        assert "B" in levels
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
+def test_small_n_leaf_regularization_boosting_same_rule(n):
+    """GradientBoosting shares the tree min_samples_leaf rules (issue #138)."""
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted, _ = apply_complexity_guard(
+        space, "gradient_boosting", n=n, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, IntSpace)
+    physical = min(math.floor(n / 2), 10)
+    expected = (min(2, physical), physical) if physical < 2 else (2, physical)
+    assert (entry.config.low, entry.config.high) == expected
+
+
+def test_small_n_leaf_regularization_monotonic_issue_example():
+    """The issue's example: n=5 gives leaf 2 (not 1), n=8 gives leaf 2.
+
+    Before the fix the behavior was non-monotonic: n=5 collapsed to
+    min_samples_leaf=1 while n=8 already kept [2, 2].
+    """
+    space = {"min_samples_leaf": _entry(1, 10, "int")}
+    adjusted_5, _ = apply_complexity_guard(
+        space, "decision_tree", n=5, p=5, config=_default_cfg()
+    )
+    adjusted_8, _ = apply_complexity_guard(
+        space, "decision_tree", n=8, p=5, config=_default_cfg()
+    )
+    leaf_5 = adjusted_5["min_samples_leaf"].config
+    leaf_8 = adjusted_8["min_samples_leaf"].config
+    assert (leaf_5.low, leaf_5.high) == (2, 2)
+    assert (leaf_8.low, leaf_8.high) == (2, 2)
+
+
+def test_small_n_leaf_regularization_float_fraction_preserved():
+    """A float min_samples_leaf fraction on n < 8 stays a fraction.
+
+    The fallback (lower bound 2 rows) must not leak into fraction units:
+    the row bounds are divided back by n, so on n=5 the guard range is
+    [2/5, floor(5/2)/5] = [0.4, 0.4], never a row count.
+    """
+    space = {"min_samples_leaf": _entry(0.1, 1.0, "float")}
+    adjusted, logs = apply_complexity_guard(
+        space, "decision_tree", n=5, p=5, config=_default_cfg()
+    )
+    entry = adjusted["min_samples_leaf"]
+    assert isinstance(entry.config, FloatSpace)
+    assert entry.config.low == pytest.approx(2 / 5, abs=1e-6)
+    assert entry.config.high == pytest.approx(2 / 5, abs=1e-6)
+    levels = [log["level"] for log in logs]
+    assert "B" in levels
+
+
 # ─────────────────────────── small mode: trees ─────────────────────────────── #
 
 

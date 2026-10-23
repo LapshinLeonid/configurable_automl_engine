@@ -189,6 +189,10 @@ _MIN_SAMPLES_LEAF_B_LOW = 2.0
 # Upper bound for ``min_samples_leaf`` on level B in the small mode.
 # ``floor(n / 4)`` with the leaf bound is used as a base multiplier.
 _MIN_SAMPLES_LEAF_B_DIVISOR = 4.0
+# On ``n < 8`` the level B range ``[2, floor(n / 4)]`` is empty; it collapses
+# to the lower bound 2 (regularization must not vanish), capped by the
+# physical limit ``floor(n / 2)`` of level A.
+_MIN_SAMPLES_LEAF_B_PHYSICAL_DIVISOR = 2.0
 
 # Lower bound for XGBoost ``min_child_weight`` on level B (for a squared loss
 # this is roughly the minimum number of rows in a leaf).
@@ -261,9 +265,10 @@ def _apply_rule(
     """Apply a rule to a range, converting fraction ranges to rows.
 
     The leaf rules of ``min_samples_leaf`` are expressed in absolute rows
-    (``floor(n / 2)``, ``[2, floor(n / 4)]``). When the range is a fraction
-    of the sample size (float in (0, 1)), the bounds are converted to rows
-    (``value * n``) before the rule applies and divided back afterwards.
+    (``floor(n / 2)``, ``[2, floor(n / 4)]`` with a fallback to 2 on an empty
+    range). When the range is a fraction of the sample size (float in (0, 1)),
+    the bounds are converted to rows (``value * n``) before the rule applies
+    and divided back afterwards.
 
     Args:
         rule: The rule to apply.
@@ -299,10 +304,10 @@ def _clamp_for_param(
     value — the parameter is fixed), preserves the int/float type and the log
     scale. Integer-like parameters (leaf sizes, depths, tree counts) never go
     below their physical minimum of 1: on extremely small ``n`` a rule may
-    compute an empty range whose bounds would collapse to 0 (e.g.
-    ``min_samples_leaf`` level B on ``n=2`` yields ``[2, 0]``) — such a range
-    is fixed at 1, never at 0, because sklearn/XGBoost reject 0
-    (``InvalidParameterError`` / silently overridden depth).
+    compute an empty or inverted range whose bounds would collapse to 0 (e.g.
+    on ``n=1`` a leaf rule yields at most 0 rows) — such a range is fixed at
+    1, never at 0, because sklearn/XGBoost reject 0 (``InvalidParameterError``
+    / silently overridden depth).
 
     Args:
         param: The hyperparameter name.
@@ -357,7 +362,13 @@ def _rule_min_samples_leaf_a() -> Rule:
 
 
 def _rule_min_samples_leaf_b() -> Rule:
-    """Level B: ``min_samples_leaf`` in ``[2, floor(n / 4)]``."""
+    """Level B: ``min_samples_leaf`` in ``[2, floor(n / 4)]``.
+
+    On ``n < 8`` the range ``[2, floor(n / 4)]`` is empty; instead of
+    collapsing it to the top (``min_samples_leaf = 1``, which drops the leaf
+    regularization entirely) the lower bound 2 is kept, capped by the
+    physical limit ``floor(n / 2)`` of level A.
+    """
 
     def _apply(
         orig_low: float,
@@ -367,15 +378,25 @@ def _rule_min_samples_leaf_b() -> Rule:
         leaf_min: float,
     ) -> tuple[float, float]:
         low = max(orig_low, _MIN_SAMPLES_LEAF_B_LOW)
-        high = min(orig_high, math.floor(n / _MIN_SAMPLES_LEAF_B_DIVISOR))
+        b_high = math.floor(n / _MIN_SAMPLES_LEAF_B_DIVISOR)
+        if b_high < _MIN_SAMPLES_LEAF_B_LOW:
+            # The regularization range [2, floor(n/4)] itself is empty
+            # (n < 8): keep the lower bound 2, capped by the physical
+            # limit floor(n / 2) — the leaf regularization must not
+            # silently vanish on tiny data.
+            high = min(orig_high, math.floor(n / _MIN_SAMPLES_LEAF_B_PHYSICAL_DIVISOR))
+        else:
+            high = min(orig_high, b_high)
         return low, high
 
     return Rule(
         level="B",
         reason=(
-            f"min_samples_leaf in [{_MIN_SAMPLES_LEAF_B_LOW:g}, "
-            f"floor(n / {_MIN_SAMPLES_LEAF_B_DIVISOR:g})]: regularization on "
-            "small data"
+            f"min_samples_leaf >= {_MIN_SAMPLES_LEAF_B_LOW:g}: on n < 8 the "
+            f"range [{_MIN_SAMPLES_LEAF_B_LOW:g}, "
+            f"floor(n / {_MIN_SAMPLES_LEAF_B_DIVISOR:g})] is empty, so the "
+            "lower bound is capped by the physical limit floor(n / 2) "
+            "instead of collapsing the leaf regularization"
         ),
         apply=_apply,
     )

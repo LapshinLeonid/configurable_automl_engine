@@ -500,7 +500,10 @@ Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
 
 * **Decision tree / Random forest / Extra trees**
   * `min_samples_leaf`: level A — upper bound ≤ `floor(n / 2)`; level B —
-    lower bound 2, upper bound ≤ `floor(n / 4)` (example: 2–3);
+    lower bound 2, upper bound ≤ `floor(n / 4)` (example: 2–3). On `n < 8`
+    the range `[2, floor(n / 4)]` is empty and collapses to the lower bound
+    2, capped by the physical limit `floor(n / 2)` — the leaf regularization
+    does not vanish (it never collapses to `min_samples_leaf = 1`);
   * `max_depth`: level A — ≤ `floor(n / leaf_min) − 1`; level B —
     ≤ `ceil(log2(n / leaf_min))` (example: A gives ≤ 6, B gives 2–3);
   * `max_features` (a fraction): level A — lower bound ≥ `1 / p` (at least one
