@@ -750,57 +750,37 @@ def _leaf_size_param(space: dict[str, Any], is_boosting: bool) -> str:
     return ""
 
 
-def _effective_leaf_min(
-    space: dict[str, Any],
-    rules: list[tuple[str, Rule]],
-    *,
-    cfg: ComplexityGuardConfig,
-    n: int,
-    p: int,
-    is_boosting: bool,
-) -> float:
-    """Compute the effective minimum leaf size used by ``max_depth`` rules.
+def _effective_leaf_min(param: str, entry: SearchSpaceEntry | None, n: int) -> float:
+    """Compute the effective minimum leaf size from a leaf-size range.
 
     For trees and GradientBoosting the leaf size comes from
-    ``min_samples_leaf`` (after the guard rules); for XGBoost from
-    ``min_child_weight`` when present. When the parameter is absent, the
-    sklearn/XGBoost default of 1 is used. A fractional ``min_samples_leaf``
-    (float in (0, 1)) is converted to rows (``value * n``) before the rules
-    apply, and the resulting absolute leaf size is returned.
+    ``min_samples_leaf``; for XGBoost from ``min_child_weight`` when present.
+    The entry is the FINAL range of the parameter (after the guard rules and
+    the ``user_range_policy`` were applied), so the value reflects the
+    resolved range — not the raw user range. When the parameter is absent,
+    the sklearn/XGBoost default of 1 is used. A fractional
+    ``min_samples_leaf`` (float in (0, 1)) is converted to rows
+    (``value * n``) and the resulting absolute leaf size is returned.
 
     Args:
-        space: The search space dict.
-        rules: The rules of the current (size_mode, family).
-        cfg: The guard configuration.
+        param: The leaf-size parameter name (may be empty).
+        entry: The final ``SearchSpaceEntry`` of the parameter.
         n: Number of rows.
-        p: Number of features.
-        is_boosting: Whether the algorithm is a boosting family.
 
     Returns:
         float: The effective minimum leaf size (>= 1).
     """
-    param = _leaf_size_param(space, is_boosting)
-    if not param:
+    if not param or entry is None:
         return 1.0
-    entry = space[param]
     config = entry.config
     if not isinstance(config, (IntSpace, FloatSpace)):
         return 1.0
     low, high = float(config.low), float(config.high)
     is_float = isinstance(config, FloatSpace)
     is_fraction = _is_fraction_param(param, is_float=is_float, low=low, high=high)
-    for key, rule in rules:
-        if key != param:
-            continue
-        if rule.level == "A" and not cfg.lossless:
-            continue
-        if rule.level == "B" and not cfg.regularize:
-            continue
-        low, high = _apply_rule(rule, low, high, n, p, low, param, is_fraction)
-        low, high = _clamp_for_param(param, low, high, n, is_float=is_float)
     if is_fraction:
-        # The effective absolute leaf size: the fraction (after the rules)
-        # scaled to rows, at least one row.
+        # The effective absolute leaf size: the fraction scaled to rows, at
+        # least one row.
         return max(1.0, low * n)
     return max(1.0, low)
 
@@ -1074,45 +1054,80 @@ def apply_complexity_guard(
 
     rules = _RULE_TABLE[(size_mode, is_boosting)]
     user_keys = set(user_space_keys or ())
-    leaf_min = _effective_leaf_min(
-        space, rules, cfg=cfg, n=n, p=p, is_boosting=is_boosting
-    )
-
     result = dict(space)
     logs: list[dict[str, Any]] = []
-    for param, rule in rules:
-        entry = result.get(param)
-        if not isinstance(entry, SearchSpaceEntry):
-            continue
-        applied, record = _apply_rule_to_entry(
-            entry,
-            rule,
-            param=param,
-            n=n,
-            p=p,
-            leaf_min=leaf_min,
-            user_key=param in user_keys,
-            cfg=cfg,
-        )
-        if record is None:
-            continue
-        record.update(
-            {
-                "algo": algo,
-                "param": param,
-                "level": rule.level,
-                "size_mode": size_mode,
-                "n": n,
-                "p": p,
-                "p_size": p_size if p_size is not None else p,
-                "leaf_min": leaf_min,
-                "reason": rule.reason,
-                "user_range_policy": cfg.user_range_policy,
-                "applied": record["applied"] and cfg.mode == "apply",
-            }
-        )
-        logs.append(record)
-        if cfg.mode == "apply" and record.get("applied"):
-            result[param] = applied
+    # Would-be computed entries (even of an unapplied warn run) so that the
+    # resolved leaf range is readable after the rules.
+    computed_entries: dict[str, SearchSpaceEntry] = {}
+
+    def _run_rules(
+        params: Iterable[str],
+        leaf_min: float,
+    ) -> None:
+        for param, rule in rules:
+            if param not in params:
+                continue
+            entry = result.get(param)
+            if not isinstance(entry, SearchSpaceEntry):
+                continue
+            applied, record = _apply_rule_to_entry(
+                entry,
+                rule,
+                param=param,
+                n=n,
+                p=p,
+                leaf_min=leaf_min,
+                user_key=param in user_keys,
+                cfg=cfg,
+            )
+            if record is None:
+                continue
+            computed_entries[param] = applied
+            record.update(
+                {
+                    "algo": algo,
+                    "param": param,
+                    "level": rule.level,
+                    "size_mode": size_mode,
+                    "n": n,
+                    "p": p,
+                    "p_size": p_size if p_size is not None else p,
+                    "leaf_min": leaf_min,
+                    "reason": rule.reason,
+                    "user_range_policy": cfg.user_range_policy,
+                    "applied": record["applied"] and cfg.mode == "apply",
+                }
+            )
+            logs.append(record)
+            if cfg.mode == "apply" and record.get("applied"):
+                result[param] = applied
+
+    # The leaf-size parameter is processed FIRST: its final range (after the
+    # guard rules and ``user_range_policy``) defines ``leaf_min``, which the
+    # ``max_depth`` rules use. Resolving it from the final range — not from
+    # the raw user range — keeps ``max_depth`` consistent with the resolved
+    # ``min_samples_leaf``/``min_child_weight`` (e.g. with engine_wins a user
+    # ``min_samples_leaf=[1, 1]`` resolves to ``[2, n/4]`` and ``max_depth``
+    # must use the resolved leaf_min=2, not the user's 1).
+    leaf_param = _leaf_size_param(result, is_boosting)
+    if leaf_param:
+        _run_rules({leaf_param}, leaf_min=1.0)
+    leaf_entry = computed_entries.get(leaf_param, result.get(leaf_param))
+    leaf_min = _effective_leaf_min(leaf_param, leaf_entry, n)
+    # Invariant of the two-pass scheme: the second pass runs only with the
+    # resolved leaf size (in rows, at least 1), never with a raw user value;
+    # the first pass (the leaf-size rules) must not consume ``leaf_min``, so
+    # the resolved value is always available before any consumer runs.
+    assert leaf_min >= 1.0
+    # The leaf-size rules themselves do not use ``leaf_min`` (only the
+    # ``max_depth`` rules do); report the resolved value in their records too
+    # so that all records of the run carry the same effective leaf size.
+    for record in logs:
+        if record["param"] == leaf_param:
+            record["leaf_min"] = leaf_min
+    _run_rules(
+        {param for param, _ in rules} - {leaf_param},
+        leaf_min=leaf_min,
+    )
 
     return result, logs

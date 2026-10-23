@@ -456,7 +456,10 @@ def test_small_boosting_rules():
         space, "xgboosting", n=15, p=5, config=_default_cfg()
     )
     # max_depth: B target [1, 3]
-    assert (adjusted["max_depth"].config.low, adjusted["max_depth"].config.high) == (1, 3)
+    assert (adjusted["max_depth"].config.low, adjusted["max_depth"].config.high) == (
+        1,
+        3,
+    )
     # subsample: B lower bound 0.7
     assert adjusted["subsample"].config.low == pytest.approx(0.7)
     # colsample_bytree: A lower bound 1/p = 0.2 (original 0.5 stays)
@@ -492,7 +495,10 @@ def test_small_gradient_boosting_min_samples_leaf():
     adjusted, _ = apply_complexity_guard(
         space, "gradient_boosting", n=15, p=5, config=_default_cfg()
     )
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
 
 
 # ─────────────────────── default XGBoost space (issue #132) ───────────────── #
@@ -703,8 +709,88 @@ def test_ordinary_mode_with_one_hot_p_size():
         config=_default_cfg(),
     )
     assert logs_xgb == []
-    assert (adjusted_xgb["max_depth"].config.low, adjusted_xgb["max_depth"].config.high) == (3, 10)
+    assert (
+        adjusted_xgb["max_depth"].config.low,
+        adjusted_xgb["max_depth"].config.high,
+    ) == (3, 10)
     assert adjusted_xgb["subsample"].config.low == pytest.approx(0.5)
+
+
+def test_medium_mode_feature_count_rules_use_p_not_p_size():
+    """In the medium mode the feature-count rules use the post-preprocessing
+    ``p``, NOT ``p_size`` (issue #134, review remark).
+
+    ``max_features`` lower bound is ``1 / p``: with ``p = 250`` (after
+    one-hot) the bound is 0.004, with ``p_size = 50`` (original columns) it
+    would be 0.02. The medium mode here fires via ``n < medium_n_threshold``
+    (n=100), not via the ratio, so the ONLY observable distinction between
+    using ``p`` and ``p_size`` is exactly the ``max_features`` /
+    ``colsample_bytree`` bound.
+    """
+    tree_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "max_features": _entry(0.001, 1.0, "float"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        tree_space,
+        "random_forest",
+        n=100,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs
+    # max_features >= 1/p = 1/250 = 0.004 (NOT 1/p_size = 0.02).
+    assert adjusted["max_features"].config.low == pytest.approx(1.0 / 250)
+
+    # The same for boosting: colsample_bytree >= 1/p = 1/250, not 1/50.
+    xgb_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "colsample_bytree": _entry(0.001, 1.0, "float"),
+    }
+    adjusted_xgb, logs_xgb = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=100,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert logs_xgb
+    assert adjusted_xgb["colsample_bytree"].config.low == pytest.approx(1.0 / 250)
+
+
+def test_medium_mode_rule_bounds_do_not_use_p_size():
+    """No rule uses ``p_size`` for its bound: with a fixed ``n`` and ``p``,
+    changing ``p_size`` alone changes only the size-mode decision
+    (via the ``n / p`` ratio), never the applied rule bounds."""
+    xgb_space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "colsample_bytree": _entry(0.001, 1.0, "float"),
+    }
+    # p_size=50 and p_size=5 resolve DIFFERENT modes for the same n/p
+    # (300/50=6 < 20 -> medium; 300/5=60 >= 20 -> ordinary).
+    med, med_logs = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=300,
+        p=250,
+        p_size=50,
+        config=_default_cfg(),
+    )
+    assert med_logs
+    assert med["colsample_bytree"].config.low == pytest.approx(1.0 / 250)
+
+    ord_space, ord_logs = apply_complexity_guard(
+        xgb_space,
+        "xgboosting",
+        n=300,
+        p=250,
+        p_size=5,
+        config=_default_cfg(),
+    )
+    assert ord_logs == []
+    assert ord_space["colsample_bytree"].config.low == pytest.approx(0.001)
 
 
 def test_off_mode_space_unchanged():
@@ -750,7 +836,10 @@ def test_lossless_off_keeps_level_a_unchanged():
         config=_default_cfg(lossless=False),
     )
     # Level A disabled: min_samples_leaf only gets the B range [2, floor(15/4)=3]
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
     # max_depth: only B applies -> ceil(log2(15/2))=3
     assert adjusted["max_depth"].config.high == 3
     assert all(log["level"] != "A" for log in logs)
@@ -771,7 +860,10 @@ def test_regularize_off_disables_level_b():
     )
     # Level B disabled: only A applies.
     # min_samples_leaf: A upper floor(15/2)=7, low stays 1 -> [1, 7].
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (1, 7)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (1, 7)
     # max_depth A uses leaf_min = min_samples_leaf low = 1 -> floor(15/1)-1 = 14.
     assert adjusted["max_depth"].config.high == 14
     assert all(log["level"] == "A" for log in logs)
@@ -802,7 +894,10 @@ def test_user_range_conflict_user_wins():
         user_space_keys=["min_samples_leaf"],
     )
     # The user range [1, 1] stays despite the guard's B lower bound 2.
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (1, 1)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (1, 1)
     conflicts = [log for log in logs if log.get("conflict") and not log["applied"]]
     assert conflicts
     # The conflict records carry before/after (the unchanged user range) and
@@ -825,7 +920,10 @@ def test_user_range_conflict_engine_wins():
         user_space_keys=["min_samples_leaf"],
     )
     # The guard's B range [2, 3] wins.
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
     assert any(log.get("conflict") for log in logs)
     # Applied conflict records carry before/after too.
     for log in logs:
@@ -844,8 +942,154 @@ def test_user_range_non_conflicting_intersection():
         user_space_keys=["min_samples_leaf"],
     )
     # Intersection of user [1, 10] with guard B [2, 3] -> [2, 3].
-    assert (adjusted["min_samples_leaf"].config.low, adjusted["min_samples_leaf"].config.high) == (2, 3)
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
     assert not any(log.get("conflict") for log in logs)
+
+
+# ───────────── leaf_min from the resolved leaf range (issue #137) ──────────── #
+
+
+def test_engine_wins_max_depth_uses_resolved_leaf_min():
+    """engine_wins: max_depth rules use leaf_min from the resolved leaf range.
+
+    Regression for issue #137: with engine_wins a user ``min_samples_leaf``
+    ``[1, 1]`` resolves to the guard range ``[2, floor(n/4)]``, but the
+    ``max_depth`` rules were computed with ``leaf_min=1`` (from the raw user
+    range), so on n=14 max_depth became 3–4 instead of 3–3.
+    """
+    space = {
+        "min_samples_leaf": _entry(1, 1, "int"),
+        "max_depth": _entry(3, 20, "int"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "random_forest",
+        n=14,
+        p=5,
+        config=_default_cfg(user_range_policy="engine_wins"),
+        user_space_keys=["min_samples_leaf", "max_depth"],
+    )
+    # The leaf range resolves via engine_wins to [2, floor(14/4)=3].
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
+    # max_depth: A -> floor(14/2)-1 = 6, B -> ceil(log2(14/2)) = ceil(2.807) = 3.
+    max_depth = adjusted["max_depth"].config
+    assert isinstance(max_depth, IntSpace)
+    assert (max_depth.low, max_depth.high) == (3, 3)
+    assert any(log.get("conflict") for log in logs)
+    # All records of the run carry the resolved leaf_min=2.
+    assert all(log["leaf_min"] == 2.0 for log in logs)
+
+
+def test_user_wins_max_depth_keeps_user_leaf_min():
+    """user_wins: max_depth rules keep leaf_min from the (staying) user range."""
+    space = {
+        "min_samples_leaf": _entry(1, 1, "int"),
+        "max_depth": _entry(3, 20, "int"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "random_forest",
+        n=14,
+        p=5,
+        config=_default_cfg(user_range_policy="user_wins"),
+        user_space_keys=["min_samples_leaf", "max_depth"],
+    )
+    # The user leaf range [1, 1] stays -> leaf_min=1.
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (1, 1)
+    # max_depth: A -> floor(14/1)-1 = 13, B -> ceil(log2(14/1)) = 4.
+    max_depth = adjusted["max_depth"].config
+    assert (max_depth.low, max_depth.high) == (3, 4)
+    assert all(log["leaf_min"] == 1.0 for log in logs)
+
+
+def test_leaf_min_default_range_resolution():
+    """No user range: leaf_min reflects the default leaf resolution."""
+    space = {
+        "min_samples_leaf": _entry(1, 10, "int"),
+        "max_depth": _entry(3, 20, "int"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "decision_tree",
+        n=15,
+        p=5,
+        config=_default_cfg(),
+    )
+    # Default leaf resolves to [2, 3] -> leaf_min=2; max_depth B = ceil(log2(15/2)) = 3.
+    assert (
+        adjusted["min_samples_leaf"].config.low,
+        adjusted["min_samples_leaf"].config.high,
+    ) == (2, 3)
+    assert (adjusted["max_depth"].config.low, adjusted["max_depth"].config.high) == (
+        3,
+        3,
+    )
+    assert all(log["leaf_min"] == 2.0 for log in logs)
+
+
+def test_float_fraction_resolved_leaf_min_feeds_max_depth():
+    """A float-fraction min_samples_leaf feeds max_depth in absolute rows.
+
+    ``_effective_leaf_min`` converts the resolved fraction to rows
+    (``low * n``) and the ``max_depth`` rules must consume that absolute
+    value (issue #137 for the fractional case): with engine_wins the user
+    fraction range resolves to the guard range, leaf_min becomes 2 rows,
+    and max_depth B = ceil(log2(15 / 2)) = 3 — not ceil(log2(15 / 1)).
+    """
+    space = {
+        "min_samples_leaf": _entry(0.4, 0.9, "float"),
+        "max_depth": _entry(3, 20, "int"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "decision_tree",
+        n=15,
+        p=5,
+        config=_default_cfg(user_range_policy="engine_wins"),
+        user_space_keys=["min_samples_leaf", "max_depth"],
+    )
+    # engine_wins: the guard fraction range [2/15, 0.2] replaces [0.4, 0.9].
+    leaf = adjusted["min_samples_leaf"]
+    assert isinstance(leaf.config, FloatSpace)
+    assert leaf.config.low == pytest.approx(2 / 15, abs=1e-6)
+    assert leaf.config.high == pytest.approx(0.2, abs=1e-6)
+    # leaf_min = 2/15 * 15 = 2 rows -> all records carry it.
+    assert all(log["leaf_min"] == 2.0 for log in logs)
+    # max_depth: A -> floor(15/2)-1 = 6, B -> ceil(log2(15/2)) = 3.
+    max_depth = adjusted["max_depth"].config
+    assert isinstance(max_depth, IntSpace)
+    assert (max_depth.low, max_depth.high) == (3, 3)
+
+
+def test_xgb_engine_wins_min_child_weight_leaf_min():
+    """XGBoost: engine_wins applies to min_child_weight and feeds max_depth."""
+    space = {
+        "min_child_weight": _entry(1, 1, "float"),
+        "max_depth": _entry(3, 10, "int"),
+    }
+    adjusted, logs = apply_complexity_guard(
+        space,
+        "xgboosting",
+        n=15,
+        p=5,
+        config=_default_cfg(user_range_policy="engine_wins"),
+        user_space_keys=["min_child_weight", "max_depth"],
+    )
+    # min_child_weight B lower bound 2 wins over [1, 1] -> leaf_min=2.
+    assert adjusted["min_child_weight"].config.low == pytest.approx(2.0)
+    # max_depth (user [3, 10]) intersected with the B target [1, 3] -> [3, 3].
+    max_depth = adjusted["max_depth"].config
+    assert (max_depth.low, max_depth.high) == (3, 3)
+    assert all(log["leaf_min"] == 2.0 for log in logs)
 
 
 # ─────────────────────── collapse to a single value ────────────────────────── #

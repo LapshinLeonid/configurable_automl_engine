@@ -1540,7 +1540,8 @@ class _OptimizeRunner:
                     f"[complexity_guard] {record['algo']} {record['param']} "
                     f"{fmt(before[0])}–{fmt(before[1])} → "
                     f"{fmt(after[0])}–{fmt(after[1])}: n={record['n']}, "
-                    f"p={record['p']}, mode={record['size_mode']}, "
+                    f"p={record['p']}, p_size={fmt(record['p_size'])}, "
+                    f"mode={record['size_mode']}, "
                     f"leaf_min={fmt(record['leaf_min'])}, level={record['level']}"
                 )
                 if record.get("conflict"):
@@ -1839,8 +1840,18 @@ class _OptimizeRunner:
         self.n_features_eff = self._estimate_n_features_after_preprocessing()
         # The number of ORIGINAL columns (a categorical column counts as 1,
         # before the one-hot expansion). Used by the adaptive complexity
-        # guard for the size-mode ratio ``n / p`` only.
-        self.n_features_size = max(1, int(self.X.shape[1]))
+        # guard for the size-mode ratio ``n / p`` only. Without a preprocessor
+        # (np.ndarray input without explicit column lists) the model sees
+        # exactly the original columns, so the size count is aligned with the
+        # post-preprocessing count — this preserves the legacy behavior of
+        # direct optimize() calls (no one-hot expansion, the guard sees the
+        # same p it always did).
+        self.n_features_size = max(
+            1,
+            int(self.X.shape[1])
+            if self.preprocessor is not None
+            else self.n_features_eff,
+        )
 
     def _estimate_n_features_after_preprocessing(self) -> int:
         """Estimate the number of features after the preprocessor.
