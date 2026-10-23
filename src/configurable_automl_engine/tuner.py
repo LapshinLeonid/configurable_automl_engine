@@ -58,7 +58,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     compute_svr_epsilon_bounds,
     normalize_hyperparameter_entry,
 )
-from configurable_automl_engine.common.validation_utils import get_effective_train_size
+from configurable_automl_engine.common.validation_utils import (
+    check_target_numeric,
+    get_effective_train_size,
+)
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
     AVAILABLE_ALGORITHMS,
@@ -309,7 +312,9 @@ def _validate_data(X: Any, y: Any) -> None:
     on which rows happen to land in which fold (the folds containing the
     values crash, the rest look "clean"), so the HPO budget is spent on
     randomly clean folds and the final full-data fit fails with an unclear
-    error.
+    error. The numeric/finite/shape checks are shared with the pipeline
+    entry point (``check_target_numeric``) so both callers reject a bad
+    target identically.
 
     Args:
         X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
@@ -330,24 +335,9 @@ def _validate_data(X: Any, y: Any) -> None:
     if len(X) != len(y):
         raise InvalidDataError(f"Size mismatch: X={len(X)} and y={len(y)}")
     try:
-        y_float = np.asarray(y, dtype=float).reshape(-1)
-    except (TypeError, ValueError) as err:
-        raise InvalidDataError(
-            "y must be a numeric vector (a numpy.ndarray, pandas.Series or "
-            "pandas.DataFrame of numbers)"
-        ) from err
-    if y_float.size != len(X):
-        raise InvalidDataError(
-            "y must be a single-column target vector (a numpy.ndarray of "
-            f"shape (n,), a pandas.Series or a one-column pandas.DataFrame); "
-            f"got {y_float.size} values for {len(X)} rows"
-        )
-    if not np.all(np.isfinite(y_float)):
-        n_non_finite = int(np.sum(~np.isfinite(y_float)))
-        raise InvalidDataError(
-            f"y must not contain NaN or infinite values; found "
-            f"{n_non_finite} non-finite value(s)"
-        )
+        check_target_numeric(y)
+    except ValueError as err:
+        raise InvalidDataError(str(err)) from err
 
 
 def _get_estimator(algo: str) -> Any:
@@ -621,9 +611,12 @@ def _evaluate_with_intermediate_reports(
     values — each row enters the calculation exactly once, in the same way as
     the final pooled estimate. Non-finite predictions of individual folds are
     masked out of the pooled value (the same contract as
-    ``metrics.oof_rmse``). A fold whose fit/predict raises a NON-FATAL
-    exception (e.g. ``TypeError``, ``KeyError``, ``IndexError``,
-    ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED: its rows are
+    ``metrics.oof_rmse`` and the final ``ModelTrainer`` OOF channel): a model
+    that merely predicts NaN on some rows is NOT penalized — only its
+    non-finite rows are excluded from the estimate. A fold whose fit/predict
+    raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
+    ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
+    its rows are
     marked with NaN (they cannot enter the pooled estimate) and a warning is
     logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
     (a failed fold became NaN, i.e. the worst possible outcome; it must not
@@ -848,9 +841,12 @@ def _evaluate_pooled_cv(
     differs from the average of per-fold values.
 
     Non-finite predictions of individual folds are masked out of the pooled
-    value (the same contract as ``metrics.oof_rmse``), so a fold producing NaN
-    (e.g. isotonic regression on a degenerate split) does not abort the trial.
-    A fold whose fit/predict (or per-fold scoring, on the non-poolable path)
+    value (the same contract as ``metrics.oof_rmse`` and the final
+    ``ModelTrainer`` OOF channel): a model that merely predicts NaN on some
+    rows is NOT penalized — only its non-finite rows are excluded from the
+    estimate (e.g. isotonic regression on a degenerate split does not abort
+    the trial). A fold whose fit/predict (or per-fold scoring, on the
+    non-poolable path)
     raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
     ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
     the trial's estimate becomes NaN — the semantics of the legacy

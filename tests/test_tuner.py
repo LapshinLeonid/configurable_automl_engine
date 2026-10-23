@@ -351,13 +351,13 @@ def test_validate_data_multi_column_y_rejected():
     """
     X = np.zeros((5, 2))
     y_2d = np.zeros((5, 2))
-    with pytest.raises(hyperopt.InvalidDataError, match="single-column target"):
+    with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
         hyperopt._validate_data(X, y_2d)
 
     y_2col = pd.DataFrame(
         {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
     )
-    with pytest.raises(hyperopt.InvalidDataError, match="single-column target"):
+    with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
         hyperopt._validate_data(X, y_2col)
 
 
