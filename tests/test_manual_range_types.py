@@ -8,6 +8,8 @@ Coverage:
 - Scale parameters (``alpha``, ``C``, ``epsilon``, ``gamma``,
   ``learning_rate``) without an explicit type default to the logarithmic
   scale.
+- A parameter whose DEFAULT_SPACES entry is ``float_log`` (e.g. ``alpha_1``
+  of an ARD regression) also defaults to the logarithmic scale (issue #140).
 - An explicitly typed range (``[1, 50, "int"]``) is never rewritten.
 - The tuner warns when the best trial lies at a range boundary.
 """
@@ -132,6 +134,67 @@ def test_learning_rate_integer_bounds_log():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 2a. Parameters with a float_log DEFAULT_SPACES entry default to log scale
+#     (issue #140: ARD alpha_1/alpha_2/lambda_1/lambda_2 are not in
+#     SCALE_PARAMS, so their inferred [1e-6, 0.1] became a linear range)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "param",
+    ["alpha_1", "alpha_2", "lambda_1", "lambda_2"],
+)
+def test_ard_float_log_default_params_inferred_as_log(param):
+    """[1e-6, 0.1] for ARD alpha_1/alpha_2/lambda_1/lambda_2 → float_log."""
+    cfg = _config("ardregression", {param: [1e-6, 0.1]})
+    entry = cfg.algorithms.ardregression.hyperparameters[param]
+    assert entry.dist_type == "float_log"
+    assert isinstance(entry.config, FloatSpace)
+
+
+def test_ard_integer_bounds_stay_float_log():
+    """ARD alpha_1 [1, 50] is float_log, not an integer range."""
+    cfg = _config("ardregression", {"alpha_1": [1, 50]})
+    entry = cfg.algorithms.ardregression.hyperparameters["alpha_1"]
+    assert entry.dist_type == "float_log"
+    assert isinstance(entry.config, FloatSpace)
+
+
+def test_ard_float_log_default_non_positive_low_falls_back_to_float():
+    """ARD alpha_1 [0, 0.1] → plain float (log scale requires low > 0)."""
+    cfg = _config("ardregression", {"alpha_1": [0.0, 0.1]})
+    entry = cfg.algorithms.ardregression.hyperparameters["alpha_1"]
+    assert entry.dist_type == "float"
+    assert isinstance(entry.config, FloatSpace)
+
+
+def test_ard_explicit_float_preserved_despite_float_log_default():
+    """[1e-6, 0.1, 'float'] for ARD alpha_1 stays a plain float range."""
+    cfg = _config("ardregression", {"alpha_1": [1e-6, 0.1, "float"]})
+    entry = cfg.algorithms.ardregression.hyperparameters["alpha_1"]
+    assert entry.dist_type == "float"
+    assert isinstance(entry.config, FloatSpace)
+
+
+def test_sgd_eta0_float_log_default_inferred_as_log():
+    """eta0 of an SGD regressor (float_log in DEFAULT_SPACES) → float_log."""
+    cfg = _config("sgdregressor", {"eta0": [1e-4, 1e-1]})
+    entry = cfg.algorithms.sgdregressor.hyperparameters["eta0"]
+    assert entry.dist_type == "float_log"
+    assert isinstance(entry.config, FloatSpace)
+
+
+def test_plain_float_default_stays_linear():
+    """l1_ratio/subsample (float in DEFAULT_SPACES) stay plain float."""
+    cfg = _config("elasticnet", {"l1_ratio": [0.2, 0.8]})
+    entry = cfg.algorithms.elasticnet.hyperparameters["l1_ratio"]
+    assert entry.dist_type == "float"
+    cfg = _config("gradient_boosting", {"subsample": [0.5, 1.0]})
+    entry = cfg.algorithms.gradient_boosting.hyperparameters["subsample"]
+    assert entry.dist_type == "float"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 3. Explicitly typed ranges are preserved
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -204,6 +267,38 @@ def test_normalize_keeps_fractional_bounds_for_int_param():
 def test_resolve_implicit_scale_param_log():
     assert resolve_implicit_range_type("ridge", "alpha", 1.0, 50.0) == "float_log"
     assert resolve_implicit_range_type("svr", "epsilon", 1e-3, 1.0) == "float_log"
+
+
+def test_resolve_implicit_float_log_default_param_log():
+    """A float_log default entry (ARD alpha_1, SGD eta0) resolves to log."""
+    assert (
+        resolve_implicit_range_type("ardregression", "alpha_1", 1e-6, 0.1)
+        == "float_log"
+    )
+    assert (
+        resolve_implicit_range_type("ardregression", "lambda_2", 1e-6, 0.1)
+        == "float_log"
+    )
+    assert (
+        resolve_implicit_range_type("sgdregressor", "eta0", 1e-4, 1e-1)
+        == "float_log"
+    )
+
+
+def test_resolve_implicit_float_log_default_non_positive_bounds_float():
+    """A float_log default with a non-positive bound falls back to float."""
+    assert (
+        resolve_implicit_range_type("ardregression", "alpha_1", 0.0, 0.1) == "float"
+    )
+
+
+def test_resolve_implicit_plain_float_default_stays_float():
+    """A float default entry (l1_ratio, subsample) stays linear."""
+    assert resolve_implicit_range_type("elasticnet", "l1_ratio", 0.2, 0.8) == "float"
+    assert (
+        resolve_implicit_range_type("gradient_boosting", "subsample", 0.5, 1.0)
+        == "float"
+    )
 
 
 def test_resolve_implicit_non_scale_unknown_param_none():
@@ -411,6 +506,17 @@ def test_dump_reload_round_trip_inferred_still_retyped():
     assert entry.explicit_type is False
 
 
+def test_dump_reload_round_trip_inferred_ard_float_log_preserved():
+    """An inferred ARD alpha_1 range stays float_log after a round trip."""
+    cfg = _config("ardregression", {"alpha_1": [1e-6, 0.1]})
+    assert cfg.algorithms.ardregression.hyperparameters["alpha_1"].dist_type == "float_log"
+    dumped = cfg.model_dump(mode="json")
+    cfg_reloaded = Config.model_validate(dumped)
+    entry = cfg_reloaded.algorithms.ardregression.hyperparameters["alpha_1"]
+    assert entry.dist_type == "float_log"
+    assert entry.explicit_type is False
+
+
 def test_dump_reload_round_trip_dict_form_int_preserved():
     """A dict-form entry survives the dump → reload round trip as int."""
     cfg = _config("ridge", {"alpha": {"config": {"type": "int", "low": 1, "high": 50}}})
@@ -437,6 +543,22 @@ def test_normalize_space_dict_retypes_inferred_entry():
     # Categorical lists are parsed to SearchSpaceEntry too (no longer constants).
     assert isinstance(normalized["kernel"], SearchSpaceEntry)
     assert normalized["kernel"].dist_type == "categorical"
+
+
+def test_normalize_space_dict_retypes_float_log_default_param():
+    """_normalize_space_dict re-resolves ARD alpha_1 [1e-6, 0.1] to float_log.
+
+    The direct optimize() path (issue #140): alpha_1 is absent from
+    SCALE_PARAMS, but its DEFAULT_SPACES entry is float_log, so an inferred
+    range must be searched on a logarithmic scale.
+    """
+    runner = _OptimizeRunner.__new__(_OptimizeRunner)
+    runner.algo = "ardregression"
+    space = {"alpha_1": [1e-6, 0.1], "max_iter": 500}
+    normalized = runner._normalize_space_dict(space)
+    assert normalized["alpha_1"].dist_type == "float_log"
+    assert isinstance(normalized["alpha_1"].config, FloatSpace)
+    assert normalized["max_iter"] == 500
 
 
 def test_normalize_space_dict_keeps_explicit_types():

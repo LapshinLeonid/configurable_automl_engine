@@ -1485,9 +1485,11 @@ class _OptimizeRunner:
         against the parameter type (the default search space or the estimator
         signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
         ``C`` as a real range (``float_log``), not as an integer-only range —
-        the exact issue #127 bug. Raw lists (not yet parsed into
-        ``SearchSpaceEntry`` objects) are parsed first; explicitly typed
-        entries and constants pass through unchanged.
+        the exact issue #127 bug. A parameter whose default space entry is
+        ``float_log`` (e.g. ``alpha_1`` of an ARD regression) is likewise
+        searched on a logarithmic scale without an explicit type. Raw lists
+        (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;
+        explicitly typed entries and constants pass through unchanged.
 
         Args:
             space_dict: The parameter name → value mapping (``SearchSpaceEntry``

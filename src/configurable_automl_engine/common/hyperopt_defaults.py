@@ -591,11 +591,12 @@ def _default_dist_type(algo_name: str, param_name: str) -> str | None:
 
 
 def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
-    """Infer the numeric type (``'int'``/``'float'``) of a model parameter.
+    """Infer the numeric type of a model parameter.
 
-    Falls back to the estimator constructor signature (the type of the
-    parameter's default value) when the parameter is absent from
-    :data:`DEFAULT_SPACES`. Returns ``None`` when the type cannot be
+    The type is taken from the parameter's entry in :data:`DEFAULT_SPACES`
+    when present (``'int'``, ``'float'`` or ``'float_log'``); otherwise it
+    falls back to the estimator constructor signature (the type of the
+    parameter's default value). Returns ``None`` when the type cannot be
     determined (unknown algorithm, missing dependency, ``**kwargs``
     constructors, or a non-numeric default).
 
@@ -604,10 +605,10 @@ def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
         param_name: Hyperparameter name.
 
     Returns:
-        ``'int'``, ``'float'``, or ``None`` when unknown.
+        ``'int'``, ``'float'``, ``'float_log'``, or ``None`` when unknown.
     """
     default = _default_dist_type(algo_name, param_name)
-    if default in ("int", "float"):
+    if default in ("int", "float", "float_log"):
         return default
     # Lazy import: the estimator factory is only needed for parameters not
     # present in DEFAULT_SPACES, and this module stays lightweight otherwise.
@@ -626,10 +627,14 @@ def resolve_implicit_range_type(
     A real-valued parameter stays real-valued even when both bounds look like
     integers (e.g. ``[1, 50]`` for ``C`` of an SVR).
 
-    Scale parameters (``alpha``, ``C``, ``epsilon``, ``gamma``,
-    ``learning_rate``) default to the logarithmic scale (``float_log``) when
-    the type is not stated explicitly and both bounds are positive; an
-    explicit type (``[1, 50, "int"]``) is always preserved by the caller.
+    The logarithmic scale (``float_log``) is preferred when the parameter is
+    searched on a log scale BY DEFAULT — the default space entry is
+    ``float_log`` (e.g. ``alpha_1``/``lambda_1`` of an ARD) or the parameter
+    is a scale parameter (``alpha``, ``C``, ``epsilon``, ``gamma``,
+    ``learning_rate``) — and both bounds are positive. An explicit type
+    (``[1, 50, "int"]``) is always preserved by the caller; with a
+    non-positive bound the log scale is unavailable and a plain float range
+    is used.
 
     Args:
         algo_name: Algorithm name or alias.
@@ -644,10 +649,14 @@ def resolve_implicit_range_type(
     """
     numeric_type = infer_param_numeric_type(algo_name, param_name)
     is_int_param = numeric_type == "int"
-    if not is_int_param and param_name in SCALE_PARAMS:
-        # A real scale parameter with an inferred type: prefer the
-        # logarithmic scale. If a bound is not strictly positive, the
-        # log scale is unavailable and a plain float range is used.
+    wants_log = not is_int_param and (
+        param_name in SCALE_PARAMS or numeric_type == "float_log"
+    )
+    if wants_log:
+        # A real parameter with a logarithmic default (either a scale
+        # parameter or a default 'float_log' entry from DEFAULT_SPACES):
+        # prefer the logarithmic scale. If a bound is not strictly positive,
+        # the log scale is unavailable and a plain float range is used.
         if low > 0 and high > 0:
             return "float_log"
         return "float"

@@ -1689,10 +1689,12 @@ class Config(BaseModel):
         search space or the estimator signature — not from how the boundary
         numbers are written. So ``[1, 50]`` for a real-valued parameter
         (e.g. ``C`` of an SVR, ``alpha`` of a Tweedie) stays a real range
-        instead of silently becoming an integer range. Scale parameters
-        (``alpha``, ``C``, ``epsilon``, ``gamma``, ``learning_rate``)
-        without an explicit type default to the logarithmic scale.
-        Explicitly typed ranges (``[1, 50, "int"]``) are left untouched.
+        instead of silently becoming an integer range. A parameter whose
+        default space entry is ``float_log`` (e.g. ``alpha_1``/``lambda_1``
+        of an ARD regression), as well as scale parameters (``alpha``,
+        ``C``, ``epsilon``, ``gamma``, ``learning_rate``), default to the
+        logarithmic scale without an explicit type. Explicitly typed ranges
+        (``[1, 50, "int"]``) are left untouched.
         """
         from configurable_automl_engine.common.hyperopt_defaults import (
             normalize_hyperparameter_entry,
