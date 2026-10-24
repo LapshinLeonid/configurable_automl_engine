@@ -21,7 +21,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding.
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
-* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
+* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats. `ModelTrainer.save()` records artifact metadata (engine and dependency versions, UTC timestamp, algorithm, params, config hash), and `ModelTrainer.load()` auto-detects the format from the file extension and warns when the engine or scikit-learn major/minor version differs from the current environment.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
@@ -73,6 +73,14 @@ For the full suite including all supported gradient boosting backends:
 Testing:
 
     python -c "import configurable_automl_engine; print('Success!')"
+
+# Model artifacts: format and security
+
+`ModelTrainer.save()` serializes the trainer (including the fitted pipeline) with `pickle` (default) or `joblib`, depending on `serialization_format`. Artifacts are therefore **pickle files** and execute arbitrary code at load time — **only load artifacts from trusted sources**.
+
+`ModelTrainer.load(path)` auto-detects the serialization format from the file extension: `.joblib` → joblib, `.pkl`/`.pickle` → pickle; if the file was saved in the other format, it is tried as a fallback. For unknown extensions joblib is tried first, then pickle. You may force a format explicitly with `ModelTrainer.load(path, fmt=...)`.
+
+Artifacts saved by a recent version also carry `artifact_metadata_`: the engine version, versions of Python and the ML stack, the UTC creation timestamp, the algorithm, hyperparameters and a config hash. On load, a `WARNING` is logged when the artifact's engine or scikit-learn major/minor version differs from the one in the current environment.
 
 # Quick Start
 
