@@ -37,12 +37,14 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
      - **Edge cases:** Empty/boundary/invalid inputs.
   4. Run and fix all quality checks:
      ```bash
+     ruff format src/
      ruff check src/
      ruff format --check src/
-     mypy src
+     mypy src --install-types --non-interactive
      pytest --cov=src --cov-report=term-missing
      ```
     After your changes all tests must pass. If you changes breaks some old test you must fix that tests.
+    `ruff format src/` is mandatory before every commit: CI runs `ruff format --check src/` and fails on any unformatted file. Never add or change a CI check without running it locally first.
     Remember you need to check in ruff and mypy only /src/ folder. Tests must not be checked with ruff and mypy.
   5. Commit changes with descriptive commit messages (add `[skip-sync]` if working on internal CI-only iterations).
 

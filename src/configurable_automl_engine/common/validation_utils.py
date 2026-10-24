@@ -4,14 +4,14 @@ import logging
 import math
 from collections import Counter
 from math import sqrt
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
 
-_InfInput = TypeVar("_InfInput", pd.DataFrame, np.ndarray)
+_InfInput = TypeVar("_InfInput", bound=pd.DataFrame | np.ndarray)
 
 #: Fraction of unique values (nunique / n) above which an object/string column
 #: is considered ID-like and flagged with a WARNING.
@@ -666,10 +666,10 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
     if isinstance(X, pd.DataFrame):
         out = X.copy()
         out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
-        return out
+        return cast(_InfInput, out)
     out_arr = X.astype(np.result_type(X.dtype, np.float64), copy=True)
     out_arr[np.isinf(out_arr)] = np.nan
-    return out_arr
+    return cast(_InfInput, out_arr)
 
 
 def validate_features(
