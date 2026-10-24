@@ -2651,6 +2651,75 @@ def test_feature_selection_selector_uses_explicit_random_state_when_set():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+#  Model seed semantics: trainer.random_state drives stochastic estimators
+#  (issue #160)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_trainer_model_seed_follows_random_state():
+    """The trainer's random_state seeds stochastic models by default."""
+    X, y = _fs_noisy_dataset(seed=5)
+    tr = ModelTrainer(algorithm="random_forest", random_state=7)
+    tr.fit(X, y)
+    assert tr.pipeline.named_steps["model"].random_state == 7
+
+
+def test_trainer_model_explicit_hyperparameter_seed_wins():
+    """An explicit random_state in the hyperparameters wins over the trainer seed."""
+    X, y = _fs_noisy_dataset(seed=5)
+    tr = ModelTrainer(
+        algorithm="random_forest",
+        hyperparams={"random_state": 11},
+        random_state=7,
+    )
+    tr.fit(X, y)
+    assert tr.pipeline.named_steps["model"].random_state == 11
+
+
+def test_trainer_model_random_state_none_true_random_fit(caplog):
+    """Trainer random_state=None → the stochastic model gets random_state=None
+    (a truly random fit), with a WARNING from the model factory."""
+    import logging
+
+    X, y = _fs_noisy_dataset(seed=5)
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        tr = ModelTrainer(
+            algorithm="random_forest", hyperparams={"n_estimators": 10}, random_state=None
+        )
+        tr.fit(X, y)
+    assert tr.pipeline.named_steps["model"].random_state is None
+    assert any(
+        "random_state=None" in r.message and "NOT reproducible" in r.message
+        for r in caplog.records
+    )
+
+
+def test_trainer_reproducible_with_same_seed_different_with_different(caplog):
+    """Same ModelTrainer seed → identical results; different seed → different.
+
+    A stochastic model (RandomForest) is used; the seeds change both the
+    splits and the model RNG.
+    """
+    import logging
+
+    X, y = _fs_noisy_dataset(seed=9)
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        r1 = ModelTrainer(
+            algorithm="random_forest", hyperparams={"n_estimators": 10}, random_state=42
+        ).fit(X, y)
+        r2 = ModelTrainer(
+            algorithm="random_forest", hyperparams={"n_estimators": 10}, random_state=42
+        ).fit(X, y)
+        r3 = ModelTrainer(
+            algorithm="random_forest", hyperparams={"n_estimators": 10}, random_state=7
+        ).fit(X, y)
+
+    assert r1.val_score == r2.val_score
+    assert r1.pipeline.named_steps["model"].random_state == 42
+    assert r3.pipeline.named_steps["model"].random_state == 7
+
+
+# ──────────────────────────────────────────────────────────────────────────
 #  FeatureSelector unit tests (public API)
 # ──────────────────────────────────────────────────────────────────────────
 

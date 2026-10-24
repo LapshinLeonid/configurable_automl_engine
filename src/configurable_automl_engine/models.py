@@ -516,10 +516,17 @@ def create_model(
     # (and the refine monotonicity promise would break). A fixed seed is
     # injected for every estimator that accepts ``random_state`` (including
     # XGBoost, whose constructor accepts **kwargs), unless the caller set the
-    # parameter explicitly — an explicit value always wins.
+    # parameter explicitly — an explicit value always wins. An EXPLICIT
+    # ``random_state=None`` (a truly random fit, sklearn semantics) is
+    # respected: the seed is not injected, and a WARNING is logged so that the
+    # non-reproducible fit is visible.
     if "random_state" in hyperparams:
         if hyperparams["random_state"] is None:
-            hyperparams["random_state"] = MODEL_RANDOM_STATE
+            logger.warning(
+                "Algorithm '%s': explicit random_state=None — the fit is "
+                "NOT reproducible (a fresh RNG is drawn at fit time).",
+                algo_key,
+            )
     else:
         accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
         if "random_state" in accepted_params or accepts_var_kwargs:

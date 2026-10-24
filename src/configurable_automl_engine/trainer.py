@@ -1630,9 +1630,16 @@ class ModelTrainer:
             # Done BEFORE preprocessor assembly so that an unknown algorithm
             # (a typo in the name) is rejected here with a clear message rather
             # than being masked by the default preprocessing preset.
+            # The model seed follows the trainer's ``random_state`` (the engine
+            # seed from ``general.random_state``), unless the user set
+            # ``random_state`` explicitly in the hyperparameters — an explicit
+            # value always wins. ``random_state=None`` (trainer or explicit
+            # hyperparameter) produces a truly random fit.
             try:
                 model_kwargs = self.hyperparams.copy()
                 model_kwargs.pop("feature_index", None)
+                if "random_state" not in model_kwargs:
+                    model_kwargs["random_state"] = self.random_state
                 base_model = create_model(self.algorithm, **model_kwargs)
             except (ValueError, ImportError) as e:
                 raise TrainingError(f"Error creating model: {e}")

@@ -57,6 +57,33 @@ def test_n_folds_ok():
     assert cfg.general.n_folds == 5
 
 
+def test_general_random_state_default_42():
+    """By default, general.random_state=42 (the documented engine seed)."""
+    cfg = Config.model_validate(BASE)
+    assert cfg.general.random_state == 42
+
+
+def test_general_random_state_explicit_int():
+    """An explicit general.random_state int is preserved."""
+    cfg_data = BASE | {"general": {**BASE["general"], "random_state": 7}}
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.random_state == 7
+
+
+def test_general_random_state_explicit_none():
+    """An explicit general.random_state=None is preserved (non-reproducible run)."""
+    cfg_data = BASE | {"general": {**BASE["general"], "random_state": None}}
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.random_state is None
+
+
+def test_general_random_state_invalid_type_rejected():
+    """A non-integer seed is rejected (int | None only)."""
+    cfg_data = BASE | {"general": {**BASE["general"], "random_state": 1.5}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(cfg_data)
+
+
 def test_categorical_encoding_ordinal_valid():
     """A config with categorical_encoding='ordinal' passes Config validation."""
     cfg_data = BASE | {

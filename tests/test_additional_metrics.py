@@ -498,6 +498,8 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         "metric",
         "params",
         "model_path",
+        # The engine seed is recorded in the report (issue #160).
+        "random_state",
     }
     assert "n_trials_evaluated" not in result
 

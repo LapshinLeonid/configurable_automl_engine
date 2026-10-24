@@ -440,15 +440,23 @@ def test_create_model_respects_explicit_random_state():
     assert model.random_state == 7
 
 
-def test_create_model_none_random_state_normalized_to_default():
-    """random_state=None is normalized to the fixed engine seed.
+def test_create_model_none_random_state_respected_with_warning(caplog):
+    """random_state=None is respected: a truly random fit, with a WARNING.
 
-    ``None`` requests a fresh RNG per fit (sklearn semantics), which would
-    break reproducibility exactly like an omitted seed — the explicit-none
-    case is treated as "no seed set" and normalized.
+    ``None`` requests a fresh RNG per fit (sklearn semantics). An explicit
+    ``None`` now wins over the injected engine seed (issue #160): the model
+    is created with ``random_state=None`` and a WARNING is logged so that the
+    non-reproducible fit is visible.
     """
-    model = create_model("random_forest", n_estimators=10, random_state=None)
-    assert model.random_state == 42
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        model = create_model("random_forest", n_estimators=10, random_state=None)
+    assert model.random_state is None
+    assert any(
+        "random_state=None" in record.message and "NOT reproducible" in record.message
+        for record in caplog.records
+    )
 
 
 def test_create_model_estimators_without_random_state_unaffected():
@@ -462,6 +470,25 @@ def test_create_model_estimators_without_random_state_unaffected():
     assert model.get_params(deep=False).get("random_state") is None
     model = create_model("svr", C=1.0)
     assert model.get_params(deep=False).get("random_state") is None
+    # An explicit None for an estimator without the parameter is a no-op
+    # (no WARNING, no parameter added).
+    model = create_model("svr", C=1.0, random_state=None)
+    assert model.get_params(deep=False).get("random_state") is None
+
+
+def test_create_model_explicit_none_other_hyperparams_kept(caplog):
+    """Explicit random_state=None keeps the other hyperparameters intact."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        model = create_model("random_forest", n_estimators=10, max_depth=5, random_state=None)
+    assert model.random_state is None
+    assert model.n_estimators == 10
+    assert model.max_depth == 5
+    assert any(
+        "random_state=None" in record.message and "NOT reproducible" in record.message
+        for record in caplog.records
+    )
 
 
 def test_create_model_xgboost_gets_seeded_when_installed():

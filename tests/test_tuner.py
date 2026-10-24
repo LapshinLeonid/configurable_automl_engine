@@ -1990,6 +1990,85 @@ def test_stochastic_estimator_runs_reproducible(toy_data):
     assert rf1.get_params(deep=False).get("random_state") == 42
 
 
+def test_optimize_model_seed_follows_random_state(toy_data):
+    """The tuner's random_state seeds the trial models by default (issue #160).
+
+    Previously the model factory injected a hard-coded MODEL_RANDOM_STATE for
+    every stochastic estimator; now the models follow ``optimize(random_state=...)``
+    so that different engine seeds produce different splits AND different fits.
+    """
+    X, y = toy_data
+    space = {
+        "random_forest": lambda t: {
+            "n_estimators": t.suggest_int("n_estimators", 10, 30, step=10),
+        }
+    }
+    run_kwargs = dict(
+        n_trials=2,
+        random_state=7,
+        validation_strategy="train_test_split",
+        space_overrides=space,
+    )
+    res = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res is not None
+    model = res.model
+    rf = model.named_steps["model"] if hasattr(model, "named_steps") else model
+    assert rf.get_params(deep=False).get("random_state") == 7
+
+
+def test_optimize_model_explicit_hyperparameter_seed_wins(toy_data):
+    """An explicit random_state in the search space wins over the tuner seed."""
+    X, y = toy_data
+    space = {
+        "random_forest": lambda t: {
+            "n_estimators": t.suggest_int("n_estimators", 10, 30, step=10),
+            "random_state": t.suggest_categorical("random_state", [11]),
+        }
+    }
+    run_kwargs = dict(
+        n_trials=2,
+        random_state=7,
+        validation_strategy="train_test_split",
+        space_overrides=space,
+    )
+    res = hyperopt.optimize("random_forest", X, y, **run_kwargs)
+    assert res is not None
+    model = res.model
+    rf = model.named_steps["model"] if hasattr(model, "named_steps") else model
+    assert rf.get_params(deep=False).get("random_state") == 11
+
+
+def test_optimize_model_random_state_none_true_random_fit(toy_data, caplog):
+    """optimize(random_state=None) → stochastic models get random_state=None
+    (a truly random fit) with a WARNING from the model factory."""
+    import logging
+
+    X, y = toy_data
+    space = {
+        "random_forest": lambda t: {
+            "n_estimators": t.suggest_int("n_estimators", 10, 30, step=10),
+        }
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        res = hyperopt.optimize(
+            "random_forest",
+            X,
+            y,
+            n_trials=2,
+            random_state=None,
+            validation_strategy="train_test_split",
+            space_overrides=space,
+        )
+    assert res is not None
+    model = res.model
+    rf = model.named_steps["model"] if hasattr(model, "named_steps") else model
+    assert rf.get_params(deep=False).get("random_state") is None
+    assert any(
+        "random_state=None" in r.message and "NOT reproducible" in r.message
+        for r in caplog.records
+    )
+
+
 def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
     """The service key use_feature_selection does not reach the model constructor.
 

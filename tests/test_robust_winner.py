@@ -764,7 +764,7 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
     mocker.patch.object(comp, "_fit_finalist", side_effect=_fake_fit)
     with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         candidates = comp._train_finalists(
-            ["elasticnet", "ridge"], phase_results, cfg, prepared
+            ["elasticnet", "ridge"], phase_results, cfg, prepared, cfg.general.random_state
         )
     assert set(candidates) == {"ridge"}
     assert any(

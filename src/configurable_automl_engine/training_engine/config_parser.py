@@ -963,6 +963,10 @@ class GeneralCfg(BaseModel):
             steps ('select'); the last phase must be a select with output: winner.
         validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).
         n_folds (int): Number of splits for cross-validation.
+        random_state (int | None): The engine seed driving data splits, model
+            seeds and the TPE sampler base seed (``random_state +
+            phase_ordinal``); recorded in the report. None — the run is not
+            reproducible (a WARNING is logged).
         categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy
             for categorical features. Default is 'one_hot'.
         parallel_strategy (str): Parallelization level (by algorithms/folds).
@@ -1030,6 +1034,18 @@ class GeneralCfg(BaseModel):
         description=(
             "Number of blocks (folds) for cross-validation."
             "Used only when validation_strategy = 'k_fold'"
+        ),
+    )
+    random_state: int | None = Field(
+        default=42,
+        description=(
+            "The engine seed: drives the data splits (CV folds / hold-out), "
+            "the model seeds (via the ModelTrainer and the model factory) and "
+            "the TPE sampler base seed (random_state + hpo_phase_ordinal). "
+            "It is recorded in the training report under the 'random_state' "
+            "key. None — a non-deterministic run: the data splits are not "
+            "fixed and stochastic models draw a fresh RNG at fit time; a "
+            "WARNING is logged that the run is not reproducible."
         ),
     )
     holdout_fraction: float | None = Field(

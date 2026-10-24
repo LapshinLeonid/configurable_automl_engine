@@ -2310,7 +2310,15 @@ class _OptimizeRunner:
         #    (contract of the original code: their errors are not fatal
         #    evaluation failures and are not counted by the circuit breaker).
         params = self.space_fn(trial)
-        model = create_model(self.algo, **params)
+        model_kwargs = dict(params)
+        # The model seed follows the run's ``random_state`` (the engine seed),
+        # unless the user set ``random_state`` explicitly in the algorithm
+        # hyperparameters — an explicit value always wins (including an
+        # explicit None → a truly random fit, a WARNING is logged by
+        # ``create_model``).
+        if "random_state" not in model_kwargs:
+            model_kwargs["random_state"] = self.random_state
+        model = create_model(self.algo, **model_kwargs)
         current_estimator = self.assemble_estimator(
             model,
             apply_fs=self._resolve_apply_fs(trial),
@@ -2813,8 +2821,11 @@ class _OptimizeRunner:
         Returns:
             Any: The trained best model (``self.best_model``).
         """
+        clean_params = dict(self.clean_model_params)
+        if "random_state" not in clean_params:
+            clean_params["random_state"] = self.random_state
         best_model = self.assemble_estimator(
-            create_model(self.algo, **self.clean_model_params),
+            create_model(self.algo, **clean_params),
             apply_fs=self.best_apply_fs,
             feature_index=self.clean_model_params.get("feature_index"),
         )
@@ -2951,12 +2962,14 @@ def optimize(
             ``val_method`` (takes precedence).
         n_folds (int): Number of cross-validation folds. Defaults to 5.
         n_trials (int): Number of search iterations (trials). Defaults to 50.
-        random_state (int | None): Randomness state for the data splits and
-            the preprocessor (CV folds, train_test_split, pruning folds,
-            hashing / target-encoding cross-fit). Defaults to 42. With
-            ``None``, the data splits are not fixed; however, the feature
-            selection step (``FeatureSelector``) always uses the fixed seed 42
-            so that selection stays reproducible across runs.
+        random_state (int | None): Randomness state for the data splits, the
+            preprocessor and the model seeds (CV folds, train_test_split,
+            pruning folds, hashing / target-encoding cross-fit, stochastic
+            estimator seeding). Defaults to 42. With ``None``, the data splits
+            are not fixed and stochastic models draw a fresh RNG at fit time
+            (a fully non-deterministic run); however, the feature selection
+            step (``FeatureSelector``) always uses the fixed seed 42 so that
+            selection stays reproducible across runs.
         sampler_seed (int | None): Seed of the TPE sampler, separated from
             ``random_state`` so that each HPO phase can use a different
             sampler seed (e.g. ``RANDOM_STATE + phase_ordinal``) while the

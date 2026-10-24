@@ -224,6 +224,9 @@ def test_tuner_limit_suppresses_svr_adaptive_epsilon():
         seen: list[dict[str, object]] = []
 
         def capturing_create_model(algo: str, **params):
+            # The tuner always injects the engine seed (issue #160); SVR does
+            # not accept it, and it is not a searched parameter.
+            params.pop("random_state", None)
             if params:
                 seen.append(dict(params))
             from sklearn.svm import SVR
@@ -291,7 +294,9 @@ def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path)
 
     def capturing(algo: str, **params):
         if algo == "decision_tree" and params:
-            seen.append(dict(params))
+            # Skip the engine seed injected by the tuner (issue #160): it is
+            # not a searched parameter.
+            seen.append({k: v for k, v in params.items() if k != "random_state"})
         return real_create_model(algo, **params)
 
     model_path = tmp_path / "model.pkl"

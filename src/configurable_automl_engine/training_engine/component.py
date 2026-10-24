@@ -72,7 +72,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
     read_config,
 )
-from configurable_automl_engine.validation import RANDOM_STATE, make_cv
+from configurable_automl_engine.validation import make_cv
 
 # ───────────────────────── canonical IAE ─────────────────────── #
 from ..tuner import WORST_SCORE_THRESHOLD, HPOHistoryError, OptimizeResult
@@ -598,6 +598,7 @@ def _fit_finalist(
     validation_strategy: ValidationStrategy | str | None,
     n_folds: int | None,
     test_size: float | None,
+    random_state: int | None,
 ) -> Any:
     """Train a finalist on 100% of the data and return its ``ModelTrainer``.
 
@@ -618,6 +619,9 @@ def _fit_finalist(
             validation strategy.
         n_folds (int | None): The number of folds (for 'k_fold').
         test_size (float | int | None): The hold-out size.
+        random_state (int | None): The engine seed (``general.random_state``)
+            for the finalist's splits and model seeds; ``None`` — a
+            non-reproducible fit.
 
     Returns:
         Any: The trained ``ModelTrainer`` (pipeline on 100% of the data, OOF
@@ -636,6 +640,7 @@ def _fit_finalist(
         validation_strategy=validation_strategy,
         n_folds=n_folds,
         test_size=test_size,
+        random_state=random_state,
     )
     trainer.fit(X, y)
     return trainer
@@ -690,6 +695,7 @@ def _train_finalists(
     phase_results: dict[str, PhaseResult],
     cfg: Config,
     prepared: PreparedData,
+    random_state: int | None,
 ) -> dict[str, FinalistCandidate]:
     """Train every finalist in the pool on 100% of the data exactly once.
 
@@ -703,6 +709,8 @@ def _train_finalists(
             "algorithm → PhaseResult".
         cfg (Config): The root config.
         prepared (PreparedData): The prepared data and settings.
+        random_state (int | None): The engine seed (``general.random_state``)
+            forwarded to every finalist's ``ModelTrainer``.
 
     Returns:
         dict[str, FinalistCandidate]: Trained candidates (key — the algorithm
@@ -728,6 +736,7 @@ def _train_finalists(
                 validation_strategy=prepared.resolved_validation,
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
+                random_state=random_state,
             )
         except Exception as err:  # noqa: BLE001 — the finalist is excluded
             _LOG.warning(
@@ -1256,15 +1265,17 @@ def _run_hpo(
             preprocessor (CV folds, train_test_split, pruning folds, hashing /
             target-encoding cross-fit). Always forwarded to tuners that accept
             the argument — for the bundled
-            ``configurable_automl_engine.tuner`` it must be the fixed
-            ``RANDOM_STATE`` so that every HPO phase (and the final
-            ``ModelTrainer`` fit) evaluates models on the SAME folds.
+            ``configurable_automl_engine.tuner`` it is the
+            ``general.random_state`` engine seed so that every HPO phase (and
+            the final ``ModelTrainer`` fit) evaluates models on the SAME
+            folds; ``None`` — non-reproducible splits.
         sampler_seed (int | None): The seed of the TPE sampler, separated from
             ``random_state``: it changes per HPO phase
-            (``RANDOM_STATE + hpo_phase_ordinal``) so that TPE startup points
-            do not repeat, while the data splits stay fixed. Forwarded to
-            tuners that accept the ``sampler_seed`` argument (the bundled
-            tuner); custom tuners without the argument are unaffected.
+            (``general.random_state + hpo_phase_ordinal``) so that TPE
+            startup points do not repeat, while the data splits stay fixed.
+            ``None`` — the sampler is not seeded. Forwarded to tuners that
+            accept the ``sampler_seed`` argument (the bundled tuner); custom
+            tuners without the argument are unaffected.
         categorical_features (list[str] | None): Categorical column names,
             detected once in ``train_best_model`` and passed to the tuner.
         numerical_features (list[str] | None): Numerical column names.
@@ -1346,7 +1357,7 @@ def _run_hpo(
 
     # pass the data-split seed if the tuner supports it (mandatory for the
     # bundled tuner: every HPO phase and the final fit must use the same
-    # folds/preprocessor — RANDOM_STATE)
+    # folds/preprocessor — general.random_state)
     if "random_state" in sig.parameters:
         kwargs["random_state"] = random_state
 
@@ -1571,6 +1582,7 @@ def _build_trainer(
     validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int | None = None,
     test_size: float | None = None,
+    random_state: int | None = None,
 ) -> Any:
     """Construct a ``ModelTrainer`` for an algorithm from its configuration.
 
@@ -1591,6 +1603,9 @@ def _build_trainer(
             ('train_test_split').
         n_folds (int | None): The number of folds (for 'k_fold').
         test_size (float | int | None): The hold-out size.
+        random_state (int | None): The engine seed from
+            ``general.random_state``; drives the ModelTrainer's data splits
+            and model seeds. ``None`` — non-reproducible final training.
 
     Returns:
         Any: The constructed (but not yet trained) ``ModelTrainer``.
@@ -1716,6 +1731,11 @@ def _build_trainer(
     ):
         trainer_kwargs["test_size"] = test_size
 
+    # The engine seed: the ModelTrainer's data splits and model seeds follow
+    # ``general.random_state`` (None — a non-reproducible final fit).
+    if "random_state" in trainer_sig.parameters or trainer_accepts_var_kwargs:
+        trainer_kwargs["random_state"] = random_state
+
     return trainer_module.ModelTrainer(**trainer_kwargs)
 
 
@@ -1732,6 +1752,7 @@ def _fit_and_save(
     validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int | None = None,
     test_size: float | None = None,
+    random_state: int | None = None,
 ) -> Any:
     """Train the final model and save the result to disk.
     Args:
@@ -1750,6 +1771,8 @@ def _fit_and_save(
         n_folds (int | None): The number of folds (for 'k_fold').
         test_size (float | int | None): The hold-out size (a fraction or a
             number of rows after 'auto' resolution).
+        random_state (int | None): The engine seed (``general.random_state``)
+            for the final model's splits and model seeds.
     Returns:
         Any: The ``ModelTrainer`` instance after training and saving (used to
             access the additional metric values).
@@ -1768,6 +1791,7 @@ def _fit_and_save(
         validation_strategy=validation_strategy,
         n_folds=n_folds,
         test_size=test_size,
+        random_state=random_state,
     )
     trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1807,6 +1831,8 @@ class PreparedData:
             integer number of rows after 'auto' resolution.
         categorical_features (list[str]): The detected categorical columns.
         numerical_features (list[str]): The detected numerical columns.
+        random_state (int | None): The engine seed from
+            ``general.random_state``; ``None`` — a non-reproducible run.
         holdout_X (pd.DataFrame | None): The feature matrix of the reserved
             outer hold-out (``general.holdout_fraction``); ``None`` when the
             hold-out is not configured.
@@ -1826,6 +1852,7 @@ class PreparedData:
     resolved_test_size: float | int
     categorical_features: list[str]
     numerical_features: list[str]
+    random_state: int | None = None
     holdout_X: pd.DataFrame | None = None
     holdout_y: pd.Series | None = None
     holdout_fraction: float | None = None
@@ -1908,13 +1935,24 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    # The engine seed: drives the data splits (and, through the trainer, the
+    # model seeds). An explicit ``general.random_state=None`` means a
+    # non-reproducible run — the splits are not fixed; the WARNING is logged
+    # here (the pipeline entry point) once per run.
+    random_state = cfg.general.random_state
+    if random_state is None:
+        _LOG.warning(
+            "general.random_state=None: the run is NOT reproducible — "
+            "data splits, model seeds and the TPE sampler are not fixed."
+        )
+
     # Optional reserved outer hold-out (general.holdout_fraction): the rows
     # are split OFF before HPO and are never used for model selection. The
     # honest estimate on these rows is reported as result["holdout_score"];
     # the final model is still trained on ALL data (train + hold-out). The
-    # split is shuffled with the fixed RANDOM_STATE; a deterministic
-    # stratified split cannot be applied to a continuous target, so a plain
-    # random split is used.
+    # split is shuffled with the engine seed (general.random_state); a
+    # deterministic stratified split cannot be applied to a continuous
+    # target, so a plain random split is used.
     holdout_fraction = cfg.general.holdout_fraction
     holdout_X: pd.DataFrame | None = None
     holdout_y: pd.Series | None = None
@@ -1940,7 +1978,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
             y,
             test_size=holdout_fraction,
             shuffle=True,
-            random_state=RANDOM_STATE,
+            random_state=random_state,
         )
         X, y = X_hold, y_hold
         _LOG.info(
@@ -1973,7 +2011,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
         n_samples=len(X),
         val_method=cfg.general.validation_strategy,
         n_folds=cfg.general.n_folds,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         test_size=0.2,
         n_features=X.shape[1],
     )
@@ -2008,6 +2046,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
         resolved_test_size=resolved_test_size,
         categorical_features=categorical_features,
         numerical_features=numerical_features,
+        random_state=random_state,
         holdout_X=holdout_X,
         holdout_y=holdout_y,
         holdout_fraction=holdout_fraction,
@@ -2131,12 +2170,14 @@ class _HpoPhaseSpec:
         feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
             selection configuration.
         random_state (int | None): The random seed of the data splits and the
-            preprocessor — the fixed ``RANDOM_STATE`` for every HPO phase
-            (so folds stay comparable between phases and with the final
-            ``ModelTrainer`` fit).
+            preprocessor — the ``general.random_state`` engine seed for every
+            HPO phase (so folds stay comparable between phases and with the
+            final ``ModelTrainer`` fit); ``None`` — the splits are not fixed
+            (non-reproducible run).
         sampler_seed (int | None): The per-phase TPE sampler seed
-            (``RANDOM_STATE + hpo_phase_ordinal`` — a different seed per HPO
-            phase, so TPE random startup points do not repeat between phases).
+            (``general.random_state + hpo_phase_ordinal`` — a different seed
+            per HPO phase, so TPE random startup points do not repeat between
+            phases); ``None`` — the sampler is not seeded.
     """
 
     phase: HPOPhaseCfg
@@ -2266,10 +2307,11 @@ def _execute_hpo_phase(
         previous_trials (list[FrozenTrial] | None): The TPE history of the
             previous phase (refine warm-start), forwarded to ``_run_hpo``.
         random_state (int | None): The random seed of the data splits and the
-            preprocessor (the fixed ``RANDOM_STATE``), forwarded to
-            ``_run_hpo``.
+            preprocessor (the ``general.random_state`` engine seed), forwarded
+            to ``_run_hpo``; ``None`` — non-reproducible splits.
         sampler_seed (int | None): The per-phase TPE sampler seed
-            (``RANDOM_STATE + hpo_phase_ordinal``), forwarded to ``_run_hpo``.
+            (``general.random_state + hpo_phase_ordinal``), forwarded to
+            ``_run_hpo``; ``None`` — the sampler is not seeded.
         limit_hyperparameters (bool): Restrict the search to ONLY the
             user-listed parameters (``AlgoCfg.limit_hyperparameters: true``);
             forwarded to ``_run_hpo``.
@@ -2548,14 +2590,18 @@ def execute_phases(
     parameters would hide the regression (deliberate design decision).
 
     Per-phase sampler seeds: each HPO phase (``all_algorithms``/``refine``)
-    runs the TPE sampler with its own seed ``RANDOM_STATE + hpo_phase_ordinal``
-    (the first HPO phase = 42, the second = 43, etc.; select steps do not
-    count). Together with the ``previous_trials`` transfer this guarantees that
-    TPE startup points do not repeat between phases. The data splits and the
-    preprocessor, in contrast, keep the FIXED ``RANDOM_STATE`` seed for every
-    phase: every phase (and the final ``ModelTrainer`` fit) evaluates models
-    on the same folds, so scores stay comparable and the monotonicity of
-    ``enqueue_trial`` holds.
+    runs the TPE sampler with its own seed derived from the engine seed,
+    ``general.random_state + hpo_phase_ordinal`` (the first HPO phase keeps
+    the engine seed — 42 by default, the second = 43, etc.; select steps do
+    not count). Together with the ``previous_trials`` transfer this
+    guarantees that TPE startup points do not repeat between phases. The
+    data splits and the preprocessor, in contrast, keep the SAME engine seed
+    for every phase: every phase (and the final ``ModelTrainer`` fit)
+    evaluates models on the same folds, so scores stay comparable and the
+    monotonicity of ``enqueue_trial`` holds. With
+    ``general.random_state=None`` the run is non-reproducible: neither the
+    splits nor the sampler are seeded (a WARNING is logged in
+    ``prepare_dataset``).
 
     Args:
         cfg (Config): The configuration object.
@@ -2594,12 +2640,20 @@ def execute_phases(
     # Disqualification does not abort the run: the algorithm is excluded from
     # candidates and results, the rest continue training.
     # living in ctx: populated by HPO failures and select steps.
+    # The engine seed from ``general.random_state``: drives the data splits /
+    # preprocessor (passed to the HPO workers as ``random_state``) and the TPE
+    # sampler base seed (``random_state + hpo_phase_ordinal``; with None the
+    # sampler and the splits are non-deterministic). The default value of
+    # ``general.random_state`` is 42 (the ``validation.RANDOM_STATE`` default),
+    # so configs without an explicit seed behave exactly as before.
+    engine_random_state = cfg.general.random_state
     # HPO phase ordinal: incremented only for all_algorithms/refine phases
-    # (select steps are not counted). The per-phase SAMPLER seed is
-    # RANDOM_STATE + hpo_phase_ordinal: the first HPO phase keeps the
-    # documented engine seed 42, every next HPO phase gets a different seed,
-    # so TPE random startup points never repeat between phases. The data
-    # splits / preprocessor seed stays RANDOM_STATE for every phase (see the
+    # (select steps are not counted). The per-phase SAMPLER seed is derived
+    # from the engine seed: the first HPO phase keeps the documented engine
+    # seed (42 by default), every next HPO phase gets a different seed,
+    # so TPE random startup points never repeat between phases. When the
+    # engine seed is None the sampler is not seeded at all. The data
+    # splits / preprocessor seed stays fixed for every phase (see the
     # _HpoPhaseSpec construction below).
     hpo_phase_ordinal = 0
     for phase in cfg.general.phases:
@@ -2609,7 +2663,11 @@ def execute_phases(
             _execute_select_phase(phase=phase, cfg=cfg, prepared=prepared, ctx=ctx)
             continue
 
-        phase_seed = RANDOM_STATE + hpo_phase_ordinal
+        phase_seed = (
+            engine_random_state + hpo_phase_ordinal
+            if engine_random_state is not None
+            else None
+        )
         hpo_phase_ordinal += 1
         _LOG.info(
             f"--- Starting Phase: {phase.name} ({phase.n_trials}"
@@ -2718,10 +2776,12 @@ def execute_phases(
             target_encoding_fallback=cfg.general.target_encoding_fallback,
             feature_selection_cfg=cfg.general.feature_selection,
             complexity_guard_cfg=cfg.general.complexity_guard,
-            # Data splits and preprocessor: the fixed engine seed, so every
-            # phase (and the final ModelTrainer fit) uses the same folds.
-            random_state=RANDOM_STATE,
-            # TPE sampler: a per-phase seed, so startup points do not repeat.
+            # Data splits and preprocessor: the engine seed (general.
+            # random_state), so every phase (and the final ModelTrainer fit)
+            # uses the same folds; None — non-reproducible splits.
+            random_state=engine_random_state,
+            # TPE sampler: a per-phase seed derived from the engine seed, so
+            # startup points do not repeat between phases; None — unseeded.
             sampler_seed=phase_seed,
         )
 
@@ -3212,7 +3272,9 @@ def _execute_select_sanity_gate(
     # 2. Train the finalists on 100% of the data (exactly once; a repeated
     # select after HPO phases trains them anew).
     gate_started = time.monotonic()
-    candidates = _train_finalists(pool, ctx.working_set, cfg, prepared)
+    candidates = _train_finalists(
+        pool, ctx.working_set, cfg, prepared, cfg.general.random_state
+    )
     if not candidates:
         raise RuntimeError(
             f"No finalist could be trained on the full dataset in select "
@@ -3523,6 +3585,7 @@ def _compute_holdout_score(
             validation_strategy=prepared.resolved_validation,
             n_folds=prepared.resolved_n_folds,
             test_size=prepared.resolved_test_size,
+            random_state=prepared.random_state,
         )
         # Train on the train part of the outer split only: the hold-out rows
         # never participate in the fit, so the estimate on them is honest.
@@ -3671,6 +3734,7 @@ def persist_artifact(
                 validation_strategy=prepared.resolved_validation,
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
+                random_state=cfg.general.random_state,
             )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:
@@ -3688,6 +3752,9 @@ def persist_artifact(
         "metric": prepared.metric_user,
         "params": final_params,
         "model_path": str(model_path),
+        # The engine seed of the run, recorded in the report so that a
+        # reproducible rerun is possible (None — the run was not reproducible).
+        "random_state": cfg.general.random_state,
     }
     # Honest out-of-sample estimate of the FINAL pipeline: the comparison
     # metric computed on the pooled OOF predictions (the trainer's OOF channel

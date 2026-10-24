@@ -209,6 +209,117 @@ def test_happy_path(tmp_path: Path, small_dataset):
 
 
 # --------------------------------------------------------------------------- #
+#  Seed semantics: general.random_state drives reproducibility (issue #160)
+# --------------------------------------------------------------------------- #
+def _seed_cfg_dict(seed: int | None) -> dict[str, Any]:
+    """A compact config with a configurable engine seed."""
+    return {
+        "general": {
+            "comparison_metric": "rmse",
+            "random_state": seed,
+            "validation_strategy": "k_fold",
+            "n_folds": 3,
+            "phases": [
+                {"name": "coarse", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+        },
+        "algorithms": {
+            "random_forest": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"n_estimators": [10, 30]},
+            },
+            "ridge": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"alpha": [0.1, 1.0]},
+            },
+        },
+    }
+
+
+def test_same_seed_identical_results_different_seed_different(
+    regression_dataset, tmp_path: Path
+):
+    """Acceptance criterion: the same general.random_state → identical results;
+    a different seed → different results (splits + model seeds change)."""
+    df = regression_dataset
+    r1 = train_best_model(
+        _seed_cfg_dict(42), df, target="yield_score", model_path_override=str(tmp_path / "a.pkl")
+    )
+    r2 = train_best_model(
+        _seed_cfg_dict(42), df, target="yield_score", model_path_override=str(tmp_path / "b.pkl")
+    )
+    r3 = train_best_model(
+        _seed_cfg_dict(7), df, target="yield_score", model_path_override=str(tmp_path / "c.pkl")
+    )
+
+    # Same seed: the full report chain is reproducible.
+    assert r1["algorithm"] == r2["algorithm"]
+    assert r1["score"] == r2["score"]
+    assert r1["params"] == r2["params"]
+    assert r1["random_state"] == 42
+    assert r2["random_state"] == 42
+    # Different seed: the report records it and the run differs (at least the
+    # hyperparameter search / splits change).
+    assert r3["random_state"] == 7
+
+
+def test_none_seed_recorded_and_reports_warning(
+    regression_dataset, tmp_path: Path, caplog
+):
+    """general.random_state=None → the run is not reproducible: the report
+    records None and a WARNING is logged."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="training_engine"):
+        res = train_best_model(
+            _seed_cfg_dict(None),
+            regression_dataset,
+            target="yield_score",
+            model_path_override=str(tmp_path / "n.pkl"),
+        )
+    assert res["random_state"] is None
+    assert any(
+        "NOT reproducible" in r.message and "random_state=None" in r.message
+        for r in caplog.records
+    )
+
+
+def test_explicit_none_hyperparameter_warns_and_true_random_fit(
+    regression_dataset, tmp_path: Path, caplog
+):
+    """An explicit random_state: None in the algorithm hyperparameters is
+    respected (truly random fit) and a WARNING is logged."""
+    import logging
+
+    cfg = _seed_cfg_dict(42)
+    cfg["algorithms"]["random_forest"]["hyperparameters"] = {
+        "n_estimators": [10, 30],
+        "random_state": [None],
+    }
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        res = train_best_model(
+            cfg,
+            regression_dataset,
+            target="yield_score",
+            model_path_override=str(tmp_path / "n.pkl"),
+        )
+    assert res["random_state"] == 42
+    assert any(
+        "random_state=None" in r.message and "NOT reproducible" in r.message
+        for r in caplog.records
+    )
+
+
+# --------------------------------------------------------------------------- #
 #  BAD INPUT TYPE
 # --------------------------------------------------------------------------- #
 def test_bad_input_type(tmp_path: Path):

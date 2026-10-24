@@ -97,6 +97,7 @@ def _cfg_dict(
     comparison_metric: str = "mae",
     validation_strategy: str = "train_test_split",
     n_folds: int = 5,
+    random_state: int | None = 42,
     algorithms: list[str] | None = None,
     additional_metrics: list[str] | None = None,
     log_to_file: str | None = None,
@@ -129,6 +130,7 @@ def _cfg_dict(
             "comparison_metric": comparison_metric,
             "validation_strategy": validation_strategy,
             "n_folds": n_folds,
+            "random_state": random_state,
             "phases": phases,
             "path_to_model": "model.pkl",
             "log_to_file": log_to_file,
@@ -1135,3 +1137,116 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
     assert sampler_seeds == [42, 42, 43, 43, 44]
     # The folds/preprocessor seed is the fixed RANDOM_STATE for every phase.
     assert split_seeds == [42, 42, 42, 42, 42]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Seed semantics: general.random_state (issue #160)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_hpo_phases_use_general_random_state_for_splits_and_sampler_base():
+    """general.random_state drives the data-split seed AND the sampler base seed.
+
+    With ``general.random_state=7`` every HPO phase receives the same
+    data-split seed (7) and a per-phase sampler seed derived from it
+    (7 + hpo_phase_ordinal). Select steps do not count.
+    """
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "fine", "n_trials": 1, "action": "refine"},
+            {"name": "gate", "n_trials": 1, "action": "select",
+             "strategy": "cv_best", "output": "top_k", "k": 1},
+            {"name": "fine2", "n_trials": 1, "action": "refine"},
+        ],
+        algorithms=["random_forest", "extra_trees"],
+        random_state=7,
+    )
+    prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+    sampler_seeds: list[int] = []
+    split_seeds: list[int] = []
+
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
+        sampler_seeds.append(kw["sampler_seed"])
+        split_seeds.append(kw["random_state"])
+        return PhaseResult(score=0.9, params={"p": 1})
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        execute_phases(cfg, prepared)
+
+    # coarse: 2 algos × sampler 7; fine (refine): 2 algos × 8;
+    # gate select (top_k, k=1) → 1 algo; fine2: 1 × 9.
+    assert sampler_seeds == [7, 7, 8, 8, 9]
+    # The folds/preprocessor seed stays the engine seed for every phase.
+    assert split_seeds == [7, 7, 7, 7, 7]
+    assert prepared.random_state == 7
+
+
+def test_hpo_phases_none_random_state_unseeded_and_warns(caplog):
+    """general.random_state=None → non-reproducible run: the data-split seed
+    and the sampler seed are both None, and a WARNING is logged."""
+    import logging
+
+    cfg = _hpo_only_cfg(
+        [
+            {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
+        ],
+        algorithms=["random_forest"],
+        random_state=None,
+    )
+    with caplog.at_level(logging.WARNING, logger="training_engine"):
+        prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+
+    assert caplog.messages and any(
+        "NOT reproducible" in m and "random_state=None" in m for m in caplog.messages
+    )
+    assert prepared.random_state is None
+
+    seen: list[tuple[Any, Any]] = []
+
+    def fake_run_hpo(**kw: Any) -> PhaseResult:
+        seen.append((kw.get("random_state"), kw.get("sampler_seed")))
+        return PhaseResult(score=0.9, params={"p": 1})
+
+    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+        execute_phases(cfg, prepared)
+
+    # One algorithm × one HPO phase, both seeds None (non-reproducible).
+    assert seen == [(None, None)]
+
+
+def test_general_random_state_none_report_and_prepared(caplog):
+    """The engine seed (None) travels to PreparedData and the report."""
+    import logging
+
+    cfg_dict = _cfg_dict(
+        phases=[
+            {"name": "search", "n_trials": 1, "action": "all_algorithms"},
+            {"name": "final", "n_trials": 1, "action": "select",
+             "strategy": "cv_best", "output": "winner"},
+        ],
+        random_state=None,
+    )
+    cfg = Config.model_validate(cfg_dict)
+    with (
+        caplog.at_level(logging.WARNING, logger="training_engine"),
+        patch.object(
+            component,
+            "_run_hpo",
+            return_value=PhaseResult(score=0.5, params={"p": 1}),
+        ),
+        patch.object(component, "_fit_and_save", return_value=MagicMock()),
+    ):
+        prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
+        ctx = execute_phases(cfg, prepared)
+        result = persist_artifact(
+            cfg=cfg,
+            prepared=prepared,
+            winner_algo=ctx.winner_algo or "random_forest",
+            final_score=0.5,
+            final_params={"p": 1},
+            model_path_override="/tmp/seed_report.pkl",
+            disqualified_algorithms={},
+        )
+
+    assert result["random_state"] is None
