@@ -9,8 +9,6 @@ import pandas as pd
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
 
-pd.options.mode.copy_on_write = True
-
 
 def ceil_div(a: int, b: int) -> int:
     """Ceiling integer division: ceil(a / b)."""
