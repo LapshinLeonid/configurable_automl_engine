@@ -54,12 +54,18 @@ from sklearn.model_selection import train_test_split
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 from configurable_automl_engine.common.validation_utils import (
+    check_target_constant,
     check_target_exists,
+    datetime_expansion_map,
     prepare_X_y,
     validate_df_not_empty,
+    validate_features,
 )
 from configurable_automl_engine.models import remap_legacy_param_names
-from configurable_automl_engine.preprocessing import detect_feature_types
+from configurable_automl_engine.preprocessing import (
+    _clean_uninformative_features,
+    detect_feature_types,
+)
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -1218,6 +1224,9 @@ def _run_hpo(
     user_hyperparameter_keys: list[str] | None = None,
     limit_hyperparameters: bool = False,
     phase_name: str | None = None,
+    inf_policy: str | None = None,
+    datetime_policy: str | None = None,
+    drop_id_like_columns: bool | None = None,
 ) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
     Workflow:
@@ -1292,6 +1301,12 @@ def _run_hpo(
             argument or accept ``**kwargs`` (the signature is checked via
             ``inspect.signature``); custom tuners are unaffected.
         phase_name (str | None): The name of the HPO phase (e.g. 'coarse').
+        inf_policy (str | None): ``general.inf_policy``, forwarded to tuners
+            that accept it (``None`` — not forwarded, the tuner default).
+        datetime_policy (str | None): ``general.datetime_policy``, forwarded
+            the same way.
+        drop_id_like_columns (bool | None): ``general.drop_id_like_columns``,
+            forwarded the same way.
             Forwarded to tuners that accept the argument and used to
             deduplicate the WARNING about the pooled-metric fallback (once
             per algorithm and phase).
@@ -1504,6 +1519,20 @@ def _run_hpo(
     # (emitted once per algorithm and phase).
     if phase_name is not None and "phase_name" in sig.parameters:
         kwargs["phase_name"] = phase_name
+
+    # Input-data diagnostics policies: the same values as for the final
+    # ModelTrainer (_build_trainer), so the tuner's own data validation follows
+    # the configuration instead of its defaults (e.g. the bundled tuner's
+    # inf_policy="error"). On the engine path the data is already repaired in
+    # prepare_dataset, so re-validation is a no-op; the forwarding keeps
+    # custom tuners consistent with the final fit.
+    for key, value in (
+        ("inf_policy", inf_policy),
+        ("datetime_policy", datetime_policy),
+        ("drop_id_like_columns", drop_id_like_columns),
+    ):
+        if value is not None and key in sig.parameters:
+            kwargs[key] = value
 
     try:
         result = tuner.optimize(**kwargs)
@@ -1744,6 +1773,24 @@ def _build_trainer(
     ):
         trainer_kwargs["test_size"] = test_size
 
+    # Input-data diagnostics policies: forwarded so that the final fit treats
+    # ±inf / datetime / ID-like columns exactly as the pipeline entry point
+    # (prepare_dataset has already applied them; re-validation is a no-op on
+    # the already-repaired data). The ID-like WARNING is suppressed there:
+    # prepare_dataset already reported it once (B2 — no double warnings).
+    trainer_has_inf_policy = "inf_policy" in trainer_sig.parameters
+    trainer_has_datetime_policy = "datetime_policy" in trainer_sig.parameters
+    trainer_has_drop_id_like = "drop_id_like_columns" in trainer_sig.parameters
+    trainer_has_warn_id_like = "warn_id_like" in trainer_sig.parameters
+    if trainer_has_inf_policy or trainer_accepts_var_kwargs:
+        trainer_kwargs["inf_policy"] = cfg.general.inf_policy
+    if trainer_has_datetime_policy or trainer_accepts_var_kwargs:
+        trainer_kwargs["datetime_policy"] = cfg.general.datetime_policy
+    if trainer_has_drop_id_like or trainer_accepts_var_kwargs:
+        trainer_kwargs["drop_id_like_columns"] = cfg.general.drop_id_like_columns
+    if trainer_has_warn_id_like or trainer_accepts_var_kwargs:
+        trainer_kwargs["warn_id_like"] = False
+
     # The engine seed: the ModelTrainer's data splits and model seeds follow
     # ``general.random_state`` (None — a non-reproducible final fit).
     if "random_state" in trainer_sig.parameters or trainer_accepts_var_kwargs:
@@ -1766,6 +1813,7 @@ def _fit_and_save(
     n_folds: int | None = None,
     test_size: float | None = None,
     random_state: int | None = None,
+    datetime_expansion: dict[str, list[str]] | None = None,
 ) -> Any:
     """Train the final model and save the result to disk.
     Args:
@@ -1786,6 +1834,10 @@ def _fit_and_save(
             number of rows after 'auto' resolution).
         random_state (int | None): The engine seed (``general.random_state``)
             for the final model's splits and model seeds.
+        datetime_expansion (dict[str, list[str]] | None): The datetime
+            expansion applied upstream (``PreparedData.datetime_expansion``);
+            registered on the trainer before saving so that the artifact
+            accepts the raw input schema.
     Returns:
         Any: The ``ModelTrainer`` instance after training and saving (used to
             access the additional metric values).
@@ -1807,9 +1859,42 @@ def _fit_and_save(
         random_state=random_state,
     )
     trainer.fit(X, y)
+    _register_datetime_expansion(trainer, datetime_expansion, algo_cfg)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
     return trainer
+
+
+def _register_datetime_expansion(
+    trainer: Any,
+    expansion: dict[str, list[str]] | None,
+    algo_cfg: AlgoCfg,
+) -> None:
+    """Register an upstream datetime expansion on a trainer before saving.
+
+    Custom trainers without ``register_datetime_expansion`` are skipped with a
+    WARNING: their artifact then expects the expanded columns at inference.
+
+    Args:
+        trainer (Any): The trained trainer instance.
+        expansion (dict[str, list[str]] | None): Source column → generated
+            component columns; nothing is done when empty.
+        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
+    """
+    if not expansion:
+        return
+    register = getattr(trainer, "register_datetime_expansion", None)
+    if callable(register):
+        register(expansion)
+        return
+    _LOG.warning(
+        "ModelTrainer %s does not provide `register_datetime_expansion`; the "
+        "saved model expects the expanded datetime components %s instead of "
+        "the raw column(s) %s at prediction time.",
+        algo_cfg.trainer_module,
+        sorted(name for names in expansion.values() for name in names),
+        sorted(expansion),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1854,6 +1939,11 @@ class PreparedData:
         holdout_fraction (float | None): The configured
             ``general.holdout_fraction`` value (the fraction of rows reserved
             before HPO).
+        datetime_expansion (dict[str, list[str]]): The datetime expansion
+            applied by the input-data diagnostics (``general.datetime_policy:
+            'expand'``): source column → generated component columns. It is
+            registered on the saved trainer so that the artifact can predict
+            on the raw input schema.
     """
 
     X: pd.DataFrame
@@ -1869,6 +1959,7 @@ class PreparedData:
     holdout_X: pd.DataFrame | None = None
     holdout_y: pd.Series | None = None
     holdout_fraction: float | None = None
+    datetime_expansion: dict[str, list[str]] = field(default_factory=dict)
 
 
 def load_config(
@@ -1947,6 +2038,32 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
 
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
+
+    # Centralized input-data diagnostics: duplicate columns, ±inf in numeric
+    # features, datetime/timedelta columns and ID-like columns are detected
+    # and (depending on the configured policies) repaired or rejected here —
+    # before the HPO budget is spent on data that would fail with an unclear
+    # error or silently degrade the search.
+    X_raw = X
+    X, generated = validate_features(
+        X,
+        inf_policy=cfg.general.inf_policy,
+        datetime_policy=cfg.general.datetime_policy,
+        drop_id_like_columns=cfg.general.drop_id_like_columns,
+    )
+    # Recorded for inference: the saved trainer only ever sees the expanded
+    # data, so it cannot derive the mapping itself (B3 — the artifact must
+    # accept the raw schema it was trained on).
+    datetime_expansion = datetime_expansion_map(X_raw, generated)
+    check_target_constant(y)
+    # Uninformative-feature cleaning at the same point where it runs in
+    # ModelTrainer.fit / tuner.build_trial_pipeline: fully empty and strictly
+    # constant columns (including datetime-derived components such as
+    # ts_year that are constant on the sample) are removed BEFORE type
+    # detection, so the column lists in PreparedData match the feature set
+    # actually used by HPO and the final fit (S3 — no drift between the
+    # detected lists and the cleaned data).
+    X = _clean_uninformative_features(X)
 
     # The engine seed: drives the data splits (and, through the trainer, the
     # model seeds). An explicit ``general.random_state=None`` means a
@@ -2063,6 +2180,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
         holdout_X=holdout_X,
         holdout_y=holdout_y,
         holdout_fraction=holdout_fraction,
+        datetime_expansion=datetime_expansion,
     )
 
 
@@ -2193,6 +2311,12 @@ class _HpoPhaseSpec:
             (``general.random_state + hpo_phase_ordinal`` — a different seed
             per HPO phase, so TPE random startup points do not repeat between
             phases); ``None`` — the sampler is not seeded.
+        inf_policy (str | None): ``general.inf_policy`` for the tuner's data
+            validation (``None`` — the tuner default).
+        datetime_policy (str | None): ``general.datetime_policy`` for the
+            tuner's data validation.
+        drop_id_like_columns (bool | None): ``general.drop_id_like_columns``
+            for the tuner's data validation.
     """
 
     phase: HPOPhaseCfg
@@ -2220,6 +2344,9 @@ class _HpoPhaseSpec:
     user_hyperparameter_keys: list[str] | None = None
     random_state: int | None = None
     sampler_seed: int | None = None
+    inf_policy: str | None = None
+    datetime_policy: str | None = None
+    drop_id_like_columns: bool | None = None
 
 
 def _prepare_search_space(
@@ -2377,6 +2504,9 @@ def _execute_hpo_phase(
             user_hyperparameter_keys=user_hyperparameter_keys,
             limit_hyperparameters=limit_hyperparameters,
             phase_name=phase_name,
+            inf_policy=spec.inf_policy,
+            datetime_policy=spec.datetime_policy,
+            drop_id_like_columns=spec.drop_id_like_columns,
         )
 
         if result is None:
@@ -2801,6 +2931,9 @@ def execute_phases(
             # TPE sampler: a per-phase seed derived from the engine seed, so
             # startup points do not repeat between phases; None — unseeded.
             sampler_seed=phase_seed,
+            inf_policy=cfg.general.inf_policy,
+            datetime_policy=cfg.general.datetime_policy,
+            drop_id_like_columns=cfg.general.drop_id_like_columns,
         )
 
         # Execution (parallel or sequential)
@@ -3733,6 +3866,9 @@ def persist_artifact(
     try:
         if pre_trained_trainer is not None and prepared.holdout_X is None:
             trainer = pre_trained_trainer
+            _register_datetime_expansion(
+                trainer, prepared.datetime_expansion, winner_cfg
+            )
             model_path.parent.mkdir(parents=True, exist_ok=True)
             trainer.save(model_path)
         else:
@@ -3753,6 +3889,7 @@ def persist_artifact(
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
                 random_state=cfg.general.random_state,
+                datetime_expansion=prepared.datetime_expansion,
             )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:

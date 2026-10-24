@@ -62,6 +62,7 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
     get_effective_train_size,
+    validate_features,
 )
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.models import (
@@ -316,7 +317,14 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
     return params
 
 
-def _validate_data(X: Any, y: Any) -> None:
+def _validate_data(
+    X: Any,
+    y: Any,
+    *,
+    inf_policy: str = "error",
+    datetime_policy: str = "expand",
+    drop_id_like_columns: bool = False,
+) -> Any:
     """Validate the types and sizes of the input data X and y.
 
     The target ``y`` is additionally required to be a NUMERIC vector
@@ -328,14 +336,37 @@ def _validate_data(X: Any, y: Any) -> None:
     entry point (``check_target_numeric``) so both callers reject a bad
     target identically.
 
+    Feature diagnostics mirror the pipeline entry point and honor the
+    configurable policies: duplicate column names are always rejected;
+    ±inf in numeric features follows ``inf_policy`` (``"error"`` by default
+    for the standalone path, ``"as_missing"`` when the config says so);
+    datetime/timedelta columns follow ``datetime_policy`` (``"expand"`` by
+    default — the derived components keep them from being silently dropped
+    by the preprocessor); ID-like columns follow ``drop_id_like_columns``.
+    The ID-like WARNING is suppressed here — it is emitted by the pipeline
+    entry point (``prepare_dataset``) for engine runs and by the standalone
+    ``optimize()`` for direct callers.
+
     Args:
         X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
         y (Any): Target variable vector
             (expected np.ndarray, pd.Series or pd.DataFrame).
+        inf_policy: Policy for ±inf in numeric features (default
+            ``"error"`` — reject with InvalidDataError).
+        datetime_policy: Policy for datetime/timedelta columns (default
+            ``"expand"`` — replace with derived components).
+        drop_id_like_columns: Whether ID-like columns are dropped (default
+            ``False``).
+    Returns:
+        The (possibly repaired) feature matrix ``X``: for a ``pd.DataFrame``
+        with datetime columns the expanded frame is returned; otherwise the
+        original ``X`` is returned unchanged.
     Raises:
         InvalidDataError: If the data types are not supported
             or the sizes of X and y do not match, or the target y is
-            non-numeric or contains NaN/±inf.
+            non-numeric or contains NaN/±inf, or the features contain
+            duplicate column names / infinite values (when the policy
+            rejects them).
     """
     ok_types = (np.ndarray, pd.DataFrame)
     if not isinstance(X, ok_types):
@@ -350,6 +381,23 @@ def _validate_data(X: Any, y: Any) -> None:
         check_target_numeric(y)
     except ValueError as err:
         raise InvalidDataError(str(err)) from err
+    # Feature diagnostics: duplicate columns are always rejected (a duplicated
+    # name makes X[col] return a DataFrame — an unclear pandas error
+    # downstream); ±inf / datetime / ID-like columns follow the configured
+    # policies.
+    if isinstance(X, pd.DataFrame):
+        try:
+            repaired, _ = validate_features(
+                X,
+                inf_policy=inf_policy,
+                datetime_policy=datetime_policy,
+                drop_id_like_columns=drop_id_like_columns,
+                warn_id_like=False,
+            )
+        except ValueError as err:
+            raise InvalidDataError(str(err)) from err
+        return repaired
+    return X
 
 
 def _get_estimator(algo: str) -> Any:
@@ -1142,6 +1190,9 @@ class _OptimizeRunner:
         limit_hyperparameters: bool = False,
         fit_best_model: bool = True,
         phase_name: str | None = None,
+        inf_policy: str = "error",
+        datetime_policy: str = "expand",
+        drop_id_like_columns: bool = False,
     ) -> None:
         """Store the parameters of a single optimisation run.
 
@@ -1234,6 +1285,13 @@ class _OptimizeRunner:
         # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
         # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
         self.phase_name = phase_name
+
+        # Input-data diagnostics policies for the fail-fast feature checks:
+        # defaults mirror the pipeline behavior for direct ``optimize()``
+        # callers (S2 — the policies are configurable instead of hard-coded).
+        self.inf_policy = inf_policy
+        self.datetime_policy = datetime_policy
+        self.drop_id_like_columns = drop_id_like_columns
 
         # Names of columns dropped by cleaning uninformative features.
         # Filled in build_trial_pipeline for diagnostics; empty by default.
@@ -1483,7 +1541,18 @@ class _OptimizeRunner:
             self.val_method = self.validation_strategy
 
         self.algo = self.algo_name.lower()
-        _validate_data(self.X, self.y)
+        # _validate_data may return a repaired feature matrix (e.g. datetime
+        # columns expanded); the None return is kept for backward compatibility
+        # with callers/mocks that treat the helper as a pure validator.
+        _validated = _validate_data(
+            self.X,
+            self.y,
+            inf_policy=self.inf_policy,
+            datetime_policy=self.datetime_policy,
+            drop_id_like_columns=self.drop_id_like_columns,
+        )
+        if isinstance(_validated, (pd.DataFrame, np.ndarray)):
+            self.X = _validated
 
         _get_estimator(self.algo)
 
@@ -2941,6 +3010,9 @@ def optimize(
     limit_hyperparameters: bool = False,
     fit_best_model: bool = True,
     phase_name: str | None = None,
+    inf_policy: str = "error",
+    datetime_policy: str = "expand",
+    drop_id_like_columns: bool = False,
 ) -> OptimizeResult | None:
     """Run the model hyperparameter optimisation process using Optuna.
 
@@ -3084,6 +3156,22 @@ def optimize(
             fallback from the pooled metric to the per-fold mean (emitted
             once per algorithm and phase). ``None`` for direct callers — the
             warning falls back to a generic phase label.
+        inf_policy (str): Policy for ±inf values in numeric features during
+            the data validation: ``"error"`` (default) — reject the data;
+            ``"as_missing"`` — replace with NaN and warn.
+        datetime_policy (str): Policy for datetime/timedelta columns during
+            the data validation: ``"expand"`` (default) — replace with
+            derived components; ``"drop"`` — drop; ``"error"`` — reject.
+        drop_id_like_columns (bool): Whether ID-like columns are dropped
+            (default ``False`` — they are only reported with a WARNING).
+
+            The three policies above are applied once, on entry, and both the
+            HPO trials and the final best-model fit work on the repaired
+            matrix. Note the defaults differ from ``ModelTrainer``
+            (``inf_policy="as_missing"``); the engine forwards the configured
+            ``general.*`` values to both. The returned ``model`` is a plain
+            pipeline: unlike ``ModelTrainer.predict`` it does NOT re-apply
+            the datetime expansion, so it expects the repaired schema.
 
     Returns:
         OptimizeResult: The result of the phase — ``model`` (the trained
@@ -3153,4 +3241,7 @@ def optimize(
         limit_hyperparameters=limit_hyperparameters,
         fit_best_model=fit_best_model,
         phase_name=phase_name,
+        inf_policy=inf_policy,
+        datetime_policy=datetime_policy,
+        drop_id_like_columns=drop_id_like_columns,
     ).run()

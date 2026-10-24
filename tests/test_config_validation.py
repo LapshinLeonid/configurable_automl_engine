@@ -450,6 +450,39 @@ def test_general_cfg_valid_n_folds():
     assert cfg.n_folds == 3
 
 
+def test_general_cfg_input_diagnostics_policies_defaults():
+    """The input-data diagnostics policies have the documented defaults."""
+    cfg = GeneralCfg(phases=[])
+    assert cfg.inf_policy == "as_missing"
+    assert cfg.datetime_policy == "expand"
+    assert cfg.drop_id_like_columns is False
+
+
+def test_general_cfg_input_diagnostics_policies_overridable():
+    """The input-data diagnostics policies accept all documented values."""
+    cfg = GeneralCfg(
+        phases=[],
+        inf_policy="error",
+        datetime_policy="drop",
+        drop_id_like_columns=True,
+    )
+    assert cfg.inf_policy == "error"
+    assert cfg.datetime_policy == "drop"
+    assert cfg.drop_id_like_columns is True
+
+
+def test_general_cfg_unknown_inf_policy_rejected():
+    """An unknown inf_policy value is rejected by config validation."""
+    with pytest.raises(ValidationError, match="inf_policy"):
+        GeneralCfg(phases=[], inf_policy="bogus")
+
+
+def test_general_cfg_unknown_datetime_policy_rejected():
+    """An unknown datetime_policy value is rejected by config validation."""
+    with pytest.raises(ValidationError, match="datetime_policy"):
+        GeneralCfg(phases=[], datetime_policy="bogus")
+
+
 # 3. Tests for AlgoCfg._must_not_be_empty
 def test_algo_cfg_empty_paths():
     """Checks that an empty string is rejected in module paths."""

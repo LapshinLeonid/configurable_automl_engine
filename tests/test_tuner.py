@@ -339,6 +339,41 @@ def test_validate_data_y_dataframe_column_is_validated():
         hyperopt._validate_data(X, y_bad)
 
 
+def test_validate_data_duplicate_columns_rejected():
+    """Duplicate feature columns are rejected before the search (S2)."""
+    X = pd.DataFrame(np.ones((4, 3)), columns=["a", "b", "a"])
+    y = pd.Series([1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(hyperopt.InvalidDataError, match="duplicate column names"):
+        hyperopt._validate_data(X, y)
+
+
+def test_validate_data_inf_policy_default_error():
+    """±inf in features is rejected by default (inf_policy='error')."""
+    X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
+    y = pd.Series([1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(hyperopt.InvalidDataError, match="[Ii]nfinite"):
+        hyperopt._validate_data(X, y)
+
+
+def test_validate_data_inf_policy_as_missing():
+    """inf_policy='as_missing' replaces ±inf with NaN instead of rejecting."""
+    X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
+    y = pd.Series([1.0, 2.0, 3.0, 4.0])
+    repaired = hyperopt._validate_data(X, y, inf_policy="as_missing")
+    assert np.isnan(repaired["a"].iloc[1])
+
+
+def test_validate_data_datetime_expands_by_default():
+    """datetime columns are expanded (datetime_policy='expand') by default."""
+    X = pd.DataFrame(
+        {"ts": pd.to_datetime(["2024-01-01", "2024-01-02"]), "b": [1.0, 2.0]}
+    )
+    y = pd.Series([1.0, 2.0])
+    repaired = hyperopt._validate_data(X, y)
+    assert "ts" not in repaired.columns
+    assert "ts_day" in repaired.columns
+
+
 def test_validate_data_multi_column_y_rejected():
     """A multi-column y (2D ndarray / 2-column DataFrame) is rejected.
 

@@ -642,17 +642,20 @@ def test_kfold_fallback_to_split_on_small_data(caplog):
     assert "Falling back to 'train_test_split'" in caplog.text
 
 
-def test_constant_target_nrmse_inf_kept():
-    """A constant target: NRMSE → inf is kept as is; training succeeds."""
+def test_constant_target_rejected_before_training():
+    """A constant target is rejected before training (issue #156).
+
+    Previously a constant target trained and reported a perfect score
+    (e.g. R² = 1.0), which is silently misleading: every model trivially
+    predicts the constant. The guard fails fast with a clear message.
+    """
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([5.0, 5.0, 5.0, 5.0])
-    trainer = ModelTrainer(
-        algorithm="ridge", metric="nrmse", additional_metrics=["mse"]
-    ).fit(X, y)
-
-    assert trainer.val_score == float("inf")
-    assert trainer.additional_scores["mse"] >= 0
-    assert trainer.pipeline is not None
+    trainer = ModelTrainer(algorithm="ridge", metric="nrmse")
+    with pytest.raises(TrainingError, match="constant"):
+        trainer.fit(X, y)
+    assert trainer.pipeline is None
+    assert trainer.val_score is None
 
 
 def test_deterministic_splits_when_random_state_none():

@@ -73,6 +73,14 @@ try:
     from configurable_automl_engine._version import __version__ as _engine_version
 except ImportError:  # pragma: no cover - _version.py absent in a fresh checkout
     _engine_version = "0.0.0"
+
+from configurable_automl_engine.common.validation_utils import (
+    check_target_constant,
+    check_target_numeric,
+    datetime_expansion_map,
+    expand_datetime_columns,
+    validate_features,
+)
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
@@ -590,6 +598,10 @@ class ModelTrainer:
         validation_strategy: ValidationStrategy | str = "train_test_split",
         n_folds: int = 5,
         test_size: float = 0.2,
+        inf_policy: str = "as_missing",
+        datetime_policy: str = "expand",
+        drop_id_like_columns: bool = False,
+        warn_id_like: bool = True,
     ):
         """Initialize the trainer with model parameters and preprocessing settings.
 
@@ -611,6 +623,18 @@ class ModelTrainer:
             test_size: Size of the hold-out part: a fraction in (0, 1) or an
                 integer number of rows (as in sklearn ``train_test_split``).
                 Defaults to 0.2.
+            inf_policy: Policy for ±inf values in numeric features:
+                ``"as_missing"`` (default) — replace with NaN and warn;
+                ``"error"`` — reject with ValueError.
+            datetime_policy: Policy for datetime/timedelta columns:
+                ``"expand"`` (default) — replace with derived components and
+                warn; ``"drop"`` — drop with a warning; ``"error"`` — reject.
+            drop_id_like_columns: Whether ID-like columns are dropped (default
+                ``False`` — they are only reported with a WARNING).
+            warn_id_like: Whether the ID-like WARNING is emitted (default
+                ``True``). Set to ``False`` when the diagnostics have already
+                been reported by the pipeline entry point (``prepare_dataset``)
+                to avoid duplicate warnings on the engine path.
         """
 
         self.logger = logging.getLogger(__name__)
@@ -637,6 +661,31 @@ class ModelTrainer:
         self.categorical_features = categorical_features
         self.numerical_features = numerical_features
         self.id_column = id_column
+        # ---------- input-data diagnostics policies ----------
+        # Validated immediately: invalid policy values are rejected at
+        # initialization time, before training starts.
+        if inf_policy not in ("as_missing", "error"):
+            raise TrainingError(
+                f"Unknown inf_policy: {inf_policy!r}. Expected 'as_missing' or 'error'."
+            )
+        self.inf_policy: str = inf_policy
+        if datetime_policy not in ("expand", "drop", "error"):
+            raise TrainingError(
+                f"Unknown datetime_policy: {datetime_policy!r}. "
+                "Expected 'expand', 'drop' or 'error'."
+            )
+        self.datetime_policy: str = datetime_policy
+        if not isinstance(drop_id_like_columns, bool):
+            raise TrainingError(
+                "drop_id_like_columns must be a bool, got "
+                f"{type(drop_id_like_columns).__name__}"
+            )
+        self.drop_id_like_columns: bool = drop_id_like_columns
+        if not isinstance(warn_id_like, bool):
+            raise TrainingError(
+                f"warn_id_like must be a bool, got {type(warn_id_like).__name__}"
+            )
+        self.warn_id_like: bool = warn_id_like
         # Categorical encoding strategy: 'one_hot' (default), 'ordinal',
         # 'target', 'frequency' or 'hashing'. Stored as a string primitive
         # to remain pickle-compatible.
@@ -814,6 +863,13 @@ class ModelTrainer:
         # Populated in fit() for pd.DataFrame inputs; empty list by default
         # (pickle-compatible attribute).
         self.dropped_features_: list[str] = []
+        # Datetime expansion applied to the training data: source column →
+        # generated component columns (``datetime_policy="expand"``). predict()
+        # applies the same expansion to raw input data, so a model trained on
+        # a frame with datetime columns can predict on the same raw schema.
+        # Populated in fit() and by register_datetime_expansion() (the engine
+        # expands the data in prepare_dataset, before the trainer sees it).
+        self.datetime_expansion_: dict[str, list[str]] = {}
         self._last_train_y: pd.Series | None = None
         self._last_val_y: pd.Series | None = None
         # Artifact metadata, populated by :meth:`save` (and read back by
@@ -1570,6 +1626,7 @@ class ModelTrainer:
             self.feature_selection_active_ = False
             self.selected_features_mask_ = None
             self.dropped_features_ = []
+            self.datetime_expansion_ = {}
 
             # Stage 1: Validation and data preparation
             X_prepared, y_s = self._prepare_data(X, y)
@@ -1580,7 +1637,71 @@ class ModelTrainer:
             if n_samples < 2:
                 raise TrainingError("Insufficient records for training")
 
+            # Target guards — the same checks as at the pipeline entry point
+            # (prepare_dataset / tuner._validate_data): a non-numeric or
+            # non-finite y would otherwise fail late (inside the validation
+            # splits) with an unclear sklearn error, and a constant y makes
+            # training meaningless (every model trivially reports a perfect
+            # score).
+            try:
+                check_target_numeric(y_s)
+                check_target_constant(y_s)
+            except ValueError as err:
+                raise TrainingError(str(err)) from err
+
             if isinstance(X_prepared, pd.DataFrame):
+                # Input-data diagnostics (the same checks as the pipeline entry
+                # point prepare_dataset): duplicate columns, ±inf in numeric
+                # features, datetime/timedelta columns and ID-like columns are
+                # detected before cleaning/type detection. Duplicate names
+                # would surface later as an unclear pandas error, ±inf breaks
+                # distance/linear models, datetime columns are dropped by the
+                # preprocessor (remainder="drop"), and ID-like columns are
+                # usually uninformative.
+                try:
+                    X_checked, generated = validate_features(
+                        X_prepared,
+                        inf_policy=str(getattr(self, "inf_policy", "as_missing")),
+                        datetime_policy=str(getattr(self, "datetime_policy", "expand")),
+                        drop_id_like_columns=bool(
+                            getattr(self, "drop_id_like_columns", False)
+                        ),
+                        warn_id_like=bool(getattr(self, "warn_id_like", True)),
+                    )
+                except ValueError as err:
+                    raise TrainingError(str(err)) from err
+                self.datetime_expansion_ = datetime_expansion_map(X_prepared, generated)
+                X_prepared = X_checked
+                if self.feature_names is not None:
+                    self.feature_names = [
+                        name
+                        for name in self.feature_names
+                        if name in X_prepared.columns
+                    ]
+                for attr in ("categorical_features", "numerical_features"):
+                    features = getattr(self, attr)
+                    if features is not None:
+                        setattr(
+                            self,
+                            attr,
+                            [f for f in features if f in X_prepared.columns],
+                        )
+                if generated:
+                    # The expansion happens BEFORE self.feature_names was
+                    # fixed (it is extracted in _prepare_data from the
+                    # original X), so the generated columns must be appended
+                    # to the feature list for the preprocessor.
+                    self.feature_names = list(self.feature_names or []) + generated
+                    # The generated components are numeric: they must join the
+                    # numerical feature list (or be added to it when the user
+                    # provided explicit lists), otherwise the preprocessor
+                    # would not know how to handle them.
+                    if self.numerical_features is not None:
+                        self.numerical_features = list(self.numerical_features) + [
+                            name
+                            for name in generated
+                            if name not in self.numerical_features
+                        ]
                 # Cleaning uninformative features: fully empty and strictly
                 # constant columns are removed BEFORE feature type detection and
                 # preprocessor assembly, so that HPO and final training work
@@ -2180,6 +2301,39 @@ class ModelTrainer:
                 return pd.Series(oof_pred, index=X.index, name="y_pred_oof")
         return oof_pred
 
+    def register_datetime_expansion(self, expansion: dict[str, list[str]]) -> None:
+        """Record a datetime expansion applied to the data before ``fit``.
+
+        Used when the expansion happened upstream of the trainer (the engine
+        expands datetime columns in ``prepare_dataset``): ``predict`` then
+        applies the same expansion to raw input data. Entries recorded by
+        ``fit`` itself take precedence for the same source column.
+
+        Args:
+            expansion: Mapping ``source column → generated component
+                columns`` (see ``datetime_expansion_map``).
+
+        Raises:
+            TrainingError: If ``expansion`` is not a mapping of column names
+                to lists of column names.
+        """
+        if not isinstance(expansion, dict) or not all(
+            isinstance(src, str)
+            and isinstance(names, list)
+            and all(isinstance(name, str) for name in names)
+            for src, names in expansion.items()
+        ):
+            raise TrainingError(
+                "expansion must be a dict[str, list[str]] "
+                "(source column → generated component columns)"
+            )
+        with self.lock:
+            current = getattr(self, "datetime_expansion_", None) or {}
+            self.datetime_expansion_ = {
+                **{src: list(names) for src, names in expansion.items()},
+                **current,
+            }
+
     def _align_predict_columns(self, X: pd.DataFrame) -> pd.DataFrame:
         """Align the DataFrame columns to the training order.
 
@@ -2251,7 +2405,10 @@ class ModelTrainer:
         For ``pd.DataFrame`` inputs, a defensive validation and alignment of
         the column order to the training order (``self.feature_names``) is
         performed: missing columns raise an explicit error, extra columns are
-        dropped, and duplicated names are rejected. ``SharedDataFrame`` is
+        dropped, and duplicated names are rejected. Datetime/timedelta columns
+        that were expanded into components at training time
+        (``datetime_expansion_``) are expanded the same way first, so the
+        model accepts the raw schema it was trained on. ``SharedDataFrame`` is
         restored into a DataFrame and aligned the same way when column names
         are available. For ``np.ndarray`` and other inputs without names, the
         positional column order fixed at training time is used.
@@ -2269,7 +2426,11 @@ class ModelTrainer:
                 # conversion if X is already an array or DataFrame
                 X_input: Any
                 if isinstance(X, pd.DataFrame):
-                    X_input = self._align_predict_columns(X)
+                    X_input = self._align_predict_columns(
+                        expand_datetime_columns(
+                            X, getattr(self, "datetime_expansion_", None) or {}
+                        )
+                    )
                 elif isinstance(X, SharedDataFrame):
                     X_input = self._align_predict_shared_dataframe(X)
                 elif isinstance(X, (pd.Series, np.ndarray)):

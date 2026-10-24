@@ -35,6 +35,9 @@ The `general` section may include the following attributes:
 * `target_encoding_fallback` — (optional, default `null`) fallback value of target encoding for categories unseen in training; `null` means the global target mean.
 * `sanity_gate` — (optional) thresholds and settings of the Sanity Gate audit used by select phases with `strategy: "sanity_gate"`. The section is a pure source of thresholds — the global switch `mode` was removed. See [Sanity Gate configuration](#sanity-gate-configuration-sanity_gate).
 * `complexity_guard` — (optional) settings of the adaptive complexity guard for tree/boosting search spaces on small data. See [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard).
+* `inf_policy` — (optional, `"as_missing"` | `"error"`, default `"as_missing"`) policy for infinite values (`±inf`) in numeric features. `"as_missing"` replaces them with NaN and logs a WARNING listing the columns and counts (the missing values are imputed by the preprocessor); `"error"` rejects the data with a ValueError naming the columns.
+* `datetime_policy` — (optional, `"expand"` | `"drop"` | `"error"`, default `"expand"`) policy for datetime/timedelta columns (not handled by any transformer and previously silently dropped). `"expand"` replaces each column with derived numeric components (`year`, `month`, `day`, `dayofweek`, and `hour` when it is non-zero) and logs a WARNING listing the generated columns; `"drop"` removes the columns and logs a WARNING; `"error"` rejects the data with a ValueError naming the columns.
+* `drop_id_like_columns` — (optional, `bool`, default `false`) whether ID-like columns are dropped from the feature matrix. An ID-like column is an object/string column with `nunique/n >= 0.95` or a unique monotonic integer column. With `false` (default) such columns are only reported with a WARNING naming them; with `true` they are removed. The rule is a heuristic: time-dependent monotonic features (e.g. a timestamp counter) may be meaningful and should be reviewed before removal.
 
 ### Early stopping (`pruning`)
 
@@ -948,6 +951,10 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `hashing_n_components` | `int` | `16` | Number of binary columns per categorical column when `"hashing"` encoding is used (`>= 1`). Controls output dimensionality regardless of column cardinality. |
 | `target_encoding_smoothing` | `float` | `20.0` | Smoothing parameter `m` of target encoding (`>= 0`). With `m=0` the raw per-category mean is used; larger values pull rare categories toward the global mean. |
 | `target_encoding_fallback` | `float` or `None` | `None` | Fallback value for categories unseen in training under target encoding. `None` means the global target mean. |
+| `inf_policy` | `str` | `"as_missing"` | Policy for infinite values (`±inf`) in numeric features during `fit()`: `"as_missing"` (default) — replace with NaN and log a WARNING listing the columns/counts; `"error"` — reject with `TrainingError` naming the columns. |
+| `datetime_policy` | `str` | `"expand"` | Policy for datetime/timedelta columns during `fit()`: `"expand"` (default) — replace each column with derived numeric components (`year`, `month`, `day`, `dayofweek`, `hour` if non-zero) and log a WARNING listing the generated columns; `"drop"` — remove and warn; `"error"` — reject. |
+| `drop_id_like_columns` | `bool` | `False` | Whether ID-like columns (object/string with `nunique/n >= 0.95`, or a unique monotonic integer column) are dropped during `fit()`. `False` (default) — only a WARNING naming the columns; `True` — they are removed. |
+| `warn_id_like` | `bool` | `True` | Whether the ID-like WARNING is emitted during `fit()`. The engine path (via `prepare_dataset`) passes `False` so the diagnostics are not duplicated; standalone calls warn by default. |
 
 **Key attributes:**
 
@@ -955,13 +962,15 @@ Orchestrator class for training, validation, and serialization of regression mod
 
 **Key methods:**
 
-* `fit(X, y)` — Train the model with full preprocessing pipeline.
-* `predict(X)` — Make predictions on new data.
+* `fit(X, y)` — Train the model with full preprocessing pipeline. The target is validated like at the engine entry point: a non-numeric or NaN/±inf target, or a constant one, is rejected with `TrainingError`.
+* `predict(X)` — Make predictions on new data. Accepts the raw schema the model was trained on: datetime/timedelta columns expanded at training time (`datetime_policy="expand"`) are expanded the same way first (object-dtype date strings are parsed with `pd.to_datetime`), and extra columns (e.g. dropped ID-like ones) are ignored.
+* `register_datetime_expansion(mapping)` — Record a datetime expansion applied upstream of `fit()` (used by the engine, which expands the data in `prepare_dataset`), so that `predict` re-applies it to raw data.
 * `save(path)` — Serialize to disk.
 * `load(path)` — Load from disk (class method).
 
 **Attributes after `fit()`:**
 
+* `datetime_expansion_` — `dict[str, list[str]]`: source datetime/timedelta column → generated component columns; re-applied by `predict` (empty when nothing was expanded).
 * `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
 * `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set).
 

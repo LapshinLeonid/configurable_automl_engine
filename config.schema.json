@@ -761,6 +761,33 @@
         "complexity_guard": {
           "$ref": "#/$defs/ComplexityGuardCfg",
           "description": "Settings of the adaptive complexity guard for tree/boosting search spaces on small data (mode: 'off'/'warn'/'apply', lossless/regularize levels, user_range_policy, size-mode thresholds, size_basis). See API_REFERENCE.md."
+        },
+        "inf_policy": {
+          "default": "as_missing",
+          "description": "Policy for infinite values (±inf) in numeric features: 'as_missing' (default) — replace them with NaN and log a WARNING listing the columns and counts (missing values are imputed by the preprocessor); 'error' — reject the data with a ValueError naming the columns.",
+          "enum": [
+            "as_missing",
+            "error"
+          ],
+          "title": "Inf Policy",
+          "type": "string"
+        },
+        "datetime_policy": {
+          "default": "expand",
+          "description": "Policy for datetime/timedelta columns (not handled by any transformer and previously silently dropped): 'expand' (default) — replace each column with derived numeric components (year, month, day, dayofweek, and hour if it is non-zero) and log a WARNING listing the generated columns; 'drop' — remove the columns and log a WARNING; 'error' — reject the data with a ValueError naming the columns.",
+          "enum": [
+            "expand",
+            "drop",
+            "error"
+          ],
+          "title": "Datetime Policy",
+          "type": "string"
+        },
+        "drop_id_like_columns": {
+          "default": false,
+          "description": "Whether ID-like columns (object/string with nunique/n >= 0.95, or a unique monotonic integer column) are dropped from the feature matrix. False (default) — such columns are only reported with a WARNING naming them; true — they are removed. ID-like columns are typically uninformative for regression and can slow training down dramatically.",
+          "title": "Drop Id Like Columns",
+          "type": "boolean"
         }
       },
       "required": [

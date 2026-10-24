@@ -138,6 +138,16 @@ SelectStrategy = Literal["cv_best", "sanity_gate"]
 #: or the entire corridor pool of finalists.
 SelectOutput = Literal["winner", "top_k", "pool"]
 
+#: Policy for ±inf values in numeric features: ``"as_missing"`` (default) —
+#: replace with NaN and warn; ``"error"`` — reject with ValueError.
+InfPolicy = Literal["as_missing", "error"]
+
+#: Policy for datetime/timedelta columns: ``"expand"`` (default) — replace
+#: with derived components (year/month/day/dayofweek, hour if non-zero) and
+#: warn; ``"drop"`` — drop the columns and warn; ``"error"`` — reject with
+#: ValueError.
+DatetimePolicy = Literal["expand", "drop", "error"]
+
 
 # ─────────────────── pruning (early stopping) ──────────────────── #
 class PruningStrategy(str, Enum):
@@ -1212,6 +1222,39 @@ class GeneralCfg(BaseModel):
             "search spaces on small data (mode: 'off'/'warn'/'apply', "
             "lossless/regularize levels, user_range_policy, size-mode "
             "thresholds, size_basis). See API_REFERENCE.md."
+        ),
+    )
+    inf_policy: InfPolicy = Field(
+        default="as_missing",
+        description=(
+            "Policy for infinite values (±inf) in numeric features: "
+            "'as_missing' (default) — replace them with NaN and log a "
+            "WARNING listing the columns and counts (missing values are "
+            "imputed by the preprocessor); 'error' — reject the data with a "
+            "ValueError naming the columns."
+        ),
+    )
+    datetime_policy: DatetimePolicy = Field(
+        default="expand",
+        description=(
+            "Policy for datetime/timedelta columns (not handled by any "
+            "transformer and previously silently dropped): 'expand' (default) "
+            "— replace each column with derived numeric components "
+            "(year, month, day, dayofweek, and hour if it is non-zero) and log "
+            "a WARNING listing the generated columns; 'drop' — remove the "
+            "columns and log a WARNING; 'error' — reject the data with a "
+            "ValueError naming the columns."
+        ),
+    )
+    drop_id_like_columns: bool = Field(
+        default=False,
+        description=(
+            "Whether ID-like columns (object/string with nunique/n >= 0.95, "
+            "or a unique monotonic integer column) are dropped from the "
+            "feature matrix. False (default) — such columns are only reported "
+            "with a WARNING naming them; true — they are removed. ID-like "
+            "columns are typically uninformative for regression and can slow "
+            "training down dramatically."
         ),
     )
 
