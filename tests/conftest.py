@@ -28,8 +28,16 @@ def test_config(tmp_path: Path) -> Config:
             ],
         ),
         algorithms={
-            "random_forest": {"enable": True, "limit_hyperparameters": True},
-            "ridge": {"enable": True, "limit_hyperparameters": True},
+            "random_forest": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"n_estimators": [10, 20]},
+            },
+            "ridge": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"alpha": [0.1, 1.0]},
+            },
         },
     )
 

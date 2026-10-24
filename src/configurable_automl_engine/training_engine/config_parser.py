@@ -1492,7 +1492,8 @@ class AlgoCfg(BaseModel):
     and paths to the trainer and tuner modules.
     Attributes:
         enable (bool): Flag for the algorithm's participation in the current experiment.
-        limit_hyperparameters (bool): Reduced search-space mode.
+        limit_hyperparameters (bool): Restrict the search to the user-listed
+            hyperparameters only (no DEFAULT_SPACES entries).
         hyperparameters (Dict | None): Custom parameter bounds
             overriding the default values.
         tuner (str): Dotted path to the optimizer module.
@@ -1505,7 +1506,13 @@ class AlgoCfg(BaseModel):
         default=True, description="Whether to use this algorithm in the AutoML pipeline"
     )
     limit_hyperparameters: bool = Field(
-        default=False, description=("Limit the hyperparameters of the search space")
+        default=False,
+        description=(
+            "Restrict the search to ONLY the parameters listed in "
+            "'hyperparameters'; every other parameter stays at the estimator "
+            "default (no DEFAULT_SPACES entries are added). false (default) — "
+            "user ranges override and are merged into DEFAULT_SPACES."
+        ),
     )
     hyperparameters: dict[str, SearchSpaceEntry] | None = Field(
         default=None,
@@ -1589,6 +1596,23 @@ class AlgoCfg(BaseModel):
                 "(expecting 'package.module' or 'a.b.c.Class' format)"
             )
         return v
+
+    @model_validator(mode="after")
+    def _limit_requires_hyperparameters(self) -> AlgoCfg:
+        """Reject the meaningless ``limit_hyperparameters: true`` without ``hyperparameters``.
+
+        The limited mode searches ONLY the user-listed parameters; with an
+        empty (or missing) ``hyperparameters`` block there would be nothing
+        to search and every parameter would silently stay at the estimator
+        default. The combination is a configuration error, not a silent no-op.
+        """
+        if self.limit_hyperparameters and not self.hyperparameters:
+            raise ValueError(
+                "limit_hyperparameters=true requires a non-empty 'hyperparameters' "
+                "block: the limited search space is built ONLY from the listed "
+                "parameters, so an empty block would leave nothing to optimize."
+            )
+        return self
 
 
 class _AlgorithmsConfigBase(BaseModel):

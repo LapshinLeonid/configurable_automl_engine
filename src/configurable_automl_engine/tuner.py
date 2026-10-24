@@ -1128,6 +1128,7 @@ class _OptimizeRunner:
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
         complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
         user_hyperparameter_keys: list[str] | None = None,
+        limit_hyperparameters: bool = False,
         fit_best_model: bool = True,
         phase_name: str | None = None,
     ) -> None:
@@ -1194,6 +1195,11 @@ class _OptimizeRunner:
         # (``algo.hyperparameters``); the complexity guard treats them as
         # "user ranges" (intersected, with ``user_range_policy`` on conflict).
         self.user_hyperparameter_keys = list(user_hyperparameter_keys or [])
+        # Restrict the search to the user-listed parameters only: the space
+        # dict passed via ``space_overrides`` is used as-is (NO adaptive SVR
+        # epsilon injection, NO DEFAULT_SPACES fallback). Mirrors
+        # ``AlgoCfg.limit_hyperparameters``.
+        self.limit_hyperparameters = limit_hyperparameters
         # Number of features after preprocessing (what the model sees).
         # Filled in build_trial_pipeline (falls back to the raw column count).
         self.n_features_eff: int = 1
@@ -1761,8 +1767,15 @@ class _OptimizeRunner:
             # user did not set epsilon explicitly (prepare_search_space omits
             # the default epsilon from DEFAULT_SPACES, so its absence in the
             # dict means "not overridden"). The bounds are computed once
-            # BEFORE the Optuna loop.
-            if self.algo == "svr" and "epsilon" not in space_dict:
+            # BEFORE the Optuna loop. In the limited mode
+            # (``limit_hyperparameters: true``) the space is exactly what the
+            # user listed: no parameter is added beyond it, so the adaptive
+            # epsilon is NOT injected.
+            if (
+                self.algo == "svr"
+                and "epsilon" not in space_dict
+                and not self.limit_hyperparameters
+            ):
                 space_dict = {
                     **space_dict,
                     "epsilon": _svr_adaptive_epsilon_entry(self.y),
@@ -2805,6 +2818,7 @@ def optimize(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
     user_hyperparameter_keys: list[str] | None = None,
+    limit_hyperparameters: bool = False,
     fit_best_model: bool = True,
     phase_name: str | None = None,
 ) -> OptimizeResult | None:
@@ -2930,6 +2944,12 @@ def optimize(
             intersects its ranges with these user ranges and applies
             ``user_range_policy`` on an empty intersection. ``None`` — no
             user-specified parameters.
+        limit_hyperparameters (bool): Restrict the search to ONLY the
+            parameters present in ``space_overrides`` for this algorithm
+            (``AlgoCfg.limit_hyperparameters: true``): no ``DEFAULT_SPACES``
+            entries are added and the SVR adaptive epsilon is not injected.
+            Defaults to False — user ranges override and are merged into
+            ``DEFAULT_SPACES``.
         fit_best_model (bool): Whether to train the final model on all
             provided data after the search and return it in the ``model``
             field of the result. Defaults to True (the original behavior).
@@ -3004,6 +3024,7 @@ def optimize(
         feature_selection_cfg=feature_selection_cfg,
         complexity_guard_cfg=complexity_guard_cfg,
         user_hyperparameter_keys=user_hyperparameter_keys,
+        limit_hyperparameters=limit_hyperparameters,
         fit_best_model=fit_best_model,
         phase_name=phase_name,
     ).run()

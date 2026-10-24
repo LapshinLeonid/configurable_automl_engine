@@ -405,10 +405,11 @@ general:
 algorithms:
   ridge:
     enable: true
-    limit_hyperparameters: true
   random_forest:
     enable: true
     limit_hyperparameters: true
+    hyperparameters:
+      n_estimators: [50, 300]
 ```
 
 Boundary behavior:
@@ -559,6 +560,12 @@ XGBoost `max_depth` ≤ 5. In the `"ordinary"` mode the spaces are unchanged.
 
 Interaction with user ranges (`limit_hyperparameters` + `hyperparameters`):
 
+* In the default mode (`limit_hyperparameters: false`) the user ranges
+  override and are merged into `DEFAULT_SPACES`, and the guard applies to the
+  merged space.
+* With `limit_hyperparameters: true` the search space contains ONLY the
+  user-listed parameters: the guard restricts those ranges exactly as below,
+  and no default-space parameter (e.g. SVR's adaptive `epsilon`) is added.
 * The default spaces adapt automatically. The default XGBoost space
   (`DEFAULT_SPACES['xgboosting']`) includes `min_child_weight` (1–10, float)
   and `reg_lambda` (1e-3–100, log scale), so the level B rules of the guard
@@ -715,7 +722,7 @@ Short aliases are also supported: `"dt"`, `"rf"`, `"et"`, `"gb"`, `"ab"`, `"sgd"
 Algorithm configuration consists of:
 
 * `enable` — boolean flag, whether hyperparameter search is performed for the algorithm.
-* `limit_hyperparameters` — (optional) boolean flag to set limits for hyperparameter search.
+* `limit_hyperparameters` — (optional) boolean flag (default `false`). `true` — the search is restricted to ONLY the parameters listed in `hyperparameters`; every other parameter stays at the estimator default (no `DEFAULT_SPACES` entries are added). `false` — the user ranges override and are merged into the algorithm's default search space. `true` requires a non-empty `hyperparameters` block (rejected at config load otherwise).
 * `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. Keys must match hyperparameters accepted by the estimator constructor (including legacy names from `LEGACY_PARAM_MAPPINGS`, e.g. `n_iter` → `max_iter` for ARDRegression). The allowed set is derived from the estimator signature via [`get_allowed_hyperparameters`](src/configurable_automl_engine/models.py), not from the default search space — so parameters outside `DEFAULT_SPACES` (e.g. `min_samples_split`, `max_features`) are valid as long as the estimator accepts them. Unknown names (typos) are rejected at configuration validation. One documented exception: `isotonic_regression` also accepts `feature_index` — an integer data-adapter hint (not an estimator constructor parameter) consumed by `IsotonicDataTransformer` to select the column fed to the strictly univariate isotonic model.
 
 A numeric range is written as `[low, high]` or with an explicit type: `[low, high, "float"]`, `[low, high, "float_log"]` or `[low, high, "int"]`. When the type is **not** written explicitly, it is taken from the **parameter's type** (the default search space or the estimator signature), not from how the boundary numbers look — so `[1, 50]` for a real-valued parameter (e.g. `C` of an SVR or `alpha` of a Tweedie) stays a real range instead of silently becoming an integer one. The **logarithmic scale** (`float_log`) is used by default when the parameter is searched on a log scale by default — a scale parameter (`alpha`, `C`, `epsilon`, `gamma`, `learning_rate`) or a parameter whose default search space entry is `float_log` (e.g. `alpha_1`, `alpha_2`, `lambda_1`, `lambda_2` of an ARD regression or `eta0` of an SGD regressor) — and both bounds are positive; an explicit type (`[1, 50, "int"]`) is always honored. An explicit `[low, high, "float_log"]` requires `low > 0` (the log scale needs strictly positive bounds).

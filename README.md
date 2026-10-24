@@ -143,6 +143,25 @@ terminal select) — the two examples are intentionally different.
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
+## Restricted hyperparameter search (`limit_hyperparameters`)
+
+Each algorithm block accepts an optional boolean
+`limit_hyperparameters` (default `false`):
+
+* **`false` (default)** — the user ranges from `hyperparameters` override
+  and are merged into the algorithm's default search space
+  (`DEFAULT_SPACES`): parameters not listed by the user keep their default
+  search ranges.
+* **`true`** — the search is restricted to ONLY the parameters listed in
+  `hyperparameters`; every other parameter stays at the estimator default
+  (no `DEFAULT_SPACES` entries are added to the search). Useful to make a
+  search fast and focused (e.g. tune only `n_estimators` of a forest), or
+  to reproduce a fixed configuration while still searching a small subset.
+
+`limit_hyperparameters: true` requires a non-empty `hyperparameters` block —
+an empty one would leave nothing to optimize, so such a config is rejected
+at load (no silent no-op).
+
 # Pipeline phases: `refine` / `select`
 
 > **Note:** both explicit pipeline actions are executed:

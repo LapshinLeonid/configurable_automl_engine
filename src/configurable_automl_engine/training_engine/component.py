@@ -1195,6 +1195,7 @@ def _run_hpo(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
     user_hyperparameter_keys: list[str] | None = None,
+    limit_hyperparameters: bool = False,
     phase_name: str | None = None,
 ) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
@@ -1271,6 +1272,11 @@ def _run_hpo(
             Forwarded to tuners that accept the argument and used to
             deduplicate the WARNING about the pooled-metric fallback (once
             per algorithm and phase).
+        limit_hyperparameters (bool): Restrict the search to ONLY the
+            user-listed parameters (``AlgoCfg.limit_hyperparameters: true``):
+            the prepared search space contains no ``DEFAULT_SPACES`` entries,
+            and the tuner must not add any parameter beyond it (e.g. the SVR
+            adaptive epsilon). Forwarded to tuners that accept the argument.
     Returns:
         PhaseResult | None: The phase result — score, params and the phase's
             own Optuna trials; or ``None`` if an error occurred during HPO
@@ -1455,6 +1461,9 @@ def _run_hpo(
 
     if user_hyperparameter_keys and "user_hyperparameter_keys" in sig.parameters:
         kwargs["user_hyperparameter_keys"] = user_hyperparameter_keys
+
+    if limit_hyperparameters and "limit_hyperparameters" in sig.parameters:
+        kwargs["limit_hyperparameters"] = limit_hyperparameters
 
     # The HPO phase needs only the best parameters and score — the final model
     # is trained later by the engine's own trainer. Ask a tuner that supports
@@ -2064,13 +2073,26 @@ class _HpoPhaseSpec:
 
 
 def _prepare_search_space(
-    algo_name: str, user_overrides: dict[str, Any] | None
+    algo_name: str,
+    user_overrides: dict[str, Any] | None,
+    limit: bool = False,
 ) -> dict[str, Any]:
     """Prepare the hyperparameter search space.
 
     Merges the system defaults with the user overrides from the
     configuration. A module-level function (not a closure) so that the
     ``_hpo_phase_worker`` worker is serializable in the "processes" mode.
+
+    When ``limit`` is True the search is restricted to ONLY the parameters
+    listed in ``user_overrides`` (``AlgoCfg.hyperparameters``): no
+    ``DEFAULT_SPACES`` entries are added, and every other parameter stays at
+    the estimator default. When ``limit`` is False (the default) the user
+    ranges override and are merged into ``DEFAULT_SPACES`` — the current
+    behavior.
+
+    A limited search must not be empty: the caller passes the already
+    validated ``AlgoCfg.hyperparameters``, whose keys are guaranteed to be
+    allowed for the algorithm (the config validator rejects unknown names).
 
     Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
     ARDRegression) are remapped ONCE here, before the Optuna loop — not at
@@ -2080,10 +2102,19 @@ def _prepare_search_space(
     Args:
         algo_name (str): The algorithm name used to look up defaults.
         user_overrides (dict[str, Any] | None): A dict of parameters to override.
+        limit (bool): Restrict the search to the user-listed parameters only
+            (no ``DEFAULT_SPACES`` entries). Defaults to False.
 
     Returns:
         dict[str, Any]: The resulting search space.
     """
+    if limit:
+        if not user_overrides:
+            return {}
+        # Only the user-listed parameters are searched; everything else
+        # stays at the estimator default. Legacy names are remapped once.
+        return remap_legacy_param_names(algo_name, user_overrides)
+
     space = DEFAULT_SPACES.get(algo_name, {}).copy()
     if user_overrides:
         # Remap legacy names in the user overrides BEFORE the merge so that
@@ -2118,6 +2149,7 @@ def _execute_hpo_phase(
     random_state: int | None = None,
     sampler_seed: int | None = None,
     user_hyperparameter_keys: list[str] | None = None,
+    limit_hyperparameters: bool = False,
 ) -> PhaseResult | None:
     """Run a specific HPO phase for an algorithm (module-level function).
 
@@ -2145,6 +2177,9 @@ def _execute_hpo_phase(
             ``_run_hpo``.
         sampler_seed (int | None): The per-phase TPE sampler seed
             (``RANDOM_STATE + hpo_phase_ordinal``), forwarded to ``_run_hpo``.
+        limit_hyperparameters (bool): Restrict the search to ONLY the
+            user-listed parameters (``AlgoCfg.limit_hyperparameters: true``);
+            forwarded to ``_run_hpo``.
 
     Returns:
         PhaseResult | None: The phase result (score, params, trials), or
@@ -2188,6 +2223,7 @@ def _execute_hpo_phase(
             feature_selection_cfg=spec.feature_selection_cfg,
             complexity_guard_cfg=spec.complexity_guard_cfg,
             user_hyperparameter_keys=user_hyperparameter_keys,
+            limit_hyperparameters=limit_hyperparameters,
             phase_name=phase_name,
         )
 
@@ -2262,10 +2298,14 @@ def _hpo_phase_worker(
         init_params = prev.params
         previous_trials = prev.trials or None
 
-    # 1. Take the system defaults and overlay what is in AlgoCfg (from YAML/JSON)
+    # 1. Take the system defaults and overlay what is in AlgoCfg (from YAML/JSON).
+    #    In the limited mode (limit_hyperparameters: true) ONLY the user-listed
+    #    parameters are searched — no DEFAULT_SPACES entries.
+    limit = bool(getattr(algo_cfg, "limit_hyperparameters", False))
     full_search_space = _prepare_search_space(
         algo_name,
         algo_cfg.hyperparameters,  # this is the dict from config_parser
+        limit=limit,
     )
     # The names of parameters the user set explicitly (algo.hyperparameters):
     # the complexity guard treats them as "user ranges" (intersected, with
@@ -2285,6 +2325,7 @@ def _hpo_phase_worker(
             random_state=spec.random_state,
             sampler_seed=spec.sampler_seed,
             user_hyperparameter_keys=user_keys,
+            limit_hyperparameters=limit,
         )
 
         if result is None:

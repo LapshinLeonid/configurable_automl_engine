@@ -205,9 +205,9 @@ class DegenerateCase:
 # soft_warning, not a disqualification, so the genuinely best model by
 # RMSE_oof wins rather than "the one that passed the gate".
 _REFERENCE_ALGORITHMS: dict[str, dict[str, Any]] = {
-    "ridge": {"enable": True, "limit_hyperparameters": True},
-    "lasso": {"enable": True, "limit_hyperparameters": True},
-    "elasticnet": {"enable": True, "limit_hyperparameters": True},
+    "ridge": {"enable": True},
+    "lasso": {"enable": True},
+    "elasticnet": {"enable": True},
 }
 
 REFERENCE_CASES: list[ReferenceCase] = [
@@ -243,8 +243,8 @@ DEGENERATE_CASES: list[DegenerateCase] = [
         name="degenerate_flat_shelf",
         generator=make_degenerate_flat_shelf,
         algorithms={
-            "elasticnet": {"enable": True, "limit_hyperparameters": True},
-            "ridge": {"enable": True, "limit_hyperparameters": True},
+            "elasticnet": {"enable": True},
+            "ridge": {"enable": True},
         },
         stub_hpo=lambda name: {
             "elasticnet": PhaseResult(score=-0.08, params={"alpha": 500.0}),
@@ -255,8 +255,8 @@ DEGENERATE_CASES: list[DegenerateCase] = [
         name="degenerate_tanh_plateau",
         generator=make_degenerate_tanh_plateau,
         algorithms={
-            "svr": {"enable": True, "limit_hyperparameters": True},
-            "ridge": {"enable": True, "limit_hyperparameters": True},
+            "svr": {"enable": True},
+            "ridge": {"enable": True},
         },
         stub_hpo=lambda name: {
             # gamma=0.0 — the true tanh plateau: almost constant predictions
@@ -275,8 +275,8 @@ DEGENERATE_CASES: list[DegenerateCase] = [
         name="degenerate_overfit",
         generator=make_degenerate_overfit,
         algorithms={
-            "decision_tree": {"enable": True, "limit_hyperparameters": True},
-            "ridge": {"enable": True, "limit_hyperparameters": True},
+            "decision_tree": {"enable": True},
+            "ridge": {"enable": True},
         },
         stub_hpo=lambda name: {
             "decision_tree": PhaseResult(score=-0.08, params={"max_depth": 20}),
@@ -298,7 +298,7 @@ ALL_CASES: list[ReferenceCase | DegenerateCase] = [
 
 def _algo_cfg(extra: dict[str, Any]) -> dict[str, Any]:
     """Normalize an algorithm configuration from a case into an AlgoCfg dict."""
-    cfg: dict[str, Any] = {"enable": True, "limit_hyperparameters": True}
+    cfg: dict[str, Any] = {"enable": True}
     cfg.update(extra)
     return cfg
 

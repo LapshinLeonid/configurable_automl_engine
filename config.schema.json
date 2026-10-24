@@ -2,7 +2,7 @@
   "$defs": {
     "AlgoCfg": {
       "additionalProperties": false,
-      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, overridden search spaces,\nand paths to the trainer and tuner modules.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Reduced search-space mode.\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.\n    tuner (str): Dotted path to the optimizer module.\n    trainer_module (str): Dotted path to the model training implementation.",
+      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, overridden search spaces,\nand paths to the trainer and tuner modules.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.\n    tuner (str): Dotted path to the optimizer module.\n    trainer_module (str): Dotted path to the model training implementation.",
       "properties": {
         "enable": {
           "default": true,
@@ -12,7 +12,7 @@
         },
         "limit_hyperparameters": {
           "default": false,
-          "description": "Limit the hyperparameters of the search space",
+          "description": "Restrict the search to ONLY the parameters listed in 'hyperparameters'; every other parameter stays at the estimator default (no DEFAULT_SPACES entries are added). false (default) — user ranges override and are merged into DEFAULT_SPACES.",
           "title": "Limit Hyperparameters",
           "type": "boolean"
         },

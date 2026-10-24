@@ -456,7 +456,6 @@ general:
 algorithms:
   svr:
     enable: true
-    limit_hyperparameters: true
 """
 
 
@@ -525,7 +524,6 @@ general:
 algorithms:
   svr:
     enable: true
-    limit_hyperparameters: true
     hyperparameters:
       epsilon: [0.5, 1.0]
 """
