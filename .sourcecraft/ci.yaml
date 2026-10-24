@@ -365,6 +365,7 @@ workflows:
                 echo "  1. CODE STYLE CHECK (Ruff)"
                 echo "═══════════════════════════════════════════════════════════════"
                 ruff check src/
+                ruff format --check src/
                 echo "✅ Ruff: no issues found"
               - |
                 echo ""

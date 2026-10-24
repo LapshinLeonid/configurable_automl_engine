@@ -28,6 +28,9 @@ jobs:
       - name: Lint with Ruff
         run: ruff check src/
 
+      - name: Check formatting with Ruff
+        run: ruff format --check src/
+
       - name: Type check with Mypy
         run: mypy src --install-types --non-interactive
 
