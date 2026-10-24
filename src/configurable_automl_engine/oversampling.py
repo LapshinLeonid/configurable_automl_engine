@@ -22,10 +22,199 @@ import numpy as np
 import pandas as pd
 from imblearn.base import BaseSampler
 from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
-from pandas.api.types import is_numeric_dtype
+from pandas.api.types import is_bool_dtype, is_numeric_dtype
 from sklearn.preprocessing import OrdinalEncoder
 
+#: Number of quantile bins used to discretize a continuous regression target
+#: before class-based oversampling. The binned groups imitate (and balance)
+#: "classes" of a regression target; after resampling the bins are decoded
+#: back into the original continuous values.
+CONTINUOUS_TARGET_QUANTILES = 8
+
+#: Minimum number of "classes" a target must have to be considered
+#: continuous: pd.qcut of a target with fewer effective quantiles produces
+#: fewer bins (Peter-Hall estimator), and imbalanced-learn needs at least two
+#: groups to resample.
+CONTINUOUS_TARGET_MIN_BINS = 2
+
 logger = logging.getLogger(__name__)
+
+
+def _bin_continuous_target(
+    y: pd.Series,
+) -> tuple[bool, pd.Series, dict[int, float]]:
+    """Detect a continuous regression target and discretize it into bins.
+
+    Runs a single quantile discretization and reuses it for both the
+    continuous detection and the backward decoding, so the hot path
+    (:meth:`DataOversampler._fit_resample`) bins the target only once.
+
+    Args:
+        y (pd.Series): The target variable vector.
+
+    Returns:
+        tuple[bool, pd.Series, dict[int, float]]: A triple of
+            (is_continuous, codes, bin_mids). When the target is not
+            continuous — or cannot be discretized into at least
+            :data:`CONTINUOUS_TARGET_MIN_BINS` groups — returns
+            ``(False, y, {})`` so the caller keeps the classification path.
+    """
+    if y.empty or not is_numeric_dtype(y.dtype):
+        return False, y, {}
+    if is_bool_dtype(y.dtype):
+        return False, y, {}
+    finite = y.dropna()
+    if finite.empty:
+        return False, y, {}
+    if not np.issubdtype(np.asarray(finite).dtype, np.floating):
+        return False, y, {}
+    # A float target that contains any non-integer-representable value is
+    # "continuous" for sklearn/imblearn and must be binned. Integer-valued
+    # floats (``0.0``/``1.0``, ``0.0``/``1.0``/``2.0``, ...) are valid
+    # multiclass targets and stay on the classification path.
+    values = np.asarray(finite, dtype=float)
+    if not np.all(np.isfinite(values)):
+        return False, y, {}
+    if np.all(values == np.floor(values)):
+        return False, y, {}
+    try:
+        finite_bins = pd.qcut(finite, q=CONTINUOUS_TARGET_QUANTILES, duplicates="drop")
+    except (TypeError, ValueError):
+        return False, y, {}
+    if finite_bins.cat.categories.size < CONTINUOUS_TARGET_MIN_BINS:
+        return False, y, {}
+
+    finite_mask = y.notna()
+    codes = np.asarray(finite_bins.cat.codes, dtype=np.int8)
+    binned: pd.Series = pd.Series(
+        np.full(len(y), -1, dtype=np.int8), index=y.index, name=y.name
+    )
+    binned.iloc[np.asarray(finite_mask)] = codes
+    bin_mids: dict[int, float] = {
+        int(code): float(interval.mid)
+        for code, interval in enumerate(finite_bins.cat.categories)
+    }
+    return True, binned, bin_mids
+
+
+def _is_continuous_target(y: pd.Series) -> bool:
+    """Determine whether a target vector is continuous regression data.
+
+    The classification-style samplers of imbalanced-learn reject float
+    targets that contain at least one non-integer value
+    (``ValueError: Unknown label type: continuous`` — sklearn's
+    ``type_of_target`` rule). A target is considered continuous exactly when
+    imbalanced-learn would reject it: a float dtype (``NaN`` allowed — the
+    natural regression case) with a finite value that is not integer-
+    representable (e.g. ``2.5``). Integer dtypes, bools and integer-valued
+    floats (``0.0``/``1.0`` binary targets, ``0.0``/``1.0``/``2.0``
+    multiclass targets, ...) are valid classification targets and stay on
+    the classification path. The binned path additionally requires a
+    quantile discretization into at least
+    :data:`CONTINUOUS_TARGET_MIN_BINS` groups.
+
+    Args:
+        y (pd.Series): The target variable vector.
+
+    Returns:
+        bool: ``True`` if the target should be treated as continuous.
+    """
+    return _bin_continuous_target(y)[0]
+
+
+def _prepare_continuous_bins(y: pd.Series) -> tuple[pd.Series, dict[int, float]]:
+    """Discretize a continuous target into quantile bins (class codes).
+
+    The bin codes are computed on the finite target values; rows with a
+    missing target keep code ``-1`` and are passed through the samplers
+    unchanged (like an extra class that is not resampled). The selected
+    number of bins is derived from the quantile discretization itself
+    (``duplicates="drop"``), so the same bin structure is used both for the
+    resampling strategy and for the backward decoding.
+
+    Args:
+        y (pd.Series): The continuous target vector.
+
+    Returns:
+        tuple[pd.Series, dict[int, float]]: A pair of the integer (``int8``)
+            code series (the quantile bin number per row, ``-1`` for a
+            missing target) and the per-bin representative values (interval
+            midpoints) used to restore continuous targets after resampling.
+
+    Raises:
+        ValueError: If ``y`` cannot be discretized into at least
+            :data:`CONTINUOUS_TARGET_MIN_BINS` quantile bins.
+    """
+    is_continuous, binned, bin_mids = _bin_continuous_target(y)
+    if not is_continuous:
+        raise ValueError(
+            "a continuous target with at least "
+            f"{CONTINUOUS_TARGET_MIN_BINS} quantile bins is required"
+        )
+    return binned, bin_mids
+
+
+def _decode_continuous_y(
+    y_binned: Any,
+    y_original: pd.Series,
+    y_orig_codes: pd.Series,
+    bin_mids: dict[int, float],
+) -> np.ndarray:
+    """Decode quantile-bin codes back into continuous target values.
+
+    Original rows keep their real target values; each synthetic row receives
+    the midpoint of the quantile bin it was generated for (identified by its
+    own bin code, so the per-row association is preserved).
+
+    The decoding relies on the samplers prepending the original rows
+    unchanged (the current behavior of RandomOverSampler/SMOTE/ADASYN in
+    imbalanced-learn, where ``X_resampled``/``y_resampled`` start with a copy
+    of the input). The prefix is verified explicitly so that a future change
+    in the row ordering of imbalanced-learn cannot silently corrupt the
+    original target values — it fails loudly instead.
+
+    Args:
+        y_binned: The resampled bin-code vector (first ``len(y_original)``
+            entries are the original codes, the tail is synthetic).
+        y_original (pd.Series): The original (continuous) target vector.
+        y_orig_codes (pd.Series): The bin codes of the original target
+            vector (the first element of the tuple returned by
+            :func:`_prepare_continuous_bins`).
+        bin_mids (dict[int, float]): Per-bin representative values produced
+            by :func:`_prepare_continuous_bins`.
+
+    Returns:
+        np.ndarray: The continuous target vector for the resampled rows
+            (original values followed by the synthetic ones).
+
+    Raises:
+        ValueError: If the resampled vector does not start with the original
+            rows (unexpected row ordering from the sampler).
+        KeyError: If a synthetic row carries a bin code absent from
+            ``bin_mids`` (i.e. a code that was never generated by
+            :func:`_prepare_continuous_bins`).
+    """
+    y_binned_arr = np.asarray(y_binned)
+    n_original = len(y_original)
+    y_res = np.asarray(y_original, dtype=float).copy()
+    if len(y_binned_arr) < n_original:
+        raise ValueError(
+            "The resampled bin-code vector is shorter than the original "
+            "target; cannot decode the continuous target."
+        )
+    if not np.array_equal(y_binned_arr[:n_original], np.asarray(y_orig_codes)):
+        raise ValueError(
+            "The resampled bin-code vector does not start with the original "
+            "rows; cannot safely decode the continuous target. This may "
+            "indicate a change in the row ordering of imbalanced-learn."
+        )
+    if len(y_binned_arr) == n_original:
+        return y_res
+    synth_values = np.array(
+        [float(bin_mids[int(c)]) for c in y_binned_arr[n_original:]],
+        dtype=float,
+    )
+    return np.concatenate([y_res, synth_values])
 
 
 def _is_categorical_col(s: pd.Series) -> bool:
@@ -99,16 +288,39 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         super().__init__()
         self._lock = threading.RLock()
 
-    def _strategy(self, y: pd.Series, multiplier: float) -> dict[Any, int]:
+    def _strategy(
+        self, y: pd.Series, multiplier: float, skip_missing_code: bool = False
+    ) -> dict[Any, int]:
         """Compute the target number of instances for each class.
+
+        For a classification target (or the pseudo-classes of a binned
+        continuous target) the values are the *final* per-class row counts;
+        the overall result size is therefore approximately
+        ``N * multiplier`` (exact for ``balance=False``, where each class is
+        scaled independently). For a binned continuous target, classes that
+        end up smaller than ``ceil(count * multiplier)`` (e.g. singleton
+        bins that cannot be synthesized) are dropped from the strategy by
+        the caller and pass through unchanged, so the final size may be
+        smaller than ``N * multiplier`` — this is an intentional
+        "balance-like" behavior, not a bug.
+
         Args:
             y (pd.Series): The target variable vector.
             multiplier (float): The scaling factor.
+            skip_missing_code (bool): Whether to exclude the pseudo-class
+                ``-1`` (rows with a missing target in the continuous mode)
+                from the strategy — it must never be rebalanced or scaled
+                (pass-through only).
         Returns:
             Dict[Any, int]: A dictionary where keys are class labels
                 and values are the final number of rows.
         """
         counts = Counter(y)
+        # The pseudo-class "-1" is reserved for rows with a missing target in
+        # the continuous mode: imbalanced-learn treats it as a real class, so
+        # it must never be rebalanced or scaled (pass-through only).
+        if skip_missing_code and -1 in counts:
+            del counts[-1]
         # If balancing is enabled, bring all classes up to the majority class,
         # multiplied by the factor. Otherwise scale each class proportionally.
         if self.balance:
@@ -296,6 +508,15 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         For SMOTE/ADASYN: Dynamic calculation of k_neighbors.
         Prevents ValueError if the number of samples in the minority class
         is smaller than the standard value (5). It is set as min(5, n_samples-1).
+        A continuous (regression) target is detected automatically and
+        oversampled through quantile bins: the target is discretized into
+        equal-frequency bins (see :data:`CONTINUOUS_TARGET_QUANTILES`), the
+        bins are resampled as pseudo-classes, and the real continuous values
+        are restored afterwards (original rows keep their values, synthetic
+        rows receive the midpoint of their bin). This replaces the previous
+        failure when every unique continuous ``y`` value was treated as a
+        separate class, which imbalanced-learn rejects with
+        ``ValueError: Unknown label type: continuous``.
         Args:
             X (Any): Features (array, DataFrame or sparse matrix).
             y (Any): The target variable.
@@ -340,6 +561,14 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             y_validated = np.asarray(y)
             y_s = pd.Series(y_validated)
 
+            # Continuous-target mode: the imblearn samplers reject continuous
+            # labels ("Unknown label type: continuous"). Discretize the target
+            # into quantile bins, resample the bins as pseudo-classes and
+            # restore the real continuous values afterwards. A single
+            # quantile discretization is reused for the detection and the
+            # binning.
+            is_continuous, y_fit, bin_mids = _bin_continuous_target(y_s)
+
             # Sparse branch (output of hashing encoding, csr_matrix):
             # the data is already numeric, there are no categorical columns
             # (OrdinalEncoder is not needed) and pd.DataFrame(csr) would create a
@@ -348,19 +577,25 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # dense distance matrices, so for them a sparse input
             # is converted to dense (as before the hashing switch to sparse).
             if is_sparse:
-                strategy_sparse = self._strategy(y_s, self.multiplier_)
+                strategy_sparse = self._strategy(
+                    y_fit, self.multiplier_, skip_missing_code=is_continuous
+                )
                 if algo_local == "random":
                     sampler = RandomOverSampler(
                         sampling_strategy=strategy_sparse,
                         random_state=self.random_state,
                     )
-                    X_res_raw, y_res = sampler.fit_resample(X, y_s)
+                    X_res_raw, y_res = sampler.fit_resample(X, y_fit)
                     logger.info(
                         "%s resample: %d -> %d",
                         algo_local.upper(),
                         X.shape[0],
                         X_res_raw.shape[0],
                     )
+                    if is_continuous:
+                        return X_res_raw, _decode_continuous_y(
+                            y_res, y_s, y_fit, bin_mids
+                        )
                     return X_res_raw, y_res.to_numpy()
                 if algo_local in ("smote", "adasyn"):
                     X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
@@ -390,7 +625,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             X_to_resample = X_df
 
             # Determine the algorithm and perform resampling
-            strategy = self._strategy(y_s, self.multiplier_)
+            strategy = self._strategy(
+                y_fit, self.multiplier_, skip_missing_code=is_continuous
+            )
 
             if algo_local == "random":
                 sampler = RandomOverSampler(
@@ -408,16 +645,72 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     X_to_resample[cat_cols] = ordinal_encoder.fit_transform(
                         X_to_resample[cat_cols]
                     )
+                y_to_fit: Any = y_fit
             else:
                 ordinal_encoder = None
                 # SMOTE / ADASYN case
-                counts = Counter(y_s)
+                counts = Counter(y_fit)
+                # "-1" (missing target in the continuous mode) is a
+                # pass-through pseudo-class: it is excluded from the strategy
+                # AND from the k_neighbors estimation.
+                skip_missing = is_continuous
+                active_counts = Counter(
+                    {
+                        cls: cnt
+                        for cls, cnt in counts.items()
+                        if not (skip_missing and cls == -1)
+                    }
+                )
+                if not active_counts:
+                    raise ValueError(
+                        "SMOTE/ADASYN require at least one non-missing target value."
+                    )
 
-                # For SMOTE/ADASYN: Dynamic calculation of k_neighbors.
-                # Prevents ValueError if a class has fewer
-                # than the default 5 neighbors.
-                min_samples = min(counts.values())
-                k_neighbors = max(1, min(5, min_samples - 1))
+                if is_continuous:
+                    # Continuous mode: quantile-bin pseudo-classes that are
+                    # too small for the current k cannot be synthesized.
+                    # imblearn fits a k-NN with (k_neighbors + 1) points per
+                    # resampled class and drops the point itself, so a class
+                    # with n samples can only be synthesized when
+                    # n >= k_neighbors + 1. Such classes are excluded from
+                    # the strategy and pass through unchanged; k is recomputed
+                    # from the minimum of the remaining classes until the set
+                    # stabilizes. When every class is too small (e.g. all
+                    # quantile bins are singletons) the strategy becomes empty
+                    # and the data is kept unchanged.
+                    strategy = {
+                        cls: tgt
+                        for cls, tgt in strategy.items()
+                        if not (skip_missing and cls == -1)
+                    }
+                    eligible = dict(active_counts)
+                    k_neighbors = 1
+                    while eligible:
+                        k_candidate = min(5, min(eligible.values()) - 1)
+                        k_candidate = max(1, k_candidate)
+                        too_small = {
+                            cls: cnt
+                            for cls, cnt in eligible.items()
+                            if cnt <= k_candidate
+                        }
+                        if not too_small:
+                            k_neighbors = k_candidate
+                            break
+                        eligible = {
+                            cls: cnt
+                            for cls, cnt in eligible.items()
+                            if cnt > k_candidate
+                        }
+                    strategy = {
+                        cls: tgt for cls, tgt in strategy.items() if cls in eligible
+                    }
+                else:
+                    # Classification mode: keep all classes in the strategy and
+                    # derive k from the smallest class count. A singleton
+                    # minority class is left to imbalanced-learn, which raises
+                    # a ValueError (the documented imblearn contract).
+                    min_samples = min(active_counts.values())
+                    k_neighbors = max(1, min(5, min_samples - 1))
 
                 if algo_local == "smote":
                     if cat_features_idx:
@@ -454,8 +747,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                         )
                 else:
                     raise ValueError(f"Unsupported algorithm: {algo_local}")
+                y_to_fit = y_fit
 
-            X_res_raw, y_res = sampler.fit_resample(X_to_resample, y_s)
+            X_res_raw, y_res = sampler.fit_resample(X_to_resample, y_to_fit)
             # Cast to DF since SMOTE may return numpy
             X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
 
@@ -478,6 +772,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 "%s resample: %d -> %d", algo_local.upper(), len(X_df), len(X_res_df)
             )
 
+            if is_continuous:
+                return X_res_df.to_numpy(), _decode_continuous_y(
+                    y_res, y_s, y_fit, bin_mids
+                )
             return X_res_df.to_numpy(), y_res.to_numpy()
         except (ValueError, TypeError, ImportError, RuntimeError):
             # Re-raise known data-related or configuration errors directly

@@ -12,8 +12,14 @@ from pandas.api.types import is_numeric_dtype
 
 # Imports according to your project structure
 from configurable_automl_engine.oversampling import (
+    CONTINUOUS_TARGET_MIN_BINS,
+    CONTINUOUS_TARGET_QUANTILES,
     DataOversampler,
+    _bin_continuous_target,
+    _decode_continuous_y,
     _is_categorical_col,
+    _is_continuous_target,
+    _prepare_continuous_bins,
     oversample as functional_oversample,
     oversample,
 )
@@ -397,6 +403,54 @@ def test_sparse_unsupported_algorithm_raises():
     sampler = DataOversampler(algorithm="magic")
     with pytest.raises(ValueError, match="Unsupported algorithm"):
         sampler.fit_resample(X_sparse, y)
+
+
+def test_smote_adasyn_require_non_missing_target():
+    """SMOTE/ADASYN raise a clear error when there is no usable target."""
+    X = np.arange(4.0).reshape(2, 2)
+    y = np.array([])
+    for algorithm in ("smote", "adasyn"):
+        sampler = DataOversampler(algorithm=algorithm, multiplier=2.0)
+        with pytest.raises(ValueError, match="require at least one non-missing"):
+            sampler.fit_resample(X, y)
+
+
+def test_decode_continuous_y_rejects_short_input():
+    """A resampled vector shorter than the original target must raise."""
+    y = pd.Series(np.linspace(0.0, 1.0, 64))
+    binned, bin_mids = _prepare_continuous_bins(y)
+
+    with pytest.raises(ValueError, match="shorter than the original"):
+        _decode_continuous_y(binned.to_numpy()[:10], y, binned, bin_mids)
+
+
+def test_sparse_random_continuous_target_keeps_sparse():
+    """Random oversampling of a continuous target on a sparse input stays
+    sparse and decodes the target back to real continuous values."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+        ]
+    )
+    rng = np.random.RandomState(5)
+    y = rng.randn(X_sparse.shape[0])
+    sampler = DataOversampler(algorithm="random", multiplier=2.0, random_state=42)
+    X_res, y_res = sampler.fit_resample(X_sparse, y)
+
+    assert sparse.issparse(X_res)
+    assert X_res.format == "csr"
+    n_orig = len(y)
+    assert X_res.shape[0] > n_orig
+    # Original rows keep their exact values; the tail is bin midpoints.
+    assert np.array_equal(y_res[:n_orig], y)
+    assert np.isfinite(y_res[n_orig:]).all()
 
 
 # 6. Coverage of line 259: Unsupported algorithm
@@ -870,3 +924,259 @@ def test_smote_guard_not_triggered_for_numeric_strings():
     sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
     result = sampler.oversample(df, target="target")
     assert len(result) > len(df)
+
+
+# ------------------------------------------------------------------ #
+#  Continuous regression targets (quantile-binned oversampling)       #
+# ------------------------------------------------------------------ #
+
+
+def test_is_continuous_target_detection():
+    """Continuous (regression) targets are detected; discrete targets are not."""
+    rng = np.random.RandomState(0)
+    # True continuous (non-integer floats)
+    assert _is_continuous_target(pd.Series(rng.randn(200))) is True
+    assert _is_continuous_target(pd.Series([0.5, 1.5, 2.5, 0.5, 1.5])) is True
+    # Two unique non-integer floats are also continuous for imblearn
+    assert _is_continuous_target(pd.Series([2.5, 5.5, 2.5, 5.5])) is True
+    # Integer dtypes and integer-valued floats stay on the classification path
+    assert _is_continuous_target(pd.Series(np.arange(100) % 40)) is False
+    assert _is_continuous_target(pd.Series([0, 1, 0, 1])) is False
+    assert _is_continuous_target(pd.Series([0.0, 1.0, 0.0, 1.0])) is False
+    assert _is_continuous_target(pd.Series([0.0, 1.0, 2.0, 0.0, 1.0, 2.0])) is False
+    # Bool targets stay on the classification path
+    assert _is_continuous_target(pd.Series([True, False, True, False])) is False
+    # Non-numeric targets are never continuous
+    assert _is_continuous_target(pd.Series(["a", "b", "c", "a"])) is False
+    # NaN-only / empty targets are not continuous
+    assert _is_continuous_target(pd.Series([np.nan, np.nan])) is False
+    assert _is_continuous_target(pd.Series([], dtype=float)) is False
+
+
+def test_prepare_continuous_bins_raises_on_non_discretizable():
+    """_prepare_continuous_bins raises a ValueError when the target cannot
+    be split into the required number of quantile bins."""
+    with pytest.raises(ValueError, match="quantile bins is required"):
+        _prepare_continuous_bins(pd.Series([2.5] * 5))
+
+
+def test_prepare_continuous_bins_structure():
+    """Bins cover all finite rows; NaN rows are marked with code -1."""
+    y = pd.Series([1.0, 2.5, 4.0, 8.0, 16.0, np.nan, 32.0, 64.0, 128.0])
+    binned, bin_mids = _prepare_continuous_bins(y)
+
+    assert len(binned) == len(y)
+    assert int(binned.iloc[5]) == -1  # NaN row -> -1
+    finite_codes = binned[binned != -1]
+    assert set(finite_codes.unique()) == set(bin_mids.keys())
+    assert set(finite_codes.unique()) == set(range(len(bin_mids)))
+    # Midpoints are finite and (weakly) ordered like the bins
+    mids = [bin_mids[k] for k in sorted(bin_mids)]
+    assert all(np.isfinite(m) for m in mids)
+    assert mids == sorted(mids)
+
+
+def test_decode_continuous_y_keeps_originals_and_synthesizes():
+    """Original rows keep their real values; synthetic rows get bin mids."""
+    y = pd.Series(np.linspace(0.0, 1.0, 64))
+    binned, bin_mids = _prepare_continuous_bins(y)
+    n = len(y)
+
+    # Simulate a resampled bin vector: originals + 3 synthetic for bin 0 and
+    # 2 synthetic for bin 1 (synthetic rows always come last).
+    y_binned = np.concatenate(
+        [binned.to_numpy(), np.array([0, 0, 0, 1, 1], dtype=binned.dtype)]
+    )
+    decoded = _decode_continuous_y(y_binned, y, binned, bin_mids)
+
+    assert len(decoded) == n + 5
+    assert np.array_equal(decoded[:n], y.to_numpy())
+    assert np.allclose(decoded[n:], [bin_mids[0]] * 3 + [bin_mids[1]] * 2)
+
+
+@pytest.mark.parametrize("algorithm", ["random", "smote", "adasyn"])
+def test_oversample_continuous_target_all_algorithms(algorithm):
+    """The three algorithms oversample a continuous target without crashing
+    and preserve the original target values."""
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame(
+        {"f1": rng.randn(120), "f2": rng.randn(120), "f3": rng.randn(120)}
+    )
+    df["target"] = df["f1"] + 0.5 * df["f2"] + rng.randn(120) * 0.2
+
+    sampler = DataOversampler(algorithm=algorithm, multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+
+    n_orig = len(df)
+    assert len(res) > n_orig
+    assert np.array_equal(res["target"].iloc[:n_orig].to_numpy(), df["target"].to_numpy())
+    synth = res["target"].iloc[n_orig:]
+    assert np.isfinite(synth).all()
+    assert synth.between(df["target"].min(), df["target"].max()).all()
+
+
+def test_oversample_continuous_target_with_nan():
+    """NaN targets pass through unchanged; no synthetic NaN is produced."""
+    rng = np.random.RandomState(7)
+    df = pd.DataFrame({"f1": rng.randn(100)})
+    df["target"] = rng.randn(100)
+    df.loc[df.index[:10], "target"] = np.nan
+
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+
+    n_orig = len(df)
+    assert len(res) > n_orig
+    assert res["target"].iloc[:n_orig].isna().sum() == 10
+    assert res["target"].iloc[n_orig:].notna().all()
+
+
+def test_binary_float_target_stays_classification():
+    """Binary float 0.0/1.0 targets must NOT take the continuous path:
+    the result contains only the original class values."""
+    rng = np.random.RandomState(5)
+    df = pd.DataFrame({"f1": rng.randn(80), "f2": rng.randn(80)})
+    df["target"] = np.where(rng.rand(80) > 0.5, 1.0, 0.0)
+
+    sampler = DataOversampler(algorithm="smote", multiplier=2.0, random_state=42)
+    res = sampler.oversample(df, target="target")
+
+    assert len(res) > len(df)
+    assert set(res["target"].unique()) == {0.0, 1.0}
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_continuous_target_singleton_bin_pass_through(algorithm):
+    """A quantile bin with a single row cannot be synthesized (SMOTE/ADASYN
+    need k_neighbors); such bins are passed through instead of crashing.
+
+    Regression: the previous implementation computed k_neighbors from the
+    global minimum class count, so a singleton bin crashed with
+    ``n_neighbors <= n_samples_fit``. The buggy test did not actually
+    produce a singleton bin; this dataset reproduces the reviewer's case
+    (bin counts {0: 20, 1: 1, 2: 3, 3: 4}).
+    """
+    # Truly continuous target with a singleton quantile bin (99.0 outlier).
+    target = [0.0] * 10 + [1.5] * 10 + [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 99.0]
+    rng = np.random.RandomState(3)
+    df = pd.DataFrame({"f1": rng.randn(len(target)), "f2": rng.randn(len(target))})
+    df["target"] = target
+
+    sampler = DataOversampler(algorithm=algorithm, multiplier=2.0, random_state=42)
+    res = sampler.oversample(df, target="target")
+
+    n_orig = len(df)
+    assert len(res) >= n_orig
+    # Original rows keep their exact values (including the singleton row).
+    assert np.array_equal(res["target"].iloc[:n_orig].to_numpy(), np.asarray(target))
+    # The synthetic tail is finite and within the observed range.
+    assert res["target"].iloc[n_orig:].notna().all()
+    assert res["target"].iloc[n_orig:].between(min(target), max(target)).all()
+
+
+def test_continuous_target_all_singleton_bins_pass_through():
+    """When every quantile bin is a singleton nothing can be synthesized:
+    SMOTE/ADASYN must keep the data unchanged instead of crashing."""
+    # 8 distinct continuous values -> qcut produces 8 singleton bins.
+    target = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+    rng = np.random.RandomState(1)
+    df = pd.DataFrame({"f1": rng.randn(len(target)), "f2": rng.randn(len(target))})
+    df["target"] = target
+
+    for algorithm in ("smote", "adasyn"):
+        sampler = DataOversampler(
+            algorithm=algorithm, multiplier=2.0, random_state=42
+        )
+        res = sampler.oversample(df, target="target")
+        assert len(res) == len(df)
+        assert np.allclose(
+            res["target"].to_numpy(), np.asarray(target, dtype=float), equal_nan=True
+        )
+
+
+def test_continuous_target_singleton_bin_with_nan_pass_through():
+    """Singleton bins and NaN targets together: nothing crashes, NaN rows are
+    passed through, the singleton row keeps its value."""
+    target = [0.0] * 10 + [1.5] * 10 + [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 99.0]
+    target[12] = np.nan  # NaN inside the 1.5 block; bins: {0:10, 1:9, 2:1, 3:3, 4:4}
+    rng = np.random.RandomState(4)
+    df = pd.DataFrame({"f1": rng.randn(len(target)), "f2": rng.randn(len(target))})
+    df["target"] = target
+
+    for algorithm in ("smote", "adasyn"):
+        sampler = DataOversampler(
+            algorithm=algorithm, multiplier=2.0, random_state=42
+        )
+        res = sampler.oversample(df, target="target")
+        n_orig = len(df)
+        assert len(res) >= n_orig
+        assert res["target"].iloc[:n_orig].isna().sum() == 1
+        # All original rows keep their exact values (NaN at the same place).
+        assert np.allclose(
+            res["target"].iloc[:n_orig].to_numpy(),
+            np.asarray(target, dtype=float),
+            equal_nan=True,
+        )
+        assert res["target"].iloc[n_orig:].notna().all()
+
+
+def test_continuous_target_balance_true_with_nan():
+    """balance=True with NaN targets does not crash and NaN rows are passed
+    through unchanged."""
+    target = [1.0, 2.5, 4.0, 8.0, 16.0, 32.0] + [np.nan] * 2
+    target = target * 3
+    rng = np.random.RandomState(9)
+    df = pd.DataFrame({"f1": rng.randn(len(target)), "f2": rng.randn(len(target))})
+    df["target"] = target
+
+    for algorithm in ("smote", "adasyn", "random"):
+        sampler = DataOversampler(
+            algorithm=algorithm, multiplier=1.5, balance=True, random_state=42
+        )
+        res = sampler.oversample(df, target="target")
+        n_orig = len(df)
+        assert len(res) >= n_orig
+        assert res["target"].iloc[:n_orig].isna().sum() == 6
+        assert res["target"].iloc[n_orig:].notna().all()
+
+
+def test_decode_continuous_y_rejects_unknown_synth_code():
+    """A synthetic row with a bin code absent from bin_mids must raise a
+    KeyError instead of silently substituting 0.0."""
+    y = pd.Series(np.linspace(0.0, 1.0, 64))
+    binned, bin_mids = _prepare_continuous_bins(y)
+    n = len(y)
+
+    # A valid int8 code that is NOT a bin of this target.
+    valid_int8_max = 127
+    y_binned = np.concatenate(
+        [binned.to_numpy(), np.array([valid_int8_max], dtype=np.int8)]
+    )
+
+    with pytest.raises(KeyError):
+        _decode_continuous_y(y_binned, y, binned, bin_mids)
+
+
+def test_decode_continuous_y_rejects_unexpected_row_order():
+    """If the resampled vector does not start with the original rows, the
+    decoding must fail loudly instead of silently corrupting the targets."""
+    y = pd.Series(np.linspace(0.0, 1.0, 64))
+    binned, bin_mids = _prepare_continuous_bins(y)
+
+    # Rotate the vector: the original codes are no longer the prefix.
+    rotated = np.roll(binned.to_numpy(), 1)
+    with pytest.raises(ValueError, match="does not start with the original rows"):
+        _decode_continuous_y(rotated, y, binned, bin_mids)
+
+
+def test_bin_continuous_target_single_pass_consistency():
+    """The combined detection+binning helper agrees with the standalone
+    helpers and produces identical codes/mids."""
+    y = pd.Series(np.linspace(0.0, 1.0, 200) ** 2)
+    is_cont, binned, bin_mids = _bin_continuous_target(y)
+
+    assert is_cont == _is_continuous_target(y)
+    assert is_cont is True
+    binned2, bin_mids2 = _prepare_continuous_bins(y)
+    assert bin_mids == bin_mids2
+    assert np.array_equal(binned.to_numpy(), binned2.to_numpy())
