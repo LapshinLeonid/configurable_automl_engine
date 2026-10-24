@@ -481,12 +481,16 @@ def test_execute_phases_refine_uses_initial_params_for_all_candidates():
         ctx = execute_phases(cfg, prepared)
 
     # Phase 1: both algorithms without initial_params; phase 2: both algorithms
-    # with phase 1 parameters (warm start for the whole input set).
-    assert calls == [
-        ("random_forest", None),
+    # with phase 1 parameters (warm start for the whole input set). The
+    # algorithms run in parallel worker threads, so the call order within a
+    # single phase is nondeterministic — only the phase boundaries are stable.
+    assert sorted(calls[:2]) == [
         ("extra_trees", None),
-        ("random_forest", {"p": 1}),
+        ("random_forest", None),
+    ]
+    assert sorted(calls[2:]) == [
         ("extra_trees", {"p": 1}),
+        ("random_forest", {"p": 1}),
     ]
     # Same names, updated records: the output replaces the working set.
     assert set(ctx.working_set) == {"random_forest", "extra_trees"}
@@ -531,11 +535,13 @@ def test_execute_phases_refine_after_select_warm_starts_from_select_output():
 
     # select(cv_best, top_k, k=1) left only the CV leader; refine
     # retrains it with a warm start from the select output parameters.
-    assert calls == [
-        ("random_forest", None),
+    # The algorithms run in parallel worker threads, so the call order
+    # within the all_algorithms phase is nondeterministic.
+    assert sorted(calls[:2]) == [
         ("extra_trees", None),
-        ("random_forest", {"p": 1}),
+        ("random_forest", None),
     ]
+    assert calls[2:] == [("random_forest", {"p": 1})]
     assert set(ctx.working_set) == {"random_forest"}
 
 
@@ -1057,12 +1063,16 @@ def test_execute_phases_refine_passes_previous_trials():
         execute_phases(cfg, prepared)
 
     # Phase 1 (all_algorithms): no warm-start; phase 2 (refine): the previous
-    # phase's trials are passed as previous_trials.
-    assert calls == [
-        ("random_forest", None, None),
+    # phase's trials are passed as previous_trials. The algorithms run in
+    # parallel worker threads, so the call order within a single phase is
+    # nondeterministic — only the phase boundaries are stable.
+    assert sorted(calls[:2]) == [
         ("extra_trees", None, None),
-        ("random_forest", {"p": 1}, [history]),
+        ("random_forest", None, None),
+    ]
+    assert sorted(calls[2:]) == [
         ("extra_trees", {"p": 1}, [history]),
+        ("random_forest", {"p": 1}, [history]),
     ]
 
 
