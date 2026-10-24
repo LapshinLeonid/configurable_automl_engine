@@ -1047,22 +1047,29 @@ class GeneralCfg(BaseModel):
         ),
     )
     high_cardinality_threshold: int | None = Field(
-        default=None,
+        default=50,
         ge=0,
         description=(
             "Cardinality threshold for the automatic mode (>= 0). Columns "
             "with a number of unique values strictly greater than the threshold "
-            "are encoded with the high_cardinality_encoding strategy, the rest — "
-            "with the categorical_encoding strategy. Must be set together with "
-            "high_cardinality_encoding. None — the automatic mode is disabled."
+            "are encoded with the high_cardinality_encoding strategy (default "
+            "'frequency'), the rest — with the categorical_encoding strategy. "
+            "Must be set together with high_cardinality_encoding. The default "
+            "50 enables the automatic high-cardinality mode out of the box; to "
+            "disable it, set both this field and high_cardinality_encoding to "
+            "null explicitly."
         ),
     )
     high_cardinality_encoding: EncodingStrategy | None = Field(
-        default=None,
+        default="frequency",
         description=(
-            "Encoding strategy for high-cardinality columns "
-            "(above high_cardinality_threshold). Must be set together with "
-            "high_cardinality_threshold. None — the mode is disabled."
+            "Encoding strategy for high-cardinality columns (above "
+            "high_cardinality_threshold; default 'frequency' — the relative "
+            "category frequency, which does not expand the feature space). "
+            "Must be set together with high_cardinality_threshold. The default "
+            "'frequency' keeps the memory/CPU footprint low on high-cardinality "
+            "columns; set this field and the threshold to null to disable the "
+            "automatic mode."
         ),
     )
     hashing_n_components: int = Field(

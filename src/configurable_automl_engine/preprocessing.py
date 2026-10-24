@@ -23,8 +23,13 @@ The module encapsulates the low-level data preparation building blocks:
 
 Supported categorical encoding strategies:
 
-* **one_hot** (default) — ``OneHotEncoder``: each category becomes a
-      binary column; unknown categories are ignored.
+* **one_hot** (default) — ``OneHotEncoder`` with ``sparse_output=True``:
+      each category becomes a binary column; unknown categories are ignored.
+      The sparse output avoids the dense ``n × p`` blow-up (and the
+      ``n × n`` dense allocations of the default ``OneHotEncoder`` on
+      high-cardinality ID columns) — the ``ColumnTransformer`` keeps the
+      sparse representation whenever the total density is below
+      ``sparse_threshold=0.3`` and returns a dense matrix otherwise.
     * **ordinal** — ``OrdinalEncoder``: one numerical column per category;
       unknown categories are mapped to ``-1``.
     * **target** — :class:`TargetEncodingTransformer`: mean of the target
@@ -51,7 +56,10 @@ number of unique values exceeds ``high_cardinality_threshold`` are encoded
 with the ``high_cardinality_encoding`` strategy, and the rest with the
 ``encoding`` strategy. The split is computed in :meth:`SplitCategoricalEncoder.fit`
 from the actual (training) data, so the decision does not depend on the
-validation data.
+validation data. The engine config (``GeneralCfg``) enables the mode by
+default (threshold 50, ``high_cardinality_encoding='frequency'``); passing
+``None`` for both parameters disables it (the default of the low-level
+``build_preprocessor``/``SplitCategoricalEncoder`` API).
 
 The single preprocessor entry point is used in BOTH training locations — the
 hyperparameter tuning phase (``tuner.optimize``) and final training
@@ -594,7 +602,15 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         unreachable for correct calls.
         """
         if strategy == "one_hot":
-            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+            # sparse_output=True (the default of OneHotEncoder): the
+            # pre-processed matrix stays sparse when its density is below
+            # sparse_threshold, which prevents the dense n×n float blow-up on
+            # high-cardinality columns (an ID-like column was the worst case:
+            # it expanded into n binary columns and the dense float64 output
+            # allocated n×n floats per fold). Algorithms that reject sparse
+            # input (GPR/Isotonic/ARD) get a dense matrix via
+            # build_preprocessor(force_dense_output=True).
+            return OneHotEncoder(handle_unknown="ignore", sparse_output=True)
         if strategy == "ordinal":
             return OrdinalEncoder(
                 handle_unknown="use_encoded_value",
@@ -706,8 +722,9 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
     ) -> np.ndarray | sp.spmatrix:
         """Concatenate the default- and HC-encoder outputs into one matrix.
 
-        If at least one part is sparse (hashing encoding), the parts are
-        concatenated via ``sp.hstack`` (CSR); otherwise — via ``np.hstack``.
+        If at least one part is sparse (sparse one-hot or hashing encoding),
+        the parts are concatenated via ``sp.hstack`` (CSR); otherwise — via
+        ``np.hstack``.
 
         Args:
             parts: Encoder outputs in concatenation order.
@@ -1126,7 +1143,12 @@ def build_preprocessor(
 
         The following strategies are supported for categorical features:
 
-        * ``'one_hot'`` (default) — ``OneHotEncoder``;
+        * ``'one_hot'`` (default) — ``OneHotEncoder`` with
+          ``sparse_output=True``: the sparse output avoids the dense
+          ``n × p`` blow-up on high-cardinality columns; the
+          ``ColumnTransformer`` keeps the sparse representation when the
+          total density is below ``sparse_threshold`` and returns a dense
+          matrix otherwise;
         * ``'ordinal'`` — ``OrdinalEncoder`` (1 output column per column);
         * ``'target'`` — target encoding with smoothing
           (:class:`TargetEncodingTransformer`);
@@ -1168,8 +1190,9 @@ def build_preprocessor(
             feature_names: Full list of feature names in column order.
             categorical_features: Names of the columns encoded with the selected strategy.
             numerical_features: Names of the columns subject to imputation and scaling.
-            encoding: Categorical encoding strategy: ``'one_hot'`` (default),
-                ``'ordinal'``, ``'target'``, ``'frequency'`` or ``'hashing'``.
+            encoding: Categorical encoding strategy: ``'one_hot'`` (default,
+                sparse one-hot), ``'ordinal'``, ``'target'``, ``'frequency'``
+                or ``'hashing'``.
             imputation_strategy: Missing-value imputation strategy for numerical
                 features: ``'mean'`` (default) or ``'median'`` (robust to outliers,
                 accounts for skewed distributions). Imputation is performed with
@@ -1182,8 +1205,9 @@ def build_preprocessor(
             high_cardinality_threshold: Cardinality threshold (``>= 0``). Columns
                 with a number of unique values strictly greater than the threshold
                 are high-cardinality and encoded with the
-                ``high_cardinality_encoding`` strategy. ``None`` (default) —
-                automatic mode disabled.
+                ``high_cardinality_encoding`` strategy. ``None`` — automatic
+                mode disabled (the low-level default; the engine config enables
+                the mode with threshold 50 + ``'frequency'`` by default).
             high_cardinality_encoding: Encoding strategy for high-cardinality columns.
                 Must be set together with ``high_cardinality_threshold``.
             hashing_n_components: Number of binary columns per categorical column
@@ -1199,7 +1223,7 @@ def build_preprocessor(
                 :func:`~configurable_automl_engine.models.requires_dense_input`):
                 with ``sparse_threshold=0.0`` ``ColumnTransformer`` converts sparse
                 parts to dense. ``False`` by default — the output stays sparse for
-                hashing encoding (memory savings).
+                sparse one-hot / hashing encoding (memory savings).
             add_indicator: Whether to add binary missing-value indicators for
                 numerical features (``SimpleImputer(add_indicator=...)``). ``True``
                 by default; disabled for strictly one-dimensional algorithms

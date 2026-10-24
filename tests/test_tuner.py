@@ -2302,6 +2302,71 @@ def test_runner_n_features_eff_ignores_missing_categories():
     assert runner.n_features_eff == 7
 
 
+def test_runner_n_features_eff_respects_high_cardinality_split():
+    """n_features_eff counts each categorical column with the strategy it
+    actually receives in the automatic high-cardinality mode.
+
+    Issue #157: with the default engine settings (threshold 50 + frequency),
+    the estimate must NOT expand high-cardinality columns into one-hot; the
+    HC split (per-column cardinality vs the threshold) matches
+    SplitCategoricalEncoder.
+    """
+    rng = np.random.default_rng(5)
+    n = 300
+    cats = pd.DataFrame(
+        {
+            # cardinality 3 <= threshold 10 -> one-hot (3 columns)
+            "low": rng.integers(0, 3, size=n).astype(str),
+            # cardinality 60 > threshold 10 -> frequency (1 column)
+            "high": [f"h{i % 60}" for i in range(n)],
+        }
+    )
+    X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
+    y = pd.Series(rng.normal(size=n))
+
+    runner = hyperopt._OptimizeRunner(
+        algo_name="random_forest",
+        X=X,
+        y=y,
+        data_oversampling=False,
+        data_oversampling_multiplier=1.0,
+        data_oversampling_algorithm="random",
+        metric="r2",
+        val_method="train_test_split",
+        validation_strategy=None,
+        n_folds=5,
+        n_trials=2,
+        random_state=0,
+        sampler_seed=None,
+        train_test_split_test_size=0.2,
+        space_overrides=None,
+        initial_params=None,
+        preprocessor=None,
+        categorical_features=None,
+        numerical_features=None,
+        encoding="one_hot",
+        preprocessing_override=None,
+        pruning=None,
+        high_cardinality_threshold=10,
+        high_cardinality_encoding="frequency",
+        hashing_n_components=16,
+        target_encoding_smoothing=20.0,
+        target_encoding_fallback=None,
+        feature_selection_cfg=None,
+    )
+    runner.resolve_validation()
+    runner.build_trial_pipeline()
+
+    # low one-hot (3) + high frequency (1) + numerical (1) = 5.
+    assert runner.n_features_eff == 5
+
+    # Threshold above all cardinalities: both columns are one-hot.
+    runner.high_cardinality_threshold = 10_000
+    runner.build_trial_pipeline()
+    # low (3) + high (60) + numerical (1) = 64.
+    assert runner.n_features_eff == 64
+
+
 def test_runner_n_features_size_aligned_without_preprocessor():
     """Without a preprocessor (np.ndarray input) n_features_size aligns with
     n_features_eff.

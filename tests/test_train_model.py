@@ -1430,6 +1430,58 @@ def test_trainer_logs_resolved_preset(caplog):
     assert "scaling='none'" in caplog.text
 
 
+def test_trainer_logs_preprocessed_matrix_dimensions(caplog):
+    """The final fit logs the preprocessed matrix dimensionality and format.
+
+    Issue #157: the line "preprocessed matrix: n × p (sparse/dense)" makes the
+    categorical expansion visible in the logs (a dense n×n one-hot blow-up was
+    previously invisible).
+    """
+    import logging as _logging
+
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame(
+        {
+            "cat": ["a", "b", "c"] * 20,
+            "num": rng.normal(size=60),
+        }
+    )
+    y = df["num"] * 2.0 + rng.normal(0, 0.1, 60)
+
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+        ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(df, y)
+
+    assert re.search(
+        r"preprocessed matrix: 60 × 4 \(dense\)", caplog.text
+    ), caplog.text
+
+
+def test_trainer_logs_preprocessed_matrix_sparse_for_high_cardinality(caplog):
+    """A high-cardinality one-hot column is logged as a sparse n×n matrix.
+
+    Issue #157: with the sparse one-hot, a unique-per-row ID column produces
+    the log "preprocessed matrix: N × N (sparse)" instead of a dense blow-up.
+    """
+    import logging as _logging
+
+    rng = np.random.default_rng(1)
+    n = 300
+    df = pd.DataFrame({"id": [f"id_{i}" for i in range(n)], "num": rng.normal(size=n)})
+    y = df["num"] * 2.0 + rng.normal(0, 0.1, n)
+
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+        ModelTrainer(
+            algorithm="ridge",
+            hyperparams={"alpha": 0.1},
+            categorical_features=["id"],
+            numerical_features=["num"],
+        ).fit(df, y)
+
+    assert re.search(
+        rf"preprocessed matrix: {n} × {n + 1} \(sparse\)", caplog.text
+    ), caplog.text
+
+
 def test_trainer_preset_survives_save_load(tmp_path):
     """The preset is preserved in the serialized trainer."""
     trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)

@@ -2937,7 +2937,7 @@ def test_optimize_model_failing_one_fold_gets_worst_score(toy_data, caplog):
         patch.object(
             tuner._OptimizeRunner,
             "assemble_estimator",
-            side_effect=lambda model, apply_fs=False: model,
+            side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
     ):
         opt_res = optimize(

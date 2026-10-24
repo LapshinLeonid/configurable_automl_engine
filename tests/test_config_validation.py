@@ -144,15 +144,23 @@ def test_high_cardinality_encoding_unsupported_rejected():
 
 
 def test_high_cardinality_pair_must_be_set_together():
-    """Only one parameter of the pair is set -> a clear error is raised."""
+    """Only one parameter of the pair is set -> a clear error is raised.
+
+    The defaults (threshold 50 + encoding 'frequency') mean that both
+    half-settings are now self-consistent: setting only the threshold uses the
+    default 'frequency', and setting only the encoding uses the default
+    threshold 50. The pair must be explicitly disabled together (both None).
+    """
     only_threshold = BASE | {
         "general": {
             **BASE["general"],
             "high_cardinality_threshold": 10,
         }
     }
-    with pytest.raises(ValidationError, match="must be set together"):
-        Config.model_validate(only_threshold)
+    # The threshold alone is valid now: the encoding defaults to 'frequency'.
+    cfg = Config.model_validate(only_threshold)
+    assert cfg.general.high_cardinality_threshold == 10
+    assert cfg.general.high_cardinality_encoding == "frequency"
 
     only_encoding = BASE | {
         "general": {
@@ -160,8 +168,34 @@ def test_high_cardinality_pair_must_be_set_together():
             "high_cardinality_encoding": "target",
         }
     }
+    # The encoding alone is valid now: the threshold defaults to 50.
+    cfg2 = Config.model_validate(only_encoding)
+    assert cfg2.general.high_cardinality_threshold == 50
+    assert cfg2.general.high_cardinality_encoding == "target"
+
+    # Explicitly disabling the pair must be done together.
+    partial_disable = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": None,
+        }
+    }
     with pytest.raises(ValidationError, match="must be set together"):
-        Config.model_validate(only_encoding)
+        Config.model_validate(partial_disable)
+
+
+def test_high_cardinality_pair_explicitly_disabled():
+    """Both parameters set to null disable the automatic mode."""
+    cfg_data = BASE | {
+        "general": {
+            **BASE["general"],
+            "high_cardinality_threshold": None,
+            "high_cardinality_encoding": None,
+        }
+    }
+    cfg = Config.model_validate(cfg_data)
+    assert cfg.general.high_cardinality_threshold is None
+    assert cfg.general.high_cardinality_encoding is None
 
 
 def test_hashing_n_components_zero_rejected():
@@ -190,12 +224,18 @@ def test_target_encoding_fallback_any_float():
         assert cfg.general.target_encoding_fallback == fallback
 
 
-def test_new_params_absent_backward_compat():
-    """A config without the new parameters behaves as before (backward compatibility)."""
+def test_new_params_absent_defaults():
+    """A config without the new parameters uses the documented defaults.
+
+    The automatic high-cardinality mode is enabled by default (issue #157):
+    threshold 50 with the 'frequency' strategy, so high-cardinality columns do
+    not silently expand into a dense one-hot matrix. To disable the mode, set
+    both parameters to null explicitly.
+    """
     cfg = Config.model_validate(BASE)
     assert cfg.general.categorical_encoding == "one_hot"
-    assert cfg.general.high_cardinality_threshold is None
-    assert cfg.general.high_cardinality_encoding is None
+    assert cfg.general.high_cardinality_threshold == 50
+    assert cfg.general.high_cardinality_encoding == "frequency"
     assert cfg.general.hashing_n_components == 16
     assert cfg.general.target_encoding_smoothing == 20.0
     assert cfg.general.target_encoding_fallback is None
