@@ -18,7 +18,7 @@ designed to scale from local experimentation to large-scale data processing.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality. 
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. The default config routes high-cardinality categorical columns (cardinality above 50) to `frequency` encoding and uses **sparse one-hot**, so ID-like columns no longer expand into a dense `n × n` float matrix (no OOM/blow-up; the preprocessed dimensionality is logged as `n × p (sparse/dense)`).
 * **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.

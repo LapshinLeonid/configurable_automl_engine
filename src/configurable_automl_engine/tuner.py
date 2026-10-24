@@ -37,6 +37,7 @@ import optuna
 import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import FrozenTrial, Trial
+from scipy import sparse as sp
 from sklearn import model_selection
 from sklearn.base import clone
 from sklearn.model_selection import (
@@ -1950,7 +1951,13 @@ class _OptimizeRunner:
         One-hot encoding expands each categorical column into its number of
         unique categories; ordinal/target/frequency encoding keeps one column
         per categorical column; hashing encoding expands into
-        ``n_components`` columns.
+        ``n_components`` columns. In the automatic high-cardinality mode
+        (``high_cardinality_threshold`` + ``high_cardinality_encoding``), each
+        categorical column is counted with the strategy it actually receives
+        at fit time: columns whose cardinality is strictly greater than the
+        threshold use the high-cardinality strategy, the rest — the main
+        ``encoding`` strategy (matches
+        :class:`~configurable_automl_engine.preprocessing.SplitCategoricalEncoder`).
 
         Returns:
             int: The estimated feature count (>= 1).
@@ -1979,12 +1986,25 @@ class _OptimizeRunner:
                     n += 0
         if cats and isinstance(self.X, pd.DataFrame):
             encoding = self.encoding or "one_hot"
+            hc_threshold = self.high_cardinality_threshold
+            hc_encoding = self.high_cardinality_encoding
             for col in cats:
                 if col not in self.X.columns:
                     continue
-                if encoding == "hashing":
+                # The automatic high-cardinality split: the column is encoded
+                # with the HC strategy when its cardinality strictly exceeds
+                # the threshold (the same rule as SplitCategoricalEncoder).
+                effective = encoding
+                if hc_threshold is not None and hc_encoding is not None:
+                    try:
+                        if int(self.X[col].nunique(dropna=True)) > hc_threshold:
+                            effective = hc_encoding
+                    except Exception:  # noqa: BLE001, S110 — estimate only
+                        # Cardinality is unknown: keep the main strategy.
+                        pass
+                if effective == "hashing":
                     n += self.hashing_n_components
-                elif encoding == "one_hot":
+                elif effective == "one_hot":
                     try:
                         # Missing values are imputed before encoding
                         # (``_to_string_array`` preserves NaN, the imputer fills
@@ -2682,6 +2702,24 @@ class _OptimizeRunner:
         best_model.fit(self.X, self.y)
 
         self.best_model = best_model
+        # Observability: the dimensionality and the storage format of the
+        # preprocessed matrix the final model received (issue #157: dense
+        # one-hot on high-cardinality columns inflated the matrix with no log
+        # signal). Best-effort — the log must never break the optimization.
+        if self.preprocessor is not None:
+            try:
+                matrix = self.preprocessor.transform(self.X)
+                log.info(
+                    "preprocessed matrix: %d × %d (%s)",
+                    matrix.shape[0],
+                    matrix.shape[1],
+                    "sparse" if sp.issparse(matrix) else "dense",
+                )
+            except Exception:  # noqa: BLE001 — observability only
+                log.debug(
+                    "Could not log the preprocessed matrix dimensions for '%s'.",
+                    self.algo,
+                )
         return best_model
 
     # ─────────────────── private helpers ───────────────────────────────────

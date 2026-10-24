@@ -46,6 +46,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
+from scipy import sparse as sp
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
@@ -1352,7 +1353,39 @@ class ModelTrainer:
                 feature_selection_active=feature_selection_active,
             )
 
+            # Observability: the dimensionality and the representation of the
+            # preprocessed matrix that the model actually received (one-hot
+            # expansion, missing-value indicators, sparse/dense storage).
+            self._log_preprocessed_matrix(preprocessor, X_prepared)
+
             return self
+
+    def _log_preprocessed_matrix(self, preprocessor: Any, X: Any) -> None:
+        """Log the shape and the storage format of the preprocessed matrix.
+
+        Emits the INFO line ``preprocessed matrix: n × p (sparse/dense)`` for
+        the training data after the final fit: ``n`` — rows, ``p`` — the
+        number of features the model saw (after one-hot expansion /
+        indicators), and the storage representation (``sparse`` for a
+        ``scipy.sparse`` output — e.g. sparse one-hot/hashing — and
+        ``dense`` otherwise). Used to make the categorical dimensionality
+        visible in the logs (issue #157: dense one-hot on high-cardinality
+        columns inflated the matrix without any log signal).
+
+        Args:
+            preprocessor: The fitted ``ColumnTransformer``.
+            X: The training feature matrix.
+        """
+        try:
+            matrix = preprocessor.transform(X)
+            n_rows = matrix.shape[0]
+            n_cols = matrix.shape[1]
+            fmt = "sparse" if sp.issparse(matrix) else "dense"
+            self.logger.info("preprocessed matrix: %d × %d (%s)", n_rows, n_cols, fmt)
+        except Exception as err:  # noqa: BLE001 — observability only
+            self.logger.debug(
+                "Could not log the preprocessed matrix dimensions: %s", err
+            )
 
     def _score_on_validation_splits(
         self,

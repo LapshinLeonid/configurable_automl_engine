@@ -19,6 +19,7 @@ from sklearn.preprocessing import (
 
 from configurable_automl_engine.preprocessing import (
     ColumnNameSelector,
+    SplitCategoricalEncoder,
     _clean_uninformative_features,
     _to_string_array,
     build_preprocessor,
@@ -1067,6 +1068,105 @@ def test_build_preprocessor_force_dense_passthrough():
     out = preprocessor.fit_transform(pd.DataFrame({"some_random_column": [1, 2, 3]}))
     assert isinstance(out, np.ndarray)
     assert out.shape == (3, 1)
+
+
+# ──────────────── Sparse one-hot output (issue #157) ────────────────
+
+
+def test_split_encoder_one_hot_is_sparse_by_default():
+    """OneHotEncoder is created with sparse_output=True (no dense n×n blow-up).
+
+    Issue #157: the default dense one-hot of an ID-like column allocated a
+    dense n×n float matrix per fold (≈3 GB at 20k rows). The encoder now keeps
+    the sparse representation, so a high-cardinality column does not explode.
+    """
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"id": [f"id_{i}" for i in range(2000)]})
+    enc = SplitCategoricalEncoder(encoding="one_hot")
+    out = enc.fit_transform(X)
+    assert enc.default_encoder_.sparse_output is True
+    assert sparse.issparse(out)
+    assert out.shape == (2000, 2000)
+    # nnz = n_rows * n_cols (one active column per row per input column).
+    assert out.nnz == 2000
+
+
+def test_build_preprocessor_one_hot_sparse_for_high_cardinality():
+    """The ColumnTransformer keeps a sparse one-hot output when the density is low.
+
+    A single high-cardinality one-hot column + a numeric column stays
+    sparse: the dense float64 matrix would be n×(n+1) — the exact blow-up
+    described in issue #157.
+    """
+    rng = np.random.default_rng(1)
+    df = pd.DataFrame(
+        {"id": [f"id_{i}" for i in range(3000)], "num": rng.normal(size=3000)}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["id"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    out = preprocessor.fit_transform(df)
+    assert sparse.issparse(out)
+    assert out.format == "csr"
+    assert out.shape == (3000, 3001)
+    # One non-zero per row in the one-hot part + the dense numeric column:
+    # the stored elements must be far below the dense n×(n+1).
+    assert out.nnz <= 3000 + 3000
+
+
+def test_build_preprocessor_one_hot_dense_when_density_high():
+    """Small-cardinality one-hot stays dense (no behavior regression)."""
+    df = pd.DataFrame({"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["cat"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    out = preprocessor.fit_transform(df)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (12, 4)
+
+
+def test_build_preprocessor_one_hot_sparse_force_dense():
+    """force_dense_output converts sparse one-hot to a dense matrix
+    (for GPR/Isotonic/ARD, which reject scipy.sparse)."""
+    rng = np.random.default_rng(2)
+    df = pd.DataFrame(
+        {"id": [f"id_{i}" for i in range(500)], "num": rng.normal(size=500)}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["id"],
+        numerical_features=["num"],
+        encoding="one_hot",
+        force_dense_output=True,
+    )
+    out = preprocessor.fit_transform(df)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (500, 501)
+    assert np.isfinite(out).all()
+
+
+def test_build_preprocessor_one_hot_sparse_transform_consistency():
+    """transform() after fit() keeps the sparse representation that fit chose."""
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame(
+        {"id": [f"id_{i}" for i in range(600)], "num": rng.normal(size=600)}
+    )
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=["id"],
+        numerical_features=["num"],
+        encoding="one_hot",
+    )
+    preprocessor.fit(df)
+    out = preprocessor.transform(df)
+    assert sparse.issparse(out)
+    assert out.shape == (600, 601)
 
 
 
