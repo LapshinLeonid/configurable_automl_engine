@@ -54,6 +54,7 @@ from sklearn.model_selection import train_test_split
 from configurable_automl_engine import oversampling as _oversampling
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+from configurable_automl_engine.common.target_domain import check_target_domain
 from configurable_automl_engine.common.validation_utils import (
     check_target_constant,
     check_target_exists,
@@ -2700,6 +2701,63 @@ def _consume_worker_results(
         )
 
 
+def _apply_target_domain_guard(
+    all_algorithms: dict[str, AlgoCfg],
+    y: pd.Series,
+    ctx: PhaseContext,
+) -> dict[str, AlgoCfg]:
+    """Exclude or restrict GLMs whose loss domain does not fit the target.
+
+    Runs once, before the first HPO phase. ``gammaregressor`` (``y > 0``) and
+    ``poissonregressor`` (``y >= 0``) on a target outside their domain — and
+    ``tweedieregressor`` / ``glm`` whose whole ``power`` search range is
+    invalid for the target — would fail on every fold of every trial, so they
+    are put into the circuit breaker (``ctx.disqualified_algorithms``) with a
+    reason and a single WARNING, and no trial is ever run for them. A Tweedie
+    ``power`` range that is only partly invalid is clipped to its valid part
+    instead (the algorithm stays a candidate).
+
+    Args:
+        all_algorithms (dict[str, AlgoCfg]): The configured algorithms.
+        y (pd.Series): The target vector.
+        ctx (PhaseContext): The phase context — disqualifications land here.
+
+    Returns:
+        dict[str, AlgoCfg]: The algorithms with clipped search spaces applied
+            (unchanged configs are returned as is; the input is not mutated).
+    """
+    guarded: dict[str, AlgoCfg] = {}
+    for name, a_cfg in all_algorithms.items():
+        if not a_cfg.enable or name in ctx.disqualified_algorithms:
+            guarded[name] = a_cfg
+            continue
+        space = _prepare_search_space(
+            name,
+            a_cfg.hyperparameters,
+            limit=bool(a_cfg.limit_hyperparameters),
+        )
+        check = check_target_domain(name, space, y)
+        if check.disqualify_reason is not None:
+            _LOG.warning(
+                "Algorithm %s disqualified before HPO: %s",
+                name,
+                check.disqualify_reason,
+            )
+            ctx.disqualified_algorithms[name] = check.disqualify_reason
+            guarded[name] = a_cfg
+            continue
+        if check.clipped_entries:
+            for message in check.messages:
+                _LOG.warning("Target domain guard: %s", message)
+            hyperparameters = {
+                **(a_cfg.hyperparameters or {}),
+                **check.clipped_entries,
+            }
+            a_cfg = a_cfg.model_copy(update={"hyperparameters": hyperparameters})
+        guarded[name] = a_cfg
+    return guarded
+
+
 def execute_phases(
     cfg: Config,
     prepared: PreparedData,
@@ -2784,6 +2842,10 @@ def execute_phases(
 
     # Initial candidate list (all enabled algorithms)
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
+    # Target-domain guard (before any trial): GLMs whose loss domain does not
+    # fit y are disqualified up front, a partly invalid Tweedie power range
+    # is clipped to its valid part.
+    all_algorithms = _apply_target_domain_guard(all_algorithms, y, ctx)
     # Disqualified algorithms (circuit breaker): name -> reason.
     # Disqualification does not abort the run: the algorithm is excluded from
     # candidates and results, the rest continue training.
@@ -3037,10 +3099,15 @@ def execute_phases(
 
         if not valid_results:
             failed_algos = [n for n in phase_candidates if n not in valid_results]
-            raise RuntimeError(
+            message = (
                 f"No algorithms produced valid scores in phase '{phase.name}'. "
                 f"Failed algorithms: {failed_algos}"
             )
+            if ctx.disqualified_algorithms:
+                message += (
+                    f". Disqualified algorithms: {dict(ctx.disqualified_algorithms)}"
+                )
+            raise RuntimeError(message)
     return ctx
 
 
