@@ -71,6 +71,10 @@ FINAL_SELECT_PHASE = {
     "output": "winner",
 }
 
+# The orchestrator module logger name: component.py uses
+# ``logging.getLogger(__name__)``, i.e. the full package path.
+_COMPONENT_LOGGER = "configurable_automl_engine.training_engine.component"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -458,7 +462,7 @@ def test_fallback_logs_warning_with_reasons(caplog):
         _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
     ]
     cands = {"only": _candidate("only", -0.08, 0.3, y_oof)}
-    with caplog.at_level("WARNING", logger="training_engine"):
+    with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         res = select_robust_winner(
             cands,
             pd.DataFrame(np.zeros((len(y), 2))),
@@ -758,7 +762,7 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
         return _FakeTrainer(len(prepared.y))
 
     mocker.patch.object(comp, "_fit_finalist", side_effect=_fake_fit)
-    with caplog.at_level("WARNING", logger="training_engine"):
+    with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         candidates = comp._train_finalists(
             ["elasticnet", "ridge"], phase_results, cfg, prepared
         )
@@ -1072,7 +1076,7 @@ def test_active_disqualification_logs_warning_per_candidate(caplog):
         ),
         "honest": _candidate("honest", cv_score=-0.09, rmse_oof=0.2, y_oof=y_oof),
     }
-    with caplog.at_level("WARNING", logger="training_engine"):
+    with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         res = select_robust_winner(
             cands,
             pd.DataFrame(np.zeros((len(y), 2))),
@@ -1098,7 +1102,7 @@ def test_fallback_logs_formal_criterion(caplog):
         _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
     ]
     cands = {"only": _candidate("only", -0.08, 0.3, y_oof)}
-    with caplog.at_level("WARNING", logger="training_engine"):
+    with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         res = select_robust_winner(
             cands,
             pd.DataFrame(np.zeros((len(y), 2))),
@@ -1197,7 +1201,7 @@ def test_train_best_model_sanity_gate_overhead_and_winner_audit_logged(
     tmp_path: Path, caplog
 ):
     """overhead_seconds in the gate section and an INFO log of the winner audit summary."""
-    with caplog.at_level(logging.INFO, logger="training_engine"):
+    with caplog.at_level(logging.INFO, logger=_COMPONENT_LOGGER):
         res = _run_sanity(tmp_path)
     sg = res["sanity_gate"]["GateSelect"]
     assert isinstance(sg["overhead_seconds"], float)

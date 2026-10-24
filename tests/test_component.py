@@ -1243,7 +1243,8 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
     We check:
     - the CONFIG TYPE / ALGORITHMS messages contain the substituted values;
     - no record fails in ``getMessage()`` (formatting is correct);
-    - caplog receives records exactly from the ``training_engine`` logger;
+    - caplog receives records exactly from the module logger
+      (``configurable_automl_engine.training_engine.component``);
     - ``--- Logging error ---`` does not appear in stderr even when processed
       by a real StreamHandler.
     """
@@ -1257,7 +1258,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
 
     # A real StreamHandler(stderr) at DEBUG — imitating a production handler
     # that formats the record and triggers handleError on error
-    logger = logging.getLogger("training_engine")
+    logger = logging.getLogger(component.__name__)
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.DEBUG)
     logger.addHandler(stream_handler)
@@ -1274,7 +1275,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
                     "configurable_automl_engine.training_engine.component._fit_and_save"
                 )
             )
-            with caplog.at_level(logging.DEBUG, logger="training_engine"):
+            with caplog.at_level(logging.DEBUG, logger=component.__name__):
                 train_best_model(
                     config=base_config_dict, df=sample_df, target="target"
                 )
@@ -1288,7 +1289,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
     debug_msgs = [
         record.getMessage()
         for record in caplog.records
-        if record.levelno == logging.DEBUG and record.name == "training_engine"
+        if record.levelno == logging.DEBUG and record.name == component.__name__
     ]
     assert any(
         msg.startswith("CONFIG TYPE:") and "<class 'dict'>" in msg
@@ -1301,6 +1302,71 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
 
     # No "--- Logging error ---" in stderr
     assert "--- Logging error ---" not in capsys.readouterr().err
+
+
+def test_log_to_file_captures_orchestrator_messages(tmp_path):
+    """Orchestrator INFO lines reach ``general.log_to_file``: the phase start,
+    the winner line and "Model saved to …".
+
+    Regression: ``component.py`` logged under ``"training_engine"`` (outside
+    ``configurable_automl_engine``), so the file handler attached by
+    ``setup_logging`` never saw these records — INFO messages were lost and
+    WARNINGs fell through to the lastResort stderr handler.
+    """
+    base_logger = logging.getLogger("configurable_automl_engine")
+    original_handlers = base_logger.handlers[:]
+    base_logger.handlers = []
+    try:
+        log_file = tmp_path / "run.log"
+        config_dict = {
+            "general": {
+                "comparison_metric": "mae",
+                "validation_strategy": "train_test_split",
+                "phases": [
+                    {"name": "coarse", "n_trials": 2, "action": "all_algorithms"},
+                    {
+                        "name": "final_select",
+                        "n_trials": 1,
+                        "action": "select",
+                        "strategy": "cv_best",
+                        "output": "winner",
+                    },
+                ],
+                "path_to_model": "model.pkl",
+                "log_to_file": str(log_file),
+            },
+            "algorithms": {
+                "elasticnet": {
+                    "enable": True,
+                    "tuner": "unittest.mock",
+                    "trainer_module": "unittest.mock",
+                }
+            },
+            "oversampling": {"enable": False},
+        }
+        df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        with (
+            patch(
+                "configurable_automl_engine.training_engine.component._run_hpo",
+                return_value=PhaseResult(score=-0.9, params={"alpha": 0.5}),
+            ),
+            patch(
+                "configurable_automl_engine.training_engine.component._fit_and_save",
+                return_value=SimpleNamespace(additional_scores={}),
+            ),
+        ):
+            train_best_model(config=config_dict, df=df, target="target")
+
+        text = log_file.read_text(encoding="utf-8")
+        # Phase start of the HPO phase
+        assert "Starting Phase" in text
+        # The winner line of the terminal select step (user semantics, mae)
+        assert re.search(r"winner\s+elasticnet\s+\(score", text) is not None
+        assert "Model saved to" in text
+    finally:
+        for handler in list(base_logger.handlers):
+            handler.close()
+        base_logger.handlers = original_handlers
 
 
 # --------------------------------------------------------------------------- #
@@ -1418,7 +1484,7 @@ def test_result_score_matches_logged_user_value(caplog):
             "configurable_automl_engine.training_engine.component._fit_and_save",
             return_value=SimpleNamespace(additional_scores={}),
         ),
-        caplog.at_level(logging.INFO, logger="training_engine"),
+        caplog.at_level(logging.INFO, logger=component.__name__),
     ):
         result = train_best_model(config=config_dict, df=df, target="target")
 
@@ -2901,7 +2967,7 @@ def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.legacy.module"
     with patch("importlib.import_module", return_value=LegacyTuner()):
-        with caplog.at_level("WARNING", logger="training_engine"):
+        with caplog.at_level("WARNING", logger=component.__name__):
             result = _run_hpo(
                 algo_name="test_algo",
                 algo_cfg=algo_cfg,
@@ -2931,7 +2997,7 @@ def test_run_hpo_no_warning_when_fs_disabled_for_legacy_tuner(caplog):
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.legacy.module"
     with patch("importlib.import_module", return_value=LegacyTuner()):
-        with caplog.at_level("WARNING", logger="training_engine"):
+        with caplog.at_level("WARNING", logger=component.__name__):
             _run_hpo(
                 algo_name="test_algo",
                 algo_cfg=algo_cfg,
@@ -2969,7 +3035,7 @@ def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
     algo_cfg = MagicMock(spec=AlgoCfg)
     algo_cfg.tuner = "some.var_kwargs.module"
     with patch("importlib.import_module", return_value=VarKwargsTuner()):
-        with caplog.at_level("WARNING", logger="training_engine"):
+        with caplog.at_level("WARNING", logger=component.__name__):
             result = _run_hpo(
                 algo_name="test_algo",
                 algo_cfg=algo_cfg,
@@ -3307,7 +3373,7 @@ def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
         "configurable_automl_engine.training_engine.component._load_module",
         return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
     ):
-        with caplog.at_level("WARNING", logger="training_engine"):
+        with caplog.at_level("WARNING", logger=component.__name__):
             trainer = _fit_and_save(
                 algo_name="random_forest",
                 algo_cfg=algo_cfg,
@@ -3342,7 +3408,7 @@ def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
         "configurable_automl_engine.training_engine.component._load_module",
         return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
     ):
-        with caplog.at_level("WARNING", logger="training_engine"):
+        with caplog.at_level("WARNING", logger=component.__name__):
             _fit_and_save(
                 algo_name="random_forest",
                 algo_cfg=algo_cfg,

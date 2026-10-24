@@ -88,7 +88,7 @@ from .metrics import (
 from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .thread_pool import run_parallel
 
-_LOG = logging.getLogger("training_engine")
+_LOG = logging.getLogger(__name__)
 
 
 def is_valid_winner_score(score: Any) -> bool:
