@@ -27,6 +27,7 @@ from types import SimpleNamespace
 import importlib
 import inspect
 import logging
+import multiprocessing
 import re
 
 import numpy as np
@@ -56,6 +57,19 @@ from configurable_automl_engine.tuner import (
 )
 
 import textwrap
+
+# The processes-mode tests patch ``_load_module`` in the parent process; the
+# patch only reaches the pool workers when they are forked. Under spawn
+# (Windows, macOS) or forkserver (the Linux default on Python 3.14+) the
+# workers re-import the real module and cannot resolve the mock tuners.
+_START_METHOD = (
+    multiprocessing.get_start_method(allow_none=True)
+    or multiprocessing.get_all_start_methods()[0]
+)
+requires_fork = pytest.mark.skipif(
+    _START_METHOD != "fork",
+    reason="parent-process patches reach workers only with the fork start method",
+)
 
 # Terminal select step: the last phase of any valid config.
 TERMINAL_SELECT = {
@@ -2240,6 +2254,7 @@ class TestWorstScoreResultsExcluded:
 
         return fake_load
 
+    @requires_fork
     @patch(f"{_MODULE}._fit_and_save")
     def test_processes_parallel_mode_produces_valid_winner(
         self, mock_save, minimal_df, tmp_path
@@ -2269,6 +2284,7 @@ class TestWorstScoreResultsExcluded:
         assert result["score"] == 0.4
         mock_save.assert_called_once()
 
+    @requires_fork
     @patch(f"{_MODULE}._fit_and_save")
     def test_processes_parallel_mode_shares_X_via_shared_memory(
         self, mock_save, minimal_df, tmp_path
@@ -2323,6 +2339,7 @@ class TestWorstScoreResultsExcluded:
         assert created[0].shape == (4, 1)
         mock_save.assert_called_once()
 
+    @requires_fork
     @patch(f"{_MODULE}._fit_and_save")
     def test_processes_parallel_disqualification_propagates(
         self, mock_save, minimal_df, tmp_path
@@ -2359,6 +2376,7 @@ class TestWorstScoreResultsExcluded:
         assert result["disqualified_algorithms"] == {"random_forest": "not supported"}
         mock_save.assert_called_once()
 
+    @requires_fork
     @patch(f"{_MODULE}._fit_and_save")
     @patch(f"{_MODULE}._run_hpo")
     def test_processes_parallel_worker_failure_does_not_corrupt_others(

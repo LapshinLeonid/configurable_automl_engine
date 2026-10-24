@@ -16,6 +16,22 @@ import unittest
 from unittest.mock import MagicMock, patch
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
+# Platform guards: the SHM free-space checks (issue #146) rely on the POSIX
+# os.statvfs and the Linux /dev/shm tmpfs, both absent on Windows.
+requires_statvfs = pytest.mark.skipif(
+    not hasattr(os, "statvfs"), reason="os.statvfs is POSIX-only"
+)
+requires_dev_shm = pytest.mark.skipif(
+    not os.path.isdir("/dev/shm"), reason="requires the Linux /dev/shm tmpfs"
+)
+# Pool restarts after a hung task re-spawn the worker processes; on Windows
+# (spawn start method) that overhead alone breaks the tight wall-clock budgets
+# of the processes-mode timeout tests.
+skip_timing_on_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="spawn-based pool restarts on Windows exceed the timing budget",
+)
+
 from configurable_automl_engine.training_engine import thread_pool
 
 from configurable_automl_engine.training_engine.thread_pool import (
@@ -1169,6 +1185,7 @@ def test_run_parallel_processes_task_timeout_still_enforced():
     assert results == [None]
 
 
+@skip_timing_on_windows
 def test_run_parallel_never_starting_task_is_bounded():
     """A task that never starts does not hang forever.
 
@@ -1338,6 +1355,7 @@ def choose_hang_or_fast(seconds):
     return slow_task(seconds)
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_hung_task_frees_worker():
     """A task that exceeds task_timeout must free its worker process.
 
@@ -1364,6 +1382,7 @@ def test_run_parallel_processes_hung_task_frees_worker():
     assert elapsed < 8
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_multiple_hung_tasks_each_restart():
     """Every hung task frees its worker; the queued fast task still runs.
 
@@ -1386,6 +1405,7 @@ def test_run_parallel_processes_multiple_hung_tasks_each_restart():
     assert elapsed < 5
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_hang_detected_without_queue_delay():
     """The timeout of an already-started task is noticed promptly.
 
@@ -1413,6 +1433,7 @@ def test_run_parallel_processes_hang_detected_without_queue_delay():
     assert elapsed < 5
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_restart_preserves_queued_tasks():
     """After a restart the tasks that were still queued are resubmitted.
 
@@ -1433,6 +1454,7 @@ def test_run_parallel_processes_restart_preserves_queued_tasks():
     assert elapsed < 8
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_healthy_inflight_task_resubmitted():
     """A healthy in-flight task, killed by a neighbor's timeout, is resubmitted.
 
@@ -2565,6 +2587,7 @@ def test_shm_has_free_space_no_backing_path_returns_true(monkeypatch):
     assert thread_pool._shm_has_free_space(10**9) is True
 
 
+@requires_statvfs
 def test_shm_has_free_space_enough_room(monkeypatch):
     """A segment smaller than the free space (with margin) fits."""
     st = MagicMock()
@@ -2580,6 +2603,7 @@ def test_shm_has_free_space_enough_room(monkeypatch):
     assert thread_pool._shm_has_free_space(256 * 1024 * 1024) is True
 
 
+@requires_statvfs
 def test_shm_has_free_space_not_enough_room(monkeypatch):
     """A segment larger than the free space must be rejected."""
     st = MagicMock()
@@ -2595,6 +2619,7 @@ def test_shm_has_free_space_not_enough_room(monkeypatch):
     assert thread_pool._shm_has_free_space(1024 * 1024) is False
 
 
+@requires_statvfs
 def test_shm_has_free_space_margin_enforced(monkeypatch):
     """The 30% margin is applied: a segment close to the free space is rejected."""
     st = MagicMock()
@@ -2613,6 +2638,7 @@ def test_shm_has_free_space_margin_enforced(monkeypatch):
     assert thread_pool._shm_has_free_space(40) is True
 
 
+@requires_statvfs
 def test_shm_has_free_space_statvfs_error_rejects(monkeypatch):
     """A broken /dev/shm statvfs must report no room (data → disk fallback)."""
     monkeypatch.setattr(
@@ -2626,6 +2652,7 @@ def test_shm_has_free_space_statvfs_error_rejects(monkeypatch):
     assert thread_pool._shm_has_free_space(1) is False
 
 
+@requires_statvfs
 def test_shm_has_free_space_statvfs_valueerror_rejects(monkeypatch):
     """A statvfs ValueError (e.g. an invalid/garbage backing path) is treated
     the same as OSError: no room is reported and the data goes to the disk
@@ -2693,6 +2720,7 @@ def test_run_parallel_no_room_routes_frame_to_disk(caplog, monkeypatch):
     assert "routing the dataframe through the disk cache instead" in caplog.text
 
 
+@requires_statvfs
 def test_run_parallel_broken_shm_statvfs_routes_frame_to_disk(caplog, monkeypatch):
     """A broken /dev/shm statvfs must not crash the run.
 
@@ -2813,6 +2841,7 @@ def test_disk_persistence_manager_free_parquet_space_no_tmp_dir():
     assert manager.free_parquet_space() == 1 << 62
 
 
+@requires_statvfs
 def test_disk_persistence_manager_free_parquet_space_dev_shm(monkeypatch):
     """free_parquet_space reads os.statvfs on /dev/shm."""
     st = MagicMock()
@@ -2824,6 +2853,7 @@ def test_disk_persistence_manager_free_parquet_space_dev_shm(monkeypatch):
     assert manager.free_parquet_space() == 409600
 
 
+@requires_statvfs
 def test_disk_persistence_manager_free_parquet_space_statvfs_error(monkeypatch):
     """A broken /dev/shm statvfs → free_parquet_space returns 0."""
     monkeypatch.setattr(
@@ -2833,6 +2863,7 @@ def test_disk_persistence_manager_free_parquet_space_statvfs_error(monkeypatch):
     assert manager.free_parquet_space() == 0
 
 
+@requires_statvfs
 def test_disk_persistence_manager_free_parquet_space_statvfs_valueerror(monkeypatch):
     """A statvfs ValueError (invalid path) → free_parquet_space returns 0."""
     monkeypatch.setattr(
@@ -2883,6 +2914,7 @@ def test_disk_persistence_manager_full_dev_shm_uses_system_tmp(monkeypatch):
             manager.cleanup()
 
 
+@requires_dev_shm
 def test_disk_persistence_manager_dev_shm_small_file_stays_on_dev_shm(
     monkeypatch,
 ):

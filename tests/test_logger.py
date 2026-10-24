@@ -2,7 +2,6 @@ import importlib
 import logging
 import logging.handlers
 import sys
-import tempfile
 import weakref
 from pathlib import Path
 from unittest.mock import patch
@@ -147,31 +146,33 @@ def test_setup_logging_twice_no_file_handler_leak(tmp_path):
             super().__init__(*args, **kwargs)
             constructed.append(weakref.ref(self))
 
-    with (
-        patch.object(logger_module, "HandlerClass", TrackingHandler),
-        tempfile.TemporaryDirectory() as d,
-    ):
-        logger_module.setup_logging(Path(d) / "first.log")
-        first_handlers = len(base.handlers)
-        logger_module.setup_logging(Path(d) / "second.log")
+    # tmp_path (not a TemporaryDirectory) keeps the log files alive while the
+    # attached handler still holds them open: Windows refuses to delete an
+    # open file, which used to fail the test before its cleanup ran and leak
+    # the handler into later tests.
+    try:
+        with patch.object(logger_module, "HandlerClass", TrackingHandler):
+            logger_module.setup_logging(tmp_path / "first.log")
+            first_handlers = len(base.handlers)
+            logger_module.setup_logging(tmp_path / "second.log")
 
-    import gc
+        import gc
 
-    gc.collect()
-    alive = [r for r in constructed if r() is not None]
-    # Exactly ONE handler was ever constructed and it stays attached
-    # (the second call must not construct another one).
-    assert len(constructed) == 1
-    assert len(alive) == 1
-    # The single alive handler is the attached file handler
-    assert alive[0]() is next(
-        h for h in base.handlers if isinstance(h, logging.FileHandler)
-    )
-    assert first_handlers == 2  # file + console handler from the first call
-
-    for h in list(base.handlers):
-        h.close()
-    base.handlers = original_handlers
+        gc.collect()
+        alive = [r for r in constructed if r() is not None]
+        # Exactly ONE handler was ever constructed and it stays attached
+        # (the second call must not construct another one).
+        assert len(constructed) == 1
+        assert len(alive) == 1
+        # The single alive handler is the attached file handler
+        assert alive[0]() is next(
+            h for h in base.handlers if isinstance(h, logging.FileHandler)
+        )
+        assert first_handlers == 2  # file + console handler from the first call
+    finally:
+        for h in list(base.handlers):
+            h.close()
+        base.handlers = original_handlers
 
 
 def test_setup_logging_format_and_level(tmp_path, clean_logger):

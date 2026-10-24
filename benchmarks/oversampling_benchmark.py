@@ -51,9 +51,21 @@ EVIDENCE_GATE_DELTA = 0.01
 #: the nightly profile cheap.
 N_SEEDS = 3
 
+#: Limited mode keeps the nightly profile cheap: the search covers ONLY the
+#: listed parameters. ``limit_hyperparameters: true`` requires a non-empty
+#: ``hyperparameters`` block (``AlgoCfg`` validation), so the spaces are
+#: listed explicitly.
 _ALGORITHMS: dict[str, dict[str, Any]] = {
-    "ridge": {"enable": True, "limit_hyperparameters": True},
-    "elasticnet": {"enable": True, "limit_hyperparameters": True},
+    "ridge": {
+        "enable": True,
+        "limit_hyperparameters": True,
+        "hyperparameters": {"alpha": [0.1, 10.0]},
+    },
+    "elasticnet": {
+        "enable": True,
+        "limit_hyperparameters": True,
+        "hyperparameters": {"alpha": [0.01, 1.0], "l1_ratio": [0.1, 0.9]},
+    },
 }
 
 
