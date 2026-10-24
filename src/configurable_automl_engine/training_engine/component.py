@@ -1622,8 +1622,12 @@ def _build_trainer(
     # result["params"]) is not mutated, and "use_feature_selection" is
     # guaranteed not to leak into the ModelTrainer hyperparameters (previously
     # it was dropped only implicitly through clean_hyperparameters).
+    # ``isotonic_feature`` is the informational name of the numerical feature
+    # selected by the isotonic HPO (reported in the params, not a constructor
+    # or data-adapter hyperparameter) — it is popped for the same reason.
     trainer_params = dict(best_params)
     fs_active = trainer_params.pop("use_feature_selection", None)
+    trainer_params.pop("isotonic_feature", None)
 
     # Check the ModelTrainer signature (same as for tuners in _run_hpo):
     # custom trainers without feature selection support must not receive new

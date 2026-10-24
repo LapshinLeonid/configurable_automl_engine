@@ -1123,6 +1123,90 @@ def _clean_uninformative_features(
     return X.drop(columns=drop_cols)
 
 
+def estimate_n_features_after_preprocessing(
+    X: Any,
+    *,
+    categorical_features: list[str],
+    numerical_features: list[str],
+    encoding: EncodingStrategy = "one_hot",
+    high_cardinality_threshold: int | None = None,
+    high_cardinality_encoding: EncodingStrategy | None = None,
+    hashing_n_components: int = 16,
+    add_indicator: bool = True,
+) -> int:
+    """Estimate the number of columns the preprocessor will produce.
+
+    A deterministic estimate from the data and encoding settings (no fitting
+    stage), shared between the tuner (data-dependent search spaces, e.g. the
+    isotonic ``feature_index`` range) and the final training
+    (``ModelTrainer``, which passes the count to the isotonic adapter for the
+    estimate-vs-actual guard). Numerical features contribute one column each,
+    plus one missing-value indicator per column with missing values when
+    ``add_indicator=True``; categorical columns contribute their number of
+    unique values for ``one_hot``, ``n_components`` for ``hashing``, and one
+    column for the remaining strategies (ordinal/target/frequency). When the
+    automatic high-cardinality mode is enabled, each column is counted with
+    the strategy it actually receives at fit time (columns whose cardinality
+    strictly exceeds the threshold use ``high_cardinality_encoding`` — the
+    same rule as :class:`SplitCategoricalEncoder`).
+
+    Args:
+        X: Feature matrix. A ``pd.DataFrame`` is required for the categorical
+            expansion; for other inputs only the numerical block is counted.
+        categorical_features: Names of the categorical columns.
+        numerical_features: Names of the numerical columns.
+        encoding: The categorical encoding strategy.
+        high_cardinality_threshold: High-cardinality threshold (``None`` — the
+            automatic mode is disabled).
+        high_cardinality_encoding: Strategy for high-cardinality columns.
+        hashing_n_components: Number of hashing output columns per
+            categorical column.
+        add_indicator: Whether missing-value indicators are added to the
+            numerical features.
+
+    Returns:
+        The estimated post-preprocessing column count (>= 1).
+    """
+    cats = list(categorical_features)
+    nums = list(numerical_features)
+    n = 0
+    if nums:
+        n += len(nums)
+        if add_indicator and isinstance(X, pd.DataFrame):
+            try:
+                n += int(X[nums].isna().any().sum())
+            except Exception:  # noqa: BLE001 — estimate only
+                n += 0
+    if cats and isinstance(X, pd.DataFrame):
+        for col in cats:
+            if col not in X.columns:
+                continue
+            # The automatic high-cardinality split: the column is encoded
+            # with the HC strategy when its cardinality strictly exceeds the
+            # threshold (the same rule as SplitCategoricalEncoder).
+            effective = encoding
+            if (
+                high_cardinality_threshold is not None
+                and high_cardinality_encoding is not None
+            ):
+                try:
+                    if int(X[col].nunique(dropna=True)) > high_cardinality_threshold:
+                        effective = high_cardinality_encoding
+                except Exception:  # noqa: BLE001, S110 — estimate only
+                    # Cardinality is unknown: keep the main strategy.
+                    pass
+            if effective == "hashing":
+                n += hashing_n_components
+            elif effective == "one_hot":
+                try:
+                    n += int(X[col].nunique(dropna=True))
+                except Exception:  # noqa: BLE001 — estimate only
+                    n += 1
+            else:
+                n += 1
+    return max(1, n)
+
+
 def build_preprocessor(
     feature_names: list[str],
     categorical_features: list[str],

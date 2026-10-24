@@ -161,6 +161,26 @@ def test_create_model_svr_explicit_sigmoid_kernel_allowed():
     assert model.kernel == "sigmoid"
 
 
+def test_create_model_isotonic_default_out_of_bounds_clip():
+    """IsotonicRegression defaults to out_of_bounds='clip' (issue #155).
+
+    sklearn defaults to 'nan'; the default hold-out then fails with NaN
+    predictions. The factory injects 'clip' unless the user sets the value
+    explicitly.
+    """
+    model = create_model("isotonic_regression")
+    assert model.out_of_bounds == "clip"
+
+    explicit = create_model("isotonic_regression", out_of_bounds="nan")
+    assert explicit.out_of_bounds == "nan"
+
+
+def test_create_model_isotonic_invalid_out_of_bounds_rejected():
+    """An invalid out_of_bounds value fails fast at creation time."""
+    with pytest.raises(ValueError, match="out_of_bounds must be one of"):
+        create_model("isotonic_regression", out_of_bounds="clamp")
+
+
 def test_clean_hyperparameters_logs_remapped(caplog):
     """clean_hyperparameters logs at DEBUG level when remapping."""
     with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.models"):

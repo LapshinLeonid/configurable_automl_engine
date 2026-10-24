@@ -552,6 +552,23 @@ def create_model(
     if algo_key == "svr" and "max_iter" not in hyperparams:
         hyperparams["max_iter"] = 10000
 
+    # IsotonicRegression defaults to out_of_bounds='nan': validation points
+    # outside the training range get NaN predictions, so the default hold-out
+    # (train_test_split) fails with "Validation scoring failed for all folds:
+    # Input contains NaN". With out_of_bounds='clip' the same data scores a
+    # finite R² (≈0.968). Unless the caller set the parameter explicitly,
+    # "clip" is used so that training works out of the box. An explicit value
+    # is validated here (sklearn accepts only 'nan'/'clip'/'raise') so a typo
+    # fails fast at model creation, before any fold evaluation.
+    if algo_key == "isotonic_regression":
+        raw_oob = hyperparams.get("out_of_bounds", "clip")
+        if raw_oob not in ("nan", "clip", "raise"):
+            raise ValueError(
+                f"out_of_bounds must be one of ('nan', 'clip', 'raise') for "
+                f"IsotonicRegression, got {raw_oob!r}"
+            )
+        hyperparams["out_of_bounds"] = raw_oob
+
     # Clean / remap hyperparameters before instantiation
     hyperparams = clean_hyperparameters(algo_key, estimator_cls, hyperparams)
 

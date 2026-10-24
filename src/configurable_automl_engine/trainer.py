@@ -79,6 +79,7 @@ from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
     _clean_uninformative_features,
     build_preprocessor,
+    estimate_n_features_after_preprocessing,
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
@@ -283,16 +284,54 @@ class TrainingError(RuntimeError):
 
 class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """Transformer for preparing data for IsotonicRegression.
-    Selects the specified column and ensures correct handling of missing values
-    to meet the requirements of the isotonic regression algorithm.
+    Selects the specified numerical feature and ensures correct handling of
+    missing values to meet the requirements of the isotonic regression
+    algorithm.
+
+    The preprocessor (``build_preprocessor``) always emits the categorical
+    block (one-hot dummies etc.) first and the numerical block
+    (imputation/scaling) last. Only the numerical features are meaningful
+    inputs for the strictly univariate isotonic model, so the adapter treats
+    ``feature_index`` as an index RELATIVE to the numerical block of the
+    input matrix and maps it to the absolute column via
+    ``(n_columns - n_numeric) + feature_index``. The number of numerical
+    features (``n_numeric``) is passed by the caller; the estimated total
+    feature count (``n_total``) guards against a divergence between the
+    estimate and the fitted preprocessor output.
+
     Attributes:
-        feature_index (int): Ordinal index of the feature to extract.
+        feature_index (int): Ordinal index of the numerical feature to
+            extract (relative to the numerical block).
+        n_numeric (int | None): Number of numerical features in the input
+            matrix (used to find the numerical block). ``None`` — the index
+            is treated as positional into the whole matrix (standalone use).
+        n_total (int | None): Estimated total feature count after
+            preprocessing, used for the guard. ``None`` — no guard.
         median_ (float): Computed median used to fill missing values.
     """
 
-    def __init__(self, feature_index: int = 0):
-        """Initialize the transformer with the index of the target feature."""
+    def __init__(
+        self,
+        feature_index: int = 0,
+        n_numeric: int | None = None,
+        n_total: int | None = None,
+    ):
+        """Initialize the transformer with the index of the target feature.
+
+        Args:
+            feature_index: Ordinal index of the numerical feature to extract
+                (relative to the numerical block of the input matrix; with
+                ``n_numeric=None`` — positional into the whole matrix).
+            n_numeric: Expected number of numerical features in the input
+                matrix (the numerical block width). ``None`` — standalone
+                positional mode.
+            n_total: Estimated total feature count after preprocessing
+                (guard against an estimate/preprocessor divergence).
+                ``None`` — no guard.
+        """
         self.feature_index = feature_index
+        self.n_numeric = n_numeric
+        self.n_total = n_total
 
     def _get_dimensions(self, X: Any) -> tuple[int, int]:
         """Return the number of rows and columns of the input data
@@ -303,21 +342,74 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         n_cols = len(X[0]) if n_rows > 0 and isinstance(X[0], (list, np.ndarray)) else 1
         return n_rows, n_cols
 
+    def _resolve_absolute_index(self, n_cols: int) -> int:
+        """Map the (possibly numerical-block-relative) index to an absolute column.
+
+        Args:
+            n_cols: Number of columns of the actual input matrix.
+
+        Returns:
+            The absolute column index to extract.
+
+        Raises:
+            ValueError: If the estimated total feature count disagrees with
+                the actual column count, ``n_numeric`` is invalid, or
+                ``feature_index`` lies outside the numerical block.
+                ValueError is non-fatal for the HPO circuit breaker (unlike
+                ``TrainingError`` — a ``RuntimeError`` — which is fatal).
+        """
+        if self.n_numeric is None:
+            # Standalone mode: positional index into the whole matrix.
+            if self.feature_index >= n_cols:
+                raise ValueError(
+                    f"IsotonicDataTransformer: feature_index {self.feature_index} "
+                    f"out of bounds. Dataset has only {n_cols} columns."
+                )
+            return self.feature_index
+
+        # Engine mode: feature_index is relative to the numerical block.
+        if self.n_total is not None and int(self.n_total) != int(n_cols):
+            raise ValueError(
+                f"IsotonicDataTransformer: the estimated feature count "
+                f"{self.n_total} disagrees with the fitted preprocessor "
+                f"output ({n_cols} columns)."
+            )
+        if int(self.n_numeric) <= 0:
+            raise ValueError(
+                "IsotonicDataTransformer: no numerical features to select "
+                "from (n_numeric=0). Isotonic regression requires at least one "
+                "numerical feature."
+            )
+        if self.feature_index >= int(self.n_numeric):
+            raise ValueError(
+                f"IsotonicDataTransformer: feature_index {self.feature_index} "
+                f"out of bounds: only {self.n_numeric} numerical features "
+                "after preprocessing."
+            )
+        offset = int(n_cols) - int(self.n_numeric)
+        if offset < 0:
+            raise ValueError(
+                f"IsotonicDataTransformer: the preprocessed matrix has fewer "
+                f"columns ({n_cols}) than the estimated numerical features "
+                f"({self.n_numeric})."
+            )
+        return offset + self.feature_index
+
+    def _extract_column(self, X: Any, idx: int) -> pd.Series | np.ndarray:
+        """Extract the ``idx``-th column of ``X`` without copying."""
+        if isinstance(X, pd.DataFrame):
+            return X.iloc[:, idx]
+        if isinstance(X, np.ndarray):
+            return X[:, idx] if len(X.shape) > 1 else X
+        return np.asarray(X)[:, idx]
+
     def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
         """Compute the median of the selected feature for subsequent missing-value imputation."""
         _, n_cols = self._get_dimensions(X)
-        idx = self.feature_index if self.feature_index < n_cols else 0
+        abs_idx = self._resolve_absolute_index(n_cols)
 
-        X_col: pd.Series | np.ndarray
-
-        if isinstance(X, pd.DataFrame):
-            X_col = X.iloc[:, idx]
-        elif isinstance(X, np.ndarray):
-            X_col = X[:, idx] if len(X.shape) > 1 else X
-        else:
-            X_col = np.asarray(X)[:, idx]
-
-        s_col = pd.Series(X_col)
+        X_col = self._extract_column(X, abs_idx)
+        s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
         self.median_ = float(s_col.median()) if not s_col.isna().all() else 0.0
         return self
 
@@ -326,25 +418,14 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         and convert to a 2D array (n_samples, 1)."""
         try:
             # 1. Get metadata without forcing a copy into a DataFrame
-            # We use the logic from _extract_metadata discussed earlier
             _n_rows, n_cols = self._get_dimensions(X)
 
-            # 2. Validate the feature index
-            if self.feature_index >= n_cols:
-                raise TrainingError(
-                    f"Data transformation error: feature_index {self.feature_index} "
-                    f"out of bounds. Dataset has only {n_cols} columns."
-                )
+            # 2. Validate the estimated feature count / resolve the absolute
+            #    column (numeric-block-relative feature_index).
+            abs_idx = self._resolve_absolute_index(n_cols)
+
             # 3. Extract the column (zero-copy for numpy and pandas)
-            # If X is a DataFrame, use iloc. If numpy, use regular slicing.
-            X_col: pd.Series | np.ndarray
-            if isinstance(X, pd.DataFrame):
-                X_col = X.iloc[:, self.feature_index]
-            elif isinstance(X, np.ndarray):
-                X_col = X[:, self.feature_index]
-            else:
-                # For lists or other types, convert to numpy (minimal copy)
-                X_col = np.asarray(X)[:, self.feature_index]
+            X_col = self._extract_column(X, abs_idx)
             # 4. NaN handling logic
             # Check whether all values in the column are NaN
             # Use pd.Series for convenient median computation,
@@ -352,8 +433,8 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             s_col = X_col if isinstance(X_col, pd.Series) else pd.Series(X_col)
 
             if s_col.isna().all():
-                raise TrainingError(
-                    f"Column with index {self.feature_index} contains only NaN values."
+                raise ValueError(
+                    f"Column with index {abs_idx} contains only NaN values."
                     " Training IsotonicRegression is impossible."
                 )
             # Compute the median and fill missing values
@@ -362,9 +443,12 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             # Return the result as a 2D array, as scikit-learn expects
             result = X_imputed.to_numpy().reshape(-1, 1)
             return cast(np.ndarray, result)
-        except Exception as e:
-            if isinstance(e, TrainingError):
-                raise
+        except ValueError:
+            # ValueError is non-fatal for the circuit breaker in HPO (see the
+            # tuner), while TrainingError (a RuntimeError) is fatal — so
+            # validation/selection errors must not be wrapped.
+            raise
+        except Exception as e:  # noqa: BLE001
             # Unify the error message according to the tests
             raise TrainingError(f"Data transformation error: {e}")
 
@@ -1224,18 +1308,19 @@ class ModelTrainer:
             return False
 
     def _resolve_isotonic_feature_index(self) -> int:
-        """Resolve the feature selected by the isotonic data adapter.
+        """Resolve the numerical feature selected by the isotonic data adapter.
 
         The ``feature_index`` value is a user/HPO hyperparameter (not an
         ``IsotonicRegression`` constructor parameter): it is popped from the
         model kwargs before ``create_model`` and consumed here by
-        ``IsotonicDataTransformer``. Although the preprocessor may output any
-        number of columns (one-hot expansion, imputation), the adapter reduces
-        them to a single feature — the input contract of the isotonic
-        algorithm.
+        ``IsotonicDataTransformer``. The index is relative to the numerical
+        feature block of the preprocessed matrix (after imputation/scaling);
+        one-hot dummies of categorical columns are not meaningful inputs for
+        the strictly univariate isotonic model.
 
         Returns:
-            The ordinal index of the feature to feed to ``IsotonicRegression``.
+            The ordinal index of the numerical feature to feed to
+            ``IsotonicRegression``.
 
         Raises:
             TrainingError: If ``feature_index`` is not a non-negative integer.
@@ -1248,12 +1333,59 @@ class ModelTrainer:
             )
         return raw
 
+    def _isotonic_n_numeric(self) -> int:
+        """Number of numerical features after preprocessing for isotonic.
+
+        For the strictly univariate algorithms the preprocessor is built with
+        ``add_indicator=False`` (``requires_missing_indicator`` returns
+        ``False``) and numeric columns are never expanded, so the numerical
+        block of the preprocessed matrix has exactly one column per original
+        numerical feature.
+
+        Returns:
+            The number of numerical features (>= 0).
+        """
+        nums = getattr(self, "numerical_features", None)
+        return len(nums) if nums else 0
+
+    def _isotonic_n_total_estimate(self, X: Any) -> int:
+        """Estimate the total post-preprocessing feature count for the guard.
+
+        The same deterministic logic the tuner uses to size the isotonic
+        search space, applied to the trainer's own feature lists and data so
+        that the adapter can reject a divergence between the estimate and the
+        fitted preprocessor output with a non-fatal ``ValueError``.
+
+        Args:
+            X: The prepared feature matrix (full data).
+
+        Returns:
+            The estimated total column count after preprocessing (>= 1).
+        """
+        return estimate_n_features_after_preprocessing(
+            X,
+            categorical_features=list(
+                getattr(self, "categorical_features", None) or []
+            ),
+            numerical_features=list(getattr(self, "numerical_features", None) or []),
+            encoding=cast(
+                EncodingStrategy, getattr(self, "encoding_strategy", "one_hot")
+            ),
+            high_cardinality_threshold=getattr(
+                self, "high_cardinality_threshold", None
+            ),
+            high_cardinality_encoding=getattr(self, "high_cardinality_encoding", None),
+            hashing_n_components=int(getattr(self, "hashing_n_components", 16)),
+            add_indicator=False,
+        )
+
     def _assemble_steps(
         self,
         preprocessor: ColumnTransformer,
         base_model: Any,
         *,
         feature_selection_active: bool,
+        X_for_estimate: Any = None,
     ) -> list[tuple[str, Any]]:
         """Assemble the list of training pipeline steps.
 
@@ -1264,7 +1396,12 @@ class ModelTrainer:
         (:class:`IsotonicDataTransformer`) is inserted right after the
         preprocessor: the algorithm is strictly univariate and accepts exactly
         one feature, so even a multi-column preprocessed matrix is reduced to
-        the single column selected via the ``feature_index`` hyperparameter.
+        the single numerical column selected via the ``feature_index``
+        hyperparameter. The adapter receives the number of numerical features
+        (``n_numeric``) to resolve the index against the numerical block of
+        the preprocessed matrix and the estimated total feature count to
+        validate against the actual preprocessor output (a disagreement
+        raises ``ValueError`` — non-fatal for the HPO circuit breaker).
         The feature selector is inserted strictly between the preprocessor and
         the oversampler so that synthetic rows are generated only for
         informative features.
@@ -1273,6 +1410,9 @@ class ModelTrainer:
             preprocessor: Feature preprocessing ``ColumnTransformer``.
             base_model: Final regressor.
             feature_selection_active: Flag enabling the feature selection step.
+            X_for_estimate: The feature matrix used to estimate the total
+                post-preprocessing feature count for the isotonic guard
+                (``None`` — the count is disabled).
 
         Returns:
             A list of ``(name, transformer)`` tuples for building the Pipeline.
@@ -1283,7 +1423,13 @@ class ModelTrainer:
                 (
                     "isotonic_selector",
                     IsotonicDataTransformer(
-                        feature_index=self._resolve_isotonic_feature_index()
+                        feature_index=self._resolve_isotonic_feature_index(),
+                        n_numeric=self._isotonic_n_numeric(),
+                        n_total=(
+                            self._isotonic_n_total_estimate(X_for_estimate)
+                            if X_for_estimate is not None
+                            else None
+                        ),
                     ),
                 )
             )
@@ -1348,6 +1494,7 @@ class ModelTrainer:
             preprocessor,
             base_model,
             feature_selection_active=feature_selection_active,
+            X_for_estimate=X_train,
         )
         # 2) Initialize the pipeline
         # Use imblearn's Pipeline so that resampling steps work correctly
@@ -1722,6 +1869,11 @@ class ModelTrainer:
                         clone(preprocessor),
                         clone(base_model),
                         feature_selection_active=feature_selection_active,
+                        # The estimate is based on the fold's training part so
+                        # it matches the fold-fitted preprocessor output (a
+                        # category absent from the train part must not trigger
+                        # the guard).
+                        X_for_estimate=X_tr,
                     )
                 )
                 fold_pipe.fit(X_tr, y_tr)

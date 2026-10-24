@@ -1659,11 +1659,13 @@ def test_isotonic_optimize_multifeature_default_space(toy_data):
     assert np.isfinite(preds).all()
 
 
-def test_isotonic_optimize_dict_space_default_feature_index(toy_data):
-    """The engine path (dict ``space_overrides`` without feature_index) works.
+def test_isotonic_optimize_dict_space_merges_feature_index(toy_data):
+    """The engine path (dict ``space_overrides`` without feature_index).
 
-    The feature selection is forcibly disabled; the isotonic adapter defaults
-    to feature_index=0, so the multi-feature data does not need truncation.
+    ``_prepare_search_space`` passes only DEFAULT_SPACES (``increasing``) plus
+    user overrides; the tuner must merge a data-driven ``feature_index`` over
+    the NUMERICAL features into the dict (issue #155), so the index is tuned
+    instead of silently staying at the default 0.
     """
     X, y = toy_data
     space = {
@@ -1686,6 +1688,135 @@ def test_isotonic_optimize_dict_space_default_feature_index(toy_data):
     model = opt_res.model
     steps = [name for name, _ in getattr(model, "steps", [])]
     assert "isotonic_selector" in steps
+    # The merged feature_index is present in the searched params and lies
+    # within the numeric range (toy_data is 10 numerical columns).
+    assert "feature_index" in opt_res.params
+    assert 0 <= opt_res.params["feature_index"] <= X.shape[1] - 1
+
+
+def test_isotonic_optimize_numeric_feature_index_reported(toy_data):
+    """The best isotonic trial reports the chosen NUMERICAL feature name in
+    params as ``isotonic_feature`` (resolved from get_feature_names_out).
+
+    Only numeric columns are candidates; the informative column must win and
+    be reported by name (issue #155).
+    """
+    rng = np.random.RandomState(5)
+    X = pd.DataFrame(
+        {
+            "noise": rng.rand(80),
+            "signal": rng.permutation(np.linspace(0, 1, 80)),
+        }
+    )
+    y = pd.Series(X["signal"] * 3.0 + rng.randn(80) * 0.05)
+
+    space = {
+        "isotonic_regression": {
+            "feature_index": SearchSpaceEntry.model_validate([0, 1, "int"]),
+            "increasing": SearchSpaceEntry.model_validate(
+                [[True, False], "categorical"]
+            ),
+        }
+    }
+    opt_res = hyperopt.optimize(
+        "isotonic_regression",
+        X,
+        y,
+        n_trials=6,
+        random_state=42,
+        space_overrides=space,
+    )
+    assert opt_res is not None
+    assert opt_res.params["feature_index"] == 1
+    # The reported name matches the informative numeric column, resolved from
+    # the preprocessor's get_feature_names_out (the numerical block's
+    # ``num__<col>`` prefix).
+    assert opt_res.params["isotonic_feature"] == "num__signal"
+
+    model = opt_res.model
+    assert "isotonic_selector" in model.named_steps
+    adapter = model.named_steps["isotonic_selector"]
+    assert adapter.feature_index == 1
+
+
+def test_isotonic_optimize_ndarray_positional(toy_data):
+    """Direct optimize(\"isotonic_regression\", X_ndarray, y) works.
+
+    Without column lists no preprocessor is built and every column is treated
+    as numeric: the ``feature_index`` range is positional over the raw matrix
+    (``[0, n_columns-1]``) and the adapter does not run the total-width guard
+    (the estimate would be 1, i.e. meaningless for an ndarray). Regression for
+    the review blocker: every trial failed with "estimated feature count 1
+    disagrees with the fitted preprocessor output (5 columns)".
+    """
+    rng = np.random.RandomState(0)
+    X = rng.rand(60, 5)
+    y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
+
+    opt_res = hyperopt.optimize(
+        "isotonic_regression",
+        X,
+        y,
+        n_trials=5,
+        random_state=42,
+        metric="r2",
+        validation_strategy="train_test_split",
+    )
+    assert opt_res is not None
+    assert np.isfinite(opt_res.score)
+    assert 0 <= opt_res.params["feature_index"] <= X.shape[1] - 1
+    # The informative column (numeric) wins.
+    assert opt_res.params["feature_index"] == 1
+
+
+def test_isotonic_optimize_rare_category_does_not_poison_fold(toy_data):
+    """A categorical value present only in the validation part does not abort
+    a fold evaluation.
+
+    The tuner's total-width guard used the full-data estimate, so a fold whose
+    train part lacks a rare category produced fewer preprocessor columns and
+    the trial was pruned. The numeric-block selection is exact regardless of
+    the categorical block width, so no guard is applied in the tuner (it stays
+    in ModelTrainer, where the estimate is per-fold). Regression for the
+    review blocker.
+    """
+    rng = np.random.default_rng(0)
+    n = 100
+    X = pd.DataFrame(
+        {
+            "noise": rng.normal(size=n),
+            "signal": rng.permutation(np.linspace(0, 1, n)),
+            "cat": rng.choice(
+                ["a", "b", "c", "d", "e", "f", "g", "h"], size=n
+            ),
+        }
+    )
+    # One row carries a category that appears nowhere else; with a random
+    # hold-out it lands in the validation part with high probability.
+    X.loc[0, "cat"] = "only_once"
+    y = pd.Series(X["signal"] * 3.0 + rng.normal(0, 0.05, n))
+
+    space = {
+        "isotonic_regression": {
+            "feature_index": SearchSpaceEntry.model_validate([0, 1, "int"]),
+            "increasing": SearchSpaceEntry.model_validate(
+                [[True, False], "categorical"]
+            ),
+        }
+    }
+    opt_res = hyperopt.optimize(
+        "isotonic_regression",
+        X,
+        y,
+        n_trials=4,
+        random_state=42,
+        metric="r2",
+        validation_strategy="train_test_split",
+        space_overrides=space,
+    )
+    assert opt_res is not None
+    assert np.isfinite(opt_res.score)
+    assert opt_res.params["feature_index"] == 1
 
 
 def test_isotonic_optimize_feature_index_from_params(toy_data):

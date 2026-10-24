@@ -465,10 +465,15 @@ def test_model_trainer_sparse_rejecting_algos_with_hashing(
 
 
 def test_model_trainer_isotonic_hashing_single_feature() -> None:
-    """Isotonic requires a single feature and rejects sparse: one categorical
-    column with hashing_n_components=1 yields exactly one column, and
-    force_dense_output is activated via the algorithm flag."""
-    df = _make_regression_df(n=60, seed=19)[["color", "target"]]
+    """Isotonic requires a single (numerical) feature and rejects sparse: a
+    categorical column with hashing_n_components=1 plus one numerical column
+    keeps exactly one numerical feature (the isotonic input), and
+    force_dense_output is activated via the algorithm flag.
+
+    Only numerical features are meaningful inputs for isotonic (issue #155), so
+    the frame includes the numerical ``num`` column, which the adapter selects.
+    """
+    df = _make_regression_df(n=60, seed=19)[["color", "num", "target"]]
     trainer = ModelTrainer(
         algorithm="isotonic_regression",
         hyperparams={},
@@ -479,6 +484,11 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
     trainer.fit(df.drop(columns=["target"]), df["target"])
     assert trainer.val_score is not None
     assert np.isfinite(trainer.val_score)
+    assert trainer.pipeline is not None
+    # The adapter selects the numerical block (color -> 1 hashing column,
+    # num -> the stable name from the numerical block).
+    selector = trainer.pipeline.named_steps["isotonic_selector"]
+    assert selector.n_numeric == 1
 
     preds = trainer.predict(df.drop(columns=["target"]).head(5))
     assert np.isfinite(preds).all()
@@ -487,12 +497,16 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
 def test_model_trainer_isotonic_multifeature_end_to_end() -> None:
     """IsotonicRegression trains end-to-end on a multi-feature DataFrame with
     categorical columns: the IsotonicDataTransformer step reduces the
-    preprocessed matrix to a single feature (issue #150)."""
+    preprocessed matrix to the single NUMERICAL feature (issue #150, #155).
+
+    ``feature_index`` is relative to the numerical block (one-hot dummies are
+    not meaningful inputs), so the only numerical feature ``num`` has index 0.
+    """
     df = _make_regression_df(n=120, seed=23)
     X = df.drop(columns=["target"])
     trainer = ModelTrainer(
         algorithm="isotonic_regression",
-        hyperparams={"feature_index": 3, "out_of_bounds": "clip"},
+        hyperparams={"feature_index": 0, "out_of_bounds": "clip"},
         metric="r2",
         encoding_strategy="one_hot",
     )
@@ -501,9 +515,80 @@ def test_model_trainer_isotonic_multifeature_end_to_end() -> None:
     assert np.isfinite(trainer.val_score)
     assert trainer.pipeline is not None
     assert "isotonic_selector" in trainer.pipeline.named_steps
+    # Only the (single) numerical feature is fed to the univariate model.
+    selector = trainer.pipeline.named_steps["isotonic_selector"]
+    assert selector.n_numeric == 1
 
     preds = trainer.predict(X.head(5))
     assert np.isfinite(preds).all()
+
+
+def _make_isotonic_mixed_df(n: int = 140, seed: int = 11) -> pd.DataFrame:
+    """Mixed frame where ONLY the numerical ``x3`` drives y.
+
+    Four numerical columns (x0–x3), one categorical column; the target depends
+    on x3 alone, so the isotonic HPO must pick x3 (numeric index 3) — the
+    informative feature among the numeric candidates (issue #155).
+    """
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(
+        {
+            "x0": rng.normal(size=n),
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "x3": rng.normal(size=n),
+            "cat": rng.choice(["a", "b", "c"], size=n),
+        }
+    )
+    df["x3"] = rng.permutation(np.linspace(0, 1, n))
+    df["target"] = df["x3"] * 3.0 + rng.normal(0, 0.05, n)
+    return df
+
+
+def test_engine_isotonic_selects_informative_numeric_column(tmp_path: Path) -> None:
+    """Engine run with isotonic only selects the informative NUMERICAL column.
+
+    Acceptance (issue #155): on ``make_mixed_tabular``-style data (only x3
+    drives y), the HPO ``feature_index`` must be tuned over the numeric
+    features and the informative column (x3) must win; the chosen feature name
+    is reported in ``result["params"]["isotonic_feature"]``.
+    """
+    df = _make_isotonic_mixed_df()
+    model_path = tmp_path / "model.pkl"
+    cfg = {
+        "general": {
+            "comparison_metric": "r2",
+            "validation_strategy": "train_test_split",
+            "n_folds": 3,
+            "path_to_model": str(model_path),
+            "phases": [
+                {"name": "search", "n_trials": 20, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+        },
+        "algorithms": {"isotonic_regression": {"enable": True}},
+    }
+
+    result = train_best_model(config=cfg, df=df, target="target")
+
+    assert result["algorithm"] == "isotonic_regression"
+    assert np.isfinite(result["score"])
+    assert result["params"]["feature_index"] == 3
+    # The informative numeric feature is reported by name from
+    # get_feature_names_out (num block of the preprocessor).
+    assert result["params"]["isotonic_feature"].endswith("x3")
+    # The final model selects x3 too.
+    loaded = ModelTrainer.load(str(model_path))
+    selector = loaded.pipeline.named_steps["isotonic_selector"]
+    assert selector.feature_index == 3
+    # The winner is genuinely informative (high R² on a clean signal).
+    assert result["score"] > 0.9
 
 
 def test_hashing_preprocessor_output_is_sparse() -> None:

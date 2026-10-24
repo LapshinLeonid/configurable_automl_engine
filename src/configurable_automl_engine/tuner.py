@@ -77,6 +77,7 @@ from configurable_automl_engine.preprocessing import (
     _clean_uninformative_features,
     build_preprocessor,
     detect_feature_types,
+    estimate_n_features_after_preprocessing,
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
@@ -1212,6 +1213,13 @@ class _OptimizeRunner:
         # Number of features after preprocessing (what the model sees).
         # Filled in build_trial_pipeline (falls back to the raw column count).
         self.n_features_eff: int = 1
+        # Number of NUMERICAL features after preprocessing (one column per
+        # numerical feature for isotonic — no one-hot expansion, no missing
+        # indicators). Used to size the isotonic ``feature_index`` search
+        # range: only numeric columns are meaningful inputs for the strictly
+        # univariate model. ``None`` — not determinable (an external
+        # preprocessor without explicit column lists).
+        self.n_numeric_eff: int | None = None
         # Number of ORIGINAL columns (a categorical column counts as 1,
         # before the one-hot expansion). Used only by the complexity guard
         # for the size-mode ratio ``n / p``; filled in build_trial_pipeline.
@@ -1741,19 +1749,13 @@ class _OptimizeRunner:
         elif resolve_algorithm_name(self.algo) == "isotonic_regression":
             # Isotonic without an external config (including a direct
             # optimize("isotonic_regression", X, y) call): a data-dependent
-            # space. ``feature_index`` selects the column fed to the strictly
-            # univariate model (consumed by ``IsotonicDataTransformer``) and
-            # must cover the post-preprocessing feature count; ``increasing``
-            # is the single IsotonicRegression constructor parameter searched.
-            max_feature_index = max(
-                0,
-                int(
-                    self.n_features_eff
-                    if self.preprocessor is not None
-                    else self.X.shape[1]
-                )
-                - 1,
-            )
+            # space. ``feature_index`` selects the NUMERICAL column fed to the
+            # strictly univariate model (consumed by
+            # ``IsotonicDataTransformer``); one-hot dummies are not meaningful
+            # inputs, so the range covers the numerical features only
+            # (``n_numeric_eff``); ``increasing`` is the single
+            # IsotonicRegression constructor parameter searched.
+            max_feature_index = self._isotonic_max_feature_index()
             base_space_dict = {
                 "feature_index": SearchSpaceEntry.model_validate(
                     [0, max_feature_index, "int"]
@@ -1795,6 +1797,23 @@ class _OptimizeRunner:
                 space_dict = {
                     **space_dict,
                     "epsilon": _svr_adaptive_epsilon_entry(self.y),
+                }
+            # Isotonic in the engine path: ``_prepare_search_space`` delivers
+            # only the DEFAULT_SPACES keys (``increasing``) plus user
+            # overrides, and without an explicit ``feature_index`` the tuner
+            # would take the external-dict branch and silently use the default
+            # index 0 (an arbitrary one-hot dummy column). Merge a data-driven
+            # ``feature_index`` over the NUMERICAL features into the dict when
+            # absent; an explicit user value is kept as is.
+            if (
+                resolve_algorithm_name(self.algo) == "isotonic_regression"
+                and "feature_index" not in space_dict
+            ):
+                space_dict = {
+                    **space_dict,
+                    "feature_index": SearchSpaceEntry.model_validate(
+                        [0, self._isotonic_max_feature_index(), "int"]
+                    ),
                 }
             clipped_config = clip_search_space(space_dict, self.n_samples_eff)
             clipped_config, guard_logs = self._resolve_complexity_guard(clipped_config)
@@ -1918,6 +1937,11 @@ class _OptimizeRunner:
                 # on a purely numerical DataFrame the HPO phase applies
                 # scaling just like the final ModelTrainer.
                 cats, nums = detect_feature_types(self.X)
+                # Store the detected lists so that the isotonic numeric block
+                # (``n_numeric_eff``) is determinable from the same feature
+                # set that built the preprocessor.
+                self.categorical_features = cats
+                self.numerical_features = nums
                 if cats or nums:
                     self.preprocessor = build_preprocessor(
                         list(self.X.columns),
@@ -1963,6 +1987,27 @@ class _OptimizeRunner:
             if self.preprocessor is not None
             else self.n_features_eff,
         )
+        # The number of NUMERICAL features after preprocessing: the isotonic
+        # ``feature_index`` is restricted to this range (numeric columns only;
+        # one-hot dummies are not meaningful inputs). Deterministic — one
+        # column per numerical feature (isotonic disables missing indicators
+        # and never expands numeric columns).
+        if self.preprocessor is not None and not (
+            self.categorical_features or self.numerical_features
+        ):
+            # An external preprocessor without explicit column lists: the
+            # numerical block is not determinable.
+            self.n_numeric_eff = None
+        elif self.preprocessor is None and not isinstance(self.X, pd.DataFrame):
+            # ndarray without column lists: no preprocessor is built and every
+            # column is treated as numeric, so the feature_index is positional
+            # over the whole matrix.
+            self.n_numeric_eff = None
+        else:
+            nums = list(self.numerical_features or [])
+            if not nums and isinstance(self.X, pd.DataFrame):
+                _, nums = detect_feature_types(self.X)
+            self.n_numeric_eff = max(0, len(nums))
 
     def _estimate_n_features_after_preprocessing(self) -> int:
         """Estimate the number of features after the preprocessor.
@@ -2003,50 +2048,16 @@ class _OptimizeRunner:
         if not cats and not nums and isinstance(self.X, pd.DataFrame):
             cats, nums = detect_feature_types(self.X)
 
-        n = 0
-        if nums:
-            n += len(nums)
-            if self._missing_indicator_added():
-                # add_indicator=True: one binary column per numerical feature
-                # that has missing values in the training set.
-                try:
-                    n += int(self.X[nums].isna().any().sum())
-                except Exception:  # noqa: BLE001 — estimate only
-                    n += 0
-        if cats and isinstance(self.X, pd.DataFrame):
-            encoding = self.encoding or "one_hot"
-            hc_threshold = self.high_cardinality_threshold
-            hc_encoding = self.high_cardinality_encoding
-            for col in cats:
-                if col not in self.X.columns:
-                    continue
-                # The automatic high-cardinality split: the column is encoded
-                # with the HC strategy when its cardinality strictly exceeds
-                # the threshold (the same rule as SplitCategoricalEncoder).
-                effective = encoding
-                if hc_threshold is not None and hc_encoding is not None:
-                    try:
-                        if int(self.X[col].nunique(dropna=True)) > hc_threshold:
-                            effective = hc_encoding
-                    except Exception:  # noqa: BLE001, S110 — estimate only
-                        # Cardinality is unknown: keep the main strategy.
-                        pass
-                if effective == "hashing":
-                    n += self.hashing_n_components
-                elif effective == "one_hot":
-                    try:
-                        # Missing values are imputed before encoding
-                        # (``_to_string_array`` preserves NaN, the imputer fills
-                        # it with the most frequent category), so NaN is NOT a
-                        # separate one-hot category: the column expands into its
-                        # non-missing unique values only.
-                        n += int(self.X[col].nunique(dropna=True))
-                    except Exception:  # noqa: BLE001 — estimate only
-                        n += 1
-                else:
-                    # ordinal / target / frequency: one column per column.
-                    n += 1
-        return max(1, n)
+        return estimate_n_features_after_preprocessing(
+            self.X,
+            categorical_features=cats,
+            numerical_features=nums,
+            encoding=cast(EncodingStrategy, self.encoding or "one_hot"),
+            high_cardinality_threshold=self.high_cardinality_threshold,
+            high_cardinality_encoding=self.high_cardinality_encoding,
+            hashing_n_components=int(getattr(self, "hashing_n_components", 16)),
+            add_indicator=self._missing_indicator_added(),
+        )
 
     def _missing_indicator_added(self) -> bool:
         """Whether missing-value indicators are added for numerical features."""
@@ -2086,7 +2097,8 @@ class _OptimizeRunner:
                 (
                     "isotonic_selector",
                     IsotonicDataTransformer(
-                        feature_index=feature_index if feature_index is not None else 0
+                        feature_index=feature_index if feature_index is not None else 0,
+                        n_numeric=self.n_numeric_eff,
                     ),
                 )
             )
@@ -2418,17 +2430,39 @@ class _OptimizeRunner:
             # The Minkowski power of the KNN space.
             low = 1.0
         elif param == "feature_index":
-            # The ordinal column index consumed by IsotonicDataTransformer:
-            # the natural domain spans [0, n_features - 1] — neither side can
-            # be pushed beyond it even by widening the search range.
+            # The ordinal NUMERICAL column index consumed by
+            # IsotonicDataTransformer: the natural domain spans
+            # [0, n_numeric - 1] — only numeric features are meaningful
+            # inputs for the strictly univariate model (one-hot dummies are
+            # excluded), and neither side can be pushed beyond it even by
+            # widening the search range.
             low = 0.0
-            n_features = int(
-                self.n_features_eff
-                if self.preprocessor is not None
-                else getattr(self.X, "shape", (0, 1))[1]
-            )
-            high = float(max(0, n_features - 1))
+            high = float(max(0, self._isotonic_max_feature_index()))
         return low, high
+
+    def _isotonic_max_feature_index(self) -> int:
+        """The upper bound of the isotonic ``feature_index`` search range.
+
+        Candidates are restricted to numerical features (one-hot dummies are
+        not meaningful inputs): the count comes from the numerical feature
+        list (``n_numeric_eff``). When the numeric block is not determinable
+        (``n_numeric_eff is None``):
+
+        * an already-built preprocessor — fall back to its estimated output
+          width (``n_features_eff``);
+        * no preprocessor (ndarray without column lists) — every column is
+          treated as numeric and the index is positional over the raw matrix.
+
+        Returns:
+            The inclusive upper bound of the index range (>= 0).
+        """
+        if self.n_numeric_eff is not None:
+            n_features = int(self.n_numeric_eff)
+        elif self.preprocessor is not None:
+            n_features = int(self.n_features_eff)
+        else:
+            n_features = int(getattr(self.X, "shape", (0, 1))[1])
+        return max(0, n_features - 1)
 
     def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
         """Whether ``value`` lies on a bound introduced by the complexity guard.
@@ -2693,6 +2727,17 @@ class _OptimizeRunner:
             best_params = {
                 k: v for k, v in best_params.items() if k != "use_feature_selection"
             }
+            # Report the chosen NUMERICAL feature name in the params
+            # (``isotonic_feature``), resolved from the preprocessor's
+            # get_feature_names_out (the numerical block occupies the last
+            # ``n_numeric`` columns). Fitted only when the preprocessor is
+            # available and the name is resolvable.
+            if self.preprocessor is not None:
+                feature_name = self._resolve_isotonic_feature_name(
+                    best_params.get("feature_index", 0)
+                )
+                if feature_name is not None:
+                    best_params["isotonic_feature"] = feature_name
         self.best_params = best_params
         # The base model constructor parameters are cleaned of the tuner's
         # auxiliary key ("use_feature_selection" is not a model
@@ -2705,6 +2750,45 @@ class _OptimizeRunner:
         self.clean_model_params.pop("use_feature_selection", None)
         self.best_apply_fs = best_apply_fs
         return True
+
+    def _resolve_isotonic_feature_name(self, feature_index: int) -> str | None:
+        """Resolve the name of the numerical feature selected by isotonic.
+
+        The preprocessor emits the categorical block first and the numerical
+        block last, so the selected numerical feature occupies the absolute
+        position ``(n_columns - n_numeric) + feature_index`` in the
+        preprocessed matrix. The name is resolved from the fitted
+        preprocessor's ``get_feature_names_out`` (the preprocessor is fitted
+        once on the full data); ``None`` is returned when the names are not
+        available (np.ndarray input without column lists) or the resolution
+        fails (the estimate does not match a fitted output — non-fatal).
+
+        Args:
+            feature_index: The numeric-block-relative index of the best trial.
+
+        Returns:
+            The resolved feature name, or ``None``.
+        """
+        if self.preprocessor is None or self.n_numeric_eff is None:
+            return None
+        try:
+            # The preprocessor used by the trials is only ever fitted through
+            # clones (per fold), so fit a copy once on the full data to obtain
+            # the stable output names (the numerical block width and the
+            # ``num__<col>`` names are data-independent for the numeric block).
+            names = self.preprocessor.get_feature_names_out()
+        except Exception:  # noqa: BLE001 — best-effort name resolution
+            try:
+                probe = clone(self.preprocessor).fit(self.X, self.y)
+                names = probe.get_feature_names_out()
+            except Exception:  # noqa: BLE001 — best-effort name resolution
+                return None
+        names_list = list(names)
+        n_cols = len(names_list)
+        if n_cols < self.n_numeric_eff or feature_index >= self.n_numeric_eff:
+            return None
+        absolute = (n_cols - int(self.n_numeric_eff)) + feature_index
+        return str(names_list[absolute])
 
     def _log_best_result(self) -> None:
         """Log the outcome of the best trial (shared by both return paths)."""

@@ -759,11 +759,16 @@ class TestIsotonicDataTransformer:
         assert transformer.median_ == 0.0
 
     def test_transform_index_out_of_bounds(self):
-        """Cover the feature_index out of bounds error."""
+        """Cover the feature_index out of bounds error.
+
+        The guard raises ``ValueError`` (non-fatal for the HPO circuit
+        breaker) rather than ``TrainingError`` (a ``RuntimeError``, which is
+        fatal).
+        """
         transformer = IsotonicDataTransformer(feature_index=5)
         X = np.array([[1, 2], [3, 4]])  # Only 2 columns
 
-        with pytest.raises(TrainingError, match="out of bounds"):
+        with pytest.raises(ValueError, match="out of bounds"):
             transformer.transform(X)
 
     def test_transform_all_nan_error(self):
@@ -771,7 +776,7 @@ class TestIsotonicDataTransformer:
         transformer = IsotonicDataTransformer(feature_index=0)
         X = pd.DataFrame({"a": [np.nan, np.nan]})
 
-        with pytest.raises(TrainingError, match="contains only NaN values"):
+        with pytest.raises(ValueError, match="contains only NaN values"):
             transformer.transform(X)
 
     def test_transform_different_formats(self):
@@ -809,6 +814,47 @@ class TestIsotonicDataTransformer:
         result = transformer.transform(X_test)
 
         assert result[1, 0] == 2.0  # NaN replaced by the median 2.0
+
+    def test_numeric_block_relative_index(self):
+        """With ``n_numeric`` set, ``feature_index`` is relative to the
+        numerical block (the last ``n_numeric`` columns), so one-hot dummies
+        are excluded (issue #155)."""
+        # 3 dummy columns + 2 numerical: numeric block is the last 2 columns.
+        X = np.array(
+            [
+                [0.0, 1.0, 0.0, 10.0, 100.0],
+                [1.0, 0.0, 0.0, 20.0, 200.0],
+            ]
+        )
+        transformer = IsotonicDataTransformer(feature_index=1, n_numeric=2, n_total=5)
+        transformer.fit(X)
+        result = transformer.transform(X)
+        # Absolute column = (5 - 2) + 1 = 4 -> the last column.
+        assert np.array_equal(result, np.array([[100.0], [200.0]]))
+
+    def test_numeric_block_index_out_of_bounds_is_valueerror(self):
+        """A ``feature_index`` outside the numerical block raises ValueError
+        (non-fatal for the HPO circuit breaker), not TrainingError."""
+        X = np.array(
+            [
+                [1.0, 0.0, 10.0, 100.0],
+                [0.0, 1.0, 20.0, 200.0],
+            ]
+        )
+        transformer = IsotonicDataTransformer(feature_index=2, n_numeric=2, n_total=4)
+        with pytest.raises(
+            ValueError, match="out of bounds: only 2 numerical features"
+        ):
+            transformer.transform(X)
+
+    def test_estimate_mismatch_guard_is_valueerror(self):
+        """A divergence between the estimated feature count and the fitted
+        preprocessor output raises ValueError (non-fatal for the circuit
+        breaker), per issue #155."""
+        X = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        transformer = IsotonicDataTransformer(feature_index=0, n_numeric=2, n_total=4)
+        with pytest.raises(ValueError, match="estimated feature count"):
+            transformer.transform(X)
 
     def test_features_parameter_validation(self):
         """
@@ -1981,6 +2027,95 @@ def test_isotonic_multifeature_default_feature_index():
     assert preds.shape[0] == len(y)
     assert np.isfinite(preds).all()
     assert trainer.val_score is not None
+
+
+def test_isotonic_empty_hyperparams_default_holdout_works():
+    """Acceptance: ModelTrainer('isotonic_regression', {}) trains on a
+    5-feature frame with the default hold-out (issue #155).
+
+    Regressions fixed here:
+
+    * IsotonicRegression defaults to ``out_of_bounds='nan'``, so validation
+      points outside the training range produced NaN predictions and the
+      default hold-out failed with "Validation scoring failed for all folds:
+      Input contains NaN" — ``create_model`` now defaults to ``'clip'``.
+    * ``feature_index`` is relative to the NUMERICAL block (one-hot dummies
+      are excluded), so the adapter never fits an arbitrary dummy column.
+    """
+    rng = np.random.default_rng(7)
+    X = pd.DataFrame(rng.normal(size=(100, 5)))
+    y = pd.Series(X[3] * 3.0 + rng.normal(0, 0.05, 100))
+
+    trainer = ModelTrainer(algorithm="isotonic_regression", hyperparams={}).fit(X, y)
+
+    assert trainer.pipeline is not None
+    step_names = [name for name, _ in trainer.pipeline.steps]
+    assert step_names == ["preprocessor", "isotonic_selector", "model"]
+    # The default hold-out (train_test_split) produced a finite score with
+    # out_of_bounds='clip'.
+    assert trainer.val_score is not None
+    assert np.isfinite(trainer.val_score)
+    # The numeric block has all 5 columns.
+    selector = trainer.pipeline.named_steps["isotonic_selector"]
+    assert selector.n_numeric == 5
+    assert np.isfinite(trainer.predict(X)).all()
+
+
+def test_isotonic_feature_index_restricted_to_numeric_block():
+    """``feature_index`` selects a NUMERICAL feature only: one-hot dummies
+    of categorical columns are not meaningful inputs for isotonic.
+
+    With 2 numerical features and 3 categorical columns, index 1 must resolve
+    to the second numerical column, not to a one-hot dummy (issue #155).
+    """
+    rng = np.random.default_rng(3)
+    n = 80
+    df = pd.DataFrame(
+        {
+            "cat1": rng.choice(["a", "b", "c"], size=n),
+            "cat2": rng.choice(["x", "y"], size=n),
+            "cat3": rng.choice(["u", "v", "w", "z"], size=n),
+            "num1": rng.normal(size=n),
+            "num2": rng.permutation(np.linspace(0, 1, n)),
+        }
+    )
+    y = pd.Series(df["num2"] * 3.0 + rng.normal(0, 0.05, n))
+
+    # num2 (the informative numeric feature) has numeric index 1.
+    trainer = ModelTrainer(
+        algorithm="isotonic_regression", hyperparams={"feature_index": 1}
+    ).fit(df, y)
+    assert trainer.val_score is not None
+    selector = trainer.pipeline.named_steps["isotonic_selector"]
+    # The numeric block holds 2 columns; index 1 -> the second numeric one.
+    assert selector.n_numeric == 2
+    # The selected numeric feature correlates with y (high R²), not a dummy.
+    assert trainer.val_score > 0.9
+
+
+def test_isotonic_no_numeric_features_rejected():
+    """A frame with no numerical features is rejected with a non-fatal
+    ValueError (the isotonic adapter has no meaningful input column).
+
+    Previously the model silently fell back to feature_index=0 and was fitted
+    on an arbitrary one-hot dummy column (issue #155).
+    """
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame(
+        {
+            "a": rng.choice(["x", "y"], size=50),
+            "b": rng.choice(["p", "q", "r"], size=50),
+        }
+    )
+    y = pd.Series((X["a"] == "x").astype(float) * 2.0)
+
+    # In the final trainer the per-fold ValueError surfaces through the
+    # "Validation scoring failed for all folds" wrapper (the message keeps the
+    # adapter guard text).
+    with pytest.raises(
+        TrainingError, match="no numerical features to select from"
+    ):
+        ModelTrainer(algorithm="isotonic_regression", hyperparams={}).fit(X, y)
 
 
 def test_isotonic_multifeature_feature_index_selection():
