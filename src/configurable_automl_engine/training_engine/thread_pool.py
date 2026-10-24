@@ -198,6 +198,14 @@ def _shm_has_free_space(size: int) -> bool:
     30% margin is kept free so that this segment never exhausts the tmpfs
     for the segments still to be created.
 
+    Known limitation (TOCTOU): the statvfs check is not atomic with the
+    subsequent segment creation — another process may consume the remaining
+    free space between the check and the ftruncate, in which case SIGBUS is
+    still theoretically possible. This is inherent to the POSIX shared
+    memory API (there is no way to reserve space atomically); the 30% margin
+    reduces the window but does not eliminate it. On a typical single-node
+    run this is a best-effort guard against the 64MB /dev/shm default.
+
     When the backing path cannot be determined (non-Linux POSIX systems),
     no check is possible and True is returned: the existing behaviour (an
     attempt that may or may not fail with ENOMEM) is preserved there.
@@ -566,14 +574,17 @@ class DiskPersistenceManager:
         Returns:
             str: Absolute path to the created temporary file.
         """
-        # A conservative size estimate: 8 bytes per element + 1KB of Parquet
-        # metadata. Files exceeding the free space on /dev/shm (a 64MB
-        # default in Docker/Kubernetes — issue #146) go to the system temp
-        # directory instead: on a full tmpfs the write would either raise a
-        # catchable ENOSPC (a warning and pickle fallback) or, for the SHM
-        # path, kill the process with SIGBUS.
+        # A conservative size estimate of the Parquet file: the in-memory
+        # footprint of the DataFrame (deep=True accounts for object/string
+        # columns with long values, which the old 8-bytes-per-element
+        # heuristic underestimated) plus 1KB of Parquet metadata. Files
+        # exceeding the free space on /dev/shm (a 64MB default in
+        # Docker/Kubernetes — issue #146) go to the system temp directory
+        # instead: on a full tmpfs the write would either raise a catchable
+        # ENOSPC (a warning and pickle fallback) or, for the SHM path, kill
+        # the process with SIGBUS.
         if self.tmp_dir == "/dev/shm":
-            approx = df.shape[0] * df.shape[1] * 8 + 1024
+            approx = int(df.memory_usage(deep=True).sum()) + 1024
             if approx > self.free_parquet_space():
                 logger.warning(
                     "Not enough free space in /dev/shm for the Parquet cache "

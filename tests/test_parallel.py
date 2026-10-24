@@ -2626,6 +2626,21 @@ def test_shm_has_free_space_statvfs_error_rejects(monkeypatch):
     assert thread_pool._shm_has_free_space(1) is False
 
 
+def test_shm_has_free_space_statvfs_valueerror_rejects(monkeypatch):
+    """A statvfs ValueError (e.g. an invalid/garbage backing path) is treated
+    the same as OSError: no room is reported and the data goes to the disk
+    cache instead of crashing with SIGBUS."""
+    monkeypatch.setattr(
+        "configurable_automl_engine.training_engine.thread_pool."
+        "_shm_backing_path",
+        lambda: "/dev/shm",
+    )
+    monkeypatch.setattr(
+        os, "statvfs", lambda path: (_ for _ in ()).throw(ValueError("invalid path"))
+    )
+    assert thread_pool._shm_has_free_space(1) is False
+
+
 def test_shared_dataframe_creation_no_room_raises_oserror(monkeypatch):
     """SharedDataFrame(df) on a full /dev/shm raises OSError, not SIGBUS.
 
@@ -2818,6 +2833,15 @@ def test_disk_persistence_manager_free_parquet_space_statvfs_error(monkeypatch):
     assert manager.free_parquet_space() == 0
 
 
+def test_disk_persistence_manager_free_parquet_space_statvfs_valueerror(monkeypatch):
+    """A statvfs ValueError (invalid path) → free_parquet_space returns 0."""
+    monkeypatch.setattr(
+        os, "statvfs", lambda path: (_ for _ in ()).throw(ValueError("invalid"))
+    )
+    manager = DiskPersistenceManager(use_shm=True)
+    assert manager.free_parquet_space() == 0
+
+
 def test_disk_persistence_manager_full_dev_shm_uses_system_tmp(monkeypatch):
     """A parquet bigger than the /dev/shm free space goes to the system tmp.
 
@@ -2889,6 +2913,49 @@ def test_disk_persistence_manager_dev_shm_small_file_stays_on_dev_shm(
         try:
             assert nonlocal_holder["dir"] == "/dev/shm"
             assert path.startswith("/dev/shm/")
+        finally:
+            manager.cleanup()
+
+
+def test_disk_persistence_manager_long_strings_route_to_system_tmp(monkeypatch):
+    """Long object/string values must not slip through the size estimate.
+
+    The old 8-bytes-per-element heuristic underestimated frames with long
+    strings (a 20k-char string is ~20KB per cell, not 8 bytes); the estimate
+    now uses ``df.memory_usage(deep=True).sum()`` so such frames are routed
+    to the system temp directory instead of exhausting the 64MB /dev/shm.
+    """
+    long_text = "x" * 20_000
+    df = pd.DataFrame({"text": [long_text] * 1000})  # ~20 MB deep usage
+    assert int(df.memory_usage(deep=True).sum()) > 20 * 1000 * 1000
+
+    real_tempfile_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        nonlocal_holder["dir"] = kwargs.get("dir")
+        return real_tempfile_mkstemp(*args, **kwargs)
+
+    nonlocal_holder: dict[str, object] = {}
+
+    manager = DiskPersistenceManager(use_shm=True)
+    manager.tmp_dir = "/dev/shm"
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            side_effect=recording_mkstemp,
+        ),
+        patch(
+            "configurable_automl_engine.training_engine.thread_pool."
+            "DiskPersistenceManager.free_parquet_space",
+            lambda self: 1024 * 1024,  # only 1 MiB free on /dev/shm
+        ),
+    ):
+        path = manager.save_df(df)
+        try:
+            assert nonlocal_holder["dir"] is None  # system temp directory
+            assert not path.startswith("/dev/shm/")
+            recovered = pd.read_parquet(path)
+            pd.testing.assert_frame_equal(recovered, df)
         finally:
             manager.cleanup()
 
