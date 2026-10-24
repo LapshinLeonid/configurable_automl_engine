@@ -225,3 +225,42 @@ def test_oversampler_diabetes_honest_synthetic_targets() -> None:
     synth_smote = res_smote["target"].iloc[n:]
     assert synth_smote.between(df["target"].min(), df["target"].max()).all()
     assert synth_smote.nunique() >= 0.8 * len(synth_smote)
+
+@pytest.mark.parametrize("experimental", [True, False])
+def test_experimental_warning_logged_once_per_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch, experimental: bool
+) -> None:
+    """Robustness scenario "oversampling on continuous target": a run with
+    3 trials x 5 folds logs the experimental WARNING exactly once from the
+    sampler plus once from config validation (<= 2 total)."""
+    import logging
+
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", experimental)
+    df = _make_regression_df()
+    config = _make_config(tmp_path / "models" / "warn.pkl", os_algorithm="random")
+    config["general"]["validation_strategy"] = "k_fold"
+    config["general"]["n_folds"] = 5
+    config["general"]["phases"][0]["n_trials"] = 3
+
+    with caplog.at_level(logging.WARNING):
+        train_best_model(config=config, df=df, target="target")
+
+    experimental_records = [
+        r for r in caplog.records if "Oversampling is EXPERIMENTAL" in r.getMessage()
+    ]
+    if not experimental:
+        assert experimental_records == []
+        return
+    sampler_records = [
+        r for r in experimental_records if r.name == "configurable_automl_engine.oversampling"
+    ]
+    config_records = [
+        r
+        for r in experimental_records
+        if r.name == "configurable_automl_engine.training_engine.component"
+    ]
+    assert len(sampler_records) == 1
+    assert len(config_records) == 1
+    assert len(experimental_records) <= 2

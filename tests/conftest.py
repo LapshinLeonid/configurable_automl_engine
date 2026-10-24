@@ -58,3 +58,14 @@ def regression_dataset():
     Creates an expanded dataset: 200 rows, 10 features.
     """
     return create_mock_df(rows=200, cols=10, target="yield_score")
+
+
+@pytest.fixture(autouse=True)
+def _reset_oversampling_experimental_warnings():
+    """Reset the warn-once state of the oversampling experimental WARNING so
+    every test observes the first emission independently."""
+    from configurable_automl_engine.oversampling import reset_experimental_warnings
+
+    reset_experimental_warnings()
+    yield
+    reset_experimental_warnings()
