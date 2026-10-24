@@ -760,6 +760,8 @@ Supported algorithms:
 
 Short aliases are also supported: `"dt"`, `"rf"`, `"et"`, `"gb"`, `"ab"`, `"sgd"`, `"knn"`, `"gpr"`, `"ard"`, `"xgboost"`, and others.
 
+**Target-domain guard for GLMs.** Before the first HPO phase the engine checks that the target fits the loss domain of the GLMs: `gammaregressor` requires `y > 0`, `poissonregressor` requires `y >= 0`, and `tweedieregressor` / `glm` follow their `power` (`power <= 0` — any `y`; `0 < power < 2` — `y >= 0`; `power >= 2` — `y > 0`; without `power` in the search space the estimator default `power=0` accepts any target). An algorithm whose domain does not fit the target is excluded **before any trial runs**: its reason lands in `result["disqualified_algorithms"]` and a single `WARNING` is logged. A Tweedie `power` search range that is only partly valid is clipped to its valid part instead (e.g. `[0, 3]` on a target with negative values becomes `[0, 0]`; on a target with zeros the upper bound is kept just below `2`; categorical options are filtered), with a `WARNING` describing the change.
+
 Algorithm configuration consists of:
 
 * `enable` — boolean flag, whether hyperparameter search is performed for the algorithm.
