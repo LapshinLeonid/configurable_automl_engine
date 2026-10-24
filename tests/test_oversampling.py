@@ -16,6 +16,7 @@ from configurable_automl_engine.oversampling import (
     CONTINUOUS_TARGET_QUANTILES,
     DataOversampler,
     _bin_continuous_target,
+    _bin_regression_target,
     _decode_continuous_y,
     _is_categorical_col,
     _is_continuous_target,
@@ -753,6 +754,12 @@ def test_fit_resample_adasyn_to_smotenc_fallback_coverage(caplog):
 
     # Create an imbalanced target (at least 2 samples for the minority class)
     y = np.array([0, 0, 0, 0, 1, 1])
+    sampler = DataOversampler(
+        algorithm="ADASYN",
+        multiplier=2.0,
+        task="classification",
+        random_state=42,
+    )
 
     # 3. Call the method. Use caplog to check the logs.
     with caplog.at_level("WARNING"):
@@ -932,23 +939,29 @@ def test_smote_guard_not_triggered_for_numeric_strings():
 
 
 def test_is_continuous_target_detection():
-    """Continuous (regression) targets are detected; discrete targets are not."""
+    """Any numeric (binnable) target is regression data; non-numeric are not.
+
+    The engine is regression-only: integer targets (counts, whole-unit
+    prices) are regression targets just like truly continuous floats. Only
+    non-numeric / bool / NaN-only targets are not regression data.
+    """
     rng = np.random.RandomState(0)
     # True continuous (non-integer floats)
     assert _is_continuous_target(pd.Series(rng.randn(200))) is True
     assert _is_continuous_target(pd.Series([0.5, 1.5, 2.5, 0.5, 1.5])) is True
-    # Two unique non-integer floats are also continuous for imblearn
+    # Two unique non-integer floats are also regression for the engine
     assert _is_continuous_target(pd.Series([2.5, 5.5, 2.5, 5.5])) is True
-    # Integer dtypes and integer-valued floats stay on the classification path
-    assert _is_continuous_target(pd.Series(np.arange(100) % 40)) is False
-    assert _is_continuous_target(pd.Series([0, 1, 0, 1])) is False
-    assert _is_continuous_target(pd.Series([0.0, 1.0, 0.0, 1.0])) is False
-    assert _is_continuous_target(pd.Series([0.0, 1.0, 2.0, 0.0, 1.0, 2.0])) is False
-    # Bool targets stay on the classification path
+    # Integer dtypes and integer-valued floats are regression too (the
+    # engine never treats a numeric target as a class label).
+    assert _is_continuous_target(pd.Series(np.arange(100) % 40)) is True
+    assert _is_continuous_target(pd.Series([0, 1, 0, 1])) is True
+    assert _is_continuous_target(pd.Series([0.0, 1.0, 0.0, 1.0])) is True
+    assert _is_continuous_target(pd.Series([0.0, 1.0, 2.0, 0.0, 1.0, 2.0])) is True
+    # Bool targets are not regression data
     assert _is_continuous_target(pd.Series([True, False, True, False])) is False
-    # Non-numeric targets are never continuous
+    # Non-numeric targets are not regression data
     assert _is_continuous_target(pd.Series(["a", "b", "c", "a"])) is False
-    # NaN-only / empty targets are not continuous
+    # NaN-only / empty targets are not regression data
     assert _is_continuous_target(pd.Series([np.nan, np.nan])) is False
     assert _is_continuous_target(pd.Series([], dtype=float)) is False
 
@@ -1031,9 +1044,10 @@ def test_oversample_continuous_target_with_nan():
     assert res["target"].iloc[n_orig:].notna().all()
 
 
-def test_binary_float_target_stays_classification():
-    """Binary float 0.0/1.0 targets must NOT take the continuous path:
-    the result contains only the original class values."""
+def test_binary_float_target_takes_regression_path():
+    """Binary float 0.0/1.0 targets take the regression path (the engine is
+    regression-only): the result contains the real class-like values, and
+    synthetic rows may interpolate between them."""
     rng = np.random.RandomState(5)
     df = pd.DataFrame({"f1": rng.randn(80), "f2": rng.randn(80)})
     df["target"] = np.where(rng.rand(80) > 0.5, 1.0, 0.0)
@@ -1042,7 +1056,12 @@ def test_binary_float_target_stays_classification():
     res = sampler.oversample(df, target="target")
 
     assert len(res) > len(df)
-    assert set(res["target"].unique()) == {0.0, 1.0}
+    # Original rows are preserved exactly at the front.
+    assert np.array_equal(
+        res["target"].iloc[: len(df)].to_numpy(), df["target"].to_numpy()
+    )
+    # The regression path keeps the values in the observed range.
+    assert res["target"].between(0.0, 1.0).all()
 
 
 @pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
@@ -1147,10 +1166,10 @@ def test_decode_continuous_y_rejects_unknown_synth_code():
     binned, bin_mids = _prepare_continuous_bins(y)
     n = len(y)
 
-    # A valid int8 code that is NOT a bin of this target.
-    valid_int8_max = 127
+    # A valid int32 code that is NOT a bin of this target.
+    valid_int32_code = 1_000_000
     y_binned = np.concatenate(
-        [binned.to_numpy(), np.array([valid_int8_max], dtype=np.int8)]
+        [binned.to_numpy(), np.array([valid_int32_code], dtype=np.int32)]
     )
 
     with pytest.raises(KeyError):
@@ -1180,3 +1199,378 @@ def test_bin_continuous_target_single_pass_consistency():
     binned2, bin_mids2 = _prepare_continuous_bins(y)
     assert bin_mids == bin_mids2
     assert np.array_equal(binned.to_numpy(), binned2.to_numpy())
+
+
+# ------------------------------------------------------------------ #
+#  Regression oversampling for ANY numeric target (issue #154)        #
+# ------------------------------------------------------------------ #
+
+
+def _diabetes_df() -> pd.DataFrame:
+    """The sklearn diabetes dataset (a float target with many unique values)."""
+    from sklearn.datasets import load_diabetes
+
+    return load_diabetes(as_frame=True).frame
+
+
+def _count_target_df(n: int = 300, seed: int = 0) -> pd.DataFrame:
+    """A count (integer-valued Poisson) regression target."""
+    rng = np.random.RandomState(seed)
+    df = pd.DataFrame({"f1": rng.randn(n), "f2": rng.randn(n)})
+    df["target"] = rng.poisson(3, n).astype(int)
+    return df
+
+
+@pytest.mark.parametrize("algorithm", ["random", "smote", "adasyn"])
+def test_integer_target_uses_regression_path(algorithm):
+    """Integer-valued regression targets (counts) are NOT treated as classes:
+    every unique value must not become a 'class' (which broke SMOTE/ADASYN
+    with singleton classes and multiplied random by per-class ceil)."""
+    df = _count_target_df()
+    sampler = DataOversampler(algorithm=algorithm, multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    n = len(df)
+    assert len(res) >= n
+    # Row count: ceil(n * multiplier) ± number of bins.
+    expected = ceil(n * 1.5)
+    n_bins = 6  # qcut(duplicates='drop') of the Poisson target
+    assert abs(len(res) - expected) <= n_bins, (len(res), expected)
+    # Original rows keep their exact integer values.
+    assert np.array_equal(res["target"].iloc[:n].to_numpy(), df["target"].to_numpy())
+
+
+@pytest.mark.parametrize("algorithm", ["random", "smote", "adasyn"])
+def test_diabetes_target_oversamples(algorithm):
+    """The diabetes target (214 unique float values) must take the regression
+    path: SMOTE/ADASYN succeed (previously: singleton-class crash) and the
+    row count matches ceil(n * multiplier) ± number of bins."""
+    df = _diabetes_df()
+    sampler = DataOversampler(algorithm=algorithm, multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    n = len(df)
+    expected = ceil(n * 1.5)
+    assert abs(len(res) - expected) <= 8, (len(res), expected)
+    assert np.array_equal(res["target"].iloc[:n].to_numpy(), df["target"].to_numpy())
+
+
+def test_random_oversampling_restores_real_targets():
+    """Random oversampling: EVERY synthetic row's y equals the y of its
+    source row (RandomOverSampler.sample_indices_), not a bin midpoint."""
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({"f1": rng.randn(200), "f2": rng.randn(200)})
+    df["target"] = df["f1"] * 3.0 + 1.0 + rng.randn(200) * 0.1
+
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    X = df.drop("target", axis=1)
+    y = df["target"].to_numpy()
+    X_res, y_res = sampler.fit_resample(X, y)
+    n = len(y)
+    assert len(y_res) > n
+    # sample_indices_ must be used: every output row maps to a real source
+    # row, so the synthetic tail must contain only values from the original
+    # target (never bin midpoints / interpolated values).
+    synth_vals = set(y_res[n:])
+    orig_vals = set(y)
+    assert synth_vals <= orig_vals
+    assert len(synth_vals) > 1
+    # With 200 rows and multiplier=1.5 the old midpoint decode produced only
+    # 8 distinct synthetic values; the row-level restore must produce many
+    # more (the number of distinct synthetic y equals the number of
+    # *distinct source rows that were duplicated*).
+    assert len(synth_vals) > 50
+
+
+def test_smote_synthetic_y_between_parents():
+    """SMOTE-style regression generation: synthetic y values lie between the
+    two parents' values (interpolation), and the number of distinct synthetic
+    y ≈ number of synthetic rows (honest targets, not bin midpoints)."""
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({"f1": rng.randn(300), "f2": rng.randn(300)})
+    df["target"] = df["f1"] + 0.5 * df["f2"] + rng.randn(300) * 0.1
+
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    X = df.drop("target", axis=1)
+    y = df["target"].to_numpy()
+    X_res, y_res = sampler.fit_resample(X, y)
+    n = len(y)
+    synth = y_res[n:]
+    assert len(synth) > 0
+    # Every synthetic value is an interpolation, so it stays inside the
+    # observed target range.
+    assert synth.min() >= y.min() and synth.max() <= y.max()
+    # Distinct synthetic values ≈ number of synthetic rows (unlike the 8
+    # bin midpoints of the previous implementation).
+    n_distinct = len(np.unique(np.round(synth, 8)))
+    assert n_distinct >= 0.8 * len(synth)
+
+
+def test_smote_synthetic_parents_real():
+    """SMOTE-style generation interpolates between REAL rows: the synthetic
+    row x must lie in the convex hull of the parents. With identical
+    duplicated features (a single cluster) every synthetic target must be
+    between the min and max of the real rows whose features match."""
+    rng = np.random.RandomState(3)
+    y_real = np.linspace(10.0, 20.0, 200)
+    df = pd.DataFrame({"f1": np.zeros(200), "f2": np.zeros(200)})
+    df["target"] = y_real
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=1)
+    X = df.drop("target", axis=1)
+    X_res, y_res = sampler.fit_resample(X, y_real)
+    n = len(y_real)
+    synth = y_res[n:]
+    assert len(synth) > 0
+    # x is a convex combination of two real rows: with constant features the
+    # synthetic x stays 0 (the fractional change is allowed).
+    assert np.allclose(X_res[n:], 0.0)
+    # y is the same convex combination of two real targets.
+    assert synth.min() >= y_real.min() and synth.max() <= y_real.max()
+
+
+def test_task_classification_keeps_classification_path():
+    """An explicit task='classification' call keeps the class-based path: a
+    binary 0.0/1.0 target yields only the original classes."""
+    rng = np.random.RandomState(5)
+    df = pd.DataFrame({"f1": rng.randn(80), "f2": rng.randn(80)})
+    df["target"] = np.where(rng.rand(80) > 0.5, 1.0, 0.0)
+
+    for algo in ("smote", "adasyn", "random"):
+        sampler = DataOversampler(
+            algorithm=algo, multiplier=2.0, task="classification", random_state=42
+        )
+        res = sampler.oversample(df, target="target")
+        assert len(res) > len(df)
+        assert set(res["target"].unique()) == {0.0, 1.0}
+
+
+def test_default_task_is_regression():
+    """The default task='regression' bins an integer target instead of
+    treating every unique value as a class."""
+    df = _count_target_df()
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    X = df.drop("target", axis=1)
+    X_res, y_res = sampler.fit_resample(X, df["target"].to_numpy())
+    assert len(y_res) > len(df)
+
+
+def test_target_bins_parameter_controls_bin_count():
+    """target_bins controls the quantile discretization used for the
+    sampling strategy."""
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(400), "f2": rng.randn(400)})
+    df["target"] = rng.randn(400)
+    y = df["target"]
+
+    is_reg4, binned4, mids4 = _bin_regression_target(pd.Series(y), 4)
+    is_reg16, binned16, mids16 = _bin_regression_target(pd.Series(y), 16)
+    assert is_reg4 and is_reg16
+    assert len(mids4) == 4
+    assert len(mids16) == 16
+
+
+def test_target_bins_less_than_two_raises():
+    """target_bins < 2 is a configuration error."""
+    sampler = DataOversampler(target_bins=1)
+    df = pd.DataFrame({"f1": [1.0, 2.0], "target": [0.5, 1.5]})
+    with pytest.raises(ValueError, match="target_bins"):
+        sampler.fit_resample(df[["f1"]], df["target"])
+
+
+def test_experimental_oversampling_warns_when_enabled(caplog, monkeypatch):
+    """When the evidence gate marks oversampling experimental, running the
+    oversampler with a real sample increase logs a WARNING."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
+    df = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0], "target": [0.0, 1.0, 2.0, 3.0]})
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        sampler.oversample(df, target="target")
+    assert "EXPERIMENTAL" in caplog.text
+    assert "degradation" in caplog.text
+
+
+def test_non_experimental_oversampling_does_not_warn(caplog, monkeypatch):
+    """When the evidence gate passes (flag False), no experimental warning
+    is emitted."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", False)
+    df = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0], "target": [0.0, 1.0, 2.0, 3.0]})
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        sampler.oversample(df, target="target")
+    assert "EXPERIMENTAL" not in caplog.text
+
+
+def test_experimental_warns_on_balance_even_with_unit_multiplier(caplog, monkeypatch):
+    """N3: balancing generates rows even at multiplier == 1.0, so the
+    experimental WARNING must be emitted for balance=True as well."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(40), "f2": rng.randn(40)})
+    # An imbalanced binned target: balancing will generate rows.
+    df["target"] = np.concatenate([np.full(10, 0.0), np.full(30, 1.0)])
+    sampler = DataOversampler(algorithm="random", multiplier=1.0, balance=True, random_state=42)
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        res = sampler.oversample(df, target="target")
+    assert len(res) > len(df), "balancing must generate additional rows"
+    assert "EXPERIMENTAL" in caplog.text
+
+
+def test_infinite_target_values_stay_classification():
+    """A numeric target with an infinite value cannot be binned: it falls
+    back to the classification path instead of crashing."""
+    y = pd.Series([0.0, 1.0, 2.0, np.inf])
+    is_reg, binned, mids = _bin_regression_target(y, 8)
+    assert is_reg is False
+    assert mids == {}
+
+
+def test_decode_regression_y_falls_back_to_legacy_decode(caplog):
+    """RandomOverSampler without sample_indices_ falls back to the
+    quantile-bin decode (defensive path for future imblearn versions)."""
+    y = pd.Series([0.5, 1.5, 2.5, 3.5])
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    y_res = np.array([0, 1, 2, 3, 0, 1])  # bin codes: originals + 2 synthetic
+    fake_sampler = type("Fake", (), {"sample_indices_": None})()
+    decoded = sampler._decode_regression_y(
+        y_res, y, pd.Series([0, 1, 2, 3]),
+        {0: 0.75, 1: 1.75, 2: 2.75, 3: 3.75}, fake_sampler,
+    )
+    assert len(decoded) == 6
+    assert np.allclose(decoded[:4], y.to_numpy())
+    assert np.allclose(decoded[4:], [0.75, 1.75])
+
+
+def test_smote_requires_non_missing_target_all_nan():
+    """SMOTE/ADASYN with an all-NaN target raise a clear error."""
+    df = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0]})
+    for algorithm in ("smote", "adasyn"):
+        sampler = DataOversampler(algorithm=algorithm, multiplier=2.0, random_state=42)
+        with pytest.raises(ValueError):
+            sampler.fit_resample(df[["f1"]], pd.Series([np.nan] * 4))
+
+
+# ------------------------------------------------------------------ #
+#  Review follow-up (B1/B2): dtype honesty and ADASYN != SMOTE        #
+# ------------------------------------------------------------------ #
+
+
+def test_smote_integer_target_interpolation_not_rounded():
+    """B1: the public oversample() must return the honest SMOTER-interpolated
+    (float) values for an integer regression target instead of casting them
+    back to int (which collapsed 152 synthetic rows into a handful of
+    distinct values)."""
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(300), "f2": rng.randn(300)})
+    df["target"] = rng.poisson(3, 300).astype(int)
+
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    n = len(df)
+    synth = res["target"].iloc[n:]
+    # Result is float: the interpolation is not rounded away.
+    assert np.issubdtype(res["target"].dtype, np.floating)
+    # The synthetic values are actual interpolations, not just the observed
+    # integers: at least one non-integer-representable value must exist
+    # (otherwise the interpolation was still destroyed).
+    non_integer = (synth % 1 != 0).sum()
+    assert non_integer > 0, "the SMOTER interpolation was rounded away"
+    # Original rows keep their exact integer values.
+    assert np.array_equal(res["target"].iloc[:n].to_numpy(), df["target"].to_numpy())
+
+
+def test_smote_nullable_int64_target_with_nan():
+    """B1: a nullable Int64 target with NaN must not crash the public
+    oversample() (previously astype(target_dtype) raised
+    'cannot safely cast non-equivalent float64 to int64')."""
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(200), "f2": rng.randn(200)})
+    df["target"] = pd.Series(rng.poisson(3, 200)).astype("Int64")
+    df.loc[df.index[:10], "target"] = pd.NA
+
+    sampler = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    n = len(df)
+    assert np.issubdtype(res["target"].dtype, np.floating)
+    # The original NaN rows are preserved (10), no new NaN appeared.
+    assert res["target"].iloc[:n].isna().sum() == 10
+    assert res["target"].iloc[n:].notna().all()
+
+
+def test_random_integer_target_values_stay_exact():
+    """B1: random oversampling of an integer target keeps the EXACT source
+    values (the float64 result contains only the original integers)."""
+    rng = np.random.RandomState(1)
+    df = pd.DataFrame({"f1": rng.randn(200), "f2": rng.randn(200)})
+    df["target"] = rng.poisson(4, 200).astype(int)
+
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    n = len(df)
+    assert np.issubdtype(res["target"].dtype, np.floating)
+    orig = set(df["target"].astype(float))
+    assert set(res["target"].iloc[n:]) <= orig
+
+
+def test_adasyn_differs_from_smote_regression_path():
+    """B2: in the regression path ADASYN must NOT be a byte-identical alias
+    of SMOTE: density-weighted parent selection produces a different
+    synthetic set."""
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(400), "f2": rng.randn(400)})
+    df["target"] = df["f1"] + 0.5 * df["f2"] + rng.randn(400) * 0.1
+
+    X = df.drop("target", axis=1)
+    y = df["target"].to_numpy()
+    smote = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    adasyn = DataOversampler(algorithm="adasyn", multiplier=1.5, random_state=42)
+    Xr_s, yr_s = smote.fit_resample(X, y)
+    Xr_a, yr_a = adasyn.fit_resample(X, y)
+
+    assert len(yr_s) == len(yr_a)
+    assert not np.array_equal(Xr_s, Xr_a) or not np.array_equal(yr_s, yr_a), (
+        "ADASYN must differ from SMOTE in the regression path"
+    )
+
+
+def test_adasyn_zero_cross_bin_density_no_unbound_local():
+    """B3: ADASYN with well-separated feature clusters (every k-NN neighbor
+    belongs to the same bin -> zero cross-bin density for all parents) must
+    not crash with UnboundLocalError: the density branch falls back to the
+    uniform parent selection."""
+    rng = np.random.RandomState(0)
+    n_per_cluster = 30
+    n_clusters = 8
+    centers = np.arange(n_clusters)[:, None] * 100.0
+    X = np.vstack(
+        [centers[i] + rng.randn(n_per_cluster, 2) * 0.01 for i in range(n_clusters)]
+    )
+    y = np.repeat(np.linspace(0.0, 100.0, n_clusters), n_per_cluster)
+    df = pd.DataFrame(X, columns=["f1", "f2"])
+    df["target"] = y
+
+    sampler = DataOversampler(algorithm="adasyn", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    assert len(res) > len(df)
+
+
+def test_string_target_with_default_task_preserved():
+    """B4: a string (non-numeric) target on the default regression task goes
+    through the classification fallback path and keeps its original dtype
+    (previously the unconditional float64 cast crashed with
+    'could not convert string to float')."""
+    df = pd.DataFrame(
+        {
+            "f1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "f2": [2.0, 3.0, 1.0, 5.0, 4.0, 6.0, 8.0, 7.0],
+            "target": ["cat", "dog", "bird", "cat", "dog", "bird", "cat", "dog"],
+        }
+    )
+    sampler = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    res = sampler.oversample(df, target="target")
+    assert len(res) > len(df)
+    assert res["target"].dtype == df["target"].dtype
+    assert set(res["target"]) <= {"cat", "dog", "bird"}

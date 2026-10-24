@@ -1482,6 +1482,7 @@ class OversamplingCfg(BaseModel):
         multiplier (float): Target sample-increase factor.
         algorithm (OversamplingAlgorithm): Selected generation method
             (SMOTE, ADASYN, etc.).
+        target_bins (int): Number of quantile bins for the regression path.
     """
 
     # accept alias names
@@ -1501,6 +1502,14 @@ class OversamplingCfg(BaseModel):
         default=OversamplingAlgorithm.random,
         alias="data_oversampling_algorithm",
         description="Algorithm for synthesizing new data (Random, SMOTE, ADASYN)",
+    )
+    target_bins: int = Field(
+        default=8,
+        alias="data_oversampling_target_bins",
+        ge=2,
+        description=(
+            "Number of quantile bins for the regression oversampling strategy"
+        ),
     )
 
     @model_validator(mode="after")

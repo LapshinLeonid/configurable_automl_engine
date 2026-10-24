@@ -1199,6 +1199,7 @@ def _run_hpo(
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
+    data_oversampling_target_bins: int = 8,
     initial_params: dict[str, Any] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
     random_state: int | None = None,
@@ -1390,6 +1391,9 @@ def _run_hpo(
 
     if "data_oversampling_algorithm" in sig.parameters:
         kwargs["data_oversampling_algorithm"] = data_oversampling_algorithm
+
+    if "data_oversampling_target_bins" in sig.parameters:
+        kwargs["data_oversampling_target_bins"] = data_oversampling_target_bins
 
     # pass the custom search space if provided
     if search_space_override is not None:
@@ -1654,6 +1658,9 @@ def _build_trainer(
     )
     trainer_has_fs_cfg = "feature_selection_cfg" in trainer_sig.parameters
     trainer_has_fs_active = "feature_selection_active" in trainer_sig.parameters
+    trainer_has_os_target_bins = (
+        "data_oversampling_target_bins" in trainer_sig.parameters
+    )
 
     trainer_kwargs: dict[str, Any] = {
         "algorithm": algo_name,
@@ -1676,6 +1683,12 @@ def _build_trainer(
         "target_encoding_smoothing": cfg.general.target_encoding_smoothing,
         "target_encoding_fallback": cfg.general.target_encoding_fallback,
     }
+    # The regression oversampling bin count is passed only to trainers that
+    # support it (custom trainers without the argument fall back to the
+    # engine default 8) — the same signature-aware contract as for feature
+    # selection.
+    if trainer_has_os_target_bins or trainer_accepts_var_kwargs:
+        trainer_kwargs["data_oversampling_target_bins"] = cfg.oversampling.target_bins
     # Feature selection: the root Config configuration plus the HPO winner's
     # decision. Arguments are passed only to trainers that support them; when
     # feature selection is active we warn about silent ignoring.
@@ -2160,6 +2173,8 @@ class _HpoPhaseSpec:
         oversampling_enabled (bool): Whether oversampling is enabled.
         oversampling_multiplier (float): Sample increase coefficient.
         oversampling_algorithm (str): Oversampling algorithm name.
+        oversampling_target_bins (int): Number of quantile bins for the
+            regression oversampling strategy.
         pruning_cfg (dict[str, Any] | None): Early stopping settings.
         encoding (str): Categorical encoding strategy.
         high_cardinality_threshold (int | None): High-cardinality threshold.
@@ -2192,6 +2207,7 @@ class _HpoPhaseSpec:
     oversampling_enabled: bool
     oversampling_multiplier: float
     oversampling_algorithm: str
+    oversampling_target_bins: int
     pruning_cfg: dict[str, Any] | None
     encoding: str
     high_cardinality_threshold: int | None
@@ -2342,6 +2358,7 @@ def _execute_hpo_phase(
             data_oversampling=spec.oversampling_enabled,
             data_oversampling_multiplier=spec.oversampling_multiplier,
             data_oversampling_algorithm=spec.oversampling_algorithm,
+            data_oversampling_target_bins=spec.oversampling_target_bins,
             initial_params=initial_params,
             previous_trials=previous_trials,
             random_state=random_state,
@@ -2767,6 +2784,7 @@ def execute_phases(
             oversampling_enabled=ovr.enable,
             oversampling_multiplier=ovr.multiplier,
             oversampling_algorithm=ovr.algorithm.value,
+            oversampling_target_bins=ovr.target_bins,
             pruning_cfg=pruning_cfg,
             encoding=cfg.general.categorical_encoding,
             high_cardinality_threshold=cfg.general.high_cardinality_threshold,

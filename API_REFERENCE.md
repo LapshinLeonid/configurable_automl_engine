@@ -816,12 +816,22 @@ The optional `oversampling` section may include:
 * `enable` — (optional) enable oversampling.
 * `multiplier` — (optional) factor to increase dataset size (minimum 1.0).
 * `algorithm` — (optional) oversampling algorithm.
+* `target_bins` — (optional, flat alias `data_oversampling_target_bins`) number of quantile bins for the regression oversampling strategy (default 8, minimum 2).
 
 ### Supported oversampling algorithms
 
 * `"random"`
 * `"smote"`
 * `"adasyn"`
+
+The engine is regression-only: any numeric target (float or integer — counts, whole-unit prices) is oversampled through the regression path regardless of integrality. The target is discretized into `target_bins` quantile bins, the bins are resampled as pseudo-classes, and the real target values are restored afterwards:
+
+* `random` — every duplicated row keeps its source row's real target (`RandomOverSampler.sample_indices_`), never a bin midpoint;
+* `smote` / `adasyn` — synthetic rows are generated SMOTER-style: for a synthetic sample between row `i` and a same-bin neighbor `n` with gap `u`, both the features (`x = x_i + u·(x_n − x_i)`) and the target (`y = y_i + u·(y_n − y_i)`) are interpolated, so synthetic `y` values lie between the two parents' values. `adasyn` uses density-weighted parent selection (rows whose feature-space neighborhoods are dominated by other bins are replicated more often), following the original ADASYN idea. Categorical columns follow the SMOTENC rule — a category that differs between the two parents keeps the first parent's value.
+
+The classification path is kept only for standalone `DataOversampler` calls with an explicit `task="classification"` argument (the default is `"regression"`).
+
+> ⚠️ **Experimental**: the nightly evidence gate (T13, `benchmarks/run_oversampling_benchmark.py`) observed a median held-out R² degradation of `adasyn` on the count dataset of about 0.019 (> 0.01) relative to the no-oversampling baseline. The feature is therefore marked experimental: a WARNING is logged whenever the oversampler actually runs, and you should verify the effect of oversampling on your own data before relying on it. When the gate passes again, the experimental mark is removed.
 
 Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of `DataOversampler` (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
 
@@ -861,6 +871,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `data_oversampling` | `bool` | `False` | Enable oversampling. |
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
 | `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
+| `data_oversampling_target_bins` | `int` | `8` | Number of quantile bins for the regression oversampling strategy (minimum 2). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
 | `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
 | `validation_strategy` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). |
@@ -921,6 +932,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `data_oversampling` | `bool` | `False` | Enable oversampling. |
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
 | `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
+| `data_oversampling_target_bins` | `int` | `8` | Number of quantile bins for the regression oversampling strategy (minimum 2). |
 | `serialization_format` | `SerializationFormat` | `pickle` | Save format. |
 | `categorical_features` | `list[str]` or `None` | `None` | Categorical column names. |
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |
@@ -1043,6 +1055,8 @@ Oversampling wrapper compatible with imbalanced-learn pipelines.
 | `balance` | `bool` | `False` | Balance all classes to majority class size. |
 | `random_state` | `int` or `None` | `42` | Random seed. |
 | `noise_level` | `float` | `0.01` | Noise intensity relative to std. |
+| `task` | `str` | `"regression"` | `"regression"` (default) — bin any numeric target into quantiles and use the regression path; `"classification"` — treat `y` as class labels. |
+| `target_bins` | `int` | `8` | Number of quantile bins for the regression path (minimum 2). |
 
 **Key methods:**
 

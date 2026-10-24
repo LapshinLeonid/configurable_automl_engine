@@ -145,3 +145,83 @@ def test_oversampler_continuous_target_with_nan() -> None:
     assert res["target"].iloc[:n_orig].isna().sum() == 15
     # No new NaN was generated.
     assert res["target"].iloc[n_orig:].notna().all()
+
+
+def _make_count_df(n: int = 300, seed: int = 0) -> pd.DataFrame:
+    """A count (integer-valued Poisson) regression dataset."""
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(
+        {
+            "num": rng.normal(size=n),
+            "cat": rng.choice(["red", "green", "blue"], size=n),
+        }
+    )
+    df["target"] = (
+        np.floor(2.5 + 0.8 * df["num"] + (df["cat"] == "green")).clip(lower=0).astype(int)
+    )
+    return df
+
+
+@pytest.mark.parametrize("os_algorithm", ["random", "smote", "adasyn"])
+def test_train_best_model_count_target_with_oversampling(
+    tmp_path: Path, os_algorithm: str
+) -> None:
+    """train_best_model trains successfully on an INTEGER (count) target with
+    oversampling: the integer target must take the regression path instead of
+    being treated as a class label (which crashed SMOTE/ADASYN on singleton
+    classes)."""
+    df = _make_count_df()
+    model_path = tmp_path / "models" / f"{os_algorithm}.pkl"
+    config = _make_config(model_path, os_algorithm=os_algorithm)
+
+    result = train_best_model(config=config, df=df, target="target")
+
+    assert isinstance(result, dict)
+    assert result["algorithm"] == "elasticnet"
+    assert result["score"] is not None
+    assert np.isfinite(result["score"])
+    assert Path(result["model_path"]).exists()
+
+
+@pytest.mark.parametrize("os_algorithm", ["random", "smote", "adasyn"])
+def test_train_best_model_diabetes_target_with_oversampling(
+    tmp_path: Path, os_algorithm: str
+) -> None:
+    """train_best_model succeeds on the sklearn diabetes target (214 unique
+    float values) with all three oversampling algorithms."""
+    from sklearn.datasets import load_diabetes
+
+    df = load_diabetes(as_frame=True).frame
+    model_path = tmp_path / "models" / f"{os_algorithm}.pkl"
+    config = _make_config(model_path, os_algorithm=os_algorithm)
+
+    result = train_best_model(config=config, df=df, target="target")
+
+    assert result["algorithm"] == "elasticnet"
+    assert result["score"] is not None
+    assert np.isfinite(result["score"])
+
+
+def test_oversampler_diabetes_honest_synthetic_targets() -> None:
+    """Diabetes at the oversampler level: random restores real source values
+    (not bin midpoints); smote interpolates between real rows."""
+    from sklearn.datasets import load_diabetes
+
+    df = load_diabetes(as_frame=True).frame
+
+    # Random: every synthetic y is a real source value; far more distinct
+    # values than the 8 quantile bins.
+    s_random = DataOversampler(algorithm="random", multiplier=1.5, random_state=42)
+    res_random = s_random.oversample(df, target="target")
+    n = len(df)
+    synth_random = res_random["target"].iloc[n:]
+    assert set(synth_random) <= set(df["target"])
+    assert synth_random.nunique() > 50
+
+    # SMOTE: synthetic y values interpolate between parents, so they stay
+    # within the observed range and are nearly all distinct.
+    s_smote = DataOversampler(algorithm="smote", multiplier=1.5, random_state=42)
+    res_smote = s_smote.oversample(df, target="target")
+    synth_smote = res_smote["target"].iloc[n:]
+    assert synth_smote.between(df["target"].min(), df["target"].max()).all()
+    assert synth_smote.nunique() >= 0.8 * len(synth_smote)

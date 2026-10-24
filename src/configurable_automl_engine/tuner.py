@@ -1113,6 +1113,7 @@ class _OptimizeRunner:
         data_oversampling: bool,
         data_oversampling_multiplier: float,
         data_oversampling_algorithm: str,
+        data_oversampling_target_bins: int = 8,
         metric: str,
         val_method: ValidationStrategy | str,
         validation_strategy: ValidationStrategy | str | None,
@@ -1244,6 +1245,7 @@ class _OptimizeRunner:
             "params": {
                 "multiplier": data_oversampling_multiplier,
                 "algorithm": data_oversampling_algorithm,
+                "target_bins": data_oversampling_target_bins,
             },
         }
 
@@ -2908,6 +2910,7 @@ def optimize(
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
+    data_oversampling_target_bins: int = 8,
     metric: str = "r2",
     # keep the old argument for backward compatibility
     val_method: ValidationStrategy | str = "k_fold",
@@ -3121,6 +3124,7 @@ def optimize(
         data_oversampling=data_oversampling,
         data_oversampling_multiplier=data_oversampling_multiplier,
         data_oversampling_algorithm=data_oversampling_algorithm,
+        data_oversampling_target_bins=data_oversampling_target_bins,
         metric=metric,
         val_method=val_method,
         validation_strategy=validation_strategy,

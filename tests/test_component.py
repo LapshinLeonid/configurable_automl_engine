@@ -2444,6 +2444,7 @@ class TestWorstScoreResultsExcluded:
             oversampling_enabled=False,
             oversampling_multiplier=1.0,
             oversampling_algorithm="random",
+            oversampling_target_bins=8,
             pruning_cfg=None,
             encoding="one_hot",
             high_cardinality_threshold=20,

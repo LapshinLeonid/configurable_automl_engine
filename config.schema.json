@@ -900,7 +900,7 @@
     },
     "OversamplingCfg": {
       "additionalProperties": false,
-      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).",
+      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins (int): Number of quantile bins for the regression path.",
       "properties": {
         "data_oversampling": {
           "default": false,
@@ -919,6 +919,13 @@
           "$ref": "#/$defs/OversamplingAlgorithm",
           "default": "random",
           "description": "Algorithm for synthesizing new data (Random, SMOTE, ADASYN)"
+        },
+        "data_oversampling_target_bins": {
+          "default": 8,
+          "description": "Number of quantile bins for the regression oversampling strategy",
+          "minimum": 2,
+          "title": "Data Oversampling Target Bins",
+          "type": "integer"
         }
       },
       "title": "OversamplingCfg",
@@ -1306,7 +1313,8 @@
       "default": {
         "data_oversampling": false,
         "data_oversampling_multiplier": 1.0,
-        "data_oversampling_algorithm": "random"
+        "data_oversampling_algorithm": "random",
+        "data_oversampling_target_bins": 8
       },
       "description": "Data balancing settings"
     },

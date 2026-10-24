@@ -425,6 +425,28 @@ def test_optimize_with_oversampling(toy_data):
     assert any(isinstance(step[1], DataOversampler) for step in model.steps)
 
 
+def test_optimize_oversampling_target_bins_passed_to_sampler(toy_data):
+    """data_oversampling_target_bins reaches the DataOversampler inside the
+    assembled pipeline."""
+    X, y = toy_data
+    opt_res = hyperopt.optimize(
+        "knn",
+        X,
+        y,
+        data_oversampling=True,
+        data_oversampling_algorithm="random",
+        data_oversampling_multiplier=1.2,
+        data_oversampling_target_bins=12,
+        n_trials=1,
+    )
+    assert opt_res is not None
+    model = opt_res.model
+    assert isinstance(model, ImbPipeline)
+    sampler_steps = [s[1] for s in model.steps if isinstance(s[1], DataOversampler)]
+    assert sampler_steps, "the assembled pipeline must contain a DataOversampler"
+    assert sampler_steps[0].target_bins == 12
+
+
 def test_optimize_pure_numeric_builds_preprocessor(toy_data):
     """On a purely numeric DataFrame without explicit column lists, optimize
     builds a preprocessor with StandardScaler (desync of the ``if cats:`` branch)."""

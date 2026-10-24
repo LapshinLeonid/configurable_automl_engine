@@ -304,6 +304,20 @@ def test_oversampling_unknown_algorithm_rejected():
         OversamplingCfg(enable=True, multiplier=2.0, algorithm="magic_boost")
 
 
+def test_oversampling_target_bins_default_and_alias():
+    """target_bins defaults to 8 and is configurable via its flat alias."""
+    cfg = OversamplingCfg()
+    assert cfg.target_bins == 8
+    cfg_alias = OversamplingCfg(data_oversampling_target_bins=16)
+    assert cfg_alias.target_bins == 16
+
+
+def test_oversampling_target_bins_less_than_two_rejected():
+    """A target_bins value below 2 is rejected during validation."""
+    with pytest.raises(ValidationError, match="greater than or equal to 2"):
+        OversamplingCfg(data_oversampling_target_bins=1)
+
+
 # --- Tests for AlgoCfg ---
 
 # --- Tests for the root Config and the API ---
