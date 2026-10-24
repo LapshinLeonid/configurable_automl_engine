@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - _version.py absent in a fresh checkout
     _engine_version = "0.0.0"
 
 from configurable_automl_engine.common.validation_utils import (
+    apply_inf_policy,
     check_target_constant,
     check_target_numeric,
     datetime_expansion_map,
@@ -2412,6 +2413,24 @@ class ModelTrainer:
         restored into a DataFrame and aligned the same way when column names
         are available. For ``np.ndarray`` and other inputs without names, the
         positional column order fixed at training time is used.
+
+        The ±inf policy used at training time (``inf_policy``) is applied to
+        the input as well, so inference is symmetric with :meth:`fit`:
+        ``"as_missing"`` replaces ±inf in numeric features with NaN (the
+        preprocessor imputes them) and logs a WARNING listing the columns and
+        counts; ``"error"`` rejects the input. Both ``pd.DataFrame`` and
+        numeric ``np.ndarray`` inputs are handled.
+
+        Args:
+            X: Feature matrix to predict on.
+
+        Returns:
+            The model predictions as a ``np.ndarray``.
+
+        Raises:
+            TrainingError: If the model is not trained, if ``inf_policy`` is
+                ``"error"`` and ``X`` contains ±inf (the message names the
+                columns), or if the prediction itself fails.
         """
 
         with self.lock:
@@ -2438,9 +2457,23 @@ class ModelTrainer:
                 else:
                     X_input = np.asarray(X)
 
+                # The same ±inf policy as in fit(): without it a frame that
+                # trained fine (inf → NaN) would fail at prediction time with
+                # an sklearn "Input X contains infinity" error.
+                if isinstance(X_input, (pd.DataFrame, np.ndarray)):
+                    try:
+                        X_input = apply_inf_policy(
+                            X_input,
+                            str(getattr(self, "inf_policy", "as_missing")),
+                        )
+                    except ValueError as err:
+                        raise TrainingError(str(err)) from err
+
                 preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
 
+            except TrainingError:
+                raise
             except Exception as e:  # noqa: BLE001
                 raise TrainingError(f"Error during prediction: {e}")
 
