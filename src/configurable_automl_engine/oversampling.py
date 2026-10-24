@@ -53,7 +53,8 @@ CONTINUOUS_TARGET_MIN_BINS = MIN_TARGET_BINS
 #: more than 0.01 relative to the no-oversampling baseline, the benchmark
 #: reports the violation and this flag is set to ``True``: README and
 #: API_REFERENCE then mark the feature experimental, and a WARNING is logged
-#: every time the oversampler actually runs.
+#: once per process per (algorithm, multiplier) when the oversampler actually
+#: runs, plus once per ``train_best_model`` call with oversampling enabled.
 #
 #: Current status: the nightly benchmark observed a median held-out R²
 #: degradation of ADASYN on the count dataset (Δ ≈ +0.019 > 0.01), so the
@@ -82,6 +83,52 @@ def _bin_continuous_target(
 
 
 logger = logging.getLogger(__name__)
+
+#: Text of the experimental-status WARNING (evidence gate T13).
+EXPERIMENTAL_WARNING_MESSAGE = (
+    "Oversampling is EXPERIMENTAL: the nightly evidence benchmark "
+    "observed a median held-out R² degradation exceeding 0.01. "
+    "Disable oversampling unless you have verified the effect on "
+    "your own data."
+)
+
+# Experimental-warning deduplication: the oversampler runs once per fold per
+# trial, so an unconditional WARNING floods the log (hundreds of identical
+# lines in a realistic run). The WARNING is emitted once per process per
+# (algorithm, multiplier) configuration — added to the set on first emission.
+# The set is guarded by a lock: samplers run concurrently in the threaded
+# parallel mode.
+_experimental_lock = threading.Lock()
+_experimental_warned: set[tuple[str, float]] = set()
+
+
+def warn_experimental_once(*, algorithm: str, multiplier: float) -> None:
+    """Log the experimental-status WARNING once per (algorithm, multiplier).
+
+    Args:
+        algorithm (str): The normalized oversampling algorithm name.
+        multiplier (float): The sample size multiplier.
+
+    Returns:
+        None
+    """
+    key = (algorithm, float(multiplier))
+    with _experimental_lock:
+        if key in _experimental_warned:
+            return
+        _experimental_warned.add(key)
+    logger.warning(EXPERIMENTAL_WARNING_MESSAGE)
+
+
+def reset_experimental_warnings() -> None:
+    """Clear the warn-once deduplication state (test helper).
+
+    ``warn_experimental_once`` logs at most once per (algorithm, multiplier)
+    pair for the whole process lifetime; tests call this helper to reset the
+    recorded pairs between tests.
+    """
+    with _experimental_lock:
+        _experimental_warned.clear()
 
 
 def _bin_regression_target(
@@ -747,16 +794,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
         # Evidence gate (T13): when the nightly benchmark has shown that
         # oversampling degrades the held-out R² beyond the threshold, the
-        # feature is experimental — warn whenever the oversampler actually
-        # generates rows (multiplier > 1, or balancing that brings minority
-        # groups up to the majority size even at multiplier == 1).
+        # feature is experimental — warn (once per configuration) when the
+        # oversampler actually generates rows (multiplier > 1, or balancing
+        # that brings minority groups up to the majority size even at
+        # multiplier == 1).
         if (self.multiplier_ > 1.0 or self.balance) and OVERSAMPLING_EXPERIMENTAL:
-            logger.warning(
-                "Oversampling is EXPERIMENTAL: the nightly evidence benchmark "
-                "observed a median held-out R² degradation exceeding 0.01. "
-                "Disable oversampling unless you have verified the effect on "
-                "your own data."
-            )
+            warn_experimental_once(algorithm=algo_local, multiplier=self.multiplier_)
 
         # Check for sparse matrices (scipy.sparse)
         is_sparse = hasattr(X, "tocsr")

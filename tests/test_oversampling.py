@@ -1574,3 +1574,88 @@ def test_string_target_with_default_task_preserved():
     assert len(res) > len(df)
     assert res["target"].dtype == df["target"].dtype
     assert set(res["target"]) <= {"cat", "dog", "bird"}
+
+
+def _count_experimental(caplog) -> int:
+    return sum("EXPERIMENTAL" in r.getMessage() for r in caplog.records)
+
+
+def test_experimental_warning_emitted_once_per_configuration(caplog, monkeypatch):
+    """Repeated fit_resample calls with the same (algorithm, multiplier)
+    log the experimental WARNING only once."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
+    df = pd.DataFrame({"f1": np.arange(20.0), "target": np.arange(20.0)})
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        for seed in range(15):
+            DataOversampler(algorithm="random", multiplier=1.5, random_state=seed).fit_resample(
+                df[["f1"]], df["target"]
+            )
+    assert _count_experimental(caplog) == 1
+
+
+def test_experimental_warning_once_per_distinct_configuration(caplog, monkeypatch):
+    """A different algorithm or multiplier is a new configuration and warns
+    again; algorithm name normalization maps to the same key."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
+    rng = np.random.RandomState(0)
+    df = pd.DataFrame({"f1": rng.randn(60), "f2": rng.randn(60)})
+    df["target"] = rng.randn(60)
+    X, y = df[["f1", "f2"]], df["target"]
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        DataOversampler(algorithm="random", multiplier=1.5, random_state=0).fit_resample(X, y)
+        DataOversampler(algorithm="RANDOM", multiplier=1.5, random_state=0).fit_resample(X, y)
+        DataOversampler(algorithm="random", multiplier=2.0, random_state=0).fit_resample(X, y)
+        DataOversampler(algorithm="smote", multiplier=1.5, random_state=0).fit_resample(X, y)
+    assert _count_experimental(caplog) == 3
+
+
+def test_experimental_warning_not_emitted_without_generation(caplog, monkeypatch):
+    """multiplier == 1 without balancing generates no rows: no WARNING and
+    the configuration is not recorded."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
+    df = pd.DataFrame({"f1": np.arange(10.0), "target": np.arange(10.0)})
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        DataOversampler(algorithm="random", multiplier=1.0, random_state=0).fit_resample(
+            df[["f1"]], df["target"]
+        )
+    assert _count_experimental(caplog) == 0
+    assert os_mod._experimental_warned == set()
+
+
+def test_reset_experimental_warnings_allows_reemission(caplog, monkeypatch):
+    """reset_experimental_warnings clears the dedup state."""
+    import configurable_automl_engine.oversampling as os_mod
+
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        os_mod.warn_experimental_once(algorithm="random", multiplier=1.5)
+        os_mod.warn_experimental_once(algorithm="random", multiplier=1.5)
+        os_mod.reset_experimental_warnings()
+        os_mod.warn_experimental_once(algorithm="random", multiplier=1.5)
+    assert _count_experimental(caplog) == 2
+
+
+def test_experimental_warning_thread_safe(caplog):
+    """Concurrent emissions for the same configuration log exactly once."""
+    import threading
+
+    import configurable_automl_engine.oversampling as os_mod
+
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        os_mod.warn_experimental_once(algorithm="smote", multiplier=2.0)
+
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert _count_experimental(caplog) == 1

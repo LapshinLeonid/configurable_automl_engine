@@ -51,6 +51,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 from sklearn.model_selection import train_test_split
 
+from configurable_automl_engine import oversampling as _oversampling
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 from configurable_automl_engine.common.validation_utils import (
@@ -4039,6 +4040,11 @@ def train_best_model(
             training.
     """
     cfg, target_col = load_config(config, df, target)
+    # Evidence gate (T13): surface the experimental status once per run at
+    # config validation time; the sampler itself warns once per process per
+    # (algorithm, multiplier) instead of once per fold per trial.
+    if cfg.oversampling.enable and _oversampling.OVERSAMPLING_EXPERIMENTAL:
+        _LOG.warning(_oversampling.EXPERIMENTAL_WARNING_MESSAGE)
     prepared = prepare_dataset(cfg, df, target_col)
     ctx = execute_phases(cfg, prepared)
 
