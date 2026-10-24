@@ -4,12 +4,14 @@ import logging
 import math
 from collections import Counter
 from math import sqrt
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
+
+_InfInput = TypeVar("_InfInput", pd.DataFrame, np.ndarray)
 
 #: Fraction of unique values (nunique / n) above which an object/string column
 #: is considered ID-like and flagged with a WARNING.
@@ -589,6 +591,87 @@ def expand_datetime_columns(
     return out
 
 
+def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
+    """Apply the ±inf policy to the numeric features of ``X``.
+
+    This is the single implementation of the ``general.inf_policy`` rule,
+    shared by the training path (:func:`validate_features`) and the
+    inference path (``ModelTrainer.predict``) so that both treat infinite
+    values identically.
+
+    For a ``pd.DataFrame`` only the numeric columns are inspected. For an
+    ``np.ndarray`` the check runs when the array has a numeric dtype;
+    columns are reported by their positional index. Arrays of other dtypes
+    (e.g. ``object``) are returned unchanged. The input is never modified in
+    place: a copy is returned when values are replaced.
+
+    Args:
+        X: The feature matrix (``pd.DataFrame`` or ``np.ndarray``).
+        inf_policy: ``"as_missing"`` (default) — replace ±inf with NaN and
+            emit a WARNING listing the columns and counts; ``"error"`` —
+            raise ``ValueError`` naming the columns.
+
+    Returns:
+        ``X`` with ±inf replaced by NaN (or ``X`` itself when it contains no
+        infinite values).
+
+    Raises:
+        ValueError: If ``inf_policy`` is ``"error"`` and ``X`` contains ±inf,
+            or if ``inf_policy`` is unknown.
+    """
+    if inf_policy not in ("as_missing", "error"):
+        raise ValueError(
+            f"Unknown inf_policy: {inf_policy!r}. Expected 'as_missing' or 'error'."
+        )
+
+    numeric_cols: list[Any] = []
+    labels: list[str]
+    if isinstance(X, pd.DataFrame):
+        numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
+        if not numeric_cols:
+            return X
+        numeric_data = X[numeric_cols].to_numpy(dtype=float)
+        labels = [str(col) for col in numeric_cols]
+    else:
+        if X.size == 0 or not np.issubdtype(X.dtype, np.number):
+            return X
+        numeric_data = X.reshape(X.shape[0], -1) if X.ndim != 2 else X
+        labels = [f"column {i}" for i in range(numeric_data.shape[1])]
+
+    inf_mask = np.isinf(numeric_data)
+    if not inf_mask.any():
+        return X
+    inf_counts_per_col = inf_mask.sum(axis=0)
+    offenders = [
+        f"{col} ({int(count)} value(s))"
+        for col, count in zip(labels, inf_counts_per_col, strict=True)
+        if count > 0
+    ]
+    detail = _format_column_list(offenders)
+    if inf_policy == "error":
+        raise ValueError(
+            "Numeric feature(s) contain infinite values (±inf): "
+            f"{detail}. Infinite values break "
+            "distance-based and linear models. Replace them with NaN "
+            "(set general.inf_policy: 'as_missing') or remove the "
+            "offending rows."
+        )
+    logging.getLogger(__name__).warning(
+        "Infinite values (±inf) found in numeric feature(s) "
+        "%s; replacing them with NaN (general.inf_policy: "
+        "'as_missing'). The missing values will be imputed by the "
+        "preprocessor.",
+        detail,
+    )
+    if isinstance(X, pd.DataFrame):
+        out = X.copy()
+        out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        return out
+    out_arr = X.astype(np.result_type(X.dtype, np.float64), copy=True)
+    out_arr[np.isinf(out_arr)] = np.nan
+    return out_arr
+
+
 def validate_features(
     X: pd.DataFrame,
     *,
@@ -690,41 +773,7 @@ def validate_features(
     generated: list[str] = []
 
     # 2. ±inf in numeric features.
-    numeric_cols = out.select_dtypes(include=["number"]).columns.tolist()
-    if numeric_cols:
-        numeric_data = out[numeric_cols].to_numpy(dtype=float)
-        inf_mask = np.isinf(numeric_data)
-        inf_counts_per_col = inf_mask.sum(axis=0)
-        if inf_mask.any():
-            if inf_policy == "error":
-                offenders = [
-                    f"{col} ({int(count)} value(s))"
-                    for col, count in zip(numeric_cols, inf_counts_per_col, strict=True)
-                    if count > 0
-                ]
-                raise ValueError(
-                    "Numeric feature(s) contain infinite values (±inf): "
-                    f"{_format_column_list(offenders)}. Infinite values break "
-                    "distance-based and linear models. Replace them with NaN "
-                    "(set general.inf_policy: 'as_missing') or remove the "
-                    "offending rows."
-                )
-            inf_counts = {
-                col: int(count)
-                for col, count in zip(numeric_cols, inf_counts_per_col, strict=True)
-                if count > 0
-            }
-            detail = _format_column_list(
-                [f"{col} ({count} value(s))" for col, count in inf_counts.items()]
-            )
-            logger.warning(
-                "Infinite values (±inf) found in numeric feature(s) "
-                "%s; replacing them with NaN (general.inf_policy: "
-                "'as_missing'). The missing values will be imputed by the "
-                "preprocessor.",
-                detail,
-            )
-            out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    out = apply_inf_policy(out, inf_policy)
 
     # 3. Datetime/timedelta columns.
     datetime_cols = [
