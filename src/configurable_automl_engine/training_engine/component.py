@@ -49,6 +49,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
+from sklearn.model_selection import train_test_split
 
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
@@ -79,8 +80,10 @@ from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
     direction_label,
+    get_scorer_object,
     is_error_metric,
     oof_rmse,
+    pooled_scorer_value,
     to_sklearn_name,
     to_user_value,
     user_direction,
@@ -148,12 +151,20 @@ class PhaseResult:
             complexity guard for the phase (one per restricted parameter,
             "before → after" with the reason). Empty for custom tuners or
             when the guard produced no records.
+        n_trials_evaluated (int): The number of trials actually evaluated by
+            the phase (own COMPLETED trials; transferred history never
+            counts). Reported in ``result["n_trials_evaluated"]`` next to the
+            best-trial ``score``: the score is the maximum over exactly these
+            trials, so a larger count implies a more optimistic score.
+            Defaults to 0 for custom tuners and legacy code paths that do not
+            report the count.
     """
 
     score: float
     params: dict[str, Any]
     trials: list[FrozenTrial] = field(default_factory=list)
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
+    n_trials_evaluated: int = 0
 
 
 def select_winner(results: dict[str, PhaseResult]) -> str:
@@ -1503,12 +1514,16 @@ def _run_hpo(
             complexity_guard_logs: list[dict[str, Any]] = list(
                 result.complexity_guard or []
             )
+            # The honest number of trials the best score was selected from
+            # (own COMPLETED trials of the phase).
+            n_trials_evaluated = int(result.n_trials_evaluated or 0)
         else:
             # A legacy custom tuner returning the (model, params, score)
             # triple; the trials are unavailable (empty history).
             _, best_params, best_score = result
             trials = []
             complexity_guard_logs = []
+            n_trials_evaluated = 0
         if best_score is None or best_params is None:
             # Tuner couldn't get a valid result: either all trials failed
             # (optuna.TrialPruned) or it failed otherwise. Return None so the
@@ -1528,6 +1543,7 @@ def _run_hpo(
             params=best_params,
             trials=trials,
             complexity_guard=complexity_guard_logs,
+            n_trials_evaluated=n_trials_evaluated,
         )
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
@@ -1787,6 +1803,14 @@ class PreparedData:
             integer number of rows after 'auto' resolution.
         categorical_features (list[str]): The detected categorical columns.
         numerical_features (list[str]): The detected numerical columns.
+        holdout_X (pd.DataFrame | None): The feature matrix of the reserved
+            outer hold-out (``general.holdout_fraction``); ``None`` when the
+            hold-out is not configured.
+        holdout_y (pd.Series | None): The target vector of the reserved outer
+            hold-out; ``None`` when the hold-out is not configured.
+        holdout_fraction (float | None): The configured
+            ``general.holdout_fraction`` value (the fraction of rows reserved
+            before HPO).
     """
 
     X: pd.DataFrame
@@ -1798,6 +1822,9 @@ class PreparedData:
     resolved_test_size: float | int
     categorical_features: list[str]
     numerical_features: list[str]
+    holdout_X: pd.DataFrame | None = None
+    holdout_y: pd.Series | None = None
+    holdout_fraction: float | None = None
 
 
 def load_config(
@@ -1877,6 +1904,61 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
 
+    # Optional reserved outer hold-out (general.holdout_fraction): the rows
+    # are split OFF before HPO and are never used for model selection. The
+    # honest estimate on these rows is reported as result["holdout_score"];
+    # the final model is still trained on ALL data (train + hold-out). The
+    # split is shuffled with the fixed RANDOM_STATE; a deterministic
+    # stratified split cannot be applied to a continuous target, so a plain
+    # random split is used.
+    holdout_fraction = cfg.general.holdout_fraction
+    holdout_X: pd.DataFrame | None = None
+    holdout_y: pd.Series | None = None
+    if holdout_fraction is not None:
+        if len(X) < 2:
+            raise ValueError(
+                f"general.holdout_fraction requires at least 2 rows for the "
+                f"outer split; the input has {len(X)} row(s)."
+            )
+        # Guard against a degenerate split BEFORE the sklearn call: an extreme
+        # fraction (e.g. 0.999 on a tiny dataset) would otherwise surface as a
+        # raw sklearn ValueError about an empty training set. sklearn computes
+        # n_test = ceil(fraction * n), so n_train = n - ceil(fraction * n).
+        n_hold = int(np.ceil(holdout_fraction * len(X)))
+        if len(X) - n_hold < 1:
+            raise ValueError(
+                f"general.holdout_fraction={holdout_fraction:.6f} leaves an "
+                f"EMPTY training part ({len(X)} row(s) in the input); lower "
+                f"the fraction so that at least 1 row remains for HPO."
+            )
+        X_hold, holdout_X, y_hold, holdout_y = train_test_split(
+            X,
+            y,
+            test_size=holdout_fraction,
+            shuffle=True,
+            random_state=RANDOM_STATE,
+        )
+        X, y = X_hold, y_hold
+        _LOG.info(
+            "Reserving outer hold-out: %.1f%% of the rows "
+            "(%d train, %d hold-out); HPO runs on the train part only, the "
+            "final model is trained on all rows.",
+            holdout_fraction * 100.0,
+            len(X),
+            len(holdout_X),
+        )
+        if len(holdout_X) <= 2:
+            # A degenerate tiny hold-out (1-2 rows) yields an estimate with
+            # extremely high variance: warn explicitly so the user can raise
+            # the fraction (or disable the hold-out) instead of trusting a
+            # noise-level number.
+            _LOG.warning(
+                "Outer hold-out is very small (%d row(s)): the hold-out score "
+                "will have extremely high variance. Increase "
+                "general.holdout_fraction or leave it unset.",
+                len(holdout_X),
+            )
+
     # Single resolution of the validation strategy: 'auto' is resolved exactly
     # once on the raw X/y — before the HPO phases. The resolved values (method
     # + number of folds / hold-out size) are passed both to HPO and to the
@@ -1922,6 +2004,9 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
         resolved_test_size=resolved_test_size,
         categorical_features=categorical_features,
         numerical_features=numerical_features,
+        holdout_X=holdout_X,
+        holdout_y=holdout_y,
+        holdout_fraction=holdout_fraction,
     )
 
 
@@ -1990,6 +2075,9 @@ class _HPOWorkerResult:
         complexity_guard (list[dict[str, Any]]): The adaptive complexity
             guard "before → after" records of the phase (serializable in the
             "processes" mode).
+        n_trials_evaluated (int): The number of trials actually evaluated by
+            the phase (own COMPLETED trials; transferred history never
+            counts); 0 for custom tuners that do not report the count.
     """
 
     name: str
@@ -1999,6 +2087,7 @@ class _HPOWorkerResult:
     disqualify_reason: str | None = None
     history_error: str | None = None
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
+    n_trials_evaluated: int = 0
 
 
 @dataclass
@@ -2337,6 +2426,7 @@ def _hpo_phase_worker(
             params=result.params,
             trials=list(result.trials),
             complexity_guard=list(result.complexity_guard or []),
+            n_trials_evaluated=int(result.n_trials_evaluated or 0),
         )
     except _CanonicalIAE as err:
         # Circuit breaker: the algorithm is disqualified after
@@ -2412,6 +2502,7 @@ def _consume_worker_results(
             params=res.params,
             trials=list(res.trials or []),
             complexity_guard=list(res.complexity_guard or []),
+            n_trials_evaluated=int(res.n_trials_evaluated or 0),
         )
 
 
@@ -3305,6 +3396,157 @@ def _execute_select_phase(
         )
 
 
+def _oof_score_in_user_metric(
+    metric_user: str,
+    trainer: Any,
+    y: pd.Series,
+) -> float | None:
+    """Compute the honest out-of-sample estimate of the final model.
+
+    The comparison metric is recomputed on the final pipeline's pooled OOF
+    predictions (``trainer.oof_predictions_``) against the true target —
+    the same values the trainer's OOF channel uses, expressed in the
+    comparison metric semantics. The raw scorer value over the aligned
+    vector is obtained via ``metrics.pooled_scorer_value`` (the same masking
+    contract as the trainer's OOF channel: non-finite pairs are dropped) and
+    converted to user semantics (``to_user_value``) — so error metrics are
+    reported positive and score metrics (R² and similar) keep their natural
+    direction.
+
+    Args:
+        metric_user (str): The user-facing comparison metric name.
+        trainer (Any): The trained ``ModelTrainer`` (OOF attributes populated).
+        y (pd.Series): The full target vector (for the OOF rows alignment).
+
+    Returns:
+        float | None: The OOF estimate in the comparison metric semantics,
+            or ``None`` when the OOF vector is unavailable (no valid pairs).
+    """
+    oof_pred = getattr(trainer, "oof_predictions_", None)
+    if oof_pred is None:
+        return None
+    try:
+        oof_true = np.asarray(y, dtype=float).reshape(-1)
+        oof_pred_arr = np.asarray(oof_pred, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        # The OOF vector is not array-convertible (e.g. a mocked trainer
+        # without a real fit): the estimate is unavailable.
+        return None
+    if oof_true.shape != oof_pred_arr.shape:
+        # A shape mismatch (e.g. a mocked vector) means no aligned pairs.
+        return None
+    mask = np.isfinite(oof_true) & np.isfinite(oof_pred_arr)
+    if not np.any(mask):
+        return None
+    try:
+        scorer = get_scorer_object(
+            metric_user, global_y=np.asarray(y, dtype=float).reshape(-1)
+        )
+    except Exception as err:  # noqa: BLE001 — an unknown metric must not crash the report
+        _LOG.warning(
+            "OOF score could not be computed for metric '%s': %s", metric_user, err
+        )
+        return None
+    try:
+        raw = pooled_scorer_value(scorer, oof_true[mask], oof_pred_arr[mask])
+    except (ValueError, TypeError):
+        # The pooled value is impossible (the scorer exposes no raw metric
+        # function): fall back to the RMSE_oof value already computed by the
+        # trainer. The fallback is exact ONLY when the comparison metric IS
+        # RMSE (the trainer's OOF channel always computes RMSE_oof); for any
+        # other error metric (MAE, MSE, NRMSE, ...) RMSE_oof is a DIFFERENT
+        # metric, so silently substituting it would mislabel the report — the
+        # key is omitted instead. For score metrics (R² and similar) RMSE_oof
+        # is not an estimate of the score metric either — omitted as well.
+        if metric_user.lower().strip().startswith("neg_"):
+            metric_base = metric_user.lower().strip()[4:]
+        else:
+            metric_base = metric_user.lower().strip()
+        if metric_base != "rmse":
+            return None
+        oof_score = getattr(trainer, "oof_score_", None)
+        if oof_score is None:
+            return None
+        return to_user_value(metric_user, -float(oof_score))
+    if not np.isfinite(raw):
+        return None
+    return to_user_value(metric_user, raw)
+
+
+def _compute_holdout_score(
+    *,
+    cfg: Config,
+    winner_cfg: AlgoCfg,
+    prepared: PreparedData,
+    winner_algo: str,
+    final_params: dict[str, Any],
+) -> float:
+    """Compute the honest hold-out score of the winner.
+
+    Trains the winning algorithm with its best parameters on the train part
+    of the reserved outer hold-out (the rows that were split off before HPO),
+    predicts the hold-out rows, and returns the comparison metric
+    (``general.comparison_metric``) in user semantics. The final artifact is
+    still trained on ALL data by ``persist_artifact``; this estimate is a
+    true out-of-sample quality of the chosen pipeline configuration.
+
+    Args:
+        cfg (Config): The configuration object.
+        winner_cfg (AlgoCfg): The configuration of the winning algorithm.
+        prepared (PreparedData): The prepared data and settings (X/y are the
+            TRAIN part of the outer split; ``holdout_X``/``holdout_y`` are
+            the reserved rows).
+        winner_algo (str): The winning algorithm name.
+        final_params (Dict[str, Any]): The winner's best hyperparameters.
+
+    Returns:
+        float: The comparison metric value on the hold-out rows in user
+            semantics. ``float("nan")`` when the estimate cannot be computed.
+    """
+    try:
+        # The trainer is assembled through the same single point as the final
+        # fit (``_build_trainer``): the custom ``trainer_module`` of the
+        # winning algorithm is honored, and the feature-selection helper key
+        # (``use_feature_selection``) is popped from a copy by the same
+        # contract. The validation parameters are forwarded so the pipeline
+        # matches the engine's fit.
+        holdout_trainer = _build_trainer(
+            winner_algo,
+            winner_cfg,
+            final_params,
+            cfg,
+            metric_name_sklearn=to_sklearn_name(prepared.metric_user),
+            validation_strategy=prepared.resolved_validation,
+            n_folds=prepared.resolved_n_folds,
+            test_size=prepared.resolved_test_size,
+        )
+        # Train on the train part of the outer split only: the hold-out rows
+        # never participate in the fit, so the estimate on them is honest.
+        holdout_trainer.fit(prepared.X, prepared.y)
+        pred = np.asarray(
+            holdout_trainer.predict(prepared.holdout_X), dtype=float
+        ).reshape(-1)
+        true = np.asarray(prepared.holdout_y, dtype=float).reshape(-1)
+        mask = np.isfinite(true) & np.isfinite(pred)
+        if not np.any(mask):
+            return float("nan")
+        scorer = get_scorer_object(
+            prepared.metric_user,
+            global_y=np.asarray(prepared.y, dtype=float).reshape(-1),
+        )
+        raw = pooled_scorer_value(scorer, true[mask], pred[mask])
+        if not np.isfinite(raw):
+            return float("nan")
+        return to_user_value(prepared.metric_user, raw)
+    except Exception as err:  # noqa: BLE001 — a hold-out estimate failure is non-fatal
+        _LOG.warning(
+            "Hold-out score could not be computed for winner '%s': %s",
+            winner_algo,
+            err,
+        )
+        return float("nan")
+
+
 def persist_artifact(
     *,
     cfg: Config,
@@ -3317,18 +3559,27 @@ def persist_artifact(
     pre_trained_trainer: Any | None = None,
     sanity_gate_sections: dict[str, dict[str, Any]] | None = None,
     complexity_guard_sections: dict[str, Any] | None = None,
+    n_trials_evaluated: int | None = None,
 ) -> dict[str, Any]:
     """Final training of the winner, artifact persistence, and report assembly.
 
     Pipeline step 5. Trains the winning algorithm's model on the full dataset
     via ``_fit_and_save`` (or reuses the already-trained finalist of the
-    terminal ``sanity_gate`` select step), saves the artifact to disk, and
+    terminal ``sanity_gate`` select step — unless ``general.holdout_fraction``
+    is set, see below), saves the artifact to disk, and
     builds the result dict: ``algorithm``, ``score`` (in user semantics),
     ``metric``, ``params``, ``model_path``; when present it also adds
     ``disqualified_algorithms`` (the circuit breaker, including Sanity Gate
-    select-step disqualifications), ``additional_metrics``, and ``sanity_gate``
+    select-step disqualifications), ``additional_metrics``, ``sanity_gate``
     — a dict of the report sections of the ``sanity_gate`` select steps (key —
-    the phase name).
+    the phase name), ``oof_score`` — the comparison metric computed on the
+    final pipeline's pooled out-of-fold predictions (an honest estimate on
+    rows the model has not been trained on; omitted when the OOF estimate is
+    impossible), ``n_trials_evaluated`` — the number of trials actually
+    evaluated by the winning algorithm's HPO phase (omitted when unknown),
+    and ``holdout_score`` — the comparison metric of the winner on the
+    reserved outer hold-out (``general.holdout_fraction``; present only when
+    the hold-out is configured).
 
     Args:
         cfg (Config): The configuration object.
@@ -3345,7 +3596,11 @@ def persist_artifact(
         pre_trained_trainer (Any | None): The winner's already-trained
             ``ModelTrainer`` on 100% of the data (terminal ``sanity_gate``
             select step). If given, retraining is NOT performed — the artifact
-            is saved from it (finalists are trained once).
+            is saved from it (finalists are trained once). Exception: when
+            ``general.holdout_fraction`` is set, the pre-trained finalist
+            covered only the train part of the outer split, so it is NOT
+            reused — the artifact is refit on ALL data (train + hold-out
+            concatenated in ``full_X``/``full_y``) via ``_fit_and_save``.
         sanity_gate_sections (Dict[str, Dict[str, Any]] | None): Report
             sections of the ``sanity_gate`` select steps (key — the phase
             name). The ``sanity_gate`` key is added to the result only when at
@@ -3356,6 +3611,11 @@ def persist_artifact(
             ``n``/``p``, ``leaf_min``, level, and the applied flag). The
             ``complexity_guard`` key is added to the result only when the
             guard produced at least one record.
+        n_trials_evaluated (int | None): The number of trials actually
+            evaluated by the winner's HPO phase (own COMPLETED trials;
+            transferred history never counts). ``None`` or 0 (unknown — e.g.
+            legacy custom tuners without the count) — the key is omitted from
+            the result.
 
     Returns:
         Dict[str, Any]: A dict with the training results.
@@ -3367,17 +3627,39 @@ def persist_artifact(
     model_path = Path(model_path_override or cfg.general.path_to_model)
     winner_cfg = _algorithms_as_dict(cfg.algorithms)[winner_algo]
 
+    # Reserved outer hold-out (general.holdout_fraction): the final model is
+    # refit on ALL data (train + hold-out) so that the production artifact
+    # does not silently lose the reserved fraction. The hold-out rows are
+    # concatenated back in the deterministic order produced by
+    # ``prepare_dataset`` (train part first, then the hold-out part).
+    full_X = prepared.X
+    full_y = prepared.y
+    if prepared.holdout_X is not None and prepared.holdout_y is not None:
+        full_X = pd.concat([prepared.X, prepared.holdout_X], axis=0)
+        full_y = pd.concat([prepared.y, prepared.holdout_y], axis=0)
+        _LOG.info(
+            "Refitting the final model on ALL data (%d train + %d hold-out rows); "
+            "the hold-out score remains an honest estimate of the winner on "
+            "the reserved rows.",
+            len(prepared.X),
+            len(prepared.holdout_X),
+        )
+
     try:
-        if pre_trained_trainer is not None:
+        if pre_trained_trainer is not None and prepared.holdout_X is None:
             trainer = pre_trained_trainer
             model_path.parent.mkdir(parents=True, exist_ok=True)
             trainer.save(model_path)
         else:
+            # When a hold-out is configured, the pre-trained finalist (trained
+            # on the train part only) is NOT reused: the artifact must be
+            # refit on all data, so the winner is retrained with its best
+            # parameters via the standard fit-and-save path.
             trainer = _fit_and_save(
                 winner_algo,
                 winner_cfg,
-                prepared.X,
-                prepared.y,
+                full_X,
+                full_y,
                 final_params,
                 model_path,
                 cfg,
@@ -3403,6 +3685,22 @@ def persist_artifact(
         "params": final_params,
         "model_path": str(model_path),
     }
+    # Honest out-of-sample estimate of the FINAL pipeline: the comparison
+    # metric computed on the pooled OOF predictions (the trainer's OOF channel
+    # uses the same validation method/splits as HPO). Unlike ``score`` (the
+    # best of N trials on the same folds — an optimistic maximum), this value
+    # is computed on rows the final model has not seen; omitted when no valid
+    # OOF pair exists. With a reserved outer hold-out the OOF vector is
+    # aligned to the FULL data (train + hold-out), so the target is the
+    # concatenated vector.
+    oof_score = _oof_score_in_user_metric(prepared.metric_user, trainer, full_y)
+    if oof_score is not None:
+        result["oof_score"] = oof_score
+    # Honest evaluation count of the winner's HPO phase: reported next to the
+    # best-trial score as the denominator of the "best of N" maximum. Omitted
+    # when the count is unknown (None or 0 — legacy custom tuners).
+    if n_trials_evaluated is not None and int(n_trials_evaluated) > 0:
+        result["n_trials_evaluated"] = int(n_trials_evaluated)
     # Circuit breaker diagnostics: which algorithms were disqualified and why.
     # The key is added only when there are disqualifications, otherwise the
     # results are identical to the previous behavior. The sources are mixed
@@ -3429,6 +3727,23 @@ def persist_artifact(
     # previous behavior.
     if cfg.general.additional_metrics:
         result["additional_metrics"] = dict(trainer.additional_scores)
+    # Reserved outer hold-out (general.holdout_fraction): the honest estimate
+    # of the WINNER on the rows that were split off before HPO and never
+    # participated in model selection. The hold-out model is trained with the
+    # winner's best parameters on the train part of the outer split; the final
+    # artifact is trained on ALL data (the issue requirement: "the final model
+    # is still refit on all data"), so the hold-out score is a true
+    # out-of-sample estimate of the chosen pipeline configuration. The key is
+    # added only when the hold-out is configured.
+    if prepared.holdout_X is not None and prepared.holdout_y is not None:
+        holdout_score = _compute_holdout_score(
+            cfg=cfg,
+            winner_cfg=winner_cfg,
+            prepared=prepared,
+            winner_algo=winner_algo,
+            final_params=final_params,
+        )
+        result["holdout_score"] = holdout_score
     return result
 
 
@@ -3458,7 +3773,11 @@ def train_best_model(
     (``select_robust_winner``, ``active`` mode). The terminal select
     (``output: winner``) hands the winner's already-trained-on-100%-of-the-data
     trainer to ``persist_artifact`` via ``pre_trained_trainer`` — no retraining
-    of the winner is required. There is no global
+    of the winner is required. Exception: when ``general.holdout_fraction`` is
+    set, the saved artifact is refit on ALL data (train + hold-out rows are
+    concatenated back), because the sanity-gate finalists were trained on the
+    train part of the outer split only — the pre-trained trainer is then NOT
+    reused. There is no global
     ``general.sanity_gate.mode`` switch anymore: selection is performed ONLY
     by an explicit select step, and the ``general.sanity_gate`` section is the
     source of thresholds.
@@ -3509,6 +3828,11 @@ def train_best_model(
     winner_record = ctx.working_set[winner_algo]
     final_score = winner_record.score
     final_params = winner_record.params
+    # The honest evaluation count of the winner's HPO phase: the number of
+    # trials actually evaluated (own COMPLETED trials; transferred history
+    # never counts). 0 means "unknown" (legacy custom tuners that do not
+    # report the count) — persist_artifact then omits the key.
+    n_trials_evaluated = int(winner_record.n_trials_evaluated or 0)
     # Final invariant: the winner's score must be finite and strictly above the
     # worst-score sentinel class before entering result["score"]. Otherwise the
     # sentinel could leak into the report — for neg_-metrics to_user_value
@@ -3534,4 +3858,5 @@ def train_best_model(
             if ctx.complexity_guard_records
             else None
         ),
+        n_trials_evaluated=n_trials_evaluated,
     )

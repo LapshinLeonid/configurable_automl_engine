@@ -679,6 +679,12 @@ Result format (`train_best_model` return value):
     "params": {...},
     "model_path": "model.pkl",
     "additional_metrics": {"r2": 0.98, "mae": 0.07, "mse": 0.009},  # only when non-empty
+    "oof_score": 0.131,          # honest OOF estimate of the final pipeline,
+                                 #   same semantics as "score" (always present
+                                 #   when the OOF vector could be built)
+    "n_trials_evaluated": 47,    # trials actually evaluated by the winner's HPO phase
+    "holdout_score": 0.118,      # winner on the reserved outer hold-out
+                                 #   (only when general.holdout_fraction is set)
 }
 ```
 
@@ -688,6 +694,37 @@ internal sklearn negative scorers (`neg_root_mean_squared_error` and other
 `neg_*`) are an optimizer detail: their inverted values never leak into
 `result["score"]`. `metric` carries the user-facing name of the comparison
 metric from the configuration (`general.comparison_metric`).
+
+Honest out-of-sample estimate: `result["oof_score"]` is the **comparison
+metric computed on the final pipeline's pooled OOF predictions**
+(the trainer's OOF channel: `oof_predictions_`). Every row is predicted by a
+fold-model that has not seen it during training — no leakage — and the value
+is expressed in the same user semantics as `score`. `score` itself is the
+**best** of the HPO trials on the same folds, so it is systematically
+optimistic ("best of N"); the optimism is `score - oof_score` for score
+metrics (R² and similar, maximized by HPO) and `oof_score - score` for error
+metrics (RMSE/MAE, minimized by HPO) — a positive value always means the
+honest estimate is worse than the best-trial score. The gap mixes the
+best-of-N selection bias of `score` with the fact that the final pipeline is
+trained on more data than any single OOF fold-model; for a fixed
+configuration `oof_score` is the honest out-of-sample estimate of the
+artifact. `n_trials_evaluated` (the winner's own COMPLETED trials;
+transferred TPE history never counts) is the honest denominator of that
+maximum; the key is omitted when the count is unknown (legacy custom tuners).
+For `train_test_split` the OOF vector covers the validation part only (the
+same limitation as the trainer's OOF channel); the key is absent when no
+valid OOF pair exists.
+
+Outer hold-out: the optional `general.holdout_fraction` (default `null`,
+strictly in `(0, 1)`) reserves that fraction of the rows BEFORE
+hyperparameter optimization. The reserved rows never participate in model
+selection and are used only to report `result["holdout_score"]` — the winner
+trained on the train part of the outer split with its best parameters. The
+final model is **still refit on all data** (train + hold-out) for the
+artifact — the reserved rows are concatenated back in `persist_artifact`, so
+the production model does not lose the hold-out fraction and `holdout_score`
+is a true out-of-sample estimate of the chosen pipeline configuration. The
+key is present only when the hold-out is configured.
 
 The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model (same natural semantics as `score`).
 
@@ -803,7 +840,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`. When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). `"oof_score"` is the honest out-of-sample estimate of the final pipeline — the comparison metric computed on the pooled OOF predictions (absent when no valid OOF pair exists); `"n_trials_evaluated"` is the number of trials actually evaluated by the winner's HPO phase (own COMPLETED trials; 0 for custom tuners that do not report the count). When `general.holdout_fraction` is set, `"holdout_score"` reports the comparison metric of the winner on the reserved outer hold-out (the final model is still trained on all data). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
@@ -841,7 +878,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
 
-**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials` and `complexity_guard`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
+**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials`, `complexity_guard` and `n_trials_evaluated`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `n_trials_evaluated` is the number of trials actually evaluated by the phase (own COMPLETED trials; transferred history never counts) — the honest denominator of the best-trial `score` (the "best of N" maximum). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
 
 In `'auto'` mode `params` additionally contains the service key `use_feature_selection` (`True`/`False`) — the winner's decision about feature selection, which is preserved between multi-phase HPO runs (passed to the next phase via `initial_params`/`enqueue_trial`) and consumed by `train_best_model` for the final fit. The key is absent in `'always'`/`'disabled'` modes and for `isotonic_regression` (feature selection is forcibly turned off there). The key is never passed to the base model constructor.
 

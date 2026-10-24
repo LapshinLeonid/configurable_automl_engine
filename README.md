@@ -143,6 +143,54 @@ terminal select) — the two examples are intentionally different.
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
+# Honest out-of-sample estimates: `score`, `oof_score`, `holdout_score`
+
+`result["score"]` is the **best** quality estimate of the winning algorithm
+over the HPO trials, computed on the same validation folds — so it is
+systematically **optimistic** (the maximum of N trials on the same folds; on
+the diabetes benchmark the reported CV R² of 0.534 vs. a held-out 0.357).
+Two additional report keys give an honest out-of-sample estimate next to it:
+
+* `result["oof_score"]` — the **comparison metric computed on the final
+  pipeline's pooled OOF predictions** (the trainer's OOF channel:
+  `oof_predictions_`). Every row is predicted by a fold-model that has not
+  seen it during training, so the value is an honest estimate of the final
+  model without leakage. It is reported in the same user semantics as
+  `score` (positive RMSE/MAE, plain R²) and is always present when the OOF
+  vector could be built (for `train_test_split` it covers the validation part
+  only, the same limitation as the trainer's OOF channel). The gap between
+  `score` and `oof_score` is an optimism estimate — with the **direction of
+  the metric taken into account**: for score metrics (R² and similar, where
+  HPO maximizes) `score - oof_score = optimism`, for error metrics (RMSE/MAE,
+  where HPO minimizes) the optimism is `oof_score - score` (a positive value
+  means the honest estimate is worse than the best-trial score). Two effects
+  are mixed here: the best-of-N selection bias of `score` AND the fact that
+  the final pipeline is trained on more data than any single fold-model of
+  the OOF channel (the full input, or train + hold-out with a reserved
+  hold-out); for a fixed configuration `oof_score` is the honest
+  out-of-sample estimate of the artifact, so the gap remains a useful,
+  if not pure, optimism signal.
+* `result["holdout_score"]` — the comparison metric of the **winner on a
+  reserved outer hold-out** (optional `general.holdout_fraction`, default
+  `null`). When set, the engine splits off that fraction of the rows BEFORE
+  hyperparameter optimization; those rows never participate in model
+  selection and are used only for this honest estimate. The winner is trained
+  on the train part of the outer split to produce the estimate, while the
+  **final model is still refit on all data** (train + hold-out) for the
+  artifact — the reserved rows are concatenated back, so the production model
+  does not lose the hold-out fraction. The key is present only when the
+  hold-out is configured.
+* `result["n_trials_evaluated"]` — the number of trials actually evaluated
+  by the winning algorithm's HPO phase (its own COMPLETED trials; transferred
+  TPE history never counts). It is the honest denominator of the "best of N"
+  maximum: the more trials were evaluated on the same folds, the more
+  optimistic `score` is expected to be. The key is omitted when the count is
+  unknown (legacy custom tuners that do not report it).
+
+In short: `score` is what HPO maximized (optimistic), `oof_score` is the
+honest CV-style estimate of the final pipeline, and `holdout_score` is the
+honest estimate on rows that never influenced any decision.
+
 ## Restricted hyperparameter search (`limit_hyperparameters`)
 
 Each algorithm block accepts an optional boolean

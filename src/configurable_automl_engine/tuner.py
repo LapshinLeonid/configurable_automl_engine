@@ -155,6 +155,14 @@ class OptimizeResult:
             the phase (one per restricted parameter, "before → after" with
             the reason). ``None`` when the guard is disabled or produced no
             records.
+        n_trials_evaluated: The number of trials actually evaluated by the
+            phase — the count of the phase's own COMPLETED trials
+            (transferred ``previous_trials`` never count). Reported as the
+            honest denominator next to the best-trial ``score``: on a fixed
+            number of folds the score is the maximum over the evaluated
+            trials, so the more trials were evaluated, the more optimistic the
+            best score is expected to be. Defaults to 0 for legacy code paths
+            that construct ``OptimizeResult`` without the field.
     """
 
     model: Any | None
@@ -162,6 +170,7 @@ class OptimizeResult:
     score: float | None
     trials: list[FrozenTrial]
     complexity_guard: list[dict[str, Any]] | None = None
+    n_trials_evaluated: int = 0
 
 
 # ═══════════════════════════════════ logging setup ═══════════════════════════
@@ -1265,6 +1274,11 @@ class _OptimizeRunner:
         self.best_score: float
         self.clean_model_params: dict[str, Any]
         self.best_apply_fs: bool
+        # The number of trials actually evaluated by the phase (own COMPLETED
+        # trials; transferred history never counts), reported in
+        # ``OptimizeResult.n_trials_evaluated`` as the honest denominator next
+        # to the best-trial score.
+        self.n_trials_evaluated: int = 0
         # Log records of the adaptive complexity guard, filled in
         # resolve_search_space; travels with OptimizeResult for the report.
         self.complexity_guard_logs: list[dict[str, Any]] = []
@@ -1350,6 +1364,7 @@ class _OptimizeRunner:
                 score=self.best_score,
                 trials=self.phase_trials,
                 complexity_guard=self.complexity_guard_logs or None,
+                n_trials_evaluated=self.n_trials_evaluated,
             )
         return OptimizeResult(
             model=self._fit_best_model(),
@@ -1357,6 +1372,7 @@ class _OptimizeRunner:
             score=self.best_score,
             trials=self.phase_trials,
             complexity_guard=self.complexity_guard_logs or None,
+            n_trials_evaluated=self.n_trials_evaluated,
         )
 
     # ─────────────────── run steps ─────────────────────────────────────────
@@ -2644,6 +2660,12 @@ class _OptimizeRunner:
             )
             return False
 
+        # The honest evaluation count reported next to the best-trial score:
+        # the best score is the MAXIMUM over exactly these trials (the more
+        # trials were evaluated on the same folds, the more optimistic the
+        # score is expected to be). Transferred history never counts.
+        self.n_trials_evaluated = n_completed
+
         best_trial = max(
             (t for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE),
             key=lambda t: cast(float, t.value),
@@ -2970,9 +2992,12 @@ def optimize(
             found optimal hyperparameters; in ``'auto'`` mode it contains
             the auxiliary ``use_feature_selection`` key with the selection
             decision), ``score`` (the best raw "optimizer" metric value on
-            validation, higher is better), and ``trials`` — the frozen
+            validation, higher is better), ``trials`` — the frozen
             trials of the current phase ONLY (transferred
-            ``previous_trials`` are excluded).
+            ``previous_trials`` are excluded), and
+            ``n_trials_evaluated`` — the number of trials actually
+            evaluated by the phase (own COMPLETED trials; transferred
+            history never counts).
         None: The "no valid result" signal — ``n_trials=0`` (an empty trial
             list) or no trial of the current phase completed (e.g., every
             trial was turned into ``optuna.TrialPruned`` by a non-fatal

@@ -488,6 +488,10 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         )
 
     assert "additional_metrics" not in result
+    # The honest-score report keys (issue #161): oof_score is omitted only
+    # when no OOF vector is available (a fake trainer here); n_trials_evaluated
+    # is reported only when the count is known (a legacy tuner returning the
+    # triple reports an UNKNOWN count → the key is omitted).
     assert set(result.keys()) == {
         "algorithm",
         "score",
@@ -495,6 +499,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         "params",
         "model_path",
     }
+    assert "n_trials_evaluated" not in result
 
 
 def test_train_best_model_no_key_when_additional_empty(tiny_df):

@@ -588,6 +588,21 @@
           "title": "N Folds",
           "type": "integer"
         },
+        "holdout_fraction": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). None (default) — no outer hold-out is reserved and the key is not reported.",
+          "title": "Holdout Fraction"
+        },
         "categorical_encoding": {
           "default": "one_hot",
           "description": "Encoding strategy for categorical features: 'one_hot' (each category -> a separate binary column), 'ordinal' (each categorical column -> one numeric column with an imposed order), 'target' (target encoding with smoothing), 'frequency' (category frequency) or 'hashing' (deterministic hashing into a fixed number of binary columns). Ordinal encoding does not increase the number of columns and is useful for linear models, but it imposes an artificial order on categories. Target/frequency/hashing are effective for high-cardinality columns.",

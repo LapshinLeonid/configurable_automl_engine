@@ -1032,6 +1032,20 @@ class GeneralCfg(BaseModel):
             "Used only when validation_strategy = 'k_fold'"
         ),
     )
+    holdout_fraction: float | None = Field(
+        default=None,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Optional fraction of rows (in (0, 1)) reserved as an outer "
+            "hold-out BEFORE hyperparameter optimization: these rows never "
+            "participate in model selection and are used only to report the "
+            'honest out-of-sample estimate result["holdout_score"] of the '
+            "winner. The final model is still trained on ALL data (the "
+            "hold-out rows are included in the final fit). None (default) — "
+            "no outer hold-out is reserved and the key is not reported."
+        ),
+    )
     categorical_encoding: EncodingStrategy = Field(
         default="one_hot",
         description=(
