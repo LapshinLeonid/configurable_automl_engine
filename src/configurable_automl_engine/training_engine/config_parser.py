@@ -28,7 +28,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import yaml
 from pydantic import (
@@ -109,6 +109,13 @@ SanityGateMode = Literal["off", "active"]
 #: (chosen based on the metric type). Defined here so that ``SanityGateCfg``
 #: and ``select_finalists`` share one type without a circular import.
 CorridorMode = Literal["multiplicative", "additive", "auto"]
+
+#: ``general.holdout_fraction: "auto"`` reserves this fraction of the rows as
+#: the outer hold-out when the input has at least ``AUTO_HOLDOUT_MIN_ROWS``
+#: rows (so the hold-out has at least 20 rows); on smaller data no hold-out is
+#: reserved and the honest estimate is the BBC-CV ``bbc_score``.
+AUTO_HOLDOUT_FRACTION = 0.2
+AUTO_HOLDOUT_MIN_ROWS = 100
 
 #: Circuit D mode for ``_check_generalization_gap``:
 #: ``"warn"`` (default) — a circuit D violation (a finite ``gap >
@@ -228,6 +235,10 @@ class PruningCfg(BaseModel):
 
 
 # ─────────────────── phases ──────────────────── #
+#: Default number of HPO trials of a phase when ``n_trials`` is omitted.
+DEFAULT_PHASE_N_TRIALS = 50
+
+
 class HPOPhaseCfg(BaseModel):
     """Configuration of a single pipeline step.
 
@@ -240,8 +251,8 @@ class HPOPhaseCfg(BaseModel):
     Attributes:
         name (str): Unique phase identifier.
         n_trials (int): Iteration (trial) limit for HPO phases
-            (``all_algorithms`` / ``refine``). Ignored for ``select``,
-            but the field remains mandatory for schema uniformity.
+            (``all_algorithms`` / ``refine``), default
+            ``DEFAULT_PHASE_N_TRIALS``. Ignored for ``select``.
         action (str): Action type: 'all_algorithms' (search across all
             algorithms), 'refine' (fine-tune the whole input set
             with warm-start) or 'select' (selection step). The legacy value
@@ -269,6 +280,7 @@ class HPOPhaseCfg(BaseModel):
         ),
     )
     n_trials: int = Field(
+        default=DEFAULT_PHASE_N_TRIALS,
         ge=1,
         description=(
             "Number of iterations (trials) for HPO phases (all_algorithms / "
@@ -346,7 +358,7 @@ class HPOPhaseCfg(BaseModel):
                 "k: N) -> refine -> select(strategy: cv_best, output: winner); "
                 "for a single-winner pipeline use "
                 "all_algorithms -> select(strategy: cv_best, output: winner). "
-                "See the migration table in README.md.",
+                "See 'Migrating older configs' in API_REFERENCE.md.",
             )
         return data
 
@@ -593,7 +605,7 @@ class SanityGateCfg(BaseModel):
                 "gate diagnostics are available in the gate section of the "
                 "select step report. The sanity_gate section remains the "
                 "source of thresholds (corridor, top_k_candidates, audit "
-                "limits, ...). See the migration table in README.md.",
+                "limits, ...). See 'Migrating older configs' in API_REFERENCE.md.",
             )
         return data
 
@@ -954,6 +966,24 @@ class ComplexityGuardCfg(BaseModel):
 
 
 # ─────────────────── general ─────────────────── #
+def _default_phases() -> list[HPOPhaseCfg]:
+    """Build the default pipeline used when ``general.phases`` is omitted.
+
+    Returns:
+        list[HPOPhaseCfg]: An ``all_algorithms`` HPO phase followed by a
+        terminal ``select`` step picking the best cross-validation score.
+    """
+    return [
+        HPOPhaseCfg(name="search", action="all_algorithms"),
+        HPOPhaseCfg(
+            name="final_select",
+            action="select",
+            strategy="cv_best",
+            output="winner",
+        ),
+    ]
+
+
 class GeneralCfg(BaseModel):
     """General settings of the AutoML process, validation, and parallelism.
 
@@ -971,6 +1001,7 @@ class GeneralCfg(BaseModel):
         phases (List[HPOPhaseCfg]): Sequence of pipeline steps:
             HPO phases ('all_algorithms' / 'refine') and explicit selection
             steps ('select'); the last phase must be a select with output: winner.
+            Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.
         validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).
         n_folds (int): Number of splits for cross-validation.
         random_state (int | None): The engine seed driving data splits, model
@@ -1029,7 +1060,13 @@ class GeneralCfg(BaseModel):
         ),
     )
     phases: list[HPOPhaseCfg] = Field(
-        ..., description="List of sequential hyperparameter optimization phases"
+        default_factory=_default_phases,
+        description=(
+            "List of sequential pipeline steps. Default: one HPO phase over "
+            "all algorithms followed by picking the best cross-validation "
+            "score: [{action: all_algorithms, n_trials: 50}, "
+            "{action: select, strategy: cv_best, output: winner}]"
+        ),
     )
     validation_strategy: ValidationStrategy = Field(
         default=ValidationStrategy.auto,
@@ -1058,18 +1095,24 @@ class GeneralCfg(BaseModel):
             "WARNING is logged that the run is not reproducible."
         ),
     )
-    holdout_fraction: float | None = Field(
-        default=None,
-        gt=0.0,
-        lt=1.0,
+    holdout_fraction: (
+        Annotated[float, Field(gt=0.0, lt=1.0)] | Literal["auto"] | None
+    ) = Field(
+        default="auto",
         description=(
-            "Optional fraction of rows (in (0, 1)) reserved as an outer "
-            "hold-out BEFORE hyperparameter optimization: these rows never "
-            "participate in model selection and are used only to report the "
-            'honest out-of-sample estimate result["holdout_score"] of the '
-            "winner. The final model is still trained on ALL data (the "
-            "hold-out rows are included in the final fit). None (default) — "
-            "no outer hold-out is reserved and the key is not reported."
+            "Fraction of rows (in (0, 1)) reserved as an outer hold-out "
+            "BEFORE hyperparameter optimization: these rows never participate "
+            "in model selection and are used only to report the honest "
+            'out-of-sample estimate result["holdout_score"] of the winner. '
+            "The final model is still trained on ALL data (the hold-out rows "
+            "are included in the final fit). 'auto' (default) — reserve "
+            f"{AUTO_HOLDOUT_FRACTION:g} of the rows when the input has at "
+            f"least {AUTO_HOLDOUT_MIN_ROWS} rows; on smaller data no hold-out "
+            "is reserved. None — no outer hold-out is reserved and the key "
+            'is not reported. Without a hold-out result["score"] and '
+            'result["oof_score"] are computed on the folds that selected the '
+            "algorithm and hyperparameters and are optimistic; the honest "
+            'estimate is then the bias-corrected (BBC-CV) result["bbc_score"].'
         ),
     )
     categorical_encoding: EncodingStrategy = Field(
@@ -1433,7 +1476,7 @@ class GeneralCfg(BaseModel):
                 "is built from the result of the terminal select step. "
                 "Migration: append "
                 "{action: 'select', strategy: 'cv_best', output: 'winner'} "
-                "as the last phase. See the migration table in README.md."
+                "as the last phase. See 'Migrating older configs' in API_REFERENCE.md."
             )
         return self
 
@@ -1730,7 +1773,8 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     general: GeneralCfg = Field(
-        ..., description="General experiment and validation settings"
+        default_factory=GeneralCfg,
+        description="General experiment and validation settings",
     )
     oversampling: OversamplingCfg = Field(
         default=OversamplingCfg(), description="Data balancing settings"

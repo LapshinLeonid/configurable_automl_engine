@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -69,6 +69,8 @@ from configurable_automl_engine.preprocessing import (
     detect_feature_types,
 )
 from configurable_automl_engine.training_engine.config_parser import (
+    AUTO_HOLDOUT_FRACTION,
+    AUTO_HOLDOUT_MIN_ROWS,
     AlgoCfg,
     Config,
     CorridorMode,
@@ -87,6 +89,8 @@ from ..tuner import WORST_SCORE_THRESHOLD, HPOHistoryError, OptimizeResult
 from ..tuner import InvalidAlgorithmError as _CanonicalIAE
 from .logger import setup_logging
 from .metrics import (
+    BBC_MAX_OOF_CELLS,
+    bbc_cv_score,
     direction_label,
     get_scorer_object,
     is_error_metric,
@@ -166,6 +170,10 @@ class PhaseResult:
             trials, so a larger count implies a more optimistic score.
             Defaults to 0 for custom tuners and legacy code paths that do not
             report the count.
+        oof_predictions (np.ndarray | None): The out-of-fold predictions of
+            the phase's completed trials, shape ``(n_trials, n_rows)`` (the
+            BBC-CV input); ``None`` when OOF collection is off or the tuner
+            does not support it.
     """
 
     score: float
@@ -173,6 +181,7 @@ class PhaseResult:
     trials: list[FrozenTrial] = field(default_factory=list)
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
     n_trials_evaluated: int = 0
+    oof_predictions: np.ndarray | None = None
 
 
 def select_winner(results: dict[str, PhaseResult]) -> str:
@@ -1229,6 +1238,7 @@ def _run_hpo(
     inf_policy: str | None = None,
     datetime_policy: str | None = None,
     drop_id_like_columns: bool | None = None,
+    collect_oof: bool = False,
 ) -> PhaseResult | None:
     """Run the hyperparameter search for an algorithm.
     Workflow:
@@ -1536,6 +1546,12 @@ def _run_hpo(
         if value is not None and key in sig.parameters:
             kwargs[key] = value
 
+    # BBC-CV input: the out-of-fold predictions of every trial. Only the
+    # bundled tuner (or a custom one with the same argument) supports it; for
+    # the others the BBC-CV estimate is simply not reported.
+    if collect_oof and "collect_oof" in sig.parameters:
+        kwargs["collect_oof"] = True
+
     try:
         result = tuner.optimize(**kwargs)
         if result is None:
@@ -1563,6 +1579,7 @@ def _run_hpo(
             # The honest number of trials the best score was selected from
             # (own COMPLETED trials of the phase).
             n_trials_evaluated = int(result.n_trials_evaluated or 0)
+            oof_predictions = result.oof_predictions
         else:
             # A legacy custom tuner returning the (model, params, score)
             # triple; the trials are unavailable (empty history).
@@ -1570,6 +1587,7 @@ def _run_hpo(
             trials = []
             complexity_guard_logs = []
             n_trials_evaluated = 0
+            oof_predictions = None
         if best_score is None or best_params is None:
             # Tuner couldn't get a valid result: either all trials failed
             # (optuna.TrialPruned) or it failed otherwise. Return None so the
@@ -1590,6 +1608,7 @@ def _run_hpo(
             trials=trials,
             complexity_guard=complexity_guard_logs,
             n_trials_evaluated=n_trials_evaluated,
+            oof_predictions=oof_predictions,
         )
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
@@ -1938,9 +1957,10 @@ class PreparedData:
             hold-out is not configured.
         holdout_y (pd.Series | None): The target vector of the reserved outer
             hold-out; ``None`` when the hold-out is not configured.
-        holdout_fraction (float | None): The configured
+        holdout_fraction (float | None): The resolved
             ``general.holdout_fraction`` value (the fraction of rows reserved
-            before HPO).
+            before HPO; ``'auto'`` already expanded); ``None`` when no
+            hold-out is reserved.
         datetime_expansion (dict[str, list[str]]): The datetime expansion
             applied by the input-data diagnostics (``general.datetime_policy:
             'expand'``): source column → generated component columns. It is
@@ -2019,6 +2039,42 @@ def load_config(
     return cfg, target_col
 
 
+def _resolve_holdout_fraction(
+    configured: float | Literal["auto"] | None, n_rows: int
+) -> float | None:
+    """Resolve ``general.holdout_fraction`` into a concrete fraction.
+
+    ``'auto'`` reserves ``AUTO_HOLDOUT_FRACTION`` of the rows when the input
+    has at least ``AUTO_HOLDOUT_MIN_ROWS`` rows. On smaller data no hold-out
+    is reserved (it would be too small to be informative and would take rows
+    away from HPO): the honest estimate is then the BBC-CV
+    ``result["bbc_score"]``, and an INFO record says so. An explicit fraction
+    or ``None`` is returned as is.
+
+    Args:
+        configured (float | Literal["auto"] | None): The configured value.
+        n_rows (int): The number of rows in the input data.
+
+    Returns:
+        float | None: The fraction of rows to reserve, or ``None`` when no
+            outer hold-out is reserved.
+    """
+    if configured != "auto":
+        return configured
+    if n_rows >= AUTO_HOLDOUT_MIN_ROWS:
+        return AUTO_HOLDOUT_FRACTION
+    _LOG.info(
+        "general.holdout_fraction='auto': no outer hold-out is reserved on "
+        "small data (%d rows < %d). result['score'] and result['oof_score'] "
+        "are computed on the same folds that selected the algorithm and "
+        "hyperparameters and are therefore optimistic; the honest estimate "
+        "is the bias-corrected result['bbc_score'].",
+        n_rows,
+        AUTO_HOLDOUT_MIN_ROWS,
+    )
+    return None
+
+
 def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedData:
     """Prepare the data and resolve the settings for the HPO phases.
 
@@ -2078,14 +2134,14 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
             "data splits, model seeds and the TPE sampler are not fixed."
         )
 
-    # Optional reserved outer hold-out (general.holdout_fraction): the rows
-    # are split OFF before HPO and are never used for model selection. The
-    # honest estimate on these rows is reported as result["holdout_score"];
-    # the final model is still trained on ALL data (train + hold-out). The
-    # split is shuffled with the engine seed (general.random_state); a
-    # deterministic stratified split cannot be applied to a continuous
-    # target, so a plain random split is used.
-    holdout_fraction = cfg.general.holdout_fraction
+    # Reserved outer hold-out (general.holdout_fraction): the rows are split
+    # OFF before HPO and are never used for model selection. The honest
+    # estimate on these rows is reported as result["holdout_score"]; the final
+    # model is still trained on ALL data (train + hold-out). The split is
+    # shuffled with the engine seed (general.random_state); a deterministic
+    # stratified split cannot be applied to a continuous target, so a plain
+    # random split is used.
+    holdout_fraction = _resolve_holdout_fraction(cfg.general.holdout_fraction, len(X))
     holdout_X: pd.DataFrame | None = None
     holdout_y: pd.Series | None = None
     if holdout_fraction is not None:
@@ -2129,7 +2185,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
             _LOG.warning(
                 "Outer hold-out is very small (%d row(s)): the hold-out score "
                 "will have extremely high variance. Increase "
-                "general.holdout_fraction or leave it unset.",
+                "general.holdout_fraction or set it to null.",
                 len(holdout_X),
             )
 
@@ -2218,6 +2274,10 @@ class PhaseContext:
         complexity_guard_records (list[dict[str, Any]]): The accumulated
             "before → after" records of the adaptive complexity guard across
             all HPO phases (one per restricted parameter), for the report.
+        oof_pool (list[np.ndarray]): The OOF prediction matrices of every
+            algorithm in every HPO phase (``(n_trials, n_rows)`` each) — all
+            configurations the selection chose from; the BBC-CV input. Empty
+            when OOF collection is off.
     """
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
@@ -2227,6 +2287,7 @@ class PhaseContext:
     winner_algo: str | None = None
     pre_trained_trainer: Any | None = None
     complexity_guard_records: list[dict[str, Any]] = field(default_factory=list)
+    oof_pool: list[np.ndarray] = field(default_factory=list)
 
 
 @dataclass
@@ -2254,6 +2315,9 @@ class _HPOWorkerResult:
         n_trials_evaluated (int): The number of trials actually evaluated by
             the phase (own COMPLETED trials; transferred history never
             counts); 0 for custom tuners that do not report the count.
+        oof_predictions (np.ndarray | None): The OOF predictions of the
+            phase's completed trials (``(n_trials, n_rows)``); ``None`` when
+            OOF collection is off.
     """
 
     name: str
@@ -2264,6 +2328,7 @@ class _HPOWorkerResult:
     history_error: str | None = None
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
     n_trials_evaluated: int = 0
+    oof_predictions: np.ndarray | None = None
 
 
 @dataclass
@@ -2319,6 +2384,8 @@ class _HpoPhaseSpec:
             tuner's data validation.
         drop_id_like_columns (bool | None): ``general.drop_id_like_columns``
             for the tuner's data validation.
+        collect_oof (bool): Whether the tuner keeps the OOF predictions of
+            every trial for the BBC-CV estimate.
     """
 
     phase: HPOPhaseCfg
@@ -2349,6 +2416,7 @@ class _HpoPhaseSpec:
     inf_policy: str | None = None
     datetime_policy: str | None = None
     drop_id_like_columns: bool | None = None
+    collect_oof: bool = False
 
 
 def _prepare_search_space(
@@ -2509,6 +2577,7 @@ def _execute_hpo_phase(
             inf_policy=spec.inf_policy,
             datetime_policy=spec.datetime_policy,
             drop_id_like_columns=spec.drop_id_like_columns,
+            collect_oof=spec.collect_oof,
         )
 
         if result is None:
@@ -2622,6 +2691,7 @@ def _hpo_phase_worker(
             trials=list(result.trials),
             complexity_guard=list(result.complexity_guard or []),
             n_trials_evaluated=int(result.n_trials_evaluated or 0),
+            oof_predictions=result.oof_predictions,
         )
     except _CanonicalIAE as err:
         # Circuit breaker: the algorithm is disqualified after
@@ -2692,12 +2762,18 @@ def _consume_worker_results(
             continue
         if res.score is None or res.params is None:
             continue
+        # Every evaluated configuration was a candidate of the selection, so
+        # its OOF predictions enter the BBC-CV pool even if the algorithm is
+        # later dropped by a select step.
+        if res.oof_predictions is not None:
+            ctx.oof_pool.append(res.oof_predictions)
         phase_results[res.name] = PhaseResult(
             score=res.score,
             params=res.params,
             trials=list(res.trials or []),
             complexity_guard=list(res.complexity_guard or []),
             n_trials_evaluated=int(res.n_trials_evaluated or 0),
+            oof_predictions=res.oof_predictions,
         )
 
 
@@ -2756,6 +2832,43 @@ def _apply_target_domain_guard(
             a_cfg = a_cfg.model_copy(update={"hyperparameters": hyperparameters})
         guarded[name] = a_cfg
     return guarded
+
+
+def _bbc_enabled(
+    cfg: Config, prepared: PreparedData, algorithms: dict[str, AlgoCfg]
+) -> bool:
+    """Decide whether the OOF predictions of every trial are kept for BBC-CV.
+
+    BBC-CV is the honest estimate when no outer hold-out is reserved. The
+    memory cost is known before HPO: ``n_rows`` floats per evaluated trial,
+    at most the sum of ``n_trials`` over the HPO phases times the number of
+    enabled algorithms. Above ``BBC_MAX_OOF_CELLS`` the estimate is skipped
+    with a WARNING.
+
+    Args:
+        cfg (Config): The configuration object.
+        prepared (PreparedData): The prepared data (hold-out already split).
+        algorithms (dict[str, AlgoCfg]): The configured algorithms.
+
+    Returns:
+        bool: True when the OOF predictions must be collected.
+    """
+    if prepared.holdout_X is not None:
+        return False
+    n_algorithms = sum(1 for a in algorithms.values() if a.enable)
+    n_trials = sum(p.n_trials for p in cfg.general.phases if p.action != "select")
+    cells = n_algorithms * n_trials * len(prepared.y)
+    if cells > BBC_MAX_OOF_CELLS:
+        _LOG.warning(
+            "BBC-CV estimate skipped: keeping the OOF predictions of up to %d "
+            "trials x %d rows exceeds the budget of %d values. Reserve an "
+            "outer hold-out (general.holdout_fraction) for an honest estimate.",
+            n_algorithms * n_trials,
+            len(prepared.y),
+            BBC_MAX_OOF_CELLS,
+        )
+        return False
+    return True
 
 
 def execute_phases(
@@ -2857,6 +2970,9 @@ def execute_phases(
     # ``general.random_state`` is 42 (the ``validation.RANDOM_STATE`` default),
     # so configs without an explicit seed behave exactly as before.
     engine_random_state = cfg.general.random_state
+    # BBC-CV: without an outer hold-out the OOF predictions of every trial
+    # are kept, so persist_artifact can report the bias-corrected estimate.
+    collect_oof = _bbc_enabled(cfg, prepared, all_algorithms)
     # HPO phase ordinal: incremented only for all_algorithms/refine phases
     # (select steps are not counted). The per-phase SAMPLER seed is derived
     # from the engine seed: the first HPO phase keeps the documented engine
@@ -2997,6 +3113,7 @@ def execute_phases(
             inf_policy=cfg.general.inf_policy,
             datetime_policy=cfg.general.datetime_policy,
             drop_id_like_columns=cfg.general.drop_id_like_columns,
+            collect_oof=collect_oof,
         )
 
         # Execution (parallel or sequential)
@@ -3686,7 +3803,14 @@ def _oof_score_in_user_metric(
     trainer: Any,
     y: pd.Series,
 ) -> float | None:
-    """Compute the honest out-of-sample estimate of the final model.
+    """Compute the comparison metric on the final pipeline's OOF vector.
+
+    The OOF vector is built on the same splits that HPO used to select the
+    winner and its hyperparameters, so the value carries the same best-of-N
+    selection bias as ``result["score"]`` (on ``k_fold``/``loo`` without an
+    outer hold-out it equals the best-trial score for pooled metrics). It is
+    a diagnostic, not an independent estimate of generalization: the honest
+    estimate is ``result["holdout_score"]``.
 
     The comparison metric is recomputed on the final pipeline's pooled OOF
     predictions (``trainer.oof_predictions_``) against the true target —
@@ -3846,6 +3970,7 @@ def persist_artifact(
     sanity_gate_sections: dict[str, dict[str, Any]] | None = None,
     complexity_guard_sections: dict[str, Any] | None = None,
     n_trials_evaluated: int | None = None,
+    oof_pool: list[np.ndarray] | None = None,
 ) -> dict[str, Any]:
     """Final training of the winner, artifact persistence, and report assembly.
 
@@ -3859,13 +3984,16 @@ def persist_artifact(
     select-step disqualifications), ``additional_metrics``, ``sanity_gate``
     — a dict of the report sections of the ``sanity_gate`` select steps (key —
     the phase name), ``oof_score`` — the comparison metric computed on the
-    final pipeline's pooled out-of-fold predictions (an honest estimate on
-    rows the model has not been trained on; omitted when the OOF estimate is
-    impossible), ``n_trials_evaluated`` — the number of trials actually
-    evaluated by the winning algorithm's HPO phase (omitted when unknown),
-    and ``holdout_score`` — the comparison metric of the winner on the
-    reserved outer hold-out (``general.holdout_fraction``; present only when
-    the hold-out is configured).
+    final pipeline's pooled out-of-fold predictions (on the same splits that
+    selected the winner, so it is optimistic like ``score``; omitted when the
+    OOF estimate is impossible), ``n_trials_evaluated`` — the number of trials
+    actually evaluated by the winning algorithm's HPO phase (omitted when
+    unknown), ``holdout_score`` — the honest comparison metric of the
+    winner on the reserved outer hold-out (``general.holdout_fraction``;
+    present only when a hold-out is reserved), and ``bbc_score`` — the
+    bootstrap bias-corrected (BBC-CV) estimate of the selection procedure
+    from the OOF predictions of all evaluated trials (present when no
+    hold-out is reserved and the OOF pool is available).
 
     Args:
         cfg (Config): The configuration object.
@@ -3902,6 +4030,9 @@ def persist_artifact(
             transferred history never counts). ``None`` or 0 (unknown — e.g.
             legacy custom tuners without the count) — the key is omitted from
             the result.
+        oof_pool (list[np.ndarray] | None): The OOF prediction matrices of
+            all evaluated trials (``PhaseContext.oof_pool``); empty or
+            ``None`` — ``bbc_score`` is not reported.
 
     Returns:
         Dict[str, Any]: A dict with the training results.
@@ -3979,14 +4110,14 @@ def persist_artifact(
         # reproducible rerun is possible (None — the run was not reproducible).
         "random_state": cfg.general.random_state,
     }
-    # Honest out-of-sample estimate of the FINAL pipeline: the comparison
-    # metric computed on the pooled OOF predictions (the trainer's OOF channel
-    # uses the same validation method/splits as HPO). Unlike ``score`` (the
-    # best of N trials on the same folds — an optimistic maximum), this value
-    # is computed on rows the final model has not seen; omitted when no valid
-    # OOF pair exists. With a reserved outer hold-out the OOF vector is
-    # aligned to the FULL data (train + hold-out), so the target is the
-    # concatenated vector.
+    # The comparison metric on the FINAL pipeline's pooled OOF predictions.
+    # The trainer's OOF channel uses the same validation method/splits as HPO,
+    # so this value is NOT independent of model selection: like ``score`` it
+    # is optimistic (without an outer hold-out on k_fold/loo it equals the
+    # best-trial score for pooled metrics). The honest estimate is
+    # ``holdout_score``. Omitted when no valid OOF pair exists. With a
+    # reserved outer hold-out the OOF vector is aligned to the FULL data
+    # (train + hold-out), so the target is the concatenated vector.
     oof_score = _oof_score_in_user_metric(prepared.metric_user, trainer, full_y)
     if oof_score is not None:
         result["oof_score"] = oof_score
@@ -4038,7 +4169,57 @@ def persist_artifact(
             final_params=final_params,
         )
         result["holdout_score"] = holdout_score
+    # BBC-CV: the honest estimate when no outer hold-out is reserved. It
+    # corrects the best-of-N bias of ``score`` using the OOF predictions of
+    # every evaluated configuration, without retraining.
+    if oof_pool and prepared.holdout_X is None:
+        bbc_score = _bbc_score_in_user_metric(
+            prepared.metric_user, oof_pool, prepared.y, prepared.random_state
+        )
+        if bbc_score is not None:
+            result["bbc_score"] = bbc_score
     return result
+
+
+def _bbc_score_in_user_metric(
+    metric_user: str,
+    oof_pool: list[np.ndarray],
+    y: pd.Series,
+    random_state: int | None,
+) -> float | None:
+    """Compute the BBC-CV estimate in the comparison metric semantics.
+
+    Args:
+        metric_user (str): The user-facing comparison metric name.
+        oof_pool (list[np.ndarray]): The OOF prediction matrices of all
+            evaluated trials (``(n_trials, n_rows)`` each).
+        y (pd.Series): The target vector the OOF rows are aligned to.
+        random_state (int | None): The bootstrap seed (the engine seed).
+
+    Returns:
+        float | None: The estimate in user semantics, or ``None`` when it
+            cannot be computed (a WARNING is logged).
+    """
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    matrices = [m for m in oof_pool if m.ndim == 2 and m.shape[1] == len(y_arr)]
+    if len(matrices) != len(oof_pool):
+        _LOG.warning(
+            "BBC-CV: %d OOF matrix(es) are not aligned to the %d target rows "
+            "and are ignored.",
+            len(oof_pool) - len(matrices),
+            len(y_arr),
+        )
+    if not matrices:
+        return None
+    try:
+        scorer = get_scorer_object(metric_user, global_y=y_arr)
+        raw = bbc_cv_score(
+            scorer, y_arr, np.vstack(matrices), random_state=random_state
+        )
+    except Exception as err:  # noqa: BLE001 — a BBC-CV failure must not crash the report
+        _LOG.warning("BBC-CV estimate could not be computed: %s", err)
+        return None
+    return to_user_value(metric_user, raw)
 
 
 # --------------------------------------------------------------------------- #
@@ -4158,4 +4339,5 @@ def train_best_model(
             else None
         ),
         n_trials_evaluated=n_trials_evaluated,
+        oof_pool=ctx.oof_pool,
     )

@@ -1,43 +1,353 @@
-# Configuration File Structure
+# User Guide & API Reference
 
-The system uses a typed YAML or JSON config based on Pydantic.
+This document starts with the shortest path to a trained model and then goes
+deeper. You do not need to read past [Quick start](#quick-start) and
+[How the engine works](#how-the-engine-works) to use the library: every other
+setting has a sensible default.
 
-Scheme: [config.schema.json](config.schema.json).
+**Contents**
 
-Some Pydantic validation rules cannot be described in the schema. See [config_parser.py](/src/configurable_automl_engine/training_engine/config_parser.py) for details.
+1. [Quick start](#quick-start) — a complete example and the smallest working config.
+2. [How the engine works](#how-the-engine-works) — the few terms used throughout this document.
+3. [Recipes](#recipes) — copy-paste configs for common tasks.
+4. [Configuration reference](#configuration-reference) — every option, grouped by section.
+   * [`general`](#general-section) · [Pipeline steps (`phases`)](#pipeline-steps-phases) · [Sanity Gate](#sanity-gate-robust-winner-selection) · [`algorithms`](#algorithms-section) · [`oversampling`](#oversampling-section)
+   * Advanced: [early stopping](#early-stopping-pruning) · [additional metrics](#additional-metrics-additional_metrics) · [feature selection](#feature-selection-feature_selection) · [complexity guard](#complexity-guard-configuration-complexity_guard) · [preprocessing presets](#adaptive-feature-preprocessing-preprocessing-presets) · [categorical encoding](#categorical-encoding)
+5. [Training results](#training-results) — what `train_best_model` returns.
+6. [Python API](#python-api) — functions and classes.
+7. [Migrating older configs](#migrating-older-configs).
 
-The file must contain two sections: "general" and "algorithms". Additionally, it may include an optional "oversampling" section.
+The machine-readable schema of the config is [config.schema.json](config.schema.json).
+A few cross-field rules cannot be expressed in JSON Schema; they live in
+[config_parser.py](/src/configurable_automl_engine/training_engine/config_parser.py)
+and are listed under "Validation rules" in each section below.
+
+# Quick start
+
+The same example as in the README and [example.py](example.py):
+
+```python
+from sklearn.datasets import load_diabetes
+
+import configurable_automl_engine as caml
+
+data = load_diabetes(as_frame=True)
+df = data.frame
+
+config = {
+    "general": {
+        "comparison_metric": "r2",
+        "phases": [
+            {"n_trials": 100, "action": "all_algorithms"},
+            {
+                "name": "final_select",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "winner"
+            }
+        ],
+        "path_to_model": "diabetes_model.pkl"
+    },
+    "algorithms": {
+        "random_forest": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
+        },
+        "ridge": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {"alpha": [0.1, 1.0]}
+        },
+        "xgboosting": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {
+                "n_estimators": [100, 1000],
+                "max_depth": [3, 10],
+                "learning_rate": [0.01, 0.3],
+                "subsample": [0.5, 1.0]
+            }
+        },
+    }
+}
+
+results = caml.train_best_model(config=config, df=df, target='target')
+
+print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+```
+
+What this config does:
+
+* `phases` — the pipeline: first 100 tuning attempts (trials) for every
+  algorithm (`all_algorithms`), then a `select` step that keeps the algorithm
+  with the best validation score (`cv_best`) as the single `winner`.
+* `comparison_metric: "r2"` — "best" means the highest R².
+* `limit_hyperparameters: true` + `hyperparameters` — only the listed
+  parameters are tuned, within the given `[low, high]` ranges; all other
+  parameters keep the estimator defaults.
+* `path_to_model` — the winner is trained on all rows and saved there.
+* `xgboosting` needs `pip install "configurable-automl-engine[xgboost]"`.
+
+The same config as YAML (pass the file path as `config=`):
+
+```yaml
+general:
+  comparison_metric: "r2"
+  phases:
+    - {n_trials: 100, action: "all_algorithms"}
+    - {name: "final_select", n_trials: 1, action: "select", strategy: "cv_best", output: "winner"}
+  path_to_model: "diabetes_model.pkl"
+algorithms:
+  random_forest:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {n_estimators: [10, 500], max_depth: [3, 20]}
+  ridge:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {alpha: [0.1, 1.0]}
+  xgboosting:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      n_estimators: [100, 1000]
+      max_depth: [3, 10]
+      learning_rate: [0.01, 0.3]
+      subsample: [0.5, 1.0]
+```
+
+Every setting above has a default, so it can be shortened. The smallest valid
+config lists only the algorithms — `general` falls back to R², 50 trials per
+algorithm and the `cv_best` winner, and `{}` means "use the built-in search
+space":
+
+```yaml
+algorithms:
+  ridge: {}
+  random_forest: {}
+```
+
+To use the Sanity Gate or a multi-step search, see [Recipes](#recipes).
+
+# How the engine works
+
+A training run is a short **pipeline** of steps, configured in
+`general.phases`. There are two kinds of steps:
+
+* **Search steps** tune hyperparameters with [Optuna](https://optuna.org/).
+  Each tuning attempt is called a **trial**: the engine picks hyperparameters,
+  trains the model, and measures its validation score.
+  * `all_algorithms` — tune every enabled algorithm (`n_trials` attempts each).
+  * `refine` — continue tuning only the algorithms that are still in the race,
+    starting from their best parameters so far.
+* **Select steps** (`action: "select"`) decide which algorithms stay in the race.
+  * `strategy` — how candidates are ranked: `cv_best` (by validation score) or
+    `sanity_gate` (validation score plus [extra checks](#sanity-gate-robust-winner-selection)
+    that reject degenerate models).
+  * `output` — what the step keeps: `winner` (one model — this ends the
+    pipeline), `top_k` (the best `k`), or `pool` (every candidate close
+    enough to the leader).
+
+The pipeline always ends with a select step that keeps a single `winner`.
+When `phases` is omitted, the engine uses:
+
+```yaml
+phases:
+  - {name: "search", action: "all_algorithms", n_trials: 50}
+  - {name: "final_select", action: "select", strategy: "cv_best", output: "winner"}
+```
+
+Other terms used in this document:
+
+| Term | Meaning |
+|------|---------|
+| Validation score / CV score | The quality of a trial measured on rows the model was **not** trained on (cross-validation folds or a hold-out part). |
+| OOF (out-of-fold) predictions | For every row, the prediction of the fold model that did not see that row. Used for honest quality estimates. |
+| `RMSE_oof` | RMSE computed on the OOF predictions. |
+| `RMSE_full` | RMSE of a model trained on all rows, measured on the same rows (in-sample). |
+| Candidates | The algorithms still in the race at a given step. Search steps tune them, select steps narrow them down. |
+| Disqualified algorithm | An algorithm removed from the race: it failed repeatedly during tuning, did not fit the target, or was rejected by the Sanity Gate. Reasons are reported in `result["disqualified_algorithms"]`. |
+
+# Recipes
+
+**More or fewer tuning attempts.** Write the pipeline explicitly and set
+`n_trials`:
+
+```yaml
+general:
+  phases:
+    - {action: "all_algorithms", n_trials: 200}
+    - {action: "select", strategy: "cv_best", output: "winner"}
+```
+
+**Reject degenerate models (recommended for small or noisy data).** Use the
+Sanity Gate for the final choice. It double-checks the best candidates and
+skips models that predict a near-constant value, ignore most features, or
+overfit badly:
+
+```yaml
+general:
+  phases:
+    - {action: "all_algorithms", n_trials: 100}
+    - {action: "select", strategy: "sanity_gate", output: "winner"}
+```
+
+**Coarse search, then fine-tune the top 3.**
+
+```yaml
+general:
+  phases:
+    - {name: "coarse",  action: "all_algorithms", n_trials: 100}
+    - {name: "top3",    action: "select", strategy: "sanity_gate", output: "top_k", k: 3}
+    - {name: "fine",    action: "refine", n_trials: 200}
+    - {name: "final",   action: "select", strategy: "sanity_gate", output: "winner"}
+```
+
+**Search only the parameters you list.** By default your ranges are merged
+into the built-in search space. With `limit_hyperparameters: true` only the
+listed parameters are tuned; the rest keep the estimator defaults:
+
+```yaml
+algorithms:
+  random_forest:
+    limit_hyperparameters: true
+    hyperparameters:
+      n_estimators: [50, 300]
+      max_depth: [3, 12]
+```
+
+**Fixed validation scheme.**
+
+```yaml
+general:
+  validation_strategy: "k_fold"   # or "train_test_split", "loo", "auto" (default)
+  n_folds: 5
+```
+
+**Hard time limits.** Timeouts are only supported with process-based
+parallelism:
+
+```yaml
+general:
+  parallel_mode: "processes"
+  max_workers: 4
+  phase_timeout: 1800    # seconds for a whole search step
+  task_timeout: 600      # seconds for one algorithm
+```
+
+**An honest final estimate on untouched rows.** By default
+(`holdout_fraction: "auto"`) 20 % of the rows are reserved before tuning when
+the data has at least 100 rows, and the result contains `holdout_score`. To
+reserve a hold-out on smaller data too, or a different share, set it
+explicitly; `null` turns it off (the result then has `bbc_score` instead, see
+[Training results](#training-results)):
+
+```yaml
+general:
+  holdout_fraction: 0.3
+```
+
+**Extra metrics in the report.**
+
+```yaml
+general:
+  comparison_metric: "rmse"
+  additional_metrics: ["r2", "mae"]
+```
+
+# Configuration reference
+
+A config has three top-level sections. Only `algorithms` is required:
+
+* `general` — what to optimize, how to validate, the pipeline, parallelism.
+* `algorithms` — which models to try and their search spaces.
+* `oversampling` — optional (experimental) data augmentation.
 
 ## General section
 
-The `general` section may include the following attributes:
+**Main options**
 
-* `phases` — required section (array) of hyperparameter optimization phases.
-* `comparison_metric` — (optional) accuracy metric for model comparison. Defaults to `"r2"` if not specified.
-* `additional_metrics` — (optional) list of additional quality metrics computed for the final trained model and returned together with the training results (see [Additional metrics](#additional-metrics-additional_metrics)).
-* `path_to_model` — (optional) path to save the best model.
-* `serialization_format` — (optional) format for saving the model (`"pickle"` or `"joblib"`).
-* `log_to_file` — (optional) path to the log file.
-* `validation_strategy` — (optional) strategy for evaluating model accuracy (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). With `"auto"` the engine automatically picks between LOO, k-fold and train-test split based on the number of observations and features.
-* `n_folds` — (optional) number of folds for cross-validation; used only if `validation_strategy = "k_fold"`. Ignored when `validation_strategy = "auto"`.
-* `random_state` — (optional, `int` or `null`, default `42`) the engine seed. It drives the data splits (CV folds / hold-out), the model seeds (via the `ModelTrainer` and the model factory) and the TPE sampler base seed (`random_state + hpo_phase_ordinal`, so startup points do not repeat between phases). The value is recorded in the training report under the `random_state` key. `null` — a non-reproducible run: the splits are not fixed and stochastic models draw a fresh RNG at fit time; a WARNING is logged that the run is not reproducible.
-* `max_workers` — (optional) maximum number of threads/processes. If not specified, the number of CPU cores is used.
-* `parallel_mode` — (optional) parallelism mode (`"threads"` or `"processes"`). Defaults to `"threads"`.
-* `parallel_strategy` — (optional) controls parallel execution strategy. Defaults to `"algorithms"`.
-* `phase_timeout` — (optional) global timeout for the entire HPO phase in seconds (minimum 1.0). If `null`, defaults to 3600. Supported only in `"processes"` mode, where it is **hard** (hung workers are force-terminated). In `"threads"` mode setting it is a **config error**: an already running Python function cannot be interrupted, so a soft timeout does not save time and only discards the ready results of completed algorithms.
-* `task_timeout` — (optional) per-task timeout in seconds (minimum 1.0). If `null`, uses `phase_timeout`. Supported only in `"processes"` mode (hard). In `"threads"` mode setting it is a **config error**: the deadline counted from submit caused tasks queued behind `max_workers` to "expire" before even starting.
-* `pruning` — (optional) early-stopping (pruning) settings for Optuna trials. Disabled by default.
-* `categorical_encoding` — (optional) categorical encoding strategy: `"one_hot"` (default), `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. See [Categorical encoding](#categorical-encoding).
-* `high_cardinality_threshold` — (optional, `>= 0`) cardinality threshold for the automatic high-cardinality mode. Must be set together with `high_cardinality_encoding`.
-* `high_cardinality_encoding` — (optional) encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`.
-* `hashing_n_components` — (optional, `>= 1`, default `16`) number of binary columns per categorical column when `"hashing"` encoding is used.
-* `target_encoding_smoothing` — (optional, `>= 0`, default `20.0`) smoothing parameter `m` of target encoding.
-* `target_encoding_fallback` — (optional, default `null`) fallback value of target encoding for categories unseen in training; `null` means the global target mean.
-* `sanity_gate` — (optional) thresholds and settings of the Sanity Gate audit used by select phases with `strategy: "sanity_gate"`. The section is a pure source of thresholds — the global switch `mode` was removed. See [Sanity Gate configuration](#sanity-gate-configuration-sanity_gate).
-* `complexity_guard` — (optional) settings of the adaptive complexity guard for tree/boosting search spaces on small data. See [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard).
-* `inf_policy` — (optional, `"as_missing"` | `"error"`, default `"as_missing"`) policy for infinite values (`±inf`) in numeric features. `"as_missing"` replaces them with NaN and logs a WARNING listing the columns and counts (the missing values are imputed by the preprocessor); `"error"` rejects the data with a ValueError naming the columns.
-* `datetime_policy` — (optional, `"expand"` | `"drop"` | `"error"`, default `"expand"`) policy for datetime/timedelta columns (not handled by any transformer and previously silently dropped). `"expand"` replaces each column with derived numeric components (`year`, `month`, `day`, `dayofweek`, and `hour` when it is non-zero) and logs a WARNING listing the generated columns; `"drop"` removes the columns and logs a WARNING; `"error"` rejects the data with a ValueError naming the columns.
-* `drop_id_like_columns` — (optional, `bool`, default `false`) whether ID-like columns are dropped from the feature matrix. An ID-like column is an object/string column with `nunique/n >= 0.95` or a unique monotonic integer column. With `false` (default) such columns are only reported with a WARNING naming them; with `true` they are removed. The rule is a heuristic: time-dependent monotonic features (e.g. a timestamp counter) may be meaningful and should be reviewed before removal.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `comparison_metric` | `"r2"` | Metric that defines the best model. See [allowed values](#allowed-values-for-comparison_metric). |
+| `phases` | search + `cv_best` winner | The pipeline. See [Pipeline steps](#pipeline-steps-phases). |
+| `path_to_model` | `"model.pkl"` | Where the winning model is saved. |
+| `serialization_format` | `"pickle"` | `"pickle"` or `"joblib"`. |
+| `log_to_file` | `null` | Path of a log file. Without it logs go to the console only. |
+| `additional_metrics` | `[]` | Extra metrics reported for the final model; they do not affect the choice. See [Additional metrics](#additional-metrics-additional_metrics). |
+
+**Validation**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `validation_strategy` | `"auto"` | `"train_test_split"`, `"k_fold"`, `"loo"` (leave-one-out) or `"auto"`. `"auto"` picks between LOO, k-fold and a hold-out split from the number of rows and features. |
+| `n_folds` | `5` | Number of folds; used only with `"k_fold"` (ignored with `"auto"`). |
+| `holdout_fraction` | `"auto"` | Rows reserved **before** tuning for an honest final estimate (`result["holdout_score"]`): a fraction strictly in `(0, 1)`, `"auto"` or `null`. `"auto"` reserves 20 % when the data has at least 100 rows and nothing on smaller data (a WARNING then says that `score`/`oof_score` are optimistic, and `result["bbc_score"]` is the honest estimate). `null` disables the hold-out. The final model is still trained on all rows. |
+| `random_state` | `42` | Seed of the data splits, the models and the tuner — the same seed gives the same result. `null` makes the run non-reproducible (a WARNING is logged). Recorded as `result["random_state"]`. |
+
+**Parallelism and time limits**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `max_workers` | CPU count | Maximum number of threads/processes. |
+| `parallel_mode` | `"threads"` | `"threads"` or `"processes"`. |
+| `parallel_strategy` | `"algorithms"` | What runs in parallel. Currently only `"algorithms"` (different algorithms are tuned at the same time). |
+| `phase_timeout` | `null` (3600 s) | Time limit of one search step, seconds (≥ 1). **Only with `parallel_mode: "processes"`**, where hung workers are terminated. In `"threads"` mode setting it is a config error: a running Python thread cannot be stopped, so the limit would only throw away finished results. |
+| `task_timeout` | `null` (= `phase_timeout`) | Time limit of one algorithm, seconds (≥ 1). Only with `"processes"`, same reason. |
+
+**Data handling**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `categorical_encoding` | `"one_hot"` | `"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. See [Categorical encoding](#categorical-encoding). |
+| `high_cardinality_threshold` | `50` | Columns with more distinct values than this use `high_cardinality_encoding` instead. Set both options to `null` to turn this off; they must be set together. |
+| `high_cardinality_encoding` | `"frequency"` | Encoding of high-cardinality columns (same values as `categorical_encoding`). |
+| `hashing_n_components` | `16` | Columns per categorical feature for `"hashing"` (≥ 1). |
+| `target_encoding_smoothing` | `20.0` | Smoothing `m` of `"target"` encoding (≥ 0). |
+| `target_encoding_fallback` | `null` | `"target"` encoding value for unseen categories; `null` = mean of the target. |
+| `inf_policy` | `"as_missing"` | Infinite values in numeric features: `"as_missing"` turns them into missing values (imputed later) with a WARNING; `"error"` rejects the data. Applied at training and prediction time. |
+| `datetime_policy` | `"expand"` | Date/time columns: `"expand"` replaces each column with `year`, `month`, `day`, `dayofweek` (and `hour` when it is not always zero); `"drop"` removes them; `"error"` rejects the data. A WARNING lists the affected columns. |
+| `drop_id_like_columns` | `false` | ID-like columns (text columns where ≥ 95 % of values are unique, or unique monotonic integers) are only reported with a WARNING by default; `true` removes them. This is a heuristic: a monotonic counter such as a timestamp may be a useful feature. |
+
+**Advanced blocks** (each has its own section below): `pruning`
+([early stopping](#early-stopping-pruning)), `feature_selection`
+([feature selection](#feature-selection-feature_selection)), `sanity_gate`
+([Sanity Gate settings](#sanity-gate-configuration-sanity_gate)),
+`complexity_guard` ([complexity guard](#complexity-guard-configuration-complexity_guard)).
+
+### Allowed values for `comparison_metric`
+
+* `"nrmse"`
+* `"rmse"`
+* `"neg_root_mean_squared_error"`
+* `"mae"`
+* `"mse"`
+* `"r2"`
+
+### Additional metrics (`additional_metrics`)
+
+The optional `general.additional_metrics` parameter is a list of extra quality metrics whose values are computed for the **final trained model** (after the winner is selected) and returned together with the training results.
+
+Rules and behavior:
+
+* **Optional & backward compatible.** If the parameter is absent or empty, the system behaves exactly as before: no `additional_metrics` key is added to the results.
+* **Allowed values** — the same set as for `comparison_metric` (see above). An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
+* **Informational only.** Additional metrics do **not** participate in hyperparameter optimization, model comparison, or winner selection. The winner is determined solely by the main `comparison_metric`.
+* **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
+* **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
+* **Post-validation list.** Both rules above are applied at config validation time, so the resulting `general.additional_metrics` (as exposed on the validated config object and forwarded to the final `ModelTrainer`) may differ from the list the user provided: duplicates are removed and the comparison metric (with its aliases) is dropped. Only the metrics present in the final list are computed and returned.
+* **Computation.** Each additional metric is evaluated for the final model with the **same validation method as the comparison metric**: on a hold-out split (`train_test_split`) or as the CV estimate (`k_fold`/`loo`) — never on the full training set. The CV estimate is the mean over folds for additive metrics (MAE and similar per-sample means) and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases), matching the `val_score` semantics. Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
+* **Failure tolerance.** If a single additional metric cannot be computed (scorer error), it is skipped with a warning and does not abort training, model selection, or artifact saving.
+
+Example:
+
+```yaml
+general:
+  comparison_metric: "rmse"
+  additional_metrics: ["r2", "mae", "mse"]
+```
 
 ### Early stopping (`pruning`)
 
@@ -85,373 +395,27 @@ Behavior by validation strategy:
 * `auto` — pruning is applied when `auto` resolves to `k_fold` or `loo`; if it resolves to `train_test_split`, pruning is not applied (see below).
 * `train_test_split` (hold-out) — there are no intermediate steps, so the pruner is **not** applied; the configuration is accepted with a warning, and every trial runs to completion. This behavior is safe and documented.
 
-### Structure of a pipeline phase (`phases`)
+### Feature selection (`feature_selection`)
 
-* `n_trials` — number of HPO iterations for phases `all_algorithms` / `refine` (ignored for `select`, but the field is required for schema uniformity).
-* `name` — (optional) user-defined name of the phase.
-* `action` — (optional) action of the phase, default is `"all_algorithms"`.
-* `strategy` — (only for `action: "select"`) selection strategy: `"cv_best"` or `"sanity_gate"`.
-* `output` — (only for `action: "select"`) what the select step emits: `"winner"`, `"top_k"` or `"pool"`.
-* `k` — (only for `output: "top_k"`) number of candidates to keep, `>= 1`.
+The optional `general.feature_selection` block adds a feature-selection step
+in front of the model. It is off by default.
 
-### Allowed actions for a pipeline phase
-
-> **Note:** both explicit pipeline actions are executed:
-> `refine` (see the contract below) and `select` (both
-> strategies `cv_best` / `sanity_gate` and all output forms `winner` /
-> `top_k` / `pool`).
-
-* `"all_algorithms"` — for each algorithm, performs `n_trials` hyperparameter optimization attempts.
-* `"refine"` — performs `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set. Input: the current working set of the pipeline — the result of the last HPO phase or the output of the previous select step. Only `params` are used for warm-start: each candidate's current parameters are passed to the tuner as `initial_params` (`enqueue_trial` guarantees score monotonicity); incoming scores are ignored. Monotonicity holds because every HPO phase evaluates models on the SAME folds: the data-split/preprocessor seed is the fixed `RANDOM_STATE` for all phases (as in the final `ModelTrainer` fit), while only the TPE sampler seed varies per phase (`RANDOM_STATE + phase_ordinal`) so that startup points do not repeat. The service key `use_feature_selection` keeps being carried inside `params`. Output: the same set of names with updated `(score', params')` records; the output replaces the working set. There is no narrowing in refine — no winners, no top-K, no corridors. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set (all candidates failed), the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (a deliberate design decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
-* `"select"` — an explicit selection step. Required fields: `strategy` (`"cv_best"` — ranking by CV score, or `"sanity_gate"` — finalists pool + `ModelSanityGate` audit + ranking by `RMSE_oof`) and `output` (`"winner"` — a single winner, terminal step; `"top_k"` — top-K candidates, requires integer `k >= 1`; `"pool"` — the whole corridor finalists pool). The step runs synchronously (never inside `run_parallel`) and its output **replaces** the pipeline working set — subsequent `refine` / `select` steps operate on it. The combination `strategy: "cv_best"` + `output: "pool"` is valid: it builds the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
-
-Execution semantics:
-
-* `strategy: "cv_best"` — ranking by raw CV score (no audit, no gate section in the report): `output: "winner"` — the CV leader (documented tie-break: configuration order); `output: "top_k"` — the first `k` candidates of the ranking; `output: "pool"` — the corridor finalists pool.
-* `strategy: "sanity_gate"` — the two-stage selection: finalists pool → every finalist trained on **100% of the data exactly once** → `ModelSanityGate` audit → `select_robust_winner` ranking of the passed candidates by `RMSE_oof` (formal fallback criterion when the whole pool is disqualified). Ranking metric of the strategy — `RMSE_oof`. `output: "winner"` — the robust winner (terminal step; its full-fit trainer is reused for the artifact — the winner is **not** retrained); `output: "top_k"` — the first `k` candidates of the `RMSE_oof` ranking; `output: "pool"` — every candidate that passed the audit (or the full fallback ranking when all are disqualified). Gate disqualifications are fed into the circuit breaker (`disqualified_algorithms`) on a par with HPO failures. A repeated sanity select (e.g. after `refine`) trains its finalists from scratch — stale full-fit trainers are never reused.
-* An empty incoming working set (nothing to rank/audit) raises a `RuntimeError`.
-
-Validation rules (rejected at config load with a clear message):
-
-* Deprecated action `"refine_winner"` — rejected with a migration hint (no silent translation): replace it with explicit `select` + `refine` phases.
-* `select` cannot be the first phase (there is nothing to rank/audit yet).
-* No phases are allowed after a terminal select (`output: "winner"`).
-* The **last phase must be a `select` with `output: "winner"`** — the final artifact is built from the result of the terminal select step.
-* `output: "top_k"` without `k >= 1` — error; `k` set for `output: "winner" | "pool"` — error; `strategy` / `output` / `k` set for non-select phases — error.
-* The parameter `k` is deliberately **not** cross-checked against `sanity_gate.top_k_candidates` at the config level: the finalists pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay (trim / cap) is defined at execution time.
-
-Typical pipeline (see the migration table in README.md):
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mode` | `"disabled"` | `"disabled"` — no selection; `"always"` — every trial and the final model use it; `"auto"` — the tuner decides per trial whether selection helps (the decision is kept in the winner's `params` as `use_feature_selection`). Always off for `isotonic_regression`. |
+| `method` | `"importance"` | `"importance"` (tree-based importance), `"percentile"` (F-test), `"mutual_info"` (mutual information) or `"variance"` (drops near-constant features). |
+| `percentile` | `50.0` | Percentage of features kept by `"percentile"` / `"mutual_info"`, in `(0, 100]`. |
+| `min_features` | `2` | Never keep fewer features than this (≥ 1). |
+| `variance_threshold` | `0.0` | Minimum variance for `"variance"` (≥ 0). |
+| `n_estimators` | `50` | Trees used by `"importance"` (≥ 10). |
 
 ```yaml
 general:
-  phases:
-    - name: "coarse"
-      n_trials: 100
-      action: "all_algorithms"
-    - name: "gate_select"
-      n_trials: 1
-      action: "select"
-      strategy: "sanity_gate"
-      output: "top_k"
-      k: 3
-    - name: "refine"
-      n_trials: 200
-      action: "refine"
-    - name: "gate_final"
-      n_trials: 1
-      action: "select"
-      strategy: "sanity_gate"
-      output: "winner"
+  feature_selection:
+    mode: "auto"
+    method: "mutual_info"
+    percentile: 30
 ```
-
-### Allowed values for `comparison_metric`
-
-* `"nrmse"`
-* `"rmse"`
-* `"neg_root_mean_squared_error"`
-* `"mae"`
-* `"mse"`
-* `"r2"`
-
-### Finalists pool Top-K (`select_finalists`)
-
-The engine replaces the "blind" first-place CV pick with a deterministic
-**finalists pool** used by the two-stage winner selection: candidates whose CV
-score falls inside the δ corridor from the leader, intersected with the hard
-`top_k_candidates` cap. The pool is built by `select_finalists` in
-`training_engine/component.py` from the HPO phase results (raw optimizer
-scores); the corridor is expressed in **user** metric semantics (see
-`metrics.user_direction` / `metrics.to_user_value`).
-
-Corridor form (`corridor_mode`):
-
-* `"multiplicative"` — min-better metrics (errors): `Score_CV(m) <=
-  Score_CV_best * (1 + δ)`; max-better metrics (R² etc.): `Score_CV(m) >=
-  Score_CV_best * (1 - δ)`.
-* `"additive"` — for metrics where the multiplicative form is incorrect
-  (zero/negative values: R² < 0, MAE ≈ 0): `|Score_CV(m) - Score_CV_best| <=
-  δ * (max_score - min_score)`, the range computed over all valid candidates.
-* `"auto"` (default) — chosen by the metric type: error → multiplicative,
-  score metric with a possible sign → additive. For error metrics with a
-  practically zero best score (MAE ≈ 0) the multiplicative form would collapse
-  the pool to the leader, so the additive form is used instead.
-* If the multiplicative corridor excludes the leader itself (e.g. a max-better
-  metric with a negative best score such as R² < 0), the additive form is used
-  instead.
-
-Combination of filters (explicit): pool = (candidates inside the corridor) ∩
-(first `top_k_candidates` by CV score). If the corridor yields fewer candidates
-than `top_k_candidates`, the pool contains exactly those — no topping up beyond
-the corridor, except the optional family-diversity rule:
-
-* `enforce_family_diversity` (default `false`) — when the pool represents
-  exactly one algorithm family (linear / ensembles / kernel-GPR) **and that
-  family is permitted by `allowed_families`**, the best representative of each
-  missing family is added from the *extended* corridor
-  (`family_diversity_multiplier * δ`, default 1.5), never exceeding
-  `top_k_candidates`. The added families are also restricted to
-  `allowed_families`; when the pool's single family is not permitted, no
-  top-up happens at all.
-
-Algorithms disqualified by the circuit breaker never enter the pool.
-Determinism: the pool is ordered by the raw score descending (optimizer
-semantics, same ordering as `select_winner`); ties keep the configuration
-order, which is the documented tie-break. Scores exactly on the corridor
-boundary are included (equality never fails).
-
-Edge cases: an empty result set raises `RuntimeError`; fewer than `top_k` valid
-algorithms produce a pool of what is available; `top_k_candidates = 1` yields
-the single CV leader. The pool function is standalone: it is used by select
-steps with `strategy: "sanity_gate"`; thresholds come from the
-`general.sanity_gate` section.
-
-### Two-stage winner selection with Sanity Gate (`select_robust_winner`)
-
-Select phases with `strategy: "sanity_gate"` replace the
-"blind" CV-first-place pick with a two-stage selection:
-
-1. **Pool** — built by `select_finalists` from the HPO phase results.
-2. **Finalist training** — every pool candidate is trained on **100% of the
-   data exactly once** (`ModelTrainer.fit`, which also produces the OOF vector
-   `oof_predictions_` and `RMSE_oof`); the same training result is reused for
-   `RMSE_full`, the sanity audit and the final report (no duplicated training).
-3. **Audit** — each finalist is checked by `ModelSanityGate`: circuits A/B
-   (diversity / unique) are computed on the **OOF vector**, circuit D
-   (generalization gap) uses the full-fit predictions, circuit C (dead
-features) inspects the model. Circuit A runs in the **adaptive mode by
-   default**: the reference is the constant model — only a zero prediction
-   variance (a tie with the constant baseline) and models **worse than the
-   constant prediction** (`R²_oof < 0`, e.g. a deep tree with an honestly
-   negative OOF R²) are disqualified, so an honest model with a weak signal
-   (R² between 0 and 0.15) keeps its chance to win by `RMSE_oof`; an explicit
-   `adaptive_diversity: false` restores the legacy fixed
-   `min_prediction_diversity` threshold. Circuit D violations are routed by
-   `general.sanity_gate.generalization_gap_mode`: the default
-   `"warn"` records them in `soft_warnings` (no disqualification — the
-   candidate keeps its chance to win by `RMSE_oof`), `"reject"` turns them
-   into disqualification reasons. In `"warn"` mode this covers an **infinite**
-   gap as well (`RMSE_full ≈ 0` perfect in-sample fit, `RMSE_oof ≈ 0`);
-   `RMSE_oof ≈ 0` additionally raises a `WARNING` log record
-   (suspiciously perfect out-of-fold fit, possible target leakage). In both
-   modes a missing `y_pred_full` and the absence of finite pairs stay
-   `reasons`. The total audit phase can be capped by
-   `general.sanity_gate.audit_time_budget_seconds` (0 = no limit):
-   when the budget is exhausted, the remaining candidates are skipped with an
-   explicit reason.
-4. **Ranking** — among the candidates that passed every check the winner is
-   the one with the **best (minimum) `RMSE_oof`**. CV score and `RMSE_full`
-   do NOT participate in the ranking (the v2 composite score
-   `α·Score_CV + (1−α)·Score_full` was removed).
-
-Selection step modes (`select_robust_winner` mode):
-
-The mode is a property of the select step handling, **not** a config field
-(`general.sanity_gate.mode` was removed) and there is no way to
-set it from the config: the mode is fixed inside the select-step
-implementation — select steps with `strategy: "sanity_gate"` always run the
-**`"active"`** mode. The underlying `select_robust_winner` machinery exposes
-two modes:
-
-* `"off"` — old `select_winner` behavior: no pool, no audit (legacy direct
-  calls only; `strategy: "cv_best"` select steps do not use
-  `select_robust_winner` at all).
-* `"active"` — disqualifications are applied; the winner is the best `RMSE_oof`
-  among the candidates that passed the audit.
-
-The `"warn_only"` mode was removed together with the
-report keys `sanity_gate_warn_only` and `winner_if_active`: diagnostics are
-always available in the gate section of each select-step report, and the
-decision to narrow the working set is made explicitly by the select step
-itself.
-
-Fallback (formalized): if every candidate is rejected, the "least problematic"
-model wins — minimum number of violated circuits, then minimum severity of the
-violations (circuit significance order fixed in code: D > A > B > C), then the
-best `RMSE_oof`. The run never fails; a `WARNING`
-with all reasons is logged.
-
-Failure of a finalist's full-data training is handled: the candidate is
-skipped, the reason is logged, and selection continues with the next candidate.
-If no finalist can be trained at all, a `RuntimeError` is raised.
-
-Result reporting: every select step with `strategy: "sanity_gate"` adds its
-own section to `result["sanity_gate"]` keyed by the **phase name** — see
-[Result keys](#result-keys) below. Select steps with
-`strategy: "cv_best"` add no gate section.
-
-#### Result keys
-
-The `sanity_gate` key of the `train_best_model` return value is a dict keyed
-by the names of select phases with `strategy: "sanity_gate"`; select steps
-with `strategy: "cv_best"` add no sections, and with
-no sanity-gate select steps the key is absent entirely:
-
-| Key of `result["sanity_gate"][<phase name>]` | Type | Description |
-|-----|------|-------------|
-| `strategy` | `str` | Always `"sanity_gate"`. |
-| `generalization_gap_mode` | `str` | Applied circuit D mode: `"warn"` (default) or `"reject"`. In `"warn"` a gap violation — finite or infinite (`RMSE_full ≈ 0` / `RMSE_oof ≈ 0`) — appears as a `soft_warnings` entry and does NOT disqualify; in `"reject"` it is a `reasons` entry. |
-| `pool` | `list[str]` | Ordered finalist names (best first). |
-| `audit` | `dict[str, dict]` | Per-candidate audit results: `is_valid`, `reasons`, `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (disabled/not-computable statistics are `null`), `generalization_gap_infinite` (`true` when the circuit D gap is `inf` — division by zero), `generalization_gap_mode`, `severity`. |
-| `disqualified` | `dict[str, list[str]]` | Applied disqualifications `{algo: [reasons]}`; the same entries are also fed into the top-level `disqualified_algorithms` (circuit breaker). Warn-mode circuit D violations never appear here. |
-| `fallback_used` | `bool` | `true` when the whole pool was disqualified and the winner was chosen by the formal fallback criterion. |
-| `winner_rmse_oof` | `float \| null` | `RMSE_oof` of the winner (`null` when not computable). |
-| `overhead_seconds` | `float` | Wall-clock overhead of the select step: finalist training on 100% of the data + the audit phase. |
-
-The legacy keys `disqualified_by_sanity_gate`, `sanity_gate_warn_only` and
-`sanity_gate_overhead_seconds` (and the `mode` / `winner_if_active` fields)
-were removed together with the `warn_only` mode.
-
-### Sanity Gate configuration (`sanity_gate`)
-
-The optional `general.sanity_gate` block is a **pure source of thresholds**
-for select phases with `strategy: "sanity_gate"` — corridor shape,
-pool cap, audit limits and circuit thresholds. The global switch `mode`
-(`"off" | "warn_only" | "active"`) was removed together with the
-`warn_only` semantics: selection happens only through explicit select phases,
-and gate diagnostics are available in the gate section of each select-step
-report. An absent block (or an empty `{}`) is valid — the section is optional,
-not a behavioral flag; a config with `sanity_gate.mode` is rejected with a
-migration hint. The only routing flag the section keeps is
-`generalization_gap_mode` — it tunes one circuit (D), not the
-whole gate: with the default `"warn"` a gap violation — finite or infinite
-(`RMSE_full ≈ 0` / `RMSE_oof ≈ 0`) — is a soft warning, and an
-explicit `generalization_gap_mode: reject` restores the legacy strict
-disqualification.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `top_k_candidates` | `int` | `3` | Hard cap of the finalists pool size (≥ 1). Larger than the number of algorithms — allowed (pool of what is available). |
-| `corridor_delta` | `float` | `0.15` | Relative corridor width δ from the leader, strictly in `(0, 1)`. |
-| `corridor_mode` | `string` | `"auto"` | Corridor form: `"multiplicative"`, `"additive"` or `"auto"` (chosen by metric type; unknown metric — conservative additive form + warning). |
-| `enforce_family_diversity` | `bool` | `false` | Optional soft top-up of missing algorithm families into the pool. |
-| `algorithm_families` | `dict[str, str] \| null` | `null` | «algorithm → family» map for the family-diversity rule. |
-| `allowed_families` | `list[str] \| null` | `null` | Families participating in the top-up (`null` — all allowed). |
-| `family_diversity_multiplier` | `float` | `1.5` | Extended-corridor multiplier for the family top-up (> 0). |
-| `min_prediction_diversity` | `float` | `0.15` | Circuit A threshold: `Var(y_pred_oof) / Var(y) >=` threshold, computed on **OOF predictions**, strictly in `(0, 1]`. Applied only in the **non-adaptive** mode (`adaptive_diversity: false`). Too strict values (e.g. `1.0` on noisy data) are not rejected by validation but cause false positives — documented consequence. |
-| `adaptive_diversity` | `bool` | `true` | Adaptive mode of circuit A (comparison against the constant model, **default `true`**): only a zero prediction variance (a tie with the constant baseline) and models **worse than the constant prediction** (`R²_oof < 0`) fail; the absolute `min_prediction_diversity` threshold is not applied. `false` restores the legacy fixed-threshold behavior. |
-| `min_unique_count` | `int` | `5` | Absolute lower bound of `nunique` for circuit B (≥ 1). The final threshold never exceeds the number of distinct target values. |
-| `min_unique_ratio` | `float` | `0.05` | Lower bound of the unique-prediction share for circuit B, in `(0, 1]`. Applied as `min_unique_ratio * N` **capped by the number of distinct target values** (a perfect model always reaches the cap). |
-| `max_dead_feature_ratio` | `float` | `0.4` | Dead-feature share threshold of circuit C, in `[0, 1]` — a **signal** for linear models; standalone disqualification only when `dead_features_require_low_diversity=true` and diversity is low. |
-| `dead_features_require_low_diversity` | `bool` | `true` | Combination rule of circuit C: disqualify only when "many dead features AND low diversity". |
-| `zero_coef_tolerance` | `float` | `1e-12` | Coefficients with `abs(coef) <=` threshold count as zero (circuit C, linear path; ≥ 0). |
-| `max_generalization_gap` | `float` | `1.5` | Circuit D threshold (≥ 1): `RMSE_oof / RMSE_full >` threshold means overfitting. |
-| `generalization_gap_mode` | `string` | `"warn"` | Circuit D routing of a gap violation: `"warn"` — the violation is recorded in `soft_warnings` (no disqualification, `is_valid` stays `true`, `severity` ≤ 1), including an **infinite** gap from division by zero (`RMSE_full ≈ 0`, `RMSE_oof ≈ 0`); `"reject"` — legacy strict behavior: a reason and disqualification. In both modes a missing `y_pred_full` and the absence of finite pairs remain `reasons`. The field is deliberately NOT named `mode` (collision with the removed `sanity_gate.mode`, which the validator rejects with a migration hint). |
-| `check_permutation_sensitivity` | `bool` | `true` | Enable the permutation sensitivity audit of circuit C for nonlinear models (cost control of the permutation audit). `false` — the permutation path is skipped, the linear `coef_` path remains. |
-| `permutation_max_rows` | `int` | `5000` | Row subsampling for the permutation path (≥ 1). |
-| `permutation_max_features` | `int` | `100` | Cap of checked columns in the permutation path (≥ 1). |
-| `permutation_repeats` | `int` | `3` | Permutation repeats per column (≥ 1). |
-| `permutation_seed` | `int` | `42` | Fixed permutation seed (determinism). |
-| `permutation_tolerance` | `float` | `1e-3` | Relative "deadness" threshold of a feature in the permutation path (≥ 0). |
-| `audit_time_budget_seconds` | `float` | `0` | Time budget of the audit phase in seconds; `0` — no limit (default). When the budget is exhausted, the remaining finalists are not audited and receive an explicit "audit skipped: budget exceeded" reason (they cannot win in `"active"` mode). |
-| `check_diversity` | `bool` | `true` | Enable circuit A. |
-| `check_unique` | `bool` | `true` | Enable circuit B. |
-| `check_dead_features` | `bool` | `true` | Enable circuit C. |
-| `check_generalization_gap` | `bool` | `true` | Enable circuit D. |
-
-Validation rules (rejected at config load with a clear message):
-
-* Unknown keys — the block has `extra="forbid"` (a typo is a hard error).
-* `sanity_gate.mode` (removed) — rejected with a migration hint:
-  "use an explicit select step" (`{action: 'select', strategy: 'sanity_gate',
-  output: 'winner'}` as the last phase).
-* Unknown `corridor_mode`.
-* Unknown `generalization_gap_mode` (only `"warn"` and `"reject"` are
-  accepted).
-* Out-of-range thresholds: `top_k_candidates < 1`; `corridor_delta` outside
-  `(0, 1)`; `min_prediction_diversity` outside `(0, 1]`;
-  `max_dead_feature_ratio` outside `[0, 1]`; `min_unique_ratio` outside
-  `(0, 1]`; `min_unique_count < 1`; `max_generalization_gap < 1`;
-  `permutation_max_rows < 1`; `permutation_max_features < 1`;
-  `permutation_repeats < 1`; `audit_time_budget_seconds < 0`.
-
-Edge cases:
-
-* `top_k_candidates` greater than the number of algorithms — allowed (pool of
-  what is available).
-* `corridor_mode: "auto"` with an unknown metric — conservative additive form
-  plus a warning.
-* Absent `generalization_gap_mode` — the default `"warn"` applies; an explicit
-  `generalization_gap_mode: reject` fully reproduces the legacy strict
-  behavior of circuit D (migration path).
-* A finite `gap` strictly **equal** to `max_generalization_gap` — not a
-  violation in either mode (`_fails_above`, equality always passes).
-* Absent `sanity_gate` block or an empty `{}` — valid: the section is an
-  optional threshold source, not a behavioral flag.
-* A `sanity_gate` section without any select phase with
-  `strategy: "sanity_gate"` — valid (thresholds are simply unused).
-
-Example:
-
-```yaml
-general:
-  comparison_metric: "r2"
-  validation_strategy: "k_fold"
-  n_folds: 5
-  phases:
-    - name: "search"
-      n_trials: 50
-      action: "all_algorithms"
-    - name: "gate_select"
-      n_trials: 1
-      action: "select"
-      strategy: "sanity_gate"   # pool + audit + ranking by RMSE_oof
-      output: "winner"          # terminal step
-  sanity_gate:
-    top_k_candidates: 3        # pool size cap
-    corridor_delta: 0.15       # relative corridor from the CV leader
-    # adaptive_diversity: true (default) — constant-model baseline;
-    # min_prediction_diversity applies only with adaptive_diversity: false
-    min_prediction_diversity: 0.15
-    min_unique_count: 5
-    min_unique_ratio: 0.05
-    max_dead_feature_ratio: 0.4
-    max_generalization_gap: 1.5
-algorithms:
-  ridge:
-    enable: true
-  random_forest:
-    enable: true
-    limit_hyperparameters: true
-    hyperparameters:
-      n_estimators: [50, 300]
-```
-
-Boundary behavior:
-
-* **OOF coverage with `train_test_split`** — the OOF vector covers only the
-  hold-out part (`oof_coverage_` < 1.0); train rows are `NaN` and masked, so
-  circuits A/B and the `RMSE_oof` ranking are computed on the hold-out subset
-  only. Prefer `k_fold` / `loo` for the most complete audit.
-* **Small N** — the unique-ratio circuit is governed by the absolute
-  `min_unique_count` bound; a constant target (`Var(y) == 0`) skips circuit A
-  with a soft warning and circuit B takes over. The unique threshold
-  (`max(min_unique_count, min_unique_ratio * N)`) is capped by the number of
-  distinct target values at the prediction rounding granularity: a model
-  predicting `y` exactly always reaches the cap and passes, so a
-  low-cardinality target with a high `min_unique_ratio` cannot disqualify a
-  perfect model.
-* **Weak signal (R² < 0.15)** — circuit A runs in the adaptive mode by
-  default, so an honest model whose diversity ≈ R² is below the fixed 0.15
-  threshold is NOT disqualified anymore (the divergence between the diversity
-  ratio and the constant baseline is what matters). Models with `R²_oof < 0`
-  (worse than predicting the mean, e.g. a deep overfit tree on weak data) are
-  rejected explicitly — previously they could pass the audit.
-* **Correlated features** — the permutation path may report "false-dead"
-  features on correlated columns (the model borrows the information from a
-  neighbour column): a high dead-feature share produces a soft warning, never
-  a standalone disqualification.
-* **Permutation cost controls** — `permutation_max_rows` / `permutation_max_features`
-  bound the audit cost; `check_permutation_sensitivity: false` disables the
-  whole permutation path (the linear `coef_` path of circuit C remains).
-
-Migration note: the v2 statement tightened `corridor_delta` to the
-open interval `(0, 1)` — the previously allowed value `0` (degenerate corridor
-= leader only) is now rejected. Use a small positive value (e.g. `1e-9`) for
-the same behavior. `permutation_max_rows` / `permutation_max_features` are
-plain `int` (≥ 1) since v2; the old `null` ("no cap") form is replaced by
-`check_permutation_sensitivity: false` when the permutation audit should be
-skipped entirely. These changes apply to the pre-release schema only —
-no released configuration is affected.
 
 ### Complexity Guard configuration (`complexity_guard`)
 
@@ -646,91 +610,275 @@ general:
     size_basis: "rows"
 ```
 
-### Additional metrics (`additional_metrics`)
+## Pipeline steps (`phases`)
 
-The optional `general.additional_metrics` parameter is a list of extra quality metrics whose values are computed for the **final trained model** (after the winner is selected) and returned together with the training results.
+`general.phases` is a list of steps executed in order (see
+[How the engine works](#how-the-engine-works) for the idea). Omit it to use
+the default "search all algorithms, keep the best validation score" pipeline.
 
-Rules and behavior:
+### Fields of a step
 
-* **Optional & backward compatible.** If the parameter is absent or empty, the system behaves exactly as before: no `additional_metrics` key is added to the results.
-* **Allowed values** — the same set as for `comparison_metric` (see above). An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
-* **Informational only.** Additional metrics do **not** participate in hyperparameter optimization, model comparison, or winner selection. The winner is determined solely by the main `comparison_metric`.
-* **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
-* **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
-* **Post-validation list.** Both rules above are applied at config validation time, so the resulting `general.additional_metrics` (as exposed on the validated config object and forwarded to the final `ModelTrainer`) may differ from the list the user provided: duplicates are removed and the comparison metric (with its aliases) is dropped. Only the metrics present in the final list are computed and returned.
-* **Computation.** Each additional metric is evaluated for the final model with the **same validation method as the comparison metric**: on a hold-out split (`train_test_split`) or as the CV estimate (`k_fold`/`loo`) — never on the full training set. The CV estimate is the mean over folds for additive metrics (MAE and similar per-sample means) and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases), matching the `val_score` semantics. Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
-* **Failure tolerance.** If a single additional metric cannot be computed (scorer error), it is skipped with a warning and does not abort training, model selection, or artifact saving.
+| Field | Applies to | Default | Description |
+|-------|-----------|---------|-------------|
+| `action` | all | `"all_algorithms"` | `"all_algorithms"`, `"refine"` or `"select"`. |
+| `name` | all | `"phase"` | Your label for the step. Used in logs and as the key of the step's report in `result["sanity_gate"]`. |
+| `n_trials` | `all_algorithms`, `refine` | `50` | Tuning attempts per algorithm (≥ 1). Ignored by `select`. |
+| `strategy` | `select` only (required) | — | `"cv_best"` or `"sanity_gate"`. |
+| `output` | `select` only (required) | — | `"winner"`, `"top_k"` or `"pool"`. |
+| `k` | `output: "top_k"` only (required) | — | How many candidates to keep (≥ 1). |
+
+### Search steps
+
+* **`all_algorithms`** — runs `n_trials` tuning attempts for every enabled
+  algorithm, in parallel across algorithms. All of them become candidates
+  for the next step.
+* **`refine`** — runs `n_trials` more attempts for **each** current candidate,
+  starting from its best parameters so far (they are tried first, so the score
+  of a candidate can only stay the same or improve). Refine does not drop
+  candidates — it only updates their parameters and scores. If one algorithm
+  fails, only that algorithm is dropped; if all of them fail, the step raises
+  `RuntimeError` instead of silently falling back to the old parameters.
+  `refine` may also be the first step: then it tunes all enabled algorithms
+  from scratch.
+
+All search steps evaluate models on the same data splits, so scores are
+comparable between steps. Only the tuner's random seed changes from step to
+step (`random_state + step number`) so that the first attempts are not repeated.
+
+### Select steps
+
+A select step ranks the current candidates and keeps some of them; the next
+steps work only with what it kept.
+
+| | `output: "winner"` | `output: "top_k"` | `output: "pool"` |
+|---|---|---|---|
+| `strategy: "cv_best"` — rank by validation score | The best candidate (ties: the order of `algorithms` in the config). Ends the pipeline. | The first `k` candidates. | Every candidate close to the leader (see [shortlist](#how-the-sanity-gate-works)), ranked by validation score, without the extra checks. |
+| `strategy: "sanity_gate"` — validation score + checks | The best candidate that passes the [checks](#how-the-sanity-gate-works). Ends the pipeline; the model trained during the checks is reused as the final model (when a hold-out is reserved, the winner is retrained on all rows instead). | The first `k` of the ranking: candidates that pass the checks (by `RMSE_oof`), then — only if fewer than `k` pass — the "least bad" rejected ones. | Every candidate that passes the checks (all finalists, "least bad" first, if none pass). |
+
+* Select steps run one after another, never in parallel.
+* A select step with nothing to rank raises `RuntimeError`.
+* A repeated `sanity_gate` select (for example after `refine`) re-trains its
+  candidates from scratch.
+
+### Validation rules
+
+The config is rejected at load time, with a message saying what to change, when:
+
+* the first step is a `select` (there is nothing to rank yet);
+* the last step is not a `select` with `output: "winner"`;
+* any step follows a `select` with `output: "winner"`;
+* `strategy` or `output` is missing on a `select`, or set on a search step;
+* `k` is missing for `output: "top_k"`, or set for any other output;
+* `action: "refine_winner"` is used (removed — see [Migrating older configs](#migrating-older-configs)).
+
+`k` is not compared with `sanity_gate.top_k_candidates` at load time: if `k`
+is larger than the shortlist, you simply get fewer candidates.
+
+### Example
+
+```yaml
+general:
+  phases:
+    - name: "coarse"
+      action: "all_algorithms"
+      n_trials: 100
+    - name: "gate_select"
+      action: "select"
+      strategy: "sanity_gate"
+      output: "top_k"
+      k: 3
+    - name: "refine"
+      action: "refine"
+      n_trials: 200
+    - name: "gate_final"
+      action: "select"
+      strategy: "sanity_gate"
+      output: "winner"
+```
+
+## Sanity Gate: robust winner selection
+
+The best validation score is not always the best model. On small or noisy
+data the leader can be a model that predicts almost the same value for every
+row, a step function, a model that ignores most features, or a model that
+memorized the training data. The Sanity Gate catches these cases. It is used
+by select steps with `strategy: "sanity_gate"`; its thresholds are set in the
+optional `general.sanity_gate` block.
+
+### How the Sanity Gate works
+
+1. **Shortlist.** Take the candidates whose validation score is close to the
+   leader's — within the relative margin `corridor_delta` (15 % by default) —
+   and keep at most `top_k_candidates` (3 by default) of them, best first.
+2. **Train each finalist once on all rows.** This also produces its OOF
+   predictions and `RMSE_oof`; the same trained model is reused for the
+   checks and the report. A finalist that fails to train is skipped (the
+   reason is logged); if none can be trained, `RuntimeError` is raised.
+3. **Run four checks** on each finalist. Letters A–D are the short names used
+   in log messages and reports:
+
+   | Check | Switch | What it rejects |
+   |-------|--------|-----------------|
+   | **A — prediction diversity** | `check_diversity` | Models no better than predicting the mean. By default (`adaptive_diversity: true`) a model fails when its OOF predictions are constant or its `R²_oof < 0`; models with a weak but real signal pass. With `adaptive_diversity: false` it fails when `Var(OOF predictions) / Var(y) < min_prediction_diversity`. |
+   | **B — distinct predictions** | `check_unique` | Step-like models that output only a few distinct values: fewer than `max(min_unique_count, min_unique_ratio × N)` distinct OOF predictions. The threshold never exceeds the number of distinct target values, so a perfect model always passes. |
+   | **C — unused features** | `check_dead_features` | Models that ignore most inputs: the share of features with a zero coefficient (linear models) or no effect when shuffled (other models) is above `max_dead_feature_ratio`. By default this rejects a model only together with low prediction diversity; otherwise it is a warning. |
+   | **D — overfitting** | `check_generalization_gap` | A large gap between out-of-sample and in-sample error: `RMSE_oof / RMSE_full > max_generalization_gap`. By default (`generalization_gap_mode: "warn"`) this is only a warning; `"reject"` makes it a rejection. A perfect in-sample fit (infinite gap) is treated the same way; `RMSE_oof ≈ 0` additionally logs a WARNING about possible target leakage. |
+
+   Checks A and B use the OOF predictions, check D uses both, check C
+   inspects the model itself.
+4. **Pick the winner**: among the finalists that pass, the one with the lowest
+   `RMSE_oof`. The validation score and `RMSE_full` are not used for this
+   ranking.
+
+If **every** finalist is rejected, the run does not fail. The "least bad"
+finalist wins — fewest failed checks, then the least severe ones (D is the
+most severe, then A, B, C), then the lowest `RMSE_oof` — and a WARNING lists
+all reasons.
+
+Rejected algorithms are also added to `result["disqualified_algorithms"]`,
+the same as algorithms that failed during tuning. Warnings never disqualify.
+
+**How "close to the leader" is measured** (`corridor_mode`):
+
+* `"multiplicative"` — within `δ` of the leader's value: for errors
+  `score ≤ best × (1 + δ)`, for R²-like metrics `score ≥ best × (1 − δ)`.
+* `"additive"` — within `δ` of the score range:
+  `|score − best| ≤ δ × (max − min)` over all candidates. Works when scores can
+  be zero or negative.
+* `"auto"` (default) — multiplicative for error metrics, additive for R²-like
+  metrics; also switches to additive when the multiplicative margin would not
+  work (error ≈ 0, or a negative best R²). An unknown metric uses the additive
+  form with a warning.
+
+Candidates exactly on the boundary are included. Ties keep the order of the
+`algorithms` section. The shortlist is never topped up beyond the margin,
+except by the optional family rule: with `enforce_family_diversity: true`,
+when all finalists belong to one algorithm family (linear, ensembles,
+kernel/GPR), the best member of each missing family within a wider margin
+(`family_diversity_multiplier × δ`) is added, up to `top_k_candidates`. Only
+families from `allowed_families` take part.
+
+### Sanity Gate configuration (`sanity_gate`)
+
+The block only holds thresholds; it does nothing without a select step with
+`strategy: "sanity_gate"`. Omitting it (or writing `{}`) uses the defaults.
+Unknown keys are rejected, so a typo is an error.
+
+**Shortlist**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `top_k_candidates` | `3` | Maximum number of finalists (≥ 1). Larger than the number of algorithms is fine. |
+| `corridor_delta` | `0.15` | Margin `δ` from the leader, strictly between 0 and 1. To keep only the leader, use a tiny value such as `1e-9`. |
+| `corridor_mode` | `"auto"` | `"multiplicative"`, `"additive"` or `"auto"`. |
+| `enforce_family_diversity` | `false` | Add the best model of each missing algorithm family. |
+| `algorithm_families` | `null` | Custom `{algorithm: family}` map for the family rule. |
+| `allowed_families` | `null` | Families that may be added (`null` — all). |
+| `family_diversity_multiplier` | `1.5` | Wider margin for the family rule (> 0). |
+
+**Check A — prediction diversity**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `check_diversity` | `true` | Enable the check. |
+| `adaptive_diversity` | `true` | Compare with the "predict the mean" baseline (see the table above). `false` uses the fixed threshold below. |
+| `min_prediction_diversity` | `0.15` | Fixed threshold for `Var(OOF predictions) / Var(y)`, in `(0, 1]`; used only with `adaptive_diversity: false`. High values (such as `1.0` on noisy data) are accepted but reject good models. |
+
+**Check B — distinct predictions**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `check_unique` | `true` | Enable the check. |
+| `min_unique_count` | `5` | Minimum number of distinct predictions (≥ 1). |
+| `min_unique_ratio` | `0.05` | Minimum share of distinct predictions, in `(0, 1]`. |
+
+**Check C — unused features**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `check_dead_features` | `true` | Enable the check. |
+| `max_dead_feature_ratio` | `0.4` | Maximum share of unused features, in `[0, 1]`. |
+| `dead_features_require_low_diversity` | `true` | Reject only when there are many unused features **and** prediction diversity is low. |
+| `zero_coef_tolerance` | `1e-12` | A linear coefficient with `abs(coef) <=` this value counts as zero (≥ 0). |
+| `check_permutation_sensitivity` | `true` | Use the shuffle test for non-linear models. `false` skips it (the coefficient test for linear models remains). |
+| `permutation_max_rows` | `5000` | Rows sampled for the shuffle test (≥ 1). |
+| `permutation_max_features` | `100` | Maximum number of features shuffled (≥ 1). |
+| `permutation_repeats` | `3` | Shuffles per feature (≥ 1). |
+| `permutation_seed` | `42` | Seed of the shuffles. |
+| `permutation_tolerance` | `1e-3` | Relative change below which a feature counts as unused (≥ 0). |
+
+**Check D — overfitting**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `check_generalization_gap` | `true` | Enable the check. |
+| `max_generalization_gap` | `1.5` | Maximum `RMSE_oof / RMSE_full` (≥ 1). A gap exactly equal to the threshold passes. |
+| `generalization_gap_mode` | `"warn"` | `"warn"` — a large gap is reported in `soft_warnings` only; `"reject"` — it disqualifies the model. Missing predictions are always a rejection. |
+
+**Time limit**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `audit_time_budget_seconds` | `0` | Total time for the checks, seconds; `0` — no limit. Finalists not checked in time get the reason "audit skipped: budget exceeded" and cannot win. |
+
+**Validation rules** — rejected at load time: unknown keys; the removed
+`mode` key (see [Migrating older configs](#migrating-older-configs));
+unknown `corridor_mode` or `generalization_gap_mode`; values outside the
+ranges listed above.
 
 Example:
 
 ```yaml
 general:
-  comparison_metric: "rmse"
-  additional_metrics: ["r2", "mae", "mse"]
   phases:
-    - name: "search"
-      n_trials: 50
-      action: "all_algorithms"
+    - {name: "search", action: "all_algorithms", n_trials: 50}
+    - {name: "gate_select", action: "select", strategy: "sanity_gate", output: "winner"}
+  sanity_gate:
+    top_k_candidates: 3
+    corridor_delta: 0.15
+    max_generalization_gap: 1.5
+    generalization_gap_mode: "reject"   # treat strong overfitting as a rejection
+algorithms:
+  ridge: {}
+  random_forest:
+    hyperparameters:
+      n_estimators: [50, 300]
 ```
 
-Result format (`train_best_model` return value):
+### Sanity Gate report
 
-```python
-{
-    "algorithm": "ridge",
-    "score": 0.123,              # main comparison metric in natural (user-facing) semantics
-    "metric": "rmse",            # user-facing name of the comparison metric
-    "params": {...},
-    "model_path": "model.pkl",
-    "additional_metrics": {"r2": 0.98, "mae": 0.07, "mse": 0.009},  # only when non-empty
-    "oof_score": 0.131,          # honest OOF estimate of the final pipeline,
-                                 #   same semantics as "score" (always present
-                                 #   when the OOF vector could be built)
-    "n_trials_evaluated": 47,    # trials actually evaluated by the winner's HPO phase
-    "holdout_score": 0.118,      # winner on the reserved outer hold-out
-                                 #   (only when general.holdout_fraction is set)
-}
-```
+Every select step with `strategy: "sanity_gate"` adds a section to
+`result["sanity_gate"]`, keyed by the step `name`. Steps with
+`strategy: "cv_best"` add nothing, and without any Sanity Gate step the key
+is absent.
 
-Metric semantics: `score` always reflects the natural value of the
-metric as the user knows it — positive RMSE/MAE/MSE/NRMSE, plain R². The
-internal sklearn negative scorers (`neg_root_mean_squared_error` and other
-`neg_*`) are an optimizer detail: their inverted values never leak into
-`result["score"]`. `metric` carries the user-facing name of the comparison
-metric from the configuration (`general.comparison_metric`).
+| Key of `result["sanity_gate"][<step name>]` | Type | Description |
+|-----|------|-------------|
+| `strategy` | `str` | Always `"sanity_gate"`. |
+| `generalization_gap_mode` | `str` | The check D mode used: `"warn"` or `"reject"`. |
+| `pool` | `list[str]` | Finalists, best first. |
+| `audit` | `dict[str, dict]` | Per finalist: `is_valid`, `reasons` (rejections), `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (`null` when disabled or not computable), `generalization_gap_infinite`, `generalization_gap_mode`, `severity`. |
+| `disqualified` | `dict[str, list[str]]` | Rejected finalists and their reasons (also copied to `result["disqualified_algorithms"]`). Warnings are not listed here. |
+| `fallback_used` | `bool` | `true` when every finalist was rejected and the "least bad" one won. |
+| `winner_rmse_oof` | `float \| null` | `RMSE_oof` of the winner. |
+| `overhead_seconds` | `float` | Time spent on training the finalists and running the checks. |
 
-Honest out-of-sample estimate: `result["oof_score"]` is the **comparison
-metric computed on the final pipeline's pooled OOF predictions**
-(the trainer's OOF channel: `oof_predictions_`). Every row is predicted by a
-fold-model that has not seen it during training — no leakage — and the value
-is expressed in the same user semantics as `score`. `score` itself is the
-**best** of the HPO trials on the same folds, so it is systematically
-optimistic ("best of N"); the optimism is `score - oof_score` for score
-metrics (R² and similar, maximized by HPO) and `oof_score - score` for error
-metrics (RMSE/MAE, minimized by HPO) — a positive value always means the
-honest estimate is worse than the best-trial score. The gap mixes the
-best-of-N selection bias of `score` with the fact that the final pipeline is
-trained on more data than any single OOF fold-model; for a fixed
-configuration `oof_score` is the honest out-of-sample estimate of the
-artifact. `n_trials_evaluated` (the winner's own COMPLETED trials;
-transferred TPE history never counts) is the honest denominator of that
-maximum; the key is omitted when the count is unknown (legacy custom tuners).
-For `train_test_split` the OOF vector covers the validation part only (the
-same limitation as the trainer's OOF channel); the key is absent when no
-valid OOF pair exists.
+### Things to know
 
-Outer hold-out: the optional `general.holdout_fraction` (default `null`,
-strictly in `(0, 1)`) reserves that fraction of the rows BEFORE
-hyperparameter optimization. The reserved rows never participate in model
-selection and are used only to report `result["holdout_score"]` — the winner
-trained on the train part of the outer split with its best parameters. The
-final model is **still refit on all data** (train + hold-out) for the
-artifact — the reserved rows are concatenated back in `persist_artifact`, so
-the production model does not lose the hold-out fraction and `holdout_score`
-is a true out-of-sample estimate of the chosen pipeline configuration. The
-key is present only when the hold-out is configured.
-
-The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model (same natural semantics as `score`).
+* **Hold-out validation gives partial OOF predictions.** With
+  `train_test_split` only the hold-out rows have OOF predictions, so checks A,
+  B and `RMSE_oof` use those rows only. Prefer `k_fold` or `loo` for the most
+  reliable checks.
+* **Small data.** Check B relies on `min_unique_count` when `N` is small. A
+  constant target skips check A (with a warning); check B still applies.
+* **Weak signal.** With the default adaptive check A, an honest model with a
+  low R² (for example 0.1) is not rejected; a model worse than predicting the
+  mean (`R²_oof < 0`) is.
+* **Correlated features.** The shuffle test can mark one of two correlated
+  features as unused (the model gets the same information from the other).
+  That is why check C only warns by default.
+* **Cost.** `permutation_max_rows` / `permutation_max_features` bound the
+  shuffle test; `check_permutation_sensitivity: false` turns it off.
 
 ## Algorithms section
 
@@ -840,8 +988,81 @@ The classification path is kept only for standalone `DataOversampler` calls with
 
 Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of `DataOversampler` (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
 
+# Training results
 
-# API Reference
+`train_best_model` returns a dict:
+
+```python
+{
+    "algorithm": "ridge",          # the winner
+    "score": 0.123,                # its validation score (comparison_metric)
+    "metric": "rmse",              # general.comparison_metric
+    "params": {...},               # the winner's hyperparameters
+    "model_path": "model.pkl",     # where the trained model was saved
+    "random_state": 42,            # seed of the run (None = not reproducible)
+    "oof_score": 0.123,            # diagnostic, optimistic like "score" (see below)
+    "n_trials_evaluated": 47,      # trials behind "score"
+    # present only in some runs:
+    "additional_metrics": {"r2": 0.98, "mae": 0.07},   # general.additional_metrics
+    "holdout_score": 0.141,        # HONEST estimate on the reserved rows (>= 100 rows by default)
+    "bbc_score": 0.146,            # HONEST estimate when no hold-out is reserved
+    "sanity_gate": {...},          # Sanity Gate select steps, by step name
+    "disqualified_algorithms": {"svr": "reason ..."},
+    "complexity_guard": {"parameters": [...]},
+}
+```
+
+| Key | When present | Meaning |
+|-----|--------------|---------|
+| `algorithm`, `params` | always | The winning algorithm and its hyperparameters. |
+| `score` | always | Validation score of the best trial, in the metric's natural form: RMSE/MAE/MSE/NRMSE are positive, R² is as is. |
+| `metric` | always | The metric name from `general.comparison_metric`. |
+| `model_path` | always | Path of the saved model. |
+| `random_state` | always | Seed of the run; `None` for a non-reproducible run. |
+| `oof_score` | when OOF predictions exist | The same metric on the final pipeline's out-of-fold predictions. A diagnostic, **not** an honest estimate — see below. |
+| `n_trials_evaluated` | when known | Completed trials of the winner in the step that produced `score`. |
+| `additional_metrics` | `general.additional_metrics` is non-empty | `{metric: value}` for the final model, same form as `score`. |
+| `holdout_score` | a hold-out is reserved (by default — data with ≥ 100 rows) | **Honest estimate**: the winner's metric on the rows reserved before tuning. |
+| `bbc_score` | no hold-out is reserved (by default — data with < 100 rows, or `holdout_fraction: null`) | **Honest estimate** without a hold-out: BBC-CV over all evaluated trials, see below. Absent over the memory budget or for custom tuners without `collect_oof`. |
+| `sanity_gate` | at least one Sanity Gate select step | Per-step report, see [Sanity Gate report](#sanity-gate-report). |
+| `disqualified_algorithms` | something was disqualified | `{algorithm: reason}` — failures during tuning, a target that does not fit a GLM, or a Sanity Gate rejection. |
+| `complexity_guard` | the guard changed a search range | One "before → after" record per changed parameter, see [Complexity guard](#complexity-guard-configuration-complexity_guard). |
+
+**Which number to trust.** `score` is the best of many trials measured on the
+validation folds, so it is optimistic ("best of N"; `n_trials_evaluated` is
+the N), and on small data the bias can be large. `oof_score` is computed on
+the **same** folds that were used to choose the algorithm and its parameters,
+so it carries the same bias: on `k_fold`/`loo` without a hold-out it equals
+`score` for pooled metrics (RMSE, R², …) and differs only slightly for
+additive ones (MAE). Use it as a diagnostic (for example residual analysis on
+`oof_predictions_`), not as a quality estimate. With `train_test_split` only
+the validation rows have OOF predictions. The honest estimate is
+`holdout_score` or, without a hold-out, `bbc_score`.
+
+**`holdout_score`.** The rows reserved by `general.holdout_fraction` never
+take part in tuning or selection. `holdout_score` is the winner (trained on
+the remaining rows with its best parameters) measured on them. The saved
+model is then trained on **all** rows, including the reserved ones. With the
+default `"auto"` a hold-out is reserved only on data with at least 100 rows;
+an explicit fraction reserves one on smaller data too, at the cost of a noisy
+estimate and fewer rows for tuning.
+
+**`bbc_score`.** Without a hold-out the engine reports the Bootstrap Bias
+Corrected CV estimate (Tsamardinos et al., 2018), in the same form as
+`score`. During tuning it keeps the out-of-fold predictions of every
+completed trial of every algorithm in every search step — all the
+configurations the selection chose from. In each of 500 bootstrap resamples
+of the rows, the best configuration is picked on the in-bag rows and scored on
+the out-of-bag rows; `bbc_score` is the mean out-of-bag score. No model is
+retrained. For R² and NRMSE the bootstrap runs on MSE / RMSE and is normalized
+by the variance / range of the whole target. The estimate is slightly
+conservative (fold models see fewer rows than the final model) and models the
+selection as "best comparison metric over all trials" — the Sanity Gate is not
+replayed. Storing the predictions costs `n_trials × n_rows` values; when the
+planned total (sum of `n_trials` of the search steps × enabled algorithms ×
+rows) exceeds 4,000,000, the estimate is skipped with a WARNING.
+
+# Python API
 
 ## `train_best_model(config, df, target, model_path_override)`
 
@@ -856,7 +1077,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`, `"random_state"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`, `"random_state"` is the engine seed of the run recorded for reproducibility (`null` for a non-reproducible run). When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). `"oof_score"` is the honest out-of-sample estimate of the final pipeline — the comparison metric computed on the pooled OOF predictions (absent when no valid OOF pair exists); `"n_trials_evaluated"` is the number of trials actually evaluated by the winner's HPO phase (own COMPLETED trials; 0 for custom tuners that do not report the count). When `general.holdout_fraction` is set, `"holdout_score"` reports the comparison metric of the winner on the reserved outer hold-out (the final model is still trained on all data). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
+**Returns:** `dict[str, Any]` — the winner, its scores and diagnostic reports. See [Training results](#training-results) for every key.
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 
@@ -884,7 +1105,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `n_folds` | `int` | `5` | Number of CV folds. |
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
 | `random_state` | `int` or `None` | `42` | Random seed of the data splits and the preprocessor (CV folds, `train_test_split`, pruning folds, hashing / target-encoding cross-fit). |
-| `sampler_seed` | `int` or `None` | `None` | Seed of the TPE sampler, separated from `random_state`: each HPO phase may use a different `sampler_seed` (e.g. `RANDOM_STATE + phase_ordinal`) while the data splits stay fixed. `None` — the sampler falls back to `random_state` (backward-compatible). |
+| `sampler_seed` | `int` or `None` | `None` | Seed of the TPE sampler, separated from `random_state`: each HPO phase may use a different `sampler_seed` (e.g. `random_state + step number`) while the data splits stay fixed. `None` — the sampler falls back to `random_state` (backward-compatible). |
 | `space_overrides` | `dict[str, Callable]` or `None` | `None` | Custom search space overrides. |
 | `initial_params` | `dict[str, Any]` or `None` | `None` | Hyperparameters from the previous HPO phase, enqueued as the first trial (`enqueue_trial`) — the "monotonicity anchor" between phases. |
 | `previous_trials` | `list[optuna.trial.FrozenTrial]` or `None` | `None` | Trials of the previous HPO phase to be transferred into the new study via `study.add_trials` (the TPE history warm-start). Transferred BEFORE `enqueue_trial`/`optimize`; they feed the TPE sampler but never count as the current phase's own trials. Empty list — no-op. Trials whose distributions are incompatible with the current search space raise `HPOHistoryError` (fail fast). |
@@ -976,7 +1197,7 @@ Orchestrator class for training, validation, and serialization of regression mod
 * `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
 * `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set).
 
-**Categorical encoding**
+### Categorical encoding
 
 Categorical columns are encoded by a single shared preprocessor used both during HPO and final training. Five strategies are available via the `general.categorical_encoding` config key (or the `encoding` argument of `tuner.optimize`):
 
@@ -986,7 +1207,7 @@ Categorical columns are encoded by a single shared preprocessor used both during
 * `frequency` — frequency encoding (`FrequencyEncodingTransformer`): each category is replaced by its relative frequency in the training data. Deterministic; unknown categories map to `0.0`. One output column per input column.
 * `hashing` — feature hashing (`HashingEncodingTransformer`): each category is deterministically hashed (blake2b, salt derived from the random seed) into `general.hashing_n_components` binary columns per input column. The output dimensionality is fixed and independent of column cardinality — unlike one-hot, high-cardinality columns do not cause feature explosion. Unknown categories are hashed the same way, so prediction never fails. Hash collisions (different categories landing in the same column) are a documented limitation.
 
-**Sparse output of `hashing` and sparse one-hot**
+#### Sparse output of `hashing` and sparse one-hot
 
 The hashing transformer returns a `scipy.sparse.csr_matrix` (COO→CSR, `nnz = n_samples * n_columns`, values `1.0`) instead of a dense `float64` matrix — exactly like sklearn's standard `FeatureHasher`. The default one-hot is sparse too (`OneHotEncoder(sparse_output=True)`): a unique-per-row ID column no longer expands into a dense `n × n` float matrix per fold (≈3 GB at 20k rows before the fix). Building a dense `(n_rows, n_cols * n_components)` matrix would consume gigabytes of memory on real high-cardinality tables (OOM risk). `SplitCategoricalEncoder` is sparse-aware: parts are joined with `sp.hstack` when any encoder produces a sparse matrix.
 
@@ -994,11 +1215,11 @@ Because `ColumnTransformer` uses the default `sparse_threshold=0.3`, its output 
 
 The dimensionality and the storage format of the preprocessed matrix are logged at INFO level after each final fit: `preprocessed matrix: n × p (sparse/dense)` — the categorical expansion is always visible in the logs.
 
-**High-cardinality mode**
+#### High-cardinality mode
 
 The engine config enables the automatic high-cardinality mode **by default**: `general.high_cardinality_threshold=50` with `general.high_cardinality_encoding="frequency"`. Columns whose number of unique values strictly exceeds the threshold are encoded with `high_cardinality_encoding`, while the remaining categorical columns keep `categorical_encoding`. The split is computed at fit time from the training data only (via `SplitCategoricalEncoder`), so the decision never depends on validation/test observations. A threshold of `0` marks every non-empty column as high-cardinality; a threshold larger than every column's cardinality effectively disables the mode. To disable the automatic mode, set **both** `high_cardinality_threshold` and `high_cardinality_encoding` to `null`/`None` explicitly. The low-level `build_preprocessor`/`SplitCategoricalEncoder` API keeps the previous `None` defaults.
 
-**Edge cases**
+#### Edge cases
 
 * Columns with a single unique category or fully missing columns are handled without failures for all strategies (missing values are imputed with the most frequent category before encoding).
 * NaNs in categorical columns are converted to strings and treated as ordinary categories.
@@ -1074,4 +1295,17 @@ Oversampling wrapper compatible with imbalanced-learn pipelines.
 * `fit_resample(X, y)` — Resample with bypass of `_check_X_y` for categorical data support.
 * `oversample(data, target)` — DataFrame-level oversampling interface.
 
----
+# Migrating older configs
+
+Removed options are rejected at load time with an error that explains the
+replacement; nothing is translated silently.
+
+| Old config | Replace with |
+|------------|--------------|
+| A pipeline whose last step is a search step (no final `select`) | Append `{action: "select", strategy: "cv_best", output: "winner"}` as the last step — or omit `phases` entirely to get the default pipeline. |
+| `action: "refine_winner"` | `select` + `refine`: `all_algorithms → select(strategy: cv_best, output: top_k, k: N) → refine → select(strategy: cv_best, output: winner)`. For a single winner use `all_algorithms → select(strategy: cv_best, output: winner)`. |
+| `general.sanity_gate.mode` (`off` / `warn_only` / `active`) | Remove the key. To use the Sanity Gate, add a select step with `strategy: "sanity_gate"`; without such a step the thresholds are not used. The gate report is always produced for those steps. |
+| Report keys `disqualified_by_sanity_gate`, `sanity_gate_warn_only`, `sanity_gate_overhead_seconds`, `winner_if_active` | `result["sanity_gate"][<step name>]` (`disqualified`, `overhead_seconds`) and `result["disqualified_algorithms"]`. |
+| `sanity_gate.corridor_delta: 0` | A tiny positive value such as `1e-9`, or a `cv_best` select. |
+| `sanity_gate.permutation_max_rows: null` / `permutation_max_features: null` | An integer limit, or `check_permutation_sensitivity: false` to skip the shuffle test. |
+| `sanity_gate.generalization_gap_mode` not set, expecting strict rejection | Set `generalization_gap_mode: "reject"` (the default is now `"warn"`). |

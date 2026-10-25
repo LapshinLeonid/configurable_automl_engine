@@ -511,7 +511,7 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models.\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n    validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy\n        for categorical features. Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (by algorithms/folds).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.",
+      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models.\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy\n        for categorical features. Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (by algorithms/folds).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.",
       "properties": {
         "comparison_metric": {
           "default": "r2",
@@ -570,7 +570,7 @@
           "title": "Log To File"
         },
         "phases": {
-          "description": "List of sequential hyperparameter optimization phases",
+          "description": "List of sequential pipeline steps. Default: one HPO phase over all algorithms followed by picking the best cross-validation score: [{action: all_algorithms, n_trials: 50}, {action: select, strategy: cv_best, output: winner}]",
           "items": {
             "$ref": "#/$defs/HPOPhaseCfg"
           },
@@ -609,11 +609,15 @@
               "type": "number"
             },
             {
+              "const": "auto",
+              "type": "string"
+            },
+            {
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). None (default) — no outer hold-out is reserved and the key is not reported.",
+          "default": "auto",
+          "description": "Fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). 'auto' (default) — reserve 0.2 of the rows when the input has at least 100 rows; on smaller data no hold-out is reserved. None — no outer hold-out is reserved and the key is not reported. Without a hold-out result[\"score\"] and result[\"oof_score\"] are computed on the folds that selected the algorithm and hyperparameters and are optimistic; the honest estimate is then the bias-corrected (BBC-CV) result[\"bbc_score\"].",
           "title": "Holdout Fraction"
         },
         "categorical_encoding": {
@@ -790,15 +794,12 @@
           "type": "boolean"
         }
       },
-      "required": [
-        "phases"
-      ],
       "title": "GeneralCfg",
       "type": "object"
     },
     "HPOPhaseCfg": {
       "additionalProperties": false,
-      "description": "Configuration of a single pipeline step.\n\nThe class describes the parameters of a specific step: an HPO phase\n(``all_algorithms`` / ``refine``) or an explicit selection step\n(``select``), enabling multi-stage search and selection strategies\n(for example: search across all models → audited select → fine-tuning\nfinalists → final winner select).\n\nAttributes:\n    name (str): Unique phase identifier.\n    n_trials (int): Iteration (trial) limit for HPO phases\n        (``all_algorithms`` / ``refine``). Ignored for ``select``,\n        but the field remains mandatory for schema uniformity.\n    action (str): Action type: 'all_algorithms' (search across all\n        algorithms), 'refine' (fine-tune the whole input set\n        with warm-start) or 'select' (selection step). The legacy value\n        'refine_winner' was removed: configs containing it are rejected\n        by validation with a migration hint.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Select step\n        strategy (only for action='select'): ranking by CV score\n        ('cv_best') or a Sanity Gate audit ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): What the\n        select step returns (only for action='select'): 'winner' — a\n        single winner (terminal step), 'top_k' — the top-K candidates,\n        'pool' — the entire corridor pool of finalists.\n    k (int | None): Number of candidates (>= 1) for output='top_k'.\n        Required only for output='top_k'; forbidden for\n        output='winner'/'pool'.",
+      "description": "Configuration of a single pipeline step.\n\nThe class describes the parameters of a specific step: an HPO phase\n(``all_algorithms`` / ``refine``) or an explicit selection step\n(``select``), enabling multi-stage search and selection strategies\n(for example: search across all models → audited select → fine-tuning\nfinalists → final winner select).\n\nAttributes:\n    name (str): Unique phase identifier.\n    n_trials (int): Iteration (trial) limit for HPO phases\n        (``all_algorithms`` / ``refine``), default\n        ``DEFAULT_PHASE_N_TRIALS``. Ignored for ``select``.\n    action (str): Action type: 'all_algorithms' (search across all\n        algorithms), 'refine' (fine-tune the whole input set\n        with warm-start) or 'select' (selection step). The legacy value\n        'refine_winner' was removed: configs containing it are rejected\n        by validation with a migration hint.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Select step\n        strategy (only for action='select'): ranking by CV score\n        ('cv_best') or a Sanity Gate audit ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): What the\n        select step returns (only for action='select'): 'winner' — a\n        single winner (terminal step), 'top_k' — the top-K candidates,\n        'pool' — the entire corridor pool of finalists.\n    k (int | None): Number of candidates (>= 1) for output='top_k'.\n        Required only for output='top_k'; forbidden for\n        output='winner'/'pool'.",
       "properties": {
         "name": {
           "default": "phase",
@@ -807,6 +808,7 @@
           "type": "string"
         },
         "n_trials": {
+          "default": 50,
           "description": "Number of iterations (trials) for HPO phases (all_algorithms / refine). Ignored for action='select'",
           "minimum": 1,
           "title": "N Trials",
@@ -873,9 +875,6 @@
           "title": "K"
         }
       },
-      "required": [
-        "n_trials"
-      ],
       "title": "HPOPhaseCfg",
       "type": "object"
     },
@@ -1351,7 +1350,6 @@
     }
   },
   "required": [
-    "general",
     "algorithms"
   ],
   "title": "Config",

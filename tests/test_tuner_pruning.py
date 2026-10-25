@@ -1673,6 +1673,7 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
         pool_metric=False,
         algo_name="",
         phase_name="",
+        oof_out=None,
     ):
         del trial, estimator, X, y, method, n_folds, test_size, random_state, scorer, pool_metric, algo_name, phase_name
         return np.nan
@@ -2051,6 +2052,7 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
         pool_metric=False,
         algo_name="",
         phase_name="",
+        oof_out=None,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds
@@ -2222,6 +2224,7 @@ def test_optimize_auto_no_features_fallback_clamps_n_folds():
         pool_metric=False,
         algo_name="",
         phase_name="",
+        oof_out=None,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds
@@ -2286,6 +2289,7 @@ def test_optimize_auto_kfold_low_confidence_k2():
         pool_metric=False,
         algo_name="",
         phase_name="",
+        oof_out=None,
     ):
         captured["n_folds"] = n_folds
         return 0.9
@@ -2340,6 +2344,7 @@ def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
         pool_metric=False,
         algo_name="",
         phase_name="",
+        oof_out=None,
     ):
         captured["method"] = method
         captured["n_folds"] = n_folds
