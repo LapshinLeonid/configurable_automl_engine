@@ -1002,14 +1002,16 @@ class GeneralCfg(BaseModel):
             HPO phases ('all_algorithms' / 'refine') and explicit selection
             steps ('select'); the last phase must be a select with output: winner.
             Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.
-        validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).
+        validation_strategy (ValidationStrategy): Evaluation method
+            ('train_test_split', 'k_fold', 'loo' or 'auto').
         n_folds (int): Number of splits for cross-validation.
         random_state (int | None): The engine seed driving data splits, model
             seeds and the TPE sampler base seed (``random_state +
             phase_ordinal``); recorded in the report. None — the run is not
             reproducible (a WARNING is logged).
-        categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy
-            for categorical features. Default is 'one_hot'.
+        categorical_encoding (EncodingStrategy): Encoding strategy for
+            categorical features ('one_hot', 'ordinal', 'target', 'frequency'
+            or 'hashing'). Default is 'one_hot'.
         parallel_strategy (str): Parallelization level (only by algorithms).
         max_workers (int | None): Limit on threads or processes.
         parallel_mode (str): Technical execution mode ('threads' or 'processes').

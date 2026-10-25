@@ -238,15 +238,15 @@ A config has three top-level sections. Only `algorithms` is required:
 | `phases` | search + `cv_best` winner | The pipeline. See [Pipeline steps](#pipeline-steps-phases). |
 | `path_to_model` | `"model.pkl"` | Where the winning model is saved. |
 | `serialization_format` | `"pickle"` | `"pickle"` or `"joblib"`. |
-| `log_to_file` | `null` | Path of a log file. Without it logs go to the console only. |
+| `log_to_file` | `null` | Path of a rotating log file (DEBUG level, 10 MB × 5 files); setting it also adds INFO output to the console. Without it the engine does not configure logging at all: its messages follow your application's logging setup, and with Python's defaults only WARNING and above are shown (call `logging.basicConfig(level=logging.INFO)` to see progress). Optuna prints its own per-trial lines either way. |
 | `additional_metrics` | `[]` | Extra metrics reported for the final model; they do not affect the choice. See [Additional metrics](#additional-metrics-additional_metrics). |
 
 **Validation**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `validation_strategy` | `"auto"` | `"train_test_split"`, `"k_fold"`, `"loo"` (leave-one-out) or `"auto"`. `"auto"` picks between LOO, k-fold and a hold-out split from the number of rows and features. |
-| `n_folds` | `5` | Number of folds; used only with `"k_fold"` (ignored with `"auto"`). |
+| `validation_strategy` | `"auto"` | `"train_test_split"`, `"k_fold"`, `"loo"` (leave-one-out) or `"auto"`. `"auto"` picks from the number of rows `N` and features `P`: LOO for `N ≤ 15` (when `N ≥ 2P`), 3–4-fold CV for `16 ≤ N ≤ 50`, 5-fold CV for `200 ≤ N < 50 000` (when `N ≥ 10P`), a single hold-out split for `N ≥ 50 000` (when `N ≥ 5P`), and a k-fold heuristic otherwise. |
+| `n_folds` | `5` | Number of folds; used only with `"k_fold"` (ignored with `"auto"`), where it must be ≥ 2. With fewer than `max(4, 2 × n_folds)` rows `k_fold` falls back to a hold-out split. |
 | `holdout_fraction` | `"auto"` | Rows reserved **before** tuning for an honest final estimate (`result["holdout_score"]`): a fraction strictly in `(0, 1)`, `"auto"` or `null`. `"auto"` reserves 20 % when the data has at least 100 rows and nothing on smaller data (a WARNING then says that `score`/`oof_score` are optimistic, and `result["bbc_score"]` is the honest estimate). `null` disables the hold-out. The final model is still trained on all rows. |
 | `random_state` | `42` | Seed of the data splits, the models and the tuner — the same seed gives the same result. `null` makes the run non-reproducible (a WARNING is logged). Recorded as `result["random_state"]`. |
 
@@ -302,6 +302,7 @@ Rules and behavior:
 * **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
 * **Post-validation list.** Both rules above are applied at config validation time, so the resulting `general.additional_metrics` (as exposed on the validated config object and forwarded to the final `ModelTrainer`) may differ from the list the user provided: duplicates are removed and the comparison metric (with its aliases) is dropped. Only the metrics present in the final list are computed and returned.
 * **Computation.** Each additional metric is evaluated for the final model with the **same validation method as the comparison metric**: on a hold-out split (`train_test_split`) or as the CV estimate (`k_fold`/`loo`) — never on the full training set. The CV estimate is the mean over folds for additive metrics (MAE and similar per-sample means) and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D², explained_variance, max error, median absolute error and their aliases), matching the `val_score` semantics. Error-type metrics (RMSE, MAE, MSE, NRMSE) are returned as positive natural values, score-type metrics (R²) as-is. Non-finite values (e.g., `inf` from NRMSE on a constant target) are returned as-is and do not affect training completion or artifact saving.
+* **Not an honest estimate.** The values come from the same validation folds that were used to choose the winner, not from the reserved hold-out, so they are optimistic in the same way as `score` (see [Training results](#training-results)).
 * **Failure tolerance.** If a single additional metric cannot be computed (scorer error), it is skipped with a warning and does not abort training, model selection, or artifact saving.
 
 Example:
@@ -386,7 +387,7 @@ The optional `general.complexity_guard` block is an **adaptive complexity
 guard** for the search spaces of trees and boosting on small data. It extends
 the existing data-dependent clipping layer (`clip_search_space` in
 `common/hyperopt_defaults.py`): on small data the default ranges of
-tree/boosting hyperparameters are too wide (e.g. `max_depth` 3–20 or 2–32 on
+tree/boosting hyperparameters are too wide (e.g. `max_depth` 2–32 on
 a 15-row training fold), trials are spent on values that do not change the
 model, the TPE surface has flat regions and the search drifts toward overfit
 models. The guard tightens the ranges depending on the number of rows (`n` —
@@ -459,7 +460,7 @@ Rules of the `"small"` mode (with `n = 15`, `p = 5` as the example):
     ≤ `ceil(log2(n / leaf_min))` (example: A gives ≤ 6, B gives 2–3);
   * `max_features` (a fraction): level A — lower bound ≥ `1 / p` (at least one
     feature);
-  * `n_estimators` (RF / Extra trees): capped only for time (e.g. 100–300) —
+  * `n_estimators` (RF / Extra trees): capped only for time (e.g. the default 50–500 becomes 50–300) —
     bagging averages independent trees, so more trees only reduce variance,
     not a regularization.
 * **Gradient boosting / XGBoost**
@@ -518,7 +519,7 @@ Interaction with user ranges (`limit_hyperparameters` + `hyperparameters`):
 Transparency:
 
 * Per (algorithm, phase, parameter) one INFO log record: "was → became" with
-  the reason, e.g. `max_depth 3–20 → 2–3: n=15, p=5, mode=small, leaf_min=2`.
+  the reason, e.g. `max_depth 2–32 → 2–3: n=15, p=5, mode=small, leaf_min=2`.
 * The same records are aggregated into the `train_best_model` report under the
   `complexity_guard` key: `{"parameters": [ ... ]}` — **one record per
   restricted parameter** (the A/B rules of the same parameter are merged, and
@@ -869,15 +870,29 @@ Supported algorithms:
 * `"lasso"`
 * `"xgboosting"`
 
-Short aliases are also supported: `"dt"`, `"rf"`, `"et"`, `"gb"`, `"ab"`, `"sgd"`, `"knn"`, `"gpr"`, `"ard"`, `"xgboost"`, and others.
+The keys of the `algorithms` section must be these exact names: a short alias such as `rf` in the config is rejected as an unknown key. Aliases are accepted only by the Python API (`create_model`, `optimize`, `ModelTrainer`): `"dt"`, `"rf"`, `"et"`, `"gb"`, `"ab"`, `"sgd"`, `"knn"`, `"gpr"`, `"gaussianprocessregressor"`, `"isotonic"`, `"ard"`, `"xgboost"`, `"ridge_regression"`. Names are case-insensitive there.
+
+`xgboosting` needs the optional package: `pip install "configurable-automl-engine[xgboost]"`. A config that enables it without the package is rejected at validation.
+
+At least one algorithm must be enabled; otherwise the config is rejected.
 
 **Target-domain guard for GLMs.** Before the first HPO phase the engine checks that the target fits the loss domain of the GLMs: `gammaregressor` requires `y > 0`, `poissonregressor` requires `y >= 0`, and `tweedieregressor` / `glm` follow their `power` (`power <= 0` — any `y`; `0 < power < 2` — `y >= 0`; `power >= 2` — `y > 0`; without `power` in the search space the estimator default `power=0` accepts any target). An algorithm whose domain does not fit the target is excluded **before any trial runs**: its reason lands in `result["disqualified_algorithms"]` and a single `WARNING` is logged. A Tweedie `power` search range that is only partly valid is clipped to its valid part instead (e.g. `[0, 3]` on a target with negative values becomes `[0, 0]`; on a target with zeros the upper bound is kept just below `2`; categorical options are filtered), with a `WARNING` describing the change.
 
 Algorithm configuration consists of:
 
-* `enable` — boolean flag, whether hyperparameter search is performed for the algorithm.
+* `enable` — (optional) boolean flag, default `true`. `false` keeps the entry in the config but excludes the algorithm from the run.
 * `limit_hyperparameters` — (optional) boolean flag (default `false`). `true` — the search is restricted to ONLY the parameters listed in `hyperparameters`; every other parameter stays at the estimator default (no `DEFAULT_SPACES` entries are added). `false` — the user ranges override and are merged into the algorithm's default search space. `true` requires a non-empty `hyperparameters` block (rejected at config load otherwise).
-* `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. Keys must match hyperparameters accepted by the estimator constructor (including legacy names from `LEGACY_PARAM_MAPPINGS`, e.g. `n_iter` → `max_iter` for ARDRegression). The allowed set is derived from the estimator signature via [`get_allowed_hyperparameters`](src/configurable_automl_engine/models.py), not from the default search space — so parameters outside `DEFAULT_SPACES` (e.g. `min_samples_split`, `max_leaf_nodes`) are valid as long as the estimator accepts them. Unknown names (typos) are rejected at configuration validation. Two documented exceptions for `isotonic_regression`: `feature_index` — an integer data-adapter hint (not an estimator constructor parameter) consumed by `IsotonicDataTransformer`; it selects the column fed to the strictly univariate isotonic model **relative to the numerical block** of the preprocessed matrix (one-hot dummies of categorical columns are not meaningful inputs, so searchable/selectable indices cover only the numerical features, `0..n_numeric−1`). When the engine path omits `feature_index`, the tuner merges a data-driven numeric range into the search space; an explicit user value is kept as is. `isotonic_feature` — an informational read-only key reported in the HPO result: the name (from the preprocessor's `get_feature_names_out`) of the numerical feature actually chosen. It is consumed by the engine (not passed to the estimator). The `IsotonicRegression` model itself defaults to `out_of_bounds='clip'` (unless set explicitly) so that the default hold-out validation never fails with NaN predictions.
+* `hyperparameters` — (optional) hyperparameter value constraints, unique to each algorithm. Keys must match hyperparameters accepted by the estimator constructor (including legacy names from `LEGACY_PARAM_MAPPINGS`, e.g. `n_iter` → `max_iter` for ARDRegression). The allowed set is derived from the estimator signature via [`get_allowed_hyperparameters`](src/configurable_automl_engine/models.py), not from the default search space — so parameters outside `DEFAULT_SPACES` (e.g. `min_samples_split`, `max_leaf_nodes`) are valid as long as the estimator accepts them. Unknown names (typos) are rejected at configuration validation. The check is skipped when the estimator constructor accepts `**kwargs` — this is the case for `xgboosting` (`XGBRegressor`), so a typo there is passed to XGBoost as is. Two documented exceptions for `isotonic_regression`: `feature_index` — an integer data-adapter hint (not an estimator constructor parameter) consumed by `IsotonicDataTransformer`; it selects the column fed to the strictly univariate isotonic model **relative to the numerical block** of the preprocessed matrix (one-hot dummies of categorical columns are not meaningful inputs, so searchable/selectable indices cover only the numerical features, `0..n_numeric−1`). When the engine path omits `feature_index`, the tuner merges a data-driven numeric range into the search space; an explicit user value is kept as is. `isotonic_feature` — an informational read-only key reported in the HPO result: the name (from the preprocessor's `get_feature_names_out`) of the numerical feature actually chosen. It is consumed by the engine (not passed to the estimator). The `IsotonicRegression` model itself defaults to `out_of_bounds='clip'` (unless set explicitly) so that the default hold-out validation never fails with NaN predictions.
+
+Forms of a `hyperparameters` entry:
+
+| Form | Meaning |
+|------|---------|
+| `[low, high]` | Numeric range; the type is taken from the parameter (see below). |
+| `[low, high, "int"]`, `[low, high, "float"]`, `[low, high, "float_log"]` | Numeric range with an explicit type. |
+| `[low, high, "int", step]` (also for `"float"`) | Range on a grid with the given step, e.g. `n_estimators: [50, 500, "int", 50]`. Only grid points `low, low + step, …` not above `high` are tried. |
+| `[value]` | A fixed value (not tuned). |
+| `[[a, b, c], "categorical"]` | One of the listed values, e.g. `kernel: [["rbf", "linear"], "categorical"]`. |
 
 A numeric range is written as `[low, high]` or with an explicit type: `[low, high, "float"]`, `[low, high, "float_log"]` or `[low, high, "int"]`. When the type is **not** written explicitly, it is taken from the **parameter's type** (the default search space or the estimator signature), not from how the boundary numbers look — so `[1, 50]` for a real-valued parameter (e.g. `C` of an SVR or `alpha` of a Tweedie) stays a real range instead of silently becoming an integer one. The **logarithmic scale** (`float_log`) is used by default when the parameter is searched on a log scale by default — a scale parameter (`alpha`, `C`, `epsilon`, `gamma`, `learning_rate`) or a parameter whose default search space entry is `float_log` (e.g. `alpha_1`, `alpha_2`, `lambda_1`, `lambda_2` of an ARD regression or `eta0` of an SGD regressor) — and both bounds are positive; an explicit type (`[1, 50, "int"]`) is always honored. An explicit `[low, high, "float_log"]` requires `low > 0` (the log scale needs strictly positive bounds).
 
@@ -894,6 +909,8 @@ algorithms:
 ```
 
 Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message.
+
+* `tuner`, `trainer_module` — (optional, advanced) dotted module paths of the tuner (default `"configurable_automl_engine.tuner"`, must provide `optimize`) and of the module with the `ModelTrainer` class (default `"configurable_automl_engine.trainer"`). They let you plug in a custom tuner or trainer per algorithm; leave them unset otherwise.
 
 ## Adaptive Feature Preprocessing (preprocessing presets)
 
@@ -929,10 +946,14 @@ Each preset defines:
 
 The optional `oversampling` section may include:
 
-* `enable` — (optional) enable oversampling.
-* `multiplier` — (optional) factor to increase dataset size (minimum 1.0).
-* `algorithm` — (optional) oversampling algorithm.
-* `target_bins` — (optional, flat alias `data_oversampling_target_bins`) number of quantile bins for the regression oversampling strategy (default 8, minimum 2).
+| Field | Flat alias | Default | Description |
+|-------|-----------|---------|-------------|
+| `enable` | `data_oversampling` | `false` | Enable oversampling. |
+| `multiplier` | `data_oversampling_multiplier` | `1.0` | Factor to increase the size of the training data (≥ 1.0; `1.0` with `enable: true` changes nothing and logs a WARNING). |
+| `algorithm` | `data_oversampling_algorithm` | `"random"` | Oversampling algorithm, see below. |
+| `target_bins` | `data_oversampling_target_bins` | `8` | Number of quantile bins of the target (≥ 2). |
+
+Oversampling is a step of the model pipeline, so it is applied only to the training part of every fold (and to the data of the final fit); validation and hold-out rows are never oversampled.
 
 ### Supported oversampling algorithms
 
@@ -949,7 +970,7 @@ The classification path is kept only for standalone `DataOversampler` calls with
 
 > ⚠️ **Experimental**: the nightly evidence gate (`benchmarks/run_oversampling_benchmark.py`) observed a median held-out R² degradation of `adasyn` on the count dataset of about 0.019 (> 0.01) relative to the no-oversampling baseline. The feature is therefore marked experimental: a WARNING is logged whenever the oversampler actually runs, and you should verify the effect of oversampling on your own data before relying on it. When the gate passes again, the experimental mark is removed.
 
-Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of `DataOversampler` (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
+Gaussian noise injection is **not a separate algorithm** and **cannot be enabled from the config** — it is available only when `DataOversampler` is used directly, via its `add_noise` flag (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
 
 # Training results
 
@@ -1029,6 +1050,8 @@ rows) exceeds 4,000,000, the estimate is skipped with a WARNING.
 
 ## `train_best_model(config, df, target, model_path_override)`
 
+`import configurable_automl_engine as caml; caml.train_best_model(...)`
+
 The main entry point for the AutoML pipeline. Validates data, runs multi-phase hyperparameter optimization, selects the best algorithm, and saves the final model.
 
 **Parameters:**
@@ -1042,11 +1065,13 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 **Returns:** `dict[str, Any]` — the winner, its scores and diagnostic reports. See [Training results](#training-results) for every key.
 
-**Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
+**Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for an invalid config; `ValueError` for unusable data (for example a missing or non-numeric target column); `RuntimeError` if no algorithm succeeds.
 
 ---
 
 ## `optimize(algo_name, X, y, ...)`
+
+`from configurable_automl_engine.tuner import optimize`. All parameters after `y` are keyword-only.
 
 Runs hyperparameter optimization for a single algorithm using Optuna.
 
@@ -1063,7 +1088,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `data_oversampling_target_bins` | `int` | `8` | Number of quantile bins for the regression oversampling strategy (minimum 2). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
 | `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
-| `validation_strategy` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). |
+| `validation_strategy` | `ValidationStrategy`, `str` or `None` | `None` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`); takes precedence over `val_method`. `None` — `val_method` is used. |
 | `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. Ignored when using `"auto"`. |
 | `n_folds` | `int` | `5` | Number of CV folds. |
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
@@ -1077,9 +1102,20 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 | `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the guard is disabled (the exact legacy behavior for direct callers). When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
 | `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
+| `preprocessor` | `ColumnTransformer` or `None` | `None` | A ready feature preprocessor; takes precedence over `categorical_features` / `numerical_features`. |
+| `categorical_features`, `numerical_features` | `list[str]` or `None` | `None` | Column lists used to build the preprocessor when `preprocessor` is not passed. |
+| `encoding` | `str` or `None` | `None` (= `"one_hot"`) | Categorical encoding, same values as `general.categorical_encoding`. |
+| `high_cardinality_threshold`, `high_cardinality_encoding` | `int`/`str` or `None` | `None` | High-cardinality mode (off by default in the direct API, unlike the engine config). |
+| `hashing_n_components`, `target_encoding_smoothing`, `target_encoding_fallback` | | `16`, `20.0`, `None` | Same as the `general` options of the same name. |
+| `limit_hyperparameters` | `bool` | `False` | Search ONLY the parameters in `space_overrides` (see `limit_hyperparameters` in the [algorithms section](#algorithms-section)). |
+| `inf_policy` | `str` | `"error"` | Infinite values in numeric features: `"error"` rejects the data, `"as_missing"` turns them into missing values. Note: the default differs from the engine config and `ModelTrainer` (`"as_missing"`). |
+| `datetime_policy` | `str` | `"expand"` | Same as `general.datetime_policy`. |
+| `drop_id_like_columns` | `bool` | `False` | Same as `general.drop_id_like_columns`. |
+| `collect_oof` | `bool` | `False` | Keep the out-of-fold predictions of every completed trial in `OptimizeResult.oof_predictions` (the input of `bbc_score`); costs `n_trials × len(X)` floats. |
+| `phase_name` | `str` or `None` | `None` | Step name used in log messages. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
 
-**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials`, `complexity_guard` and `n_trials_evaluated`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `n_trials_evaluated` is the number of trials actually evaluated by the phase (own COMPLETED trials; transferred history never counts) — the honest denominator of the best-trial `score` (the "best of N" maximum). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
+**Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials`, `complexity_guard`, `n_trials_evaluated` and `oof_predictions` — an `(n_trials, n_rows)` array when `collect_oof=True`, otherwise `None`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `n_trials_evaluated` is the number of trials actually evaluated by the phase (own COMPLETED trials; transferred history never counts) — the honest denominator of the best-trial `score` (the "best of N" maximum). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
 
 In `'auto'` mode `params` additionally contains the service key `use_feature_selection` (`True`/`False`) — the winner's decision about feature selection, which is preserved between multi-phase HPO runs (passed to the next phase via `initial_params`/`enqueue_trial`) and consumed by `train_best_model` for the final fit. The key is absent in `'always'`/`'disabled'` modes and for `isotonic_regression` (feature selection is forcibly turned off there). The key is never passed to the base model constructor.
 
@@ -1088,6 +1124,8 @@ In `'auto'` mode `params` additionally contains the service key `use_feature_sel
 ---
 
 ## `create_model(algorithm, **hyperparams)`
+
+`from configurable_automl_engine.models import create_model`
 
 Creates a scikit-learn compatible regressor instance by algorithm name.
 
@@ -1107,6 +1145,8 @@ Creates a scikit-learn compatible regressor instance by algorithm name.
 ---
 
 ## `ModelTrainer`
+
+`from configurable_automl_engine import ModelTrainer`
 
 Orchestrator class for training, validation, and serialization of regression models.
 
@@ -1140,6 +1180,8 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `inf_policy` | `str` | `"as_missing"` | Policy for infinite values (`±inf`) in numeric features during `fit()`: `"as_missing"` (default) — replace with NaN and log a WARNING listing the columns/counts; `"error"` — reject with `TrainingError` naming the columns. |
 | `datetime_policy` | `str` | `"expand"` | Policy for datetime/timedelta columns during `fit()`: `"expand"` (default) — replace each column with derived numeric components (`year`, `month`, `day`, `dayofweek`, `hour` if non-zero) and log a WARNING listing the generated columns; `"drop"` — remove and warn; `"error"` — reject. |
 | `drop_id_like_columns` | `bool` | `False` | Whether ID-like columns (object/string with `nunique/n >= 0.95`, or a unique monotonic integer column) are dropped during `fit()`. `False` (default) — only a WARNING naming the columns; `True` — they are removed. |
+| `feature_selection_cfg` | `FeatureSelectionCfg`, `dict` or `None` | `None` | Feature selection settings, same fields as [`general.feature_selection`](#feature-selection-feature_selection). `None` — disabled. |
+| `feature_selection_active` | `bool` or `None` | `None` | Explicit on/off switch for feature selection (takes precedence over the mode in `feature_selection_cfg`); the engine passes the winner's `use_feature_selection` decision here. `None` — decided by the config. |
 | `warn_id_like` | `bool` | `True` | Whether the ID-like WARNING is emitted during `fit()`. The engine path (via `prepare_dataset`) passes `False` so the diagnostics are not duplicated; standalone calls warn by default. |
 
 **Key attributes:**
@@ -1193,6 +1235,8 @@ The engine config enables the automatic high-cardinality mode **by default**: `g
 
 ## `run_parallel(func, args_seq, ...)`
 
+`from configurable_automl_engine.training_engine.thread_pool import run_parallel`
+
 Executes a function in parallel across multiple workers with shared memory and disk persistence support.
 
 **Parameters:**
@@ -1200,20 +1244,23 @@ Executes a function in parallel across multiple workers with shared memory and d
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `func` | `Callable` | — | Function to execute. |
-| `args_seq` | `Iterable[Sequence]` | `[()]` | Sequence of argument tuples. |
-| `kwargs_seq` | `Iterable[Mapping]` | — | Sequence of keyword argument dicts. |
+| `args_seq` | `Iterable[Sequence]` or `None` | `None` | Sequence of argument tuples. |
+| `kwargs_seq` | `Iterable[Mapping]` or `None` | `None` | Sequence of keyword argument dicts. |
 | `max_workers` | `int` or `None` | `None` | Max worker count (defaults to CPU count). |
 | `mode` | `str` | `"threads"` | `"threads"` or `"processes"`. |
 | `timeout` | `float` or `None` | `None` | Global timeout in seconds. Used only in `"processes"` mode (hard: hung workers are force-terminated). `None` — no limit. In `"threads"` mode it is ignored with a warning — a running Python function cannot be interrupted, so a soft timeout did not save time and only discarded ready results. |
 | `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds. Used only in `"processes"` mode. In `"threads"` mode it is ignored with a warning: the deadline counted from submit made queued tasks "expire" before starting. |
 | `shared_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to share via shared memory. Data is passed positionally and the index is NOT transferred (the worker always receives a `RangeIndex(0, n)`); worker code must not align `X`/`y` by index. When the free space of the shared-memory file system is insufficient (in Docker/Kubernetes `/dev/shm` defaults to 64 MB), the frame is automatically routed through the disk cache (Parquet, falling back to the system temp directory) or pickle instead of crashing the process with a Bus error (SIGBUS, exit 135). |
 | `disk_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to persist to disk. |
+| `shutdown_grace_period` | `float` | `5.0` | After a timeout, seconds the hung worker processes get to exit before they are killed (`"processes"` mode only). |
 
 **Returns:** `list[Any]` — results in the same order as inputs; failed tasks return `None`.
 
 ---
 
 ## `train_model(cfg_or_algo, metric_or_testsize, params_or_metric, ...)`
+
+`from configurable_automl_engine.trainer import train_model`
 
 Legacy facade function for training a single model. Accepts either a config dictionary or positional arguments.
 
@@ -1237,6 +1284,8 @@ Legacy facade function for training a single model. Accepts either a config dict
 ---
 
 ## `DataOversampler`
+
+`from configurable_automl_engine.oversampling import DataOversampler`. All parameters are keyword-only.
 
 Oversampling wrapper compatible with imbalanced-learn pipelines.
 

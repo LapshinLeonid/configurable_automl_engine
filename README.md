@@ -25,7 +25,7 @@ Classification is not supported.
 * **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
-* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`), plus short aliases (`rf`, `knn`, `xgboost`, …).
+* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`), In the config the full names are required; short aliases (`rf`, `knn`, `xgboost`, …) work only in the Python API.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, categorical encoding, infinite values and date/time columns, with per-algorithm preprocessing presets and optional feature selection.
 * **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers.
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
@@ -34,8 +34,8 @@ Classification is not supported.
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
 * **Phase/Task Timeouts (process mode only)**: A global timeout for a search step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`), enforced by a watchdog that terminates hung workers. Timeouts require `parallel_mode: "processes"`; with `parallel_mode: "threads"` (the default) setting either of them is a configuration error (`ValueError`), because a running Python thread cannot be stopped.
-* **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names in the config are **rejected** at config validation, so typos do not go unnoticed. Only a direct call of `configurable_automl_engine.models.create_model(...)` silently drops parameters the estimator does not accept.
-* ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Optional Gaussian noise injection (`add_noise` flag / `noise_level`) is applied to numeric features after resampling for regularization.
+* **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names in the config are **rejected** at config validation, so typos do not go unnoticed (the only exception is `xgboosting`, whose estimator accepts arbitrary `**kwargs`). Only a direct call of `configurable_automl_engine.models.create_model(...)` silently drops parameters the estimator does not accept.
+* ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Oversampling is applied only to the training part of each fold. Gaussian noise injection (`add_noise` / `noise_level`) is available only when `DataOversampler` is used directly, not from the config.
 
 **Scale.** The engine targets small and medium tabular datasets that fit in
 memory. Cross-validation inside a trial is not parallelized, and the
@@ -225,7 +225,7 @@ If you are considering larger contributions to the source code, please contact t
 If you contribute, please ensure your code:
 
 * 100% covered by tests.
-* Has 0 errors when checked by the ruff linter.
+* Has 0 errors when checked by the ruff linter and passes `ruff format --check`.
 * Has 0 errors when checked by the mypy static analyzer.
 * All docstrings written in English.
 

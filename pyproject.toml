@@ -5,7 +5,7 @@
     [project]
     name = "configurable-automl-engine"              # PyPI name (may differ from the module name)
     dynamic = ["version"]
-    description = "A configuration-driven AutoML orchestrator for automated model selection and two-stage hyperparameter optimization."
+    description = "A configuration-driven AutoML orchestrator for tabular regression: automated model selection and multi-step hyperparameter optimization."
     readme = "README.md"
     license = "BSD-3-Clause"
     authors = [
