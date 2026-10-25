@@ -53,6 +53,7 @@ from configurable_automl_engine.common.complexity_guard import (
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.hyperopt_defaults import (
     DEFAULT_SPACES,
+    CategoricalSpace,
     FloatSpace,
     SearchSpaceEntry,
     clip_search_space,
@@ -1395,10 +1396,9 @@ class _OptimizeRunner:
         self.phase_start_number = len(self.study.get_trials(deepcopy=False))
         # If there are parameters from the previous phase, enqueue them as the first trial
         if self.initial_params is not None:
-            self.study.enqueue_trial(self.initial_params)
-            log.info(
-                "Enqueued initial params from previous phase: %s", self.initial_params
-            )
+            initial_params = self._enqueueable_initial_params(self.initial_params)
+            self.study.enqueue_trial(initial_params)
+            log.info("Enqueued initial params from previous phase: %s", initial_params)
         try:
             self.study.optimize(self._objective, n_trials=self.n_trials)
         except InvalidAlgorithmError:
@@ -1492,6 +1492,45 @@ class _OptimizeRunner:
         log.info(
             "Transferred %d trial(s) from the previous phase", len(self.previous_trials)
         )
+
+    def _enqueueable_initial_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Drop initial params whose value type does not fit the search space.
+
+        A value carried over from an older space (e.g. SVR ``gamma="scale"``
+        from the former categorical default, now a numeric ``float_log``
+        range) would make Optuna fail the enqueued trial. Such a key is
+        dropped with a warning and sampled from the space instead; numeric
+        values outside the range are kept as is (Optuna handles them).
+
+        Args:
+            params: The initial params from the previous phase.
+
+        Returns:
+            dict[str, Any]: The params that can be enqueued.
+        """
+        kept: dict[str, Any] = {}
+        for name, value in params.items():
+            entry = self.search_space_dict.get(name)
+            if isinstance(entry, SearchSpaceEntry):
+                config = entry.config
+                if isinstance(config, CategoricalSpace):
+                    compatible = value in config.options
+                else:
+                    compatible = isinstance(
+                        value, (int, float, np.integer, np.floating)
+                    ) and not isinstance(value, bool)
+                if not compatible:
+                    log.warning(
+                        "Initial param %s=%r does not fit the search space of "
+                        "'%s' (%s); it is sampled instead",
+                        name,
+                        value,
+                        self.algo,
+                        entry.dist_type,
+                    )
+                    continue
+            kept[name] = value
+        return kept
 
     def _canonical_distributions(self) -> dict[str, Any] | None:
         """Compute the canonical distributions of the current phase space.
