@@ -76,40 +76,59 @@ Testing:
 
 # Quick Start
 
-The only required part of a config is the list of algorithms to try:
+The example can be run from [example.py](example.py).
 
     from sklearn.datasets import load_diabetes
 
     import configurable_automl_engine as caml
 
-    df = load_diabetes(as_frame=True).frame
+    data = load_diabetes(as_frame=True)
+    df = data.frame
 
     config = {
+        "general": {
+            "comparison_metric": "r2",
+            "phases": [
+                {"n_trials": 100, "action": "all_algorithms"},
+                {
+                    "name": "final_select",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner"
+                }
+            ],
+            "path_to_model": "diabetes_model.pkl"
+        },
         "algorithms": {
-            "ridge": {},
-            "random_forest": {"hyperparameters": {"max_depth": [3, 20]}},
+            "random_forest": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
+            },
+            "ridge": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {"alpha": [0.1, 1.0]}
+            },
+            "xgboosting": {
+                "enable": True,
+                "limit_hyperparameters": True,
+                "hyperparameters": {
+                    "n_estimators": [100, 1000],
+                    "max_depth": [3, 10],
+                    "learning_rate": [0.01, 0.3],
+                    "subsample": [0.5, 1.0]
+                }
+            },
         }
     }
 
-    results = caml.train_best_model(config=config, df=df, target="target")
+    results = caml.train_best_model(config=config, df=df, target='target')
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
-Each algorithm gets 50 tuning attempts, the one with the best validation R² wins
-and is saved to `model.pkl`. Everything else — the metric, the number of
-attempts, a multi-step search with the Sanity Gate — is optional; a full
-pipeline is shown in [example.py](example.py).
-
-📖 Start with the [User Guide & API Reference](API_REFERENCE.md): quick start,
-key concepts and copy-paste recipes come first, the full option reference
-follows.
-
-# Migrating older configs
-
-Removed options (`action: "refine_winner"`, `general.sanity_gate.mode`, a
-pipeline without a final `select` step, ...) are rejected at load time with
-an explanation. The migration table is in
-[API_REFERENCE.md → Migrating older configs](API_REFERENCE.md#migrating-older-configs).
+📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # Contributing
 

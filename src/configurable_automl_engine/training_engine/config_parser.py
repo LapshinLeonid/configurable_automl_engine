@@ -351,7 +351,7 @@ class HPOPhaseCfg(BaseModel):
                 "k: N) -> refine -> select(strategy: cv_best, output: winner); "
                 "for a single-winner pipeline use "
                 "all_algorithms -> select(strategy: cv_best, output: winner). "
-                "See the migration table in README.md.",
+                "See 'Migrating older configs' in API_REFERENCE.md.",
             )
         return data
 
@@ -598,7 +598,7 @@ class SanityGateCfg(BaseModel):
                 "gate diagnostics are available in the gate section of the "
                 "select step report. The sanity_gate section remains the "
                 "source of thresholds (corridor, top_k_candidates, audit "
-                "limits, ...). See the migration table in README.md.",
+                "limits, ...). See 'Migrating older configs' in API_REFERENCE.md.",
             )
         return data
 
@@ -1463,7 +1463,7 @@ class GeneralCfg(BaseModel):
                 "is built from the result of the terminal select step. "
                 "Migration: append "
                 "{action: 'select', strategy: 'cv_best', output: 'winner'} "
-                "as the last phase. See the migration table in README.md."
+                "as the last phase. See 'Migrating older configs' in API_REFERENCE.md."
             )
         return self
 

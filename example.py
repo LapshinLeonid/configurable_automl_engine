@@ -5,49 +5,31 @@ import configurable_automl_engine as caml
 data = load_diabetes(as_frame=True)
 df = data.frame
 
-# NOTE: the config below uses the target pipeline schema — explicit
-# `select` and `refine` steps. The pipeline runs end-to-end:
-# coarse HPO -> Sanity Gate keeps the top-3 candidates -> warm-started refine
-# -> terminal Sanity Gate re-audits the refined models and picks the winner.
-
 config = {
     "general": {
         "comparison_metric": "r2",
         "phases": [
-            # 1. Coarse search: HPO for every enabled algorithm.
-            {"name": "coarse", "n_trials": 100, "action": "all_algorithms"},
-            # 2. Sanity Gate keeps the top-3 candidates that pass the audit.
+            {"n_trials": 100, "action": "all_algorithms"},
             {
-                "name": "gate_select",
+                "name": "final_select",
                 "n_trials": 1,
                 "action": "select",
-                "strategy": "sanity_gate",
-                "output": "top_k",
-                "k": 3,
-            },
-            # 3. Refine: warm-started HPO for every surviving candidate.
-            {"name": "refine", "n_trials": 200, "action": "refine"},
-            # 4. Terminal step: re-audit the refined models, pick the winner.
-            {
-                "name": "gate_final",
-                "n_trials": 1,
-                "action": "select",
-                "strategy": "sanity_gate",
-                "output": "winner",
-            },
+                "strategy": "cv_best",
+                "output": "winner"
+            }
         ],
-        "path_to_model": "diabetes_model.pkl",
+        "path_to_model": "diabetes_model.pkl"
     },
     "algorithms": {
         "random_forest": {
             "enable": True,
             "limit_hyperparameters": True,
-            "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]},
+            "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
         },
         "ridge": {
             "enable": True,
             "limit_hyperparameters": True,
-            "hyperparameters": {"alpha": [0.1, 1.0]},
+            "hyperparameters": {"alpha": [0.1, 1.0]}
         },
         "xgboosting": {
             "enable": True,
@@ -56,26 +38,12 @@ config = {
                 "n_estimators": [100, 1000],
                 "max_depth": [3, 10],
                 "learning_rate": [0.01, 0.3],
-                "subsample": [0.5, 1.0],
-            },
+                "subsample": [0.5, 1.0]
+            }
         },
-    },
+    }
 }
 
-results = caml.train_best_model(config=config, df=df, target="target")
+results = caml.train_best_model(config=config, df=df, target='target')
 
 print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
-print(f"Metric: {results['metric']}, Model: {results['model_path']}")
-
-# Report: every `select` step with `strategy: sanity_gate`
-# adds its own section to `result["sanity_gate"]` keyed by the phase name.
-for phase_name, section in results.get("sanity_gate", {}).items():
-    print(f"\nSanity Gate report — phase '{phase_name}'")
-    print(f"  Pool: {section['pool']}")
-    if section["disqualified"]:
-        print(f"  Disqualified: {section['disqualified']}")
-    else:
-        print("  Disqualified: none")
-    print(f"  Fallback used: {section['fallback_used']}")
-    print(f"  Winner RMSE_oof: {section['winner_rmse_oof']}")
-    print(f"  Overhead: {section['overhead_seconds']:.1f} s")

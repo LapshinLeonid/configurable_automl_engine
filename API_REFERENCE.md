@@ -7,7 +7,7 @@ setting has a sensible default.
 
 **Contents**
 
-1. [Quick start](#quick-start) — the smallest working config.
+1. [Quick start](#quick-start) — a complete example and the smallest working config.
 2. [How the engine works](#how-the-engine-works) — the few terms used throughout this document.
 3. [Recipes](#recipes) — copy-paste configs for common tasks.
 4. [Configuration reference](#configuration-reference) — every option, grouped by section.
@@ -24,27 +24,104 @@ and are listed under "Validation rules" in each section below.
 
 # Quick start
 
-The only required part of a config is the list of algorithms to try:
+The same example as in the README and [example.py](example.py):
 
 ```python
 from sklearn.datasets import load_diabetes
 
 import configurable_automl_engine as caml
 
-df = load_diabetes(as_frame=True).frame
+data = load_diabetes(as_frame=True)
+df = data.frame
 
 config = {
+    "general": {
+        "comparison_metric": "r2",
+        "phases": [
+            {"n_trials": 100, "action": "all_algorithms"},
+            {
+                "name": "final_select",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "winner"
+            }
+        ],
+        "path_to_model": "diabetes_model.pkl"
+    },
     "algorithms": {
-        "ridge": {},
-        "random_forest": {},
+        "random_forest": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
+        },
+        "ridge": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {"alpha": [0.1, 1.0]}
+        },
+        "xgboosting": {
+            "enable": True,
+            "limit_hyperparameters": True,
+            "hyperparameters": {
+                "n_estimators": [100, 1000],
+                "max_depth": [3, 10],
+                "learning_rate": [0.01, 0.3],
+                "subsample": [0.5, 1.0]
+            }
+        },
     }
 }
 
-result = caml.train_best_model(config=config, df=df, target="target")
-print(result["algorithm"], result["score"])   # e.g. "ridge 0.49"
+results = caml.train_best_model(config=config, df=df, target='target')
+
+print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 ```
 
-The same config as a YAML file (pass its path as `config=`):
+What this config does:
+
+* `phases` — the pipeline: first 100 tuning attempts (trials) for every
+  algorithm (`all_algorithms`), then a `select` step that keeps the algorithm
+  with the best validation score (`cv_best`) as the single `winner`.
+* `comparison_metric: "r2"` — "best" means the highest R².
+* `limit_hyperparameters: true` + `hyperparameters` — only the listed
+  parameters are tuned, within the given `[low, high]` ranges; all other
+  parameters keep the estimator defaults.
+* `path_to_model` — the winner is trained on all rows and saved there.
+* `xgboosting` needs `pip install "configurable-automl-engine[xgboost]"`.
+
+The same config as YAML (pass the file path as `config=`):
+
+```yaml
+general:
+  comparison_metric: "r2"
+  phases:
+    - {n_trials: 100, action: "all_algorithms"}
+    - {name: "final_select", n_trials: 1, action: "select", strategy: "cv_best", output: "winner"}
+  path_to_model: "diabetes_model.pkl"
+algorithms:
+  random_forest:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {n_estimators: [10, 500], max_depth: [3, 20]}
+  ridge:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters: {alpha: [0.1, 1.0]}
+  xgboosting:
+    enable: true
+    limit_hyperparameters: true
+    hyperparameters:
+      n_estimators: [100, 1000]
+      max_depth: [3, 10]
+      learning_rate: [0.01, 0.3]
+      subsample: [0.5, 1.0]
+```
+
+Every setting above has a default, so it can be shortened. The smallest valid
+config lists only the algorithms — `general` falls back to R², 50 trials per
+algorithm and the `cv_best` winner, and `{}` means "use the built-in search
+space":
 
 ```yaml
 algorithms:
@@ -52,34 +129,7 @@ algorithms:
   random_forest: {}
 ```
 
-Any of the [supported algorithms](#algorithms-section) can be listed; `{}`
-means "use the built-in search space". XGBoost (`xgboosting`) needs
-`pip install "configurable-automl-engine[xgboost]"`.
-
-What happens with this config:
-
-* Each algorithm gets **50 tuning attempts** (trials) with its built-in search
-  space of hyperparameters.
-* Every attempt is scored with **R²** using a validation scheme picked
-  automatically from the data size (cross-validation or a hold-out split).
-* The algorithm with the **best validation score** wins, is trained on all
-  rows and saved to `model.pkl`.
-
-The usual first tweaks, all inside an optional `general` section:
-
-```yaml
-general:
-  comparison_metric: "rmse"        # what "best" means: r2, rmse, mae, mse, nrmse
-  path_to_model: "my_model.pkl"   # where the winner is saved
-algorithms:
-  ridge: {}
-  random_forest:
-    hyperparameters:              # narrow the search for one parameter
-      max_depth: [3, 10]
-```
-
-To change the number of attempts or the way the winner is chosen, see
-[Recipes](#recipes).
+To use the Sanity Gate or a multi-step search, see [Recipes](#recipes).
 
 # How the engine works
 
@@ -154,8 +204,6 @@ general:
     - {name: "fine",    action: "refine", n_trials: 200}
     - {name: "final",   action: "select", strategy: "sanity_gate", output: "winner"}
 ```
-
-A complete runnable version is in [example.py](example.py).
 
 **Search only the parameters you list.** By default your ranges are merged
 into the built-in search space. With `limit_hyperparameters: true` only the

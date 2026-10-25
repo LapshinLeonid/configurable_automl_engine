@@ -2055,7 +2055,7 @@ def test_refine_winner_rejected_with_migration_hint():
     assert "refine_winner" in msg
     assert "has been removed" in msg
     assert "select" in msg and "refine" in msg
-    assert "README.md" in msg
+    assert "API_REFERENCE.md" in msg
 
 
 def test_select_first_phase_rejected():
