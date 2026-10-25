@@ -2055,7 +2055,7 @@ def test_refine_winner_rejected_with_migration_hint():
     assert "refine_winner" in msg
     assert "has been removed" in msg
     assert "select" in msg and "refine" in msg
-    assert "README.md" in msg
+    assert "API_REFERENCE.md" in msg
 
 
 def test_select_first_phase_rejected():
@@ -2413,3 +2413,65 @@ def test_complexity_guard_non_positive_threshold_rejected():
                 }
             }
         )
+
+
+# ─────────────── default pipeline (phases / general omitted) ─────────────── #
+
+
+def _assert_default_pipeline(phases):
+    assert [p.action for p in phases] == ["all_algorithms", "select"]
+    search, final = phases
+    assert search.n_trials == 50
+    assert final.strategy == "cv_best"
+    assert final.output == "winner"
+    assert final.k is None
+
+
+def test_minimal_config_only_algorithms():
+    cfg = Config.model_validate({"algorithms": {"ridge": {}}})
+    assert cfg.general.comparison_metric == "r2"
+    _assert_default_pipeline(cfg.general.phases)
+
+
+def test_general_without_phases_uses_default_pipeline():
+    cfg = Config.model_validate(
+        {"general": {"comparison_metric": "rmse"}, "algorithms": {"ridge": {}}}
+    )
+    _assert_default_pipeline(cfg.general.phases)
+
+
+def test_default_phases_are_not_shared_between_configs():
+    first = GeneralCfg()
+    second = GeneralCfg()
+    assert first.phases is not second.phases
+    first.phases[0].n_trials = 3
+    assert second.phases[0].n_trials == 50
+
+
+def test_phase_n_trials_defaults_to_50():
+    assert HPOPhaseCfg().n_trials == 50
+    select = HPOPhaseCfg(action="select", strategy="cv_best", output="winner")
+    assert select.n_trials == 50
+
+
+def test_explicit_empty_phases_list_is_kept():
+    # An explicit empty list is kept as is (not replaced by the default).
+    cfg = Config.model_validate(
+        {"general": {"phases": []}, "algorithms": {"ridge": {}}}
+    )
+    assert cfg.general.phases == []
+
+
+def test_n_trials_zero_still_rejected():
+    with pytest.raises(ValidationError):
+        HPOPhaseCfg(n_trials=0)
+
+
+def test_minimal_config_without_enabled_algorithm_rejected():
+    with pytest.raises(ValidationError, match="At least one algorithm"):
+        Config.model_validate({"algorithms": {"ridge": {"enable": False}}})
+
+
+def test_missing_algorithms_section_rejected():
+    with pytest.raises(ValidationError):
+        Config.model_validate({})
