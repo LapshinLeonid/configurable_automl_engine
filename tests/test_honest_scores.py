@@ -4,12 +4,15 @@ Coverage:
     1. ``result["oof_score"]`` — the comparison metric computed on the final
        pipeline's pooled OOF predictions (the trainer's OOF channel), present
        for error (RMSE/MAE) and score (R²) metrics; equals a manual
-       recomputation over ``trainer.oof_predictions_``.
+       recomputation over ``trainer.oof_predictions_``. It is computed on the
+       HPO folds, so without an outer hold-out it equals the best-trial
+       ``score`` (it is NOT an independent estimate).
     2. ``result["n_trials_evaluated"]`` — the number of trials actually
        evaluated by the winner's HPO phase (own COMPLETED trials; transferred
        history never counts); 0 for custom tuners that do not report it.
-    3. ``general.holdout_fraction`` — config validation (default None,
-       (0, 1) range), the outer split before HPO (rows never participate in
+    3. ``general.holdout_fraction`` — config validation (default 'auto',
+       (0, 1) range, explicit None disables it), the 'auto' resolution by the
+       number of rows, the outer split before HPO (rows never participate in
        model selection), ``result["holdout_score"]`` semantics (the winner
        trained on the TRAIN part only), and the final artifact still trained
        on ALL data.
@@ -36,7 +39,11 @@ from configurable_automl_engine.training_engine.component import (
     prepare_dataset,
     train_best_model,
 )
-from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.config_parser import (
+    AUTO_HOLDOUT_FRACTION,
+    AUTO_HOLDOUT_MIN_ROWS,
+    Config,
+)
 from configurable_automl_engine.validation import RANDOM_STATE
 
 
@@ -77,7 +84,7 @@ def _noisy_regression(n: int = 120, p: int = 8, seed: int = 7) -> pd.DataFrame:
 def _cfg(
     *,
     metric: str = "r2",
-    holdout_fraction: float | None = None,
+    holdout_fraction: float | str | None = None,
     n_trials: int = 3,
     model_path: str = "model.pkl",
     select_strategy: str = "cv_best",
@@ -155,28 +162,30 @@ def test_oof_score_matches_manual_oof_recomputation(tmp_path, metric, manual_met
     assert "n_trials_evaluated" in result
 
 
-def test_oof_score_is_honest_not_maximized_over_trials(tmp_path):
-    """On noisy data the OOF estimate is NOT systematically above score.
+@pytest.mark.parametrize("metric", ["r2", "rmse"])
+def test_oof_score_equals_best_trial_score_without_holdout(tmp_path, metric):
+    """Without an outer hold-out oof_score is NOT independent of selection.
 
-    ``score`` is the best of N trials on the same folds (an optimistic
-    maximum); ``oof_score`` re-evaluates the final pipeline on the pooled OOF
-    vector. The two may differ; the OOF value equals the manual
-    recomputation (see the parametrized test) rather than the trial maximum.
+    The final pipeline's OOF vector is built on the same folds (same seed)
+    on which the winner and its hyperparameters were selected, so for a
+    pooled metric on k_fold it reproduces the best-trial ``score`` exactly:
+    it carries the same best-of-N bias and must not be read as an honest
+    estimate (the honest one is ``holdout_score``).
     """
     df = _noisy_regression(n=200, p=10, seed=3)
-    cfg = _cfg(n_trials=10, model_path=str(tmp_path / "model.pkl"))
+    cfg = _cfg(metric=metric, n_trials=10, model_path=str(tmp_path / "model.pkl"))
     result = train_best_model(config=cfg, df=df, target="target")
 
     loaded = ModelTrainer.load(str(tmp_path / "model.pkl"))
     oof = np.asarray(loaded.oof_predictions_, dtype=float).reshape(-1)
     y = np.asarray(df["target"], dtype=float).reshape(-1)
     mask = np.isfinite(y) & np.isfinite(oof)
-    manual = float(r2_score(y[mask], oof[mask]))
-    assert result["oof_score"] == pytest.approx(manual, rel=1e-9)
-    # The OOF estimate is a single honest value; for a fixed model it is
-    # deterministic and cannot exceed the best-trial maximum by construction
-    # of the R² range (a sanity bound, not an optimism claim).
-    assert result["oof_score"] <= 1.0
+    manual_fn = r2_score if metric == "r2" else (
+        lambda a, b: float(np.sqrt(mean_squared_error(a, b)))
+    )
+    assert result["oof_score"] == pytest.approx(manual_fn(y[mask], oof[mask]), rel=1e-9)
+    assert result["oof_score"] == pytest.approx(result["score"], rel=1e-9)
+    assert "holdout_score" not in result
 
 
 def test_oof_score_absent_without_oof_channel(tmp_path):
@@ -264,8 +273,15 @@ def test_n_trials_evaluated_reported_for_real_tuner():
 
 
 def test_holdout_fraction_config_default_and_range():
-    """holdout_fraction defaults to None and must be strictly in (0, 1)."""
+    """holdout_fraction defaults to 'auto', accepts None and (0, 1) only."""
     from pydantic import ValidationError
+
+    raw = _cfg()
+    del raw["general"]["holdout_fraction"]
+    assert Config.model_validate(raw).general.holdout_fraction == "auto"
+
+    cfg = Config.model_validate(_cfg(holdout_fraction="auto"))
+    assert cfg.general.holdout_fraction == "auto"
 
     cfg = Config.model_validate(_cfg(holdout_fraction=None))
     assert cfg.general.holdout_fraction is None
@@ -273,9 +289,73 @@ def test_holdout_fraction_config_default_and_range():
     cfg = Config.model_validate(_cfg(holdout_fraction=0.2))
     assert cfg.general.holdout_fraction == 0.2
 
-    for bad in (0.0, 1.0, -0.1, 1.5):
+    for bad in (0.0, 1.0, -0.1, 1.5, "always", ""):
         with pytest.raises(ValidationError):
             Config.model_validate(_cfg(holdout_fraction=bad))
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "expected_holdout"),
+    [
+        (AUTO_HOLDOUT_MIN_ROWS - 1, None),
+        (AUTO_HOLDOUT_MIN_ROWS, int(np.ceil(AUTO_HOLDOUT_FRACTION * AUTO_HOLDOUT_MIN_ROWS))),
+        (250, int(np.ceil(AUTO_HOLDOUT_FRACTION * 250))),
+    ],
+)
+def test_holdout_fraction_auto_resolution(n_rows, expected_holdout):
+    """'auto' reserves AUTO_HOLDOUT_FRACTION from AUTO_HOLDOUT_MIN_ROWS rows on
+    (the boundary is inclusive) and no hold-out below it."""
+    df = _noisy_regression(n=n_rows, p=4, seed=5)
+    prepared = prepare_dataset(
+        Config.model_validate(_cfg(holdout_fraction="auto")), df, "target"
+    )
+    if expected_holdout is None:
+        assert prepared.holdout_X is None
+        assert prepared.holdout_y is None
+        assert prepared.holdout_fraction is None
+        assert len(prepared.X) == n_rows
+    else:
+        assert prepared.holdout_fraction == AUTO_HOLDOUT_FRACTION
+        assert len(prepared.holdout_X) == expected_holdout
+        assert len(prepared.X) == n_rows - expected_holdout
+
+
+def test_holdout_fraction_auto_warns_on_small_data(caplog):
+    """'auto' on small data warns that score/oof_score are optimistic."""
+    df = _noisy_regression(n=40, p=4, seed=5)
+    with caplog.at_level("WARNING"):
+        prepare_dataset(
+            Config.model_validate(_cfg(holdout_fraction="auto")), df, "target"
+        )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("no outer hold-out is reserved" in m and "optimistic" in m for m in messages)
+
+
+def test_holdout_fraction_none_disables_without_warning(caplog):
+    """An explicit None disables the hold-out on any N and does not warn."""
+    df = _noisy_regression(n=250, p=4, seed=5)
+    with caplog.at_level("WARNING"):
+        prepared = prepare_dataset(
+            Config.model_validate(_cfg(holdout_fraction=None)), df, "target"
+        )
+    assert prepared.holdout_X is None
+    assert len(prepared.X) == 250
+    assert not any(
+        "no outer hold-out is reserved" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_holdout_score_reported_by_default(tmp_path):
+    """With the default config (no holdout_fraction key) and enough rows the
+    honest holdout_score is reported and the artifact is trained on all rows."""
+    df = _noisy_regression(n=150, p=6, seed=9)
+    raw = _cfg(model_path=str(tmp_path / "default.pkl"))
+    del raw["general"]["holdout_fraction"]
+    result = train_best_model(config=raw, df=df, target="target")
+    assert "holdout_score" in result
+    assert np.isfinite(result["holdout_score"])
+    loaded = ModelTrainer.load(str(tmp_path / "default.pkl"))
+    assert len(np.asarray(loaded.oof_predictions_).reshape(-1)) == len(df)
 
 
 def test_holdout_rows_reserved_before_hpo(tmp_path):

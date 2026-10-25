@@ -609,11 +609,15 @@
               "type": "number"
             },
             {
+              "const": "auto",
+              "type": "string"
+            },
+            {
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Optional fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). None (default) — no outer hold-out is reserved and the key is not reported.",
+          "default": "auto",
+          "description": "Fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). 'auto' (default) — reserve 0.2 of the rows when the input has at least 100 rows; on smaller data no hold-out is reserved and a WARNING is logged. None — no outer hold-out is reserved and the key is not reported. Without a hold-out there is no honest estimate: result[\"score\"] and result[\"oof_score\"] are computed on the folds that selected the algorithm and hyperparameters and are optimistic.",
           "title": "Holdout Fraction"
         },
         "categorical_encoding": {
