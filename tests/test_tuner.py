@@ -1684,7 +1684,7 @@ def test_isotonic_optimize_multifeature_default_space(toy_data):
 
     Previously ``optimize()`` raised "No search space for algorithm
     'isotonic_regression'" for a direct call, and the trials failed because
-    the single-feature adapter was not connected (issue #150). The default
+    the single-feature adapter was not connected. The default
     data-dependent space must include ``feature_index`` (within range) and
     ``increasing``, and the resulting pipeline must contain the
     ``isotonic_selector`` step.
@@ -1721,7 +1721,7 @@ def test_isotonic_optimize_dict_space_merges_feature_index(toy_data):
 
     ``_prepare_search_space`` passes only DEFAULT_SPACES (``increasing``) plus
     user overrides; the tuner must merge a data-driven ``feature_index`` over
-    the NUMERICAL features into the dict (issue #155), so the index is tuned
+    the NUMERICAL features into the dict, so the index is tuned
     instead of silently staying at the default 0.
     """
     X, y = toy_data
@@ -1756,7 +1756,7 @@ def test_isotonic_optimize_numeric_feature_index_reported(toy_data):
     params as ``isotonic_feature`` (resolved from get_feature_names_out).
 
     Only numeric columns are candidates; the informative column must win and
-    be reported by name (issue #155).
+    be reported by name.
     """
     rng = np.random.RandomState(5)
     X = pd.DataFrame(
@@ -2013,7 +2013,7 @@ def test_fs_reproducible_with_random_state_none(noisy_fs_data):
 def test_stochastic_estimator_runs_reproducible(toy_data):
     """Identical optimize() runs of a stochastic estimator give the same result.
 
-    Regression for issue #144: the random_state was not forwarded to the
+    Regression: the random_state was not forwarded to the
     models (models.py), so three identical train_best_model runs produced
     different scores (0.7558/0.7593/0.7586) and different best params. With
     the fixed seed injected by create_model, identical runs must yield the
@@ -2048,7 +2048,7 @@ def test_stochastic_estimator_runs_reproducible(toy_data):
 
 
 def test_optimize_model_seed_follows_random_state(toy_data):
-    """The tuner's random_state seeds the trial models by default (issue #160).
+    """The tuner's random_state seeds the trial models by default.
 
     Previously the model factory injected a hard-coded MODEL_RANDOM_STATE for
     every stochastic estimator; now the models follow ``optimize(random_state=...)``
@@ -2517,7 +2517,7 @@ def test_runner_n_features_size_uses_original_columns():
 def test_runner_n_features_eff_ignores_missing_categories():
     """Missing values do not add a separate one-hot category in the estimate.
 
-    Regression (issue #143): after the imputer fix, NaN/None are imputed with
+    Regression: after the imputer fix, NaN/None are imputed with
     the most-frequent value instead of becoming literal "nan"/"None" one-hot
     columns. The feature-count estimate must use the non-missing unique values,
     otherwise estimates diverge from the real preprocessor output.
@@ -2573,7 +2573,7 @@ def test_runner_n_features_eff_respects_high_cardinality_split():
     """n_features_eff counts each categorical column with the strategy it
     actually receives in the automatic high-cardinality mode.
 
-    Issue #157: with the default engine settings (threshold 50 + frequency),
+    With the default engine settings (threshold 50 + frequency),
     the estimate must NOT expand high-cardinality columns into one-hot; the
     HC split (per-column cardinality vs the threshold) matches
     SplitCategoricalEncoder.
@@ -2771,7 +2771,7 @@ def test_missing_indicator_enabled_regular_algorithms():
 #  TPE history transfer between HPO phases (previous_trials)
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_previous_trials_returns_only_own_phase_trials(toy_data):
-    """T2/T1: when previous_trials is passed, the new study keeps the
+    """When previous_trials is passed, the new study keeps the
     transferred history as TPE warm-start, and the returned OptimizeResult
     contains ONLY the current phase's own trials (numbers >= the transferred
     boundary)."""

@@ -48,8 +48,8 @@ CONTINUOUS_TARGET_QUANTILES = DEFAULT_TARGET_BINS
 CONTINUOUS_TARGET_MIN_BINS = MIN_TARGET_BINS
 
 #: Experimental status of the oversampling feature, driven by the nightly
-#: evidence benchmark (``benchmarks/run_oversampling_benchmark.py``, gate
-#: T13). When any oversampling algorithm lowers the median held-out R² by
+#: evidence benchmark (``benchmarks/run_oversampling_benchmark.py``).
+#: When any oversampling algorithm lowers the median held-out R² by
 #: more than 0.01 relative to the no-oversampling baseline, the benchmark
 #: reports the violation and this flag is set to ``True``: README and
 #: API_REFERENCE then mark the feature experimental, and a WARNING is logged
@@ -84,7 +84,7 @@ def _bin_continuous_target(
 
 logger = logging.getLogger(__name__)
 
-#: Text of the experimental-status WARNING (evidence gate T13).
+#: Text of the experimental-status WARNING (evidence gate).
 EXPERIMENTAL_WARNING_MESSAGE = (
     "Oversampling is EXPERIMENTAL: the nightly evidence benchmark "
     "observed a median held-out R² degradation exceeding 0.01. "
@@ -792,7 +792,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         if algo_local not in ("random", "smote", "adasyn"):
             raise ValueError(f"Unsupported algorithm: {algo_local}")
 
-        # Evidence gate (T13): when the nightly benchmark has shown that
+        # Evidence gate: when the nightly benchmark has shown that
         # oversampling degrades the held-out R² beyond the threshold, the
         # feature is experimental — warn (once per configuration) when the
         # oversampler actually generates rows (multiplier > 1, or balancing

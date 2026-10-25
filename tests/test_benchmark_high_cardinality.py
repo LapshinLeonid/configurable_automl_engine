@@ -1,6 +1,6 @@
-"""Regression performance test for the high-cardinality encoding fix (issue #157).
+"""Regression performance test for the high-cardinality encoding fix.
 
-Scenario (T14 item 3): a frame with a unique-per-row string column ("ID
+Scenario: a frame with a unique-per-row string column ("ID
 scenario"). Before the fix the default one-hot expanded the column into ``n``
 binary columns and produced a dense ``n × n`` float64 matrix per fold (~3 GB at
 20k rows, 14x wall time). After the fix:
@@ -49,7 +49,7 @@ def _control_frame() -> pd.DataFrame:
 
 
 def _id_frame() -> pd.DataFrame:
-    """A frame with a unique-per-row string column (the issue #157 scenario)."""
+    """A frame with a unique-per-row string column (the ID scenario)."""
     rng = np.random.default_rng(1)
     n = _N_ROWS
     return pd.DataFrame({"id": [f"id_{i}" for i in range(n)], "num": rng.normal(size=n)})
@@ -58,7 +58,7 @@ def _id_frame() -> pd.DataFrame:
 def test_high_cardinality_preprocessing_within_bounds_on_control():
     """Wall time of the ID preprocessing <= 3x the numerical-only control.
 
-    The regression (issue #157) made a 3000-row ID frame 14x slower than the
+    The regression made a 3000-row ID frame 14x slower than the
     numeric control; with the automatic high-cardinality routing (threshold 50
     + frequency) and sparse one-hot the ratio must stay well under 3x.
     """
@@ -116,7 +116,7 @@ def test_sparse_one_hot_id_no_dense_blow_up():
 
     Even without the automatic high-cardinality routing, the sparse one-hot
     must not allocate the dense n×n float64 matrix that caused the OOM/14x
-    regression of issue #157.
+    regression.
     """
     df = _id_frame()
     pre = build_preprocessor(

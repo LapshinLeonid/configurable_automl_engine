@@ -223,7 +223,7 @@ def test_happy_path(tmp_path: Path, small_dataset):
 
 
 # --------------------------------------------------------------------------- #
-#  Seed semantics: general.random_state drives reproducibility (issue #160)
+#  Seed semantics: general.random_state drives reproducibility
 # --------------------------------------------------------------------------- #
 def _seed_cfg_dict(seed: int | None) -> dict[str, Any]:
     """A compact config with a configurable engine seed."""
@@ -262,7 +262,7 @@ def _seed_cfg_dict(seed: int | None) -> dict[str, Any]:
 def test_same_seed_identical_results_different_seed_different(
     regression_dataset, tmp_path: Path
 ):
-    """Acceptance criterion: the same general.random_state → identical results;
+    """The same general.random_state → identical results;
     a different seed → different results (splits + model seeds change)."""
     df = regression_dataset
     r1 = train_best_model(
@@ -4014,7 +4014,7 @@ def test_e2e_reject_mode_disqualifies_overfit_finalists(tmp_path: Path):
 def test_train_best_model_reproducible_with_stochastic_models(tmp_path: Path):
     """Two identical train_best_model runs return the same score and params.
 
-    Regression for issue #144: the random_state was not forwarded to the
+    Regression: the random_state was not forwarded to the
     models, so three identical runs produced different scores (0.7558,
     0.7593, 0.7586) and different best parameters. With create_model now
     injecting a fixed seed, the end-to-end pipeline result is reproducible.

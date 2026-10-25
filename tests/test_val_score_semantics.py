@@ -643,7 +643,7 @@ def test_kfold_fallback_to_split_on_small_data(caplog):
 
 
 def test_constant_target_rejected_before_training():
-    """A constant target is rejected before training (issue #156).
+    """A constant target is rejected before training.
 
     Previously a constant target trained and reported a perfect score
     (e.g. R² = 1.0), which is silently misleading: every model trivially

@@ -1140,7 +1140,7 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Seed semantics: general.random_state (issue #160)
+#  Seed semantics: general.random_state
 # ──────────────────────────────────────────────────────────────────────────────
 
 

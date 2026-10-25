@@ -2904,7 +2904,7 @@ class _OptimizeRunner:
 
         self.best_model = best_model
         # Observability: the dimensionality and the storage format of the
-        # preprocessed matrix the final model received (issue #157: dense
+        # preprocessed matrix the final model received (dense
         # one-hot on high-cardinality columns inflated the matrix with no log
         # signal). Best-effort — the log must never break the optimization.
         if self.preprocessor is not None:

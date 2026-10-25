@@ -470,7 +470,7 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
     keeps exactly one numerical feature (the isotonic input), and
     force_dense_output is activated via the algorithm flag.
 
-    Only numerical features are meaningful inputs for isotonic (issue #155), so
+    Only numerical features are meaningful inputs for isotonic, so
     the frame includes the numerical ``num`` column, which the adapter selects.
     """
     df = _make_regression_df(n=60, seed=19)[["color", "num", "target"]]
@@ -497,7 +497,7 @@ def test_model_trainer_isotonic_hashing_single_feature() -> None:
 def test_model_trainer_isotonic_multifeature_end_to_end() -> None:
     """IsotonicRegression trains end-to-end on a multi-feature DataFrame with
     categorical columns: the IsotonicDataTransformer step reduces the
-    preprocessed matrix to the single NUMERICAL feature (issue #150, #155).
+    preprocessed matrix to the single NUMERICAL feature.
 
     ``feature_index`` is relative to the numerical block (one-hot dummies are
     not meaningful inputs), so the only numerical feature ``num`` has index 0.
@@ -528,7 +528,7 @@ def _make_isotonic_mixed_df(n: int = 140, seed: int = 11) -> pd.DataFrame:
 
     Four numerical columns (x0–x3), one categorical column; the target depends
     on x3 alone, so the isotonic HPO must pick x3 (numeric index 3) — the
-    informative feature among the numeric candidates (issue #155).
+    informative feature among the numeric candidates.
     """
     rng = np.random.default_rng(seed)
     df = pd.DataFrame(
@@ -548,7 +548,7 @@ def _make_isotonic_mixed_df(n: int = 140, seed: int = 11) -> pd.DataFrame:
 def test_engine_isotonic_selects_informative_numeric_column(tmp_path: Path) -> None:
     """Engine run with isotonic only selects the informative NUMERICAL column.
 
-    Acceptance (issue #155): on ``make_mixed_tabular``-style data (only x3
+    On ``make_mixed_tabular``-style data (only x3
     drives y), the HPO ``feature_index`` must be tuned over the numeric
     features and the informative column (x3) must win; the chosen feature name
     is reported in ``result["params"]["isotonic_feature"]``.

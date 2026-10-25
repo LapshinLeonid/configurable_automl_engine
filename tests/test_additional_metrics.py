@@ -253,7 +253,7 @@ def test_trainer_error_metric_additional_values(simple_regression_data):
 
 def test_trainer_non_finite_additional_value_kept():
     """inf (e.g. NRMSE with a constant target) is returned as is."""
-    # A constant target is now rejected at fit() (issue #156); use a nearly
+    # A constant target is now rejected at fit(); use a nearly
     # constant target on a tiny sample so that a single fold can still hit
     # the NRMSE inf path while the target itself is not constant.
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
@@ -490,7 +490,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         )
 
     assert "additional_metrics" not in result
-    # The honest-score report keys (issue #161): oof_score is omitted only
+    # The honest-score report keys: oof_score is omitted only
     # when no OOF vector is available (a fake trainer here); n_trials_evaluated
     # is reported only when the count is known (a legacy tuner returning the
     # triple reports an UNKNOWN count → the key is omitted).
@@ -500,7 +500,7 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
         "metric",
         "params",
         "model_path",
-        # The engine seed is recorded in the report (issue #160).
+        # The engine seed is recorded in the report.
         "random_state",
     }
     assert "n_trials_evaluated" not in result

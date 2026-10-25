@@ -12,7 +12,7 @@ Coverage:
   exactly what the user listed).
 - Config validation: ``limit_hyperparameters: true`` without a non-empty
   ``hyperparameters`` block is rejected at load (no silent no-op).
-- Acceptance: e2e trial params differ between ``true`` and ``false``.
+- E2e: trial params differ between ``true`` and ``false``.
 """
 
 from __future__ import annotations
@@ -224,7 +224,7 @@ def test_tuner_limit_suppresses_svr_adaptive_epsilon():
         seen: list[dict[str, object]] = []
 
         def capturing_create_model(algo: str, **params):
-            # The tuner always injects the engine seed (issue #160); SVR does
+            # The tuner always injects the engine seed; SVR does
             # not accept it, and it is not a searched parameter.
             params.pop("random_state", None)
             if params:
@@ -273,10 +273,10 @@ def test_tuner_limit_suppresses_svr_adaptive_epsilon():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Acceptance: e2e trial params differ between true and false
+# E2e: trial params differ between true and false
 # ──────────────────────────────────────────────────────────────────────────────
 def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path):
-    """Acceptance (strong): decision_tree trial params differ between true/false.
+    """Decision_tree trial params differ between true/false.
 
     DECISION_TREE's DEFAULT_SPACES has max_depth and min_samples_leaf. With
     ``limit_hyperparameters: true`` and user ``min_samples_leaf`` listed, the
@@ -294,7 +294,7 @@ def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path)
 
     def capturing(algo: str, **params):
         if algo == "decision_tree" and params:
-            # Skip the engine seed injected by the tuner (issue #160): it is
+            # Skip the engine seed injected by the tuner: it is
             # not a searched parameter.
             seen.append({k: v for k, v in params.items() if k != "random_state"})
         return real_create_model(algo, **params)

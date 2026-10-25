@@ -52,7 +52,7 @@ POLL_INTERVAL = 0.5
 # float64, to avoid precision loss for large PIDs.
 _START_SIGNAL_DTYPE = np.dtype([("start", np.float64), ("pid", np.int64)])
 
-# Free-space safety margin for POSIX shared memory (issue #146). A segment is
+# Free-space safety margin for POSIX shared memory. A segment is
 # created with ftruncate and pages are only touched later (by the np.ndarray
 # copy at creation or by a worker's reads): on a tmpfs file system (Docker,
 # Kubernetes and CI default /dev/shm to a 64MB ramdisk; desktop Linux usually
@@ -173,7 +173,7 @@ def _shm_backing_path() -> str | None:
     exposes the OS-generated random name; the directory comes from the
     shm_open(3) implementation). macOS lacks the directory-level API
     entirely, and Windows uses a different mechanism. For the free-space
-    check (issue #146) the closest observable approximation is /dev/shm
+    check the closest observable approximation is /dev/shm
     when it exists, otherwise None (no check possible).
 
     Returns:
@@ -190,8 +190,8 @@ def _shm_backing_path() -> str | None:
 def _shm_has_free_space(size: int) -> bool:
     """Whether an SHM segment of ``size`` bytes fits the free space.
 
-    Checks ``os.statvfs`` on the file system backing the shared memory
-    (issue #146): a segment larger than the free space on a tmpfs would be
+    Checks ``os.statvfs`` on the file system backing the shared memory:
+    a segment larger than the free space on a tmpfs would be
     created successfully by ftruncate but kill the process with SIGBUS on
     the first touch of a page past the end of the backing store (Bus error,
     exit code 135 — a signal, not a catchable exception). A conservative
@@ -293,7 +293,7 @@ class SharedDataFrame:
 
         if df is not None:
             data = df.to_numpy()
-            # Free-space pre-check (issue #146): on a tmpfs /dev/shm (Docker/
+            # Free-space pre-check: on a tmpfs /dev/shm (Docker/
             # Kubernetes default 64MB) ftruncate succeeds even beyond the
             # available space and the first touch of the data then kills the
             # process with SIGBUS (Bus error, exit 135) — a signal that
@@ -530,7 +530,7 @@ class DiskPersistenceManager:
 
     def __init__(self, use_shm: bool = True):
         # Use /dev/shm on Linux if available, otherwise the standard temp dir
-        # (issue #146: a /dev/shm that cannot hold the file, e.g. the 64MB
+        # (a /dev/shm that cannot hold the file, e.g. the 64MB
         # Docker default, is detected by free_parquet_space before the Parquet
         # write; save_df then falls back to the system temp directory).
         self.tmp_dir = "/dev/shm" if use_shm and os.path.exists("/dev/shm") else None
@@ -540,7 +540,7 @@ class DiskPersistenceManager:
         """Free space (bytes) available on the Parquet temp file system.
 
         Used to decide whether the Parquet cache can fit the data without
-        exhausting the file system (issue #146): on a tmpfs /dev/shm (the
+        exhausting the file system: on a tmpfs /dev/shm (the
         Docker/Kubernetes default is 64MB) writing a large Parquet file can
         otherwise raise a catchable OSError (ENOSPC on write) — unlike the
         SIGBUS of the SHM path — but the pre-check keeps the disk cache on
@@ -579,7 +579,7 @@ class DiskPersistenceManager:
         # columns with long values, which the old 8-bytes-per-element
         # heuristic underestimated) plus 1KB of Parquet metadata. Files
         # exceeding the free space on /dev/shm (a 64MB default in
-        # Docker/Kubernetes — issue #146) go to the system temp directory
+        # Docker/Kubernetes) go to the system temp directory
         # instead: on a full tmpfs the write would either raise a catchable
         # ENOSPC (a warning and pickle fallback) or, for the SHM path, kill
         # the process with SIGBUS.
@@ -1064,7 +1064,7 @@ def run_parallel(
             # The same applies to the disk fallback: one Parquet file per object.
             disk_cache: dict[int, str] = {}
             # DataFrames that are SHM-compatible but cannot be placed into shared
-            # memory (not enough free space — issue #146) are routed through the
+            # memory (not enough free space) are routed through the
             # disk cache: remembered so that the failed attempt is not repeated
             # for every task that shares the same object.
             shm_failed: set[int] = set()
@@ -1086,7 +1086,7 @@ def run_parallel(
                                     shm_wrapper = SharedDataFrame(df_obj)
                                 except OSError as shm_err:
                                     # Not enough free space in the SHM file
-                                    # system (issue #146): creating the segment
+                                    # system: creating the segment
                                     # here would later kill the process with
                                     # SIGBUS (Bus error, exit 135) when the
                                     # data pages are touched. Route this frame

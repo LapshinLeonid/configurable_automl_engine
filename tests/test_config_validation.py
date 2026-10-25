@@ -254,7 +254,7 @@ def test_target_encoding_fallback_any_float():
 def test_new_params_absent_defaults():
     """A config without the new parameters uses the documented defaults.
 
-    The automatic high-cardinality mode is enabled by default (issue #157):
+    The automatic high-cardinality mode is enabled by default:
     threshold 50 with the 'frequency' strategy, so high-cardinality columns do
     not silently expand into a dense one-hot matrix. To disable the mode, set
     both parameters to null explicitly.
@@ -987,7 +987,7 @@ def test_isotonic_feature_index_accepted_by_config_validation():
 
     The value is not an ``IsotonicRegression`` constructor parameter but a
     data-adapter hint consumed by ``IsotonicDataTransformer``, so the
-    compatibility check must accept it (issue #150).
+    compatibility check must accept it.
     """
     cfg_data = BASE | {
         "algorithms": {

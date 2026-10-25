@@ -1,9 +1,8 @@
 """Tests for input-data diagnostics: ``validate_features`` and
-``check_target_constant`` (issue #156).
+``check_target_constant``.
 
-The robustness matrix rows R03 (duplicate column names), R06 (inf in numeric
-features, warning part), R08 (datetime columns) and R17 (ID-like columns), as
-well as the "constant target" row (T04), are covered here both at the level of
+Duplicate column names, inf in numeric features (warning part), datetime
+columns, ID-like columns and a constant target are covered here both at the level of
 the standalone helpers (:mod:`~configurable_automl_engine.common.validation_utils`)
 and at the pipeline entry points (``prepare_dataset`` / ``ModelTrainer.fit``).
 """

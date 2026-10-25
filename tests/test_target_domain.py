@@ -3,8 +3,7 @@
 ``gammaregressor`` (``y > 0``), ``poissonregressor`` (``y >= 0``) and
 ``tweedieregressor`` / ``glm`` (domain depends on ``power``) must be excluded
 before HPO when the target does not fit their loss domain; a Tweedie ``power``
-range that is only partly invalid is clipped to its valid part instead
-(robustness matrix row R18 / T03).
+range that is only partly invalid is clipped to its valid part instead.
 """
 
 from __future__ import annotations
@@ -289,7 +288,7 @@ def test_guard_no_op_for_valid_target():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# E2E: robustness row R18 (T03)
+# E2E: target-domain guard
 # ──────────────────────────────────────────────────────────────────────────────
 def _negative_target_df(rows: int = 60) -> pd.DataFrame:
     rng = np.random.default_rng(0)

@@ -1202,7 +1202,7 @@ def test_bin_continuous_target_single_pass_consistency():
 
 
 # ------------------------------------------------------------------ #
-#  Regression oversampling for ANY numeric target (issue #154)        #
+#  Regression oversampling for ANY numeric target                    #
 # ------------------------------------------------------------------ #
 
 

@@ -18,10 +18,10 @@ designed to scale from local experimentation to large-scale data processing.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality. 
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
 * **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding. The default config routes high-cardinality categorical columns (cardinality above 50) to `frequency` encoding and uses **sparse one-hot**, so ID-like columns no longer expand into a dense `n × n` float matrix (no OOM/blow-up; the preprocessed dimensionality is logged as `n × p (sparse/dense)`).
-* **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization. The engine is regression-only, so any numeric target (float or integer — counts, whole-unit prices) is oversampled through the regression path: the target is binned into quantiles (`oversampling.target_bins`, default 8) for the sampling strategy, synthetic targets are restored honestly — random duplicates keep their source row's real value, SMOTE/ADASYN interpolate the target between the two parents (SMOTER-style). ⚠️ **Experimental**: the nightly evidence gate (T13) observed a median held-out R² degradation of ADASYN on a count target exceeding 0.01, so oversampling is currently marked experimental and logs a WARNING when enabled — verify the effect on your own data. See the [Oversampling section](API_REFERENCE.md#oversampling-section) in API_REFERENCE.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding.
+* ⚠️ **Experimental**: **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization.
 * **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
-* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats. `ModelTrainer.save()` records artifact metadata (engine and dependency versions, UTC timestamp, algorithm, params, config hash), and `ModelTrainer.load()` auto-detects the format from the file extension and warns when the engine or scikit-learn major/minor version differs from the current environment.
+* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
@@ -74,24 +74,9 @@ Testing:
 
     python -c "import configurable_automl_engine; print('Success!')"
 
-# Model artifacts: format and security
-
-`ModelTrainer.save()` serializes the trainer (including the fitted pipeline) with `pickle` (default) or `joblib`, depending on `serialization_format`. Artifacts are therefore **pickle files** and execute arbitrary code at load time — **only load artifacts from trusted sources**.
-
-`ModelTrainer.load(path)` auto-detects the serialization format from the file extension: `.joblib` → joblib, `.pkl`/`.pickle` → pickle; if the file was saved in the other format, it is tried as a fallback. For unknown extensions joblib is tried first, then pickle. You may force a format explicitly with `ModelTrainer.load(path, fmt=...)`.
-
-Artifacts saved by a recent version also carry `artifact_metadata_`: the engine version, versions of Python and the ML stack, the UTC creation timestamp, the algorithm, hyperparameters and a config hash. On load, a `WARNING` is logged when the artifact's engine or scikit-learn major/minor version differs from the one in the current environment.
-
 # Quick Start
 
-> **Note:** both explicit pipeline steps are implemented:
-> `select` and `refine`. The example below demonstrates
-> the full target pipeline. See the pipeline section below.
-
-The example can be run from [example.py](example.py). It demonstrates the
-full target pipeline with a Sanity Gate select step; the shorter config
-below is a minimal illustration of the same schema (`all_algorithms` →
-terminal select) — the two examples are intentionally different.
+The example can be run from [example.py](example.py).
 
     from sklearn.datasets import load_diabetes
 
@@ -143,124 +128,7 @@ terminal select) — the two examples are intentionally different.
 
     print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
 
-# Reproducibility (`general.random_state`)
-
-The engine seed is configured by `general.random_state` (default `42`). It
-drives:
-
-* the data splits (CV folds / hold-out) — every HPO phase and the final
-  `ModelTrainer` fit evaluate models on the same splits;
-* the model seeds — stochastic estimators (trees, forests, boosting,
-  randomized linear models) are seeded from it via the model factory, unless
-  the user sets `random_state` explicitly in the algorithm `hyperparameters`
-  (an explicit value always wins);
-* the TPE sampler base seed — each HPO phase uses
-  `general.random_state + hpo_phase_ordinal` so that startup points do not
-  repeat between phases.
-
-The configured seed is recorded in the training report under the
-`random_state` key, so a reproducible rerun is possible. An explicit
-`general.random_state: null` (or an explicit `random_state: [null]` in an
-algorithm's `hyperparameters`) requests a **non-reproducible** run: the data
-splits are not fixed and stochastic models draw a fresh RNG at fit time — the
-engine logs a WARNING that the run is not reproducible.
-
-# Honest out-of-sample estimates: `score`, `oof_score`, `holdout_score`
-
-`result["score"]` is the **best** quality estimate of the winning algorithm
-over the HPO trials, computed on the same validation folds — so it is
-systematically **optimistic** (the maximum of N trials on the same folds; on
-the diabetes benchmark the reported CV R² of 0.534 vs. a held-out 0.357).
-Two additional report keys give an honest out-of-sample estimate next to it:
-
-* `result["oof_score"]` — the **comparison metric computed on the final
-  pipeline's pooled OOF predictions** (the trainer's OOF channel:
-  `oof_predictions_`). Every row is predicted by a fold-model that has not
-  seen it during training, so the value is an honest estimate of the final
-  model without leakage. It is reported in the same user semantics as
-  `score` (positive RMSE/MAE, plain R²) and is always present when the OOF
-  vector could be built (for `train_test_split` it covers the validation part
-  only, the same limitation as the trainer's OOF channel). The gap between
-  `score` and `oof_score` is an optimism estimate — with the **direction of
-  the metric taken into account**: for score metrics (R² and similar, where
-  HPO maximizes) `score - oof_score = optimism`, for error metrics (RMSE/MAE,
-  where HPO minimizes) the optimism is `oof_score - score` (a positive value
-  means the honest estimate is worse than the best-trial score). Two effects
-  are mixed here: the best-of-N selection bias of `score` AND the fact that
-  the final pipeline is trained on more data than any single fold-model of
-  the OOF channel (the full input, or train + hold-out with a reserved
-  hold-out); for a fixed configuration `oof_score` is the honest
-  out-of-sample estimate of the artifact, so the gap remains a useful,
-  if not pure, optimism signal.
-* `result["holdout_score"]` — the comparison metric of the **winner on a
-  reserved outer hold-out** (optional `general.holdout_fraction`, default
-  `null`). When set, the engine splits off that fraction of the rows BEFORE
-  hyperparameter optimization; those rows never participate in model
-  selection and are used only for this honest estimate. The winner is trained
-  on the train part of the outer split to produce the estimate, while the
-  **final model is still refit on all data** (train + hold-out) for the
-  artifact — the reserved rows are concatenated back, so the production model
-  does not lose the hold-out fraction. The key is present only when the
-  hold-out is configured.
-* `result["n_trials_evaluated"]` — the number of trials actually evaluated
-  by the winning algorithm's HPO phase (its own COMPLETED trials; transferred
-  TPE history never counts). It is the honest denominator of the "best of N"
-  maximum: the more trials were evaluated on the same folds, the more
-  optimistic `score` is expected to be. The key is omitted when the count is
-  unknown (legacy custom tuners that do not report it).
-
-In short: `score` is what HPO maximized (optimistic), `oof_score` is the
-honest CV-style estimate of the final pipeline, and `holdout_score` is the
-honest estimate on rows that never influenced any decision.
-
-## Restricted hyperparameter search (`limit_hyperparameters`)
-
-Each algorithm block accepts an optional boolean
-`limit_hyperparameters` (default `false`):
-
-* **`false` (default)** — the user ranges from `hyperparameters` override
-  and are merged into the algorithm's default search space
-  (`DEFAULT_SPACES`): parameters not listed by the user keep their default
-  search ranges.
-* **`true`** — the search is restricted to ONLY the parameters listed in
-  `hyperparameters`; every other parameter stays at the estimator default
-  (no `DEFAULT_SPACES` entries are added to the search). Useful to make a
-  search fast and focused (e.g. tune only `n_estimators` of a forest), or
-  to reproduce a fixed configuration while still searching a small subset.
-
-`limit_hyperparameters: true` requires a non-empty `hyperparameters` block —
-an empty one would leave nothing to optimize, so such a config is rejected
-at load (no silent no-op).
-
-# Pipeline phases: `refine` / `select`
-
-> **Note:** both explicit pipeline actions are executed:
-> `refine` (see the contract below) and `select` (both
-> strategies `cv_best` / `sanity_gate` and all output forms `winner` /
-> `top_k` / `pool`).
-
-The HPO pipeline is assembled from explicit phases (`general.phases`):
-
-* `action: "all_algorithms"` — `n_trials` HPO attempts for every enabled algorithm;
-* `action: "refine"` — `n_trials` warm-started HPO attempts for **every** candidate of the incoming working set. The incoming working set is the result of the last HPO phase or the output of the previous select step; only `params` are used for warm-start — they are passed to the tuner as `initial_params` (`enqueue_trial`), incoming scores are ignored. The output keeps the same set of names with updated `(score', params')` records and replaces the working set. Thanks to `enqueue_trial` the score of every surviving candidate after refine is not worse than before it (monotonicity): every HPO phase evaluates models on the SAME folds (the data-split/preprocessor seed is the fixed `general.random_state` for all phases, as in the final `ModelTrainer` fit), while only the TPE sampler seed varies per phase (`general.random_state + phase_ordinal`) so that startup points do not repeat. There is no narrowing in refine — no winners, no top-K, no corridors; narrowing is the job of explicit select steps. A per-algorithm failure excludes only that algorithm (circuit breaker `disqualified_algorithms`, the others continue); if refine wipes out the whole working set, the phase ends with `RuntimeError` — a fallback to pre-refine parameters would hide the regression (a deliberate design decision). Refine runs like a regular HPO phase: in parallel across algorithms where applicable. As the first phase `refine` is accepted: the incoming working set is then the full set of enabled algorithms (no warm-start from a previous phase).
-* `action: "select"` — an explicit selection step with `strategy: "cv_best" | "sanity_gate"` and `output: "winner" | "top_k" | "pool"` (parameter `k >= 1` is required for, and only allowed with, `output: "top_k"`). The step runs synchronously (never inside `run_parallel`) and its output **replaces** the pipeline working set — subsequent `refine` / `select` steps operate on it:
-  * `strategy: "cv_best"` — ranking by raw CV score (no audit, no gate section in the report). `output: "winner"` — the CV leader; `output: "top_k"` — the first `k` candidates of the ranking; `output: "pool"` — the corridor finalists pool (corridor δ ∩ `top_k_candidates`, thresholds from the `sanity_gate` section) ranked by CV score **without** the `ModelSanityGate` audit.
-* `strategy: "sanity_gate"` — the two-stage selection: finalists pool (corridor δ ∩ `top_k_candidates` from `general.sanity_gate`) → every finalist trained on **100% of the data exactly once** → `ModelSanityGate` audit → ranking of the candidates that passed the audit by `RMSE_oof` (formal fallback criterion when the whole pool is disqualified). Circuit A (diversity) runs in the **adaptive mode by default** (`adaptive_diversity: true`): the reference is the constant model — only a zero prediction variance (a tie with the constant baseline) and models **worse than the constant prediction** (`R²_oof < 0`, e.g. a deep overfit tree on weak data) are disqualified, so an honest model with a weak signal (R² between 0 and 0.15) keeps its chance to win by `RMSE_oof`; an explicit `adaptive_diversity: false` restores the legacy fixed `min_prediction_diversity` threshold. Circuit D (generalization gap) runs in the **warn mode by default** (`generalization_gap_mode: "warn"`): a gap violation is a soft warning — overfit ensembles such as GBM/RandomForest keep their chance to win by honest `RMSE_oof`; this includes an **infinite** gap from division by zero (`RMSE_full ≈ 0` perfect in-sample fit, `RMSE_oof ≈ 0`) — in warn mode the circuit never disqualifies because of the gap magnitude, and `RMSE_oof ≈ 0` additionally raises a `WARNING` log record (suspiciously perfect out-of-fold fit, possible target leakage). An explicit `generalization_gap_mode: reject` restores the legacy strict disqualification for all of these cases; in both modes `reasons` stay only for contract violations (`y_pred_full` missing) and non-computability (no finite pairs). `output: "winner"` — the robust winner (terminal step); `output: "top_k"` — the first `k` candidates of the `RMSE_oof` ranking; `output: "pool"` — every candidate that passed the audit (or the full fallback ranking when all are disqualified). Gate disqualifications are fed into the circuit breaker (`disqualified_algorithms`) on a par with HPO failures; warn-mode violations are **not** — the candidate stays available for the next `refine` / `select`. A terminal select with `output: "winner"` reuses the already trained full-fit trainer of the winner — the winner is **not** retrained for the artifact. A repeated sanity select (e.g. after `refine`) trains its finalists from scratch — stale full-fit trainers are never reused.
-  * Every `sanity_gate` select adds its own section to `result["sanity_gate"]` keyed by the phase name (pool, applied `generalization_gap_mode`, per-candidate audit, applied disqualifications, `fallback_used`, `winner_rmse_oof`, `overhead_seconds`); `cv_best` selects add none. The legacy report keys `disqualified_by_sanity_gate`, `sanity_gate_warn_only` and `sanity_gate_overhead_seconds` were removed together with the `warn_only` mode.
-
-Validation rules: `select` cannot be the first phase; no phases are allowed after a terminal select (`output: "winner"`); the **last phase must be a `select` with `output: "winner"`**. The parameter `k` is deliberately not cross-checked against `sanity_gate.top_k_candidates` at the config level: the pool is capped by `top_k_candidates` first, and the exact `k`-vs-pool interplay is defined at execution time. The `sanity_gate` section remains a pure source of thresholds (corridor, `top_k_candidates`, audit limits) for select steps with `strategy: "sanity_gate"` — the global switch `general.sanity_gate.mode` was removed together with the deprecated action `refine_winner`.
-
-Migration table for typical legacy configs:
-
-| Legacy config | New config |
-|---------------|------------|
-| `all_algorithms` → `refine_winner` | `all_algorithms` → `select(strategy: cv_best, output: top_k, k: N)` → `refine` → `select(strategy: cv_best, output: winner)` — or simply an extended `all_algorithms` + `select(strategy: cv_best, output: winner)` |
-| Implicit gate at the end (`sanity_gate.mode: active`) | Explicit last phase `select(strategy: sanity_gate, output: winner)` |
-| `sanity_gate.mode: warn_only` | `select(strategy: sanity_gate, ...)` step + read the gate section of the select-step report (`result["sanity_gate"][<phase name>]`) |
-| Strict circuit D behavior (`gap > max_generalization_gap` disqualifies the model) | Keep the default `generalization_gap_mode: "warn"` to treat a gap violation — including an infinite gap from `RMSE_full ≈ 0` / `RMSE_oof ≈ 0` — as a soft warning (model competes by `RMSE_oof`), or set `generalization_gap_mode: "reject"` to fully reproduce the legacy strict disqualification |
-| Fixed diversity threshold (`min_prediction_diversity` disqualifies honest models with R² < 0.15) | Keep the default `adaptive_diversity: true` — circuit A compares against the constant model and rejects only zero-variance / `R²_oof < 0` models; set `adaptive_diversity: false` to restore the legacy fixed-threshold behavior |
-
-Configs with `refine_winner` or `sanity_gate.mode` are rejected at load with a migration hint (no silent translation).
+📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # Contributing
 

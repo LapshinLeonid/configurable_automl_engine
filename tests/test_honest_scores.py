@@ -1,4 +1,4 @@
-"""Tests for the honest out-of-sample report keys of issue #161.
+"""Tests for the honest out-of-sample report keys.
 
 Coverage:
     1. ``result["oof_score"]`` — the comparison metric computed on the final
@@ -367,8 +367,7 @@ def test_holdout_artifact_refit_on_all_data(tmp_path):
     The OOF vector of the artifact is aligned to the full input length —
     k_fold covers every row exactly once, so with a reserved hold-out of 25%
     the artifact's ``oof_predictions_`` must have the FULL length (150), not
-    the train-part length (112). This is the acceptance criterion of issue
-    #161: "the final model is still refit on all data".
+    the train-part length (112): the final model is still refit on all data.
     """
     df = _noisy_regression(n=150, p=6, seed=17)
     cfg = _cfg(

@@ -1823,7 +1823,7 @@ class ModelTrainer:
         indicators), and the storage representation (``sparse`` for a
         ``scipy.sparse`` output — e.g. sparse one-hot/hashing — and
         ``dense`` otherwise). Used to make the categorical dimensionality
-        visible in the logs (issue #157: dense one-hot on high-cardinality
+        visible in the logs (dense one-hot on high-cardinality
         columns inflated the matrix without any log signal).
 
         Args:

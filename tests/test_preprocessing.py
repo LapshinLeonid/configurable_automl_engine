@@ -329,7 +329,7 @@ def test_build_preprocessor_ordinal_all_missing_after_impute():
 def test_to_string_array_preserves_missing_values():
     """_to_string_array keeps NaN/None as missing values (not as 'nan'/'None' strings).
 
-    Regression (issue #143): missing values were stringified before the
+    Regression: missing values were stringified before the
     SimpleImputer ran, so the imputer never saw a gap. NaN became the literal
     "nan" category and None (e.g. from a JSON payload) became "None" — the
     same "unknown city" row produced different predictions depending on how
@@ -355,7 +355,7 @@ def test_to_string_array_preserves_missing_values():
 def test_build_preprocessor_missing_categorical_imputed_consistently():
     """NaN and None in categorical columns are imputed identically.
 
-    Regression (issue #143): the categorical pipeline converts columns to
+    Regression: the categorical pipeline converts columns to
     strings, but the imputer must see the gaps. After the fix, a missing value
     is filled with the most-frequent category during fitting, and the one-hot
     matrix contains no "nan"/"None" category — NaN/None rows map to the same
@@ -419,7 +419,7 @@ def test_build_preprocessor_missing_categorical_trained_on_none():
 def test_get_feature_names_out_with_category_missing_values():
     """get_feature_names_out works on a preprocessor with missing categorical values.
 
-    Regression (issue #143): the "to_string" step had no get_feature_names_out,
+    Regression: the "to_string" step had no get_feature_names_out,
     so calling it on the preprocessor raised AttributeError.
     """
     df = pd.DataFrame(
@@ -445,7 +445,7 @@ def test_get_feature_names_out_with_category_missing_values():
 def test_build_preprocessor_all_missing_categorical_imputed():
     """A fully-missing categorical column is imputed (kept) instead of being dropped.
 
-    Regression (issue #143): SimpleImputer(keep_empty_features=True) preserves
+    Regression: SimpleImputer(keep_empty_features=True) preserves
     the column, so the preprocessor keeps a stable dimensionality and
     get_feature_names_out stays consistent.
     """
@@ -1070,13 +1070,13 @@ def test_build_preprocessor_force_dense_passthrough():
     assert out.shape == (3, 1)
 
 
-# ──────────────── Sparse one-hot output (issue #157) ────────────────
+# ──────────────── Sparse one-hot output ────────────────
 
 
 def test_split_encoder_one_hot_is_sparse_by_default():
     """OneHotEncoder is created with sparse_output=True (no dense n×n blow-up).
 
-    Issue #157: the default dense one-hot of an ID-like column allocated a
+    Previously the default dense one-hot of an ID-like column allocated a
     dense n×n float matrix per fold (≈3 GB at 20k rows). The encoder now keeps
     the sparse representation, so a high-cardinality column does not explode.
     """
@@ -1096,7 +1096,7 @@ def test_build_preprocessor_one_hot_sparse_for_high_cardinality():
 
     A single high-cardinality one-hot column + a numeric column stays
     sparse: the dense float64 matrix would be n×(n+1) — the exact blow-up
-    described in issue #157.
+    the sparse output prevents.
     """
     rng = np.random.default_rng(1)
     df = pd.DataFrame(

@@ -3,7 +3,7 @@
 ``ModelTrainer.fit`` replaces ±inf with NaN under the default
 ``inf_policy="as_missing"``; ``ModelTrainer.predict`` must apply the same
 policy so that predicting on the training frame works end-to-end
-(robustness matrix row R03 / T03: train + predict).
+(train + predict).
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def test_apply_inf_policy_unknown_policy():
 
 
 def test_predict_on_training_frame_with_inf(caplog):
-    """R03/T03: fit on a frame with inf, then predict on the same frame."""
+    """Fit on a frame with inf, then predict on the same frame."""
     X, y = _frame_with_inf()
     trainer = ModelTrainer(algorithm="ridge").fit(X, y)
 

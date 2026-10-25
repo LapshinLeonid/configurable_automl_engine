@@ -818,7 +818,7 @@ class TestIsotonicDataTransformer:
     def test_numeric_block_relative_index(self):
         """With ``n_numeric`` set, ``feature_index`` is relative to the
         numerical block (the last ``n_numeric`` columns), so one-hot dummies
-        are excluded (issue #155)."""
+        are excluded."""
         # 3 dummy columns + 2 numerical: numeric block is the last 2 columns.
         X = np.array(
             [
@@ -850,7 +850,7 @@ class TestIsotonicDataTransformer:
     def test_estimate_mismatch_guard_is_valueerror(self):
         """A divergence between the estimated feature count and the fitted
         preprocessor output raises ValueError (non-fatal for the circuit
-        breaker), per issue #155."""
+        breaker)."""
         X = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         transformer = IsotonicDataTransformer(feature_index=0, n_numeric=2, n_total=4)
         with pytest.raises(ValueError, match="estimated feature count"):
@@ -1479,7 +1479,7 @@ def test_trainer_logs_resolved_preset(caplog):
 def test_trainer_logs_preprocessed_matrix_dimensions(caplog):
     """The final fit logs the preprocessed matrix dimensionality and format.
 
-    Issue #157: the line "preprocessed matrix: n × p (sparse/dense)" makes the
+    The line "preprocessed matrix: n × p (sparse/dense)" makes the
     categorical expansion visible in the logs (a dense n×n one-hot blow-up was
     previously invisible).
     """
@@ -1505,7 +1505,7 @@ def test_trainer_logs_preprocessed_matrix_dimensions(caplog):
 def test_trainer_logs_preprocessed_matrix_sparse_for_high_cardinality(caplog):
     """A high-cardinality one-hot column is logged as a sparse n×n matrix.
 
-    Issue #157: with the sparse one-hot, a unique-per-row ID column produces
+    With the sparse one-hot, a unique-per-row ID column produces
     the log "preprocessed matrix: N × N (sparse)" instead of a dense blow-up.
     """
     import logging as _logging
@@ -1999,7 +1999,7 @@ def test_isotonic_multifeature_default_feature_index():
     The ``IsotonicDataTransformer`` step must be present in the pipeline and
     reduce the preprocessed matrix to a single feature, so a multi-column
     input does not fail with the "input X should be a 1d array or 2d array
-    with 1 feature" error (issue #150).
+    with 1 feature" error.
     """
     rng = np.random.RandomState(0)
     X = pd.DataFrame(
@@ -2030,8 +2030,8 @@ def test_isotonic_multifeature_default_feature_index():
 
 
 def test_isotonic_empty_hyperparams_default_holdout_works():
-    """Acceptance: ModelTrainer('isotonic_regression', {}) trains on a
-    5-feature frame with the default hold-out (issue #155).
+    """ModelTrainer('isotonic_regression', {}) trains on a
+    5-feature frame with the default hold-out.
 
     Regressions fixed here:
 
@@ -2066,7 +2066,7 @@ def test_isotonic_feature_index_restricted_to_numeric_block():
     of categorical columns are not meaningful inputs for isotonic.
 
     With 2 numerical features and 3 categorical columns, index 1 must resolve
-    to the second numerical column, not to a one-hot dummy (issue #155).
+    to the second numerical column, not to a one-hot dummy.
     """
     rng = np.random.default_rng(3)
     n = 80
@@ -2098,7 +2098,7 @@ def test_isotonic_no_numeric_features_rejected():
     ValueError (the isotonic adapter has no meaningful input column).
 
     Previously the model silently fell back to feature_index=0 and was fitted
-    on an arbitrary one-hot dummy column (issue #155).
+    on an arbitrary one-hot dummy column.
     """
     rng = np.random.default_rng(1)
     X = pd.DataFrame(
@@ -2652,7 +2652,6 @@ def test_feature_selection_selector_uses_explicit_random_state_when_set():
 
 # ──────────────────────────────────────────────────────────────────────────
 #  Model seed semantics: trainer.random_state drives stochastic estimators
-#  (issue #160)
 # ──────────────────────────────────────────────────────────────────────────
 
 

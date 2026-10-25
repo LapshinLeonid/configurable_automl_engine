@@ -1,6 +1,6 @@
 """Tests for artifact metadata and format auto-detection on load.
 
-Covers the issue #159 scope:
+Covers:
 - ``ModelTrainer.save`` populates ``artifact_metadata_`` (engine version,
   dependency versions, UTC timestamp, algorithm, params, config hash).
 - ``ModelTrainer.load(path, fmt=None)`` auto-detects the format from the
@@ -137,7 +137,7 @@ def test_metadata_is_not_set_before_save(trained_trainer: ModelTrainer) -> None:
 
 
 def test_load_joblib_without_fmt(trained_trainer: ModelTrainer, tmp_path: Path) -> None:
-    """A .joblib artifact loads with fmt=None (acceptance criterion)."""
+    """A .joblib artifact loads with fmt=None."""
     trained_trainer.serialization_format = SerializationFormat.joblib
     path = tmp_path / "model.joblib"
     trained_trainer.save(path)

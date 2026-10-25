@@ -162,7 +162,7 @@ def test_create_model_svr_explicit_sigmoid_kernel_allowed():
 
 
 def test_create_model_isotonic_default_out_of_bounds_clip():
-    """IsotonicRegression defaults to out_of_bounds='clip' (issue #155).
+    """IsotonicRegression defaults to out_of_bounds='clip'.
 
     sklearn defaults to 'nan'; the default hold-out then fails with NaN
     predictions. The factory injects 'clip' unless the user sets the value
@@ -363,7 +363,7 @@ def test_get_allowed_hyperparameters_legacy_names_included():
 
 def test_get_allowed_hyperparameters_isotonic_feature_index_included():
     """``feature_index`` (an IsotonicDataTransformer hint, not a constructor
-    parameter) counts as an allowed isotonic hyperparameter (issue #150)."""
+    parameter) counts as an allowed isotonic hyperparameter."""
     allowed = get_allowed_hyperparameters("isotonic_regression")
     assert "feature_index" in allowed
     assert "increasing" in allowed
@@ -411,7 +411,7 @@ def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Deterministic seeding of stochastic estimators (issue #144)
+# Deterministic seeding of stochastic estimators
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -420,7 +420,7 @@ def test_create_model_seeds_stochastic_estimators():
 
     Trees/forests/boosting and randomized linear models draw randomness at
     fit time; without a fixed seed identical ``train_best_model`` runs
-    produced different scores/best parameters (issue #144). ``create_model``
+    produced different scores/best parameters. ``create_model``
     must inject the engine seed for every estimator accepting
     ``random_state``.
     """
@@ -444,7 +444,7 @@ def test_create_model_none_random_state_respected_with_warning(caplog):
     """random_state=None is respected: a truly random fit, with a WARNING.
 
     ``None`` requests a fresh RNG per fit (sklearn semantics). An explicit
-    ``None`` now wins over the injected engine seed (issue #160): the model
+    ``None`` now wins over the injected engine seed: the model
     is created with ``random_state=None`` and a WARNING is logged so that the
     non-reproducible fit is visible.
     """

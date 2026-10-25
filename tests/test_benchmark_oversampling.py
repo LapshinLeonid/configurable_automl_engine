@@ -1,4 +1,4 @@
-"""Smoke tests of the oversampling evidence benchmark (T13).
+"""Smoke tests of the oversampling evidence benchmark.
 
 Coverage:
 

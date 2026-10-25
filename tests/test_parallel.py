@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from configurable_automl_engine.tuner import InvalidAlgorithmError
 
-# Platform guards: the SHM free-space checks (issue #146) rely on the POSIX
+# Platform guards: the SHM free-space checks rely on the POSIX
 # os.statvfs and the Linux /dev/shm tmpfs, both absent on Windows.
 requires_statvfs = pytest.mark.skipif(
     not hasattr(os, "statvfs"), reason="os.statvfs is POSIX-only"
@@ -2548,7 +2548,7 @@ if __name__ == "__main__":
 
 
 # ═══════════════════════════════════════════════════════════
-#  Issue #146: SHM free-space pre-check (os.statvfs) — data
+#  SHM free-space pre-check (os.statvfs) — data
 #  bigger than the /dev/shm tmpfs must not crash the main
 #  process with SIGBUS (Bus error, exit 135)
 # ═══════════════════════════════════════════════════════════
@@ -2691,7 +2691,7 @@ def test_run_parallel_no_room_routes_frame_to_disk(caplog, monkeypatch):
 
     run_parallel must not raise and must not die with SIGBUS: the frame is
     routed through parquet (which may itself fall back to the system temp
-    directory) and the worker receives the same values (issue #146).
+    directory) and the worker receives the same values.
     """
     df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     assert SharedDataFrame.is_compatible(df) is True
@@ -2726,7 +2726,7 @@ def test_run_parallel_broken_shm_statvfs_routes_frame_to_disk(caplog, monkeypatc
 
     When statvfs cannot be read (e.g. a container without the /dev/shm
     mount), _shm_has_free_space reports no room; the frame goes through the
-    disk cache and the results stay correct (issue #146).
+    disk cache and the results stay correct.
     """
 
     def broken_statvfs(path):
@@ -2749,7 +2749,7 @@ def test_run_parallel_no_room_disk_full_falls_back_to_pickle(caplog, monkeypatch
     The 64MB /dev/shm can be too small for both the SHM segment and the
     Parquet cache; the disk write then fails with a catchable error and the
     whole preparation falls back to passing the dataframes through pickle
-    (the pre-SHM behaviour), so run_parallel never crashes (issue #146).
+    (the pre-SHM behaviour), so run_parallel never crashes.
     """
     df = pd.DataFrame({"a": [1, 5]})
     monkeypatch.setattr(
@@ -2786,7 +2786,7 @@ def test_run_parallel_shm_segment_created_before_failure_still_cleaned(
 
     When the no-room frame appears after an SHM-compatible one (which
     already created its segment), the later failure must not leak the
-    earlier segment: the finally-block cleanup unlinks it (issue #146).
+    earlier segment: the finally-block cleanup unlinks it.
     """
     df1 = pd.DataFrame({"a": [1, 2, 3]})  # fits → SHM segment created (24 B)
     df2 = pd.DataFrame({"b": [4, 5, 6], "c": [7, 8, 9]})  # 48 B → no room
@@ -2878,7 +2878,7 @@ def test_disk_persistence_manager_full_dev_shm_uses_system_tmp(monkeypatch):
 
     The parquet cache must not exhaust the tiny 64MB /dev/shm of Docker/
     Kubernetes: the file is written to the system temp directory instead
-    and the result is readable (issue #146).
+    and the result is readable.
     """
     df = pd.DataFrame({"a": range(100), "b": np.arange(100.0)})
 
@@ -2999,7 +2999,7 @@ def test_run_parallel_large_processes_with_forced_no_disk_uses_pickle(
 
     End-to-end check that the run completes (no SIGBUS) when neither SHM nor
     the disk cache can hold the data: the frames are passed through pickle
-    and the results are identical (issue #146).
+    and the results are identical.
     """
     df = pd.DataFrame({"a": [10, 20, 30]})
     monkeypatch.setattr(

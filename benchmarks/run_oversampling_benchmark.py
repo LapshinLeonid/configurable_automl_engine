@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI of the oversampling evidence benchmark (T13, nightly profile).
+"""CLI of the oversampling evidence benchmark (nightly profile).
 
 Run from the repository root:
 
@@ -36,7 +36,7 @@ def main() -> int:
     """Run the benchmark, print the table, and return the result code."""
     logging.getLogger("optuna").setLevel(logging.WARNING)
 
-    print("Oversampling: nightly evidence benchmark (T13)")
+    print("Oversampling: nightly evidence benchmark")
     print(f"Variants: baseline (no oversampling) vs random/smote/adasyn "
           f"(multiplier 1.5)")
     print(f"Evidence gate: degradation of the median held-out R² by more "

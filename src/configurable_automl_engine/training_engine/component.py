@@ -4107,7 +4107,7 @@ def train_best_model(
             training.
     """
     cfg, target_col = load_config(config, df, target)
-    # Evidence gate (T13): surface the experimental status once per run at
+    # Evidence gate: surface the experimental status once per run at
     # config validation time; the sampler itself warns once per process per
     # (algorithm, multiplier) instead of once per fold per trial.
     if cfg.oversampling.enable and _oversampling.OVERSAMPLING_EXPERIMENTAL:

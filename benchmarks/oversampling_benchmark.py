@@ -1,4 +1,4 @@
-"""Nightly evidence benchmark for the regression oversampling feature (T13).
+"""Nightly evidence benchmark for the regression oversampling feature.
 
 The benchmark compares two engine pipeline variants on the same datasets:
 
@@ -40,7 +40,7 @@ __all__ = [
     "check_oversampling_acceptance",
 ]
 
-#: R² degradation threshold of the evidence gate (T13): an oversampling
+#: R² degradation threshold of the evidence gate: an oversampling
 #: variant whose median held-out R² is more than this much LOWER than the
 #: no-oversampling baseline marks the feature experimental.
 EVIDENCE_GATE_DELTA = 0.01
@@ -282,7 +282,7 @@ def render_oversampling_table(results: list[OversamplingVariantResult]) -> str:
 def check_oversampling_acceptance(
     results: list[OversamplingVariantResult],
 ) -> tuple[bool, list[str]]:
-    """Check the evidence gate (T13).
+    """Check the evidence gate.
 
     If any oversampling algorithm lowers the median held-out R² by more
     than ``EVIDENCE_GATE_DELTA`` on any dataset, the feature must be marked
