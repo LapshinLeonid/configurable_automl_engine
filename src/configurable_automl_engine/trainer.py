@@ -511,12 +511,18 @@ class ModelTrainer:
             estimate is always computed on data not used to train the pipeline
             of that fold. For error metrics the value is positive
             (sign-corrected).
-        oof_score_ (float | None): ``RMSE_oof`` — an honest quality estimate on
-            all rows without leakage: predictions from validation folds are
-            concatenated into a single vector and the metric is computed on the
-            whole vector at once (rather than averaged over small folds).
-            ``None`` if an OOF estimate is impossible (no valid pairs at all).
-            Separate channel: the ``val_score`` of HPO phases is not affected.
+        oof_score_ (float | None): ``RMSE_oof`` — an out-of-fold estimate on
+            all rows: predictions from validation folds are concatenated into
+            a single vector and the metric is computed on the whole vector at
+            once (rather than averaged over small folds). Every row is
+            predicted by a fold-model that has not been trained on it, but the
+            splits are the same as in HPO (``validation.iter_splits`` with the
+            same seed): when the hyperparameters were selected on these
+            splits, the estimate inherits the selection bias and is NOT an
+            independent estimate of generalization (for RMSE it equals the
+            best-trial ``val_score``). ``None`` if an OOF estimate is
+            impossible (no valid pairs at all). Separate channel: the
+            ``val_score`` of HPO phases is not affected.
         oof_predictions_ (pd.Series | np.ndarray | None): The ``y_pred_oof``
             vector, aligned to the original row order (``pd.Series`` with the
             preserved pandas index for data with a unique index, including
@@ -851,8 +857,9 @@ class ModelTrainer:
         self.pipeline: Pipeline | None = None
         self.base_model: Any = None
         self.val_score: float | None = None
-        # OOF candidate evaluation channel: an honest metric on all rows
-        # without leakage. Each row is predicted by a model that has not seen it
+        # OOF candidate evaluation channel: a metric on all rows without
+        # training leakage (for hyperparameters selected on the same splits it
+        # still carries the selection bias). Each row is predicted by a model that has not seen it
         # during training; predictions from validation folds are collected into
         # a single y_pred_oof vector aligned to the original row order, and
         # RMSE_oof is computed on the whole vector at once.
@@ -1602,8 +1609,10 @@ class ModelTrainer:
         error and their aliases). In addition, an OOF channel is
         collected: predictions from validation folds are concatenated into
         ``y_pred_oof``, and ``RMSE_oof`` (``oof_score_``) is computed on the
-        whole vector at once — an honest estimate on all rows without leakage,
-        separate from ``val_score``. After validation scoring, the final
+        whole vector at once — an estimate on all rows without training
+        leakage, separate from ``val_score``. Both use the HPO splits, so for
+        hyperparameters selected on those splits neither is independent of
+        the selection. After validation scoring, the final
         pipeline is trained on the full data: the artifact stores a training on
         100% of the sample, while ``val_score`` remains an honest quality
         estimate (not a train score).

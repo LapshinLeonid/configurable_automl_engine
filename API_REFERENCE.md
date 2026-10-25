@@ -21,6 +21,7 @@ The `general` section may include the following attributes:
 * `validation_strategy` — (optional) strategy for evaluating model accuracy (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`). With `"auto"` the engine automatically picks between LOO, k-fold and train-test split based on the number of observations and features.
 * `n_folds` — (optional) number of folds for cross-validation; used only if `validation_strategy = "k_fold"`. Ignored when `validation_strategy = "auto"`.
 * `random_state` — (optional, `int` or `null`, default `42`) the engine seed. It drives the data splits (CV folds / hold-out), the model seeds (via the `ModelTrainer` and the model factory) and the TPE sampler base seed (`random_state + hpo_phase_ordinal`, so startup points do not repeat between phases). The value is recorded in the training report under the `random_state` key. `null` — a non-reproducible run: the splits are not fixed and stochastic models draw a fresh RNG at fit time; a WARNING is logged that the run is not reproducible.
+* `holdout_fraction` — (optional, `float` in `(0, 1)`, `"auto"` or `null`, default `"auto"`) the outer hold-out reserved before HPO and used only for the honest `result["holdout_score"]`; the final model is still trained on all rows. `"auto"` reserves 20% of the rows when the input has at least 100 rows and none on smaller data (the honest estimate is then the BBC-CV `result["bbc_score"]`); `null` disables it. See the `train_best_model` result format below.
 * `max_workers` — (optional) maximum number of threads/processes. If not specified, the number of CPU cores is used.
 * `parallel_mode` — (optional) parallelism mode (`"threads"` or `"processes"`). Defaults to `"threads"`.
 * `parallel_strategy` — (optional) controls parallel execution strategy. Defaults to `"algorithms"`.
@@ -683,12 +684,16 @@ Result format (`train_best_model` return value):
     "params": {...},
     "model_path": "model.pkl",
     "additional_metrics": {"r2": 0.98, "mae": 0.07, "mse": 0.009},  # only when non-empty
-    "oof_score": 0.131,          # honest OOF estimate of the final pipeline,
-                                 #   same semantics as "score" (always present
+    "oof_score": 0.123,          # final pipeline on the pooled OOF vector of the
+                                 #   HPO folds — optimistic like "score" (present
                                  #   when the OOF vector could be built)
     "n_trials_evaluated": 47,    # trials actually evaluated by the winner's HPO phase
-    "holdout_score": 0.118,      # winner on the reserved outer hold-out
-                                 #   (only when general.holdout_fraction is set)
+    "holdout_score": 0.141,      # HONEST estimate: winner on the reserved outer
+                                 #   hold-out (present when a hold-out is reserved;
+                                 #   by default — on data with >= 100 rows)
+    "bbc_score": 0.146,          # HONEST estimate without a hold-out: BBC-CV over
+                                 #   the OOF predictions of all evaluated trials
+                                 #   (by default — on data with < 100 rows)
 }
 ```
 
@@ -699,36 +704,62 @@ internal sklearn negative scorers (`neg_root_mean_squared_error` and other
 `result["score"]`. `metric` carries the user-facing name of the comparison
 metric from the configuration (`general.comparison_metric`).
 
-Honest out-of-sample estimate: `result["oof_score"]` is the **comparison
-metric computed on the final pipeline's pooled OOF predictions**
+Optimism of `score` and `oof_score`: `score` is the **best** of the HPO
+trials on the validation folds, so it is systematically optimistic ("best of
+N"); on small data the bias can be large. `result["oof_score"]` is the
+comparison metric computed on the final pipeline's pooled OOF predictions
 (the trainer's OOF channel: `oof_predictions_`). Every row is predicted by a
-fold-model that has not seen it during training — no leakage — and the value
-is expressed in the same user semantics as `score`. `score` itself is the
-**best** of the HPO trials on the same folds, so it is systematically
-optimistic ("best of N"); the optimism is `score - oof_score` for score
-metrics (R² and similar, maximized by HPO) and `oof_score - score` for error
-metrics (RMSE/MAE, minimized by HPO) — a positive value always means the
-honest estimate is worse than the best-trial score. The gap mixes the
-best-of-N selection bias of `score` with the fact that the final pipeline is
-trained on more data than any single OOF fold-model; for a fixed
-configuration `oof_score` is the honest out-of-sample estimate of the
-artifact. `n_trials_evaluated` (the winner's own COMPLETED trials;
-transferred TPE history never counts) is the honest denominator of that
-maximum; the key is omitted when the count is unknown (legacy custom tuners).
-For `train_test_split` the OOF vector covers the validation part only (the
-same limitation as the trainer's OOF channel); the key is absent when no
-valid OOF pair exists.
+fold-model that has not been trained on it, but the folds are the **same**
+folds (same method, same seed) on which the algorithm and its
+hyperparameters were selected. `oof_score` therefore carries the same
+selection bias and is **not** an honest estimate: on `k_fold`/`loo` without
+an outer hold-out it reproduces `score` exactly for pooled metrics (RMSE,
+R², …) and differs only by fold mean vs pooled value for additive ones
+(MAE). Use it as a diagnostic (e.g. residual analysis on `oof_predictions_`),
+not as a quality estimate. `n_trials_evaluated` (the winner's own COMPLETED
+trials; transferred TPE history never counts) is the denominator of the
+best-of-N maximum; the key is omitted when the count is unknown (legacy
+custom tuners). For `train_test_split` the OOF vector covers the validation
+part only (the same limitation as the trainer's OOF channel); the key is
+absent when no valid OOF pair exists.
 
-Outer hold-out: the optional `general.holdout_fraction` (default `null`,
-strictly in `(0, 1)`) reserves that fraction of the rows BEFORE
-hyperparameter optimization. The reserved rows never participate in model
+Outer hold-out — the honest estimate: `general.holdout_fraction` (default
+`"auto"`; a float strictly in `(0, 1)`, `"auto"` or `null`) reserves a
+fraction of the rows BEFORE hyperparameter optimization. `"auto"` reserves
+`0.2` of the rows when the input has at least `100` rows; on smaller data no
+hold-out is reserved and a `WARNING` states that `score`/`oof_score` are
+optimistic (set an explicit fraction to get `holdout_score` anyway, at the
+cost of a noisy estimate and fewer rows for HPO). `null` disables the
+hold-out.
+
+BBC-CV — the honest estimate without a hold-out: when no outer hold-out is
+reserved (`"auto"` on fewer than 100 rows, or `null`), `result["bbc_score"]`
+reports the Bootstrap Bias Corrected CV estimate (Tsamardinos et al., 2018)
+in the same user semantics as `score`. The HPO keeps the out-of-fold
+predictions of every completed trial of every algorithm in every HPO phase —
+all configurations the selection chose from. Each of 500 bootstrap
+resamples of the rows selects the best configuration on the in-bag rows and
+scores it on the out-of-bag rows; `bbc_score` is the mean out-of-bag score.
+No model is retrained. For R² and NRMSE the bootstrap runs on MSE / RMSE and
+the result is normalized by the variance / range of the whole target, so the
+small out-of-bag subsets do not bias the normalizer. The estimate is slightly
+conservative: the OOF predictions come from fold-models trained on a part of
+the rows, while the artifact is trained on all of them. It models the
+selection as "best comparison metric over all evaluated trials"; the
+`sanity_gate` audit and ranking are not replayed. The OOF predictions cost
+`n_trials × n_rows` floats; when the planned total (the sum of `n_trials` of
+the HPO phases × the enabled algorithms × the rows) exceeds 4,000,000 values,
+the estimate is skipped with a `WARNING`. The key is also absent for custom
+tuners that do not accept `collect_oof`. The reserved rows never participate in model
 selection and are used only to report `result["holdout_score"]` — the winner
 trained on the train part of the outer split with its best parameters. The
 final model is **still refit on all data** (train + hold-out) for the
 artifact — the reserved rows are concatenated back in `persist_artifact`, so
 the production model does not lose the hold-out fraction and `holdout_score`
 is a true out-of-sample estimate of the chosen pipeline configuration. The
-key is present only when the hold-out is configured.
+key is present only when a hold-out is reserved. With a hold-out the
+`sanity_gate` winner is retrained on all rows instead of reusing its
+pre-trained finalist.
 
 The `additional_metrics` key is a dict mapping each configured metric name to its computed value for the final model (same natural semantics as `score`).
 
@@ -856,7 +887,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 | `target` | `str` or `None` | Name of the target column. Defaults to `"target"`. |
 | `model_path_override` | `str`, `Path`, or `None` | Alternative path to save the model. |
 
-**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`, `"random_state"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`, `"random_state"` is the engine seed of the run recorded for reproducibility (`null` for a non-reproducible run). When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). `"oof_score"` is the honest out-of-sample estimate of the final pipeline — the comparison metric computed on the pooled OOF predictions (absent when no valid OOF pair exists); `"n_trials_evaluated"` is the number of trials actually evaluated by the winner's HPO phase (own COMPLETED trials; 0 for custom tuners that do not report the count). When `general.holdout_fraction` is set, `"holdout_score"` reports the comparison metric of the winner on the reserved outer hold-out (the final model is still trained on all data). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
+**Returns:** `dict[str, Any]` with keys `"algorithm"`, `"score"`, `"metric"`, `"params"`, `"model_path"`, `"random_state"`. `"score"` is the comparison metric in natural user-facing semantics (positive RMSE/MAE/MSE/NRMSE, plain R² — internal `neg_*` sklearn scorers are inverted back), `"metric"` is its user-facing name from `general.comparison_metric`, `"random_state"` is the engine seed of the run recorded for reproducibility (`null` for a non-reproducible run). When `general.additional_metrics` is configured (non-empty after deduplication and exclusion of the comparison metric), an additional key `"additional_metrics"` maps each extra metric name to its value computed for the final model (same natural semantics). `"oof_score"` is the comparison metric computed on the final pipeline's pooled OOF predictions over the HPO folds — optimistic like `"score"`, not an independent estimate (absent when no valid OOF pair exists); `"n_trials_evaluated"` is the number of trials actually evaluated by the winner's HPO phase (own COMPLETED trials; 0 for custom tuners that do not report the count). When an outer hold-out is reserved (`general.holdout_fraction`, by default `"auto"` — 20% of the rows on data with at least 100 rows), `"holdout_score"` reports the honest comparison metric of the winner on the reserved rows (the final model is still trained on all data). Without a hold-out, `"bbc_score"` reports the honest BBC-CV estimate computed from the out-of-fold predictions of all evaluated trials (absent over the memory budget or for tuners without `collect_oof`). Every select step with `strategy: "sanity_gate"` adds its own section under `sanity_gate` keyed by the phase name — see [Result keys](#result-keys); when any algorithm was disqualified (HPO failures or gate audits), the top-level `disqualified_algorithms` dict names the reasons. When the adaptive complexity guard adapted any tree/boosting range, an additional key `"complexity_guard"` is present: `{"parameters": [ ... ]}` — one "before → after" record per restricted parameter (see [Complexity Guard configuration](#complexity-guard-configuration-complexity_guard)).
 
 **Raises:** `TypeError` for unsupported config types; `RuntimeError` if no algorithm succeeds.
 

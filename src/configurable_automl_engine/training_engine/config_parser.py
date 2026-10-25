@@ -28,7 +28,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import yaml
 from pydantic import (
@@ -109,6 +109,13 @@ SanityGateMode = Literal["off", "active"]
 #: (chosen based on the metric type). Defined here so that ``SanityGateCfg``
 #: and ``select_finalists`` share one type without a circular import.
 CorridorMode = Literal["multiplicative", "additive", "auto"]
+
+#: ``general.holdout_fraction: "auto"`` reserves this fraction of the rows as
+#: the outer hold-out when the input has at least ``AUTO_HOLDOUT_MIN_ROWS``
+#: rows (so the hold-out has at least 20 rows); on smaller data no hold-out is
+#: reserved and the honest estimate is the BBC-CV ``bbc_score``.
+AUTO_HOLDOUT_FRACTION = 0.2
+AUTO_HOLDOUT_MIN_ROWS = 100
 
 #: Circuit D mode for ``_check_generalization_gap``:
 #: ``"warn"`` (default) — a circuit D violation (a finite ``gap >
@@ -1058,18 +1065,24 @@ class GeneralCfg(BaseModel):
             "WARNING is logged that the run is not reproducible."
         ),
     )
-    holdout_fraction: float | None = Field(
-        default=None,
-        gt=0.0,
-        lt=1.0,
+    holdout_fraction: (
+        Annotated[float, Field(gt=0.0, lt=1.0)] | Literal["auto"] | None
+    ) = Field(
+        default="auto",
         description=(
-            "Optional fraction of rows (in (0, 1)) reserved as an outer "
-            "hold-out BEFORE hyperparameter optimization: these rows never "
-            "participate in model selection and are used only to report the "
-            'honest out-of-sample estimate result["holdout_score"] of the '
-            "winner. The final model is still trained on ALL data (the "
-            "hold-out rows are included in the final fit). None (default) — "
-            "no outer hold-out is reserved and the key is not reported."
+            "Fraction of rows (in (0, 1)) reserved as an outer hold-out "
+            "BEFORE hyperparameter optimization: these rows never participate "
+            "in model selection and are used only to report the honest "
+            'out-of-sample estimate result["holdout_score"] of the winner. '
+            "The final model is still trained on ALL data (the hold-out rows "
+            "are included in the final fit). 'auto' (default) — reserve "
+            f"{AUTO_HOLDOUT_FRACTION:g} of the rows when the input has at "
+            f"least {AUTO_HOLDOUT_MIN_ROWS} rows; on smaller data no hold-out "
+            "is reserved. None — no outer hold-out is reserved and the key "
+            'is not reported. Without a hold-out result["score"] and '
+            'result["oof_score"] are computed on the folds that selected the '
+            "algorithm and hyperparameters and are optimistic; the honest "
+            'estimate is then the bias-corrected (BBC-CV) result["bbc_score"].'
         ),
     )
     categorical_encoding: EncodingStrategy = Field(
