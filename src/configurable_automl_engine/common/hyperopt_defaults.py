@@ -285,7 +285,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "alpha": SearchSpaceEntry.model_validate([1e-4, 10.0, "float_log"]),
     },
     "ridge": {
-        "alpha": SearchSpaceEntry.model_validate([1e-4, 10.0, "float_log"]),
+        # L2 penalty acts on the sum of squared residuals (not the mean), so
+        # the useful alpha grows with n: on standardized features the optimum
+        # is routinely 10–1000 (e.g. ~22 on sklearn's diabetes). The upper
+        # bound of 10 used to clamp the search at the boundary.
+        "alpha": SearchSpaceEntry.model_validate([1e-3, 1e3, "float_log"]),
     },
     "decision_tree": {
         "max_depth": SearchSpaceEntry.model_validate([2, 32, "int"]),
@@ -295,12 +299,16 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         "n_estimators": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
         "max_depth": SearchSpaceEntry.model_validate([2, 32, "int"]),
         "min_samples_leaf": SearchSpaceEntry.model_validate([1, 10, "int"]),
+        # Fraction of features per split — the main decorrelation knob of a
+        # forest. The complexity guard raises the lower bound to 1 / p.
+        "max_features": SearchSpaceEntry.model_validate([0.1, 1.0, "float"]),
         "bootstrap": SearchSpaceEntry.model_validate([[True, False], "categorical"]),
     },
     "extra_trees": {
         "n_estimators": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
         "max_depth": SearchSpaceEntry.model_validate([2, 32, "int"]),
         "min_samples_leaf": SearchSpaceEntry.model_validate([1, 10, "int"]),
+        "max_features": SearchSpaceEntry.model_validate([0.1, 1.0, "float"]),
     },
     "gradient_boosting": {
         "n_estimators": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
@@ -315,7 +323,11 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
         # on large arguments) and 'poly' (prone to degeneracy on small
         # samples) — HPO keeps only the reliable rbf/linear kernels.
         "kernel": SearchSpaceEntry.model_validate([["rbf", "linear"], "categorical"]),
-        "gamma": SearchSpaceEntry.model_validate([["scale", "auto"], "categorical"]),
+        # A numeric RBF width instead of the "scale"/"auto" heuristics: on
+        # standardized features (SVR is scale-sensitive) "scale" is ~1 / p,
+        # which this range covers with several decades on both sides.
+        # Ignored by the linear kernel.
+        "gamma": SearchSpaceEntry.model_validate([1e-4, 10.0, "float_log"]),
     },
     "xgboosting": {
         "n_estimators": SearchSpaceEntry.model_validate([100, 800, "int", 100]),

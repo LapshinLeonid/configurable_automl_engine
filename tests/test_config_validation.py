@@ -768,8 +768,27 @@ def test_default_svr_gamma_stays_in_space():
     svr_space = DEFAULT_SPACES["svr"]
     assert "gamma" in svr_space
     gamma_entry = svr_space["gamma"]
-    assert gamma_entry.dist_type == "categorical"
-    assert gamma_entry.config.options == ["scale", "auto"]
+    # A numeric RBF width (not just the "scale"/"auto" heuristics) that
+    # covers ~1 / p of standardized features on both sides.
+    assert gamma_entry.dist_type == "float_log"
+    assert gamma_entry.low <= 1e-3 and gamma_entry.high >= 1.0
+
+
+def test_default_spaces_cover_common_optima():
+    """Default spaces do not clamp typical optima at a boundary.
+
+    Ridge alpha on standardized data is often 10–1000 (~22 on diabetes);
+    forests search max_features as a fraction of the features.
+    """
+    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+
+    ridge_alpha = DEFAULT_SPACES["ridge"]["alpha"]
+    assert ridge_alpha.dist_type == "float_log"
+    assert ridge_alpha.high >= 1e3
+    for algo in ("random_forest", "extra_trees"):
+        max_features = DEFAULT_SPACES[algo]["max_features"]
+        assert max_features.dist_type == "float"
+        assert 0.0 < max_features.low < max_features.high <= 1.0
 
 
 # 6. Test for: _check_algorithm_dependencies (checking installed packages)

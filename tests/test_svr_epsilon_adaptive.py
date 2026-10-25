@@ -344,6 +344,9 @@ def test_tuner_svr_initial_params_epsilon_valid_in_adaptive_range(monkeypatch):
     assert low <= prev_epsilon <= high
     assert seen[0] == prev_epsilon  # the first trial is the enqueued value
     assert low <= params["epsilon"] <= high
+    # The legacy categorical gamma="scale" does not fit the numeric gamma
+    # range: it is dropped from the enqueued trial instead of failing it.
+    assert isinstance(params["gamma"], float)
 
 
 def test_tuner_svr_constant_y_with_user_epsilon_works(monkeypatch):
