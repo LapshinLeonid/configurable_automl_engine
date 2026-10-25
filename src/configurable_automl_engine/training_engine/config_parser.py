@@ -113,7 +113,7 @@ CorridorMode = Literal["multiplicative", "additive", "auto"]
 #: ``general.holdout_fraction: "auto"`` reserves this fraction of the rows as
 #: the outer hold-out when the input has at least ``AUTO_HOLDOUT_MIN_ROWS``
 #: rows (so the hold-out has at least 20 rows); on smaller data no hold-out is
-#: reserved and a WARNING states that ``score``/``oof_score`` are optimistic.
+#: reserved and the honest estimate is the BBC-CV ``bbc_score``.
 AUTO_HOLDOUT_FRACTION = 0.2
 AUTO_HOLDOUT_MIN_ROWS = 100
 
@@ -1078,11 +1078,11 @@ class GeneralCfg(BaseModel):
             "are included in the final fit). 'auto' (default) — reserve "
             f"{AUTO_HOLDOUT_FRACTION:g} of the rows when the input has at "
             f"least {AUTO_HOLDOUT_MIN_ROWS} rows; on smaller data no hold-out "
-            "is reserved and a WARNING is logged. None — no outer hold-out "
-            "is reserved and the key is not reported. Without a hold-out "
-            'there is no honest estimate: result["score"] and '
+            "is reserved. None — no outer hold-out is reserved and the key "
+            'is not reported. Without a hold-out result["score"] and '
             'result["oof_score"] are computed on the folds that selected the '
-            "algorithm and hyperparameters and are optimistic."
+            "algorithm and hyperparameters and are optimistic; the honest "
+            'estimate is then the bias-corrected (BBC-CV) result["bbc_score"].'
         ),
     )
     categorical_encoding: EncodingStrategy = Field(

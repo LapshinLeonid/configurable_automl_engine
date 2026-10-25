@@ -320,21 +320,26 @@ def test_holdout_fraction_auto_resolution(n_rows, expected_holdout):
         assert len(prepared.X) == n_rows - expected_holdout
 
 
-def test_holdout_fraction_auto_warns_on_small_data(caplog):
-    """'auto' on small data warns that score/oof_score are optimistic."""
+def test_holdout_fraction_auto_logs_on_small_data(caplog):
+    """'auto' on small data says score/oof_score are optimistic and points
+    to bbc_score."""
     df = _noisy_regression(n=40, p=4, seed=5)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         prepare_dataset(
             Config.model_validate(_cfg(holdout_fraction="auto")), df, "target"
         )
     messages = [r.getMessage() for r in caplog.records]
-    assert any("no outer hold-out is reserved" in m and "optimistic" in m for m in messages)
+    assert any(
+        "no outer hold-out is reserved" in m and "optimistic" in m and "bbc_score" in m
+        for m in messages
+    )
 
 
-def test_holdout_fraction_none_disables_without_warning(caplog):
-    """An explicit None disables the hold-out on any N and does not warn."""
+def test_holdout_fraction_none_disables_without_log(caplog):
+    """An explicit None disables the hold-out on any N without the 'auto'
+    record."""
     df = _noisy_regression(n=250, p=4, seed=5)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         prepared = prepare_dataset(
             Config.model_validate(_cfg(holdout_fraction=None)), df, "target"
         )
