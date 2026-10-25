@@ -1010,7 +1010,7 @@ class GeneralCfg(BaseModel):
             reproducible (a WARNING is logged).
         categorical_encoding (Literal['one_hot', 'ordinal']): Encoding strategy
             for categorical features. Default is 'one_hot'.
-        parallel_strategy (str): Parallelization level (by algorithms/folds).
+        parallel_strategy (str): Parallelization level (only by algorithms).
         max_workers (int | None): Limit on threads or processes.
         parallel_mode (str): Technical execution mode ('threads' or 'processes').
         feature_selection (FeatureSelectionCfg): Feature space reduction

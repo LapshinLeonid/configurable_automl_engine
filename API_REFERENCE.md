@@ -1,5 +1,7 @@
 # User Guide & API Reference
 
+The library solves **tabular regression only**: the target must be numeric.
+
 This document starts with the shortest path to a trained model and then goes
 deeper. You do not need to read past [Quick start](#quick-start) and
 [How the engine works](#how-the-engine-works) to use the library: every other
@@ -24,110 +26,71 @@ and are listed under "Validation rules" in each section below.
 
 # Quick start
 
-The same example as in the README and [example.py](example.py):
+The same example as in the README and [example.py](example.py). It needs only
+the basic installation (no optional extras):
 
 ```python
 from sklearn.datasets import load_diabetes
 
 import configurable_automl_engine as caml
 
-data = load_diabetes(as_frame=True)
-df = data.frame
+df = load_diabetes(as_frame=True).frame
 
 config = {
     "general": {
         "comparison_metric": "r2",
-        "phases": [
-            {"n_trials": 100, "action": "all_algorithms"},
-            {
-                "name": "final_select",
-                "n_trials": 1,
-                "action": "select",
-                "strategy": "cv_best",
-                "output": "winner"
-            }
-        ],
-        "path_to_model": "diabetes_model.pkl"
+        "path_to_model": "diabetes_model.pkl",
     },
+    # {} = use the built-in search space of the algorithm
     "algorithms": {
-        "random_forest": {
-            "enable": True,
-            "limit_hyperparameters": True,
-            "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
-        },
-        "ridge": {
-            "enable": True,
-            "limit_hyperparameters": True,
-            "hyperparameters": {"alpha": [0.1, 1.0]}
-        },
-        "xgboosting": {
-            "enable": True,
-            "limit_hyperparameters": True,
-            "hyperparameters": {
-                "n_estimators": [100, 1000],
-                "max_depth": [3, 10],
-                "learning_rate": [0.01, 0.3],
-                "subsample": [0.5, 1.0]
-            }
-        },
-    }
+        "ridge": {},
+        "random_forest": {},
+    },
 }
 
-results = caml.train_best_model(config=config, df=df, target='target')
+results = caml.train_best_model(config=config, df=df, target="target")
 
-print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+print(f"Winner: {results['algorithm']}")
+print(f"Hold-out R2 (honest estimate): {results['holdout_score']:.4f}")
 ```
 
 What this config does:
 
-* `phases` — the pipeline: first 100 tuning attempts (trials) for every
-  algorithm (`all_algorithms`), then a `select` step that keeps the algorithm
-  with the best validation score (`cv_best`) as the single `winner`.
+* `algorithms` — try Ridge and a random forest; `{}` means "use the built-in
+  search space".
 * `comparison_metric: "r2"` — "best" means the highest R².
-* `limit_hyperparameters: true` + `hyperparameters` — only the listed
-  parameters are tuned, within the given `[low, high]` ranges; all other
-  parameters keep the estimator defaults.
+* `phases` is omitted, so the default pipeline runs: 50 tuning attempts
+  (trials) per algorithm, then the algorithm with the best validation score
+  (`cv_best`) is the `winner` (see [How the engine works](#how-the-engine-works)).
+* The dataset has 442 rows, so the default `holdout_fraction: "auto"` reserves
+  20 % of them before tuning; `holdout_score` is the winner's R² on these rows —
+  the number to trust. `score` is optimistic (see [Training results](#training-results)).
 * `path_to_model` — the winner is trained on all rows and saved there.
-* `xgboosting` needs `pip install "configurable-automl-engine[xgboost]"`.
 
 The same config as YAML (pass the file path as `config=`):
 
 ```yaml
 general:
   comparison_metric: "r2"
-  phases:
-    - {n_trials: 100, action: "all_algorithms"}
-    - {name: "final_select", n_trials: 1, action: "select", strategy: "cv_best", output: "winner"}
   path_to_model: "diabetes_model.pkl"
 algorithms:
-  random_forest:
-    enable: true
-    limit_hyperparameters: true
-    hyperparameters: {n_estimators: [10, 500], max_depth: [3, 20]}
-  ridge:
-    enable: true
-    limit_hyperparameters: true
-    hyperparameters: {alpha: [0.1, 1.0]}
-  xgboosting:
-    enable: true
-    limit_hyperparameters: true
-    hyperparameters:
-      n_estimators: [100, 1000]
-      max_depth: [3, 10]
-      learning_rate: [0.01, 0.3]
-      subsample: [0.5, 1.0]
+  ridge: {}
+  random_forest: {}
 ```
 
-Every setting above has a default, so it can be shortened. The smallest valid
-config lists only the algorithms — `general` falls back to R², 50 trials per
-algorithm and the `cv_best` winner, and `{}` means "use the built-in search
-space":
+Every setting has a default, so even `general` can be dropped. The smallest
+valid config lists only the algorithms:
 
 ```yaml
 algorithms:
   ridge: {}
   random_forest: {}
 ```
+
+To add XGBoost, install `pip install "configurable-automl-engine[xgboost]"`
+and add `xgboosting: {}`; without the package a config that enables it is
+rejected at validation. To tune only selected parameters, see
+[Recipes](#recipes) — prefer wide ranges: a narrow one can cut off the optimum.
 
 To use the Sanity Gate or a multi-step search, see [Recipes](#recipes).
 
@@ -901,7 +864,7 @@ Supported algorithms:
 * `"nearest_neighbors_regression"`
 * `"svr"`
 * `"ardregression"`
-* `"glm"`
+* `"glm"` (the same `TweedieRegressor` as `"tweedieregressor"`)
 * `"ridge"`
 * `"lasso"`
 * `"xgboosting"`
@@ -1139,7 +1102,7 @@ Creates a scikit-learn compatible regressor instance by algorithm name.
 
 **Raises:** `TypeError` if `algorithm` is not a string; `ValueError` for unknown algorithms; `ImportError` for missing optional dependencies.
 
-**Notes:** Automatically cleans and remaps hyperparameters via `clean_hyperparameters()`. Sets `max_iter=10000` for SVR. Sets `kernel=RBF(1.0)` for GaussianProcessRegressor by default. Injects a fixed `random_state=42` into stochastic estimators (trees, forests, boosting, randomized linear models, XGBoost) unless the caller set `random_state` explicitly — an explicit value always wins. An explicit `random_state=None` (a truly random fit) is respected and produces a WARNING that the fit is not reproducible.
+**Notes:** Automatically cleans and remaps hyperparameters via `clean_hyperparameters()`: legacy names are remapped and parameters the estimator does not accept are **silently dropped** (unlike the config path, where unknown names are rejected at validation). Sets `max_iter=10000` for SVR. Sets `kernel=RBF(1.0)` for GaussianProcessRegressor by default. Injects a fixed `random_state=42` into stochastic estimators (trees, forests, boosting, randomized linear models, XGBoost) unless the caller set `random_state` explicitly — an explicit value always wins. An explicit `random_state=None` (a truly random fit) is respected and produces a WARNING that the fit is not reproducible.
 
 ---
 
