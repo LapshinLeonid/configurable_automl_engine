@@ -228,6 +228,10 @@ class PruningCfg(BaseModel):
 
 
 # ─────────────────── phases ──────────────────── #
+#: Default number of HPO trials of a phase when ``n_trials`` is omitted.
+DEFAULT_PHASE_N_TRIALS = 50
+
+
 class HPOPhaseCfg(BaseModel):
     """Configuration of a single pipeline step.
 
@@ -240,8 +244,8 @@ class HPOPhaseCfg(BaseModel):
     Attributes:
         name (str): Unique phase identifier.
         n_trials (int): Iteration (trial) limit for HPO phases
-            (``all_algorithms`` / ``refine``). Ignored for ``select``,
-            but the field remains mandatory for schema uniformity.
+            (``all_algorithms`` / ``refine``), default
+            ``DEFAULT_PHASE_N_TRIALS``. Ignored for ``select``.
         action (str): Action type: 'all_algorithms' (search across all
             algorithms), 'refine' (fine-tune the whole input set
             with warm-start) or 'select' (selection step). The legacy value
@@ -269,6 +273,7 @@ class HPOPhaseCfg(BaseModel):
         ),
     )
     n_trials: int = Field(
+        default=DEFAULT_PHASE_N_TRIALS,
         ge=1,
         description=(
             "Number of iterations (trials) for HPO phases (all_algorithms / "
@@ -954,6 +959,24 @@ class ComplexityGuardCfg(BaseModel):
 
 
 # ─────────────────── general ─────────────────── #
+def _default_phases() -> list[HPOPhaseCfg]:
+    """Build the default pipeline used when ``general.phases`` is omitted.
+
+    Returns:
+        list[HPOPhaseCfg]: An ``all_algorithms`` HPO phase followed by a
+        terminal ``select`` step picking the best cross-validation score.
+    """
+    return [
+        HPOPhaseCfg(name="search", action="all_algorithms"),
+        HPOPhaseCfg(
+            name="final_select",
+            action="select",
+            strategy="cv_best",
+            output="winner",
+        ),
+    ]
+
+
 class GeneralCfg(BaseModel):
     """General settings of the AutoML process, validation, and parallelism.
 
@@ -971,6 +994,7 @@ class GeneralCfg(BaseModel):
         phases (List[HPOPhaseCfg]): Sequence of pipeline steps:
             HPO phases ('all_algorithms' / 'refine') and explicit selection
             steps ('select'); the last phase must be a select with output: winner.
+            Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.
         validation_strategy (ValidationStrategy): Evaluation method (k-fold or hold-out).
         n_folds (int): Number of splits for cross-validation.
         random_state (int | None): The engine seed driving data splits, model
@@ -1029,7 +1053,13 @@ class GeneralCfg(BaseModel):
         ),
     )
     phases: list[HPOPhaseCfg] = Field(
-        ..., description="List of sequential hyperparameter optimization phases"
+        default_factory=_default_phases,
+        description=(
+            "List of sequential pipeline steps. Default: one HPO phase over "
+            "all algorithms followed by picking the best cross-validation "
+            "score: [{action: all_algorithms, n_trials: 50}, "
+            "{action: select, strategy: cv_best, output: winner}]"
+        ),
     )
     validation_strategy: ValidationStrategy = Field(
         default=ValidationStrategy.auto,
@@ -1730,7 +1760,8 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     general: GeneralCfg = Field(
-        ..., description="General experiment and validation settings"
+        default_factory=GeneralCfg,
+        description="General experiment and validation settings",
     )
     oversampling: OversamplingCfg = Field(
         default=OversamplingCfg(), description="Data balancing settings"
