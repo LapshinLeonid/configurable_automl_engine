@@ -285,10 +285,12 @@ def test_prepare_dataset_resolves_kfold_fold_count():
 
 
 def test_prepare_dataset_resolves_auto_to_kfold():
-    # auto on 100x3: choose_validation_method selects kfold with k=5
-    cfg = Config.model_validate(
-        _cfg_dict(phases=[], validation_strategy="auto", n_folds=5)
-    )
+    # auto on 100x3: choose_validation_method selects kfold with k=5. The
+    # outer hold-out is disabled: 'auto' would reserve 20 of the 100 rows and
+    # the validation would be resolved on the remaining 80.
+    raw = _cfg_dict(phases=[], validation_strategy="auto", n_folds=5)
+    raw["general"]["holdout_fraction"] = None
+    cfg = Config.model_validate(raw)
     prepared = prepare_dataset(cfg, _df(n_rows=100, n_features=3), "target")
     assert prepared.resolved_validation == ValidationStrategy.k_fold
     assert prepared.resolved_n_folds == 5

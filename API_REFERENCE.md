@@ -237,12 +237,16 @@ general:
   task_timeout: 600      # seconds for one algorithm
 ```
 
-**An honest final estimate on untouched rows.** Reserve 20 % of the rows that
-never take part in model selection; the result then contains `holdout_score`:
+**An honest final estimate on untouched rows.** By default
+(`holdout_fraction: "auto"`) 20 % of the rows are reserved before tuning when
+the data has at least 100 rows, and the result contains `holdout_score`. To
+reserve a hold-out on smaller data too, or a different share, set it
+explicitly; `null` turns it off (the result then has `bbc_score` instead, see
+[Training results](#training-results)):
 
 ```yaml
 general:
-  holdout_fraction: 0.2
+  holdout_fraction: 0.3
 ```
 
 **Extra metrics in the report.**
@@ -280,7 +284,7 @@ A config has three top-level sections. Only `algorithms` is required:
 |--------|---------|-------------|
 | `validation_strategy` | `"auto"` | `"train_test_split"`, `"k_fold"`, `"loo"` (leave-one-out) or `"auto"`. `"auto"` picks between LOO, k-fold and a hold-out split from the number of rows and features. |
 | `n_folds` | `5` | Number of folds; used only with `"k_fold"` (ignored with `"auto"`). |
-| `holdout_fraction` | `null` | Fraction of rows, strictly in `(0, 1)`, reserved **before** tuning for an independent final estimate (`result["holdout_score"]`). The final model is still trained on all rows. |
+| `holdout_fraction` | `"auto"` | Rows reserved **before** tuning for an honest final estimate (`result["holdout_score"]`): a fraction strictly in `(0, 1)`, `"auto"` or `null`. `"auto"` reserves 20 % when the data has at least 100 rows and nothing on smaller data (a WARNING then says that `score`/`oof_score` are optimistic, and `result["bbc_score"]` is the honest estimate). `null` disables the hold-out. The final model is still trained on all rows. |
 | `random_state` | `42` | Seed of the data splits, the models and the tuner — the same seed gives the same result. `null` makes the run non-reproducible (a WARNING is logged). Recorded as `result["random_state"]`. |
 
 **Parallelism and time limits**
@@ -649,7 +653,7 @@ steps work only with what it kept.
 | | `output: "winner"` | `output: "top_k"` | `output: "pool"` |
 |---|---|---|---|
 | `strategy: "cv_best"` — rank by validation score | The best candidate (ties: the order of `algorithms` in the config). Ends the pipeline. | The first `k` candidates. | Every candidate close to the leader (see [shortlist](#how-the-sanity-gate-works)), ranked by validation score, without the extra checks. |
-| `strategy: "sanity_gate"` — validation score + checks | The best candidate that passes the [checks](#how-the-sanity-gate-works). Ends the pipeline; the model trained during the checks is reused as the final model. | The first `k` of the ranking: candidates that pass the checks (by `RMSE_oof`), then — only if fewer than `k` pass — the "least bad" rejected ones. | Every candidate that passes the checks (all finalists, "least bad" first, if none pass). |
+| `strategy: "sanity_gate"` — validation score + checks | The best candidate that passes the [checks](#how-the-sanity-gate-works). Ends the pipeline; the model trained during the checks is reused as the final model (when a hold-out is reserved, the winner is retrained on all rows instead). | The first `k` of the ranking: candidates that pass the checks (by `RMSE_oof`), then — only if fewer than `k` pass — the "least bad" rejected ones. | Every candidate that passes the checks (all finalists, "least bad" first, if none pass). |
 
 * Select steps run one after another, never in parallel.
 * A select step with nothing to rank raises `RuntimeError`.
@@ -996,11 +1000,12 @@ Gaussian noise injection is **not a separate algorithm** — it is enabled with 
     "params": {...},               # the winner's hyperparameters
     "model_path": "model.pkl",     # where the trained model was saved
     "random_state": 42,            # seed of the run (None = not reproducible)
-    "oof_score": 0.131,            # honest estimate of the final pipeline (see below)
+    "oof_score": 0.123,            # diagnostic, optimistic like "score" (see below)
     "n_trials_evaluated": 47,      # trials behind "score"
     # present only in some runs:
     "additional_metrics": {"r2": 0.98, "mae": 0.07},   # general.additional_metrics
-    "holdout_score": 0.118,        # general.holdout_fraction
+    "holdout_score": 0.141,        # HONEST estimate on the reserved rows (>= 100 rows by default)
+    "bbc_score": 0.146,            # HONEST estimate when no hold-out is reserved
     "sanity_gate": {...},          # Sanity Gate select steps, by step name
     "disqualified_algorithms": {"svr": "reason ..."},
     "complexity_guard": {"parameters": [...]},
@@ -1014,26 +1019,48 @@ Gaussian noise injection is **not a separate algorithm** — it is enabled with 
 | `metric` | always | The metric name from `general.comparison_metric`. |
 | `model_path` | always | Path of the saved model. |
 | `random_state` | always | Seed of the run; `None` for a non-reproducible run. |
-| `oof_score` | when OOF predictions exist | The same metric computed on the final pipeline's out-of-fold predictions. See below. |
+| `oof_score` | when OOF predictions exist | The same metric on the final pipeline's out-of-fold predictions. A diagnostic, **not** an honest estimate — see below. |
 | `n_trials_evaluated` | when known | Completed trials of the winner in the step that produced `score`. |
 | `additional_metrics` | `general.additional_metrics` is non-empty | `{metric: value}` for the final model, same form as `score`. |
-| `holdout_score` | `general.holdout_fraction` is set | The winner's metric on the rows reserved before tuning. |
+| `holdout_score` | a hold-out is reserved (by default — data with ≥ 100 rows) | **Honest estimate**: the winner's metric on the rows reserved before tuning. |
+| `bbc_score` | no hold-out is reserved (by default — data with < 100 rows, or `holdout_fraction: null`) | **Honest estimate** without a hold-out: BBC-CV over all evaluated trials, see below. Absent over the memory budget or for custom tuners without `collect_oof`. |
 | `sanity_gate` | at least one Sanity Gate select step | Per-step report, see [Sanity Gate report](#sanity-gate-report). |
 | `disqualified_algorithms` | something was disqualified | `{algorithm: reason}` — failures during tuning, a target that does not fit a GLM, or a Sanity Gate rejection. |
 | `complexity_guard` | the guard changed a search range | One "before → after" record per changed parameter, see [Complexity guard](#complexity-guard-configuration-complexity_guard). |
 
-**`score` vs `oof_score`.** `score` is the best of many trials measured on the
-same folds, so it is slightly optimistic. `oof_score` re-measures the final
-pipeline: every row is predicted by a model that did not see it. The
-difference (`score − oof_score` for R²-like metrics, `oof_score − score` for
-errors) is how optimistic `score` is; a positive value means the honest
-estimate is worse. `n_trials_evaluated` is the "N" in "best of N". With
-`train_test_split` only the hold-out rows have OOF predictions.
+**Which number to trust.** `score` is the best of many trials measured on the
+validation folds, so it is optimistic ("best of N"; `n_trials_evaluated` is
+the N), and on small data the bias can be large. `oof_score` is computed on
+the **same** folds that were used to choose the algorithm and its parameters,
+so it carries the same bias: on `k_fold`/`loo` without a hold-out it equals
+`score` for pooled metrics (RMSE, R², …) and differs only slightly for
+additive ones (MAE). Use it as a diagnostic (for example residual analysis on
+`oof_predictions_`), not as a quality estimate. With `train_test_split` only
+the validation rows have OOF predictions. The honest estimate is
+`holdout_score` or, without a hold-out, `bbc_score`.
 
-**`holdout_score`.** With `general.holdout_fraction` the reserved rows never
+**`holdout_score`.** The rows reserved by `general.holdout_fraction` never
 take part in tuning or selection. `holdout_score` is the winner (trained on
 the remaining rows with its best parameters) measured on them. The saved
-model is then trained on **all** rows, including the reserved ones.
+model is then trained on **all** rows, including the reserved ones. With the
+default `"auto"` a hold-out is reserved only on data with at least 100 rows;
+an explicit fraction reserves one on smaller data too, at the cost of a noisy
+estimate and fewer rows for tuning.
+
+**`bbc_score`.** Without a hold-out the engine reports the Bootstrap Bias
+Corrected CV estimate (Tsamardinos et al., 2018), in the same form as
+`score`. During tuning it keeps the out-of-fold predictions of every
+completed trial of every algorithm in every search step — all the
+configurations the selection chose from. In each of 500 bootstrap resamples
+of the rows, the best configuration is picked on the in-bag rows and scored on
+the out-of-bag rows; `bbc_score` is the mean out-of-bag score. No model is
+retrained. For R² and NRMSE the bootstrap runs on MSE / RMSE and is normalized
+by the variance / range of the whole target. The estimate is slightly
+conservative (fold models see fewer rows than the final model) and models the
+selection as "best comparison metric over all trials" — the Sanity Gate is not
+replayed. Storing the predictions costs `n_trials × n_rows` values; when the
+planned total (sum of `n_trials` of the search steps × enabled algorithms ×
+rows) exceeds 4,000,000, the estimate is skipped with a WARNING.
 
 # Python API
 
