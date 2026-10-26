@@ -206,10 +206,16 @@ def test_remap_legacy_param_names_renames_ard_n_iter():
     assert raw == {"n_iter": 500, "tol": 1e-4}
 
 
-def test_remap_legacy_param_names_alias_resolution():
-    """The 'ard' alias resolves to ardregression for the remap."""
+def test_remap_legacy_param_names_case_insensitive():
+    """The algorithm name is matched case-insensitively for the remap."""
     raw = {"n_iter": 300}
-    assert remap_legacy_param_names("ard", raw) == {"max_iter": 300}
+    assert remap_legacy_param_names("ARDRegression", raw) == {"max_iter": 300}
+
+
+def test_remap_legacy_param_names_alias_not_resolved():
+    """Short aliases are not supported: 'ard' gets no legacy remap."""
+    raw = {"n_iter": 300}
+    assert remap_legacy_param_names("ard", raw) == {"n_iter": 300}
 
 
 def test_remap_legacy_param_names_modern_key_wins():
@@ -254,9 +260,8 @@ def test_create_model_import_error_for_missing_package():
         mocked_factory.__contains__.return_value = True
         mocked_factory.__getitem__.return_value = None
 
-        # Try to create a model through the 'xgboost' alias
         with pytest.raises(ImportError, match="requires an additional package"):
-            create_model("xgboost")
+            create_model("xgboosting")
 
 
 def test_create_model_unknown_algorithm():
@@ -267,11 +272,23 @@ def test_create_model_unknown_algorithm():
         create_model("unknown_model")
 
 
+@pytest.mark.parametrize("alias", ["rf", "knn", "gpr", "ard", "xgboost", "isotonic"])
+def test_create_model_rejects_short_aliases(alias):
+    """Short aliases are not supported: only the full registry names work."""
+    with pytest.raises(ValueError, match="Unknown algorithm"):
+        create_model(alias)
+
+
+def test_create_model_name_is_case_insensitive():
+    """The full algorithm name is matched case-insensitively."""
+    assert type(create_model("Random_Forest")) is type(create_model("random_forest"))
+
+
 def test_create_model_gpr_default_kernel():
     """
     Verify the specific logic for GaussianProcessRegressor.
     """
-    model = create_model("gpr")
+    model = create_model("gaussian_process_regression")
     # Verify the RBF kernel was set by default
     assert hasattr(model, "kernel")
     # In sklearn GPR, the kernel is kept in the parameters after initialization
@@ -286,7 +303,7 @@ def test_create_model_gpr_default_kernel_has_amplitude_and_noise():
     predictor, while GPR is one of the most suitable models on small
     samples and provides prediction intervals.
     """
-    model = create_model("gpr")
+    model = create_model("gaussian_process_regression")
     kernel = model.get_params()["kernel"]
     kernel_str = str(kernel)
     # amplitude * base + white noise: ConstantKernel in the Product,
@@ -301,7 +318,7 @@ def test_create_model_gpr_defaults_normalize_and_restarts():
     are part of the default configuration, so the model is not a "mean
     predictor" and reproducible across runs.
     """
-    model = create_model("gpr")
+    model = create_model("gaussian_process_regression")
     assert model.normalize_y is True
     assert model.n_restarts_optimizer >= 1
     assert model.random_state is not None
@@ -310,7 +327,7 @@ def test_create_model_gpr_defaults_normalize_and_restarts():
 @pytest.mark.parametrize("kernel_type", ["rbf", "matern", "rational_quadratic"])
 def test_create_model_gpr_kernel_type(kernel_type):
     """kernel_type selects the GPR kernel family (rbf/matern/rational_quadratic)."""
-    model = create_model("gpr", kernel_type=kernel_type)
+    model = create_model("gaussian_process_regression", kernel_type=kernel_type)
     kernel = model.get_params()["kernel"]
     kernel_str = str(kernel)
     if kernel_type == "rbf":
@@ -329,7 +346,7 @@ def test_create_model_gpr_kernel_type(kernel_type):
 
 def test_create_model_gpr_kernel_type_not_in_params():
     """kernel_type is a tuner-only hint and never a model parameter."""
-    model = create_model("gpr", kernel_type="matern")
+    model = create_model("gaussian_process_regression", kernel_type="matern")
     assert "kernel_type" not in model.get_params()
 
 
@@ -369,17 +386,17 @@ def test_get_allowed_hyperparameters_isotonic_feature_index_included():
     assert "increasing" in allowed
     assert "out_of_bounds" in allowed
 
-    alias_allowed = get_allowed_hyperparameters("isotonic")
-    assert "feature_index" in alias_allowed
+
+def test_get_allowed_hyperparameters_aliases_unknown():
+    """Short aliases are not resolved: they are unknown algorithms (None)."""
+    assert get_allowed_hyperparameters("rf") is None
+    assert get_allowed_hyperparameters("isotonic") is None
 
 
-def test_get_allowed_hyperparameters_alias_resolution():
-    """Algorithm aliases give the same set as the canonical name."""
-    assert get_allowed_hyperparameters("rf") == get_allowed_hyperparameters(
-        "random_forest"
-    )
-    assert get_allowed_hyperparameters("xgboost") == get_allowed_hyperparameters(
-        "xgboosting"
+def test_get_allowed_hyperparameters_case_insensitive():
+    """The full algorithm name is matched case-insensitively."""
+    assert get_allowed_hyperparameters("Random_Forest") == (
+        get_allowed_hyperparameters("random_forest")
     )
 
 
@@ -466,7 +483,7 @@ def test_create_model_estimators_without_random_state_unaffected():
     ``random_state`` parameter — the seeding must not add one (and must not
     break the constructor).
     """
-    model = create_model("knn", n_neighbors=5)
+    model = create_model("nearest_neighbors_regression", n_neighbors=5)
     assert model.get_params(deep=False).get("random_state") is None
     model = create_model("svr", C=1.0)
     assert model.get_params(deep=False).get("random_state") is None

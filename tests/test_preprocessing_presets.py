@@ -84,7 +84,7 @@ def test_missing_indicators_disabled_for_univariate_algorithms():
     """Strictly univariate algorithms (isotonic) are incompatible with missing-value
     indicator columns (the input contract is exactly one feature)."""
     assert requires_missing_indicator("isotonic_regression") is False
-    assert requires_missing_indicator("isotonic") is False
+    assert requires_missing_indicator("isotonic_regression") is False
 
 
 def test_missing_indicators_enabled_for_all_other_algorithms():
@@ -148,7 +148,7 @@ def test_different_classes_different_presets():
 # ──────────────────────────────────────────────────────────────────────────
 def test_partial_override_keeps_automatic_values():
     """A partial override changes only the specified fields."""
-    preset = resolve_preprocessing_preset("rf", {"scaling": "standard"})
+    preset = resolve_preprocessing_preset("random_forest", {"scaling": "standard"})
     assert preset.algorithm_class == AlgorithmClass.TREES
     assert preset.scaling == "standard"  # overridden
     assert preset.imputation_strategy == "median"  # left as the automatic choice
@@ -221,18 +221,16 @@ def test_supported_but_unregistered_algorithm_uses_default(monkeypatch):
     assert preset.scaling == "standard"
 
 
-def test_aliases_are_resolved():
-    """Algorithm aliases are resolved to canonical names."""
-    assert resolve_preprocessing_preset("rf") == resolve_preprocessing_preset(
-        "random_forest"
-    )
-    assert resolve_preprocessing_preset("xgboost") == resolve_preprocessing_preset(
-        "xgboosting"
-    )
-    assert resolve_preprocessing_preset("knn") == (
-        resolve_preprocessing_preset("nearest_neighbors_regression")
-    )
-    assert resolve_preprocessing_preset("ISOTONIC") == (
+@pytest.mark.parametrize("alias", ["rf", "xgboost", "knn", "isotonic"])
+def test_short_aliases_are_rejected(alias):
+    """Short aliases are not supported: they are rejected as unknown names."""
+    with pytest.raises(ValueError, match="Unknown algorithm"):
+        resolve_preprocessing_preset(alias)
+
+
+def test_algorithm_name_is_case_insensitive():
+    """The full algorithm name is matched case-insensitively."""
+    assert resolve_preprocessing_preset("ISOTONIC_REGRESSION") == (
         resolve_preprocessing_preset("isotonic_regression")
     )
 

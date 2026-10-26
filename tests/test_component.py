@@ -637,7 +637,7 @@ class TestTrainingEngineCoverage:
         # (imported in the component as _CanonicalIAE)
         with pytest.raises(InvalidAlgorithmError) as excinfo:
             _run_hpo(
-                algo_name="rf",
+                algo_name="random_forest",
                 algo_cfg=mock_algo_cfg,
                 X=sample_df.drop(columns="target"),
                 y=sample_df["target"],
@@ -660,7 +660,7 @@ class TestTrainingEngineCoverage:
 
         with pytest.raises(AttributeError, match="lacks `ModelTrainer` class"):
             _fit_and_save(
-                "rf",
+                "random_forest",
                 mock_algo_cfg,
                 sample_df,
                 sample_df["target"],
@@ -1791,7 +1791,7 @@ def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_d
     cfg = Config.model_validate(base_config_dict)
     with pytest.raises(ValueError, match="produced no hyperparameters"):
         _fit_and_save(
-            "rf",
+            "random_forest",
             mock_algo_cfg,
             pd.DataFrame({"a": [1]}),
             pd.Series([1]),

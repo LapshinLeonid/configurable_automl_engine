@@ -82,7 +82,7 @@ def _prepare_data(algo: str, X: pd.DataFrame, y: pd.Series):
 # ──────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "algo",
-    ["knn"],
+    ["nearest_neighbors_regression"],
 )
 def test_optimize_smoke(algo: str, toy_data):
     """optimize must not fail and returns valid objects."""
@@ -210,7 +210,7 @@ def test_zero_trials_returns_no_result(toy_data):
 def test_apply_dynamic_space_types(toy_data):
     """
     Covers the logic of _apply_dynamic_space.
-    We use the 'knn' algorithm because the code has a space factory for it.
+    We use the 'nearest_neighbors_regression' algorithm because the code has a space factory for it.
     """
     X, y = toy_data
 
@@ -243,7 +243,7 @@ def test_apply_dynamic_space_types(toy_data):
         "leaf_size": 30,  # Constant (line 144)
     }
     opt_res = hyperopt.optimize(
-        "knn", X, y, n_trials=2, space_overrides={"knn": dynamic_config}
+        "nearest_neighbors_regression", X, y, n_trials=2, space_overrides={"nearest_neighbors_regression": dynamic_config}
     )
     assert opt_res is not None
     model, params, score = opt_res.model, opt_res.params, opt_res.score
@@ -443,7 +443,7 @@ def test_optimize_with_oversampling(toy_data):
     X, y = toy_data
     y_bin = (y > y.mean()).astype(int)
     opt_res = hyperopt.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y_bin,
         data_oversampling=True,
@@ -465,7 +465,7 @@ def test_optimize_oversampling_target_bins_passed_to_sampler(toy_data):
     assembled pipeline."""
     X, y = toy_data
     opt_res = hyperopt.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         data_oversampling=True,
@@ -490,7 +490,7 @@ def test_optimize_pure_numeric_builds_preprocessor(toy_data):
     X, y = toy_data  # fully numeric DataFrame
 
     opt_res = hyperopt.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         n_trials=2,
@@ -554,12 +554,12 @@ def test_optimize_pruning(toy_data):
 
     # The method must not fail; Trial 1 will simply be marked as Pruned
     opt_res = hyperopt.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         n_trials=2,
         # Pass it as a dict for the specific algorithm
-        space_overrides={"knn": pruning_space},
+        space_overrides={"nearest_neighbors_regression": pruning_space},
     )
     assert opt_res is not None
     model, params, score = opt_res.model, opt_res.params, opt_res.score
@@ -748,7 +748,7 @@ def test_optimize_train_test_split_mode(toy_data):
     # Force the hold-out mode by passing a small amount of data
     # or by explicitly specifying the strategy
     opt_res = optimize(
-        "knn", X, y, validation_strategy="train_test_split", n_trials=1
+        "nearest_neighbors_regression", X, y, validation_strategy="train_test_split", n_trials=1
     )
     assert opt_res is not None
     model, params, score = opt_res.model, opt_res.params, opt_res.score
@@ -886,7 +886,7 @@ class TestTunerObjective:
 
     @pytest.fixture
     def mock_space(self):
-        return {"rf": lambda trial: {"n_estimators": 10}}
+        return {"random_forest": lambda trial: {"n_estimators": 10}}
 
     def test_objective_trigger_fallback(self, dummy_data, mock_space):
         """
@@ -922,7 +922,7 @@ class TestTunerObjective:
             mock_scorer_factory.return_value = MagicMock()
             # Call
             opt_res = optimize(
-                algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
             assert opt_res is not None
             _, _, best_score = opt_res.model, opt_res.params, opt_res.score
@@ -953,7 +953,7 @@ class TestTunerObjective:
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             opt_res = optimize(
-                algo_name="rf", X=X, y=y, n_trials=1, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=1, space_overrides=mock_space
             )
             assert opt_res is not None
             _, _, best_score = opt_res.model, opt_res.params, opt_res.score
@@ -983,7 +983,7 @@ class TestTunerObjective:
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
                 optimize(
-                    algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
+                    algo_name="random_forest", X=X, y=y, n_trials=10, space_overrides=mock_space
                 )
 
     def test_four_failures_one_success_not_disqualified(self, dummy_data, mock_space):
@@ -1014,7 +1014,7 @@ class TestTunerObjective:
             ]
 
             opt_res = optimize(
-                algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
             assert opt_res is not None
             _, _, best_score = opt_res.model, opt_res.params, opt_res.score
@@ -1064,7 +1064,7 @@ class TestTunerObjective:
 
             with pytest.raises(hyperopt.InvalidAlgorithmError, match="disqualified"):
                 optimize(
-                    algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
+                    algo_name="random_forest", X=X, y=y, n_trials=10, space_overrides=mock_space
                 )
 
     def test_train_test_split_success_resets_counter(self, dummy_data, mock_space):
@@ -1116,7 +1116,7 @@ class TestTunerObjective:
             mock_scorer_factory.return_value = mock_scorer
 
             opt_res = optimize(
-                algo_name="rf", X=X, y=y, n_trials=5, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=5, space_overrides=mock_space
             )
             assert opt_res is not None
             _, _, best_score = opt_res.model, opt_res.params, opt_res.score
@@ -1147,7 +1147,7 @@ class TestTunerObjective:
             # Optimization completes without InvalidAlgorithmError;
             # ValueError simply interrupts the trial (optuna.TrialPruned)
             result = optimize(
-                algo_name="rf", X=X, y=y, n_trials=10, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=10, space_overrides=mock_space
             )
 
             # No trial is successful: no COMPLETED trial of the phase, and
@@ -1191,7 +1191,7 @@ class TestTunerObjective:
             ]
 
             opt_res = optimize(
-                algo_name="rf",
+                algo_name="random_forest",
                 X=X,
                 y=y,
                 n_trials=7,
@@ -1241,7 +1241,7 @@ class TestTunerObjective:
             ]
 
             opt_res = optimize(
-                algo_name="rf", X=X, y=y, n_trials=8, space_overrides=mock_space
+                algo_name="random_forest", X=X, y=y, n_trials=8, space_overrides=mock_space
             )
             assert opt_res is not None
             _, _, best_score = opt_res.model, opt_res.params, opt_res.score
@@ -2318,11 +2318,11 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
         mock_cv.side_effect = ValueError("non-fatal scoring error")
 
         result = optimize(
-            algo_name="rf",
+            algo_name="random_forest",
             X=X,
             y=y,
             n_trials=10,
-            space_overrides={"rf": lambda trial: {"n_estimators": 10}},
+            space_overrides={"random_forest": lambda trial: {"n_estimators": 10}},
         )
 
         # No trial completed → the "no valid result" contract:
@@ -2758,13 +2758,13 @@ def test_missing_indicator_enabled_guards_invalid_algorithms():
 def test_missing_indicator_enabled_univariate_disabled():
     """Strictly univariate algorithms (isotonic) — indicators disabled."""
     assert _missing_indicator_enabled("isotonic_regression") is False
-    assert _missing_indicator_enabled("isotonic") is False
+    assert _missing_indicator_enabled("Isotonic_Regression") is False
 
 
 def test_missing_indicator_enabled_regular_algorithms():
     """Regular algorithms — indicators enabled."""
     assert _missing_indicator_enabled("ridge") is True
-    assert _missing_indicator_enabled("rf") is True
+    assert _missing_indicator_enabled("random_forest") is True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2776,12 +2776,12 @@ def test_optimize_previous_trials_returns_only_own_phase_trials(toy_data):
     contains ONLY the current phase's own trials (numbers >= the transferred
     boundary)."""
     X, y = toy_data
-    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    first = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=2, random_state=42)
     assert first is not None
     assert [t.number for t in first.trials] == [0, 1]
 
     second = hyperopt.optimize(
-        "knn", X, y, n_trials=2, random_state=43, previous_trials=first.trials
+        "nearest_neighbors_regression", X, y, n_trials=2, random_state=43, previous_trials=first.trials
     )
     assert second is not None
     # Only the current phase's own trials (transferred history is excluded).
@@ -2793,7 +2793,7 @@ def test_optimize_previous_trials_returns_only_own_phase_trials(toy_data):
 def test_optimize_empty_previous_trials_is_noop(toy_data):
     """N4: previous_trials=[] is a no-op — no exception, no transfer."""
     X, y = toy_data
-    res = hyperopt.optimize("knn", X, y, n_trials=2, previous_trials=[])
+    res = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=2, previous_trials=[])
     assert res is not None
     assert len(res.trials) == 2
 
@@ -2811,7 +2811,7 @@ def test_optimize_incompatible_previous_trials_fail_fast(toy_data):
         distributions={"n_neighbors": FloatDistribution(0.0, 100.0)},
     )
     with pytest.raises(hyperopt.HPOHistoryError, match="incompatible"):
-        hyperopt.optimize("knn", X, y, n_trials=1, previous_trials=[bad])
+        hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=1, previous_trials=[bad])
 
 
 def test_optimize_unrepresentable_space_fails_fast(toy_data):
@@ -2820,7 +2820,7 @@ def test_optimize_unrepresentable_space_fails_fast(toy_data):
     ``HPOHistoryError`` when non-empty history is transferred — no silent
     skip, which would silently degrade refine to a cold run."""
     X, y = toy_data
-    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    first = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=2, random_state=42)
     assert first is not None
 
     def exotic_space(trial):
@@ -2831,11 +2831,11 @@ def test_optimize_unrepresentable_space_fails_fast(toy_data):
 
     with pytest.raises(hyperopt.HPOHistoryError, match="cannot be reproduced"):
         hyperopt.optimize(
-            "knn",
+            "nearest_neighbors_regression",
             X,
             y,
             n_trials=2,
-            space_overrides={"knn": exotic_space},
+            space_overrides={"nearest_neighbors_regression": exotic_space},
             previous_trials=first.trials,
         )
 
@@ -2844,9 +2844,9 @@ def test_optimize_zero_trials_with_history_returns_none(toy_data):
     """B2: n_trials=0 with transferred history → None (unified no-result
     signal), the history is not added to any study."""
     X, y = toy_data
-    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    first = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=2, random_state=42)
     assert first is not None
-    res = hyperopt.optimize("knn", X, y, n_trials=0, previous_trials=first.trials)
+    res = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=0, previous_trials=first.trials)
     assert res is None
 
 
@@ -2855,7 +2855,7 @@ def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
     returns None even when transferred COMPLETED history is present — the
     history must not make the phase appear valid (no fallback)."""
     X, y = toy_data
-    first = hyperopt.optimize("knn", X, y, n_trials=2, random_state=42)
+    first = hyperopt.optimize("nearest_neighbors_regression", X, y, n_trials=2, random_state=42)
     assert first is not None
 
     with (
@@ -2875,7 +2875,7 @@ def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
         mock_cv.side_effect = ValueError("score boom")
 
         res = hyperopt.optimize(
-            "knn",
+            "nearest_neighbors_regression",
             X,
             y,
             n_trials=3,

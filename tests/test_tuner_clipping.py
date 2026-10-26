@@ -68,7 +68,7 @@ def test_optimize_integration_clipping(monkeypatch):
 
     # Intentionally inflated bounds
     overrides = {
-        "knn": {
+        "nearest_neighbors_regression": {
             "n_neighbors": SearchSpaceEntry.model_validate([15, 100, "int"]),
         }
     }
@@ -84,7 +84,7 @@ def test_optimize_integration_clipping(monkeypatch):
         if algo == "xgboosting":  # Skip initialization at the start of optimize
             return Ridge()
         # For KNN the limit is n_samples-1 = 19
-        if algo == "knn" and params.get("n_neighbors", 0) > 19:
+        if algo == "nearest_neighbors_regression" and params.get("n_neighbors", 0) > 19:
             pytest.fail(f"n_neighbors {params['n_neighbors']} exceeds limit 19")
         return Ridge()
 
@@ -100,7 +100,7 @@ def test_optimize_integration_clipping(monkeypatch):
 
     # Run the optimization
     opt_res = optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         n_trials=2,

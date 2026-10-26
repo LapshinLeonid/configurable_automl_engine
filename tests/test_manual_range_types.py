@@ -655,7 +655,7 @@ def test_no_warn_on_natural_n_neighbors_high_bound(caplog):
         {"n_neighbors": SearchSpaceEntry.model_validate([1, 30, "int"])}
     )
     runner.n_samples_eff = 30  # physical max = 29
-    runner.algo = "knn"
+    runner.algo = "nearest_neighbors_regression"
     with caplog.at_level(logging.INFO):
         runner.search_space_dict = {
             "n_neighbors": SearchSpaceEntry.model_validate([1, 29, "int"])
@@ -749,7 +749,7 @@ def test_no_warn_on_knn_p_low(caplog):
     runner = _runner_with_space(
         {"p": SearchSpaceEntry.model_validate([1, 2, "int"])}
     )
-    runner.algo = "knn"
+    runner.algo = "nearest_neighbors_regression"
     with caplog.at_level(logging.WARNING):
         runner._warn_if_optimum_at_boundary({"p": 1})
     assert "may lie beyond the range" not in caplog.text
@@ -818,11 +818,11 @@ def test_guard_log_for_other_algo_ignored(caplog):
     assert "may lie beyond the range" in caplog.text
 
 
-def test_guard_log_alias_algo_matches(caplog):
-    """A guard record under the alias ('xgboost') matches the resolved algo."""
+def test_guard_log_algo_matches_case_insensitive(caplog):
+    """A guard record matches the algorithm name case-insensitively."""
     logs = [
         {
-            "algo": "xgboost",
+            "algo": "XGBoosting",
             "param": "max_depth",
             "before": [3.0, 10.0],
             "after": [2.0, 3.0],
