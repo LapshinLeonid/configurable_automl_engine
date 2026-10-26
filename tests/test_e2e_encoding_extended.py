@@ -447,7 +447,7 @@ def test_tuner_optimize_high_cardinality_mode() -> None:
     "algorithm, hyperparams",
     [
         ("gaussian_process_regression", {}),
-        ("ardregression", {"alpha": 1.0}),
+        ("ardregression", {"alpha_1": 1e-6}),
     ],
 )
 def test_model_trainer_sparse_rejecting_algos_with_hashing(

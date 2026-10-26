@@ -105,11 +105,11 @@ def test_too_few_records(base_params):
 
 
 def test_invalid_param_key(base_params):
-    # Unknown parameters must be silently ignored (clean_hyperparameters
-    # discards them instead of raising TypeError)
+    # Unknown parameters are rejected like in the config validation
+    # (previously they were silently dropped by clean_hyperparameters)
     bad_params = {"foobar": 1}
-    score = train_model("ElasticNet", "r2", bad_params, X, y)
-    assert isinstance(score, float)
+    with pytest.raises(TrainingError, match="unknown hyperparameters"):
+        train_model("ElasticNet", "r2", bad_params, X, y)
 
 
 def test_negative_alpha(base_params):

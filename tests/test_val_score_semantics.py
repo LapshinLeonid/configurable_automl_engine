@@ -129,7 +129,12 @@ def test_val_score_is_holdout_not_train_score():
     full-sample train-R² (a systematically optimistic quality estimate).
     """
     X, y = _noisy_regression()
-    trainer = ModelTrainer(algorithm="ridge", metric="r2", random_state=42).fit(X, y)
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        metric="r2",
+        random_state=42,
+        validation_strategy="train_test_split",
+    ).fit(X, y)
 
     train_r2 = float(r2_score(y, trainer.predict(X)))
     assert trainer.val_score is not None
