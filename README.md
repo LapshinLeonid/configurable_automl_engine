@@ -123,17 +123,6 @@ What happens here:
   `holdout_score` is the winner's R² on these untouched rows.
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
-The same config as YAML (pass the file path as `config=`):
-
-```yaml
-general:
-  comparison_metric: "r2"
-  path_to_model: "diabetes_model.pkl"
-algorithms:
-  ridge: {}
-  random_forest: {}
-```
-
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # How a run works
