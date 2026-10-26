@@ -952,6 +952,8 @@ The optional `oversampling` section may include:
 | `multiplier` | `data_oversampling_multiplier` | `1.0` | Factor to increase the size of the training data (≥ 1.0; `1.0` with `enable: true` changes nothing and logs a WARNING). |
 | `algorithm` | `data_oversampling_algorithm` | `"random"` | Oversampling algorithm, see below. |
 | `target_bins` | `data_oversampling_target_bins` | `8` | Number of quantile bins of the target (≥ 2). |
+| `add_noise` | `data_oversampling_add_noise` | `false` | Add Gaussian noise to the numeric features of the oversampled training set, see below. Has no effect unless `enable` is `true` (a WARNING is logged). |
+| `noise_level` | `data_oversampling_noise_level` | `0.01` | Noise standard deviation as a fraction of each column's standard deviation (> 0). |
 
 Oversampling is a step of the model pipeline, so it is applied only to the training part of every fold (and to the data of the final fit); validation and hold-out rows are never oversampled.
 
@@ -970,7 +972,7 @@ The classification path is kept only for standalone `DataOversampler` calls with
 
 > ⚠️ **Experimental**: the nightly evidence gate (`benchmarks/run_oversampling_benchmark.py`) observed a median held-out R² degradation of `adasyn` on the count dataset of about 0.019 (> 0.01) relative to the no-oversampling baseline. The feature is therefore marked experimental: a WARNING is logged whenever the oversampler actually runs, and you should verify the effect of oversampling on your own data before relying on it. When the gate passes again, the experimental mark is removed.
 
-Gaussian noise injection is **not a separate algorithm** and **cannot be enabled from the config** — it is available only when `DataOversampler` is used directly, via its `add_noise` flag (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`, and categorical columns are excluded from the noise. Noise is not supported on sparse input (e.g., the output of the `hashing` encoder): combining `add_noise=True` with a sparse matrix raises `TypeError`.
+Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of the `oversampling` section (or of `DataOversampler` directly) (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`. Categorical columns and binary indicator columns (all non-missing values are `0`/`1`: one-hot and hashing output, missing-value indicators, raw 0/1 flags) are excluded from the noise; indicators are detected before resampling, so they are recognized even when SMOTE/ADASYN later interpolate them. On sparse input (e.g., the output of the `hashing` encoder or a high-cardinality one-hot encoding) only the stored non-zero elements are noised: zeros stay exact zeros, the matrix stays sparse for `random` and memory grows only with the number of non-zero elements. The per-column noise scale is `noise_level` times the column's standard deviation over all rows (zeros included). For `smote` / `adasyn` the sparse input is densified as before, and the same rule applies — zero cells are not noised.
 
 # Training results
 
@@ -1086,6 +1088,8 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
 | `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
 | `data_oversampling_target_bins` | `int` | `8` | Number of quantile bins for the regression oversampling strategy (minimum 2). |
+| `data_oversampling_add_noise` | `bool` | `False` | Add Gaussian noise to the numeric features of the oversampled data. |
+| `data_oversampling_noise_level` | `float` | `0.01` | Noise intensity relative to the column standard deviation (must be > 0). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
 | `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
 | `validation_strategy` | `ValidationStrategy`, `str` or `None` | `None` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`); takes precedence over `val_method`. `None` — `val_method` is used. |
@@ -1162,6 +1166,8 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |
 | `data_oversampling_algorithm` | `str` | `"random"` | Oversampling algorithm (`"random"`, `"smote"`, `"adasyn"`). |
 | `data_oversampling_target_bins` | `int` | `8` | Number of quantile bins for the regression oversampling strategy (minimum 2). |
+| `data_oversampling_add_noise` | `bool` | `False` | Add Gaussian noise to the numeric features of the oversampled data. |
+| `data_oversampling_noise_level` | `float` | `0.01` | Noise intensity relative to the column standard deviation (must be > 0). |
 | `serialization_format` | `SerializationFormat` | `pickle` | Save format. |
 | `categorical_features` | `list[str]` or `None` | `None` | Categorical column names. |
 | `numerical_features` | `list[str]` or `None` | `None` | Numerical column names. |

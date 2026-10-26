@@ -1571,6 +1571,10 @@ class OversamplingCfg(BaseModel):
         algorithm (OversamplingAlgorithm): Selected generation method
             (SMOTE, ADASYN, etc.).
         target_bins (int): Number of quantile bins for the regression path.
+        add_noise (bool): Whether to add Gaussian noise to the numeric
+            features of the oversampled training set.
+        noise_level (float): Noise standard deviation as a fraction of each
+            column's standard deviation.
     """
 
     # accept alias names
@@ -1599,12 +1603,34 @@ class OversamplingCfg(BaseModel):
             "Number of quantile bins for the regression oversampling strategy"
         ),
     )
+    add_noise: bool = Field(
+        default=False,
+        alias="data_oversampling_add_noise",
+        description=(
+            "Add Gaussian noise to the numeric features of the oversampled "
+            "training set (categorical columns are not noised)"
+        ),
+    )
+    noise_level: float = Field(
+        default=0.01,
+        alias="data_oversampling_noise_level",
+        gt=0.0,
+        description=(
+            "Gaussian noise standard deviation as a fraction of each numeric "
+            "column's standard deviation"
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_oversampling_logic(self) -> OversamplingCfg:
         if self.enable and self.multiplier == 1.0:
             logging.getLogger(__name__).warning(
                 "Oversampling multiplier = 1 ➜ class balance will not change."
+            )
+        if self.add_noise and not self.enable:
+            logging.getLogger(__name__).warning(
+                "data_oversampling_add_noise = true has no effect while "
+                "data_oversampling is disabled."
             )
         return self
 

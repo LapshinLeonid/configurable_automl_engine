@@ -816,6 +816,69 @@ def test_run_hpo_forwards_resolved_test_size_to_tuner():
     assert received["strategy"] == ValidationStrategy.train_test_split
 
 
+def test_run_hpo_forwards_oversampling_noise_to_tuner():
+    """The Gaussian noise settings are forwarded to tuners that support them."""
+    received: dict[str, object] = {}
+
+    class NoiseAwareTuner:
+        def optimize(
+            self,
+            algo_name,
+            X,
+            y,
+            metric,
+            n_trials,
+            validation_strategy,
+            data_oversampling=False,
+            data_oversampling_add_noise=False,
+            data_oversampling_noise_level=0.01,
+        ):
+            received["enable"] = data_oversampling
+            received["add_noise"] = data_oversampling_add_noise
+            received["noise_level"] = data_oversampling_noise_level
+            return ("model", {"param": 1}, 0.95)
+
+    algo_cfg = MagicMock(spec=AlgoCfg)
+    algo_cfg.tuner = "some.module"
+    with patch("importlib.import_module", return_value=NoiseAwareTuner()):
+        _run_hpo(
+            algo_name="test_algo",
+            algo_cfg=algo_cfg,
+            X=pd.DataFrame({"a": [1, 2, 3]}),
+            y=pd.Series([1, 2, 3]),
+            metric_name_sklearn="r2",
+            n_trials=1,
+            validation_strategy=ValidationStrategy.train_test_split,
+            data_oversampling=True,
+            data_oversampling_add_noise=True,
+            data_oversampling_noise_level=0.05,
+        )
+
+    assert received == {"enable": True, "add_noise": True, "noise_level": 0.05}
+
+
+def test_build_trainer_forwards_oversampling_noise(base_config_dict):
+    """_build_trainer passes the config noise settings to ModelTrainer."""
+    from configurable_automl_engine.training_engine.component import _build_trainer
+
+    base_config_dict["oversampling"] = {
+        "data_oversampling": True,
+        "data_oversampling_multiplier": 2.0,
+        "data_oversampling_add_noise": True,
+        "data_oversampling_noise_level": 0.07,
+    }
+    cfg = Config.model_validate(base_config_dict)
+    algo_cfg = component._algorithms_as_dict(cfg.algorithms)["random_forest"]
+    with patch(
+        "configurable_automl_engine.training_engine.component._load_module",
+        return_value=importlib.import_module("configurable_automl_engine.trainer"),
+    ):
+        built = _build_trainer("random_forest", algo_cfg, {}, cfg)
+
+    assert built.os_add_noise is True
+    assert built.os_noise_level == pytest.approx(0.07)
+
+
 def test_run_hpo_skips_test_size_for_legacy_tuner():
     """A custom tuner without the parameter does not receive train_test_split_test_size."""
     calls: dict[str, object] = {}
@@ -2463,6 +2526,8 @@ class TestWorstScoreResultsExcluded:
             oversampling_multiplier=1.0,
             oversampling_algorithm="random",
             oversampling_target_bins=8,
+            oversampling_add_noise=False,
+            oversampling_noise_level=0.01,
             pruning_cfg=None,
             encoding="one_hot",
             high_cardinality_threshold=20,

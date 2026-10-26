@@ -323,6 +323,40 @@ def _is_categorical_col(s: pd.Series) -> bool:
     return bool(converted.isna().any())
 
 
+def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
+    """Find the binary indicator columns of a DataFrame.
+
+    A column is an indicator when all its non-missing values are ``0`` or
+    ``1`` (one-hot / hashing output, missing-value indicators, raw 0/1
+    flags; numeric strings such as ``'0'``/``'1'`` count too). Gaussian
+    noise on such a column produces meaningless values like ``0.003`` or
+    ``0.98``, so the oversampler excludes them from the noise. Boolean
+    columns are not returned: the noise step never touches them anyway.
+
+    Args:
+        df (pd.DataFrame): The feature matrix (before resampling).
+
+    Returns:
+        list[Any]: Labels of the binary indicator columns.
+    """
+    numeric = df.select_dtypes(include=[np.number])
+    binary: list[Any] = []
+    if not numeric.empty:
+        values = numeric.to_numpy(dtype=np.float64)
+        finite = ~np.isnan(values)
+        is_01 = (values == 0) | (values == 1) | ~finite
+        mask = is_01.all(axis=0) & finite.any(axis=0)
+        binary.extend(numeric.columns[mask])
+    for col in df.select_dtypes(include=["object", "string"]).columns:
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.isna().sum() != df[col].isna().sum():
+            continue  # truly categorical — handled by the encoder logic
+        vals = converted.dropna()
+        if not vals.empty and vals.isin([0, 1]).all():
+            binary.append(col)
+    return binary
+
+
 class _SMOTERGenerator:
     """SMOTER-style synthetic sample generator for regression targets.
 
@@ -571,7 +605,11 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return {cls: ceil(cnt * multiplier) for cls, cnt in counts.items()}
 
     def _add_gaussian_noise(
-        self, df: pd.DataFrame, exclude_cols: list[str] | None = None
+        self,
+        df: pd.DataFrame,
+        exclude_cols: list[str] | None = None,
+        *,
+        nonzero_only: bool = False,
     ) -> pd.DataFrame:
         """Add Gaussian noise to numeric columns and numeric elements of object columns.
         Applies vectorized noise computation for performance.
@@ -580,6 +618,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             df (pd.DataFrame): The dataset to modify.
             exclude_cols (list[str] | None): Columns to which noise should NOT be applied
                 (e.g. ordinal-encoded categorical ones).
+            nonzero_only (bool): Noise only the non-zero cells (zeros stay
+                exact zeros). Used for data that arrived as a sparse matrix
+                and was densified for SMOTE/ADASYN, so the result matches
+                :meth:`_add_sparse_gaussian_noise`.
         Returns:
             pd.DataFrame: The dataset with added noise.
         """
@@ -609,8 +651,57 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             noise = rng.normal(0, 1.0, size=(len(df), len(numeric_cols))) * scales
 
             # Use .to_numpy() for speed
-            df[numeric_cols] = df[numeric_cols].to_numpy() + noise
+            values = df[numeric_cols].to_numpy()
+            if nonzero_only:
+                noise = noise * (values != 0)
+            df[numeric_cols] = values + noise
         return df
+
+    def _add_sparse_gaussian_noise(self, X: Any) -> Any:
+        """Add Gaussian noise to the stored non-zero elements of a sparse matrix.
+
+        Noising every cell would turn each zero into a non-zero value and
+        densify the matrix (memory explosion on hashing / one-hot output);
+        besides, a zero there means "feature absent" and should stay exact.
+        So only the explicitly stored non-zero values are perturbed: the
+        sparsity pattern is preserved and the cost is O(nnz). Binary indicator
+        columns (all stored values equal to 1 — one-hot / hashing output) are
+        left untouched as well: a noised "1.003" is not a category. The
+        decision is made on ``X`` itself, which is valid because random
+        oversampling only duplicates rows. The noise scale
+        of a column is ``noise_level`` times its standard deviation computed
+        over ALL rows (zeros included, ddof=1), the same as the dense path.
+
+        Args:
+            X: A scipy.sparse matrix.
+
+        Returns:
+            Any: A new CSR matrix (float64) with noised non-zero elements.
+        """
+        rng = np.random.default_rng(self.random_state)
+        X_csr = X.tocsr().astype(np.float64, copy=True)
+        # Explicitly stored zeros must stay zeros
+        X_csr.eliminate_zeros()
+        n_rows = X_csr.shape[0]
+        if X_csr.nnz == 0 or n_rows == 0:
+            return X_csr
+
+        mean = np.asarray(X_csr.mean(axis=0)).ravel()
+        mean_sq = np.asarray(X_csr.multiply(X_csr).mean(axis=0)).ravel()
+        var = np.maximum(mean_sq - mean**2, 0.0)
+        if n_rows > 1:
+            var = var * n_rows / (n_rows - 1)
+        stds = np.sqrt(var)
+        stds[~np.isfinite(stds) | (stds == 0)] = 1.0
+        scales = stds * self.noise_level
+
+        # Columns whose stored values are not all 1 (after eliminate_zeros
+        # every stored value is non-zero) carry real magnitudes and are noised
+        not_binary = np.zeros(X_csr.shape[1], dtype=bool)
+        not_binary[X_csr.indices[X_csr.data != 1.0]] = True
+        noise = rng.normal(0.0, 1.0, size=X_csr.nnz) * scales[X_csr.indices]
+        X_csr.data += noise * not_binary[X_csr.indices]
+        return X_csr
 
     def __getstate__(self) -> dict[str, Any]:
         # Copy the object state
@@ -773,8 +864,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             ValueError: If `multiplier` < 1, the algorithm is not supported,
                 or ``target_bins`` < 2.
             TypeError: If the data has no numeric features (needed for
-                       distance computation in SMOTE/ADASYN) or when
-                       attempting to add noise to a sparse matrix.
+                       distance computation in SMOTE/ADASYN).
         """
         with self._lock:
             # Store the result in an attribute with a leading underscore
@@ -804,16 +894,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         # Check for sparse matrices (scipy.sparse)
         is_sparse = hasattr(X, "tocsr")
 
-        # Sparse matrices are incompatible with noise addition.
-        # Adding Gaussian noise turns every zero element into a non-zero one,
-        # which causes an explosive growth of memory usage (densification).
-        if self.add_noise and is_sparse:
-            raise TypeError(
-                f"The '{self.algorithm}' algorithm with "
-                "noise injection does not support "
-                "sparse matrices. Please convert your data to a dense format "
-                "using X.toarray() or set add_noise=False."
-            )
+        # Sparse input with add_noise: only the stored non-zero elements are
+        # noised (see _add_sparse_gaussian_noise) — noising zeros would
+        # densify the matrix and corrupt the "feature absent" encoding.
+        noise_nonzero_only = False
 
         try:
             # Standard input data validation
@@ -858,6 +942,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                         X.shape[0],
                         X_res_raw.shape[0],
                     )
+                    if self.add_noise:
+                        X_res_raw = self._add_sparse_gaussian_noise(X_res_raw)
                     if is_regression:
                         return X_res_raw, self._decode_regression_y(
                             y_res, y_s, y_fit, bin_mids, sampler
@@ -865,10 +951,16 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     return X_res_raw, y_res.to_numpy()
                 if algo_local in ("smote", "adasyn"):
                     X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+                    # Keep the sparse noise semantics after densification
+                    noise_nonzero_only = True
                 else:
                     raise ValueError(f"Unsupported algorithm: {algo_local}")
 
             X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+            # Binary indicator columns (one-hot / missing indicators) are
+            # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
+            # fractions, after which they would no longer look binary.
+            binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
 
             # Determine the indices of non-numeric columns for SMOTENC.
             # Columns with numeric strings ("1.0", "2.0") are not
@@ -1053,9 +1145,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # Categorical columns are excluded from the noise so as not to break
             # the subsequent decoding via OrdinalEncoder.inverse_transform
             if self.add_noise:
-                noise_exclude = cat_cols if ordinal_encoder is not None else None
+                noise_exclude = list(cat_cols) if ordinal_encoder is not None else []
+                noise_exclude.extend(binary_cols)
                 X_res_df = self._add_gaussian_noise(
-                    X_res_df, exclude_cols=noise_exclude
+                    X_res_df,
+                    exclude_cols=noise_exclude,
+                    nonzero_only=noise_nonzero_only,
                 )
 
             # Decode categorical columns back (only for random)

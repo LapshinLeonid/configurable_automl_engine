@@ -391,6 +391,31 @@ def test_fit_internal_and_predict():
     assert "oversampler" in step_names
 
 
+def test_trainer_oversampler_receives_noise_settings():
+    """ModelTrainer forwards the Gaussian noise settings to DataOversampler."""
+    X = pd.DataFrame({"a": np.arange(12, dtype=float), "b": np.arange(12) % 3})
+    y = np.arange(12, dtype=float)
+    os_trainer = ModelTrainer(
+        algorithm="sgdregressor",
+        hyperparams={"max_iter": 5},
+        data_oversampling=True,
+        data_oversampling_multiplier=1.5,
+        data_oversampling_add_noise=True,
+        data_oversampling_noise_level=0.05,
+    )
+    os_trainer.fit(X, y)
+    sampler = dict(os_trainer.pipeline.steps)["oversampler"]
+    assert sampler.add_noise is True
+    assert sampler.noise_level == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize("bad_level", [0.0, -0.5])
+def test_trainer_rejects_non_positive_noise_level(bad_level):
+    """A non-positive noise level is rejected by the constructor."""
+    with pytest.raises(TrainingError, match="data_oversampling_noise_level"):
+        ModelTrainer(data_oversampling_noise_level=bad_level)
+
+
 def test_coverage_lock_removal_only():
     """
     Test to cover the line: if 'lock' in state: del state['lock']
