@@ -326,12 +326,18 @@ def _is_categorical_col(s: pd.Series) -> bool:
 def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
     """Find the binary indicator columns of a DataFrame.
 
-    A column is an indicator when all its non-missing values are ``0`` or
-    ``1`` (one-hot / hashing output, missing-value indicators, raw 0/1
-    flags; numeric strings such as ``'0'``/``'1'`` count too). Gaussian
-    noise on such a column produces meaningless values like ``0.003`` or
-    ``0.98``, so the oversampler excludes them from the noise. Boolean
-    columns are not returned: the noise step never touches them anyway.
+    A column is an indicator when its non-missing values take at most two
+    distinct values (one-hot / hashing output, missing-value indicators, raw
+    0/1 flags; numeric strings such as ``'0'``/``'1'`` count too). The rule
+    deliberately does not require the values to be exactly ``0``/``1``: the
+    oversampler runs after the preprocessor, and for scale-sensitive
+    algorithms ``StandardScaler`` / ``RobustScaler`` map a 0/1 flag or a
+    missing-value indicator to two other values (e.g. ``-1.02``/``0.98``).
+    Both scalers are per-column affine maps, so the number of distinct values
+    is preserved and "binary before scaling" is recognized after it. Gaussian
+    noise on such a column produces meaningless values between its two
+    levels, so the oversampler excludes them from the noise. Boolean columns
+    are not returned: the noise step never touches them anyway.
 
     Args:
         df (pd.DataFrame): The feature matrix (before resampling).
@@ -342,17 +348,14 @@ def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
     numeric = df.select_dtypes(include=[np.number])
     binary: list[Any] = []
     if not numeric.empty:
-        values = numeric.to_numpy(dtype=np.float64)
-        finite = ~np.isnan(values)
-        is_01 = (values == 0) | (values == 1) | ~finite
-        mask = is_01.all(axis=0) & finite.any(axis=0)
+        n_distinct = numeric.nunique(dropna=True).to_numpy()
+        mask = (n_distinct >= 1) & (n_distinct <= 2)
         binary.extend(numeric.columns[mask])
     for col in df.select_dtypes(include=["object", "string"]).columns:
         converted = pd.to_numeric(df[col], errors="coerce")
         if converted.isna().sum() != df[col].isna().sum():
             continue  # truly categorical — handled by the encoder logic
-        vals = converted.dropna()
-        if not vals.empty and vals.isin([0, 1]).all():
+        if 1 <= converted.nunique(dropna=True) <= 2:
             binary.append(col)
     return binary
 
@@ -665,10 +668,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         besides, a zero there means "feature absent" and should stay exact.
         So only the explicitly stored non-zero values are perturbed: the
         sparsity pattern is preserved and the cost is O(nnz). Binary indicator
-        columns (all stored values equal to 1 — one-hot / hashing output) are
-        left untouched as well: a noised "1.003" is not a category. The
-        decision is made on ``X`` itself, which is valid because random
-        oversampling only duplicates rows. The noise scale
+        columns (at most two distinct values, implicit zeros included — one-hot
+        / hashing output, and also scaled 0/1 flags and missing-value
+        indicators, see :func:`_binary_indicator_columns`) are left untouched
+        as well: a noised "1.003" is not a category. The decision is made on
+        ``X`` itself, which is valid because random oversampling only
+        duplicates rows. The noise scale
         of a column is ``noise_level`` times its standard deviation computed
         over ALL rows (zeros included, ddof=1), the same as the dense path.
 
@@ -695,10 +700,20 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         stds[~np.isfinite(stds) | (stds == 0)] = 1.0
         scales = stds * self.noise_level
 
-        # Columns whose stored values are not all 1 (after eliminate_zeros
-        # every stored value is non-zero) carry real magnitudes and are noised
-        not_binary = np.zeros(X_csr.shape[1], dtype=bool)
-        not_binary[X_csr.indices[X_csr.data != 1.0]] = True
+        # Columns with more than two distinct values (an implicit zero counts
+        # as one) carry real magnitudes and are noised; two-valued columns are
+        # binary indicators, possibly shifted/scaled by the preprocessor
+        n_cols = X_csr.shape[1]
+        order = np.lexsort((X_csr.data, X_csr.indices))
+        cols_sorted = X_csr.indices[order]
+        data_sorted = X_csr.data[order]
+        is_new = np.ones(cols_sorted.size, dtype=bool)
+        is_new[1:] = (cols_sorted[1:] != cols_sorted[:-1]) | (
+            data_sorted[1:] != data_sorted[:-1]
+        )
+        n_distinct = np.bincount(cols_sorted[is_new], minlength=n_cols)
+        n_distinct += np.bincount(X_csr.indices, minlength=n_cols) < n_rows
+        not_binary = n_distinct > 2
         noise = rng.normal(0.0, 1.0, size=X_csr.nnz) * scales[X_csr.indices]
         X_csr.data += noise * not_binary[X_csr.indices]
         return X_csr
