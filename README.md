@@ -142,13 +142,6 @@ algorithms:
   random_forest: {}
 ```
 
-To add XGBoost, install the `xgboost` extra and add `xgboosting: {}` to
-`algorithms`. To tune only selected parameters within your own ranges, use
-`limit_hyperparameters: true` with a `hyperparameters` block — but keep in mind
-that a narrow range can cut off the optimum (the tuner logs a WARNING when the
-best trial lies on the boundary of a range). The built-in search spaces are a
-better starting point.
-
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
 # How a run works
