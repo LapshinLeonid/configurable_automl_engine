@@ -37,14 +37,6 @@ Classification is not supported.
 * **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names in the config are **rejected** at config validation, so typos do not go unnoticed (the only exception is `xgboosting`, whose estimator accepts arbitrary `**kwargs`). Only a direct call of `configurable_automl_engine.models.create_model(...)` silently drops parameters the estimator does not accept.
 * ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Oversampling is applied only to the training part of each fold. Optional Gaussian noise injection (`oversampling.add_noise` / `noise_level`) is applied to numeric, non-indicator features after resampling for regularization.
 
-**Scale.** The engine targets small and medium tabular datasets that fit in
-memory. Cross-validation inside a trial is not parallelized, and the
-`bbc_score` estimate is skipped (with a WARNING) when the planned number of
-stored out-of-fold predictions exceeds 4,000,000 values. There are no
-performance benchmarks; the [benchmarks](benchmarks) directory measures the
-quality effect of individual components (Sanity Gate, Complexity Guard,
-oversampling).
-
 # Dependencies
 
 We recommend using the latest version of Python. AutoML Engine supports Python 3.11 and newer.
