@@ -318,6 +318,34 @@ def test_oversampling_target_bins_less_than_two_rejected():
         OversamplingCfg(data_oversampling_target_bins=1)
 
 
+def test_oversampling_noise_defaults_and_aliases():
+    """add_noise / noise_level default to off / 0.01 and accept flat aliases."""
+    cfg = OversamplingCfg()
+    assert cfg.add_noise is False
+    assert cfg.noise_level == pytest.approx(0.01)
+    cfg_alias = OversamplingCfg(
+        data_oversampling=True,
+        data_oversampling_add_noise=True,
+        data_oversampling_noise_level=0.05,
+    )
+    assert cfg_alias.add_noise is True
+    assert cfg_alias.noise_level == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize("bad_level", [0.0, -0.1])
+def test_oversampling_noise_level_non_positive_rejected(bad_level):
+    """A non-positive noise_level is rejected during validation."""
+    with pytest.raises(ValidationError, match="greater than 0"):
+        OversamplingCfg(data_oversampling_noise_level=bad_level)
+
+
+def test_oversampling_noise_without_enable_warns(caplog):
+    """add_noise without enabled oversampling logs a 'no effect' warning."""
+    with caplog.at_level(logging.WARNING):
+        OversamplingCfg(data_oversampling_add_noise=True)
+    assert "has no effect" in caplog.text
+
+
 # --- Tests for AlgoCfg ---
 
 # --- Tests for the root Config and the API ---

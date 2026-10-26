@@ -926,7 +926,7 @@
     },
     "OversamplingCfg": {
       "additionalProperties": false,
-      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins (int): Number of quantile bins for the regression path.",
+      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins (int): Number of quantile bins for the regression path.\n    add_noise (bool): Whether to add Gaussian noise to the numeric\n        features of the oversampled training set.\n    noise_level (float): Noise standard deviation as a fraction of each\n        column's standard deviation.",
       "properties": {
         "data_oversampling": {
           "default": false,
@@ -952,6 +952,19 @@
           "minimum": 2,
           "title": "Data Oversampling Target Bins",
           "type": "integer"
+        },
+        "data_oversampling_add_noise": {
+          "default": false,
+          "description": "Add Gaussian noise to the numeric features of the oversampled training set (categorical columns are not noised)",
+          "title": "Data Oversampling Add Noise",
+          "type": "boolean"
+        },
+        "data_oversampling_noise_level": {
+          "default": 0.01,
+          "description": "Gaussian noise standard deviation as a fraction of each numeric column's standard deviation",
+          "exclusiveMinimum": 0.0,
+          "title": "Data Oversampling Noise Level",
+          "type": "number"
         }
       },
       "title": "OversamplingCfg",
@@ -1340,7 +1353,9 @@
         "data_oversampling": false,
         "data_oversampling_multiplier": 1.0,
         "data_oversampling_algorithm": "random",
-        "data_oversampling_target_bins": 8
+        "data_oversampling_target_bins": 8,
+        "data_oversampling_add_noise": false,
+        "data_oversampling_noise_level": 0.01
       },
       "description": "Data balancing settings"
     },
