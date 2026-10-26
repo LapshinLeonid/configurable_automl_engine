@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import inspect
 
+import numpy as np
 import pytest
 
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.models import create_model
-from configurable_automl_engine.trainer import ModelTrainer
+from configurable_automl_engine.trainer import ModelTrainer, train_model
 from configurable_automl_engine.training_engine.config_parser import (
     ComplexityGuardCfg,
     GeneralCfg,
@@ -140,3 +141,34 @@ def test_create_model_accepts_legacy_names_and_random_state() -> None:
     assert model.get_params()["max_iter"] == 300
     knn = create_model("nearest_neighbors_regression", n_neighbors=3, random_state=1)
     assert "random_state" not in knn.get_params()
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "params"),
+    [
+        ("ridge", {"alpha": 1.0, "use_feature_selection": True}),
+        ("ridge", {"alpha": 1.0, "use_feature_selection": False}),
+        ("isotonic_regression", {"feature_index": 0, "isotonic_feature": "x0"}),
+    ],
+)
+def test_model_trainer_accepts_hpo_result_params(
+    algorithm: str, params: dict[str, object]
+) -> None:
+    """The auxiliary keys of the HPO result ``params`` do not break training.
+
+    ``use_feature_selection`` (feature_selection.mode='auto') and
+    ``isotonic_feature`` (an isotonic winner) are not model hyperparameters;
+    ``ModelTrainer`` and ``train_model`` drop them like the engine and the
+    tuner instead of failing on the strict ``create_model`` name check.
+    """
+    rng = np.random.default_rng(0)
+    X = rng.random((60, 3))
+    y = 2 * X[:, 0] + 0.1 * rng.random(60)
+
+    trainer = ModelTrainer(algorithm=algorithm, hyperparams=dict(params), metric="r2")
+    trainer.fit(X, y)
+    assert trainer.pipeline is not None
+    assert trainer.hyperparams == params
+
+    score = train_model(algorithm, "r2", dict(params), X, y)
+    assert np.isfinite(score)

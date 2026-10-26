@@ -1780,8 +1780,16 @@ class ModelTrainer:
             # value always wins. ``random_state=None`` (trainer or explicit
             # hyperparameter) produces a truly random fit.
             try:
+                # Auxiliary keys of the HPO result ``params`` are not model
+                # hyperparameters: ``use_feature_selection`` (the 'auto' mode
+                # decision) and the informational ``isotonic_feature`` are
+                # popped like in the engine and the tuner, so that
+                # ``ModelTrainer(hyperparams=res["params"])`` does not fail on
+                # the strict ``create_model`` name check.
                 model_kwargs = self.hyperparams.copy()
                 model_kwargs.pop("feature_index", None)
+                model_kwargs.pop("use_feature_selection", None)
+                model_kwargs.pop("isotonic_feature", None)
                 if "random_state" not in model_kwargs:
                     model_kwargs["random_state"] = self.random_state
                 base_model = create_model(self.algorithm, **model_kwargs)
