@@ -329,7 +329,7 @@ def _validate_data(
     X: Any,
     y: Any,
     *,
-    inf_policy: str = "error",
+    inf_policy: str = "as_missing",
     datetime_policy: str = "expand",
     drop_id_like_columns: bool = False,
 ) -> Any:
@@ -346,8 +346,8 @@ def _validate_data(
 
     Feature diagnostics mirror the pipeline entry point and honor the
     configurable policies: duplicate column names are always rejected;
-    ±inf in numeric features follows ``inf_policy`` (``"error"`` by default
-    for the standalone path, ``"as_missing"`` when the config says so);
+    ±inf in numeric features follows ``inf_policy`` (``"as_missing"`` by
+    default, as in ``general.inf_policy``; ``"error"`` rejects the data);
     datetime/timedelta columns follow ``datetime_policy`` (``"expand"`` by
     default — the derived components keep them from being silently dropped
     by the preprocessor); ID-like columns follow ``drop_id_like_columns``.
@@ -360,7 +360,8 @@ def _validate_data(
         y (Any): Target variable vector
             (expected np.ndarray, pd.Series or pd.DataFrame).
         inf_policy: Policy for ±inf in numeric features (default
-            ``"error"`` — reject with InvalidDataError).
+            ``"as_missing"`` — replace with NaN and warn; ``"error"`` —
+            reject with InvalidDataError).
         datetime_policy: Policy for datetime/timedelta columns (default
             ``"expand"`` — replace with derived components).
         drop_id_like_columns: Whether ID-like columns are dropped (default
@@ -1213,7 +1214,7 @@ class _OptimizeRunner:
         limit_hyperparameters: bool = False,
         fit_best_model: bool = True,
         phase_name: str | None = None,
-        inf_policy: str = "error",
+        inf_policy: str = "as_missing",
         datetime_policy: str = "expand",
         drop_id_like_columns: bool = False,
         collect_oof: bool = False,
@@ -1266,11 +1267,12 @@ class _OptimizeRunner:
         self.target_encoding_fallback = target_encoding_fallback
         self.feature_selection_cfg = feature_selection_cfg
         # The adaptive complexity guard config (trees/boosting on small data).
-        # ``None`` — the guard is disabled (defaults to the off behavior for
-        # direct ``optimize`` callers); the training engine passes the config
-        # from ``general.complexity_guard``.
+        # ``None`` — the defaults of ``general.complexity_guard`` (mode
+        # 'apply'), so direct ``optimize`` callers get the same search spaces
+        # as the engine; the guard is disabled with ``{"mode": "off"}``. The
+        # training engine passes the config from ``general.complexity_guard``.
         if complexity_guard_cfg is None:
-            self.complexity_guard_cfg: ComplexityGuardConfig | None = None
+            self.complexity_guard_cfg = ComplexityGuardConfig()
         elif isinstance(complexity_guard_cfg, ComplexityGuardConfig):
             self.complexity_guard_cfg = complexity_guard_cfg
         else:
@@ -1734,9 +1736,8 @@ class _OptimizeRunner:
         phases) and in the subprocesses (identical inputs -> identical
         results), so the TPE history transfer between phases stays valid.
 
-        When the guard is disabled (``complexity_guard_cfg is None``) the
-        space is returned unchanged and no records are produced — the exact
-        legacy behavior for direct ``optimize()`` callers.
+        When the guard is disabled (``mode='off'``) the space is returned
+        unchanged and no records are produced.
 
         Args:
             space: The already physically-clipped search space.
@@ -1746,7 +1747,7 @@ class _OptimizeRunner:
                 adjusted) space and the guard log records.
         """
         cfg = self.complexity_guard_cfg
-        if cfg is None or cfg.mode == "off":
+        if cfg.mode == "off":
             return space, []
         user_keys = set(self.user_hyperparameter_keys or ())
         adjusted, logs = apply_complexity_guard(
@@ -1767,14 +1768,8 @@ class _OptimizeRunner:
         the reason, e.g. ``max_depth 3–20 → 2–3: n=15, p=5, mode=small,
         leaf_min=2``.
         """
-        cfg_mode = (
-            self.complexity_guard_cfg.mode if self.complexity_guard_cfg else "off"
-        )
-        cfg_policy = (
-            self.complexity_guard_cfg.user_range_policy
-            if self.complexity_guard_cfg
-            else "user_wins"
-        )
+        cfg_mode = self.complexity_guard_cfg.mode
+        cfg_policy = self.complexity_guard_cfg.user_range_policy
         for record in self.complexity_guard_logs:
             before = record["before"]
             after = record["after"]
@@ -2986,14 +2981,16 @@ class _OptimizeRunner:
                     best_params["isotonic_feature"] = feature_name
         self.best_params = best_params
         # The base model constructor parameters are cleaned of the tuner's
-        # auxiliary key ("use_feature_selection" is not a model
-        # hyperparameter). They are built from the already filtered
+        # auxiliary keys ("use_feature_selection" and the informational
+        # "isotonic_feature" are not model hyperparameters; ``create_model``
+        # rejects unknown names). They are built from the already filtered
         # self.best_params (for isotonic_regression the key was excluded
         # above) so the source is single; the best trial's params are
         # not mutated and the key is guaranteed not to reach the model
         # constructor.
         self.clean_model_params = dict(self.best_params)
         self.clean_model_params.pop("use_feature_selection", None)
+        self.clean_model_params.pop("isotonic_feature", None)
         self.best_apply_fs = best_apply_fs
         return True
 
@@ -3151,7 +3148,7 @@ def optimize(
     data_oversampling_noise_level: float = 0.01,
     metric: str = "r2",
     # keep the old argument for backward compatibility
-    val_method: ValidationStrategy | str = "k_fold",
+    val_method: ValidationStrategy | str = "auto",
     # alias sent by training_engine.component
     validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int = 5,
@@ -3168,8 +3165,8 @@ def optimize(
     encoding: EncodingStrategy | None = None,
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     pruning: dict[str, Any] | None = None,
-    high_cardinality_threshold: int | None = None,
-    high_cardinality_encoding: EncodingStrategy | None = None,
+    high_cardinality_threshold: int | None = 50,
+    high_cardinality_encoding: EncodingStrategy | None = "frequency",
     hashing_n_components: int = 16,
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
@@ -3179,7 +3176,7 @@ def optimize(
     limit_hyperparameters: bool = False,
     fit_best_model: bool = True,
     phase_name: str | None = None,
-    inf_policy: str = "error",
+    inf_policy: str = "as_missing",
     datetime_policy: str = "expand",
     drop_id_like_columns: bool = False,
     collect_oof: bool = False,
@@ -3189,6 +3186,12 @@ def optimize(
     The function automatically selects the validation strategy, sets up the
     parameter search space and trains the final model on all provided data
     (unless ``fit_best_model=False`` is passed).
+
+    The defaults of the parameters that have a ``general.*`` counterpart in
+    the engine config (validation strategy, high-cardinality mode, complexity
+    guard, ±inf / datetime / ID-like policies, encoding settings) are the
+    same as in the config, so a direct call and a config run with the same
+    settings behave identically.
 
     Args:
         algo_name (str): Algorithm name to optimise.
@@ -3209,7 +3212,8 @@ def optimize(
             the column standard deviation. Defaults to 0.01.
         metric (str): Metric name to maximise. Defaults to 'r2'.
         val_method (ValidationStrategy | str): Validation method
-            ('k_fold', 'leave_one_out', 'train_test_split').
+            ('auto', 'k_fold', 'leave_one_out', 'train_test_split').
+            Defaults to 'auto', as ``general.validation_strategy``.
         validation_strategy (ValidationStrategy | str | None): Alias for
             ``val_method`` (takes precedence).
         n_folds (int): Number of cross-validation folds. Defaults to 5.
@@ -3284,10 +3288,13 @@ def optimize(
             automatic mode (>= 0). Columns whose number of unique values is
             strictly greater than the threshold are encoded with
             ``high_cardinality_encoding``, the rest with ``encoding``.
-            ``None`` — the mode is disabled.
+            Defaults to 50, as ``general.high_cardinality_threshold``.
+            ``None`` (together with ``high_cardinality_encoding=None``) —
+            the mode is disabled.
         high_cardinality_encoding (EncodingStrategy | None): Encoding strategy
             for high-cardinality columns. Set together with
-            ``high_cardinality_threshold``.
+            ``high_cardinality_threshold``. Defaults to 'frequency', as
+            ``general.high_cardinality_encoding``.
         hashing_n_components (int): Number of binary columns per categorical
             column with 'hashing' encoding (>= 1).
         target_encoding_smoothing (float): Smoothing parameter of the target
@@ -3305,9 +3312,9 @@ def optimize(
             univariate algorithm).
         complexity_guard_cfg (ComplexityGuardConfig | dict | None): Settings
             of the adaptive complexity guard for tree/boosting search spaces
-            (from ``general.complexity_guard``). ``None`` — the guard is
-            disabled (the exact legacy behavior for direct callers). When
-            enabled, the dict-based search spaces of trees/boostings are
+            (from ``general.complexity_guard``). ``None`` — the defaults of
+            ``general.complexity_guard`` (mode 'apply'); ``{"mode": "off"}``
+            disables the guard. When enabled, the dict-based search spaces of trees/boostings are
             tightened depending on ``n`` (effective training-fold rows) and
             ``p`` (features after preprocessing).
         user_hyperparameter_keys (list[str] | None): Names of parameters set
@@ -3334,8 +3341,9 @@ def optimize(
             once per algorithm and phase). ``None`` for direct callers — the
             warning falls back to a generic phase label.
         inf_policy (str): Policy for ±inf values in numeric features during
-            the data validation: ``"error"`` (default) — reject the data;
-            ``"as_missing"`` — replace with NaN and warn.
+            the data validation: ``"as_missing"`` (default, as
+            ``general.inf_policy``) — replace with NaN and warn; ``"error"`` —
+            reject the data.
         datetime_policy (str): Policy for datetime/timedelta columns during
             the data validation: ``"expand"`` (default) — replace with
             derived components; ``"drop"`` — drop; ``"error"`` — reject.
@@ -3344,9 +3352,9 @@ def optimize(
 
             The three policies above are applied once, on entry, and both the
             HPO trials and the final best-model fit work on the repaired
-            matrix. Note the defaults differ from ``ModelTrainer``
-            (``inf_policy="as_missing"``); the engine forwards the configured
-            ``general.*`` values to both. The returned ``model`` is a plain
+            matrix. The defaults are the same as in ``ModelTrainer`` and the
+            engine config; the engine forwards the configured ``general.*``
+            values to both. The returned ``model`` is a plain
             pipeline: unlike ``ModelTrainer.predict`` it does NOT re-apply
             the datetime expansion, so it expects the repaired schema.
         collect_oof (bool): Whether to keep the out-of-fold predictions of

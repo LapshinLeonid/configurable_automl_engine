@@ -468,6 +468,13 @@ def create_model(
     The algorithm is given as a string and is case-insensitive. Short
     aliases are not supported. If the algorithm is not found or requires a missing package,
     raises ValueError/ImportError.
+
+    Hyperparameter names are checked against
+    :func:`get_allowed_hyperparameters` — the same rule as the config
+    validation (``algorithms.<name>.hyperparameters``): an unknown name raises
+    ValueError instead of being silently dropped. The only exception is
+    ``random_state``, which the engine injects into every model and which is
+    dropped for estimators that do not accept it.
     """
     if not isinstance(algorithm, str):
         raise TypeError(f"Algorithm must be a string, got: {type(algorithm).__name__}")
@@ -484,6 +491,21 @@ def create_model(
             f"Algorithm '{algo_key}' requires an additional package. "
             "Install it or exclude it from the list."
         )
+
+    # Unknown hyperparameter names are rejected exactly as in the config
+    # validation (``Config._check_hyperparameter_compatibility``), so a typo
+    # in a direct call does not go unnoticed. ``random_state`` is exempt: the
+    # tuner and the trainer pass the run seed to every algorithm.
+    allowed = get_allowed_hyperparameters(algo_key)
+    if allowed is not None:
+        unknown = sorted(
+            key for key in hyperparams if key not in allowed and key != "random_state"
+        )
+        if unknown:
+            raise ValueError(
+                f"Algorithm '{algo_key}': unknown hyperparameters {unknown}. "
+                f"Allowed parameters: {sorted(allowed)}"
+            )
 
     # Deterministic seeding of stochastic estimators. Trees, forests, boosting
     # and the randomized linear models draw randomness at fit time; with a

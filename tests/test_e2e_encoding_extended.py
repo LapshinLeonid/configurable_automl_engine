@@ -219,8 +219,14 @@ def test_model_trainer_high_cardinality_mode() -> None:
     "kwargs, match",
     [
         ({"encoding_strategy": "binary"}, "Unknown encoding_strategy"),
-        ({"high_cardinality_threshold": 5}, "must be set together"),
-        ({"high_cardinality_encoding": "target"}, "must be set together"),
+        (
+            {"high_cardinality_threshold": 5, "high_cardinality_encoding": None},
+            "must be set together",
+        ),
+        (
+            {"high_cardinality_threshold": None, "high_cardinality_encoding": "target"},
+            "must be set together",
+        ),
         (
             {"high_cardinality_threshold": -1, "high_cardinality_encoding": "target"},
             ">= 0",

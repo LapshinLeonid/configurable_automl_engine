@@ -347,19 +347,19 @@ def test_validate_data_duplicate_columns_rejected():
         hyperopt._validate_data(X, y)
 
 
-def test_validate_data_inf_policy_default_error():
-    """±inf in features is rejected by default (inf_policy='error')."""
+def test_validate_data_inf_policy_error():
+    """±inf in features is rejected with inf_policy='error'."""
     X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(hyperopt.InvalidDataError, match="[Ii]nfinite"):
-        hyperopt._validate_data(X, y)
+        hyperopt._validate_data(X, y, inf_policy="error")
 
 
-def test_validate_data_inf_policy_as_missing():
-    """inf_policy='as_missing' replaces ±inf with NaN instead of rejecting."""
+def test_validate_data_inf_policy_default_as_missing():
+    """±inf is replaced with NaN by default (as general.inf_policy)."""
     X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
-    repaired = hyperopt._validate_data(X, y, inf_policy="as_missing")
+    repaired = hyperopt._validate_data(X, y)
     assert np.isnan(repaired["a"].iloc[1])
 
 

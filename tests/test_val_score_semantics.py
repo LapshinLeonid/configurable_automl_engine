@@ -614,7 +614,9 @@ def test_minimum_two_samples():
     """N = 2 (the minimum): training completes normally (hold-out 1/1)."""
     X = pd.DataFrame({"a": [1.0, 2.0]})
     y = pd.Series([1.0, 2.0])
-    trainer = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
+    trainer = ModelTrainer(
+        algorithm="ridge", metric="r2", validation_strategy="train_test_split"
+    ).fit(X, y)
     assert trainer.val_score is not None
     assert trainer.pipeline is not None
 
@@ -689,9 +691,11 @@ def test_old_pickle_without_validation_attrs_compatible():
     restored.fit(X, y)
     assert restored.val_score is not None
     # The attributes are absent (as in an old pickle), but fit uses the defaults:
-    # val_score matches a trainer trained with the explicit defaults.
+    # val_score matches a trainer trained with the pickle-fallback values.
     assert not hasattr(restored, "validation_strategy")
-    baseline = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
+    baseline = ModelTrainer(
+        algorithm="ridge", metric="r2", validation_strategy="train_test_split"
+    ).fit(X, y)
     assert restored.val_score == pytest.approx(baseline.val_score, rel=1e-6)
 
 

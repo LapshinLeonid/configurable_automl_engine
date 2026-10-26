@@ -1066,6 +1066,8 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 Runs hyperparameter optimization for a single algorithm using Optuna.
 
+Every parameter that has a counterpart in the `general` config section has the same default as that config key, so a direct call and a config run with the same settings behave identically.
+
 **Parameters:**
 
 | Parameter | Type | Default | Description |
@@ -1080,7 +1082,7 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `data_oversampling_add_noise` | `bool` | `False` | Add Gaussian noise to the numeric features of the oversampled data. |
 | `data_oversampling_noise_level` | `float` | `0.01` | Noise intensity relative to the column standard deviation (must be > 0). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
-| `val_method` | `ValidationStrategy` or `str` | `"k_fold"` | Validation method (legacy parameter). |
+| `val_method` | `ValidationStrategy` or `str` | `"auto"` | Validation method (legacy parameter), same default as `general.validation_strategy`. |
 | `validation_strategy` | `ValidationStrategy`, `str` or `None` | `None` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`); takes precedence over `val_method`. `None` — `val_method` is used. |
 | `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. Ignored when using `"auto"`. |
 | `n_folds` | `int` | `5` | Number of CV folds. |
@@ -1093,15 +1095,15 @@ Runs hyperparameter optimization for a single algorithm using Optuna.
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
-| `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the guard is disabled (the exact legacy behavior for direct callers). When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
+| `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the defaults of `general.complexity_guard` (mode `apply`); `{"mode": "off"}` disables the guard. When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
 | `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
 | `preprocessor` | `ColumnTransformer` or `None` | `None` | A ready feature preprocessor; takes precedence over `categorical_features` / `numerical_features`. |
 | `categorical_features`, `numerical_features` | `list[str]` or `None` | `None` | Column lists used to build the preprocessor when `preprocessor` is not passed. |
 | `encoding` | `str` or `None` | `None` (= `"one_hot"`) | Categorical encoding, same values as `general.categorical_encoding`. |
-| `high_cardinality_threshold`, `high_cardinality_encoding` | `int`/`str` or `None` | `None` | High-cardinality mode (off by default in the direct API, unlike the engine config). |
+| `high_cardinality_threshold`, `high_cardinality_encoding` | `int`/`str` or `None` | `50`, `"frequency"` | High-cardinality mode, same as the `general` options of the same name (on by default). Set both to `None` to disable it. |
 | `hashing_n_components`, `target_encoding_smoothing`, `target_encoding_fallback` | | `16`, `20.0`, `None` | Same as the `general` options of the same name. |
 | `limit_hyperparameters` | `bool` | `False` | Search ONLY the parameters in `space_overrides` (see `limit_hyperparameters` in the [algorithms section](#algorithms-section)). |
-| `inf_policy` | `str` | `"error"` | Infinite values in numeric features: `"error"` rejects the data, `"as_missing"` turns them into missing values. Note: the default differs from the engine config and `ModelTrainer` (`"as_missing"`). |
+| `inf_policy` | `str` | `"as_missing"` | Same as `general.inf_policy`: `"as_missing"` turns infinite values in numeric features into missing values, `"error"` rejects the data. |
 | `datetime_policy` | `str` | `"expand"` | Same as `general.datetime_policy`. |
 | `drop_id_like_columns` | `bool` | `False` | Same as `general.drop_id_like_columns`. |
 | `collect_oof` | `bool` | `False` | Keep the out-of-fold predictions of every completed trial in `OptimizeResult.oof_predictions` (the input of `bbc_score`); costs `n_trials × len(X)` floats. |
@@ -1131,9 +1133,9 @@ Creates a scikit-learn compatible regressor instance by algorithm name.
 
 **Returns:** `RegressorMixin` instance.
 
-**Raises:** `TypeError` if `algorithm` is not a string; `ValueError` for unknown algorithms; `ImportError` for missing optional dependencies.
+**Raises:** `TypeError` if `algorithm` is not a string; `ValueError` for unknown algorithms or unknown hyperparameter names; `ImportError` for missing optional dependencies.
 
-**Notes:** Automatically cleans and remaps hyperparameters via `clean_hyperparameters()`: legacy names are remapped and parameters the estimator does not accept are **silently dropped** (unlike the config path, where unknown names are rejected at validation). Sets `max_iter=10000` for SVR. Sets `kernel=RBF(1.0)` for GaussianProcessRegressor by default. Injects a fixed `random_state=42` into stochastic estimators (trees, forests, boosting, randomized linear models, XGBoost) unless the caller set `random_state` explicitly — an explicit value always wins. An explicit `random_state=None` (a truly random fit) is respected and produces a WARNING that the fit is not reproducible.
+**Notes:** Hyperparameter names are checked like in the config validation: an unknown name raises `ValueError` listing the allowed parameters (`random_state` is the only exception — it is dropped for estimators that do not accept it, because the engine passes the run seed to every model). Legacy names are remapped via `clean_hyperparameters()`. Sets `max_iter=10000` for SVR. Sets `kernel=RBF(1.0)` for GaussianProcessRegressor by default. Injects a fixed `random_state=42` into stochastic estimators (trees, forests, boosting, randomized linear models, XGBoost) unless the caller set `random_state` explicitly — an explicit value always wins. An explicit `random_state=None` (a truly random fit) is respected and produces a WARNING that the fit is not reproducible.
 
 ---
 
@@ -1142,6 +1144,8 @@ Creates a scikit-learn compatible regressor instance by algorithm name.
 `from configurable_automl_engine import ModelTrainer`
 
 Orchestrator class for training, validation, and serialization of regression models.
+
+Constructor parameters that have a counterpart in the `general` config section have the same default as that config key.
 
 **Constructor parameters:**
 
@@ -1163,12 +1167,12 @@ Orchestrator class for training, validation, and serialization of regression mod
 | `id_column` | `str` or `None` | `None` | ID column to exclude. |
 | `encoding_strategy` | `str` | `"one_hot"` | Categorical encoding strategy: `"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`. |
 | `additional_metrics` | `Iterable[str]` or `None` | `None` | Additional (informational) metrics computed for the trained model with the same validation method as the main metric (hold-out split or the CV estimate — the fold mean for additive metrics, the pooled OOF value for non-additive ones — never a train score). Any iterable of strings is accepted (list, tuple, set, generator); names are normalized to lowercase. Stored in `additional_scores` after `fit()`. |
-| `validation_strategy` | `str` or `ValidationStrategy` | `"train_test_split"` | Validation strategy for the final model quality estimate: `"train_test_split"` (one hold-out split), `"k_fold"` (CV fold mean), `"loo"` or `"auto"`. The engine path always passes the already-resolved strategy. |
+| `validation_strategy` | `str` or `ValidationStrategy` | `"auto"` | Validation strategy for the final model quality estimate, same default as `general.validation_strategy`: `"auto"`, `"train_test_split"` (one hold-out split), `"k_fold"` (CV fold mean) or `"loo"`. The engine path always passes the already-resolved strategy. |
 | `n_folds` | `int` | `5` | Number of folds for `"k_fold"` (`>= 2`). |
 | `test_size` | `float` or `int` | `0.2` | Hold-out size: a fraction in `(0, 1)` or an integer number of rows (like sklearn `train_test_split`). |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial or full overrides are supported; takes priority over the automatic class-based selection. |
-| `high_cardinality_threshold` | `int` or `None` | `50` (engine config) / `None` (low-level API) | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding` (default `"frequency"`); the rest use `encoding_strategy`. The engine config enables the mode by default; set both parameters to `None` to disable it. |
-| `high_cardinality_encoding` | `str` or `None` | `"frequency"` (engine config) / `None` (low-level API) | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
+| `high_cardinality_threshold` | `int` or `None` | `50` | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding` (default `"frequency"`); the rest use `encoding_strategy`. The mode is on by default, as in the engine config; set both parameters to `None` to disable it. |
+| `high_cardinality_encoding` | `str` or `None` | `"frequency"` | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
 | `hashing_n_components` | `int` | `16` | Number of binary columns per categorical column when `"hashing"` encoding is used (`>= 1`). Controls output dimensionality regardless of column cardinality. |
 | `target_encoding_smoothing` | `float` | `20.0` | Smoothing parameter `m` of target encoding (`>= 0`). With `m=0` the raw per-category mean is used; larger values pull rare categories toward the global mean. |
 | `target_encoding_fallback` | `float` or `None` | `None` | Fallback value for categories unseen in training under target encoding. `None` means the global target mean. |
@@ -1217,7 +1221,7 @@ The dimensionality and the storage format of the preprocessed matrix are logged 
 
 #### High-cardinality mode
 
-The engine config enables the automatic high-cardinality mode **by default**: `general.high_cardinality_threshold=50` with `general.high_cardinality_encoding="frequency"`. Columns whose number of unique values strictly exceeds the threshold are encoded with `high_cardinality_encoding`, while the remaining categorical columns keep `categorical_encoding`. The split is computed at fit time from the training data only (via `SplitCategoricalEncoder`), so the decision never depends on validation/test observations. A threshold of `0` marks every non-empty column as high-cardinality; a threshold larger than every column's cardinality effectively disables the mode. To disable the automatic mode, set **both** `high_cardinality_threshold` and `high_cardinality_encoding` to `null`/`None` explicitly. The low-level `build_preprocessor`/`SplitCategoricalEncoder` API keeps the previous `None` defaults.
+The engine config, `ModelTrainer` and `tuner.optimize` enable the automatic high-cardinality mode **by default**: `general.high_cardinality_threshold=50` with `general.high_cardinality_encoding="frequency"`. Columns whose number of unique values strictly exceeds the threshold are encoded with `high_cardinality_encoding`, while the remaining categorical columns keep `categorical_encoding`. The split is computed at fit time from the training data only (via `SplitCategoricalEncoder`), so the decision never depends on validation/test observations. A threshold of `0` marks every non-empty column as high-cardinality; a threshold larger than every column's cardinality effectively disables the mode. To disable the automatic mode, set **both** `high_cardinality_threshold` and `high_cardinality_encoding` to `null`/`None` explicitly. Only the low-level building blocks `build_preprocessor`/`SplitCategoricalEncoder` keep `None` defaults (the mode is off unless both parameters are passed).
 
 #### Edge cases
 
@@ -1317,3 +1321,5 @@ replacement; nothing is translated silently.
 | `sanity_gate.permutation_max_rows: null` / `permutation_max_features: null` | An integer limit, or `check_permutation_sensitivity: false` to skip the shuffle test. |
 | `sanity_gate.generalization_gap_mode` not set, expecting strict rejection | Set `generalization_gap_mode: "reject"` (the default is now `"warn"`). |
 | Short algorithm aliases in the Python API (`create_model("rf")`, `ModelTrainer(algorithm="knn")`, `optimize("xgboost", ...)`, …) | The full names: `dt` → `decision_tree`, `rf` → `random_forest`, `et` → `extra_trees`, `gb` → `gradient_boosting`, `ab` → `adaboost`, `sgd` → `sgdregressor`, `knn` → `nearest_neighbors_regression`, `gpr` / `gaussianprocessregressor` → `gaussian_process_regression`, `isotonic` → `isotonic_regression`, `ard` → `ardregression`, `xgboost` → `xgboosting`, `ridge_regression` → `ridge`. |
+| Direct Python API relying on the old defaults (`optimize(val_method="k_fold", inf_policy="error", high-cardinality off, complexity guard off)`, `ModelTrainer(validation_strategy="train_test_split", high-cardinality off)`) | The direct API now has the same defaults as the config (`"auto"`, `"as_missing"`, `50` + `"frequency"`, guard `apply`). Pass the old values explicitly: `validation_strategy="k_fold"` / `"train_test_split"`, `inf_policy="error"`, `high_cardinality_threshold=None, high_cardinality_encoding=None`, `complexity_guard_cfg={"mode": "off"}`. |
+| `create_model(...)` / `ModelTrainer(hyperparams=...)` with hyperparameter names the estimator does not accept | Remove or fix the names: they now raise `ValueError` (as in the config) instead of being dropped silently. |
