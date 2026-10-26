@@ -2070,7 +2070,7 @@ def _resolve_holdout_fraction(
     has at least ``AUTO_HOLDOUT_MIN_ROWS`` rows. On smaller data no hold-out
     is reserved (it would be too small to be informative and would take rows
     away from HPO): the honest estimate is then the BBC-CV
-    ``result["bbc_score"]``, and an INFO record says so. An explicit fraction
+    ``result["bbc_score"]``, and a WARNING says so. An explicit fraction
     or ``None`` is returned as is.
 
     Args:
@@ -2085,7 +2085,7 @@ def _resolve_holdout_fraction(
         return configured
     if n_rows >= AUTO_HOLDOUT_MIN_ROWS:
         return AUTO_HOLDOUT_FRACTION
-    _LOG.info(
+    _LOG.warning(
         "general.holdout_fraction='auto': no outer hold-out is reserved on "
         "small data (%d rows < %d). result['score'] and result['oof_score'] "
         "are computed on the same folds that selected the algorithm and "
