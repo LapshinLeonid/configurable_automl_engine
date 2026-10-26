@@ -323,6 +323,40 @@ def _is_categorical_col(s: pd.Series) -> bool:
     return bool(converted.isna().any())
 
 
+def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
+    """Find the binary indicator columns of a DataFrame.
+
+    A column is an indicator when all its non-missing values are ``0`` or
+    ``1`` (one-hot / hashing output, missing-value indicators, raw 0/1
+    flags; numeric strings such as ``'0'``/``'1'`` count too). Gaussian
+    noise on such a column produces meaningless values like ``0.003`` or
+    ``0.98``, so the oversampler excludes them from the noise. Boolean
+    columns are not returned: the noise step never touches them anyway.
+
+    Args:
+        df (pd.DataFrame): The feature matrix (before resampling).
+
+    Returns:
+        list[Any]: Labels of the binary indicator columns.
+    """
+    numeric = df.select_dtypes(include=[np.number])
+    binary: list[Any] = []
+    if not numeric.empty:
+        values = numeric.to_numpy(dtype=np.float64)
+        finite = ~np.isnan(values)
+        is_01 = (values == 0) | (values == 1) | ~finite
+        mask = is_01.all(axis=0) & finite.any(axis=0)
+        binary.extend(numeric.columns[mask])
+    for col in df.select_dtypes(include=["object", "string"]).columns:
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.isna().sum() != df[col].isna().sum():
+            continue  # truly categorical — handled by the encoder logic
+        vals = converted.dropna()
+        if not vals.empty and vals.isin([0, 1]).all():
+            binary.append(col)
+    return binary
+
+
 class _SMOTERGenerator:
     """SMOTER-style synthetic sample generator for regression targets.
 
@@ -630,7 +664,11 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         densify the matrix (memory explosion on hashing / one-hot output);
         besides, a zero there means "feature absent" and should stay exact.
         So only the explicitly stored non-zero values are perturbed: the
-        sparsity pattern is preserved and the cost is O(nnz). The noise scale
+        sparsity pattern is preserved and the cost is O(nnz). Binary indicator
+        columns (all stored values equal to 1 — one-hot / hashing output) are
+        left untouched as well: a noised "1.003" is not a category. The
+        decision is made on ``X`` itself, which is valid because random
+        oversampling only duplicates rows. The noise scale
         of a column is ``noise_level`` times its standard deviation computed
         over ALL rows (zeros included, ddof=1), the same as the dense path.
 
@@ -657,7 +695,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         stds[~np.isfinite(stds) | (stds == 0)] = 1.0
         scales = stds * self.noise_level
 
-        X_csr.data += rng.normal(0.0, 1.0, size=X_csr.nnz) * scales[X_csr.indices]
+        # Columns whose stored values are not all 1 (after eliminate_zeros
+        # every stored value is non-zero) carry real magnitudes and are noised
+        not_binary = np.zeros(X_csr.shape[1], dtype=bool)
+        not_binary[X_csr.indices[X_csr.data != 1.0]] = True
+        noise = rng.normal(0.0, 1.0, size=X_csr.nnz) * scales[X_csr.indices]
+        X_csr.data += noise * not_binary[X_csr.indices]
         return X_csr
 
     def __getstate__(self) -> dict[str, Any]:
@@ -914,6 +957,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     raise ValueError(f"Unsupported algorithm: {algo_local}")
 
             X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+            # Binary indicator columns (one-hot / missing indicators) are
+            # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
+            # fractions, after which they would no longer look binary.
+            binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
 
             # Determine the indices of non-numeric columns for SMOTENC.
             # Columns with numeric strings ("1.0", "2.0") are not
@@ -1098,7 +1145,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # Categorical columns are excluded from the noise so as not to break
             # the subsequent decoding via OrdinalEncoder.inverse_transform
             if self.add_noise:
-                noise_exclude = cat_cols if ordinal_encoder is not None else None
+                noise_exclude = list(cat_cols) if ordinal_encoder is not None else []
+                noise_exclude.extend(binary_cols)
                 X_res_df = self._add_gaussian_noise(
                     X_res_df,
                     exclude_cols=noise_exclude,
