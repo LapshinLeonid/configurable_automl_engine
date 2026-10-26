@@ -3,36 +3,20 @@ import pandas as pd
 import numpy as np
 from configurable_automl_engine.trainer import ModelTrainer
 
-# List of all supported abbreviations from your models.py
+# Algorithms covered by the fit/predict smoke test (full registry names)
 ALGORITHMS = [
     "elasticnet",
-    "dt",
-    "sgd",
-    "knn",
-    "gpr",
+    "decision_tree",
+    "sgdregressor",
+    "nearest_neighbors_regression",
+    "gaussian_process_regression",
     "svr",
-    "isotonic",
-    "ard",
-    "rf",
+    "isotonic_regression",
+    "ardregression",
+    "random_forest",
     "glm",
-    "xgboost",
-    "ridge_regression",
-]
-
-# List of all supported algorithms
-ALGORITHMS = [
-    "elasticnet",
-    "dt",
-    "sgd",
-    "knn",
-    "gpr",
-    "svr",
-    "isotonic",
-    "ard",
-    "rf",
-    "glm",
-    "xgboost",
-    "ridge_regression",
+    "xgboosting",
+    "ridge",
 ]
 
 
@@ -55,9 +39,7 @@ def test_every_algorithm_can_fit_and_predict(algo, small_dataset):
     preds = trainer.predict(X)
     # 5. Checks (Assertions)
     # 5. Checks (Assertions)
-    assert preds.shape[0] == y.shape[0], (
-        f"Algorithm {algo}: prediction size mismatch"
-    )
+    assert preds.shape[0] == y.shape[0], f"Algorithm {algo}: prediction size mismatch"
     assert not np.isnan(preds).any(), f"Algorithm {algo} returned NaN in predictions"
 
     # Check that the computed metric is available in the universal val_score attribute

@@ -12,17 +12,17 @@ from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 
 ALGORITHMS = [
     "elasticnet",
-    "dt",
-    "sgd",
-    "knn",
-    "gpr",
+    "decision_tree",
+    "sgdregressor",
+    "nearest_neighbors_regression",
+    "gaussian_process_regression",
     "svr",
-    "isotonic",
-    "ard",
-    "rf",
+    "isotonic_regression",
+    "ardregression",
+    "random_forest",
     "glm",
     pytest.param(
-        "xgboost",
+        "xgboosting",
         marks=pytest.mark.skipif(
             importlib.util.find_spec("xgboost") is None,
             reason="xgboost is not installed",
@@ -54,8 +54,8 @@ def test_fit_and_score_with_nan(algo):
 # ---------------------------------------------------------------------
 BAD_PARAMS = {
     "elasticnet": {"alpha": -1.0},
-    "knn": {"n_neighbors": 0},
-    "rf": {"n_estimators": 0},
+    "nearest_neighbors_regression": {"n_neighbors": 0},
+    "random_forest": {"n_estimators": 0},
 }
 
 

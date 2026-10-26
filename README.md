@@ -5,35 +5,37 @@
 [![codecov](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine/branch/main/graph/badge.svg?token=TAUHARATUM)](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine)
 [![CI](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml/badge.svg)](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![Socket Badge](https://badge.socket.dev/pypi/package/configurable-automl-engine/0.2.0?artifact_id=tar-gz)](https://socket.dev/pypi/package/configurable-automl-engine/overview/0.2.0/tar-gz)
+[![Socket Badge](https://badge.socket.dev/pypi/package/configurable-automl-engine/0.4.0?artifact_id=tar-gz)](https://socket.dev/pypi/package/configurable-automl-engine/overview/0.4.0/tar-gz)
 
 
-AutoML Engine is a configuration-driven automated machine learning library for Python. 
-It provides a high-performance ecosystem for model selection and hyperparameter optimization, 
-designed to scale from local experimentation to large-scale data processing. 
+AutoML Engine is a configuration-driven automated machine learning library for
+**tabular regression** in Python. You describe which regressors to try, how to
+validate them and how the final model is chosen in a YAML file or a dict; the
+engine tunes every algorithm with Optuna, picks a winner, reports an honest
+estimate of its quality and saves the trained pipeline.
+
+The library solves **regression only**: the target must be numeric.
+Classification is not supported.
 
 # Features
 
-* **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments.
-* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality. 
-* **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management.
-* **Extensible Model Factory**: Built-in support for 19+ regression algorithms with automatic hyperparameter cleaning.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, and categorical encoding.
-* ⚠️ **Experimental**: **Advanced Imbalance Handling**: Built-in oversampling module supporting SMOTE, ADASYN, and random oversampling, with optional Gaussian noise injection (`add_noise` flag / `noise_level`) applied to numeric features after resampling for regularization.
-* **Parallel Execution**: Utilizes threading and multi-processing for faster hyperparameter searches and cross-validation loops.
+* **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments. The config is validated before training starts: unknown keys, unknown hyperparameter names, missing optional packages and contradictory settings are reported as errors.
+* **Honest Quality Estimate**: Besides the (optimistic) validation score of the best trial, every run reports an estimate that is not biased by the search itself: `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved. See [Training results](API_REFERENCE.md#training-results).
+* **Multi-Step Pipelines**: A run is a list of steps (`general.phases`): search steps (`all_algorithms`, `refine`) tune hyperparameters, select steps (`select`) narrow the candidates down to the final winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
+* **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
+* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
+* **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
+* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`). Algorithms are referred to only by these names; short aliases (`rf`, `knn`, `xgboost`, …) are not supported.
+* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, categorical encoding, infinite values and date/time columns, with per-algorithm preprocessing presets and optional feature selection.
+* **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers.
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
+* **Adaptive Complexity Guard**: Tightens the search ranges of trees and boosting on small data (lossless clipping + regularization), saving HPO budget and reducing overfitting on small samples. Disableable via `general.complexity_guard`.
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
-* **Granular Phase/Task Timeouts**: Configurable global phase timeout and per-task timeout with a watchdog mechanism to prevent deadlocks. In `"threads"` mode timeouts are **soft**: an already running Python function cannot be killed.
-* **Signature-Aware Hyperparameter Cleaning**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression), and unknown parameters are safely dropped.
-* **Sanity Gate**: Protects the final winner selection from
-"degenerate" models: constant/flat predictions, step functions, unused
-features and overfit learners.
-* **Adaptive Complexity Guard**: Tightens the search ranges of trees and
-boosting on small data (lossless clipping + regularization), saving HPO
-budget and reducing overfitting on small samples. Disableable via
-`general.complexity_guard`.
+* **Phase/Task Timeouts (process mode only)**: A global timeout for a search step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`), enforced by a watchdog that terminates hung workers. Timeouts require `parallel_mode: "processes"`; with `parallel_mode: "threads"` (the default) setting either of them is a configuration error (`ValueError`), because a running Python thread cannot be stopped.
+* **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names in the config are **rejected** at config validation, so typos do not go unnoticed (the only exception is `xgboosting`, whose estimator accepts arbitrary `**kwargs`). Only a direct call of `configurable_automl_engine.models.create_model(...)` silently drops parameters the estimator does not accept.
+* ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Oversampling is applied only to the training part of each fold. Optional Gaussian noise injection (`oversampling.add_noise` / `noise_level`) is applied to numeric, non-indicator features after resampling for regularization.
 
 # Dependencies
 
@@ -46,7 +48,7 @@ These distributions are essential for the core functionality and will be install
 * **Pandas** (>=3.0.0): Used for data structures and high-level manipulation of tabular datasets before model ingestion. 
 * **PyArrow** (>=23.0.0): Provides a cross-language development platform for in-memory data, enabling efficient data exchange and high-performance integration with Pandas through the Arrow columnar format.
 * **Scikit-learn** (>=1.8.0): The primary library for machine learning algorithms, preprocessing tools, and validation frameworks.
-* **Imbalanced-learn** (>=0.14.1): Provides oversampling algorithms (like SMOTE) for handling datasets with skewed class distributions.
+* **Imbalanced-learn** (>=0.14.1): Provides the oversampling algorithms (random, SMOTE, ADASYN) used by the experimental oversampling module; the engine applies them to quantile bins of the regression target.
 * **Optuna** (>=4.7.0): Powers the engine to perform automated hyperparameter optimization searches.
 * **Pydantic** (>=2.12.5): Data validation and settings management using Python type annotations.
 * **PyYAML** (>=6.0.3): Implements the standard configuration schema, allowing the system to parse YAML files for model parameters and training setups.
@@ -55,9 +57,13 @@ These distributions are essential for the core functionality and will be install
 
 ## Optional Dependencies
 
-These distributions will not be installed automatically. You can install them using the bracket syntax (e.g., pip install "configurable-automl-engine[xgboost]").
+These distributions will not be installed automatically. You can install them using the bracket syntax (e.g., `pip install "configurable-automl-engine[xgboost]"`).
 
-* **XGBoost**: Adds support for high-performance gradient boosting models.
+| Extra | Installs | Adds |
+|-------|----------|------|
+| `xgboost` | `xgboost>=3.1.3` | The `xgboosting` algorithm. Without it a config that enables `xgboosting` is rejected at validation. |
+| `logging` | `concurrent-log-handler>=0.9.25` | Process-safe rotating log files (`general.log_to_file`) when several processes write to the same log. Without it the standard `RotatingFileHandler` is used. |
+| `all` | `xgboost` + `logging` | Both of the above. |
 
 # Installation
 
@@ -65,10 +71,13 @@ To install, run:
 
     pip install configurable-automl-engine
 
+With the optional XGBoost algorithm:
 
-For the full suite including all supported gradient boosting backends:
+    pip install "configurable-automl-engine[xgboost]"
 
-     pip install configurable-automl-engine[all]   
+With all optional extras (`xgboost` and `logging`):
+
+    pip install "configurable-automl-engine[all]"
 
 Testing:
 
@@ -76,57 +85,43 @@ Testing:
 
 # Quick Start
 
-The example can be run from [example.py](example.py).
+The example can be run from [example.py](example.py). It needs only the basic
+installation and takes about a minute on a laptop.
 
-    from sklearn.datasets import load_diabetes
+```python
+from sklearn.datasets import load_diabetes
 
-    import configurable_automl_engine as caml
+import configurable_automl_engine as caml
 
-    data = load_diabetes(as_frame=True)
-    df = data.frame
+df = load_diabetes(as_frame=True).frame
 
-    config = {
-        "general": {
-            "comparison_metric": "r2",
-            "phases": [
-                {"n_trials": 100, "action": "all_algorithms"},
-                {
-                    "name": "final_select",
-                    "n_trials": 1,
-                    "action": "select",
-                    "strategy": "cv_best",
-                    "output": "winner"
-                }
-            ],
-            "path_to_model": "diabetes_model.pkl"
-        },
-        "algorithms": {
-            "random_forest": {
-                "enable": True,
-                "limit_hyperparameters": True,
-                "hyperparameters": {"n_estimators": [10, 500], "max_depth": [3, 20]}
-            },
-            "ridge": {
-                "enable": True,
-                "limit_hyperparameters": True,
-                "hyperparameters": {"alpha": [0.1, 1.0]}
-            },
-            "xgboosting": {
-                "enable": True,
-                "limit_hyperparameters": True,
-                "hyperparameters": {
-                    "n_estimators": [100, 1000],
-                    "max_depth": [3, 10],
-                    "learning_rate": [0.01, 0.3],
-                    "subsample": [0.5, 1.0]
-                }
-            },
-        }
-    }
+config = {
+    "general": {
+        "comparison_metric": "r2",
+        "path_to_model": "diabetes_model.pkl",
+    },
+    # {} = use the built-in search space of the algorithm
+    "algorithms": {
+        "ridge": {},
+        "random_forest": {},
+    },
+}
 
-    results = caml.train_best_model(config=config, df=df, target='target')
+results = caml.train_best_model(config=config, df=df, target="target")
 
-    print(f"Winner: {results['algorithm']}, Score: {results['score']:.4f}")
+print(f"Winner: {results['algorithm']}")
+print(f"Hold-out R2 (honest estimate): {results['holdout_score']:.4f}")
+```
+
+What happens here:
+
+* Every setting that is not written has a default: 50 tuning trials per
+  algorithm, then the algorithm with the best validation score is the winner
+  (see [How the engine works](API_REFERENCE.md#how-the-engine-works)).
+* The dataset has 442 rows, so by default (`holdout_fraction: "auto"`, data
+  with at least 100 rows) 20 % of the rows are reserved **before** tuning.
+  `holdout_score` is the winner's R² on these untouched rows.
+* The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
 
@@ -139,33 +134,45 @@ If you are considering larger contributions to the source code, please contact t
 If you contribute, please ensure your code:
 
 * 100% covered by tests.
-* Has 0 errors when checked by the ruff linter.
+* Has 0 errors when checked by the ruff linter and passes `ruff format --check`.
 * Has 0 errors when checked by the mypy static analyzer.
 * All docstrings written in English.
 
 # Project Structure
 
 ```
+├── benchmarks                              # Quality benchmarks of Sanity Gate, Complexity Guard, oversampling
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
 │       ├── common                          # Shared utilities and helper functions
+│       │   ├── complexity_guard.py         # Adaptive tightening of tree/boosting search spaces on small data
 │       │   ├── definitions.py              # Constants, enums, and schema definitions
 │       │   ├── dependency_utils.py         # Optional library and dependency checks
 │       │   ├── hyperopt_defaults.py        # Default search spaces, clipping, and constraints
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
+│       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   └── validation_utils.py         # Low-level data validation and effective train size
 │       ├── training_engine                 # Core orchestration and execution logic
-│       │   ├── component.py                # Pipeline building block base classes
+│       │   ├── component.py                # Main orchestrator: train_best_model, phases, select steps, artifact saving
 │       │   ├── config_parser.py            # Configuration parsing and validation
 │       │   ├── logger.py                   # Centralized logging management
-│       │   ├── metrics.py                  # Evaluation metrics implementation
+│       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
+│       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
 │       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
-│       ├── models.py                       # Model factory, aliases, hyperparameter cleaning
-│       ├── oversampling.py                 # Imbalance handling and resampling
-│       ├── trainer.py                      # Training process orchestrator
+│       ├── feature_selection.py            # Optional feature selection step
+│       ├── models.py                       # Model factory, hyperparameter cleaning
+│       ├── oversampling.py                 # Experimental target-aware oversampling
+│       ├── preprocessing.py                # Feature preprocessing: imputation, scaling, encoding
+│       ├── preprocessing_presets.py        # Per-algorithm preprocessing presets
+│       ├── trainer.py                      # ModelTrainer: training, validation and saving of a single model
 │       ├── tuner.py                        # Hyperparameter optimization, circuit breaker
 │       └── validation.py                   # High-level cross-validation strategies
-└── tests                                   # Unit and integration test suites
+├── tests                                   # Unit and integration test suites
+├── agents.md                               # Instructions for AI agents in the CI pipeline
+├── API_REFERENCE.md                        # User guide and API reference
+├── config.schema.json                      # JSON Schema of the config (generated)
+├── example.py                              # Quick start example
+└── schema_generator.py                     # Generates config.schema.json from the Pydantic models
 ```
 
 # ⚠️ NeuroSlop Warning

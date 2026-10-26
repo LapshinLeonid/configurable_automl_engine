@@ -1,6 +1,5 @@
 """
 Factory for regression models.
-Added short aliases (dt, rf, etc.) and new algorithms.
 """
 
 from __future__ import annotations
@@ -189,8 +188,8 @@ def requires_dense_input(algorithm: str) -> bool:
     (GPR/Isotonic/ARD physically cannot work with sparse data).
 
     Args:
-        algorithm: Algorithm name or alias (e.g. ``'gpr'``,
-            ``'isotonic'``, ``'ard'``).
+        algorithm: Algorithm name (e.g. ``'gaussian_process_regression'``,
+            ``'isotonic_regression'``, ``'ardregression'``).
 
     Returns:
         ``True`` — the model requires dense input; ``False`` — sparse
@@ -206,30 +205,6 @@ LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
     # ARDRegression: sklearn renamed `n_iter` -> `max_iter` in 1.2+
     "ardregression": {"n_iter": "max_iter"},
 }
-
-# ----------------------------------------------------------------------------- #
-#                                 Short aliases                                 #
-# ----------------------------------------------------------------------------- #
-_ALIASES: dict[str, str] = {
-    "dt": "decision_tree",
-    "rf": "random_forest",
-    "et": "extra_trees",
-    "gb": "gradient_boosting",
-    "ab": "adaboost",
-    "elasticnet": "elasticnet",
-    "sgd": "sgdregressor",
-    "knn": "nearest_neighbors_regression",
-    "gpr": "gaussian_process_regression",
-    "gaussianprocessregressor": "gaussian_process_regression",
-    "svr": "svr",
-    "isotonic": "isotonic_regression",
-    "ard": "ardregression",
-    "glm": "glm",
-    "xgboost": "xgboosting",
-    "ridge_regression": "ridge",
-    "lasso": "lasso",
-}
-
 
 # ----------------------------------------------------------------------------- #
 #                  Signature introspection (cached)                             #
@@ -334,7 +309,7 @@ def remap_legacy_param_names(
     :func:`clean_hyperparameters`.
 
     Args:
-        algo_key: Algorithm name or alias (e.g. ``'ard'``).
+        algo_key: Algorithm name (e.g. ``'ardregression'``).
         hyperparams: Parameter dict whose keys are hyperparameter names; the
             values are passed through unchanged (``SearchSpaceEntry`` objects,
             raw values, etc.).
@@ -379,8 +354,7 @@ def get_param_numeric_type(algo_key: str, param: str) -> str | None:
     The result is cached per (algorithm, parameter) pair.
 
     Args:
-        algo_key: Normalised or aliased algorithm key (e.g. ``'svr'``,
-            ``'xgboost'``).
+        algo_key: Algorithm name (e.g. ``'svr'``, ``'xgboosting'``).
         param: Constructor parameter name.
 
     Returns:
@@ -432,8 +406,8 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     The result is cached per algorithm key.
 
     Args:
-        algo_key: Normalised or aliased algorithm key (e.g. ``'rf'``,
-            ``'xgboost'``).
+        algo_key: Algorithm name (e.g. ``'random_forest'``,
+            ``'xgboosting'``).
 
     Returns:
         Frozen set of accepted hyperparameter names, or ``None`` if the
@@ -471,17 +445,19 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
 
 
 def resolve_algorithm_name(algorithm: str) -> str:
-    """Normalize an algorithm name: lowercase + alias expansion.
+    """Normalize an algorithm name to lowercase.
+
+    Short aliases (``rf``, ``knn``, ...) are not supported: only the names
+    from :data:`AVAILABLE_ALGORITHMS` are valid.
 
     Args:
-        algorithm: Algorithm name or alias (e.g. ``'RF'``, ``'xgboost'``).
+        algorithm: Algorithm name (e.g. ``'Random_Forest'``).
 
     Returns:
-        Canonical algorithm name for lookup in the registry of supported
+        Lowercased algorithm name for lookup in the registry of supported
         algorithms (:data:`AVAILABLE_ALGORITHMS`).
     """
-    algo_key = algorithm.lower()
-    return _ALIASES.get(algo_key, algo_key)
+    return algorithm.lower()
 
 
 def create_model(
@@ -489,8 +465,8 @@ def create_model(
 ) -> RegressorMixin:
     """
     Returns an instance of the selected regressor.
-    The algorithm is given as a string and is case-insensitive. Aliases are
-    supported. If the algorithm is not found or requires a missing package,
+    The algorithm is given as a string and is case-insensitive. Short
+    aliases are not supported. If the algorithm is not found or requires a missing package,
     raises ValueError/ImportError.
     """
     if not isinstance(algorithm, str):

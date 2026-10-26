@@ -637,7 +637,7 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     )
 
     tuner.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         validation_strategy="auto",
@@ -702,7 +702,7 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     monkeypatch.setattr(tuner, "create_model", lambda *a, **k: MagicMock())
 
     tuner.optimize(
-        "knn",
+        "nearest_neighbors_regression",
         X,
         y,
         validation_strategy="auto",

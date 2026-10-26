@@ -1449,7 +1449,7 @@ def test_trainer_univariate_no_scaling():
     rng = np.random.RandomState(0)
     X1 = pd.DataFrame({"a": rng.permutation(np.linspace(0, 1, 50))})
     y1 = pd.Series(X1["a"] * 2.0 + rng.randn(50) * 0.05)
-    trainer = ModelTrainer(algorithm="isotonic").fit(X1, y1)
+    trainer = ModelTrainer(algorithm="isotonic_regression").fit(X1, y1)
     assert trainer.preprocessing_preset.scaling == "none"
     num = _num_transformer_of(trainer)
     assert "scaler" not in [s[0] for s in num.steps]
@@ -1822,7 +1822,7 @@ def test_feature_selection_auto_noisy_activates():
     """Standalone auto: on data with 90% noisy features, selection is enabled."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         feature_selection_cfg={
             "mode": "auto",
@@ -1842,7 +1842,7 @@ def test_feature_selection_auto_all_important_disables():
     """Standalone auto: when all features matter, selection is deactivated."""
     X, y = _fs_all_important_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         feature_selection_cfg={
             "mode": "auto",
@@ -1863,7 +1863,7 @@ def test_feature_selection_auto_logs_info_message(caplog):
     X, y = _fs_noisy_dataset()
     with caplog.at_level(logging.INFO, logger="configurable_automl_engine.trainer"):
         ModelTrainer(
-            algorithm="knn",
+            algorithm="nearest_neighbors_regression",
             hyperparams={"n_neighbors": 20},
             feature_selection_cfg={
                 "mode": "auto",
@@ -1890,7 +1890,7 @@ def test_feature_selection_auto_check_with_neg_error_metric():
     """
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         metric="neg_root_mean_squared_error",
         feature_selection_cfg={
@@ -1921,7 +1921,7 @@ def test_feature_selection_auto_check_direction_follows_raw_scorer():
     """
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         metric="neg_root_mean_squared_error",
         feature_selection_cfg={
@@ -1956,7 +1956,7 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
     """Fail-safe: an exception in auto-check -> WARNING + selection disabled."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         feature_selection_cfg={
             "mode": "auto",
@@ -2007,7 +2007,7 @@ def test_feature_selection_isotonic_forced_disabled(caplog):
 
     with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
         trainer = ModelTrainer(
-            algorithm="isotonic", feature_selection_cfg={"mode": "always"}
+            algorithm="isotonic_regression", feature_selection_cfg={"mode": "always"}
         ).fit(X, y)
 
     assert trainer.pipeline is not None
@@ -2036,7 +2036,7 @@ def test_isotonic_multifeature_default_feature_index():
     y = pd.Series(X["signal"] * 3.0 + rng.randn(80) * 0.05)
 
     trainer = ModelTrainer(
-        algorithm="isotonic", hyperparams={"out_of_bounds": "clip"}
+        algorithm="isotonic_regression", hyperparams={"out_of_bounds": "clip"}
     ).fit(X, y)
 
     assert trainer.pipeline is not None
@@ -2162,7 +2162,7 @@ def test_isotonic_multifeature_feature_index_selection():
     y = pd.Series(X["signal"] * 3.0 + rng.randn(100) * 0.1)
 
     trainer_signal = ModelTrainer(
-        algorithm="isotonic",
+        algorithm="isotonic_regression",
         hyperparams={"feature_index": 1, "out_of_bounds": "clip"},
     ).fit(X, y)
     assert trainer_signal.val_score is not None
@@ -2170,7 +2170,7 @@ def test_isotonic_multifeature_feature_index_selection():
     assert trainer_signal.pipeline.named_steps["isotonic_selector"].feature_index == 1
 
     trainer_noise = ModelTrainer(
-        algorithm="isotonic",
+        algorithm="isotonic_regression",
         hyperparams={"feature_index": 0, "out_of_bounds": "clip"},
     ).fit(X, y)
     assert trainer_noise.val_score is not None
@@ -2188,14 +2188,14 @@ def test_isotonic_invalid_feature_index_rejected():
         TrainingError, match="feature_index must be a non-negative integer"
     ):
         ModelTrainer(
-            algorithm="isotonic", hyperparams={"feature_index": "first"}
+            algorithm="isotonic_regression", hyperparams={"feature_index": "first"}
         ).fit(X, y)
 
     with pytest.raises(
         TrainingError, match="feature_index must be a non-negative integer"
     ):
         ModelTrainer(
-            algorithm="isotonic", hyperparams={"feature_index": -1}
+            algorithm="isotonic_regression", hyperparams={"feature_index": -1}
         ).fit(X, y)
 
 
@@ -2208,7 +2208,7 @@ def test_isotonic_feature_index_out_of_bounds_fails():
 
     with pytest.raises(TrainingError, match="out of bounds"):
         ModelTrainer(
-            algorithm="isotonic", hyperparams={"feature_index": 5}
+            algorithm="isotonic_regression", hyperparams={"feature_index": 5}
         ).fit(X, y)
 
 
@@ -2218,7 +2218,7 @@ def test_isotonic_ndarray_multifeature():
     X = rng.rand(60, 3)
     y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
 
-    trainer = ModelTrainer(algorithm="isotonic", hyperparams={"feature_index": 1}).fit(
+    trainer = ModelTrainer(algorithm="isotonic_regression", hyperparams={"feature_index": 1}).fit(
         X, y
     )
     assert trainer.pipeline is not None
@@ -2240,7 +2240,7 @@ def test_isotonic_feature_index_survives_save_load(tmp_path):
     y = pd.Series(X["signal"] * 2.0 + rng.randn(60) * 0.05)
 
     trainer = ModelTrainer(
-        algorithm="isotonic", hyperparams={"feature_index": 1}
+        algorithm="isotonic_regression", hyperparams={"feature_index": 1}
     ).fit(X, y)
     pkl = tmp_path / "isotonic.pkl"
     trainer.save(pkl)
@@ -2555,7 +2555,7 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
     """Fail-safe: None scores on hold-out -> WARNING + selection disabled, fit succeeds."""
     X, y = _fs_noisy_dataset()
     trainer = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         feature_selection_cfg={
             "mode": "auto",
@@ -2602,7 +2602,7 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
 
     X, y = _fs_noisy_dataset()
     tr = ModelTrainer(
-        algorithm="knn",
+        algorithm="nearest_neighbors_regression",
         hyperparams={"n_neighbors": 20},
         feature_selection_cfg={
             "mode": "auto",
@@ -3147,7 +3147,7 @@ def test_fit_drops_uninformative_features():
     assert set(preprocessor.feature_names_in_) == {"x1", "x2"}
 
 
-@pytest.mark.parametrize("algo", ["ridge", "svr", "knn"])
+@pytest.mark.parametrize("algo", ["ridge", "svr", "nearest_neighbors_regression"])
 def test_metric_models_with_garbage_columns_train_and_score(algo):
     """Motivational scenario: SVR/KNN/Ridge on data with garbage columns
     train without NaN/garbage, and metrics are no worse than on clean data."""

@@ -8,7 +8,7 @@ Covers:
 - the non-empty default search space (kernel family: RBF / Matern /
   RationalQuadratic) and its ``kernel_type`` translation in
   ``models.create_model``;
-- a direct ``tuner.optimize("gpr", ...)`` call without an explicit
+- a direct ``tuner.optimize("gaussian_process_regression", ...)`` call without an explicit
   ``space_overrides`` (was failing with "No search space" — the space is
   now taken from ``DEFAULT_SPACES``);
 - the GPR model actually beating the constant baseline on a small sample
@@ -52,14 +52,14 @@ def test_gpr_default_search_space_not_empty():
 
 
 def test_gpr_direct_optimize_uses_default_space():
-    """Direct optimize('gpr', X, y) no longer raises "No search space".
+    """Direct optimize('gaussian_process_regression', X, y) no longer raises "No search space".
 
     The default space (kernel family) is applied even without an explicit
     ``space_overrides``.
     """
     X, y = _small_frame()
     result = optimize(
-        "gpr",
+        "gaussian_process_regression",
         X,
         y,
         n_trials=2,
@@ -87,7 +87,7 @@ def test_gpr_optimize_beats_constant_baseline():
     X, y = _small_frame()
     baseline = float(np.var(y))
     result = optimize(
-        "gpr",
+        "gaussian_process_regression",
         X,
         y,
         n_trials=3,
@@ -109,7 +109,7 @@ def test_gpr_final_params_reconstruct_model():
     """
     X, y = _small_frame()
     result = optimize(
-        "gpr",
+        "gaussian_process_regression",
         X,
         y,
         n_trials=2,
@@ -118,7 +118,7 @@ def test_gpr_final_params_reconstruct_model():
         validation_strategy="train_test_split",
     )
     assert result is not None
-    model = create_model("gpr", **result.params)
+    model = create_model("gaussian_process_regression", **result.params)
     assert hasattr(model, "kernel")
     assert model.normalize_y is True
     assert model.n_restarts_optimizer >= 1

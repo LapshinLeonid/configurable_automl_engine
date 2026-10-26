@@ -613,7 +613,7 @@ def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
     constructors, or a non-numeric default).
 
     Args:
-        algo_name: Algorithm name or alias.
+        algo_name: Algorithm name.
         param_name: Hyperparameter name.
 
     Returns:
@@ -649,7 +649,7 @@ def resolve_implicit_range_type(
     is used.
 
     Args:
-        algo_name: Algorithm name or alias.
+        algo_name: Algorithm name.
         param_name: Hyperparameter name.
         low: Lower bound of the range.
         high: Upper bound of the range.
@@ -689,7 +689,7 @@ def normalize_hyperparameter_entry(
     passed through untouched.
 
     Args:
-        algo_name: Algorithm name or alias.
+        algo_name: Algorithm name.
         param_name: Hyperparameter name.
         entry: The parsed ``SearchSpaceEntry``.
 

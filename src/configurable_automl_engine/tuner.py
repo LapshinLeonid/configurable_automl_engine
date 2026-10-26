@@ -8,16 +8,14 @@ and integrated oversampling.
 Key features:
     1. Hybrid Model Zoo: Full support for the AutoML engine's base model pool
        with extensions for the SGD, GaussianProcess, Isotonic and GLM families.
-    2. Neural Filter: Automatic detection and exclusion of neural network
-       architectures (alias "nn") to save resources in a classical ML pipeline.
-    3. Adaptive Validation: Intelligent switching between k-fold,
+    2. Adaptive Validation: Intelligent switching between k-fold,
        Leave-One-Out and Train-Test Split (80/20) depending on the sample size
        (fallback when n_samples < 2k).
-    4. Integrated Oversampling: Seamless class-balancing integration through an
+    3. Integrated Oversampling: Seamless class-balancing integration through an
        Imbalance-Pipeline right inside the optimisation process.
-    5. Dynamic Search Spaces: Support for both hard-coded spaces (e.g. the
+    4. Dynamic Search Spaces: Support for both hard-coded spaces (e.g. the
        adaptive KNN space) and external configurations via YAML/SearchSpaceEntry.
-    6. Metric Agnostic: Optimisation against any standard or custom Sklearn
+    5. Metric Agnostic: Optimisation against any standard or custom Sklearn
        metric (R² by default).
 """
 
@@ -414,7 +412,7 @@ def _get_estimator(algo: str) -> Any:
     """Check the availability and validity of the given algorithm.
 
     Args:
-        algo (str): Algorithm name (alias).
+        algo (str): Algorithm name.
     Returns:
         Any: Returns True if the model is created successfully by the base factory.
     Raises:
@@ -441,7 +439,7 @@ def _missing_indicator_enabled(algorithm: str | None) -> bool:
     case the safe default ``True`` is returned.
 
     Args:
-        algorithm: Regression algorithm name (or alias); it may be
+        algorithm: Regression algorithm name; it may be
             ``None``/an empty string before name validation.
 
     Returns:
@@ -1902,11 +1900,11 @@ class _OptimizeRunner:
         """
         base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
         base_space_dict: dict[str, Any] | None = None
-        if self.algo == "knn":
+        if resolve_algorithm_name(self.algo) == "nearest_neighbors_regression":
             base_space_fn = _make_knn_space(self.n_samples_eff)
         elif resolve_algorithm_name(self.algo) == "gaussian_process_regression":
             # GPR without an external config (including a direct
-            # optimize("gpr", X, y) call): the DEFAULT_SPACES search space
+            # optimize("gaussian_process_regression", X, y) call): the DEFAULT_SPACES search space
             # (small: kernel family only).
             base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
             base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
