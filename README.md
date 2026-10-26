@@ -21,7 +21,7 @@ Classification is not supported.
 
 * **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments. The config is validated before training starts: unknown keys, unknown hyperparameter names, missing optional packages and contradictory settings are reported as errors.
 * **Honest Quality Estimate**: Besides the (optimistic) validation score of the best trial, every run reports an estimate that is not biased by the search itself: `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved. See [Which score to trust](#which-score-to-trust).
-* **Multi-Step Pipelines**: A run is a list of steps (`general.phases`): search steps (`all_algorithms`, `refine`) tune hyperparameters, select steps (`select`) narrow the candidates down to the final winner. See [How a run works](#how-a-run-works).
+* **Multi-Step Pipelines**: A run is a list of steps (`general.phases`): search steps (`all_algorithms`, `refine`) tune hyperparameters, select steps (`select`) narrow the candidates down to the final winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
 * **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
@@ -117,61 +117,13 @@ What happens here:
 
 * Every setting that is not written has a default: 50 tuning trials per
   algorithm, then the algorithm with the best validation score is the winner
-  (see [How a run works](#how-a-run-works)).
+  (see [How the engine works](API_REFERENCE.md#how-the-engine-works)).
 * The dataset has 442 rows, so by default (`holdout_fraction: "auto"`, data
   with at least 100 rows) 20 % of the rows are reserved **before** tuning.
   `holdout_score` is the winner's R² on these untouched rows.
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
-
-# How a run works
-
-A training run is a short pipeline of steps configured in `general.phases`.
-When `phases` is omitted, the engine uses:
-
-```yaml
-general:
-  phases:
-    - {name: "search", action: "all_algorithms", n_trials: 50}
-    - {name: "final_select", action: "select", strategy: "cv_best", output: "winner"}
-```
-
-**Search steps** tune hyperparameters with Optuna:
-
-* `all_algorithms` — `n_trials` trials for every enabled algorithm, with
-  different algorithms tuned in parallel.
-* `refine` — `n_trials` more trials for each algorithm still in the race,
-  starting from its best parameters so far; its score can only stay the same
-  or improve.
-
-**Select steps** (`action: "select"`) decide which algorithms stay in the race:
-
-* `strategy: "cv_best"` — rank the candidates by validation score.
-* `strategy: "sanity_gate"` — take the candidates close to the leader, train
-  each on all rows and reject degenerate models (near-constant predictions,
-  step functions, models that ignore most features, strong overfitting); the
-  best candidate that passes the checks wins. Recommended for small or noisy
-  data.
-* `output` — what the step keeps: `winner` (one model; this ends the
-  pipeline), `top_k` (the best `k`) or `pool` (every candidate close to the
-  leader).
-
-The pipeline must start with a search step and end with a select step with
-`output: "winner"`. A typical "coarse search, then fine-tune the top 3"
-pipeline:
-
-```yaml
-general:
-  phases:
-    - {name: "coarse", action: "all_algorithms", n_trials: 100}
-    - {name: "top3",   action: "select", strategy: "sanity_gate", output: "top_k", k: 3}
-    - {name: "fine",   action: "refine", n_trials: 200}
-    - {name: "final",  action: "select", strategy: "sanity_gate", output: "winner"}
-```
-
-Details: [Pipeline steps](API_REFERENCE.md#pipeline-steps-phases) and
-[Sanity Gate](API_REFERENCE.md#sanity-gate-robust-winner-selection).
 
 # Which score to trust
 
