@@ -1183,7 +1183,7 @@ def apply_complexity_guard(
 
     Args:
         space: The search space dict (parameter name -> ``SearchSpaceEntry``).
-        algo: The algorithm name (alias is resolved internally).
+        algo: The algorithm name (case-insensitive).
         n: Number of rows in the training fold (``n_samples_eff``).
         p: Number of features after preprocessing.
         config: The guard configuration; ``None`` — the defaults.

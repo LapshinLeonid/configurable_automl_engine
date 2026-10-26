@@ -25,7 +25,7 @@ Classification is not supported.
 * **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
-* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`). In the config the full names are required; short aliases (`rf`, `knn`, `xgboost`, …) work only in the Python API.
+* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`). Algorithms are referred to only by these names; short aliases (`rf`, `knn`, `xgboost`, …) are not supported.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, categorical encoding, infinite values and date/time columns, with per-algorithm preprocessing presets and optional feature selection.
 * **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers.
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
@@ -69,7 +69,7 @@ These distributions will not be installed automatically. You can install them us
 
 | Extra | Installs | Adds |
 |-------|----------|------|
-| `xgboost` | `xgboost>=3.1.3` | The `xgboosting` algorithm (alias `xgboost`). Without it a config that enables `xgboosting` is rejected at validation. |
+| `xgboost` | `xgboost>=3.1.3` | The `xgboosting` algorithm. Without it a config that enables `xgboosting` is rejected at validation. |
 | `logging` | `concurrent-log-handler>=0.9.25` | Process-safe rotating log files (`general.log_to_file`) when several processes write to the same log. Without it the standard `RotatingFileHandler` is used. |
 | `all` | `xgboost` + `logging` | Both of the above. |
 
@@ -251,7 +251,7 @@ If you contribute, please ensure your code:
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
 │       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
 │       ├── feature_selection.py            # Optional feature selection step
-│       ├── models.py                       # Model factory, aliases, hyperparameter cleaning
+│       ├── models.py                       # Model factory, hyperparameter cleaning
 │       ├── oversampling.py                 # Experimental target-aware oversampling
 │       ├── preprocessing.py                # Feature preprocessing: imputation, scaling, encoding
 │       ├── preprocessing_presets.py        # Per-algorithm preprocessing presets

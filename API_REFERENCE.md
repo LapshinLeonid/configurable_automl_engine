@@ -870,7 +870,7 @@ Supported algorithms:
 * `"lasso"`
 * `"xgboosting"`
 
-The keys of the `algorithms` section must be these exact names: a short alias such as `rf` in the config is rejected as an unknown key. Aliases are accepted only by the Python API (`create_model`, `optimize`, `ModelTrainer`): `"dt"`, `"rf"`, `"et"`, `"gb"`, `"ab"`, `"sgd"`, `"knn"`, `"gpr"`, `"gaussianprocessregressor"`, `"isotonic"`, `"ard"`, `"xgboost"`, `"ridge_regression"`. Names are case-insensitive there.
+Algorithms are referred to only by these exact names, both in the config and in the Python API (`create_model`, `optimize`, `ModelTrainer`, where names are case-insensitive). Short aliases such as `rf`, `knn` or `xgboost` are not supported: in the config they are rejected as unknown keys, in the Python API with `ValueError`.
 
 `xgboosting` needs the optional package: `pip install "configurable-automl-engine[xgboost]"`. A config that enables it without the package is rejected at validation.
 
@@ -937,7 +937,7 @@ Each preset defines:
 
 ### Selection and override rules
 
-* The preset is resolved automatically from the algorithm name (aliases are supported) before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.
+* The preset is resolved automatically from the algorithm name before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.
 * The same preset is applied at every lifecycle stage — hyperparameter optimization (HPO), final training, and prediction — through the single resolution point used by both `tuner.optimize` and `ModelTrainer`.
 * Explicit user override (the `preprocessing` block in the algorithm config, or the `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize`) takes priority over the automatic selection. Fields left unset keep the automatically chosen values.
 * The resolved preset is logged (INFO level) and stored on the trainer as `preprocessing_preset`, so the applied preprocessing can always be determined from logs.
@@ -1133,7 +1133,7 @@ Creates a scikit-learn compatible regressor instance by algorithm name.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `algorithm` | `str` | Algorithm name or alias (e.g., `"rf"`, `"xgboost"`, `"knn"`). |
+| `algorithm` | `str` | Algorithm name from the [supported list](#algorithms-section) (e.g., `"random_forest"`, `"xgboosting"`), case-insensitive. |
 | `**hyperparams` | `Any` | Hyperparameters passed to the estimator constructor. |
 
 **Returns:** `RegressorMixin` instance.
@@ -1321,3 +1321,4 @@ replacement; nothing is translated silently.
 | `sanity_gate.corridor_delta: 0` | A tiny positive value such as `1e-9`, or a `cv_best` select. |
 | `sanity_gate.permutation_max_rows: null` / `permutation_max_features: null` | An integer limit, or `check_permutation_sensitivity: false` to skip the shuffle test. |
 | `sanity_gate.generalization_gap_mode` not set, expecting strict rejection | Set `generalization_gap_mode: "reject"` (the default is now `"warn"`). |
+| Short algorithm aliases in the Python API (`create_model("rf")`, `ModelTrainer(algorithm="knn")`, `optimize("xgboost", ...)`, …) | The full names: `dt` → `decision_tree`, `rf` → `random_forest`, `et` → `extra_trees`, `gb` → `gradient_boosting`, `ab` → `adaboost`, `sgd` → `sgdregressor`, `knn` → `nearest_neighbors_regression`, `gpr` / `gaussianprocessregressor` → `gaussian_process_regression`, `isotonic` → `isotonic_regression`, `ard` → `ardregression`, `xgboost` → `xgboosting`, `ridge_regression` → `ridge`. |

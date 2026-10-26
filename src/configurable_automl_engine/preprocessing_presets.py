@@ -18,7 +18,7 @@ Key concepts:
 
 Selection rules:
 
-    1. The algorithm name is normalized (lowercased and aliases are expanded) and
+    1. The algorithm name is normalized (lowercased) and
        checked against the registry of supported algorithms: an unknown name is
        rejected with a :class:`ValueError` (protection against typos in the config).
     2. The algorithm class is looked up in :data:`ALGORITHM_CLASS_MAPPING`; for a
@@ -229,10 +229,10 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
 
 
 def normalize_algorithm(algorithm: str) -> str:
-    """Normalize an algorithm name: lowercased + alias expansion.
+    """Normalize an algorithm name: lowercased.
 
     Args:
-        algorithm: An algorithm name or alias (e.g. ``'RF'``, ``'xgb'``).
+        algorithm: An algorithm name (e.g. ``'Random_Forest'``).
 
     Returns:
         The canonical algorithm name used for lookup in the mapping table.
@@ -266,7 +266,7 @@ def resolve_preprocessing_preset(
 
     Selection logic:
 
-    1. The algorithm name is normalized (lowercased + aliases) and checked
+    1. The algorithm name is normalized (lowercased) and checked
        against the registry of supported algorithms: an unknown name (typo)
        is rejected with an explicit error so that configuration mistakes are
        not hidden.
@@ -277,7 +277,7 @@ def resolve_preprocessing_preset(
        fields of the selected preset (partial or full override).
 
     Args:
-        algorithm: A regression algorithm name (or alias).
+        algorithm: A regression algorithm name.
         override: An explicit preset override. ``None`` —
             only automatic selection.
 
@@ -320,7 +320,7 @@ def requires_missing_indicator(algorithm: str) -> bool:
     by imputation".
 
     Args:
-        algorithm: A regression algorithm name (or alias).
+        algorithm: A regression algorithm name.
 
     Returns:
         ``True`` — missing value indicators should be enabled; ``False`` —

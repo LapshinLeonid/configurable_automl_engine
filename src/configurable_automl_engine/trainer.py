@@ -469,8 +469,8 @@ class ModelTrainer:
     (imputation, scaling, encoding), synthetic sample enlargement
     (oversampling), and training of the selected algorithm with mandatory validation.
     Attributes:
-        algorithm (str): Algorithm name or alias
-            (e.g., 'elasticnet', 'xgboost').
+        algorithm (str): Algorithm name
+            (e.g., 'elasticnet', 'xgboosting').
         hyperparams (dict): Hyperparameter configuration for model initialization..
         metric (str): Metric key (r2, mse, mae) used to assess quality on validation.
         random_state (int | None): Random seed for reproducible splits and training.
