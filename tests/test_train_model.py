@@ -105,11 +105,11 @@ def test_too_few_records(base_params):
 
 
 def test_invalid_param_key(base_params):
-    # Unknown parameters must be silently ignored (clean_hyperparameters
-    # discards them instead of raising TypeError)
+    # Unknown parameters are rejected like in the config validation
+    # (previously they were silently dropped by clean_hyperparameters)
     bad_params = {"foobar": 1}
-    score = train_model("ElasticNet", "r2", bad_params, X, y)
-    assert isinstance(score, float)
+    with pytest.raises(TrainingError, match="unknown hyperparameters"):
+        train_model("ElasticNet", "r2", bad_params, X, y)
 
 
 def test_negative_alpha(base_params):
@@ -1546,6 +1546,9 @@ def test_trainer_logs_preprocessed_matrix_sparse_for_high_cardinality(caplog):
             hyperparams={"alpha": 0.1},
             categorical_features=["id"],
             numerical_features=["num"],
+            # the automatic high-cardinality mode would frequency-encode "id"
+            high_cardinality_threshold=None,
+            high_cardinality_encoding=None,
         ).fit(df, y)
 
     assert re.search(
@@ -2076,7 +2079,7 @@ def test_isotonic_empty_hyperparams_default_holdout_works():
     assert trainer.pipeline is not None
     step_names = [name for name, _ in trainer.pipeline.steps]
     assert step_names == ["preprocessor", "isotonic_selector", "model"]
-    # The default hold-out (train_test_split) produced a finite score with
+    # The default validation ('auto') produced a finite score with
     # out_of_bounds='clip'.
     assert trainer.val_score is not None
     assert np.isfinite(trainer.val_score)

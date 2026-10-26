@@ -1548,8 +1548,7 @@ def _run_hpo(
 
     # Input-data diagnostics policies: the same values as for the final
     # ModelTrainer (_build_trainer), so the tuner's own data validation follows
-    # the configuration instead of its defaults (e.g. the bundled tuner's
-    # inf_policy="error"). On the engine path the data is already repaired in
+    # the configuration instead of its own defaults. On the engine path the data is already repaired in
     # prepare_dataset, so re-validation is a no-op; the forwarding keeps
     # custom tuners consistent with the final fit.
     for key, value in (
@@ -1872,7 +1871,7 @@ def _fit_and_save(
         metric_name_sklearn (str): The main metric name in sklearn format.
         validation_strategy (ValidationStrategy | str | None): The resolved
             validation strategy of the final model. ``None`` — the
-            ``ModelTrainer`` default ('train_test_split').
+            ``ModelTrainer`` default ('auto').
         n_folds (int | None): The number of folds (for 'k_fold').
         test_size (float | int | None): The hold-out size (a fraction or a
             number of rows after 'auto' resolution).

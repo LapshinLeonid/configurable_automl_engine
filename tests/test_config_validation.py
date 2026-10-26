@@ -2248,7 +2248,7 @@ def test_refine_phase_executes_with_warm_start():
     )
     with patch(
         "configurable_automl_engine.training_engine.component._run_hpo",
-        side_effect=lambda **kw: PhaseResult(score=0.9, params={"p": 1}),
+        side_effect=lambda **kw: PhaseResult(score=0.9, params={"alpha": 0.1}),
     ) as mock_hpo:
         res = train_best_model(cfg_refine, df, target="target")
 
@@ -2261,7 +2261,7 @@ def test_refine_phase_executes_with_warm_start():
     first_call = mock_hpo.call_args_list[0].kwargs
     refine_call = mock_hpo.call_args_list[1].kwargs
     assert first_call.get("initial_params") is None
-    assert refine_call.get("initial_params") == {"p": 1}
+    assert refine_call.get("initial_params") == {"alpha": 0.1}
 
 
 def test_select_phase_executes_in_pipeline():

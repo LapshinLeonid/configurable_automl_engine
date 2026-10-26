@@ -538,8 +538,8 @@ class ModelTrainer:
             (fold mean for additive metrics, the pooled OOF value for
             non-additive ones; empty dict if no metrics are configured).
         validation_strategy (str): Validation strategy for the final model:
-            ``'train_test_split'`` (default), ``'k_fold'``, ``'loo'`` or
-            ``'auto'``. ``'auto'`` is resolved inside fit() via
+            ``'auto'`` (default, as ``general.validation_strategy``),
+            ``'train_test_split'``, ``'k_fold'`` or ``'loo'``. ``'auto'`` is resolved inside fit() via
             ``validation.make_cv``; the engine path passes an already resolved
             method. The list of allowed methods is in
             ``validation.SUPPORTED_VALIDATION_METHODS`` (a single extension
@@ -597,14 +597,14 @@ class ModelTrainer:
         encoding_strategy: str = "one_hot",
         additional_metrics: Iterable[str] | None = None,
         preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
-        high_cardinality_threshold: int | None = None,
-        high_cardinality_encoding: str | None = None,
+        high_cardinality_threshold: int | None = 50,
+        high_cardinality_encoding: str | None = "frequency",
         hashing_n_components: int = 16,
         target_encoding_smoothing: float = 20.0,
         target_encoding_fallback: float | None = None,
         feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
         feature_selection_active: bool | None = None,
-        validation_strategy: ValidationStrategy | str = "train_test_split",
+        validation_strategy: ValidationStrategy | str = "auto",
         n_folds: int = 5,
         test_size: float = 0.2,
         inf_policy: str = "as_missing",
@@ -626,8 +626,8 @@ class ModelTrainer:
             validation_strategy: Validation strategy for the final model
                 ('train_test_split', 'k_fold', 'loo' or 'auto'). Strings are
                 normalized via ``validation.norm_val_method`` (a single source
-                shared with HPO). Defaults to 'train_test_split' — a single
-                hold-out split (a cheap "honest" quality estimate).
+                shared with HPO). Defaults to 'auto' — the same default as
+                ``general.validation_strategy`` and ``tuner.optimize``.
             n_folds: Number of folds for the 'k_fold' strategy (>= 2).
             test_size: Size of the hold-out part: a fraction in (0, 1) or an
                 integer number of rows (as in sklearn ``train_test_split``).
