@@ -67,17 +67,6 @@ What this config does:
   the number to trust. `score` is optimistic (see [Training results](#training-results)).
 * `path_to_model` — the winner is trained on all rows and saved there.
 
-The same config as YAML (pass the file path as `config=`):
-
-```yaml
-general:
-  comparison_metric: "r2"
-  path_to_model: "diabetes_model.pkl"
-algorithms:
-  ridge: {}
-  random_forest: {}
-```
-
 Every setting has a default, so even `general` can be dropped. The smallest
 valid config lists only the algorithms:
 
