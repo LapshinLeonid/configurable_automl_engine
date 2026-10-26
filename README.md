@@ -20,7 +20,7 @@ Classification is not supported.
 # Features
 
 * **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments. The config is validated before training starts: unknown keys, unknown hyperparameter names, missing optional packages and contradictory settings are reported as errors.
-* **Honest Quality Estimate**: Besides the (optimistic) validation score of the best trial, every run reports an estimate that is not biased by the search itself: `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved. See [Which score to trust](#which-score-to-trust).
+* **Honest Quality Estimate**: Besides the (optimistic) validation score of the best trial, every run reports an estimate that is not biased by the search itself: `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved. See [Training results](API_REFERENCE.md#training-results).
 * **Multi-Step Pipelines**: A run is a list of steps (`general.phases`): search steps (`all_algorithms`, `refine`) tune hyperparameters, select steps (`select`) narrow the candidates down to the final winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
 * **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
 * **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
@@ -124,23 +124,6 @@ What happens here:
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
-
-# Which score to trust
-
-`train_best_model` returns several numbers; only some of them are honest
-estimates of how the model will do on new data:
-
-| Key | Present | Trust it as a quality estimate? |
-|-----|---------|---------------------------------|
-| `score` | always | **No** — the validation score of the best of many trials (`n_trials_evaluated`), measured on the same folds that were used to choose it. Optimistic, especially on small data. |
-| `oof_score` | when out-of-fold predictions exist | **No** — computed on the same folds as `score` and carries the same bias. A diagnostic. |
-| `holdout_score` | a hold-out is reserved (by default: data with ≥ 100 rows) | **Yes** — the winner measured on rows reserved before tuning and never used for tuning or selection. |
-| `bbc_score` | no hold-out is reserved (by default: data with < 100 rows, or `holdout_fraction: null`) | **Yes** — Bootstrap Bias Corrected CV over all evaluated trials; slightly conservative. Skipped over the memory budget (4,000,000 stored values). |
-
-Use `holdout_score` when it is present, otherwise `bbc_score`. The hold-out
-share is set by `general.holdout_fraction` (`"auto"`, a fraction in `(0, 1)`
-or `null`). See [Training results](API_REFERENCE.md#training-results) for every
-key of the result.
 
 # Contributing
 
