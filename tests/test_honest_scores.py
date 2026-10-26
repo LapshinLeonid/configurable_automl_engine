@@ -328,10 +328,12 @@ def test_holdout_fraction_auto_logs_on_small_data(caplog):
         prepare_dataset(
             Config.model_validate(_cfg(holdout_fraction="auto")), df, "target"
         )
-    messages = [r.getMessage() for r in caplog.records]
     assert any(
-        "no outer hold-out is reserved" in m and "optimistic" in m and "bbc_score" in m
-        for m in messages
+        r.levelname == "WARNING"
+        and "no outer hold-out is reserved" in (m := r.getMessage())
+        and "optimistic" in m
+        and "bbc_score" in m
+        for r in caplog.records
     )
 
 
