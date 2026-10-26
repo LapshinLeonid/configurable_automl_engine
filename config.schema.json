@@ -1346,7 +1346,7 @@
     },
     "algorithms": {
       "$ref": "#/$defs/AlgorithmsConfig",
-      "description": "Dictionary of algorithms, where the key is the algorithm name (for example, 'xgboost', 'random_forest')"
+      "description": "Dictionary of algorithms, where the key is the algorithm name (for example, 'xgboosting', 'random_forest')"
     }
   },
   "required": [

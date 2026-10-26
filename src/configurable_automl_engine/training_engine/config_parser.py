@@ -1677,7 +1677,7 @@ class AlgoCfg(BaseModel):
 
         Lookup logic:
         1. Consults the global `ALGO_PACKAGE_MAPPING`.
-        2. Maps the internal algorithm name (for example, 'xgboost')
+        2. Maps the internal algorithm name (for example, 'xgboosting')
             to its PyPI name.
 
         Args:
@@ -1785,7 +1785,7 @@ class Config(BaseModel):
         ...,
         description=(
             "Dictionary of algorithms, where the key is the algorithm name "
-            "(for example, 'xgboost', 'random_forest')"
+            "(for example, 'xgboosting', 'random_forest')"
         ),
     )
 

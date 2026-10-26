@@ -1896,11 +1896,11 @@ class _OptimizeRunner:
         """
         base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
         base_space_dict: dict[str, Any] | None = None
-        if self.algo == "knn":
+        if resolve_algorithm_name(self.algo) == "nearest_neighbors_regression":
             base_space_fn = _make_knn_space(self.n_samples_eff)
         elif resolve_algorithm_name(self.algo) == "gaussian_process_regression":
             # GPR without an external config (including a direct
-            # optimize("gpr", X, y) call): the DEFAULT_SPACES search space
+            # optimize("gaussian_process_regression", X, y) call): the DEFAULT_SPACES search space
             # (small: kernel family only).
             base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
             base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
