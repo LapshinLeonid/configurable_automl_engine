@@ -1217,6 +1217,8 @@ def _run_hpo(
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
     data_oversampling_target_bins: int = 8,
+    data_oversampling_add_noise: bool = False,
+    data_oversampling_noise_level: float = 0.01,
     initial_params: dict[str, Any] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
     random_state: int | None = None,
@@ -1273,6 +1275,12 @@ def _run_hpo(
         data_oversampling (bool): The oversampling enable flag.
         data_oversampling_multiplier (float): The sample size multiplier.
         data_oversampling_algorithm (str): The oversampling algorithm name.
+        data_oversampling_target_bins (int): Number of quantile bins for the
+            regression oversampling strategy.
+        data_oversampling_add_noise (bool): Whether to add Gaussian noise to
+            the oversampled numeric features.
+        data_oversampling_noise_level (float): Noise intensity relative to the
+            column standard deviation.
         initial_params (dict[str, Any] | None): Hyperparameters from the
             previous HPO phase for enqueue_trial (monotonic improvement between
             phases).
@@ -1421,6 +1429,12 @@ def _run_hpo(
 
     if "data_oversampling_target_bins" in sig.parameters:
         kwargs["data_oversampling_target_bins"] = data_oversampling_target_bins
+
+    if "data_oversampling_add_noise" in sig.parameters:
+        kwargs["data_oversampling_add_noise"] = data_oversampling_add_noise
+
+    if "data_oversampling_noise_level" in sig.parameters:
+        kwargs["data_oversampling_noise_level"] = data_oversampling_noise_level
 
     # pass the custom search space if provided
     if search_space_override is not None:
@@ -1711,6 +1725,10 @@ def _build_trainer(
     trainer_has_os_target_bins = (
         "data_oversampling_target_bins" in trainer_sig.parameters
     )
+    trainer_has_os_noise = (
+        "data_oversampling_add_noise" in trainer_sig.parameters
+        and "data_oversampling_noise_level" in trainer_sig.parameters
+    )
 
     trainer_kwargs: dict[str, Any] = {
         "algorithm": algo_name,
@@ -1739,6 +1757,11 @@ def _build_trainer(
     # selection.
     if trainer_has_os_target_bins or trainer_accepts_var_kwargs:
         trainer_kwargs["data_oversampling_target_bins"] = cfg.oversampling.target_bins
+    # Gaussian noise settings: same signature-aware contract (custom trainers
+    # without the arguments keep the no-noise behavior).
+    if trainer_has_os_noise or trainer_accepts_var_kwargs:
+        trainer_kwargs["data_oversampling_add_noise"] = cfg.oversampling.add_noise
+        trainer_kwargs["data_oversampling_noise_level"] = cfg.oversampling.noise_level
     # Feature selection: the root Config configuration plus the HPO winner's
     # decision. Arguments are passed only to trainers that support them; when
     # feature selection is active we warn about silent ignoring.
@@ -2360,6 +2383,10 @@ class _HpoPhaseSpec:
         oversampling_algorithm (str): Oversampling algorithm name.
         oversampling_target_bins (int): Number of quantile bins for the
             regression oversampling strategy.
+        oversampling_add_noise (bool): Whether to add Gaussian noise to the
+            oversampled numeric features.
+        oversampling_noise_level (float): Noise intensity relative to the
+            column standard deviation.
         pruning_cfg (dict[str, Any] | None): Early stopping settings.
         encoding (str): Categorical encoding strategy.
         high_cardinality_threshold (int | None): High-cardinality threshold.
@@ -2401,6 +2428,8 @@ class _HpoPhaseSpec:
     oversampling_multiplier: float
     oversampling_algorithm: str
     oversampling_target_bins: int
+    oversampling_add_noise: bool
+    oversampling_noise_level: float
     pruning_cfg: dict[str, Any] | None
     encoding: str
     high_cardinality_threshold: int | None
@@ -2556,6 +2585,8 @@ def _execute_hpo_phase(
             data_oversampling_multiplier=spec.oversampling_multiplier,
             data_oversampling_algorithm=spec.oversampling_algorithm,
             data_oversampling_target_bins=spec.oversampling_target_bins,
+            data_oversampling_add_noise=spec.oversampling_add_noise,
+            data_oversampling_noise_level=spec.oversampling_noise_level,
             initial_params=initial_params,
             previous_trials=previous_trials,
             random_state=random_state,
@@ -3094,6 +3125,8 @@ def execute_phases(
             oversampling_multiplier=ovr.multiplier,
             oversampling_algorithm=ovr.algorithm.value,
             oversampling_target_bins=ovr.target_bins,
+            oversampling_add_noise=ovr.add_noise,
+            oversampling_noise_level=ovr.noise_level,
             pruning_cfg=pruning_cfg,
             encoding=cfg.general.categorical_encoding,
             high_cardinality_threshold=cfg.general.high_cardinality_threshold,

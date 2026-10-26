@@ -588,6 +588,8 @@ class ModelTrainer:
         data_oversampling_multiplier: float = 1.0,
         data_oversampling_algorithm: str = "random",
         data_oversampling_target_bins: int = 8,
+        data_oversampling_add_noise: bool = False,
+        data_oversampling_noise_level: float = 0.01,
         serialization_format: SerializationFormat = SerializationFormat.pickle,
         categorical_features: list[str] | None = None,
         numerical_features: list[str] | None = None,
@@ -846,12 +848,16 @@ class ModelTrainer:
         self.os_multiplier = data_oversampling_multiplier
         self.os_algorithm = data_oversampling_algorithm
         self.os_target_bins = data_oversampling_target_bins
+        self.os_add_noise = data_oversampling_add_noise
+        self.os_noise_level = data_oversampling_noise_level
         if self.os_multiplier < 1:
             raise TrainingError("data_oversampling_multiplier must be ≥ 1")
         if self.os_algorithm not in {"random", "smote", "adasyn"}:
             raise TrainingError("Unknown data_oversampling_algorithm")
         if self.os_target_bins < 2:
             raise TrainingError("data_oversampling_target_bins must be ≥ 2")
+        if self.os_noise_level <= 0:
+            raise TrainingError("data_oversampling_noise_level must be > 0")
 
         # Fields populated after fit(...)
         self.pipeline: Pipeline | None = None
@@ -1527,6 +1533,8 @@ class ModelTrainer:
                 algorithm=self.os_algorithm,
                 multiplier=self.os_multiplier,
                 target_bins=self.os_target_bins,
+                add_noise=self.os_add_noise,
+                noise_level=float(self.os_noise_level),
             )
             steps.append(("oversampler", oversampler))
         steps.append(("model", base_model))

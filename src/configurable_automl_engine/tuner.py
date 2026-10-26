@@ -1185,6 +1185,8 @@ class _OptimizeRunner:
         data_oversampling_multiplier: float,
         data_oversampling_algorithm: str,
         data_oversampling_target_bins: int = 8,
+        data_oversampling_add_noise: bool = False,
+        data_oversampling_noise_level: float = 0.01,
         metric: str,
         val_method: ValidationStrategy | str,
         validation_strategy: ValidationStrategy | str | None,
@@ -1332,6 +1334,8 @@ class _OptimizeRunner:
                 "multiplier": data_oversampling_multiplier,
                 "algorithm": data_oversampling_algorithm,
                 "target_bins": data_oversampling_target_bins,
+                "add_noise": data_oversampling_add_noise,
+                "noise_level": data_oversampling_noise_level,
             },
         }
 
@@ -3145,6 +3149,8 @@ def optimize(
     data_oversampling_multiplier: float = 1.0,
     data_oversampling_algorithm: str = "random",
     data_oversampling_target_bins: int = 8,
+    data_oversampling_add_noise: bool = False,
+    data_oversampling_noise_level: float = 0.01,
     metric: str = "r2",
     # keep the old argument for backward compatibility
     val_method: ValidationStrategy | str = "k_fold",
@@ -3196,6 +3202,13 @@ def optimize(
             (for oversampling).
         data_oversampling_algorithm (str): Balancing algorithm name
             (e.g. 'random', 'smote').
+        data_oversampling_target_bins (int): Number of quantile bins for the
+            regression oversampling strategy. Defaults to 8.
+        data_oversampling_add_noise (bool): Whether to add Gaussian noise to
+            the numeric features of the oversampled training fold.
+            Defaults to False.
+        data_oversampling_noise_level (float): Noise intensity relative to
+            the column standard deviation. Defaults to 0.01.
         metric (str): Metric name to maximise. Defaults to 'r2'.
         val_method (ValidationStrategy | str): Validation method
             ('k_fold', 'leave_one_out', 'train_test_split').
@@ -3384,6 +3397,8 @@ def optimize(
         data_oversampling_multiplier=data_oversampling_multiplier,
         data_oversampling_algorithm=data_oversampling_algorithm,
         data_oversampling_target_bins=data_oversampling_target_bins,
+        data_oversampling_add_noise=data_oversampling_add_noise,
+        data_oversampling_noise_level=data_oversampling_noise_level,
         metric=metric,
         val_method=val_method,
         validation_strategy=validation_strategy,

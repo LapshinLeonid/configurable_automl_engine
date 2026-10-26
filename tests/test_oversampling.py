@@ -17,6 +17,7 @@ from configurable_automl_engine.oversampling import (
     DataOversampler,
     _bin_continuous_target,
     _bin_regression_target,
+    _binary_indicator_columns,
     _decode_continuous_y,
     _is_categorical_col,
     _is_continuous_target,
@@ -316,13 +317,110 @@ def test_invalid_multiplier():
         sampler.fit_resample(df[["A"]], df["target"])
 
 
-# 5. Coverage of lines 220-223: Noise + sparse matrix
-def test_sparse_matrix_noise_error():
-    X_sparse = sparse.csr_matrix([[1, 0], [0, 1], [1, 1]])
-    y = np.array([0, 1, 0])
+# 5. Noise + sparse matrix: only the stored non-zero elements are noised
+def test_sparse_random_noise_keeps_sparsity_pattern():
+    """Random + add_noise on a csr_matrix stays sparse, zeros stay zeros and
+    every non-zero element is perturbed."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 3.0],
+            [0.0, 2.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [0.0, 5.0, 6.0],
+            [7.0, 0.0, 8.0],
+            [0.0, 9.0, 0.0],
+        ]
+    )
+    y = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    sampler = DataOversampler(
+        algorithm="random",
+        multiplier=2.0,
+        add_noise=True,
+        noise_level=0.1,
+        target_bins=2,
+        random_state=0,
+    )
+    X_res, y_res = sampler.fit_resample(X_sparse, y)
+    assert sparse.issparse(X_res)
+    assert X_res.shape[1] == 3
+    assert len(y_res) == X_res.shape[0] > X_sparse.shape[0]
+    clean = DataOversampler(
+        algorithm="random", multiplier=2.0, target_bins=2, random_state=0
+    )
+    X_clean, _ = clean.fit_resample(X_sparse, y)
+    dense_noisy = X_res.toarray()
+    dense_clean = X_clean.toarray()
+    # The sparsity pattern is unchanged: zeros are not noised
+    np.testing.assert_array_equal(dense_noisy == 0, dense_clean == 0)
+    # Non-zero elements are perturbed
+    nz = dense_clean != 0
+    assert np.all(dense_noisy[nz] != dense_clean[nz])
+    # The input matrix is not modified in place
+    assert X_sparse[0, 0] == 1.0
+
+
+def test_sparse_noise_scale_uses_full_column_std():
+    """The noise scale is noise_level * column std over all rows (ddof=1)."""
+    rng = np.random.default_rng(0)
+    dense = rng.normal(5.0, 2.0, size=(2000, 2)) * (rng.random((2000, 2)) < 0.5)
+    X_sparse = sparse.csr_matrix(dense)
+    sampler = DataOversampler(add_noise=True, noise_level=0.1, random_state=1)
+    X_noisy = sampler._add_sparse_gaussian_noise(X_sparse)
+    diff = (X_noisy - X_sparse.astype(np.float64)).tocsc()
+    for j in range(2):
+        col_diff = diff[:, j].data
+        expected = 0.1 * dense[:, j].std(ddof=1)
+        assert col_diff.std() == pytest.approx(expected, rel=0.1)
+
+
+def test_sparse_noise_ignores_explicit_zeros_and_ints():
+    """Explicitly stored zeros stay zeros; integer input is cast to float."""
+    X_sparse = sparse.csr_matrix(
+        (np.array([0, 2, 3]), np.array([0, 1, 1]), np.array([0, 1, 2, 3])),
+        shape=(3, 2),
+    )
+    assert X_sparse.nnz == 3  # one explicit zero
+    sampler = DataOversampler(add_noise=True, noise_level=0.5, random_state=0)
+    X_noisy = sampler._add_sparse_gaussian_noise(X_sparse)
+    assert X_noisy.dtype == np.float64
+    assert X_noisy[0, 0] == 0.0
+    assert X_noisy.nnz == 2
+
+
+def test_sparse_noise_empty_matrix():
+    """A sparse matrix without non-zero elements is returned unchanged."""
+    X_sparse = sparse.csr_matrix((4, 3))
     sampler = DataOversampler(add_noise=True)
-    with pytest.raises(TypeError, match="does not support sparse matrices"):
-        sampler.fit_resample(X_sparse, y)
+    X_noisy = sampler._add_sparse_gaussian_noise(X_sparse)
+    assert X_noisy.nnz == 0
+    assert X_noisy.shape == (4, 3)
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_sparse_synthetic_noise_keeps_zeros(algorithm):
+    """SMOTE/ADASYN densify a sparse input; with add_noise the zero cells
+    stay exact zeros, as in the sparse path."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.5, 0.0, 0.0],
+            [0.0, 2.5, 0.0],
+            [0.0, 0.0, 3.5],
+            [4.5, 1.5, 0.0],
+            [0.0, 2.0, 1.2],
+            [3.1, 0.0, 2.7],
+        ]
+    )
+    y = np.array([0, 0, 0, 1, 1, 1])
+    kwargs = dict(algorithm=algorithm, multiplier=1.5, random_state=42)
+    X_clean, _ = DataOversampler(**kwargs).fit_resample(X_sparse, y)
+    X_noisy, _ = DataOversampler(
+        add_noise=True, noise_level=0.1, **kwargs
+    ).fit_resample(X_sparse, y)
+    assert isinstance(X_noisy, np.ndarray)
+    X_clean = np.asarray(X_clean, dtype=float)
+    X_noisy = np.asarray(X_noisy, dtype=float)
+    np.testing.assert_array_equal(X_noisy[X_clean == 0], 0.0)
+    assert np.any(X_noisy[X_clean != 0] != X_clean[X_clean != 0])
 
 
 # ------------------------------------------------------------------ #
@@ -1659,3 +1757,89 @@ def test_experimental_warning_thread_safe(caplog):
         for t in threads:
             t.join()
     assert _count_experimental(caplog) == 1
+
+
+# ------------------------------------------------------------------ #
+#  Binary indicator columns (one-hot / hashing) are not noised        #
+# ------------------------------------------------------------------ #
+
+
+def test_binary_indicator_columns_detection():
+    """0/1 columns (incl. NaN and numeric strings) are indicators; others not."""
+    df = pd.DataFrame(
+        {
+            "onehot": [0.0, 1.0, 0.0, 1.0],
+            "with_nan": [1.0, np.nan, 0.0, 1.0],
+            "str01": ["0", "1", "1", "0"],
+            "numeric": [0.0, 1.0, 2.0, 0.5],
+            "all_nan": [np.nan] * 4,
+            "cat": ["a", "b", "a", "b"],
+            "flag": [True, False, True, False],
+        }
+    )
+    assert set(_binary_indicator_columns(df)) == {"onehot", "with_nan", "str01"}
+
+
+def test_binary_indicator_columns_empty_frame():
+    """A frame without numeric-like columns has no indicators."""
+    assert _binary_indicator_columns(pd.DataFrame({"c": ["x", "y"]})) == []
+
+
+@pytest.mark.parametrize("algorithm", ["random", "smote", "adasyn"])
+def test_dense_onehot_columns_not_noised(algorithm):
+    """After a one-hot preprocessor the 0/1 columns stay 0/1 for random and
+    are not perturbed beyond the interpolation for SMOTE/ADASYN; the
+    continuous column is noised."""
+    rng = np.random.default_rng(0)
+    n = 40
+    onehot = np.eye(3)[rng.integers(0, 3, size=n)]
+    cont = rng.normal(size=(n, 1))
+    X = np.hstack([cont, onehot])
+    y = np.linspace(0.0, 1.0, n)
+    kwargs = dict(algorithm=algorithm, multiplier=1.5, target_bins=2, random_state=1)
+    X_clean, _ = DataOversampler(**kwargs).fit_resample(X, y)
+    X_noisy, _ = DataOversampler(
+        add_noise=True, noise_level=0.2, **kwargs
+    ).fit_resample(X, y)
+    X_clean = np.asarray(X_clean, dtype=float)
+    X_noisy = np.asarray(X_noisy, dtype=float)
+    np.testing.assert_array_equal(X_noisy[:, 1:], X_clean[:, 1:])
+    assert not np.allclose(X_noisy[:, 0], X_clean[:, 0])
+    if algorithm == "random":
+        assert set(np.unique(X_noisy[:, 1:])) <= {0.0, 1.0}
+
+
+def test_dataframe_binary_flag_not_noised():
+    """A raw 0/1 flag in a DataFrame is excluded from the noise."""
+    df = pd.DataFrame(
+        {
+            "numeric": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "flag": [0, 1, 0, 1, 1, 0],
+            "target": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        }
+    )
+    sampler = DataOversampler(
+        multiplier=2, add_noise=True, noise_level=0.5, target_bins=2, random_state=0
+    )
+    result = sampler.oversample(df, target="target")
+    assert set(result["flag"].unique()) <= {0, 1}
+    assert not np.array_equal(result["numeric"].values[:6], df["numeric"].values)
+
+
+def test_sparse_binary_columns_not_noised():
+    """Sparse input: columns whose stored values are all 1 (one-hot /
+    hashing) are left untouched; columns with real magnitudes are noised."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [1.0, 0.0, 3.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 2.0],
+            [0.0, 1.0, 6.0],
+        ]
+    )
+    sampler = DataOversampler(add_noise=True, noise_level=0.5, random_state=0)
+    X_noisy = sampler._add_sparse_gaussian_noise(X_sparse).toarray()
+    dense = X_sparse.toarray()
+    np.testing.assert_array_equal(X_noisy[:, :2], dense[:, :2])
+    nz = dense[:, 2] != 0
+    assert np.all(X_noisy[nz, 2] != dense[nz, 2])
