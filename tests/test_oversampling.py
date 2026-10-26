@@ -1775,9 +1775,20 @@ def test_binary_indicator_columns_detection():
             "all_nan": [np.nan] * 4,
             "cat": ["a", "b", "a", "b"],
             "flag": [True, False, True, False],
+            # A 0/1 flag after StandardScaler / RobustScaler
+            "scaled": [-1.02, 0.98, 0.98, -1.02],
+            "shifted": [-1.0, 0.0, 0.0, np.nan],
+            "str_scaled": ["-0.5", "1.5", "1.5", "-0.5"],
         }
     )
-    assert set(_binary_indicator_columns(df)) == {"onehot", "with_nan", "str01"}
+    assert set(_binary_indicator_columns(df)) == {
+        "onehot",
+        "with_nan",
+        "str01",
+        "scaled",
+        "shifted",
+        "str_scaled",
+    }
 
 
 def test_binary_indicator_columns_empty_frame():
@@ -1843,3 +1854,63 @@ def test_sparse_binary_columns_not_noised():
     np.testing.assert_array_equal(X_noisy[:, :2], dense[:, :2])
     nz = dense[:, 2] != 0
     assert np.all(X_noisy[nz, 2] != dense[nz, 2])
+
+
+def test_sparse_scaled_binary_columns_not_noised():
+    """Sparse input: two-valued columns that are not 0/1 (a scaled flag with
+    both levels stored, a shifted flag with an implicit zero) are left
+    untouched; a column with three distinct values is noised."""
+    X_sparse = sparse.csr_matrix(
+        [
+            [-0.5, -1.0, 3.0],
+            [1.9, 0.0, 0.0],
+            [-0.5, -1.0, 2.0],
+            [1.9, 0.0, 3.0],
+        ]
+    )
+    sampler = DataOversampler(add_noise=True, noise_level=0.5, random_state=0)
+    X_noisy = sampler._add_sparse_gaussian_noise(X_sparse).toarray()
+    dense = X_sparse.toarray()
+    np.testing.assert_array_equal(X_noisy[:, :2], dense[:, :2])
+    nz = dense[:, 2] != 0
+    assert np.all(X_noisy[nz, 2] != dense[nz, 2])
+
+
+@pytest.mark.parametrize("scaling", ["standard", "robust", "none"])
+@pytest.mark.parametrize("algorithm", ["random", "smote"])
+def test_preprocessed_flags_and_missing_indicators_not_noised(scaling, algorithm):
+    """Raw 0/1 flags and missing-value indicators keep their two levels
+    after the real preprocessor, whatever the scaler, so the noise skips them
+    while the continuous column is still noised."""
+    from configurable_automl_engine.preprocessing import build_preprocessor
+
+    rng = np.random.default_rng(0)
+    n = 120
+    X = pd.DataFrame(
+        {
+            "x": rng.normal(size=n),
+            "flag": rng.integers(0, 2, n).astype(float),
+            "rare": (rng.random(n) < 0.1).astype(float),
+        }
+    )
+    X.loc[rng.random(n) < 0.2, "x"] = np.nan
+    y = rng.normal(size=n)
+    pre = build_preprocessor(list(X.columns), [], ["x", "flag", "rare"], scaling=scaling)
+    Xt = np.asarray(pre.fit_transform(X, y), dtype=float)
+    names = list(pre.get_feature_names_out())
+    two_valued = [i for i, nm in enumerate(names) if nm != "num__x"]
+    assert any("missingindicator" in names[i] for i in two_valued)
+
+    kwargs = dict(algorithm=algorithm, multiplier=2.0, target_bins=2, random_state=1)
+    X_clean, _ = DataOversampler(**kwargs).fit_resample(Xt, y)
+    X_noisy, _ = DataOversampler(
+        add_noise=True, noise_level=0.2, **kwargs
+    ).fit_resample(Xt, y)
+    X_clean = np.asarray(X_clean, dtype=float)
+    X_noisy = np.asarray(X_noisy, dtype=float)
+    np.testing.assert_array_equal(X_noisy[:, two_valued], X_clean[:, two_valued])
+    x_idx = names.index("num__x")
+    assert not np.allclose(X_noisy[:, x_idx], X_clean[:, x_idx])
+    if algorithm == "random":
+        for i in two_valued:
+            assert set(np.unique(X_noisy[:, i])) == set(np.unique(Xt[:, i]))
