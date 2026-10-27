@@ -61,7 +61,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-import configurable_automl_engine.training_engine.component as _component
+import configurable_automl_engine.training_engine.hpo_phases as _hpo_phases
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
     PhaseResult,
@@ -408,7 +408,7 @@ def _execute(
     if stub_hpo is None:
         return execute_phases(cfg, prepared)
     with patch.object(
-        _component,
+        _hpo_phases,
         "_run_hpo",
         side_effect=lambda **kwargs: stub_hpo(kwargs["algo_name"]),
     ):

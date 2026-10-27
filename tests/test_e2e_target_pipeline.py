@@ -32,6 +32,10 @@ import pytest
 from pydantic import ValidationError
 
 import configurable_automl_engine.training_engine.component as component
+import configurable_automl_engine.training_engine.artifact as artifact_mod
+import configurable_automl_engine.training_engine.finalists as finalists_mod
+import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
+import configurable_automl_engine.training_engine.select_steps as select_steps_mod
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
     execute_phases,
@@ -201,7 +205,7 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
     # train finalists with new instances; refine does not train finalists.
     trainers_by_phase: dict[str, list[_FakeTrainer]] = {}
     current_phase: list[str] = []
-    real_build_pool = component._build_finalists_pool
+    real_build_pool = select_steps_mod._build_finalists_pool
 
     def _build_pool(cfg_arg: Any, prepared_arg: Any, ctx_arg: Any) -> list[str]:
         pending = [
@@ -221,11 +225,11 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
 
     with (
         patch.object(
-            component, "_run_hpo", side_effect=_houndstooth_hpo
+            hpo_phases_mod, "_run_hpo", side_effect=_houndstooth_hpo
         ) as mock_hpo,
-        patch.object(component, "_build_finalists_pool", side_effect=_build_pool),
-        patch.object(component, "_fit_finalist", side_effect=_fit_finalist),
-        patch.object(component, "_fit_and_save") as mock_fit,
+        patch.object(select_steps_mod, "_build_finalists_pool", side_effect=_build_pool),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_fit_finalist),
+        patch.object(artifact_mod, "_fit_and_save") as mock_fit,
     ):
         result = train_best_model(cfg, df, target="target", model_path_override=tmp_path / "m.pkl")
 
@@ -287,9 +291,9 @@ def test_e2e_target_dag_winner_refined_params_in_gate_context():
     prepared = prepare_dataset(cfg, df, "target")
 
     with (
-        patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
+        patch.object(hpo_phases_mod, "_run_hpo", side_effect=_houndstooth_hpo),
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 prepared.y.to_numpy(), 0.30, 0.25
@@ -335,9 +339,9 @@ def test_e2e_target_dag_infinite_gap_candidate_survives_to_refine(tmp_path: Path
         return _FakeTrainer(prepared.y.to_numpy(), 0.2, 0.0)  # gap = ∞, better RMSE_oof
 
     with (
-        patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
-        patch.object(component, "_fit_finalist", side_effect=_fit_finalist),
-        patch.object(component, "_fit_and_save"),
+        patch.object(hpo_phases_mod, "_run_hpo", side_effect=_houndstooth_hpo),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_fit_finalist),
+        patch.object(artifact_mod, "_fit_and_save"),
     ):
         result = train_best_model(cfg, df, target="target")
 
@@ -446,9 +450,9 @@ def test_refine_after_select_top_k_keeps_all_k_candidates():
     prepared = prepare_dataset(cfg, df, "target")
 
     with (
-        patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
+        patch.object(hpo_phases_mod, "_run_hpo", side_effect=_houndstooth_hpo),
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 prepared.y.to_numpy(), 0.30, 0.25
@@ -486,7 +490,7 @@ def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
     prepared = prepare_dataset(cfg, df, "target")
 
     current_phase: list[str] = []
-    real_build_pool = component._build_finalists_pool
+    real_build_pool = select_steps_mod._build_finalists_pool
 
     def _build_pool(cfg_arg: Any, prepared_arg: Any, ctx_arg: Any) -> list[str]:
         pending = [
@@ -508,10 +512,10 @@ def test_all_disqualified_after_refine_terminal_select_falls_back_t4():
         return _FakeTrainer(prepared.y.to_numpy(), 0.5, 0.05)
 
     with (
-        patch.object(component, "_run_hpo", side_effect=_houndstooth_hpo),
-        patch.object(component, "_build_finalists_pool", side_effect=_build_pool),
-        patch.object(component, "_fit_finalist", side_effect=_fit_finalist),
-        patch.object(component, "_fit_and_save"),
+        patch.object(hpo_phases_mod, "_run_hpo", side_effect=_houndstooth_hpo),
+        patch.object(select_steps_mod, "_build_finalists_pool", side_effect=_build_pool),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_fit_finalist),
+        patch.object(artifact_mod, "_fit_and_save"),
     ):
         result = train_best_model(cfg, df, target="target")
 

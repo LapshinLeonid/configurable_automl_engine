@@ -26,9 +26,9 @@ from pydantic import ValidationError
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
-    _fit_and_save,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     GeneralCfg,
@@ -271,7 +271,7 @@ def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
     y = pd.Series([1.0, 2.0, 3.0])
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def flaky_scorer_factory(name: str, global_y=None):
@@ -282,7 +282,7 @@ def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             side_effect=flaky_scorer_factory,
         ),
     ):
@@ -303,7 +303,7 @@ def test_trainer_additional_metric_none_skipped_with_warning(caplog):
     y = pd.Series([1.0, 2.0, 3.0])
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def none_scorer_factory(name: str, global_y=None):
@@ -314,7 +314,7 @@ def test_trainer_additional_metric_none_skipped_with_warning(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             side_effect=none_scorer_factory,
         ),
     ):
@@ -447,13 +447,13 @@ def test_train_best_model_returns_additional_metrics(tiny_df):
     fake_trainer = SimpleNamespace(additional_scores={"r2": 0.87, "mae": 0.12})
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             # comparison_metric='rmse': "raw" scorer value -RMSE,
             # result["score"] is the positive RMSE
             return_value=PhaseResult(score=-0.9, params={"alpha": 0.1}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ) as mock_save,
     ):
@@ -477,11 +477,11 @@ def test_train_best_model_no_additional_key_when_not_configured(tiny_df):
     fake_trainer = SimpleNamespace(additional_scores={})
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
     ):
@@ -510,11 +510,11 @@ def test_train_best_model_no_key_when_additional_empty(tiny_df):
     """An empty additional metrics list — behavior stays as it is now."""
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=SimpleNamespace(additional_scores={}),
         ),
     ):
@@ -528,11 +528,11 @@ def test_train_best_model_comparison_only_not_duplicated(tiny_df):
     """A metric matching the main one is not duplicated in results."""
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=-0.9, params={}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=SimpleNamespace(additional_scores={}),
         ),
     ):
@@ -570,11 +570,11 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             side_effect=hpo_side_effect,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=SimpleNamespace(additional_scores={"r2": 0.9, "mae": 0.1}),
         ),
     ):
@@ -605,7 +605,7 @@ def test_fit_and_save_forwards_additional_metrics(tmp_path, tiny_df):
     algo_cfg = cfg.algorithms.elasticnet
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=fake_module,
     ):
         trainer = _fit_and_save(
@@ -641,7 +641,7 @@ def test_fit_and_save_forwards_empty_additional_metrics(tmp_path, tiny_df):
     algo_cfg = cfg.algorithms.elasticnet
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=fake_module,
     ):
         trainer = _fit_and_save(

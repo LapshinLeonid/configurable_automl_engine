@@ -844,7 +844,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
 
-    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
+    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:  # noqa: C901
         """Resample the data according to the selected algorithm.
 
         The engine is regression-only: by default (``task="regression"``)

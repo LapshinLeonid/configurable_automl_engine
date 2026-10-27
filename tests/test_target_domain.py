@@ -24,8 +24,10 @@ from configurable_automl_engine.common.target_domain import (
 )
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
-    _apply_target_domain_guard,
     train_best_model,
+)
+from configurable_automl_engine.training_engine.hpo_phases import (
+    _apply_target_domain_guard,
 )
 from configurable_automl_engine.training_engine.config_parser import AlgoCfg
 
@@ -319,9 +321,9 @@ def _cfg(model_path: Path, algorithms: dict) -> dict:
 
 
 def test_e2e_r18_gamma_and_poisson_excluded_before_any_trial(tmp_path, caplog):
-    import configurable_automl_engine.tuner as tuner_module
+    from configurable_automl_engine.hpo import runner as hpo_runner
 
-    real_create_model = tuner_module.create_model
+    real_create_model = hpo_runner.create_model
     created: list[str] = []
 
     def capturing(algo: str, **params):
@@ -338,7 +340,7 @@ def test_e2e_r18_gamma_and_poisson_excluded_before_any_trial(tmp_path, caplog):
         },
     )
     with (
-        patch.object(tuner_module, "create_model", side_effect=capturing),
+        patch.object(hpo_runner, "create_model", side_effect=capturing),
         caplog.at_level(logging.WARNING),
     ):
         res = train_best_model(

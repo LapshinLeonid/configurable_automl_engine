@@ -588,7 +588,7 @@ class ModelSanityGate:
     # ──────────────────────────────────────────────────────────────────────── #
     #  Public API
     # ──────────────────────────────────────────────────────────────────────── #
-    def check(
+    def check(  # noqa: C901
         self,
         *,
         y: Any,
@@ -1033,7 +1033,7 @@ class ModelSanityGate:
                 [],
             )
 
-    def _permutation_impl(
+    def _permutation_impl(  # noqa: C901
         self,
         *,
         model: Any,

@@ -1254,7 +1254,7 @@ def _rec(algo, param, level, before, after, **extra):
 
 def test_merge_complexity_guard_records_one_per_parameter():
     """A/B rules of the same parameter merge into one record with levels."""
-    from configurable_automl_engine.training_engine.component import (
+    from configurable_automl_engine.training_engine.hpo_phases import (
         _merge_complexity_guard_records,
     )
 

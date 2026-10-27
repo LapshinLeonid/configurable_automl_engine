@@ -34,6 +34,9 @@ import pandas as pd
 import pytest
 
 import configurable_automl_engine.training_engine.component as component
+import configurable_automl_engine.training_engine.artifact as artifact_mod
+import configurable_automl_engine.training_engine.data_prep as data_prep_mod
+import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
     PhaseResult,
@@ -234,7 +237,7 @@ def test_load_config_missing_target_raises_value_error():
 
 
 def test_load_config_sets_up_logging_when_configured():
-    with patch.object(component, "setup_logging") as mock_setup:
+    with patch.object(data_prep_mod, "setup_logging") as mock_setup:
         load_config(
             _cfg_dict(phases=[], log_to_file="logs/test.log"),
             _df(),
@@ -244,7 +247,7 @@ def test_load_config_sets_up_logging_when_configured():
 
 
 def test_load_config_does_not_setup_logging_by_default():
-    with patch.object(component, "setup_logging") as mock_setup:
+    with patch.object(data_prep_mod, "setup_logging") as mock_setup:
         load_config(_cfg_dict(phases=[]), _df(), target="target")
     mock_setup.assert_not_called()
 
@@ -323,7 +326,7 @@ def test_prepare_dataset_resolves_auto_large_to_train_test_split():
         "train_size": 49500,
     }
     with patch.object(
-        component,
+        data_prep_mod,
         "make_cv",
         return_value=("train_test_split", None, fake_decision),
     ):
@@ -404,7 +407,7 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo) as mock_hpo:
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
 
     assert isinstance(ctx, PhaseContext)
@@ -447,7 +450,7 @@ def test_execute_phases_select_cv_best_top_k_replaces_working_set():
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
 
     # top_k replaced the working set, and the terminal select narrowed it
@@ -481,7 +484,7 @@ def test_execute_phases_refine_uses_initial_params_for_all_candidates():
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[algo], params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
 
     # Phase 1: both algorithms without initial_params; phase 2: both algorithms
@@ -534,7 +537,7 @@ def test_execute_phases_refine_after_select_warm_starts_from_select_output():
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[algo], params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
 
     # select(cv_best, top_k, k=1) left only the CV leader; refine
@@ -565,7 +568,7 @@ def test_execute_phases_refine_empty_working_set_raises():
     cfg.algorithms.random_forest.enable = False
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(component, "_run_hpo", return_value=PhaseResult(score=0.9, params={})):
+    with patch.object(hpo_phases_mod, "_run_hpo", return_value=PhaseResult(score=0.9, params={})):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -584,7 +587,7 @@ def test_execute_phases_no_valid_scores_raises_runtime_error():
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
     # All trials are unsuccessful (best_score=None -> _run_hpo returns None)
-    with patch.object(component, "_run_hpo", return_value=None):
+    with patch.object(hpo_phases_mod, "_run_hpo", return_value=None):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -601,7 +604,7 @@ def test_execute_phases_filters_worst_score_sentinel():
             return PhaseResult(score=HPO_WORST_SCORE, params={"p": 1})  # sentinel -> excluded
         return PhaseResult(score=0.7, params={"p": 2})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
 
     assert set(ctx.working_set) == {"extra_trees"}
@@ -620,7 +623,7 @@ def test_execute_phases_disqualifies_invalid_algorithm():
             raise InvalidAlgorithmError("incompatible with data")
         return PhaseResult(score=0.7, params={"p": 2})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
 
     assert set(ctx.working_set) == {"extra_trees"}
@@ -635,7 +638,7 @@ def test_execute_phases_all_invalid_algorithms_raise():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(component, "_run_hpo", side_effect=InvalidAlgorithmError("bad")):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=InvalidAlgorithmError("bad")):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -650,7 +653,7 @@ def test_persist_artifact_basic_result():
     trainer_mock.additional_scores = {"r2": 0.7}
 
     with patch.object(
-        component, "_fit_and_save", return_value=trainer_mock
+        artifact_mod, "_fit_and_save", return_value=trainer_mock
     ) as mock_fit:
         result = persist_artifact(
             cfg=cfg,
@@ -683,7 +686,7 @@ def test_persist_artifact_basic_result():
 def test_persist_artifact_r2_score_not_inverted():
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared(metric_user="r2", metric_sklearn="r2")
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -700,7 +703,7 @@ def test_persist_artifact_model_path_override(tmp_path: Path):
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
     override = tmp_path / "custom" / "best.pkl"
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -718,7 +721,7 @@ def test_persist_artifact_adds_disqualified_and_additional_metrics():
     prepared = _prepared()
     trainer_mock = MagicMock()
     trainer_mock.additional_scores = {"r2": 0.75}
-    with patch.object(component, "_fit_and_save", return_value=trainer_mock):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=trainer_mock):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -736,7 +739,7 @@ def test_persist_artifact_disqualified_copy_is_independent():
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
     disqualified = {"elasticnet": "boom"}
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -754,7 +757,7 @@ def test_persist_artifact_propagates_fit_failure():
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
     with patch.object(
-        component, "_fit_and_save", side_effect=RuntimeError("Disk full")
+        artifact_mod, "_fit_and_save", side_effect=RuntimeError("Disk full")
     ):
         with pytest.raises(RuntimeError, match="Disk full"):
             persist_artifact(
@@ -776,7 +779,7 @@ def test_persist_artifact_pre_trained_trainer_skips_retraining(tmp_path: Path):
     trainer_mock.additional_scores = {}
     override = tmp_path / "best.pkl"
 
-    with patch.object(component, "_fit_and_save") as mock_fit:
+    with patch.object(artifact_mod, "_fit_and_save") as mock_fit:
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -802,7 +805,7 @@ def test_persist_artifact_adds_sanity_gate_sections():
     prepared = _prepared()
     trainer_mock = MagicMock()
     trainer_mock.additional_scores = {}
-    with patch.object(component, "_fit_and_save", return_value=trainer_mock):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=trainer_mock):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -840,7 +843,7 @@ def test_persist_artifact_sanity_sections_absent_by_default():
     """Without sections the ``sanity_gate`` key is absent (backward compatibility)."""
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -864,7 +867,7 @@ def test_persist_artifact_empty_sanity_sections_absent():
     """An empty sections dict does not add the ``sanity_gate`` key."""
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -883,7 +886,7 @@ def test_persist_artifact_sanity_sections_copy_is_independent():
     cfg = Config.model_validate(_cfg_dict(phases=[]))
     prepared = _prepared()
     sections = {"gate": {"pool": ["ridge"], "disqualified": {}}}
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,
@@ -1021,7 +1024,7 @@ def test_train_best_model_passes_context_to_persist():
 def mocker_patch_read_config():
     cfg_mock = MagicMock()
     cfg_mock.general.log_to_file = None
-    with patch.object(component, "read_config", return_value=cfg_mock) as read_mock:
+    with patch.object(data_prep_mod, "read_config", return_value=cfg_mock) as read_mock:
         yield cfg_mock, read_mock
 
 
@@ -1063,7 +1066,7 @@ def test_execute_phases_refine_passes_previous_trials():
         calls.append((algo, kw.get("initial_params"), None if prev is None else list(prev)))
         return PhaseResult(score=0.9, params={"p": 1}, trials=[history])
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         execute_phases(cfg, prepared)
 
     # Phase 1 (all_algorithms): no warm-start; phase 2 (refine): the previous
@@ -1101,7 +1104,7 @@ def test_execute_phases_refine_total_failure_raises_with_history():
         # refine: all new trials fail (None) despite the transferred history.
         return None
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -1131,7 +1134,7 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
         split_seeds.append(kw["random_state"])
         return PhaseResult(score=0.9, params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         execute_phases(cfg, prepared)
 
     # coarse: 2 algos × sampler seed 42; fine1 (refine): 2 algos × 43;
@@ -1173,7 +1176,7 @@ def test_hpo_phases_use_general_random_state_for_splits_and_sampler_base():
         split_seeds.append(kw["random_state"])
         return PhaseResult(score=0.9, params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         execute_phases(cfg, prepared)
 
     # coarse: 2 algos × sampler 7; fine (refine): 2 algos × 8;
@@ -1210,7 +1213,7 @@ def test_hpo_phases_none_random_state_unseeded_and_warns(caplog):
         seen.append((kw.get("random_state"), kw.get("sampler_seed")))
         return PhaseResult(score=0.9, params={"p": 1})
 
-    with patch.object(component, "_run_hpo", side_effect=fake_run_hpo):
+    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         execute_phases(cfg, prepared)
 
     # One algorithm × one HPO phase, both seeds None (non-reproducible).
@@ -1233,11 +1236,11 @@ def test_general_random_state_none_report_and_prepared(caplog):
     with (
         caplog.at_level(logging.WARNING, logger="training_engine"),
         patch.object(
-            component,
+            hpo_phases_mod,
             "_run_hpo",
             return_value=PhaseResult(score=0.5, params={"p": 1}),
         ),
-        patch.object(component, "_fit_and_save", return_value=MagicMock()),
+        patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()),
     ):
         prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
         ctx = execute_phases(cfg, prepared)

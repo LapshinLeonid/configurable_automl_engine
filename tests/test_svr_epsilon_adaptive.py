@@ -20,7 +20,7 @@ import pytest
 
 from sklearn.linear_model import Ridge
 
-import configurable_automl_engine.tuner as tuner_module
+from configurable_automl_engine.hpo import runner as hpo_runner
 from configurable_automl_engine.common.hyperopt_defaults import (
     SVR_EPSILON_FALLBACK,
     SearchSpaceEntry,
@@ -29,21 +29,20 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
     PreparedData,
-    _prepare_search_space,
     execute_phases,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.hpo_phases import _prepare_search_space
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     GeneralCfg,
     HPOPhaseCfg,
     ValidationStrategy,
 )
-from configurable_automl_engine.tuner import (
-    InvalidDataError,
+from configurable_automl_engine.tuner import InvalidDataError, optimize
+from configurable_automl_engine.hpo.search_space import (
     _apply_dynamic_space,
     _make_svr_space_dict,
-    optimize,
 )
 
 
@@ -184,20 +183,20 @@ def _mock_optimize_infra(
         return factory(algo, **params)
 
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.create_model", mock_create_model
+        "configurable_automl_engine.hpo.runner.create_model", mock_create_model
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.get_scorer_object",
+        "configurable_automl_engine.hpo.evaluation.get_scorer_object",
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner._evaluate_pooled_cv",
+        "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv",
         lambda *a, **kw: 0.5,
     )
     # The additive-metric path (MAE and similar) still uses cross_val_score;
     # it is patched too so a metric change cannot break the helpers.
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 
@@ -475,7 +474,7 @@ def test_e2e_svr_adaptive_epsilon_all_trials_and_best_within_bounds(
     low, high = 0.005 * sigma, 0.10 * sigma
 
     # Intercept every create_model call in the tuner (all trials + the final fit).
-    real_create_model = tuner_module.create_model
+    real_create_model = hpo_runner.create_model
     seen: list[float] = []
 
     def capturing_create_model(algo: str, **params):
@@ -483,7 +482,7 @@ def test_e2e_svr_adaptive_epsilon_all_trials_and_best_within_bounds(
             seen.append(float(params["epsilon"]))
         return real_create_model(algo, **params)
 
-    monkeypatch.setattr(tuner_module, "create_model", capturing_create_model)
+    monkeypatch.setattr(hpo_runner, "create_model", capturing_create_model)
 
     model_path = tmp_path / "model.pkl"
     cfg_file = tmp_path / "cfg.yaml"
@@ -532,7 +531,7 @@ algorithms:
 """
     cfg_file.write_text(cfg_text, encoding="utf-8")
 
-    real_create_model = tuner_module.create_model
+    real_create_model = hpo_runner.create_model
     seen: list[float] = []
 
     def capturing_create_model(algo: str, **params):
@@ -540,7 +539,7 @@ algorithms:
             seen.append(float(params["epsilon"]))
         return real_create_model(algo, **params)
 
-    monkeypatch.setattr(tuner_module, "create_model", capturing_create_model)
+    monkeypatch.setattr(hpo_runner, "create_model", capturing_create_model)
 
     res = train_best_model(cfg_file, df, target="target", model_path_override=model_path)
 
@@ -612,7 +611,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 
@@ -643,7 +642,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 
@@ -684,7 +683,7 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
         return PhaseResult(score=0.9, params={"alpha": 0.1})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 

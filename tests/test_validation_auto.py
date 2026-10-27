@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from sklearn.model_selection import KFold, LeaveOneOut
 
+from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.validation_utils import (
     choose_validation_method,
@@ -608,6 +609,8 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     from unittest.mock import MagicMock
 
     from configurable_automl_engine import tuner
+    from configurable_automl_engine.hpo import evaluation as hpo_evaluation
+    from configurable_automl_engine.hpo import runner as hpo_runner
 
     X = pd.DataFrame(np.random.rand(20, 4), columns=list("abcd"))
     y = pd.Series(np.random.rand(20))
@@ -628,12 +631,12 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
         captured_eff["n_features"] = n_features
         return 16
 
-    monkeypatch.setattr(tuner, "make_cv", fake_make_cv)
-    monkeypatch.setattr(tuner, "get_effective_train_size", fake_get_effective_train_size)
-    monkeypatch.setattr(tuner, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
-    monkeypatch.setattr(tuner, "create_model", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(hpo_runner, "make_cv", fake_make_cv)
+    monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
+    monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
+    monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
     monkeypatch.setattr(
-        tuner.model_selection, "cross_val_score", lambda *a, **k: [0.5, 0.5]
+        hpo_evaluation.model_selection, "cross_val_score", lambda *a, **k: [0.5, 0.5]
     )
 
     tuner.optimize(
@@ -662,6 +665,8 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     from unittest.mock import MagicMock
 
     from configurable_automl_engine import tuner
+    from configurable_automl_engine.hpo import evaluation as hpo_evaluation
+    from configurable_automl_engine.hpo import runner as hpo_runner
 
     X = pd.DataFrame(np.random.rand(1000, 5), columns=list("abcde"))
     y = pd.Series(np.random.rand(1000))
@@ -695,11 +700,11 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
             ]
         )
 
-    monkeypatch.setattr(tuner, "make_cv", fake_make_cv)
-    monkeypatch.setattr(tuner, "get_effective_train_size", fake_get_effective_train_size)
-    monkeypatch.setattr(tuner, "iter_splits", fake_iter_splits)
-    monkeypatch.setattr(tuner, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
-    monkeypatch.setattr(tuner, "create_model", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(hpo_runner, "make_cv", fake_make_cv)
+    monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
+    monkeypatch.setattr(hpo_evaluation, "iter_splits", fake_iter_splits)
+    monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
+    monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
 
     tuner.optimize(
         "nearest_neighbors_regression",

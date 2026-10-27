@@ -31,19 +31,25 @@ import pandas as pd
 import pytest
 
 import configurable_automl_engine.training_engine.component as component
+import configurable_automl_engine.training_engine.artifact as artifact_mod
+import configurable_automl_engine.training_engine.finalists as finalists_mod
+import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
+import configurable_automl_engine.training_engine.select_steps as select_steps_mod
 from configurable_automl_engine.training_engine.component import (
     FinalistCandidate,
     PhaseContext,
     PhaseResult,
     PreparedData,
     RobustWinnerResult,
-    _build_sanity_gate,
-    _rank_sanity_candidates,
-    _serialize_audit_result,
     execute_phases,
     persist_artifact,
     prepare_dataset,
     train_best_model,
+)
+from configurable_automl_engine.training_engine.select_steps import (
+    _build_sanity_gate,
+    _rank_sanity_candidates,
+    _serialize_audit_result,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
@@ -196,7 +202,7 @@ _GATE_THRESHOLDS = {"sanity_gate": {"top_k_candidates": 2, "corridor_delta": 0.9
 def _patch_hpo():
     """Mock HPO: deterministic scores — 'ridge' worse than 'extra_trees'."""
     return patch.object(
-        component,
+        hpo_phases_mod,
         "_run_hpo",
         side_effect=lambda **kw: (
             PhaseResult(score=-0.10, params={"p": 1}) if kw["algo_name"] == "ridge" else PhaseResult(score=-0.08, params={"p": 1})
@@ -207,7 +213,7 @@ def _patch_hpo():
 def _patch_honest_finalists(y: pd.Series):
     """Mock finalist training with an honest trainer (gap ≈ 1.2 is valid)."""
     return patch.object(
-        component,
+        finalists_mod,
         "_fit_finalist",
         side_effect=lambda *a, **kw: _FakeTrainer(y.to_numpy(), 0.30, 0.25),
     )
@@ -220,7 +226,7 @@ def test_select_cv_best_winner():
     """select(cv_best, winner): working set = CV leader, no gate section."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -233,7 +239,7 @@ def test_select_cv_best_top_k():
     """select(cv_best, top_k): the k best by CV score."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -244,7 +250,7 @@ def test_select_cv_best_top_k_tie_keeps_insertion_order():
     """select(cv_best, top_k): a CV-score tie keeps insertion order (tie-break)."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.10, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"ridge"}
@@ -254,7 +260,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     """select(cv_best, pool): corridor pool (δ ∩ top_k_candidates)."""
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.05})
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     # Narrow corridor δ=0.05: 0.10 > 0.08 * 1.05 → only the leader.
@@ -263,7 +269,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     # Wide corridor + top_k_candidates=2 cap: both candidates.
     cfg2 = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
     ctx2 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(name="sel2", output="pool"),
         cfg=cfg2,
         prepared=_prepared(),
@@ -276,7 +282,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     # top_k_candidates=1 cuts it down to the leader.
     cfg3 = _hpo_cfg(sanity_gate={"top_k_candidates": 1, "corridor_delta": 0.9})
     ctx3 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(name="sel3", output="pool"),
         cfg=cfg3,
         prepared=_prepared(),
@@ -290,7 +296,7 @@ def test_select_cv_best_pool_excludes_disqualified():
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     ctx.disqualified_algorithms = {"ridge": "HPO failure"}
-    component._execute_select_phase(
+    select_steps_mod._execute_select_phase(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -329,9 +335,9 @@ def test_select_sanity_gate_winner_sets_pre_trained_trainer():
         return _FakeTrainer(_prepared().y.to_numpy(), 0.2, 0.25)
 
     with (
-        patch.object(component, "_fit_finalist", side_effect=fake_fit),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=fake_fit),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -343,7 +349,7 @@ def test_select_sanity_gate_winner_sets_pre_trained_trainer():
             ),
         ) as mock_select,
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="winner"),
             cfg=cfg,
             prepared=_prepared(),
@@ -366,14 +372,14 @@ def test_select_sanity_gate_top_k_ranks_by_rmse_oof():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), {"ridge": 0.5, "extra_trees": 0.2}[a[0]], 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["ridge", "extra_trees"],
@@ -385,7 +391,7 @@ def test_select_sanity_gate_top_k_ranks_by_rmse_oof():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -409,14 +415,14 @@ def test_select_sanity_gate_pool_keeps_passed_candidates():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -428,7 +434,7 @@ def test_select_sanity_gate_pool_keeps_passed_candidates():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -451,14 +457,14 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -477,7 +483,7 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -510,14 +516,14 @@ def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -531,7 +537,7 @@ def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=2
             ),
@@ -552,14 +558,14 @@ def test_select_sanity_gate_top_k_drops_failed_outside_k():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -573,7 +579,7 @@ def test_select_sanity_gate_top_k_drops_failed_outside_k():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -600,14 +606,14 @@ def test_select_sanity_gate_pool_partial_failure_keeps_only_passed():
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -621,7 +627,7 @@ def test_select_sanity_gate_pool_partial_failure_keeps_only_passed():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -645,18 +651,18 @@ def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     # The reason format is taken from the code (single source).
-    budget_reason = component._audit_budget_skip_reason(5.0)
+    budget_reason = finalists_mod._audit_budget_skip_reason(5.0)
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -670,7 +676,7 @@ def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -717,18 +723,18 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
             "svr": PhaseResult(score=-0.12, params={"p": 1}),
         }
     )
-    budget_reason = component._audit_budget_skip_reason(5.0)
+    budget_reason = finalists_mod._audit_budget_skip_reason(5.0)
 
     with (
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge", "svr"],
@@ -745,7 +751,7 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -777,19 +783,19 @@ def test_select_sanity_gate_pool_keeps_pre_existing_disqualification():
 
     with (
         patch.object(
-            component,
+            select_steps_mod,
             "_build_finalists_pool",
             return_value=["extra_trees", "ridge"],
         ),
         patch.object(
-            component,
+            finalists_mod,
             "_fit_finalist",
             side_effect=lambda *a, **kw: _FakeTrainer(
                 _prepared().y.to_numpy(), 0.2, 0.25
             ),
         ),
         patch.object(
-            component,
+            select_steps_mod,
             "select_robust_winner",
             return_value=_result(
                 ["extra_trees", "ridge"],
@@ -801,7 +807,7 @@ def test_select_sanity_gate_pool_keeps_pre_existing_disqualification():
             ),
         ),
     ):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -822,16 +828,16 @@ def test_is_audit_budget_skip_rejects_partial_prefix_match():
     '{prefix} (Ns) exceeded' format.
     """
     assert (
-        component._is_audit_budget_skip(
+        finalists_mod._is_audit_budget_skip(
             ["Sanity audit skipped: audit time budget is not a reason"]
         )
         is False
     )
-    assert component._is_audit_budget_skip(["Sanity audit skipped by user"]) is False
+    assert finalists_mod._is_audit_budget_skip(["Sanity audit skipped by user"]) is False
     # A candidate with a real reason plus a 'similar' one is also not 'skip only'.
     assert (
-        component._is_audit_budget_skip(
-            [component._audit_budget_skip_reason(5.0), "Sanity audit skipped by user"]
+        finalists_mod._is_audit_budget_skip(
+            [finalists_mod._audit_budget_skip_reason(5.0), "Sanity audit skipped by user"]
         )
         is False
     )
@@ -839,12 +845,12 @@ def test_is_audit_budget_skip_rejects_partial_prefix_match():
 
 def test_is_audit_budget_skip_detects_only_budget_reasons():
     """``_is_audit_budget_skip`` distinguishes a budget skip from a real failure."""
-    reason = component._audit_budget_skip_reason(5.0)
-    assert component._is_audit_budget_skip([reason]) is True
+    reason = finalists_mod._audit_budget_skip_reason(5.0)
+    assert finalists_mod._is_audit_budget_skip([reason]) is True
     # Mixed reasons (budget + circuit) — not 'skip only'.
-    assert component._is_audit_budget_skip([reason, "Circuit A"]) is False
-    assert component._is_audit_budget_skip(["Circuit A"]) is False
-    assert component._is_audit_budget_skip([]) is False
+    assert finalists_mod._is_audit_budget_skip([reason, "Circuit A"]) is False
+    assert finalists_mod._is_audit_budget_skip(["Circuit A"]) is False
+    assert finalists_mod._is_audit_budget_skip([]) is False
 
 
 def test_select_after_select():
@@ -855,7 +861,7 @@ def test_select_after_select():
 
     with _patch_honest_finalists(prepared.y):
         # First select: sanity_gate top_k=1 (best by RMSE_oof — per the ranking).
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -865,7 +871,7 @@ def test_select_after_select():
         )
         assert len(ctx.working_set) == 1
         # Second select: cv_best winner narrows down to the terminal winner.
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(name="final"),
             cfg=cfg,
             prepared=prepared,
@@ -889,7 +895,7 @@ def test_select_top_k_without_k_raises():
         k=None,
     )
     with pytest.raises(ValueError, match="requires"):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=phase, cfg=cfg, prepared=_prepared(), ctx=ctx
         )
 
@@ -908,7 +914,7 @@ def test_terminal_sanity_select_persists_without_retraining(tmp_path):
     with (
         _patch_hpo(),
         _patch_honest_finalists(df["target"]),
-        patch.object(component, "_fit_and_save") as mock_fit,
+        patch.object(artifact_mod, "_fit_and_save") as mock_fit,
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -927,7 +933,7 @@ def test_select_empty_working_set_raises():
     cfg = _hpo_cfg()
     ctx = PhaseContext()
     with pytest.raises(RuntimeError, match="empty working set"):
-        component._execute_select_phase(
+        select_steps_mod._execute_select_phase(
             phase=_select_phase(), cfg=cfg, prepared=_prepared(), ctx=ctx
         )
 
@@ -959,7 +965,7 @@ def test_select_sanity_gate_full_disqualification_falls_back(tmp_path):
 
     with (
         _patch_hpo(),
-        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_overfit_finalist),
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -1006,7 +1012,7 @@ def test_pipeline_pool_fallback_survives_following_refine_and_select(tmp_path):
 
     with (
         _patch_hpo(),
-        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_overfit_finalist),
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -1050,7 +1056,7 @@ def test_select_sanity_gate_warn_mode_keeps_gap_winner(tmp_path):
 
     with (
         _patch_hpo(),
-        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_overfit_finalist),
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -1101,7 +1107,7 @@ def test_select_sanity_gate_warn_mode_infinite_gap_winner(tmp_path):
 
     with (
         _patch_hpo(),
-        patch.object(component, "_fit_finalist", side_effect=_overfit_finalist),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_overfit_finalist),
     ):
         res = train_best_model(cfg, df, target="target")
 
@@ -1133,7 +1139,7 @@ def test_select_sanity_gate_all_finalists_fail_to_train():
 
     with (
         _patch_hpo(),
-        patch.object(component, "_fit_finalist", side_effect=RuntimeError("boom")),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=RuntimeError("boom")),
     ):
         with pytest.raises(RuntimeError, match="No finalist could be trained"):
             execute_phases(cfg, prepared)
@@ -1164,7 +1170,7 @@ def test_repeat_sanity_select_retrains_finalists():
     trainers_by_phase: dict[str, list[_FakeTrainer]] = {}
     current_phase: list[str] = []
 
-    real_build_pool = component._build_finalists_pool
+    real_build_pool = select_steps_mod._build_finalists_pool
 
     def _build_pool(cfg_arg: Any, prepared_arg: Any, ctx_arg: Any) -> list[str]:
         pending = [
@@ -1184,8 +1190,8 @@ def test_repeat_sanity_select_retrains_finalists():
 
     with (
         _patch_hpo(),
-        patch.object(component, "_build_finalists_pool", side_effect=_build_pool),
-        patch.object(component, "_fit_finalist", side_effect=_fit),
+        patch.object(select_steps_mod, "_build_finalists_pool", side_effect=_build_pool),
+        patch.object(finalists_mod, "_fit_finalist", side_effect=_fit),
     ):
         ctx = execute_phases(cfg, prepared)
 
@@ -1225,7 +1231,7 @@ def test_report_warn_only_keys_removed():
             "overhead_seconds": 0.1,
         }
     }
-    with patch.object(component, "_fit_and_save", return_value=MagicMock()):
+    with patch.object(artifact_mod, "_fit_and_save", return_value=MagicMock()):
         result = persist_artifact(
             cfg=cfg,
             prepared=prepared,

@@ -44,10 +44,12 @@ from sklearn.tree import DecisionTreeRegressor
 from configurable_automl_engine.training_engine.component import (
     FinalistCandidate,
     PhaseResult,
-    _circuit_rank,
-    _severity_signature,
     select_robust_winner,
     train_best_model,
+)
+from configurable_automl_engine.training_engine.finalists import (
+    _circuit_rank,
+    _severity_signature,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     ERR_REMOVED_SANITY_GATE_MODE,
@@ -334,7 +336,7 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
     ``time.monotonic`` is mocked: start at 0.0, the first candidate is
     checked at 1.0 (< budget 5.0), the rest at 10.0 (>= budget) → skipped.
     """
-    import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
 
     y, y_oof, y_full = _honest_vectors()
     cands = {
@@ -343,7 +345,7 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
         "c": _candidate("c", cv_score=-0.10, rmse_oof=0.25, y_oof=y_oof, y_full=y_full),
     }
     mocker.patch.object(
-        comp.time,
+        finalists_mod.time,
         "monotonic",
         side_effect=[0.0, 1.0, 10.0, 10.0],
     )
@@ -710,7 +712,7 @@ def test_train_best_model_sanity_winner_not_retrained_in_persist(
         encoding="utf-8",
     )
     fit_and_save = mocker.patch(
-        "configurable_automl_engine.training_engine.component._fit_and_save"
+        "configurable_automl_engine.training_engine.artifact._fit_and_save"
     )
     res = train_best_model(cfg_file, _tiny_df(), model_path_override=tmp_path / "m.pkl")
     assert Path(res["model_path"]).exists()
@@ -735,6 +737,7 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
 ):
     """A finalist training failure → move on to the next one; the reason is logged."""
     import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
 
     cfg = Config(
         general=GeneralCfg(
@@ -761,9 +764,9 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
             raise RuntimeError("boom: fit failed")
         return _FakeTrainer(len(prepared.y))
 
-    mocker.patch.object(comp, "_fit_finalist", side_effect=_fake_fit)
+    mocker.patch.object(finalists_mod, "_fit_finalist", side_effect=_fake_fit)
     with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
-        candidates = comp._train_finalists(
+        candidates = finalists_mod._train_finalists(
             ["elasticnet", "ridge"], phase_results, cfg, prepared, cfg.general.random_state
         )
     assert set(candidates) == {"ridge"}
@@ -782,7 +785,7 @@ def test_train_best_model_all_finalists_fail_raises(tmp_path: Path):
     from unittest.mock import patch
 
     with patch(
-        "configurable_automl_engine.training_engine.component._fit_finalist",
+        "configurable_automl_engine.training_engine.finalists._fit_finalist",
         side_effect=RuntimeError("boom"),
     ):
         with pytest.raises(RuntimeError, match="No finalist could be trained"):

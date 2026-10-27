@@ -26,12 +26,16 @@ from sklearn.datasets import make_regression
 from sklearn.metrics import make_scorer, median_absolute_error
 
 from configurable_automl_engine import tuner as hyperopt
+from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.training_engine import component
+import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 from configurable_automl_engine.training_engine.component import (
-    _bbc_score_in_user_metric,
     execute_phases,
     prepare_dataset,
     train_best_model,
+)
+from configurable_automl_engine.training_engine.artifact import (
+    _bbc_score_in_user_metric,
 )
 from configurable_automl_engine.training_engine.config_parser import Config
 from configurable_automl_engine.training_engine.metrics import (
@@ -241,7 +245,7 @@ def test_optimize_collects_one_oof_row_per_completed_trial(
     oof = res.oof_predictions
     assert oof is not None
     assert oof.shape == (len(values), len(X))
-    scorer = hyperopt._build_scorer(metric)
+    scorer = hpo_evaluation._build_scorer(metric)
     for value, row in zip(values, oof, strict=True):
         covered = np.isfinite(row)
         if method == "train_test_split":
@@ -335,7 +339,7 @@ def test_bbc_score_absent_with_holdout(tmp_path):
 
 
 def test_bbc_score_skipped_over_memory_budget(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(component, "BBC_MAX_OOF_CELLS", 10)
+    monkeypatch.setattr(hpo_phases_mod, "BBC_MAX_OOF_CELLS", 10)
     df = _noisy_df(60)
     with caplog.at_level(logging.WARNING):
         result = train_best_model(config=_engine_cfg(tmp_path), df=df, target="target")

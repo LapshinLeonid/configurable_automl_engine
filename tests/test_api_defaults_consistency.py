@@ -20,7 +20,8 @@ from configurable_automl_engine.training_engine.config_parser import (
     ComplexityGuardCfg,
     GeneralCfg,
 )
-from configurable_automl_engine.tuner import _OptimizeRunner, optimize
+from configurable_automl_engine.tuner import optimize
+from configurable_automl_engine.hpo.runner import _OptimizeRunner
 
 
 def _general_default(field: str) -> object:
