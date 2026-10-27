@@ -501,7 +501,7 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
     with (
         caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
         ),
     ):
@@ -543,7 +543,7 @@ def test_oof_nan_in_y_reduced_coverage(caplog):
     with (
         caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
         ),
     ):
@@ -719,7 +719,7 @@ def test_oof_reset_between_fits():
 
     # A failed fit must not leave OOF values from the previous training.
     with patch(
-        "configurable_automl_engine.trainer.get_scorer_object",
+        "configurable_automl_engine.trainer_scoring.get_scorer_object",
         return_value=lambda est, Xv, yv: (_ for _ in ()).throw(RuntimeError("boom")),
     ):
         with pytest.raises(Exception, match="Validation scoring failed"):

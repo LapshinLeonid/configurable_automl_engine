@@ -546,7 +546,7 @@ def test_validation_split_init_failure_wrapped(caplog):
         raise ValueError("splits exploded")
 
     with patch(
-        "configurable_automl_engine.trainer.iter_splits",
+        "configurable_automl_engine.trainer_scoring.iter_splits",
         side_effect=broken_iter_splits,
     ):
         with pytest.raises(
@@ -570,7 +570,7 @@ def test_all_folds_fail_raises_and_resets_state():
     assert trainer.val_score is not None
 
     with patch(
-        "configurable_automl_engine.trainer.get_scorer_object",
+        "configurable_automl_engine.trainer_scoring.get_scorer_object",
         return_value=lambda est, Xv, yv: (_ for _ in ()).throw(RuntimeError("boom")),
     ):
         with pytest.raises(TrainingError, match="Validation scoring failed"):
@@ -586,7 +586,7 @@ def test_single_additional_metric_failure_skipped_with_warning(caplog):
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def flaky(name: str, global_y=None):
@@ -597,7 +597,7 @@ def test_single_additional_metric_failure_skipped_with_warning(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object", side_effect=flaky
+            "configurable_automl_engine.trainer_scoring.get_scorer_object", side_effect=flaky
         ),
     ):
         trainer = ModelTrainer(
@@ -967,7 +967,7 @@ def test_trainer_pooled_fallback_warns_once_per_algorithm(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=NoRawScorer(),
         ),
     ):
@@ -1035,7 +1035,7 @@ def test_trainer_primary_no_finite_oof_pairs_warns(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=_NoRawScorer(),
         ),
         patch(
@@ -1073,7 +1073,7 @@ def test_trainer_additional_metric_pooled_fallback_warns(caplog):
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def flaky(name: str, global_y=None):
@@ -1085,7 +1085,7 @@ def test_trainer_additional_metric_pooled_fallback_warns(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object", side_effect=flaky
+            "configurable_automl_engine.trainer_scoring.get_scorer_object", side_effect=flaky
         ),
     ):
         trainer = ModelTrainer(
@@ -1121,7 +1121,7 @@ def test_trainer_additional_metric_no_finite_oof_pairs_warns(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=_NoRawScorer(),
         ),
         patch(

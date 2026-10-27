@@ -707,7 +707,7 @@ def test_fit_raises_error_when_scorer_returns_none():
     mock_scorer = MagicMock(return_value=None)
 
     with patch(
-        "configurable_automl_engine.trainer.get_scorer_object", return_value=mock_scorer
+        "configurable_automl_engine.trainer_scoring.get_scorer_object", return_value=mock_scorer
     ):
         # Verify that exactly our exception with the required text is raised
         with pytest.raises(TrainingError, match="Scorer returned None"):
@@ -1233,7 +1233,7 @@ def test_fit_sets_feature_names_from_numerical_when_none():
             "configurable_automl_engine.trainer.create_model",
             return_value=LinearRegression(),
         ) as mock_create,
-        patch("configurable_automl_engine.trainer.get_scorer_object") as mock_scorer,
+        patch("configurable_automl_engine.trainer_scoring.get_scorer_object") as mock_scorer,
     ):
         # Configure mocks for a minimally successful pass
         mock_scorer.return_value = lambda m, x, y: 0.9
@@ -1268,10 +1268,10 @@ def test_fit_extracts_metadata_as_fallback():
             return_value=LinearRegression(),
         ) as mock_create,
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object"
+            "configurable_automl_engine.trainer_scoring.get_scorer_object"
         ) as mock_scorer_factory,
         patch(
-            "configurable_automl_engine.trainer.direction_label",
+            "configurable_automl_engine.trainer_scoring.direction_label",
             return_value="min better",
         ),
     ):
@@ -1327,9 +1327,9 @@ def test_coverage_feature_names_from_numerical_fallback():
         patch(
             f"{module_path}.create_model", return_value=LinearRegression()
         ),
-        patch(f"{module_path}.get_scorer_object") as mock_scorer_factory,
+        patch("configurable_automl_engine.trainer_scoring.get_scorer_object") as mock_scorer_factory,
         patch(
-            f"{module_path}.direction_label", return_value="min better"
+            "configurable_automl_engine.trainer_scoring.direction_label", return_value="min better"
         ),
     ):
         # Configure the training environment
@@ -1944,9 +1944,15 @@ def test_feature_selection_auto_check_direction_follows_raw_scorer():
             return -0.20
         return 0.50
 
-    with patch(
-        "configurable_automl_engine.trainer.get_scorer_object",
-        return_value=mixed_sign_scorer,
+    with (
+        patch(
+            "configurable_automl_engine.trainer_feature_selection.get_scorer_object",
+            return_value=mixed_sign_scorer,
+        ),
+        patch(
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
+            return_value=mixed_sign_scorer,
+        ),
     ):
         trainer.fit(X, y)
 
@@ -1983,7 +1989,11 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
 
     with (
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_feature_selection.get_scorer_object",
+            return_value=exploding_scorer,
+        ),
+        patch(
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=exploding_scorer,
         ),
         caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
@@ -2582,7 +2592,11 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
 
     with (
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_feature_selection.get_scorer_object",
+            return_value=flaky_scorer,
+        ),
+        patch(
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=flaky_scorer,
         ),
         caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
@@ -2601,7 +2615,9 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
     must use a fixed fallback seed, otherwise the selection decision
     would change between fit() calls.
     """
-    from configurable_automl_engine.trainer import train_test_split as real_split
+    from configurable_automl_engine.trainer_feature_selection import (
+        train_test_split as real_split,
+    )
 
     X, y = _fs_noisy_dataset()
     tr = ModelTrainer(
@@ -2617,7 +2633,7 @@ def test_feature_selection_auto_check_deterministic_when_random_state_none():
     )
 
     with patch(
-        "configurable_automl_engine.trainer.train_test_split",
+        "configurable_automl_engine.trainer_feature_selection.train_test_split",
         wraps=real_split,
     ) as mocked_split:
         tr.fit(X, y)

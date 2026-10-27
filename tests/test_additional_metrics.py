@@ -271,7 +271,7 @@ def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
     y = pd.Series([1.0, 2.0, 3.0])
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def flaky_scorer_factory(name: str, global_y=None):
@@ -282,7 +282,7 @@ def test_trainer_additional_metric_failure_skipped_with_warning(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             side_effect=flaky_scorer_factory,
         ),
     ):
@@ -303,7 +303,7 @@ def test_trainer_additional_metric_none_skipped_with_warning(caplog):
     y = pd.Series([1.0, 2.0, 3.0])
 
     real_scorer_factory = __import__(
-        "configurable_automl_engine.trainer", fromlist=["get_scorer_object"]
+        "configurable_automl_engine.trainer_scoring", fromlist=["get_scorer_object"]
     ).get_scorer_object
 
     def none_scorer_factory(name: str, global_y=None):
@@ -314,7 +314,7 @@ def test_trainer_additional_metric_none_skipped_with_warning(caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch(
-            "configurable_automl_engine.trainer.get_scorer_object",
+            "configurable_automl_engine.trainer_scoring.get_scorer_object",
             side_effect=none_scorer_factory,
         ),
     ):
