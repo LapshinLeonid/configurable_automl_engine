@@ -22,10 +22,7 @@ from configurable_automl_engine.common.target_domain import (
     check_target_domain,
     tweedie_power_is_valid,
 )
-from configurable_automl_engine.training_engine.component import (
-    PhaseContext,
-    train_best_model,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.training_engine.hpo_phases import (
     _apply_target_domain_guard,
 )
@@ -248,14 +245,14 @@ def test_guard_disqualifies_and_clips(caplog):
         "ridge": AlgoCfg(),
         "poissonregressor": AlgoCfg(enable=False),
     }
-    ctx = PhaseContext()
     with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
-        guarded = _apply_target_domain_guard(algos, Y_NEG, ctx)
+        outcome = _apply_target_domain_guard(algos, Y_NEG)
+    guarded = outcome.algorithms
 
-    assert set(ctx.disqualified_algorithms) == {"gammaregressor"}
-    assert "y > 0" in ctx.disqualified_algorithms["gammaregressor"]
+    assert set(outcome.disqualified) == {"gammaregressor"}
+    assert "y > 0" in outcome.disqualified["gammaregressor"]
     # The disabled algorithm is not checked.
-    assert "poissonregressor" not in ctx.disqualified_algorithms
+    assert "poissonregressor" not in outcome.disqualified
     assert guarded["ridge"] is algos["ridge"]
     assert guarded["poissonregressor"] is algos["poissonregressor"]
     power = guarded["glm"].hyperparameters["power"].config
@@ -276,17 +273,21 @@ def test_guard_respects_limit_hyperparameters():
             {"limit_hyperparameters": True, "hyperparameters": {"power": [1.0, 3.0]}}
         ),
     }
-    ctx = PhaseContext()
-    _apply_target_domain_guard(algos, Y_NEG, ctx)
-    assert "glm" in ctx.disqualified_algorithms
+    assert "glm" in _apply_target_domain_guard(algos, Y_NEG).disqualified
+
+
+def test_guard_skips_already_disqualified():
+    algos = {"gammaregressor": AlgoCfg()}
+    outcome = _apply_target_domain_guard(algos, Y_NEG, {"gammaregressor": "earlier"})
+    assert outcome.disqualified == {}
+    assert outcome.algorithms["gammaregressor"] is algos["gammaregressor"]
 
 
 def test_guard_no_op_for_valid_target():
     algos = {"gammaregressor": AlgoCfg(), "poissonregressor": AlgoCfg()}
-    ctx = PhaseContext()
-    guarded = _apply_target_domain_guard(algos, Y_POS, ctx)
-    assert ctx.disqualified_algorithms == {}
-    assert guarded == algos
+    outcome = _apply_target_domain_guard(algos, Y_POS)
+    assert outcome.disqualified == {}
+    assert outcome.algorithms == algos
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -3,8 +3,10 @@
 The dataclasses exchanged between the pipeline steps: the per-algorithm HPO
 record (``PhaseResult``), the prepared data (``PreparedData``), the phase
 context (``PhaseContext``), the finalists and the robust winner result
-(``FinalistCandidate`` / ``RobustWinnerResult``) and the HPO worker payloads
-(``_HPOWorkerResult`` / ``_HpoPhaseSpec``). The module holds data only, so
+(``FinalistCandidate`` / ``RobustWinnerResult``), the HPO worker payloads
+(``_HPOWorkerResult`` / ``_HpoPhaseSpec``) and the step outcomes
+(``TargetDomainOutcome`` / ``WorkerOutcome`` / ``SelectOutcome``) that
+``component`` applies to the ``PhaseContext``. The module holds data only, so
 the step modules can share these types without importing each other. It must
 not import any other pipeline step module (``data_prep``, ``hpo_phases``,
 ``finalists``, ``select_steps``, ``artifact``, ``component``).
@@ -20,6 +22,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.training_engine.config_parser import (
+    AlgoCfg,
     FeatureSelectionCfg,
     HPOPhaseCfg,
     SanityGateMode,
@@ -207,7 +210,9 @@ class PhaseContext:
     """Explicit context shared between pipeline phases.
 
     Replaces the local ``phase_results`` variable: the context is created by
-    ``execute_phases`` once and is mutated sequentially by the phases. The
+    ``execute_phases`` once and only ``component`` mutates it — the step
+    functions return outcomes (``TargetDomainOutcome``, ``WorkerOutcome``,
+    ``SelectOutcome``) that ``component`` applies. The
     select step output REPLACES the working set (subsequent ``refine`` /
     ``select`` steps operate on it).
 
@@ -248,6 +253,70 @@ class PhaseContext:
     pre_trained_trainer: Any | None = None
     complexity_guard_records: list[dict[str, Any]] = field(default_factory=list)
     oof_pool: list[np.ndarray] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class TargetDomainOutcome:
+    """The result of the target-domain guard (``_apply_target_domain_guard``).
+
+    Attributes:
+        algorithms (dict[str, AlgoCfg]): The algorithms with the clipped
+            search spaces applied (unchanged configs are kept as is).
+        disqualified (dict[str, str]): The algorithms disqualified up front:
+            "algorithm → reason" (merged into the circuit breaker).
+    """
+
+    algorithms: dict[str, AlgoCfg] = field(compare=False)
+    disqualified: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerOutcome:
+    """The HPO worker results of a phase, sorted by their effect.
+
+    Built by ``_consume_worker_results``; ``component`` merges it into the
+    phase results and the ``PhaseContext``.
+
+    Attributes:
+        results (dict[str, PhaseResult]): The successful results
+            "algorithm → PhaseResult" (worker order).
+        disqualified (dict[str, str]): The circuit breaker additions
+            "algorithm → reason".
+        oof_pool (list[np.ndarray]): The OOF prediction matrices of the
+            successful results (the BBC-CV pool additions).
+    """
+
+    results: dict[str, PhaseResult] = field(compare=False)
+    disqualified: dict[str, str]
+    oof_pool: list[np.ndarray] = field(compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SelectOutcome:
+    """The new pipeline state after a select step (``select_step_outcome``).
+
+    Every field is the complete new value of the ``PhaseContext`` field of
+    the same name; ``component._apply_select_outcome`` assigns them.
+
+    Attributes:
+        working_set (dict[str, PhaseResult]): The step output.
+        winner_algo (str | None): The winner of a terminal step.
+        pre_trained_trainer (Any | None): The winner's full-fit trainer.
+        full_fit_trainers (dict[str, Any]): The full-fit trainers kept for
+            the output candidates.
+        disqualified_algorithms (dict[str, str]): The circuit breaker after
+            the step (gate disqualifications added, fallback candidates of
+            this step removed).
+        sanity_gate_section (dict[str, Any] | None): The report section of a
+            ``sanity_gate`` step (``None`` for ``cv_best``).
+    """
+
+    working_set: dict[str, PhaseResult] = field(compare=False)
+    winner_algo: str | None
+    pre_trained_trainer: Any | None = field(compare=False)
+    full_fit_trainers: dict[str, Any] = field(compare=False)
+    disqualified_algorithms: dict[str, str]
+    sanity_gate_section: dict[str, Any] | None = field(compare=False)
 
 
 @dataclass

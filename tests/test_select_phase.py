@@ -59,6 +59,14 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.training_engine.sanity_gate import SanityCheckResult
 
+
+def _run_select(
+    *, phase: HPOPhaseCfg, cfg: Config, prepared: PreparedData, ctx: PhaseContext
+) -> None:
+    """Run a select step the way ``execute_phases`` does: outcome, then apply."""
+    outcome = select_steps_mod.select_step_outcome(phase, cfg, prepared, ctx)
+    component._apply_select_outcome(ctx, outcome, phase.name)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Shared helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -222,7 +230,7 @@ def test_select_cv_best_winner():
     """select(cv_best, winner): working set = CV leader, no gate section."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -235,7 +243,7 @@ def test_select_cv_best_top_k():
     """select(cv_best, top_k): the k best by CV score."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -246,7 +254,7 @@ def test_select_cv_best_top_k_tie_keeps_insertion_order():
     """select(cv_best, top_k): a CV-score tie keeps insertion order (tie-break)."""
     cfg = _hpo_cfg()
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.10, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(output="top_k", k=1), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"ridge"}
@@ -256,7 +264,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     """select(cv_best, pool): corridor pool (δ ∩ top_k_candidates)."""
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.05})
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     # Narrow corridor δ=0.05: 0.10 > 0.08 * 1.05 → only the leader.
@@ -265,7 +273,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     # Wide corridor + top_k_candidates=2 cap: both candidates.
     cfg2 = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
     ctx2 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(name="sel2", output="pool"),
         cfg=cfg2,
         prepared=_prepared(),
@@ -278,7 +286,7 @@ def test_select_cv_best_pool_corridor_and_cap():
     # top_k_candidates=1 cuts it down to the leader.
     cfg3 = _hpo_cfg(sanity_gate={"top_k_candidates": 1, "corridor_delta": 0.9})
     ctx3 = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(name="sel3", output="pool"),
         cfg=cfg3,
         prepared=_prepared(),
@@ -292,7 +300,7 @@ def test_select_cv_best_pool_excludes_disqualified():
     cfg = _hpo_cfg(sanity_gate={"top_k_candidates": 2, "corridor_delta": 0.9})
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     ctx.disqualified_algorithms = {"ridge": "HPO failure"}
-    select_steps_mod._execute_select_phase(
+    _run_select(
         phase=_select_phase(output="pool"), cfg=cfg, prepared=_prepared(), ctx=ctx
     )
     assert set(ctx.working_set) == {"extra_trees"}
@@ -345,7 +353,7 @@ def test_select_sanity_gate_winner_sets_pre_trained_trainer():
             ),
         ) as mock_select,
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="winner"),
             cfg=cfg,
             prepared=_prepared(),
@@ -387,7 +395,7 @@ def test_select_sanity_gate_top_k_ranks_by_rmse_oof():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -430,7 +438,7 @@ def test_select_sanity_gate_pool_keeps_passed_candidates():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -479,7 +487,7 @@ def test_select_sanity_gate_pool_full_disqualification_falls_back_to_ranking():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -533,7 +541,7 @@ def test_select_sanity_gate_top_k_fallback_kept_candidate_not_disqualified():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=2
             ),
@@ -575,7 +583,7 @@ def test_select_sanity_gate_top_k_drops_failed_outside_k():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -623,7 +631,7 @@ def test_select_sanity_gate_pool_partial_failure_keeps_only_passed():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -672,7 +680,7 @@ def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -745,7 +753,7 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -801,7 +809,7 @@ def test_select_sanity_gate_pool_keeps_pre_existing_disqualification():
             ),
         ),
     ):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="gate", strategy="sanity_gate", output="pool"),
             cfg=cfg,
             prepared=_prepared(),
@@ -855,7 +863,7 @@ def test_select_after_select():
 
     with _patch_honest_finalists(prepared.y):
         # First select: sanity_gate top_k=1 (best by RMSE_oof — per the ranking).
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(
                 name="gate", strategy="sanity_gate", output="top_k", k=1
             ),
@@ -865,7 +873,7 @@ def test_select_after_select():
         )
         assert len(ctx.working_set) == 1
         # Second select: cv_best winner narrows down to the terminal winner.
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(name="final"),
             cfg=cfg,
             prepared=prepared,
@@ -889,7 +897,7 @@ def test_select_top_k_without_k_raises():
         k=None,
     )
     with pytest.raises(ValueError, match="requires"):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=phase, cfg=cfg, prepared=_prepared(), ctx=ctx
         )
 
@@ -927,7 +935,7 @@ def test_select_empty_working_set_raises():
     cfg = _hpo_cfg()
     ctx = PhaseContext()
     with pytest.raises(RuntimeError, match="empty working set"):
-        select_steps_mod._execute_select_phase(
+        _run_select(
             phase=_select_phase(), cfg=cfg, prepared=_prepared(), ctx=ctx
         )
 

@@ -3,8 +3,8 @@
 Builds the HPO request of one algorithm (``_build_hpo_request``) and runs
 the hyperparameter search directly (``_run_hpo``), executes an HPO phase
 for every candidate (``_hpo_phase_worker`` — a module-level function so that
-it can be pickled in the "processes" mode) and merges the worker results into
-the phase context. It also holds the target-domain guard, the BBC-CV memory
+it can be pickled in the "processes" mode) and sorts the worker results into
+a ``WorkerOutcome`` that ``component`` applies to the phase context. It also holds the target-domain guard, the BBC-CV memory
 budget check and the complexity guard record merging. It may import ``state``
 only and must not import ``data_prep``, ``finalists``, ``select_steps``,
 ``artifact`` or ``component``.
@@ -13,9 +13,10 @@ only and must not import ``data_prep``, ``finalists``, ``select_steps``,
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
@@ -42,9 +43,10 @@ from configurable_automl_engine.training_engine.config_parser import (
 
 from .metrics import BBC_MAX_OOF_CELLS, direction_label, to_user_value
 from .state import (
-    PhaseContext,
     PhaseResult,
     PreparedData,
+    TargetDomainOutcome,
+    WorkerOutcome,
     _HpoPhaseSpec,
     _HPOWorkerResult,
 )
@@ -396,38 +398,40 @@ def _hpo_phase_worker(
 
 def _consume_worker_results(
     results: Iterable[_HPOWorkerResult | None],
-    phase_results: dict[str, PhaseResult],
-    ctx: PhaseContext,
-) -> None:
-    """Distribute worker results into the working set and disqualifications.
+) -> WorkerOutcome:
+    """Sort worker results into phase results and disqualifications.
 
-    In the "processes" mode the worker cannot write to ``ctx`` directly
+    In the "processes" mode the worker cannot write to the ``PhaseContext``
     (changes in the child process would be lost), so disqualifications are
-    returned in the results and applied here, in the main process.
-    ``None`` results (a task timeout/failure in the pool) are ignored.
-    A ``history_error`` result re-raises ``HPOHistoryError`` in the main
-    process: TPE history transfer problems are configuration errors and must
-    fail the run even in the parallel mode (where ``run_parallel`` swallows
-    worker exceptions).
+    returned in the results; the main process (``component``) merges the
+    returned outcome. ``None`` results (a task timeout/failure in the pool)
+    are ignored. A ``history_error`` result re-raises ``HPOHistoryError`` in
+    the main process: TPE history transfer problems are configuration errors
+    and must fail the run even in the parallel mode (where ``run_parallel``
+    swallows worker exceptions).
 
     Args:
         results (Iterable[_HPOWorkerResult | None]): Worker results.
-        phase_results (dict[str, PhaseResult]): The working set of the
-            current phase — valid results land here.
-        ctx (PhaseContext): The phase context — disqualifications merge here.
+
+    Returns:
+        WorkerOutcome: The successful results, the circuit breaker additions
+            and the OOF matrices of the successful results (worker order).
 
     Raises:
         HPOHistoryError: If a worker reported a TPE history transfer error
             (fail fast — the pipeline must not continue with a degraded
             refine).
     """
+    phase_results: dict[str, PhaseResult] = {}
+    disqualified: dict[str, str] = {}
+    oof_pool: list[np.ndarray] = []
     for res in results:
         if res is None:
             continue
         if res.history_error is not None:
             raise HPOHistoryError(res.history_error)
         if res.disqualify_reason is not None:
-            ctx.disqualified_algorithms[res.name] = res.disqualify_reason
+            disqualified[res.name] = res.disqualify_reason
             continue
         if res.score is None or res.params is None:
             continue
@@ -435,7 +439,7 @@ def _consume_worker_results(
         # its OOF predictions enter the BBC-CV pool even if the algorithm is
         # later dropped by a select step.
         if res.oof_predictions is not None:
-            ctx.oof_pool.append(res.oof_predictions)
+            oof_pool.append(res.oof_predictions)
         phase_results[res.name] = PhaseResult(
             score=res.score,
             params=res.params,
@@ -444,36 +448,42 @@ def _consume_worker_results(
             n_trials_evaluated=int(res.n_trials_evaluated or 0),
             oof_predictions=res.oof_predictions,
         )
+    return WorkerOutcome(
+        results=phase_results, disqualified=disqualified, oof_pool=oof_pool
+    )
 
 
 def _apply_target_domain_guard(
     all_algorithms: dict[str, AlgoCfg],
     y: pd.Series,
-    ctx: PhaseContext,
-) -> dict[str, AlgoCfg]:
+    disqualified: Collection[str] = (),
+) -> TargetDomainOutcome:
     """Exclude or restrict GLMs whose loss domain does not fit the target.
 
     Runs once, before the first HPO phase. ``gammaregressor`` (``y > 0``) and
     ``poissonregressor`` (``y >= 0``) on a target outside their domain — and
     ``tweedieregressor`` / ``glm`` whose whole ``power`` search range is
     invalid for the target — would fail on every fold of every trial, so they
-    are put into the circuit breaker (``ctx.disqualified_algorithms``) with a
-    reason and a single WARNING, and no trial is ever run for them. A Tweedie
-    ``power`` range that is only partly invalid is clipped to its valid part
-    instead (the algorithm stays a candidate).
+    are returned for the circuit breaker with a reason and a single WARNING,
+    and no trial is ever run for them. A Tweedie ``power`` range that is only
+    partly invalid is clipped to its valid part instead (the algorithm stays
+    a candidate).
 
     Args:
         all_algorithms (dict[str, AlgoCfg]): The configured algorithms.
         y (pd.Series): The target vector.
-        ctx (PhaseContext): The phase context — disqualifications land here.
+        disqualified (Collection[str]): The already disqualified algorithms
+            (not checked).
 
     Returns:
-        dict[str, AlgoCfg]: The algorithms with clipped search spaces applied
-            (unchanged configs are returned as is; the input is not mutated).
+        TargetDomainOutcome: The algorithms with clipped search spaces applied
+            (unchanged configs are returned as is; the input is not mutated)
+            and the new disqualifications "algorithm → reason".
     """
     guarded: dict[str, AlgoCfg] = {}
+    new_disqualified: dict[str, str] = {}
     for name, a_cfg in all_algorithms.items():
-        if not a_cfg.enable or name in ctx.disqualified_algorithms:
+        if not a_cfg.enable or name in disqualified:
             guarded[name] = a_cfg
             continue
         space = build_search_space(
@@ -488,7 +498,7 @@ def _apply_target_domain_guard(
                 name,
                 check.disqualify_reason,
             )
-            ctx.disqualified_algorithms[name] = check.disqualify_reason
+            new_disqualified[name] = check.disqualify_reason
             guarded[name] = a_cfg
             continue
         if check.clipped_entries:
@@ -500,7 +510,7 @@ def _apply_target_domain_guard(
             }
             a_cfg = a_cfg.model_copy(update={"hyperparameters": hyperparameters})
         guarded[name] = a_cfg
-    return guarded
+    return TargetDomainOutcome(algorithms=guarded, disqualified=new_disqualified)
 
 
 def _bbc_enabled(

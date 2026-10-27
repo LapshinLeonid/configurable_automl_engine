@@ -858,7 +858,7 @@ _AUDIT_BUDGET_SKIP_RE = re.compile(
 def _is_audit_budget_skip(reasons: list[str]) -> bool:
     """True if ALL candidate reasons are a time-budget audit skip.
 
-    Used in ``_execute_select_sanity_gate`` so that such candidates do not
+    Used in ``select_steps._gate_disqualifications`` so that such candidates do not
     enter the circuit breaker (``disqualified_algorithms``) — the phase
     budget must not throw the algorithm out of all subsequent phases.
 

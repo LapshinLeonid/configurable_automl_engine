@@ -15,9 +15,9 @@ and no ``setattr`` on it. The objects are recognized by the parameter
 annotation (``runner: _OptimizeRunner``, ``trainer: ModelTrainer``,
 ``ctx: PhaseContext``) and by the names ``runner``, ``trainer`` and ``ctx``.
 
-``ALLOWED_VIOLATIONS`` lists the functions that still break the rule; it may
-only shrink. A violation that is not listed fails the test, and so does a
-listed entry that no longer violates the rule (remove it from the list).
+``ALLOWED_VIOLATIONS`` is empty and must stay empty: a step that needs to
+change the state returns an outcome (a plan, a ``SelectOutcome`` ...) that the
+owner applies. A violation fails the test.
 """
 
 from __future__ import annotations
@@ -62,22 +62,8 @@ MUTATING_METHODS = frozenset(
 )
 
 #: (module path, qualified function name, tracked class) of the functions
-#: that still mutate an object they do not own. May only shrink.
-ALLOWED_VIOLATIONS: set[tuple[str, str, str]] = {
-    ("training_engine/hpo_phases.py", "_apply_target_domain_guard", "PhaseContext"),
-    ("training_engine/hpo_phases.py", "_consume_worker_results", "PhaseContext"),
-    (
-        "training_engine/select_steps.py",
-        "_drop_kept_from_circuit_breaker",
-        "PhaseContext",
-    ),
-    ("training_engine/select_steps.py", "_execute_select_cv_best", "PhaseContext"),
-    (
-        "training_engine/select_steps.py",
-        "_execute_select_sanity_gate",
-        "PhaseContext",
-    ),
-}
+#: that mutate an object they do not own. Empty, and must stay empty.
+ALLOWED_VIOLATIONS: set[tuple[str, str, str]] = set()
 
 
 @dataclass(frozen=True)

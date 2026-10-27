@@ -66,13 +66,15 @@ from .hpo_phases import (
     _hpo_phase_worker,
     _merge_complexity_guard_records,
 )
-from .select_steps import _execute_select_phase
+from .select_steps import select_step_outcome
 from .state import (
     FinalistCandidate,
     PhaseContext,
     PhaseResult,
     PreparedData,
     RobustWinnerResult,
+    SelectOutcome,
+    WorkerOutcome,
     _HpoPhaseSpec,
 )
 from .thread_pool import run_parallel
@@ -176,7 +178,11 @@ def execute_phases(
     # Target-domain guard (before any trial): GLMs whose loss domain does not
     # fit y are disqualified up front, a partly invalid Tweedie power range
     # is clipped to its valid part.
-    all_algorithms = _apply_target_domain_guard(all_algorithms, prepared.y, ctx)
+    guard = _apply_target_domain_guard(
+        all_algorithms, prepared.y, ctx.disqualified_algorithms
+    )
+    all_algorithms = guard.algorithms
+    ctx.disqualified_algorithms.update(guard.disqualified)
     # Disqualified algorithms (circuit breaker): name -> reason.
     # Disqualification does not abort the run: the algorithm is excluded from
     # candidates and results, the rest continue training.
@@ -204,7 +210,9 @@ def execute_phases(
         if phase.action == "select":
             # The select step runs synchronously (outside run_parallel): it
             # operates on already-finished HPO results.
-            _execute_select_phase(phase=phase, cfg=cfg, prepared=prepared, ctx=ctx)
+            _apply_select_outcome(
+                ctx, select_step_outcome(phase, cfg, prepared, ctx), phase.name
+            )
             continue
 
         phase_seed = (
@@ -510,11 +518,49 @@ def _run_phase_workers(
                 else cfg.general.task_timeout
             ),
         )
-        _consume_worker_results(results, phase_results, ctx)
+        _apply_worker_outcome(ctx, phase_results, _consume_worker_results(results))
     else:
         for n, a in current_candidates.items():
             res = _hpo_phase_worker(n, a, spec, X)
-            _consume_worker_results([res], phase_results, ctx)
+            _apply_worker_outcome(ctx, phase_results, _consume_worker_results([res]))
+
+
+def _apply_worker_outcome(
+    ctx: PhaseContext,
+    phase_results: dict[str, PhaseResult],
+    outcome: WorkerOutcome,
+) -> None:
+    """Merge the HPO worker outcome into the phase results and the context.
+
+    Args:
+        ctx (PhaseContext): The pipeline phase context (disqualifications and
+            the BBC-CV pool are extended).
+        phase_results (dict[str, PhaseResult]): The phase results (extended).
+        outcome (WorkerOutcome): The sorted worker results.
+    """
+    ctx.disqualified_algorithms.update(outcome.disqualified)
+    ctx.oof_pool.extend(outcome.oof_pool)
+    phase_results.update(outcome.results)
+
+
+def _apply_select_outcome(
+    ctx: PhaseContext, outcome: SelectOutcome, phase_name: str
+) -> None:
+    """Replace the pipeline state with the outcome of a select step.
+
+    Args:
+        ctx (PhaseContext): The pipeline phase context (mutated).
+        outcome (SelectOutcome): The new state returned by the select step.
+        phase_name (str): The select phase name (the key of its gate report
+            section).
+    """
+    ctx.working_set = outcome.working_set
+    ctx.winner_algo = outcome.winner_algo
+    ctx.pre_trained_trainer = outcome.pre_trained_trainer
+    ctx.full_fit_trainers = outcome.full_fit_trainers
+    ctx.disqualified_algorithms = outcome.disqualified_algorithms
+    if outcome.sanity_gate_section is not None:
+        ctx.sanity_gate_sections[phase_name] = outcome.sanity_gate_section
 
 
 def _valid_phase_results(
