@@ -45,7 +45,7 @@ import pytest
 from sklearn.datasets import make_friedman1, make_regression
 
 from configurable_automl_engine.common.dependency_utils import is_installed
-from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 from configurable_automl_engine.tuner import (
     optimize,
 )

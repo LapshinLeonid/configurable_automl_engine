@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import logging
 from unittest.mock import MagicMock
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.metrics import (
     _rmse,
     _nrmse,
     direction_label,
@@ -245,7 +245,7 @@ def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
     Covers the defensive branch for hypothetical custom scorers whose
     direction is not exposed.
     """
-    import configurable_automl_engine.training_engine.metrics as metrics_mod
+    import configurable_automl_engine.common.metrics as metrics_mod
 
     class NoSignScorer:
         pass
@@ -265,7 +265,7 @@ def test_is_greater_better_reflects_registry_mutation():
     """
     from sklearn.metrics import make_scorer, mean_squared_error
 
-    import configurable_automl_engine.training_engine.metrics as metrics_mod
+    import configurable_automl_engine.common.metrics as metrics_mod
 
     custom_name = "dyn_registry_metric"
     assert custom_name not in metrics_mod._SCORER_OBJECTS
@@ -644,7 +644,7 @@ def test_pooled_path_works_for_sklearn_non_additive_metrics(name):
 
 def test_warn_pooled_fallback_once_warns_first_time(caplog):
     """The first fallback for an (algorithm, phase) pair emits a WARNING."""
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
@@ -660,7 +660,7 @@ def test_warn_pooled_fallback_once_warns_first_time(caplog):
 
 def test_warn_pooled_fallback_once_silent_after_first(caplog):
     """Subsequent fallbacks for the same (algorithm, phase) pair stay silent."""
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):
@@ -679,7 +679,7 @@ def test_warn_pooled_fallback_once_silent_after_first(caplog):
 
 def test_warn_pooled_fallback_once_again_for_other_phase(caplog):
     """A different phase (or algorithm) triggers the WARNING again."""
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     metrics_mod.reset_pooled_fallback_warnings()
     with caplog.at_level(logging.WARNING):

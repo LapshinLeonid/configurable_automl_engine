@@ -39,7 +39,7 @@ from configurable_automl_engine.trainer import (
 )
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.training_engine.state import PhaseResult
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     is_non_additive_metric,
     to_user_value,
@@ -957,7 +957,7 @@ def test_trainer_pooled_fallback_warns_once_per_algorithm(caplog):
     silently falls back to the per-fold mean — the WARNING must appear once
     per algorithm (the 'final_fit' phase label), not once per fold.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
@@ -1031,7 +1031,7 @@ def test_trainer_primary_no_finite_oof_pairs_warns(caplog):
     pooled estimate is impossible — the engine falls back to the per-fold
     mean with exactly one WARNING per (algorithm, metric, 'final_fit').
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
@@ -1072,7 +1072,7 @@ def test_trainer_additional_metric_pooled_fallback_warns(caplog):
     The deduplication key includes the metric ('final_fit:rmse'), so primary
     and additional metrics do not collapse into one warning.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     X, y = _noisy_regression(n=60, p=4, seed=1)
 
@@ -1117,7 +1117,7 @@ def test_trainer_additional_metric_no_finite_oof_pairs_warns(caplog):
     branch): the model predicts all-NaN, so the OOF buffer is empty and the
     pooled value of the non-additive additional metric is impossible.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     X, y = _noisy_regression(n=60, p=4, seed=1)
 

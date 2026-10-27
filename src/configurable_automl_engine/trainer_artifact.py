@@ -20,7 +20,7 @@ import logging
 import platform
 from typing import TYPE_CHECKING, Any, cast
 
-from configurable_automl_engine.trainer_errors import TrainingError
+from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
 
 if TYPE_CHECKING:

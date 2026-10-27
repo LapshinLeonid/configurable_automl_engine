@@ -24,7 +24,7 @@ from sklearn.model_selection import (
 )
 from sklearn.utils import _safe_indexing
 
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     pooled_scorer_value,
     warn_pooled_fallback_once,

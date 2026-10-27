@@ -250,7 +250,7 @@ def test_model_trainer_invalid_encoding_params(
 def test_tuner_optimize_numpy_without_features_warns() -> None:
     """tuner.optimize on numpy without categorical features does not fail
     (the model is used without a preprocessor)."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     rng = np.random.default_rng(0)
@@ -276,7 +276,7 @@ def test_tuner_optimize_numpy_without_features_warns() -> None:
 
 def test_tuner_optimize_numpy_with_features_warns(caplog) -> None:
     """Explicitly passed categorical features with numpy X -> a warning."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     rng = np.random.default_rng(0)
@@ -383,7 +383,7 @@ def test_train_best_model_hashing_with_oversampling(tmp_path: Path) -> None:
 
 def test_tuner_optimize_new_encoding_strategies() -> None:
     """tuner.optimize works with the new strategies (the same logic as the final fit)."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     df = _make_regression_df(n=120, seed=11)
@@ -412,7 +412,7 @@ def test_tuner_optimize_new_encoding_strategies() -> None:
 
 def test_tuner_optimize_high_cardinality_mode() -> None:
     """tuner.optimize with HC mode returns a model."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     df = _make_regression_df(n=140, seed=13)

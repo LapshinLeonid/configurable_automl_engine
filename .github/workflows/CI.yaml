@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML
+          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML import-linter==2.15
           # Install the project itself in "editable" mode so it is visible as a package
           # This works if there is a setup.py or pyproject.toml at the repository root
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e ".[all,test]"; fi
@@ -30,6 +30,11 @@ jobs:
 
       - name: Check formatting with Ruff
         run: ruff format --check src/
+
+      # Import layers: training_engine -> hpo/tuner/trainer -> building
+      # blocks -> common (contracts in pyproject.toml, no allowlist).
+      - name: Check import layers
+        run: lint-imports
 
       - name: Type check with Mypy
         run: mypy src --install-types --non-interactive

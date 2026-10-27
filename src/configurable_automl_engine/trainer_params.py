@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
+from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.validation import (
@@ -23,10 +24,9 @@ from configurable_automl_engine.validation import (
 
 from .common.definitions import SerializationFormat, ValidationStrategy
 from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
-from .trainer_errors import TrainingError
+from .feature_selection import FeatureSelectionCfg
 from .trainer_feature_selection import _validate_feature_selection_cfg
 from .trainer_state import TrainerSettings
-from .training_engine.config_parser import FeatureSelectionCfg
 
 _ENCODING_STRATEGIES = ("one_hot", "ordinal", "target", "frequency", "hashing")
 

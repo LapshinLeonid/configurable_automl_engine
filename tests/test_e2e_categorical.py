@@ -164,7 +164,7 @@ def test_train_best_model_categorical_with_smote_oversampling(tmp_path: Path) ->
 def test_tuner_optimize_categorical_not_pruned() -> None:
     """tuner.optimize on a categorical DataFrame produces no pruned trials
     and returns a trained model (not None)."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     df = _make_regression_df(n=120, seed=3)

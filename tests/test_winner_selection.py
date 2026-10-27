@@ -51,7 +51,7 @@ from configurable_automl_engine.training_engine.state import (
     FinalistCandidate,
     PhaseResult,
 )
-from configurable_automl_engine.training_engine.metrics import oof_rmse
+from configurable_automl_engine.common.metrics import oof_rmse
 from configurable_automl_engine.training_engine.sanity_gate import ModelSanityGate
 from configurable_automl_engine.tuner import (
     HPO_WORST_SCORE,

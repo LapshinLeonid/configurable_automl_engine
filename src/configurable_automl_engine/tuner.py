@@ -32,18 +32,18 @@ from typing import Any
 
 from optuna.trial import FrozenTrial, Trial
 
-from configurable_automl_engine.common.complexity_guard import (
+from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.feature_selection import (
+    FeatureSelectionCfg,
+)
+from configurable_automl_engine.hpo.complexity_guard import (
     ComplexityGuardConfig,
 )
-from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
-)
-from configurable_automl_engine.training_engine.config_parser import (
-    FeatureSelectionCfg,
 )
 
 from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings

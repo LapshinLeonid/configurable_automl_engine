@@ -143,7 +143,7 @@ def test_e2e_large_wide_one_hot_spaces_unchanged():
     the mode is 'ordinary' and the spaces stay unchanged — the guard
     produces no records.
     """
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     df = _wide_one_hot_frame()

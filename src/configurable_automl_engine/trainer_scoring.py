@@ -20,7 +20,8 @@ import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
 
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.metrics import (
     direction_label,
     get_scorer_object,
     is_non_additive_metric,
@@ -31,7 +32,6 @@ from configurable_automl_engine.training_engine.metrics import (
 )
 from configurable_automl_engine.validation import iter_splits, make_cv
 
-from .trainer_errors import TrainingError
 from .trainer_state import ValidationScores
 
 #: Builds fresh pipeline steps (clones of the preprocessor and the model):

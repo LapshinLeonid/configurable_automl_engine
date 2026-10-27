@@ -10,10 +10,9 @@ configured by one definition. The module holds definitions only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from configurable_automl_engine.preprocessing import EncodingStrategy
+from configurable_automl_engine.common.definitions import EncodingStrategy
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,7 +26,7 @@ import pandas as pd
 import pytest
 
 from configurable_automl_engine.common.dependency_utils import is_installed
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     DEFAULT_SPACES,
     CategoricalSpace,
     SearchSpaceEntry,
@@ -41,9 +41,9 @@ from configurable_automl_engine.models import (
     resolve_algorithm_name,
 )
 from configurable_automl_engine.training_engine import hpo_phases
+from configurable_automl_engine.feature_selection import FeatureSelectionMode
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
-    FeatureSelectionMode,
     HPOPhaseCfg,
 )
 from configurable_automl_engine.tuner import HyperoptError, optimize
@@ -241,7 +241,7 @@ def test_knn_default_n_neighbors_matches_config_and_is_clipped(
 
 def test_svr_default_epsilon_is_adaptive(monkeypatch: pytest.MonkeyPatch) -> None:
     """SVR without overrides keeps the adaptive epsilon (not DEFAULT_SPACES)."""
-    from configurable_automl_engine.common.hyperopt_defaults import (
+    from configurable_automl_engine.hpo.default_spaces import (
         compute_svr_epsilon_bounds,
     )
 

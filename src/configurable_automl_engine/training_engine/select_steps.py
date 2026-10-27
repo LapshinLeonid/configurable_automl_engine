@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from configurable_automl_engine.common.metrics import to_user_value
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     HPOPhaseCfg,
@@ -33,7 +34,6 @@ from .finalists import (
     select_robust_winner,
     select_winner,
 )
-from .metrics import to_user_value
 from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .state import (
     FinalistCandidate,

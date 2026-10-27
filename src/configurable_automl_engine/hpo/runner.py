@@ -24,21 +24,21 @@ import pandas as pd
 from optuna.trial import FrozenTrial, Trial
 from scipy import sparse as sp
 
+from configurable_automl_engine.common.metrics import (
+    is_non_additive_metric,
+)
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
     get_effective_train_size,
     validate_features,
 )
-from configurable_automl_engine.models import (
-    create_model,
-    resolve_algorithm_name,
-)
-from configurable_automl_engine.training_engine.config_parser import (
+from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
 )
-from configurable_automl_engine.training_engine.metrics import (
-    is_non_additive_metric,
+from configurable_automl_engine.models import (
+    create_model,
+    resolve_algorithm_name,
 )
 from configurable_automl_engine.validation import make_cv, norm_val_method
 

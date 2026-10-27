@@ -81,11 +81,46 @@ give the same winner, parameters, scores and predictions as 0.4.x, in both
 - The HPO exceptions (`HyperoptError`, `InvalidAlgorithmError`,
   `InvalidDataError`, `HPOHistoryError`) and `TrainingError` report the module
   that defines them (`configurable_automl_engine.hpo.types`,
-  `configurable_automl_engine.trainer_errors`) in `__module__`, tracebacks
+  `configurable_automl_engine.common.errors`) in `__module__`, tracebacks
   and pickles. Their documented import paths (`configurable_automl_engine.tuner`,
   `configurable_automl_engine.trainer`) keep working.
 - The setting groups `EncodingSettings`, `OversamplingSettings` and
   `InputPolicies` live in `configurable_automl_engine.common.settings`.
+
+### Moved modules (internal import paths)
+
+The modules now form import layers (`training_engine` → `hpo`/`tuner`/trainer
+→ building blocks → `common`, see "Import layers" in [README.md](README.md)),
+so several internal modules and names moved. Code that imported or patched
+them must use the new paths; the documented import paths
+(`configurable_automl_engine`, `tuner`, `trainer`, `training_engine.component`,
+`training_engine.config_parser`, `training_engine.thread_pool.run_parallel`)
+keep working.
+
+| Old path | New path |
+|---|---|
+| `configurable_automl_engine.training_engine.metrics` | `configurable_automl_engine.common.metrics` |
+| `configurable_automl_engine.training_engine.logger` | `configurable_automl_engine.common.log_setup` |
+| `configurable_automl_engine.training_engine.thread_pool`: `SharedDataFrame`, `_numpy_result_dtype`, `_ints_fit_float64`, `_shm_backing_path`, `_shm_has_free_space` | `configurable_automl_engine.common.shared_frame` (`run_parallel` and `DiskPersistenceManager` stay in `thread_pool`) |
+| `configurable_automl_engine.common.hyperopt_defaults` | `configurable_automl_engine.hpo.default_spaces` |
+| `configurable_automl_engine.common.complexity_guard` | `configurable_automl_engine.hpo.complexity_guard` |
+| `configurable_automl_engine.common.target_domain` | `configurable_automl_engine.hpo.target_domain` |
+| `configurable_automl_engine.common.artifact_metadata` | `configurable_automl_engine.trainer_artifact` |
+| `configurable_automl_engine.trainer_errors` | `configurable_automl_engine.common.errors` (`TrainingError`; still importable from `configurable_automl_engine.trainer`) |
+| `configurable_automl_engine.trainer.IsotonicDataTransformer` | `configurable_automl_engine.isotonic.IsotonicDataTransformer` (still importable from `trainer`) |
+| `configurable_automl_engine.training_engine.config_parser`: `FeatureSelectionCfg`, `FeatureSelectionMode`, `FeatureSelectionMethod` | `configurable_automl_engine.feature_selection` (still importable from `config_parser`) |
+| `configurable_automl_engine.preprocessing.EncodingStrategy` | `configurable_automl_engine.common.definitions.EncodingStrategy` (still importable from `preprocessing`) |
+
+- `configurable_automl_engine.common` is a regular package now (it has an
+  `__init__.py`, which imports nothing).
+- Saved models reference `IsotonicDataTransformer` and the
+  `FeatureSelection*` config types by their new module paths. The artifact
+  format version stays 2 (0.5.0 is not released yet); the old paths are
+  still importable, so artifacts saved by earlier 0.5.0 development builds
+  load as before.
+- The own records of `setup_logging` (e.g. the first-path-wins warning) log
+  as `configurable_automl_engine.common.log_setup` instead of
+  `configurable_automl_engine.training_engine.logger`.
 
 ### Internal APIs (for code that patched or called private functions)
 

@@ -20,18 +20,23 @@ import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
+from configurable_automl_engine.common.metrics import (
+    BBC_MAX_OOF_CELLS,
+    direction_label,
+    to_user_value,
+)
 from configurable_automl_engine.common.settings import (
     EncodingSettings,
     InputPolicies,
     OversamplingSettings,
 )
-from configurable_automl_engine.common.target_domain import check_target_domain
 from configurable_automl_engine.hpo.request import (
     HpoRequest,
     as_complexity_guard_config,
 )
 from configurable_automl_engine.hpo.runner import run_optimization
 from configurable_automl_engine.hpo.search_space import build_search_space
+from configurable_automl_engine.hpo.target_domain import check_target_domain
 from configurable_automl_engine.hpo.types import (
     HPOHistoryError,
     InvalidAlgorithmError,
@@ -43,7 +48,6 @@ from configurable_automl_engine.training_engine.config_parser import (
     Config,
 )
 
-from .metrics import BBC_MAX_OOF_CELLS, direction_label, to_user_value
 from .state import (
     PhaseResult,
     PreparedData,

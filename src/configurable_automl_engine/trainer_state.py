@@ -26,12 +26,12 @@ if TYPE_CHECKING:
         InputPolicies,
         OversamplingSettings,
     )
+    from configurable_automl_engine.feature_selection import (
+        FeatureSelectionCfg,
+    )
     from configurable_automl_engine.preprocessing_presets import (
         PreprocessingOverride,
         PreprocessingPreset,
-    )
-    from configurable_automl_engine.training_engine.config_parser import (
-        FeatureSelectionCfg,
     )
 
 #: The version of the saved ``ModelTrainer`` state. It is recorded in the

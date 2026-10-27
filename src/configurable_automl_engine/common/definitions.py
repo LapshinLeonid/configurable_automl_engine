@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 
 
 # ──────────────── validation enum ──────────────── #
@@ -9,6 +10,12 @@ class ValidationStrategy(str, Enum):
     k_fold = "k_fold"
     loo = "loo"
     auto = "auto"
+
+
+# ──────────────── categorical encoding ──────────────── #
+#: Categorical encoding strategies of the preprocessor
+#: (``preprocessing.SplitCategoricalEncoder``).
+EncodingStrategy = Literal["one_hot", "ordinal", "target", "frequency", "hashing"]
 
 
 # ──────────────── serialization enum ─────────────── #

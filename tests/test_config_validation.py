@@ -18,7 +18,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     ERR_REMOVED_SANITY_GATE_MODE,
     ERR_REMOVED_PLUGIN_KEY,
 )
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     NumericSpace,
     FloatSpace,
     IntSpace,
@@ -787,7 +787,7 @@ def test_default_svr_kernel_space_only_reliable_kernels():
     Positive scenario: options == ["rbf", "linear"].
     Negative scenario: 'sigmoid' and 'poly' are excluded from the search.
     """
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 
     kernel_entry = DEFAULT_SPACES["svr"]["kernel"]
     assert kernel_entry.dist_type == "categorical"
@@ -802,7 +802,7 @@ def test_default_svr_gamma_stays_in_space():
     It is used for rbf and ignored for linear by sklearn, so it does not
     need to be removed.
     """
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 
     svr_space = DEFAULT_SPACES["svr"]
     assert "gamma" in svr_space
@@ -819,7 +819,7 @@ def test_default_spaces_cover_common_optima():
     Ridge alpha on standardized data is often 10–1000 (~22 on diabetes);
     forests search max_features as a fraction of the features.
     """
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 
     ridge_alpha = DEFAULT_SPACES["ridge"]["alpha"]
     assert ridge_alpha.dist_type == "float_log"

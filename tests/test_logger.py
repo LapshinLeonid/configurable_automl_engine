@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import configurable_automl_engine.training_engine
-from configurable_automl_engine.training_engine.logger import get_logger, setup_logging
+from configurable_automl_engine.common.log_setup import get_logger, setup_logging
 
 
 @pytest.fixture
@@ -84,7 +84,7 @@ def test_setup_logging_different_path_warns_first_path_wins(
     setup_logging(first)
     with caplog.at_level(
         logging.WARNING,
-        logger="configurable_automl_engine.training_engine.logger",
+        logger="configurable_automl_engine.common.log_setup",
     ):
         setup_logging(second)
 
@@ -106,7 +106,7 @@ def test_setup_logging_same_path_no_warning(tmp_path, clean_logger, caplog):
     setup_logging(logfile)
     with caplog.at_level(
         logging.WARNING,
-        logger="configurable_automl_engine.training_engine.logger",
+        logger="configurable_automl_engine.common.log_setup",
     ):
         setup_logging(logfile)
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -130,7 +130,7 @@ def test_setup_logging_twice_no_file_handler_leak(tmp_path):
     via the ``HandlerClass`` constructor, and after the second call
     ``gc.collect()`` must collect nothing beyond the one attached handler.
     """
-    import configurable_automl_engine.training_engine.logger as logger_module
+    import configurable_automl_engine.common.log_setup as logger_module
 
     base = logging.getLogger("configurable_automl_engine")
     original_handlers = base.handlers[:]
@@ -195,17 +195,17 @@ def test_setup_logging_import_fallback(tmp_path):
     # Simulate the missing library by blocking it in sys.modules
     with patch.dict(sys.modules, {"concurrent_log_handler": None}):
         # Reload the logger module so the try-except block is exercised
-        importlib.reload(configurable_automl_engine.training_engine.logger)
+        importlib.reload(configurable_automl_engine.common.log_setup)
 
         # Take HandlerClass (the new name from your code)
         # If you kept the name ConcurrentRotatingFileHandler, use it
         # But judging by the error, you named it differently or the import did not refresh
-        handler_class = configurable_automl_engine.training_engine.logger.HandlerClass
+        handler_class = configurable_automl_engine.common.log_setup.HandlerClass
 
         # Check that it is now the standard class from logging.handlers
         assert handler_class is logging.handlers.RotatingFileHandler
     # IMPORTANT: restore everything after the test so other tests do not fail
-    importlib.reload(configurable_automl_engine.training_engine.logger)
+    importlib.reload(configurable_automl_engine.common.log_setup)
 
 
 def test_setup_logging_stream_handler_logic_coverage(tmp_path, clean_logger):
@@ -215,19 +215,19 @@ def test_setup_logging_stream_handler_logic_coverage(tmp_path, clean_logger):
     logfile = tmp_path / "test.log"
 
     # 1. Call without console
-    configurable_automl_engine.training_engine.logger.setup_logging(
+    configurable_automl_engine.common.log_setup.setup_logging(
         logfile, log_to_console=False
     )
     assert len(clean_logger.handlers) == 1
 
     # 2. Call with console (enter the covered branch)
-    configurable_automl_engine.training_engine.logger.setup_logging(
+    configurable_automl_engine.common.log_setup.setup_logging(
         logfile, log_to_console=True
     )
     assert len(clean_logger.handlers) == 2
 
     # 3. Call with console again (check that the branch is skipped)
-    configurable_automl_engine.training_engine.logger.setup_logging(
+    configurable_automl_engine.common.log_setup.setup_logging(
         logfile, log_to_console=True
     )
     assert len(clean_logger.handlers) == 2
