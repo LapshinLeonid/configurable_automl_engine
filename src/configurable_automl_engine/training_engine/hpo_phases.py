@@ -23,9 +23,8 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
-from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
 from configurable_automl_engine.common.target_domain import check_target_domain
-from configurable_automl_engine.models import remap_legacy_param_names
+from configurable_automl_engine.hpo.search_space import build_search_space
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -384,10 +383,14 @@ def _run_hpo(
                     complexity_guard_cfg,
                     complexity_guard_cfg is not None,
                 ),
+                # Always passed, an empty list included: the bundled tuner
+                # treats a missing list as "the keys of space_overrides",
+                # which on the engine path is the MERGED space — every
+                # default range would then count as a user range.
                 (
                     "user_hyperparameter_keys",
-                    user_hyperparameter_keys,
-                    bool(user_hyperparameter_keys),
+                    list(user_hyperparameter_keys or []),
+                    True,
                 ),
                 ("limit_hyperparameters", limit_hyperparameters, limit_hyperparameters),
                 # The HPO phase needs only the best parameters and score — the
@@ -681,24 +684,14 @@ def _prepare_search_space(
     """Prepare the hyperparameter search space.
 
     Merges the system defaults with the user overrides from the
-    configuration. A module-level function (not a closure) so that the
-    ``_hpo_phase_worker`` worker is serializable in the "processes" mode.
-
-    When ``limit`` is True the search is restricted to ONLY the parameters
-    listed in ``user_overrides`` (``AlgoCfg.hyperparameters``): no
-    ``DEFAULT_SPACES`` entries are added, and every other parameter stays at
-    the estimator default. When ``limit`` is False (the default) the user
-    ranges override and are merged into ``DEFAULT_SPACES`` — the current
-    behavior.
+    configuration through ``hpo.search_space.build_search_space`` — the same
+    merge a direct ``optimize()`` call uses. A module-level function (not a
+    closure) so that the ``_hpo_phase_worker`` worker is serializable in the
+    "processes" mode.
 
     A limited search must not be empty: the caller passes the already
     validated ``AlgoCfg.hyperparameters``, whose keys are guaranteed to be
     allowed for the algorithm (the config validator rejects unknown names).
-
-    Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
-    ARDRegression) are remapped ONCE here, before the Optuna loop — not at
-    every model instantiation (which would log an identical "Remapped ..."
-    line for ~100 trials).
 
     Args:
         algo_name (str): The algorithm name used to look up defaults.
@@ -709,32 +702,7 @@ def _prepare_search_space(
     Returns:
         dict[str, Any]: The resulting search space.
     """
-    if limit:
-        if not user_overrides:
-            return {}
-        # Only the user-listed parameters are searched; everything else
-        # stays at the estimator default. Legacy names are remapped once.
-        return remap_legacy_param_names(algo_name, user_overrides)
-
-    space = DEFAULT_SPACES.get(algo_name, {}).copy()
-    if user_overrides:
-        # Remap legacy names in the user overrides BEFORE the merge so that
-        # an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
-        # over the system default of the modern name.
-        space.update(remap_legacy_param_names(algo_name, user_overrides))
-
-    # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
-    # y_train spread at runtime (hpo.search_space.resolve_search_space), so the
-    # default blind range [1e-3, 1.0] from DEFAULT_SPACES is dropped. If the
-    # user set epsilon explicitly — it is already in space
-    # (space.update(user_overrides) above), and the user's priority is
-    # preserved: the adaptive logic does not interfere.
-    if algo_name == "svr" and not (user_overrides and "epsilon" in user_overrides):
-        space.pop("epsilon", None)
-
-    # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
-    # so that per-trial clean_hyperparameters has nothing to remap/log.
-    return remap_legacy_param_names(algo_name, space)
+    return build_search_space(algo_name, user_overrides, limit=limit)
 
 
 def _execute_hpo_phase(

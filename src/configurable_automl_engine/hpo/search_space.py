@@ -1,10 +1,11 @@
 """Search spaces of the HPO runner.
 
-Resolves the search space of a run (``resolve_search_space``): the
-data-dependent default spaces (the KNN space bounded by the effective sample
-size, the SVR space with the adaptive epsilon, the isotonic feature index),
-the range-type normalization of dict spaces, the physical clipping and the
-adaptive complexity guard with its log. It also converts a dict space into
+Builds the dict search space of an algorithm (``build_search_space`` — the
+single merge of the user ranges over ``DEFAULT_SPACES``, shared with the
+training engine) and resolves the search space of a run
+(``resolve_search_space``): the range-type normalization, the data-dependent
+adjustments (the SVR adaptive epsilon, the isotonic feature index), the
+physical clipping and the adaptive complexity guard with its log. It also converts a dict space into
 Optuna suggestions (``_apply_dynamic_space``), records the canonical
 distributions used to validate the TPE history transfer, and warns when the
 best value lies at a range boundary. It may import ``hpo.types``,
@@ -17,7 +18,6 @@ from __future__ import annotations
 
 import logging as _logging
 import math
-from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -64,25 +64,6 @@ log = _logging.getLogger("configurable_automl_engine.tuner")
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
 
-# ══════════ KNN-space depends on the sample size ══════════
-def _make_knn_space(n_samples: int) -> Callable[[Trial], dict[str, Any]]:
-    """Create a search space generator for the KNN algorithm."""
-
-    def _space(t: Trial) -> dict[str, Any]:
-        # Cap n_neighbors by the physical limit of the training set (N_eff - 1).
-        # Use n_samples_eff instead of the total number of rows in the dataset.
-        physical_limit = max(1, n_samples - 1)
-        max_k = int(min(30, physical_limit))
-
-        return {
-            "n_neighbors": t.suggest_int("n_neighbors", 1, max_k),
-            "weights": t.suggest_categorical("weights", ["uniform", "distance"]),
-            "p": t.suggest_int("p", 1, 2),
-        }
-
-    return _space
-
-
 # ══════════ SVR space: epsilon depends on the spread of y ══════════
 def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
     """Build a SearchSpaceEntry for SVR epsilon with bounds scaled by y.
@@ -102,21 +83,79 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
     return SearchSpaceEntry.model_validate([low, high, "float_log"])
 
 
-def _make_svr_space_dict(y: Any) -> dict[str, Any]:
-    """Build the default SVR search space dict with adaptive epsilon.
+def build_search_space(
+    algo_name: str,
+    user_overrides: dict[str, Any] | None,
+    limit: bool = False,
+) -> dict[str, Any]:
+    """Build the dict search space of an algorithm from the user ranges.
 
-    The default space is taken from ``DEFAULT_SPACES["svr"]``, and epsilon is
-    replaced by a float_log distribution within bounds derived from the spread
-    of ``y_train``.
+    The single merge rule of both paths: the training engine
+    (``hpo_phases._prepare_search_space``) and a direct ``optimize()`` call
+    (``resolve_search_space``) build the space here, so a direct call and a
+    config run with the same ranges search the same space.
+
+    When ``limit`` is True the search is restricted to ONLY the parameters
+    listed in ``user_overrides``: no ``DEFAULT_SPACES`` entries are added,
+    and every other parameter stays at the estimator default. When ``limit``
+    is False (the default) the user ranges override and are merged into
+    ``DEFAULT_SPACES``.
+
+    The SVR ``epsilon`` default (a blind ``[1e-3, 1.0]`` range) is dropped
+    unless the user set ``epsilon``: its absence means "use the adaptive
+    range" (bounds scaled by the spread of ``y``), which
+    ``resolve_search_space`` injects once the data is known.
+
+    Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
+    ARDRegression) are remapped ONCE here, before the Optuna loop — not at
+    every model instantiation (which would log an identical "Remapped ..."
+    line for ~100 trials).
+
+    The merge is idempotent: merging an already-merged space again changes
+    nothing (all ``DEFAULT_SPACES`` keys are already present, and a missing
+    SVR ``epsilon`` again means "adaptive"). The engine passes the merged
+    space to the tuner as ``space_overrides``, and the tuner merges it again.
 
     Args:
-        y (Any): Target variable vector.
+        algo_name (str): The algorithm name used to look up defaults.
+        user_overrides (dict[str, Any] | None): The user ranges
+            (``SearchSpaceEntry`` objects, raw range lists or constants).
+        limit (bool): Restrict the search to the user-listed parameters only
+            (no ``DEFAULT_SPACES`` entries). Defaults to False.
+
     Returns:
-        dict[str, Any]: A dict of ``SearchSpaceEntry`` objects.
+        dict[str, Any]: The resulting search space (a new dict; the inputs
+            are not mutated). Empty when ``limit`` is True and there are no
+            user ranges, or when the algorithm has no default space and no
+            user ranges.
     """
-    space = DEFAULT_SPACES["svr"].copy()
-    space["epsilon"] = _svr_adaptive_epsilon_entry(y)
-    return space
+    if limit:
+        if not user_overrides:
+            return {}
+        # Only the user-listed parameters are searched; everything else
+        # stays at the estimator default. Legacy names are remapped once.
+        return remap_legacy_param_names(algo_name, user_overrides)
+
+    resolved = resolve_algorithm_name(algo_name)
+    space = DEFAULT_SPACES.get(resolved, {}).copy()
+    if user_overrides:
+        # Remap legacy names in the user overrides BEFORE the merge so that
+        # an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
+        # over the system default of the modern name.
+        space.update(remap_legacy_param_names(algo_name, user_overrides))
+
+    # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
+    # y_train spread at runtime (resolve_search_space), so the default blind
+    # range [1e-3, 1.0] from DEFAULT_SPACES is dropped. If the user set
+    # epsilon explicitly — it is already in space (space.update above), and
+    # the user's priority is preserved: the adaptive logic does not
+    # interfere.
+    if resolved == "svr" and not (user_overrides and "epsilon" in user_overrides):
+        space.pop("epsilon", None)
+
+    # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
+    # so that per-trial clean_hyperparameters has nothing to remap/log.
+    return remap_legacy_param_names(algo_name, space)
 
 
 # ═════════════════════════════ helper utilities ═════════════════════════════
@@ -469,116 +508,92 @@ def _normalize_space_dict(
 def resolve_search_space(runner: _OptimizeRunner) -> None:
     """Resolve the hyperparameter search space and the scorer (step 2).
 
-    Supports the dynamic KNN space (depends on the effective sample
-    size), adaptive SVR epsilon (bounds scaled by the spread of
-    ``y_train``), direct function overrides, and dict-based YAML
-    configurations (SearchSpaceEntry). Stores ``space_fn`` and ``scorer``
-    in instance attributes.
+    A callable override (a custom ``space_fn``) is used as is. Otherwise the
+    dict search space is built by ``build_search_space`` — the same merge
+    the training engine uses — from the dict override (or from no user
+    ranges at all), so a direct ``optimize()`` call and a config run with
+    the same ranges search the same space. The data-dependent adjustments
+    then apply to every dict space: the adaptive SVR epsilon (bounds scaled
+    by the spread of ``y_train``), the isotonic ``feature_index`` over the
+    numerical features, the physical clipping (e.g. KNN ``n_neighbors`` ≤
+    ``n_samples_eff - 1``) and the adaptive complexity guard. Stores
+    ``space_fn``, ``search_space_dict`` and ``scorer`` in instance
+    attributes.
+
+    When ``user_hyperparameter_keys`` was not passed (``None``), the guard
+    treats the keys of the dict override as the user ranges.
 
     Raises:
-        HyperoptError: If no search space is defined for the selected
-            algorithm.
+        HyperoptError: If the algorithm has neither a default search space
+            nor a ``space_overrides`` entry.
     """
-    base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
-    base_space_dict: dict[str, Any] | None = None
-    if resolve_algorithm_name(runner.algo) == "nearest_neighbors_regression":
-        base_space_fn = _make_knn_space(runner.n_samples_eff)
-    elif resolve_algorithm_name(runner.algo) == "gaussian_process_regression":
-        # GPR without an external config (including a direct
-        # optimize("gaussian_process_regression", X, y) call): the DEFAULT_SPACES search space
-        # (small: kernel family only).
-        base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
-        base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
-    elif resolve_algorithm_name(runner.algo) == "isotonic_regression":
-        # Isotonic without an external config (including a direct
-        # optimize("isotonic_regression", X, y) call): a data-dependent
-        # space. ``feature_index`` selects the NUMERICAL column fed to the
-        # strictly univariate model (consumed by
-        # ``IsotonicDataTransformer``); one-hot dummies are not meaningful
-        # inputs, so the range covers the numerical features only
-        # (``n_numeric_eff``); ``increasing`` is the single
-        # IsotonicRegression constructor parameter searched.
-        max_feature_index = _isotonic_max_feature_index(runner)
-        base_space_dict = {
-            "feature_index": SearchSpaceEntry.model_validate(
-                [0, max_feature_index, "int"]
-            ),
-            "increasing": SearchSpaceEntry.model_validate(
-                [[True, False], "categorical"]
-            ),
-        }
-        base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
-
     # Priority 1: Direct overrides (functions)
-    # Priority 2: Dynamic config from YAML (dict with SearchSpaceEntry)
+    # Priority 2: Dict ranges (SearchSpaceEntry objects or shorthand lists)
+    #             merged over DEFAULT_SPACES; no override — DEFAULT_SPACES only
     external_config = (runner.space_overrides or {}).get(runner.algo)
 
-    # If a function was passed (the old mechanism), use it
+    # If a function was passed (the old mechanism), use it as is
     if callable(external_config):
-        space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
-    # If a dict was passed (new YAML mechanism), create a wrapper
-    elif isinstance(external_config, dict):
-        # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
-        # BEFORE the Optuna loop: otherwise clean_hyperparameters would
-        # log an identical "Remapped ..." line for every trial.
-        space_dict = runner._normalize_space_dict(
-            remap_legacy_param_names(runner.algo, external_config)
-        )
-        # SVR: adaptive epsilon bounds from the y_train spread, if the
-        # user did not set epsilon explicitly (prepare_search_space omits
-        # the default epsilon from DEFAULT_SPACES, so its absence in the
-        # dict means "not overridden"). The bounds are computed once
-        # BEFORE the Optuna loop. In the limited mode
-        # (``limit_hyperparameters: true``) the space is exactly what the
-        # user listed: no parameter is added beyond it, so the adaptive
-        # epsilon is NOT injected.
-        if (
-            runner.algo == "svr"
-            and "epsilon" not in space_dict
-            and not runner.limit_hyperparameters
-        ):
-            space_dict = {
-                **space_dict,
-                "epsilon": _svr_adaptive_epsilon_entry(runner.y),
-            }
-        # Isotonic in the engine path: ``_prepare_search_space`` delivers
-        # only the DEFAULT_SPACES keys (``increasing``) plus user
-        # overrides, and without an explicit ``feature_index`` the tuner
-        # would take the external-dict branch and silently use the default
-        # index 0 (an arbitrary one-hot dummy column). Merge a data-driven
-        # ``feature_index`` over the NUMERICAL features into the dict when
-        # absent; an explicit user value is kept as is.
-        if (
-            resolve_algorithm_name(runner.algo) == "isotonic_regression"
-            and "feature_index" not in space_dict
-        ):
-            space_dict = {
-                **space_dict,
-                "feature_index": SearchSpaceEntry.model_validate(
-                    [0, _isotonic_max_feature_index(runner), "int"]
-                ),
-            }
-        clipped_config = clip_search_space(space_dict, runner.n_samples_eff)
-        clipped_config, guard_logs = _resolve_complexity_guard(runner, clipped_config)
-        runner.complexity_guard_logs = guard_logs
-        _log_complexity_guard(runner)
-        space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
-        runner.search_space_dict = clipped_config
-    else:
-        # SVR without an external config (including a direct
-        # optimize("svr", X, y) call): the default space with adaptive
-        # epsilon instead of the blind [1e-3, 1.0] range from
-        # DEFAULT_SPACES.
-        if runner.algo == "svr":
-            base_space_dict = _make_svr_space_dict(runner.y)
-            base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
-        space_fn = base_space_fn
-    if space_fn is None:
-        raise HyperoptError(f"No search space for algorithm '{runner.algo}'")
+        runner.space_fn = external_config
+        runner.scorer = _build_scorer(runner.metric)
+        return
 
-    runner.space_fn = space_fn
-    if base_space_dict is not None:
-        runner.search_space_dict = base_space_dict
+    user_ranges = external_config if isinstance(external_config, dict) else None
+    # The limited mode searches exactly the listed parameters; without a
+    # dict override there is nothing listed, so the defaults are searched.
+    limit = bool(runner.limit_hyperparameters) and user_ranges is not None
+    if runner.user_hyperparameter_keys is None:
+        # A direct call: the user ranges are the keys the caller listed.
+        runner.user_hyperparameter_keys = list(user_ranges or {})
+
+    merged = build_search_space(runner.algo, user_ranges, limit=limit)
+    if user_ranges is None and not merged:
+        raise HyperoptError(
+            f"No search space for algorithm '{runner.algo}': it has no "
+            "default search space; pass "
+            f"space_overrides={{'{runner.algo}': {{...}}}} with the ranges "
+            "to search (a dict of ranges or a callable space function)"
+        )
+
+    space_dict = runner._normalize_space_dict(merged)
+    # SVR: adaptive epsilon bounds from the y_train spread, if the
+    # user did not set epsilon explicitly (build_search_space omits
+    # the default epsilon from DEFAULT_SPACES, so its absence in the
+    # dict means "not overridden"). The bounds are computed once
+    # BEFORE the Optuna loop. In the limited mode
+    # (``limit_hyperparameters: true``) the space is exactly what the
+    # user listed: no parameter is added beyond it, so the adaptive
+    # epsilon is NOT injected.
+    if (
+        resolve_algorithm_name(runner.algo) == "svr"
+        and "epsilon" not in space_dict
+        and not limit
+    ):
+        space_dict = {
+            **space_dict,
+            "epsilon": _svr_adaptive_epsilon_entry(runner.y),
+        }
+    # Isotonic: DEFAULT_SPACES holds only ``increasing``, and without an
+    # explicit ``feature_index`` the model would silently use the default
+    # index 0 (an arbitrary one-hot dummy column). Merge a data-driven
+    # ``feature_index`` over the NUMERICAL features into the dict when
+    # absent; an explicit user value is kept as is.
+    if (
+        resolve_algorithm_name(runner.algo) == "isotonic_regression"
+        and "feature_index" not in space_dict
+    ):
+        space_dict = {
+            **space_dict,
+            "feature_index": SearchSpaceEntry.model_validate(
+                [0, _isotonic_max_feature_index(runner), "int"]
+            ),
+        }
+    clipped_config = clip_search_space(space_dict, runner.n_samples_eff)
+    clipped_config, guard_logs = _resolve_complexity_guard(runner, clipped_config)
+    runner.complexity_guard_logs = guard_logs
+    _log_complexity_guard(runner)
+    runner.space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
+    runner.search_space_dict = clipped_config
     runner.scorer = _build_scorer(runner.metric)
 
 

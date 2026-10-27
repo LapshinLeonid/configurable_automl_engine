@@ -1089,14 +1089,14 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `n_trials` | `int` | `50` | Number of Optuna trials. |
 | `random_state` | `int` or `None` | `42` | Random seed of the data splits and the preprocessor (CV folds, `train_test_split`, pruning folds, hashing / target-encoding cross-fit). |
 | `sampler_seed` | `int` or `None` | `None` | Seed of the TPE sampler, separated from `random_state`: each HPO phase may use a different `sampler_seed` (e.g. `random_state + step number`) while the data splits stay fixed. `None` — the sampler falls back to `random_state` (backward-compatible). |
-| `space_overrides` | `dict[str, Callable]` or `None` | `None` | Custom search space overrides. |
+| `space_overrides` | `dict[str, Callable \| dict]` or `None` | `None` | Search space overrides keyed by the algorithm name. `None` (or no entry for `algo_name`) — the algorithm's default space (`DEFAULT_SPACES`), the same one a config run without `hyperparameters` searches. A value is one of three forms: a callable `space_fn(trial) -> dict` (used as is); a dict of `SearchSpaceEntry` objects; or a dict of shorthand lists as in the config (`[low, high]`, `[low, high, "int"\|"float"\|"float_log"]`, `[options, "categorical"]`; an untyped range is re-typed against the parameter type like in the config). A dict is merged over `DEFAULT_SPACES` (a partial override searches the listed ranges plus every other default range); with `limit_hyperparameters=True` only the listed parameters are searched. Dict spaces go through the same clipping and complexity guard as a config run. An algorithm without a default space needs an override. |
 | `initial_params` | `dict[str, Any]` or `None` | `None` | Hyperparameters from the previous HPO phase, enqueued as the first trial (`enqueue_trial`) — the "monotonicity anchor" between phases. |
 | `previous_trials` | `list[optuna.trial.FrozenTrial]` or `None` | `None` | Trials of the previous HPO phase to be transferred into the new study via `study.add_trials` (the TPE history warm-start). Transferred BEFORE `enqueue_trial`/`optimize`; they feed the TPE sampler but never count as the current phase's own trials. Empty list — no-op. Trials whose distributions are incompatible with the current search space raise `HPOHistoryError` (fail fast). |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 | `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the defaults of `general.complexity_guard` (mode `apply`); `{"mode": "off"}` disables the guard. When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
-| `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. |
+| `user_hyperparameter_keys` | `list[str]` or `None` | `None` | Names of parameters set explicitly by the user (`algo.hyperparameters`); the guard intersects its ranges with these user ranges and applies `user_range_policy` on an empty intersection. `None` — the keys of the dict `space_overrides` entry of the algorithm. |
 | `preprocessor` | `ColumnTransformer` or `None` | `None` | A ready feature preprocessor; takes precedence over `categorical_features` / `numerical_features`. |
 | `categorical_features`, `numerical_features` | `list[str]` or `None` | `None` | Column lists used to build the preprocessor when `preprocessor` is not passed. |
 | `encoding` | `str` or `None` | `None` (= `"one_hot"`) | Categorical encoding, same values as `general.categorical_encoding`. |
@@ -1110,11 +1110,41 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `phase_name` | `str` or `None` | `None` | Step name used in log messages. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
 
+**Example:**
+
+```python
+from configurable_automl_engine.tuner import optimize
+
+# The default search space of the algorithm (DEFAULT_SPACES), as in a config
+# run without `hyperparameters`.
+result = optimize("random_forest", X, y, n_trials=30)
+
+# A partial override: `max_depth` is searched in 2–5, every other default
+# range of random_forest is searched too (merged with DEFAULT_SPACES).
+result = optimize(
+    "random_forest",
+    X,
+    y,
+    n_trials=30,
+    space_overrides={"random_forest": {"max_depth": [2, 5]}},
+)
+
+# Only `max_depth` is searched; the other parameters keep the estimator defaults.
+result = optimize(
+    "random_forest",
+    X,
+    y,
+    n_trials=30,
+    space_overrides={"random_forest": {"max_depth": [2, 5]}},
+    limit_hyperparameters=True,
+)
+```
+
 **Returns:** `OptimizeResult` (a dataclass with `model`, `params`, `score`, `trials`, `complexity_guard`, `n_trials_evaluated` and `oof_predictions` — an `(n_trials, n_rows)` array when `collect_oof=True`, otherwise `None`) when the phase produced a valid result; `None` when **no trial of the current phase succeeded** (e.g., `n_trials=0`, or every trial is pruned via a non-fatal error). `model` is `None` when `fit_best_model=False` (the full-data fit is skipped); otherwise it is the trained model with the best parameters. `trials` always contains ONLY the current phase's own Optuna trials (transferred `previous_trials` are excluded), so the caller can warm-start the next phase without duplicating computations. `complexity_guard` is the list of the adaptive complexity guard records for the phase (`None` when the guard is disabled or produced no records). `n_trials_evaluated` is the number of trials actually evaluated by the phase (own COMPLETED trials; transferred history never counts) — the honest denominator of the best-trial `score` (the "best of N" maximum). `None` is the explicit failure signal — the orchestrator (`train_best_model`) then excludes the algorithm from candidates instead of treating the `HPO_WORST_SCORE` sentinel (`-3.4028235e38`) as a valid result; transferred history never masks a total failure of the current phase. The sentinel itself is returned as `score` only when trials complete but all produce a non-finite metric.
 
 In `'auto'` mode `params` additionally contains the service key `use_feature_selection` (`True`/`False`) — the winner's decision about feature selection, which is preserved between multi-phase HPO runs (passed to the next phase via `initial_params`/`enqueue_trial`) and consumed by `train_best_model` for the final fit. The key is absent in `'always'`/`'disabled'` modes and for `isotonic_regression` (feature selection is forcibly turned off there). The key is never passed to the base model constructor.
 
-**Raises:** `ValueError` for invalid `n_trials`; `HyperoptError` for missing search spaces; `HPOHistoryError` when `previous_trials` are incompatible with the current search space (fail fast); `InvalidAlgorithmError` after 5 consecutive fatal failures.
+**Raises:** `ValueError` for invalid `n_trials`; `HyperoptError` when the algorithm has no default search space and no `space_overrides` entry; `HPOHistoryError` when `previous_trials` are incompatible with the current search space (fail fast); `InvalidAlgorithmError` after 5 consecutive fatal failures.
 
 ---
 

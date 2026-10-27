@@ -170,17 +170,31 @@ def optimize(
             behavior for direct callers).
         train_test_split_test_size (float): Test size for split validation.
             Defaults to 0.2.
-        space_overrides (dict | None): Dict for overriding search spaces.
-            Each value may be a callable (a custom ``space_fn``), a dict of
-            ``SearchSpaceEntry`` objects, or a dict whose values are the same
-            shorthands accepted by the Config path: a raw range list
-            (``[low, high]`` / ``[low, high, "int"|"float"|"float_log"]`` /
-            ``[options, "categorical"]``) is parsed and a range whose type was
-            not written explicitly is re-resolved against the parameter's
-            type (the default search space or the estimator signature), the
-            same way ``Config`` does it — so
-            ``space_overrides={"svr": {"C": [1, 50]}}`` searches ``C`` as a
-            real range, not an integer-only one.
+        space_overrides (dict | None): Search space overrides keyed by the
+            algorithm name. ``None`` (or no entry for ``algo_name``) — the
+            default space of the algorithm (``DEFAULT_SPACES``), the same
+            one a config run without ``hyperparameters`` searches. Each
+            value may be:
+
+            * a callable (a custom ``space_fn``) — used as is;
+            * a dict of ``SearchSpaceEntry`` objects;
+            * a dict whose values are the same shorthands accepted by the
+              Config path: a raw range list (``[low, high]`` /
+              ``[low, high, "int"|"float"|"float_log"]`` /
+              ``[options, "categorical"]``) is parsed and a range whose type
+              was not written explicitly is re-resolved against the
+              parameter's type (the default search space or the estimator
+              signature), the same way ``Config`` does it — so
+              ``space_overrides={"svr": {"C": [1, 50]}}`` searches ``C`` as
+              a real range, not an integer-only one.
+
+            A dict is merged over ``DEFAULT_SPACES`` (a partial override
+            searches the listed ranges plus every other default range),
+            unless ``limit_hyperparameters=True``, which searches only the
+            listed parameters. Both forms go through the same physical
+            clipping and complexity guard as a config run. An algorithm
+            without a default space needs an override, otherwise
+            ``HyperoptError`` is raised.
         initial_params (dict[str, Any] | None): Hyperparameters from the
             previous phase for enqueue_trial. Keeps the improvement monotonic
             between HPO phases ("monotonicity anchor").
@@ -254,8 +268,9 @@ def optimize(
         user_hyperparameter_keys (list[str] | None): Names of parameters set
             explicitly by the user (``algo.hyperparameters``); the guard
             intersects its ranges with these user ranges and applies
-            ``user_range_policy`` on an empty intersection. ``None`` — no
-            user-specified parameters.
+            ``user_range_policy`` on an empty intersection. ``None`` — the
+            keys of the dict ``space_overrides`` entry of the algorithm (no
+            dict override — no user ranges).
         limit_hyperparameters (bool): Restrict the search to ONLY the
             parameters present in ``space_overrides`` for this algorithm
             (``AlgoCfg.limit_hyperparameters: true``): no ``DEFAULT_SPACES``

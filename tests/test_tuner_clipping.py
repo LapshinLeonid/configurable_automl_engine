@@ -12,7 +12,6 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     IntSpace,
 )
 from configurable_automl_engine.tuner import optimize
-from configurable_automl_engine.hpo.search_space import _make_knn_space
 
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.common.definitions import ValidationStrategy
@@ -43,20 +42,6 @@ def test_clip_search_space_logic():
     assert clipped["min_samples_leaf"].high == 3
     assert clipped["min_samples_leaf"].low == 3  # Fixed: low is now 3, not 1
 
-
-def test_knn_factory_clipping():
-    """Checks that the KNN factory passes the correct bounds to Optuna."""
-    # Scenario: 2 samples. The physical limit of n_neighbors is 1.
-    space_fn = _make_knn_space(n_samples=2)
-
-    trial = MagicMock()
-    # Configure the mock so it returns a value within the bounds
-    trial.suggest_int.return_value = 1
-
-    _ = space_fn(trial)
-
-    # Check that suggest_int was called with the bounds [1, 1]
-    trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
 
 
 def test_optimize_integration_clipping(monkeypatch):
@@ -243,18 +228,6 @@ def test_train_model_facade_compatibility():
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_knn_space_limit_uses_effective_size():
-    """Checks that the KNN upper bound uses Neff, not N_total."""
-    # Neff = 5
-    trial = MagicMock()
-    space_gen = _make_knn_space(n_samples=6)
-
-    space_gen(trial)
-
-    # physical_limit = max(1, 6 - 1) = 5.
-    # suggest_int must be called with high=5 (min(30, 5))
-    trial.suggest_int.assert_any_call("n_neighbors", 1, 5)
-
 
 @patch("configurable_automl_engine.hpo.search_space.clip_search_space")
 @patch("configurable_automl_engine.hpo.runner.create_model")
@@ -288,14 +261,6 @@ def test_optimize_calls_clipping_with_effective_size(
     mock_clip.assert_called_once()
     assert mock_clip.call_args[0][1] == 10
 
-
-def test_knn_space_limit_at_minimum():
-    trial = MagicMock()
-    # If only 1 row remains after the split
-    space_gen = _make_knn_space(n_samples=1)
-    space_gen(trial)
-    # It must suggest 1 neighbor (the sklearn minimum), not 0
-    trial.suggest_int.assert_any_call("n_neighbors", 1, 1)
 
 
 def test_model_trainer_raises_error_on_empty_data():

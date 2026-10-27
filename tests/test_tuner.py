@@ -666,17 +666,6 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
             mock_study.optimize.assert_called_once()
 
 
-def test_knn_space_dynamic_limit():
-    """Checks the dynamic k limit in KNN (lines 80-81)."""
-    # For 10 samples, 80% is 8. max_k must be 8.
-    space_fn = hpo_search_space._make_knn_space(n_samples=10)
-
-    # Emulate the n_neighbors request
-    trial = FixedTrial({"n_neighbors": 5, "weights": "uniform", "p": 1})
-    params = space_fn(trial)
-    assert params["n_neighbors"] <= 8
-
-
 def test_apply_dynamic_space_floats():
     trial = MagicMock()
 
