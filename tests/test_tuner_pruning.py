@@ -366,7 +366,7 @@ def test_evaluate_pooled_cv_fallback_warns_once_per_algo_phase(
     the per-fold mean must leave exactly one trace in the log per algorithm
     and phase (deduplication), no matter how many trials hit the fallback.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(40, 3))
@@ -463,7 +463,7 @@ def test_evaluate_pooled_cv_poolable_scorer_raising_on_pooled_vector_warns(
     vector — the pooled estimate is impossible, and the engine must fall back
     to the per-fold mean with a trace in the log.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(40, 3))
@@ -630,7 +630,7 @@ def test_evaluate_with_intermediate_reports_fallback_warns_once(caplog):
     Run twice with the same (algorithm, phase) pair: the WARNING is logged
     only on the first occurrence (deduplication).
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     trial = MagicMock()
     trial.number = 0
@@ -686,7 +686,7 @@ def test_evaluate_with_intermediate_reports_per_fold_fallback_scorer_raises(
     skipped (nothing published), and the FINAL return point emits the single
     fallback WARNING because the pooled value remains impossible.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     trial = MagicMock()
     trial.number = 0
@@ -741,7 +741,7 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
     per-fold mean. The WARNING is deduplicated per (algorithm, phase): the
     phase label is taken from ``optimize(phase_name=...)``.
     """
-    from configurable_automl_engine.training_engine import metrics as metrics_mod
+    from configurable_automl_engine.common import metrics as metrics_mod
 
     X, y = toy_data
 
