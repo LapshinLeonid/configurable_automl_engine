@@ -24,8 +24,10 @@ from configurable_automl_engine.common.target_domain import (
 )
 from configurable_automl_engine.training_engine.component import (
     PhaseContext,
-    _apply_target_domain_guard,
     train_best_model,
+)
+from configurable_automl_engine.training_engine.hpo_phases import (
+    _apply_target_domain_guard,
 )
 from configurable_automl_engine.training_engine.config_parser import AlgoCfg
 

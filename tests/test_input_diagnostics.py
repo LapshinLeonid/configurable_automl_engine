@@ -25,10 +25,8 @@ from configurable_automl_engine.common.validation_utils import (
 )
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 from configurable_automl_engine.training_engine import train_best_model
-from configurable_automl_engine.training_engine.component import (
-    _run_hpo,
-    prepare_dataset,
-)
+from configurable_automl_engine.training_engine.component import prepare_dataset
+from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,

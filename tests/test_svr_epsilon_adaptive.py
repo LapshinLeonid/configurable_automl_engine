@@ -29,10 +29,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
     PreparedData,
-    _prepare_search_space,
     execute_phases,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.hpo_phases import _prepare_search_space
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     GeneralCfg,
@@ -612,7 +612,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 
@@ -643,7 +643,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 
@@ -684,7 +684,7 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
         return PhaseResult(score=0.9, params={"alpha": 0.1})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 

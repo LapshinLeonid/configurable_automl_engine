@@ -34,15 +34,17 @@ import numpy as np
 from sklearn.datasets import load_diabetes, make_friedman3, make_regression
 
 import configurable_automl_engine.training_engine.component as component
+import configurable_automl_engine.training_engine.finalists as finalists_mod
+import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
-    _run_hpo,
-    _fit_and_save,
     execute_phases,
     prepare_dataset,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.artifact import _fit_and_save
+from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     AlgoCfg,
@@ -405,7 +407,7 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     mock_tuner.optimize.side_effect = _make_iae("Algorithm not supported")
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.hpo_phases._load_module",
         return_value=mock_tuner,
     ):
         with pytest.raises(RuntimeError) as excinfo:
@@ -478,7 +480,7 @@ def _patch_load_modules(broken_tuner, good_tuner):
         return importlib.import_module(path)
 
     return patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.hpo_phases._load_module",
         side_effect=fake_load,
     )
 
@@ -624,7 +626,7 @@ def base_config_dict():
 
 
 class TestTrainingEngineCoverage:
-    @patch("configurable_automl_engine.training_engine.component._load_module")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._load_module")
     def test_run_hpo_invalid_algorithm_error(self, mock_load, mock_algo_cfg, sample_df):
         mock_tuner = MagicMock()
 
@@ -650,7 +652,7 @@ class TestTrainingEngineCoverage:
         assert "Test Error" in str(excinfo.value)
 
     # Fixed test for a missing ModelTrainer
-    @patch("configurable_automl_engine.training_engine.component._load_module")
+    @patch("configurable_automl_engine.training_engine.artifact._load_module")
     def test_fit_and_save_missing_trainer_class(
         self, mock_load, mock_algo_cfg, sample_df, base_config_dict
     ):
@@ -670,26 +672,26 @@ class TestTrainingEngineCoverage:
             )
 
     # Fixed logging test
-    @patch("configurable_automl_engine.training_engine.component.setup_logging")
-    @patch("configurable_automl_engine.training_engine.component.read_config")
+    @patch("configurable_automl_engine.training_engine.data_prep.setup_logging")
+    @patch("configurable_automl_engine.training_engine.data_prep.read_config")
     def test_logging_setup(self, mock_read, mock_setup, sample_df, base_config_dict):
         base_config_dict["general"]["log_to_file"] = "test.log"
         mock_read.return_value = Config.model_validate(base_config_dict)
 
         # Mock HPO so that real training is not run
         with patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=0.9, params={}),
         ):
             with patch(
-                "configurable_automl_engine.training_engine.component._fit_and_save"
+                "configurable_automl_engine.training_engine.artifact._fit_and_save"
             ):
                 train_best_model(config="cfg.yaml", df=sample_df, target="target")
 
         mock_setup.assert_called_once()
 
     # Fixed test for an error in the worker
-    @patch("configurable_automl_engine.training_engine.component._run_hpo")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_worker_exception_handling(self, mock_hpo, sample_df, base_config_dict):
         # Configure HPO to raise an exception that is NOT InvalidAlgorithmError
         mock_hpo.side_effect = ValueError("Something went wrong")
@@ -701,10 +703,10 @@ class TestTrainingEngineCoverage:
 
     # Fixed test for a save error
     @patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         return_value=PhaseResult(score=0.9, params={"p": 1}),
     )
-    @patch("configurable_automl_engine.training_engine.component._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_fit_and_save_failure(
         self, mock_fit, mock_hpo, sample_df, base_config_dict
     ):
@@ -859,7 +861,7 @@ def test_run_hpo_forwards_oversampling_noise_to_tuner():
 
 def test_build_trainer_forwards_oversampling_noise(base_config_dict):
     """_build_trainer passes the config noise settings to ModelTrainer."""
-    from configurable_automl_engine.training_engine.component import _build_trainer
+    from configurable_automl_engine.training_engine.artifact import _build_trainer
 
     base_config_dict["oversampling"] = {
         "data_oversampling": True,
@@ -868,9 +870,9 @@ def test_build_trainer_forwards_oversampling_noise(base_config_dict):
         "data_oversampling_noise_level": 0.07,
     }
     cfg = Config.model_validate(base_config_dict)
-    algo_cfg = component._algorithms_as_dict(cfg.algorithms)["random_forest"]
+    algo_cfg = hpo_phases_mod._algorithms_as_dict(cfg.algorithms)["random_forest"]
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=importlib.import_module("configurable_automl_engine.trainer"),
     ):
         built = _build_trainer("random_forest", algo_cfg, {}, cfg)
@@ -1009,7 +1011,7 @@ def test_execute_phases_splits_sampler_and_split_seeds():
     cfg, prepared = _hpo_only_cfg_and_prepared(
         phases, df, {"elasticnet": {"enable": True}}
     )
-    with patch(f"{_MODULE}._run_hpo", side_effect=hpo_side_effect):
+    with patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo", side_effect=hpo_side_effect):
         execute_phases(cfg, prepared)
 
     # Phase 1 (all_algorithms): folds=42 (RANDOM_STATE), sampler=42.
@@ -1304,7 +1306,7 @@ def test_execute_phases_parallel_hpo_history_error_fails_fast():
     def hpo_side_effect(**kwargs):
         raise HPOHistoryError("tuner does not accept `previous_trials`")
 
-    with patch(f"{_MODULE}._run_hpo", side_effect=hpo_side_effect):
+    with patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo", side_effect=hpo_side_effect):
         with pytest.raises(HPOHistoryError, match="previous_trials"):
             execute_phases(cfg, prepared)
 
@@ -1396,7 +1398,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
 
     # Patch _run_hpo (called inside the nested _execute_hpo_phase)
     with patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         side_effect=hpo_side_effect,
     ) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
@@ -1454,13 +1456,13 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
-                    "configurable_automl_engine.training_engine.component._run_hpo",
+                    "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
                     return_value=PhaseResult(score=0.9, params={}),
                 )
             )
             mock_save = stack.enter_context(
                 patch(
-                    "configurable_automl_engine.training_engine.component._fit_and_save"
+                    "configurable_automl_engine.training_engine.artifact._fit_and_save"
                 )
             )
             with caplog.at_level(logging.DEBUG, logger=component.__name__):
@@ -1535,11 +1537,11 @@ def test_log_to_file_captures_orchestrator_messages(tmp_path):
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
         with (
             patch(
-                "configurable_automl_engine.training_engine.component._run_hpo",
+                "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
                 return_value=PhaseResult(score=-0.9, params={"alpha": 0.5}),
             ),
             patch(
-                "configurable_automl_engine.training_engine.component._fit_and_save",
+                "configurable_automl_engine.training_engine.artifact._fit_and_save",
                 return_value=SimpleNamespace(additional_scores={}),
             ),
         ):
@@ -1613,7 +1615,7 @@ def test_refine_uses_initial_params_from_phase1():
     )
 
     with patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         side_effect=hpo_side_effect,
     ) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
@@ -1665,11 +1667,11 @@ def test_result_score_matches_logged_user_value(caplog):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=-0.12345, params={"alpha": 0.1}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=SimpleNamespace(additional_scores={}),
         ),
         caplog.at_level(logging.INFO, logger=component.__name__),
@@ -1715,7 +1717,7 @@ def test_refine_first_phase_runs_without_warm_start():
         config_dict["general"]["phases"], df, config_dict["algorithms"]
     )
     with patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         side_effect=hpo_side_effect,
     ):
         ctx = execute_phases(cfg, prepared)
@@ -1730,7 +1732,7 @@ def test_refine_first_phase_runs_without_warm_start():
 # 1. Test for logging an error in _run_hpo
 def test_run_hpo_logs_error_on_exception():
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module"
+        "configurable_automl_engine.training_engine.hpo_phases._load_module"
     ) as mock_load:
         # Simulate an error in the tuner
         mock_tuner = MagicMock()
@@ -1738,7 +1740,7 @@ def test_run_hpo_logs_error_on_exception():
         mock_load.return_value = mock_tuner
 
         with patch(
-            "configurable_automl_engine.training_engine.component._LOG"
+            "configurable_automl_engine.training_engine.hpo_phases._LOG"
         ) as mock_log:
             result = _run_hpo(
                 algo_name="test_algo",
@@ -1982,25 +1984,25 @@ class TestExecuteHpoPhaseReturnsNone:
                                 └─► valid_results empty → RuntimeError
     """
 
-    @patch(f"{_MODULE}._run_hpo", return_value=None)
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo", return_value=None)
     def test_runtime_error_raised_when_hpo_returns_none(
         self, mock_hpo, minimal_df, config_single_algo
     ):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             train_best_model(config=config_single_algo, df=minimal_df, target="target")
 
-    @patch(f"{_MODULE}._run_hpo", return_value=None)
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo", return_value=None)
     def test_fit_and_save_never_called_when_hpo_returns_none(
         self, mock_hpo, minimal_df, config_single_algo
     ):
-        with patch(f"{_MODULE}._fit_and_save") as mock_save:
+        with patch("configurable_automl_engine.training_engine.artifact._fit_and_save") as mock_save:
             with pytest.raises(RuntimeError):
                 train_best_model(
                     config=config_single_algo, df=minimal_df, target="target"
                 )
             mock_save.assert_not_called()
 
-    @patch(f"{_MODULE}._run_hpo", return_value=None)
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo", return_value=None)
     def test_hpo_called_with_correct_algo_name(
         self, mock_hpo, minimal_df, config_single_algo
     ):
@@ -2020,8 +2022,8 @@ class TestPartialNoneResults:
     extra_trees   → a valid result → wins.
     """
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_winner_is_non_none_algorithm(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2043,8 +2045,8 @@ class TestPartialNoneResults:
         assert result["score"] == 0.42
         mock_save.assert_called_once()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_none_algorithm_excluded_from_results(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2072,8 +2074,8 @@ class TestWorstScoreResultsExcluded:
     are treated as failed: the result is discarded by the valid_results filter.
     """
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_all_worst_scores_raise_runtime_error(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2087,8 +2089,8 @@ class TestWorstScoreResultsExcluded:
         # is not iterable no longer occurs.
         mock_save.assert_not_called()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_worst_score_algorithm_excluded_when_mixed(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2111,8 +2113,8 @@ class TestWorstScoreResultsExcluded:
         assert result["score"] == 0.42
         mock_save.assert_called_once()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_raw_float32_min_excluded_when_mixed(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2142,8 +2144,8 @@ class TestWorstScoreResultsExcluded:
         assert result["score"] == 0.42
         mock_save.assert_called_once()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_defensive_filter_drops_none_nan_inf(
         self, mock_hpo, mock_save, minimal_df, config_single_algo
     ):
@@ -2181,8 +2183,8 @@ class TestWorstScoreResultsExcluded:
         # No iteration should reach the final training.
         mock_save.assert_not_called()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_garbage_custom_tuner_results_excluded_without_crash(
         self, mock_hpo, mock_save, minimal_df, config_single_algo
     ):
@@ -2209,8 +2211,8 @@ class TestWorstScoreResultsExcluded:
                 )
         mock_save.assert_not_called()
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_parallel_worker_failure_does_not_corrupt_others(
         self, mock_hpo, mock_save, minimal_df
     ):
@@ -2318,7 +2320,7 @@ class TestWorstScoreResultsExcluded:
         return fake_load
 
     @requires_fork
-    @patch(f"{_MODULE}._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_mode_produces_valid_winner(
         self, mock_save, minimal_df, tmp_path
     ):
@@ -2338,7 +2340,7 @@ class TestWorstScoreResultsExcluded:
         en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.8)  # MAE 0.8
 
         with patch(
-            f"{_MODULE}._load_module",
+            "configurable_automl_engine.training_engine.hpo_phases._load_module",
             side_effect=self._processes_fake_load(rf_tuner, en_tuner),
         ):
             result = train_best_model(config=config_dict, df=df, target="target")
@@ -2348,7 +2350,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
-    @patch(f"{_MODULE}._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_mode_shares_X_via_shared_memory(
         self, mock_save, minimal_df, tmp_path
     ):
@@ -2383,7 +2385,7 @@ class TestWorstScoreResultsExcluded:
 
         with (
             patch(
-                f"{_MODULE}._load_module",
+                "configurable_automl_engine.training_engine.hpo_phases._load_module",
                 side_effect=self._processes_fake_load(rf_tuner, en_tuner),
             ),
             patch(
@@ -2403,7 +2405,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
-    @patch(f"{_MODULE}._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_disqualification_propagates(
         self, mock_save, minimal_df, tmp_path
     ):
@@ -2429,7 +2431,7 @@ class TestWorstScoreResultsExcluded:
         en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.5)  # MAE 0.5
 
         with patch(
-            f"{_MODULE}._load_module",
+            "configurable_automl_engine.training_engine.hpo_phases._load_module",
             side_effect=self._processes_fake_load(rf_tuner, en_tuner),
         ):
             result = train_best_model(config=config_dict, df=df, target="target")
@@ -2440,8 +2442,8 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_processes_parallel_worker_failure_does_not_corrupt_others(
         self, mock_hpo, mock_save, minimal_df
     ):
@@ -2504,10 +2506,10 @@ class TestWorstScoreResultsExcluded:
             },
             "oversampling": {"enable": False},
         }
-        from configurable_automl_engine.training_engine.component import (
-            _HpoPhaseSpec,
+        from configurable_automl_engine.training_engine.hpo_phases import (
             _hpo_phase_worker,
         )
+        from configurable_automl_engine.training_engine.state import _HpoPhaseSpec
 
         cfg = Config.model_validate(cfg_dict)
         prepared = prepare_dataset(cfg, minimal_df, "target")
@@ -2549,8 +2551,8 @@ class TestWorstScoreResultsExcluded:
         # travels through run_parallel shared memory / disk, not via pickle.
         assert not hasattr(restored_spec, "X")
 
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_duplicate_scores_first_config_order_wins(
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
@@ -2580,8 +2582,8 @@ class TestWorstScoreResultsExcluded:
             1.0,  # positive
         ],
     )
-    @patch(f"{_MODULE}._fit_and_save")
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_reported_winner_score_is_finite_and_above_sentinel(
         self, mock_hpo, mock_save, raw_score, minimal_df, config_single_algo
     ):
@@ -2607,7 +2609,7 @@ class TestWorstScoreResultsExcluded:
 class TestWorstScoreIntegrationThroughTuner:
     """Full path: a real _run_hpo + a tuner that returned HPO_WORST_SCORE."""
 
-    @patch(f"{_MODULE}._load_module")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._load_module")
     def test_tuner_worst_score_excluded_end_to_end(
         self, mock_load, minimal_df, config_single_algo
     ):
@@ -2627,7 +2629,7 @@ class TestWorstScoreIntegrationThroughTuner:
 
         mock_load.return_value = WorstScoreTuner()
 
-        with patch(f"{_MODULE}._fit_and_save") as mock_save:
+        with patch("configurable_automl_engine.training_engine.artifact._fit_and_save") as mock_save:
             with pytest.raises(
                 RuntimeError, match="No algorithms produced valid scores"
             ):
@@ -2643,7 +2645,7 @@ class TestWorstScoreIntegrationThroughTuner:
 class TestRefineFailureCleanup:
     """When refine wiped out the whole input set → RuntimeError, not a fallback."""
 
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_refine_total_failure_raises_runtime_error(
         self, mock_hpo, minimal_df
     ):
@@ -2708,7 +2710,7 @@ class TestMultiPhaseFailureExclusion:
     checked end-to-end.
     """
 
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_s1_two_all_algorithms_phases_failed_in_phase2_excluded(
         self, mock_hpo, minimal_df
     ):
@@ -2768,7 +2770,7 @@ class TestMultiPhaseFailureExclusion:
         assert set(phase_results) == {"elasticnet"}
         assert phase_results["elasticnet"] == PhaseResult(score=-0.8, params={"alpha": 0.7})
 
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_s2_refine_none_failure_raises_runtime_error(
         self, mock_hpo, minimal_df
     ):
@@ -2814,7 +2816,7 @@ class TestMultiPhaseFailureExclusion:
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
-    @patch(f"{_MODULE}._run_hpo")
+    @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_s3_refine_failed_candidate_does_not_resurrect(
         self, mock_hpo, minimal_df
     ):
@@ -3332,7 +3334,7 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
     }
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=Mock(ModelTrainer=mock_trainer_cls),
     ):
         _fit_and_save(
@@ -3402,7 +3404,7 @@ def test_fit_and_save_fs_active_none_when_key_absent():
     )
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=Mock(ModelTrainer=mock_trainer_cls),
     ):
         _fit_and_save(
@@ -3445,7 +3447,7 @@ def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
     }
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=Mock(ModelTrainer=mock_trainer_cls),
     ):
         _fit_and_save(
@@ -3536,7 +3538,7 @@ def _fs_cfg_dict(mode: str) -> dict:
 
 def test_feature_selection_mode_helper():
     """_feature_selection_mode: FeatureSelectionCfg/dict/None → a mode string."""
-    from configurable_automl_engine.training_engine.component import (
+    from configurable_automl_engine.training_engine.hpo_phases import (
         _feature_selection_mode,
     )
 
@@ -3565,7 +3567,7 @@ def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
     cfg = Config.model_validate(_fs_cfg_dict("always"))
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
     ):
         with caplog.at_level("WARNING", logger=component.__name__):
@@ -3600,7 +3602,7 @@ def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
     cfg = Config.model_validate(_fs_cfg_dict("disabled"))
 
     with patch(
-        "configurable_automl_engine.training_engine.component._load_module",
+        "configurable_automl_engine.training_engine.artifact._load_module",
         return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
     ):
         with caplog.at_level("WARNING", logger=component.__name__):
@@ -3663,7 +3665,7 @@ def test_refine_preserves_feature_selection_status_between_phases():
         config_dict["general"]["phases"], df, config_dict["algorithms"]
     )
     with patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         side_effect=hpo_side_effect,
     ) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
@@ -3984,14 +3986,14 @@ def _run_acceptance(
     RMSE_oof among all finalists, not "the best of those who passed the gate".
     """
     oof_scores: dict[str, float] = {}
-    real_fit = component._fit_finalist
+    real_fit = finalists_mod._fit_finalist
 
     def _recorded_fit(*args: Any, **kwargs: Any) -> Any:
         trainer = real_fit(*args, **kwargs)
         oof_scores[str(args[0])] = float(trainer.oof_score_)
         return trainer
 
-    with patch.object(component, "_fit_finalist", side_effect=_recorded_fit):
+    with patch.object(finalists_mod, "_fit_finalist", side_effect=_recorded_fit):
         result = train_best_model(
             config=_acceptance_cfg(str(model_path), gap_mode=gap_mode),
             df=df,

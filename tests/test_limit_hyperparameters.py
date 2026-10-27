@@ -30,10 +30,12 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 )
 from configurable_automl_engine.training_engine.component import (
     PhaseResult,
+    train_best_model,
+)
+from configurable_automl_engine.training_engine.hpo_phases import (
     _execute_hpo_phase,
     _hpo_phase_worker,
     _prepare_search_space,
-    train_best_model,
 )
 from configurable_automl_engine.training_engine.config_parser import AlgoCfg
 from tests.data_factory import create_mock_df
@@ -160,7 +162,7 @@ def test_hpo_phase_worker_passes_limit_and_restricted_space(monkeypatch):
         return PhaseResult(score=-0.9, params={"alpha": 0.5})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._execute_hpo_phase",
+        "configurable_automl_engine.training_engine.hpo_phases._execute_hpo_phase",
         fake_execute,
     )
 
@@ -187,7 +189,7 @@ def test_execute_hpo_phase_forwards_limit_flag(monkeypatch):
         return PhaseResult(score=-0.9, params={"alpha": 0.5})
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         fake_run_hpo,
     )
 

@@ -406,15 +406,15 @@ def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component.make_cv",
+            "configurable_automl_engine.training_engine.data_prep.make_cv",
             return_value=("k_fold", resolved_cv, fake_decision),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=0.9, params={"alpha": 0.1}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ) as mock_save,
     ):
@@ -479,15 +479,15 @@ def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component.make_cv",
+            "configurable_automl_engine.training_engine.data_prep.make_cv",
             return_value=("train_test_split", None, fake_decision),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             side_effect=fake_run_hpo,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=FakeTrainer(),
         ) as mock_save,
     ):

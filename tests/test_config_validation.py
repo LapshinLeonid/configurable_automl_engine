@@ -2247,7 +2247,7 @@ def test_refine_phase_executes_with_warm_start():
         _phase(), _phase(action="refine", n_trials=1), TERMINAL_SELECT
     )
     with patch(
-        "configurable_automl_engine.training_engine.component._run_hpo",
+        "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
         side_effect=lambda **kw: PhaseResult(score=0.9, params={"alpha": 0.1}),
     ) as mock_hpo:
         res = train_best_model(cfg_refine, df, target="target")

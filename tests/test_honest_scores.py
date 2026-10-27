@@ -199,11 +199,11 @@ def test_oof_score_absent_without_oof_channel(tmp_path):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=0.9, params={"alpha": 0.1}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
     ):
@@ -236,11 +236,11 @@ def test_n_trials_evaluated_zero_for_legacy_tuner(tmp_path):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._run_hpo",
+            "configurable_automl_engine.training_engine.hpo_phases._run_hpo",
             return_value=PhaseResult(score=0.9, params={"alpha": 0.1}),
         ),
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
     ):
@@ -512,7 +512,7 @@ def test_persist_artifact_adds_oof_and_trials_keys():
     expected_oof_r2 = float(r2_score(y_arr[mask], oof_pred[mask]))
 
     with patch(
-        "configurable_automl_engine.training_engine.component._fit_and_save",
+        "configurable_automl_engine.training_engine.artifact._fit_and_save",
         return_value=trainer,
     ):
         result = persist_artifact(
@@ -539,7 +539,7 @@ def test_persist_artifact_omits_trials_key_when_zero():
     prepared = prepare_dataset(cfg, df, "target")
 
     with patch(
-        "configurable_automl_engine.training_engine.component._fit_and_save",
+        "configurable_automl_engine.training_engine.artifact._fit_and_save",
         return_value=_zero_trainer(prepared),
     ):
         result = persist_artifact(
@@ -571,7 +571,7 @@ def test_persist_artifact_omits_keys_when_unavailable():
     fake_trainer.oof_score_ = None
 
     with patch(
-        "configurable_automl_engine.training_engine.component._fit_and_save",
+        "configurable_automl_engine.training_engine.artifact._fit_and_save",
         return_value=fake_trainer,
     ):
         result = persist_artifact(
@@ -604,7 +604,7 @@ def test_persist_artifact_oof_shape_mismatch_omits_key():
     fake_trainer.oof_score_ = 0.5
 
     with patch(
-        "configurable_automl_engine.training_engine.component._fit_and_save",
+        "configurable_automl_engine.training_engine.artifact._fit_and_save",
         return_value=fake_trainer,
     ):
         result = persist_artifact(
@@ -642,11 +642,11 @@ def test_persist_artifact_oof_fallback_to_rmse_oof():
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component.get_scorer_object",
+            "configurable_automl_engine.training_engine.artifact.get_scorer_object",
             return_value=_NoRawScorer(),
         ),
     ):
@@ -684,11 +684,11 @@ def test_persist_artifact_oof_score_metric_fallback_omitted():
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component.get_scorer_object",
+            "configurable_automl_engine.training_engine.artifact.get_scorer_object",
             return_value=_NoRawScorer(),
         ),
     ):
@@ -725,11 +725,11 @@ def test_persist_artifact_oof_non_rmse_error_fallback_omitted():
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component.get_scorer_object",
+            "configurable_automl_engine.training_engine.artifact.get_scorer_object",
             return_value=_NoRawScorer(),
         ),
     ):
@@ -763,11 +763,11 @@ def test_persist_artifact_oof_unknown_metric_warns(caplog):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.component._fit_and_save",
+            "configurable_automl_engine.training_engine.artifact._fit_and_save",
             return_value=fake_trainer,
         ),
         patch(
-            "configurable_automl_engine.training_engine.component.get_scorer_object",
+            "configurable_automl_engine.training_engine.artifact.get_scorer_object",
             side_effect=ValueError("unknown metric"),
         ),
         caplog.at_level(logging.WARNING, logger="training_engine"),
@@ -793,7 +793,7 @@ def test_holdout_fraction_zero_rows_nan(tmp_path):
     one row for a valid fraction), so this covers the defensive NaN path of
     _compute_holdout_score via a hold-out with non-finite predictions.
     """
-    from configurable_automl_engine.training_engine.component import (
+    from configurable_automl_engine.training_engine.artifact import (
         _compute_holdout_score,
     )
 
@@ -825,7 +825,7 @@ def test_holdout_score_exception_returns_nan(caplog):
     """A failure inside the hold-out estimation returns NaN without crashing."""
     import logging
 
-    from configurable_automl_engine.training_engine.component import (
+    from configurable_automl_engine.training_engine.artifact import (
         _compute_holdout_score,
     )
 
