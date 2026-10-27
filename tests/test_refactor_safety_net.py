@@ -8,10 +8,13 @@ The tests pin the observable behavior of the package BEFORE the large modules
    best params, every reported score, ``n_trials_evaluated`` and the saved
    artifact's predictions. The same run in ``processes`` mode yields the
    same winner and params.
-2. Pickle compatibility — the ``configurable_automl_engine.*`` globals
-   referenced by the pickle of a fitted ``ModelTrainer`` and its instance
-   attribute names match the committed snapshot (an artifact saved by an
-   older version keeps loading).
+2. Pickle format — the ``configurable_automl_engine.*`` globals referenced
+   by the pickle of a fitted ``ModelTrainer`` and its instance attribute
+   names match the committed snapshot: the saved state is an artifact format
+   (``trainer_state.ARTIFACT_FORMAT_VERSION``), so any change of it is
+   deliberate. The snapshot was regenerated once, for artifact format 2
+   (the grouped trainer state of 0.5.0); ``ModelTrainer.load`` refuses the
+   artifacts of other formats.
 3. Public API — the documented import paths keep working.
 4. Imports — ``import configurable_automl_engine`` stays lightweight, and
    every module of the package imports on its own (no import cycles).
@@ -459,12 +462,32 @@ def test_component_public_names_unchanged() -> None:
         assert hasattr(component, name), name
 
 
-def test_pickled_classes_stay_defined_in_trainer() -> None:
-    """``ModelTrainer`` / ``IsotonicDataTransformer`` stay defined in trainer.py."""
-    from configurable_automl_engine import trainer
+def test_pickled_classes_stay_defined_in_their_modules() -> None:
+    """The classes of the saved trainer state live at their documented paths.
+
+    A pickle references every class by its module path, so the path is part
+    of the artifact format: ``ModelTrainer`` / ``IsotonicDataTransformer`` in
+    ``trainer``, the state groups in ``trainer_state`` and the setting groups
+    in ``common.settings``.
+    """
+    from configurable_automl_engine import trainer, trainer_state
+    from configurable_automl_engine.common import settings
 
     assert trainer.ModelTrainer.__module__ == f"{PACKAGE}.trainer"
     assert trainer.IsotonicDataTransformer.__module__ == f"{PACKAGE}.trainer"
+    for cls in (
+        trainer_state.TrainerSettings,
+        trainer_state.PreparedFeatures,
+        trainer_state.ValidationScores,
+        trainer_state.FeatureSelectionResult,
+    ):
+        assert cls.__module__ == f"{PACKAGE}.trainer_state"
+    for cls in (
+        settings.EncodingSettings,
+        settings.InputPolicies,
+        settings.OversamplingSettings,
+    ):
+        assert cls.__module__ == f"{PACKAGE}.common.settings"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

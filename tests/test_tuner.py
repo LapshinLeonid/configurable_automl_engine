@@ -805,15 +805,15 @@ def test_optimize_hpo_score_matches_pooled_trainer_val_score():
     )
     assert opt_res is not None
 
+    # Use the best alpha found by HPO so the comparison is on the same model.
     trainer = ModelTrainer(
         algorithm="ridge",
+        hyperparams=dict(opt_res.params),
         metric="r2",
         validation_strategy="k_fold",
         n_folds=5,
         random_state=42,
     )
-    # Use the best alpha found by HPO so the comparison is on the same model.
-    trainer.hyperparams = dict(opt_res.params)
     trainer.fit(X, y)
 
     assert trainer.val_score is not None
@@ -864,9 +864,12 @@ def test_optimize_sklearn_non_additive_metrics_use_pooled_path(metric):
     assert mock_pooled.call_count == 1
     # The trainer pools the metric too (same quantity).
     trainer = ModelTrainer(
-        algorithm="ridge", metric=metric, validation_strategy="k_fold", n_folds=5
+        algorithm="ridge",
+        hyperparams={"alpha": 0.1},
+        metric=metric,
+        validation_strategy="k_fold",
+        n_folds=5,
     )
-    trainer.hyperparams = {"alpha": 0.1}
     trainer.fit(X, y)
     assert trainer.val_score is not None
     assert np.isfinite(trainer.val_score)

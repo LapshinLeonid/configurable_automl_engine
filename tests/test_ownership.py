@@ -64,15 +64,6 @@ MUTATING_METHODS = frozenset(
 #: (module path, qualified function name, tracked class) of the functions
 #: that still mutate an object they do not own. May only shrink.
 ALLOWED_VIOLATIONS: set[tuple[str, str, str]] = {
-    ("trainer_data.py", "_apply_input_diagnostics", "ModelTrainer"),
-    ("trainer_data.py", "_build_preprocessor", "ModelTrainer"),
-    ("trainer_data.py", "_detect_feature_types", "ModelTrainer"),
-    ("trainer_data.py", "_drop_uninformative_features", "ModelTrainer"),
-    ("trainer_data.py", "_prepare_data", "ModelTrainer"),
-    ("trainer_data.py", "_prepare_training_features", "ModelTrainer"),
-    ("trainer_data.py", "_reset_fit_state", "ModelTrainer"),
-    ("trainer_scoring.py", "_finalize_oof", "ModelTrainer"),
-    ("trainer_scoring.py", "_score_on_validation_splits", "ModelTrainer"),
     ("training_engine/hpo_phases.py", "_apply_target_domain_guard", "PhaseContext"),
     ("training_engine/hpo_phases.py", "_consume_worker_results", "PhaseContext"),
     (
@@ -329,6 +320,9 @@ PURE_MODULES = (
     "hpo/evaluation.py",
     "hpo/trial_pipeline.py",
     "hpo/pruning.py",
+    "trainer_data.py",
+    "trainer_scoring.py",
+    "trainer_feature_selection.py",
 )
 
 FORBIDDEN_IMPORTS = {"_OptimizeRunner", "ModelTrainer"}

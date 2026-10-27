@@ -1,25 +1,24 @@
 """Validation scoring of the single-model trainer.
 
-The bodies of ``ModelTrainer._score_on_validation_splits`` and of the OOF
-channel (``_finalize_oof`` / ``_align_oof_vector``): the trainer pipeline is
-scored on the same splits HPO uses (``validation.iter_splits``), the primary
-and the additional metrics are aggregated (fold mean or pooled OOF value),
-and the out-of-fold prediction vector with ``RMSE_oof`` is recorded on the
-trainer. ``ModelTrainer`` keeps thin methods that call these functions. The
-module must not import ``configurable_automl_engine.trainer`` at runtime
-(the ``ModelTrainer`` type is imported for type checking only).
+``score_on_validation_splits`` scores the trainer pipeline on the same
+splits HPO uses (``validation.iter_splits``), aggregates the primary and the
+additional metrics (fold mean or pooled OOF value), and builds the
+out-of-fold prediction vector with ``RMSE_oof`` (``_finalize_oof`` /
+``_align_oof_vector``). The functions are pure: the fold pipelines come from
+a ``make_steps`` callable passed in, and the result is returned as
+``ValidationScores``. The module must not import
+``configurable_automl_engine.trainer``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
-from sklearn.base import clone
-from sklearn.compose import ColumnTransformer
 
 from configurable_automl_engine.training_engine.metrics import (
     direction_label,
@@ -33,20 +32,30 @@ from configurable_automl_engine.training_engine.metrics import (
 from configurable_automl_engine.validation import iter_splits, make_cv
 
 from .trainer_errors import TrainingError
+from .trainer_state import ValidationScores
 
-if TYPE_CHECKING:
-    from configurable_automl_engine.trainer import ModelTrainer
+#: Builds fresh pipeline steps (clones of the preprocessor and the model):
+#: ``make_steps(feature_selection_active, X_for_estimate)``.
+StepsFactory = Callable[[bool, Any], list[tuple[str, Any]]]
+
+# The records keep the logger name of ``ModelTrainer`` (its ``logger``).
+_LOG = logging.getLogger("configurable_automl_engine.trainer")
 
 
-def _score_on_validation_splits(
-    trainer: ModelTrainer,
+def score_on_validation_splits(
     X: Any,
     y: Any,
-    preprocessor: ColumnTransformer,
-    base_model: Any,
+    make_steps: StepsFactory,
     *,
     feature_selection_active: bool,
-) -> None:
+    metric: str,
+    additional_metrics: list[str],
+    validation_strategy: str,
+    n_folds: int,
+    test_size: float,
+    random_state: int | None,
+    algorithm: str,
+) -> ValidationScores:
     """Evaluate model quality on held-out data.
 
     A single mechanism shared with HPO: splits are built via
@@ -55,11 +64,9 @@ def _score_on_validation_splits(
     compare models, up to sign correction.
 
     How it works:
-    1. On each fold a fresh pipeline is assembled from clones of
-       ``preprocessor``/``base_model`` (plus selector/oversampler per
-       config) and trained on the fold's train part (a pattern taken from
-       the feature selection auto-check and extracted into the shared
-       ``_assemble_steps``).
+    1. On each fold a fresh pipeline is assembled by ``make_steps`` (clones
+       of the preprocessor and the model plus selector/oversampler per
+       config) and trained on the fold's train part.
     2. Raw values of the primary metric and all additional metrics are
        computed on the fold's validation part.
     3. ``val_score = to_user_value(metric, mean(raw))`` —
@@ -92,26 +99,33 @@ def _score_on_validation_splits(
     Args:
         X: Feature matrix (full data).
         y: Target variable (full data).
-        preprocessor: Preprocessing ``ColumnTransformer``.
-        base_model: Base regressor.
+        make_steps: Builds fresh pipeline steps for a fold
+            (``make_steps(feature_selection_active, X_for_estimate)``).
         feature_selection_active: Flag enabling the feature selection step.
+        metric: The primary metric.
+        additional_metrics: The additional (informational) metrics.
+        validation_strategy: The validation method.
+        n_folds: The number of folds of ``k_fold``.
+        test_size: The hold-out size of ``train_test_split``.
+        random_state: The seed of the splits (``None`` — the fixed fallback
+            seed 42).
+        algorithm: The algorithm name (fallback WARNING deduplication).
+
+    Returns:
+        ValidationScores: ``val_score``, the additional scores and the OOF
+            channel.
 
     Raises:
         TrainingError: If no fold produced a valid score for the primary
             metric, or on a critical split-initialization error.
     """
-    # Deterministic splits: with trainer random_state=None (non-fixed main
+    # Deterministic splits: with random_state=None (non-fixed main
     # training) the validation splits must still be reproducible (a fixed
-    # fallback seed, as in _run_feature_selection_auto_check).
-    splits_seed = trainer.random_state if trainer.random_state is not None else 42
-    # Backward compatibility with old pickles: the validation parameters
-    # are read via getattr with defaults (the same pattern used for
-    # feature_selection_cfg/encoding_strategy).
-    method = getattr(trainer, "validation_strategy", "train_test_split")
-    n_folds = getattr(trainer, "n_folds", 5)
-    test_size = getattr(trainer, "test_size", 0.2)
+    # fallback seed, as in the feature selection auto-check).
+    splits_seed = random_state if random_state is not None else 42
+    method = validation_strategy
 
-    scorer, add_scorers = _build_validation_scorers(trainer, y)
+    scorer, add_scorers = _build_validation_scorers(metric, additional_metrics, y)
 
     # Materialize the splits before the fold loop: validation initialization
     # errors (insufficient data, unknown method, etc.) must abort training
@@ -157,25 +171,18 @@ def _score_on_validation_splits(
     # must be computed over the pooled OOF vector rather than averaged by
     # folds (RMSE, MSE, R², nRMSE). MAE and similar per-sample means stay
     # on the fold-average path (their fold mean equals the pooled value).
-    pool_primary = is_non_additive_metric(trainer.metric)
+    pool_primary = is_non_additive_metric(metric)
     pool_additive = {mname: is_non_additive_metric(mname) for mname in add_scorers}
     for X_tr, X_te, y_tr, y_te, test_idx in splits:
         try:
             # A fresh pipeline per fold: clones of preprocessor/base_model
             # (sklearn Pipeline does not clone the passed steps, so shared
             # instances would mutate the state of a neighboring fold).
-            fold_pipe = Pipeline(
-                trainer._assemble_steps(
-                    clone(preprocessor),
-                    clone(base_model),
-                    feature_selection_active=feature_selection_active,
-                    # The estimate is based on the fold's training part so
-                    # it matches the fold-fitted preprocessor output (a
-                    # category absent from the train part must not trigger
-                    # the guard).
-                    X_for_estimate=X_tr,
-                )
-            )
+            # The estimate of the isotonic guard is based on the fold's
+            # training part so it matches the fold-fitted preprocessor output
+            # (a category absent from the train part must not trigger the
+            # guard).
+            fold_pipe = Pipeline(make_steps(feature_selection_active, X_tr))
             fold_pipe.fit(X_tr, y_tr)
 
             # For non-additive metrics the per-fold scorer is invoked only
@@ -194,10 +201,10 @@ def _score_on_validation_splits(
                 fold_raw.append(float(raw))
 
             _score_additional_metrics_on_fold(
-                trainer, fold_pipe, X_te, y_te, add_scorers, pool_additive, add_raw
+                fold_pipe, X_te, y_te, add_scorers, pool_additive, add_raw
             )
             _collect_fold_oof(
-                trainer, fold_pipe, X_te, y_te, test_idx, oof_pred_buffer, oof_y_buffer
+                fold_pipe, X_te, y_te, test_idx, oof_pred_buffer, oof_y_buffer
             )
         except Exception as err:  # noqa: BLE001
             fold_errors.append(str(err))
@@ -225,25 +232,25 @@ def _score_on_validation_splits(
         pooled=pool_primary,
         oof_y=oof_y_buffer,
         oof_pred=oof_pred_buffer,
-        algorithm=trainer.algorithm,
-        phase_name=f"final_fit:{trainer.metric}",
+        algorithm=algorithm,
+        phase_name=f"final_fit:{metric}",
         failure_reason="the pooled value over the OOF buffer cannot be "
         "computed (no raw scorer metric function or no valid "
         "pairs)",
         empty_reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
     )
-    trainer.val_score = to_user_value(trainer.metric, raw_mean)
+    val_score = to_user_value(metric, raw_mean)
     # User-facing semantics: val_score is a value in user representation,
     # so the direction in the log is user_direction ("min better" for
     # errors), not the optimizer greater_is_better flag (which is true for
     # neg_ metrics even though a smaller value is better for the user).
-    trainer.logger.debug(
+    _LOG.debug(
         f"Metric calculation: raw={raw_mean:.4f},"
-        f" final val_score={trainer.val_score:.4f} "
-        f"({direction_label(trainer.metric)})"
+        f" final val_score={val_score:.4f} "
+        f"({direction_label(metric)})"
     )
 
-    trainer.additional_scores = {}
+    additional_scores: dict[str, float] = {}
     for mname, raw_values in add_raw.items():
         if not raw_values:
             # All folds failed for this metric — it was already skipped with a WARNING.
@@ -254,7 +261,7 @@ def _score_on_validation_splits(
             pooled=pool_additive[mname],
             oof_y=oof_y_buffer,
             oof_pred=oof_pred_buffer,
-            algorithm=trainer.algorithm,
+            algorithm=algorithm,
             phase_name=f"final_fit:{mname}",
             failure_reason=f"the pooled value for additional metric "
             f"'{mname}' cannot be computed (no raw scorer metric "
@@ -263,21 +270,28 @@ def _score_on_validation_splits(
             f"(y_true, y_pred) pairs for additional metric "
             f"'{mname}'",
         )
-        trainer.additional_scores[mname] = to_user_value(mname, raw_values_agg)
+        additional_scores[mname] = to_user_value(mname, raw_values_agg)
 
     # OOF channel: RMSE_oof on the whole vector, warnings about
     # coverage/small N, and alignment of y_pred_oof to the original row order.
-    trainer._finalize_oof(
+    oof_predictions, oof_score, oof_coverage = _finalize_oof(
         oof_pred_buffer,
         oof_y_buffer,
         X,
         n_samples,
         method=effective_method,
     )
+    return ValidationScores(
+        val_score=val_score,
+        additional_scores=additional_scores,
+        oof_predictions=oof_predictions,
+        oof_score=oof_score,
+        oof_coverage=oof_coverage,
+    )
 
 
 def _build_validation_scorers(
-    trainer: ModelTrainer, y: Any
+    metric: str, additional_metrics: list[str], y: Any
 ) -> tuple[Callable[..., Any], dict[str, Callable[..., Any]]]:
     """Build the primary scorer and the additional-metric scorers.
 
@@ -286,7 +300,8 @@ def _build_validation_scorers(
     cannot be built is skipped with a WARNING.
 
     Args:
-        trainer: The trainer being fitted.
+        metric: The primary metric.
+        additional_metrics: The additional metrics.
         y: Target variable (full data).
 
     Returns:
@@ -296,17 +311,17 @@ def _build_validation_scorers(
         TrainingError: If the primary scorer cannot be built.
     """
     try:
-        scorer = cast(Callable[..., Any], get_scorer_object(trainer.metric, global_y=y))
+        scorer = cast(Callable[..., Any], get_scorer_object(metric, global_y=y))
     except Exception as err:  # noqa: BLE001
         raise TrainingError(f"Error calculating metrics on validation: {err}")
     add_scorers: dict[str, Callable[..., Any]] = {}
-    for mname in trainer.additional_metrics:
+    for mname in additional_metrics:
         try:
             add_scorers[mname] = cast(
                 Callable[..., Any], get_scorer_object(mname, global_y=y)
             )
         except Exception as err:  # noqa: BLE001
-            trainer.logger.warning(
+            _LOG.warning(
                 "Additional metric '%s' could not be computed: %s. "
                 "Training result and artifact are unaffected.",
                 mname,
@@ -353,7 +368,6 @@ def _effective_validation_method(
 
 
 def _score_additional_metrics_on_fold(
-    trainer: ModelTrainer,
     fold_pipe: Any,
     X_te: Any,
     y_te: Any,
@@ -373,7 +387,7 @@ def _score_additional_metrics_on_fold(
                 )
             add_raw[mname].append(float(m_raw))
         except Exception as err:  # noqa: BLE001
-            trainer.logger.warning(
+            _LOG.warning(
                 "Additional metric '%s' could not be computed on a "
                 "validation fold: %s. Training result and artifact "
                 "are unaffected.",
@@ -383,7 +397,6 @@ def _score_additional_metrics_on_fold(
 
 
 def _collect_fold_oof(
-    trainer: ModelTrainer,
     fold_pipe: Any,
     X_te: Any,
     y_te: Any,
@@ -411,7 +424,7 @@ def _collect_fold_oof(
             oof_pred_buffer[idx] = preds
             oof_y_buffer[idx] = np.asarray(y_te, dtype=float).reshape(-1)
     except Exception as err:  # noqa: BLE001
-        trainer.logger.warning(
+        _LOG.warning(
             "OOF predictions could not be collected on a "
             "validation fold: %s. RMSE_oof coverage reduced.",
             err,
@@ -458,21 +471,19 @@ def _aggregate_raw_values(
 
 
 def _finalize_oof(
-    trainer: ModelTrainer,
     oof_pred: np.ndarray,
     oof_y: np.ndarray,
     X: Any,
     n_samples: int,
     *,
     method: str,
-) -> None:
+) -> tuple[pd.Series | np.ndarray, float | None, float]:
     """Finalize the OOF evaluation channel.
 
     Based on the prediction/target buffers collected on validation folds
-    (``_score_on_validation_splits``), computes ``RMSE_oof`` over the whole
-    vector at once via :func:`metrics.oof_rmse`, fills the
-    ``oof_score_``/``oof_predictions_``/``oof_coverage_`` attributes, and
-    logs warnings:
+    (``score_on_validation_splits``), computes ``RMSE_oof`` over the whole
+    vector at once via :func:`metrics.oof_rmse`, returns the OOF vector,
+    ``RMSE_oof`` and the coverage, and logs warnings:
     - ``train_test_split`` covers only the validation part with OOF
       (a documented limitation);
     - very small N (2-5): a short OOF vector with high variance;
@@ -486,17 +497,20 @@ def _finalize_oof(
         method: The validation method actually applied (after a possible
             fallback ``k_fold`` → ``train_test_split``), which drives the
             coverage warnings.
+
+    Returns:
+        The OOF vector in the original row order, ``RMSE_oof`` (``None``
+        when impossible) and the coverage.
     """
-    oof_vector = trainer._align_oof_vector(oof_pred, X)
+    oof_vector = _align_oof_vector(oof_pred, X)
     valid = np.isfinite(oof_pred) & np.isfinite(oof_y)
     n_valid = int(valid.sum())
     coverage = float(n_valid / n_samples) if n_samples > 0 else 0.0
-    trainer.oof_coverage_ = coverage
 
     # train_test_split limitation: OOF covers only the validation part.
     # Explicitly documented in the log.
     if method == "train_test_split":
-        trainer.logger.warning(
+        _LOG.warning(
             "OOF evaluation with 'train_test_split' covers only the "
             "validation part (%d/%d rows, %.0f%%): rows from the training "
             "part have no honest out-of-fold prediction, so RMSE_oof is "
@@ -508,20 +522,18 @@ def _finalize_oof(
 
     # Very small N: the OOF vector is short and the estimate has high variance.
     if n_samples <= 5:
-        trainer.logger.warning(
+        _LOG.warning(
             "OOF evaluation on very small data (N=%d): the OOF vector is "
             "short and RMSE_oof has high variance.",
             n_samples,
         )
 
     if n_valid == 0:
-        trainer.oof_score_ = None
-        trainer.oof_predictions_ = oof_vector
-        trainer.logger.warning(
+        _LOG.warning(
             "RMSE_oof could not be computed: no valid out-of-fold "
             "prediction/target pairs."
         )
-        return
+        return oof_vector, None, coverage
 
     dropped = n_samples - n_valid
     # For train_test_split the uncovered rows are the train part; the
@@ -529,28 +541,29 @@ def _finalize_oof(
     # generic row-exclusion warning is logged only for non-finite
     # predictions/targets.
     if dropped and method != "train_test_split":
-        trainer.logger.warning(
+        _LOG.warning(
             "%d row(s) excluded from RMSE_oof (non-finite prediction or "
             "target); coverage=%.3f.",
             dropped,
             coverage,
         )
 
+    oof_score: float | None
     try:
-        trainer.oof_score_ = oof_rmse(oof_y, oof_pred)
+        oof_score = oof_rmse(oof_y, oof_pred)
     except ValueError as err:
-        trainer.oof_score_ = None
-        trainer.logger.warning("RMSE_oof could not be computed: %s", err)
-    trainer.oof_predictions_ = oof_vector
+        oof_score = None
+        _LOG.warning("RMSE_oof could not be computed: %s", err)
     # RMSE_oof is a user-facing error value ("min better"): the direction
     # is stated explicitly, and the optimizer flag is not applied.
-    trainer.logger.info(
+    _LOG.info(
         "OOF evaluation: RMSE_oof=%.4f (min better) on %d/%d rows (coverage=%.3f).",
-        trainer.oof_score_ if trainer.oof_score_ is not None else float("nan"),
+        oof_score if oof_score is not None else float("nan"),
         n_valid,
         n_samples,
         coverage,
     )
+    return oof_vector, oof_score, coverage
 
 
 def _align_oof_vector(

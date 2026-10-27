@@ -19,6 +19,7 @@ Coverage:
 from __future__ import annotations
 
 import logging
+import dataclasses
 import pickle
 from unittest.mock import patch
 
@@ -43,6 +44,7 @@ from configurable_automl_engine.training_engine.metrics import (
     to_user_value,
 )
 from configurable_automl_engine.validation import iter_splits
+from tests.trainer_helpers import score_with_trainer, trainer_preprocessor
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -86,7 +88,7 @@ def _manual_fold_score(
     ``feature_names`` is passed explicitly: the helper must not rely on
     trainer attributes that may not be set.
     """
-    preprocessor = trainer._build_preprocessor(feature_names)
+    preprocessor = trainer_preprocessor(trainer, feature_names)
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     raw: list[float] = []
     scorer = get_scorer_object(trainer.metric)
@@ -226,7 +228,7 @@ def test_val_score_matches_cross_val_score():
         assert tr_i == tr_c
         assert te_i == te_c
 
-    preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
+    preprocessor = trainer_preprocessor(trainer, trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     pipe = ImbPipeline(
         trainer._assemble_steps(preprocessor, model, feature_selection_active=False)
@@ -260,7 +262,7 @@ def test_additional_scores_use_same_validation_method():
 
     # Manual rmse recomputation on the same split. The scorer returns negative
     # values (neg_rmse), so we average the absolute values.
-    preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
+    preprocessor = trainer_preprocessor(trainer, trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     scorer = get_scorer_object("rmse")
     raws: list[float] = []
@@ -679,29 +681,29 @@ def test_deterministic_splits_when_random_state_none():
     assert t1.additional_scores == t2.additional_scores
 
 
-def test_old_pickle_without_validation_attrs_compatible():
-    """An old pickle without the new attributes: load + a re-fit both work.
+def test_old_flat_pickle_is_refused_on_load(tmp_path):
+    """An artifact of the flat pre-0.5 state is refused with a clear error.
 
-    The new attributes are read via a getattr fallback (train_test_split/5/0.2):
-    the attributes are not 'materialized' when an old artifact is loaded, but
-    fit() computes val_score using the default strategy.
+    The validation attributes used to be flat instance attributes read with a
+    getattr fallback; the grouped state of 0.5.0 cannot restore such an
+    object, so ``load`` refuses it (format 1) and says to retrain.
     """
     X, y = _noisy_regression(n=60, p=4, seed=4)
     trainer = ModelTrainer(algorithm="ridge", metric="r2").fit(X, y)
-    for attr in ("validation_strategy", "n_folds", "test_size"):
-        delattr(trainer, attr)
+    old = ModelTrainer.__new__(ModelTrainer)
+    old.__dict__.update(
+        {
+            "algorithm": "ridge",
+            "metric": "r2",
+            "pipeline": trainer.pipeline,
+            "artifact_metadata_": {"engine_version": "0.4.1"},
+        }
+    )
+    path = tmp_path / "old.pkl"
+    path.write_bytes(pickle.dumps(old))
 
-    # Serialize/deserialize the 'old' object
-    restored = pickle.loads(pickle.dumps(trainer))
-    restored.fit(X, y)
-    assert restored.val_score is not None
-    # The attributes are absent (as in an old pickle), but fit uses the defaults:
-    # val_score matches a trainer trained with the pickle-fallback values.
-    assert not hasattr(restored, "validation_strategy")
-    baseline = ModelTrainer(
-        algorithm="ridge", metric="r2", validation_strategy="train_test_split"
-    ).fit(X, y)
-    assert restored.val_score == pytest.approx(baseline.val_score, rel=1e-6)
+    with pytest.raises(TrainingError, match="artifact format 1"):
+        ModelTrainer.load(path)
 
 
 def test_serialization_round_trip_preserves_validation_attrs(tmp_path):
@@ -734,8 +736,9 @@ def test_val_score_reset_between_fits():
     ).fit(X, y)
     split_score = trainer.val_score
 
-    trainer.validation_strategy = "k_fold"
-    trainer.n_folds = 4
+    trainer.settings = dataclasses.replace(
+        trainer.settings, validation_strategy="k_fold", n_folds=4
+    )
     trainer.fit(X, y)
     assert trainer.val_score is not None
     # The values across different methods need not match, but must be recomputed

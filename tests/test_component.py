@@ -803,8 +803,8 @@ def test_build_trainer_forwards_oversampling_noise(base_config_dict):
     built = _build_trainer("random_forest", algo_cfg, {}, cfg)
 
     assert isinstance(built, ModelTrainer)
-    assert built.os_add_noise is True
-    assert built.os_noise_level == pytest.approx(0.07)
+    assert built.settings.oversampling.add_noise is True
+    assert built.settings.oversampling.noise_level == pytest.approx(0.07)
 
 
 def test_execute_phases_splits_sampler_and_split_seeds():

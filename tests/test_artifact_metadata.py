@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import logging
 import pickle
@@ -28,6 +29,7 @@ from configurable_automl_engine.common.serialization_utils import (
     resolve_load_formats,
 )
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
+from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
 
 _LOGGER_NAME = "configurable_automl_engine.trainer"
 
@@ -138,7 +140,9 @@ def test_metadata_is_not_set_before_save(trained_trainer: ModelTrainer) -> None:
 
 def test_load_joblib_without_fmt(trained_trainer: ModelTrainer, tmp_path: Path) -> None:
     """A .joblib artifact loads with fmt=None."""
-    trained_trainer.serialization_format = SerializationFormat.joblib
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     path = tmp_path / "model.joblib"
     trained_trainer.save(path)
 
@@ -176,7 +180,9 @@ def test_load_joblib_wrong_extension_falls_back(
 
     The extension suggests pickle first; pickle fails, then joblib is tried.
     """
-    trained_trainer.serialization_format = SerializationFormat.joblib
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     path = tmp_path / "model.pkl"  # misnamed
     trained_trainer.save(path)
 
@@ -203,7 +209,9 @@ def test_load_pickle_wrong_extension_falls_back(
 
 def test_load_unknown_extension(trained_trainer: ModelTrainer, tmp_path: Path) -> None:
     """An unknown extension tries joblib first, then pickle."""
-    trained_trainer.serialization_format = SerializationFormat.joblib
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     path = tmp_path / "model.art"
     trained_trainer.save(path)
 
@@ -211,7 +219,9 @@ def test_load_unknown_extension(trained_trainer: ModelTrainer, tmp_path: Path) -
     assert isinstance(loaded, ModelTrainer)
 
     # pickle content with unknown extension also works (joblib fails, pickle wins).
-    trained_trainer.serialization_format = SerializationFormat.pickle
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.pickle
+    )
     path2 = tmp_path / "model2.art"
     trained_trainer.save(path2)
     loaded2 = ModelTrainer.load(path2)
@@ -222,7 +232,9 @@ def test_load_explicit_fmt_still_works(
     trained_trainer: ModelTrainer, tmp_path: Path
 ) -> None:
     """Passing an explicit fmt restricts loading to that format (backward compat)."""
-    trained_trainer.serialization_format = SerializationFormat.joblib
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     path = tmp_path / "model.joblib"
     trained_trainer.save(path)
 
@@ -234,7 +246,9 @@ def test_load_explicit_wrong_fmt_fails(
     trained_trainer: ModelTrainer, tmp_path: Path
 ) -> None:
     """Passing a wrong explicit fmt raises instead of falling back."""
-    trained_trainer.serialization_format = SerializationFormat.joblib
+    trained_trainer.settings = dataclasses.replace(
+        trained_trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     path = tmp_path / "model.joblib"
     trained_trainer.save(path)
 
@@ -333,26 +347,59 @@ def test_load_patch_level_difference_no_warning(
     )
 
 
-def test_load_legacy_artifact_without_metadata_no_warning(
-    trained_trainer: ModelTrainer, tmp_path: Path, caplog: pytest.LogCaptureFixture
+def _write_old_artifact(path: Path, trainer: ModelTrainer, metadata: Any) -> None:
+    """Write an artifact as the engine up to 0.4.x did: flat attributes and
+    no artifact format version in the metadata."""
+    old = ModelTrainer.__new__(ModelTrainer)
+    old.__dict__.update(
+        {
+            "algorithm": trainer.algorithm,
+            "hyperparams": dict(trainer.hyperparams),
+            "metric": trainer.metric,
+            "pipeline": trainer.pipeline,
+            "val_score": trainer.val_score,
+            "feature_names": list(trainer.feature_names or []),
+        }
+    )
+    if metadata is not None:
+        old.__dict__["artifact_metadata_"] = metadata
+    with open(path, "wb") as f:
+        pickle.dump(old, f)
+
+
+def test_saved_artifact_records_the_format_version(
+    trained_trainer: ModelTrainer, tmp_path: Path
 ) -> None:
-    """Artifacts saved before metadata existed (no attribute) load without warnings."""
     path = tmp_path / "model.pkl"
     trained_trainer.save(path)
-    with open(path, "rb") as f:
-        obj = pickle.load(f)
-    del obj.artifact_metadata_
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
-
-    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
-        loaded = ModelTrainer.load(path)
-
-    assert isinstance(loaded, ModelTrainer)
-    records = _records_from_trainer_logger(caplog)
-    assert not any(
-        "Artifact was created with" in r.message for r in records
+    loaded = ModelTrainer.load(path)
+    assert loaded.artifact_metadata_["artifact_format_version"] == (
+        ARTIFACT_FORMAT_VERSION
     )
+
+
+@pytest.mark.parametrize(
+    ("metadata", "saved_by"),
+    [
+        ({"engine_version": "0.4.1", "versions": {}}, "0.4.1"),
+        (None, "<= 0.4.x"),
+    ],
+)
+def test_load_refuses_artifact_without_format_version(
+    trained_trainer: ModelTrainer, tmp_path: Path, metadata: Any, saved_by: str
+) -> None:
+    """An artifact of engine <= 0.4.x is refused with a clear message."""
+    path = tmp_path / "old_model.pkl"
+    _write_old_artifact(path, trained_trainer, metadata)
+
+    with pytest.raises(TrainingError) as excinfo:
+        ModelTrainer.load(path)
+
+    message = str(excinfo.value)
+    assert f"saved by engine {saved_by} (artifact format 1)" in message
+    assert f"engine {configurable_automl_engine.__version__}" in message
+    assert "cannot load" in message
+    assert "retrain the model" in message
 
 
 # ══════════════════════════════════════════════════════════════════════════
