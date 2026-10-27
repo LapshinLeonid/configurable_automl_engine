@@ -755,7 +755,7 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
     with (
         caplog.at_level(logging.WARNING),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", bare_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", bare_scorer_factory),
     ):
         opt_res = optimize(
             "ridge",
@@ -1398,7 +1398,7 @@ def quality_patches():
     """Patches are active for the duration of the test: a deterministic model and scorer."""
     with (
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
     ):
         yield
 
@@ -1841,7 +1841,7 @@ def test_optimize_without_pruning_never_reports(toy_data):
         patch.object(
             hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
         ),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(
             hpo_evaluation.model_selection,
             "cross_val_score",
@@ -1872,7 +1872,7 @@ def test_optimize_disabled_pruning_uses_nop_pruner(toy_data):
         patch.object(
             hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
         ),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(
             hpo_runner.optuna, "create_study", wraps=hpo_runner.optuna.create_study
         ) as mock_create_study,
@@ -1899,7 +1899,7 @@ def test_optimize_enabled_pruning_uses_configured_pruner(toy_data):
         patch.object(
             hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
         ),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(
             hpo_runner.optuna, "create_study", wraps=hpo_runner.optuna.create_study
         ) as mock_create_study,
@@ -2063,7 +2063,7 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
     with (
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 360),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
     ):
@@ -2115,7 +2115,7 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
 
     with (
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner.optuna.trial.Trial, "report", fake_report),
     ):
         opt_res = optimize(
@@ -2160,7 +2160,7 @@ def test_optimize_auto_pruning_parity_with_cross_val():
 
     with (
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_evaluation, "iter_splits", spy_iter_splits),
     ):
         # Without pruning: evaluation via iter_splits(method='k_fold',
@@ -2233,7 +2233,7 @@ def test_optimize_auto_no_features_fallback_clamps_n_folds():
         return 0.9
 
     with (
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
     ):
@@ -2299,7 +2299,7 @@ def test_optimize_auto_kfold_low_confidence_k2():
     with (
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 16),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
     ):
@@ -2353,7 +2353,7 @@ def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
         return 0.9
 
     with (
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
         patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
     ):
@@ -2391,7 +2391,7 @@ def test_optimize_auto_loo_with_pruning_works():
 
     with (
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner.optuna.trial.Trial, "report", fake_report),
     ):
         opt_res = optimize(
@@ -2452,7 +2452,7 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 49500),
         patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_search_space, "_build_scorer", _quality_scorer_factory),
+        patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
     ):
         opt_res = optimize(
             "ridge",

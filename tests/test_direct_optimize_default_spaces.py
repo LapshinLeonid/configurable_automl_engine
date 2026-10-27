@@ -36,10 +36,14 @@ from configurable_automl_engine.hpo.search_space import (
     _canonical_distributions,
     build_search_space,
 )
-from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+from configurable_automl_engine.models import (
+    AVAILABLE_ALGORITHMS,
+    resolve_algorithm_name,
+)
 from configurable_automl_engine.training_engine import hpo_phases
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
+    FeatureSelectionMode,
     HPOPhaseCfg,
 )
 from configurable_automl_engine.tuner import HyperoptError, optimize
@@ -93,18 +97,20 @@ class _SpaceSpy:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.records: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-        original = hpo_runner.resolve_search_space
+        original = hpo_runner.plan_search_space
 
-        def _spy(runner: Any) -> None:
-            original(runner)
-            self.records.append(
-                (
-                    _canonical_distributions(runner) or {},
-                    list(getattr(runner, "complexity_guard_logs", []) or []),
-                )
+        def _spy(algo: str, y: Any, **kwargs: Any) -> Any:
+            plan = original(algo, y, **kwargs)
+            distributions = _canonical_distributions(
+                plan.space_fn,
+                fs_mode=FeatureSelectionMode.disabled,
+                is_isotonic=resolve_algorithm_name(algo) == "isotonic_regression",
+                algo=algo,
             )
+            self.records.append((distributions or {}, list(plan.guard_records)))
+            return plan
 
-        monkeypatch.setattr(hpo_runner, "resolve_search_space", _spy)
+        monkeypatch.setattr(hpo_runner, "plan_search_space", _spy)
 
 
 def _direct(
@@ -275,13 +281,14 @@ def test_direct_call_user_keys_default_to_override_keys(
 ) -> None:
     """Without ``user_hyperparameter_keys`` the override keys are the user ranges."""
     seen: list[Any] = []
-    original = hpo_runner.resolve_search_space
+    original = hpo_runner.plan_search_space
 
-    def _spy(runner: Any) -> None:
-        original(runner)
-        seen.append(runner.user_hyperparameter_keys)
+    def _spy(algo: str, y: Any, **kwargs: Any) -> Any:
+        plan = original(algo, y, **kwargs)
+        seen.append(plan.user_hyperparameter_keys)
+        return plan
 
-    monkeypatch.setattr(hpo_runner, "resolve_search_space", _spy)
+    monkeypatch.setattr(hpo_runner, "plan_search_space", _spy)
     X, y = _frame()
     _direct("random_forest", X, y, {"max_depth": [2, 5, "int"]}, False)
     _direct("random_forest", X, y, None, False)

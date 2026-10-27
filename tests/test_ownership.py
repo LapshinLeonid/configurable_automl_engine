@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 import configurable_automl_engine
 
 PACKAGE_ROOT = Path(configurable_automl_engine.__file__).parent
@@ -62,10 +64,6 @@ MUTATING_METHODS = frozenset(
 #: (module path, qualified function name, tracked class) of the functions
 #: that still mutate an object they do not own. May only shrink.
 ALLOWED_VIOLATIONS: set[tuple[str, str, str]] = {
-    ("hpo/pruning.py", "handle_pruning", "_OptimizeRunner"),
-    ("hpo/runner.py", "resolve_validation", "_OptimizeRunner"),
-    ("hpo/search_space.py", "resolve_search_space", "_OptimizeRunner"),
-    ("hpo/trial_pipeline.py", "build_trial_pipeline", "_OptimizeRunner"),
     ("trainer_data.py", "_apply_input_diagnostics", "ModelTrainer"),
     ("trainer_data.py", "_build_preprocessor", "ModelTrainer"),
     ("trainer_data.py", "_detect_feature_types", "ModelTrainer"),
@@ -320,3 +318,42 @@ def apply(ctx):
     ctx.working_set = {}
 '''
     assert _scan(component, "training_engine/component.py") == set()
+
+
+# ── the pure modules are decoupled from the owner classes ────────────────────
+
+#: Modules of pure functions: they must not import the owner classes, not
+#: even under ``TYPE_CHECKING``.
+PURE_MODULES = (
+    "hpo/search_space.py",
+    "hpo/evaluation.py",
+    "hpo/trial_pipeline.py",
+    "hpo/pruning.py",
+)
+
+FORBIDDEN_IMPORTS = {"_OptimizeRunner", "ModelTrainer"}
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.split(".")[-1] == "runner" and node.level >= 1:
+                names.add("hpo.runner")
+            if module.endswith("hpo.runner"):
+                names.add("hpo.runner")
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+@pytest.mark.parametrize("module", PURE_MODULES)
+def test_pure_modules_do_not_import_the_owner_classes(module: str) -> None:
+    """The pure modules take explicit inputs, not the owner objects."""
+    tree = ast.parse((PACKAGE_ROOT / module).read_text(encoding="utf-8"))
+    imported = _imported_names(tree)
+    assert not imported & (FORBIDDEN_IMPORTS | {"hpo.runner"}), (
+        f"{module} imports {sorted(imported & (FORBIDDEN_IMPORTS | {'hpo.runner'}))}"
+    )

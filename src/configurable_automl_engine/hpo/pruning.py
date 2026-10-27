@@ -1,24 +1,22 @@
 """Early stopping (pruning) configuration of the HPO runner.
 
 Normalizes the ``general.pruning`` settings and builds the Optuna pruner
-(median / hyperband). It may import ``hpo.types`` only and must not import
-``hpo.runner`` at runtime (type checking only) or
+(median / hyperband) with the pure ``plan_pruning``. It may import
+``hpo.types`` and ``hpo.plans`` only and must not import ``hpo.runner`` or
 ``configurable_automl_engine.tuner``.
 """
 
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import optuna
 
+from .plans import PruningPlan
 from .types import (
     HyperoptError,
 )
-
-if TYPE_CHECKING:
-    from .runner import _OptimizeRunner
 
 # The records keep the logger name of the pre-split ``tuner`` module: the
 # logger name is part of the observable behavior (handlers, filters and
@@ -117,19 +115,29 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
     )
 
 
-def handle_pruning(runner: _OptimizeRunner) -> None:
-    """Configure early stopping (pruning) for the selected validation (step 5).
+def plan_pruning(pruning: dict[str, Any] | None, method: str) -> PruningPlan:
+    """Configure early stopping (pruning) for the selected validation.
 
     Normalizes the early stopping configuration and builds an Optuna
     pruner. Pruning applies only when there are natural evaluation steps
     (k_fold / loo); for hold-out (train_test_split) there are no
     intermediate steps, so early stopping is not applied (documented
     behavior).
+
+    Args:
+        pruning (dict[str, Any] | None): The early stopping settings.
+        method (str): The effective validation method.
+
+    Returns:
+        PruningPlan: The pruner and whether it is applied.
+
+    Raises:
+        HyperoptError: If the settings are invalid.
     """
-    pruning_cfg = _normalize_pruning_config(runner.pruning)
-    runner.pruner = None
+    pruning_cfg = _normalize_pruning_config(pruning)
+    pruner: optuna.pruners.BasePruner | None = None
     if pruning_cfg is not None:
-        runner.pruner = _build_pruner(pruning_cfg)
+        pruner = _build_pruner(pruning_cfg)
         log.info(
             "Early stopping enabled: strategy=%s, min_steps=%d, "
             "n_startup_trials=%d, reduction_factor=%d",
@@ -138,12 +146,11 @@ def handle_pruning(runner: _OptimizeRunner) -> None:
             pruning_cfg["n_startup_trials"],
             pruning_cfg["reduction_factor"],
         )
-    runner.pruning_active = (
-        runner.pruner is not None and runner.val_method_eff != "train_test_split"
-    )
-    if runner.pruner is not None and not runner.pruning_active:
+    active = pruner is not None and method != "train_test_split"
+    if pruner is not None and not active:
         log.warning(
             "Early stopping is enabled, but validation strategy '%s' has no "
             "intermediate steps — pruning will not be applied.",
-            runner.val_method_eff,
+            method,
         )
+    return PruningPlan(pruner=pruner, active=active)

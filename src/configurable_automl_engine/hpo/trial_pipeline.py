@@ -1,13 +1,14 @@
 """Trial pipeline assembly of the HPO runner.
 
-Builds the preprocessor of an HPO phase (with the uninformative-feature
-cleaning and the post-preprocessing feature counts used by the complexity
-guard), resolves the per-trial feature selection decision and assembles the
-trial estimator in the order preprocessor → [isotonic adapter] → [feature
-selector] → [oversampler] → model, consistent with the final
-``ModelTrainer``. It may import ``hpo.types`` only and must not import
-``hpo.runner`` at runtime (type checking only) or
-``configurable_automl_engine.tuner``.
+Plans the preprocessor of an HPO phase (``plan_preprocessing``: the
+uninformative-feature cleaning and the post-preprocessing feature counts used
+by the complexity guard), resolves the per-trial feature selection decision
+and assembles the trial estimator (``assemble_estimator``) in the order
+preprocessor → [isotonic adapter] → [feature selector] → [oversampler] →
+model, consistent with the final ``ModelTrainer``. Every function is pure: it
+takes explicit inputs and returns its result. The module may import
+``hpo.types``, ``hpo.plans`` and ``hpo.request`` only and must not import
+``hpo.runner`` or ``configurable_automl_engine.tuner``.
 """
 
 from __future__ import annotations
@@ -40,11 +41,15 @@ from configurable_automl_engine.preprocessing_presets import (
 )
 from configurable_automl_engine.trainer import IsotonicDataTransformer
 from configurable_automl_engine.training_engine.config_parser import (
+    FeatureSelectionCfg,
     FeatureSelectionMode,
 )
 
+from .plans import PreprocessingPlan
+from .request import HpoRequest, OversamplingSettings
+
 if TYPE_CHECKING:
-    from .runner import _OptimizeRunner
+    from .request import EncodingSettings
 
 # The records keep the logger name of the pre-split ``tuner`` module: the
 # logger name is part of the observable behavior (handlers, filters and
@@ -80,131 +85,75 @@ def _missing_indicator_enabled(algorithm: str | None) -> bool:
         return True
 
 
-def build_trial_pipeline(runner: _OptimizeRunner) -> None:
-    """Build the preprocessor for the HPO phase (step 3).
+def plan_preprocessing(X: Any, request: HpoRequest) -> PreprocessingPlan:
+    """Plan the preprocessor of the HPO phase.
 
     A single point of preprocessor assembly: categories -> one-hot (or
     ordinal if encoding is set), numerics -> the preprocessing preset
     selected automatically for the algorithm. The same logic is used in
     the final training (trainer.ModelTrainer), so HPO and the final fit
-    stay consistent. The ready pipeline factory is ``assemble_estimator``.
+    stay consistent. The trial pipelines are assembled by
+    ``assemble_estimator``.
 
     Cleaning of uninformative features is applied here too — at the point
     where ``detect_feature_types`` runs, before the HPO folds and before
     the final training, so that both phases use a consistent feature set.
-    Cleaning runs only in the standalone branch (``runner.preprocessor is
+    Cleaning runs only in the standalone branch (``request.preprocessor is
     None``): if the user passed a ready preprocessor, it has already fixed
-    its feature set, and ``runner.X`` must not be silently changed. For
-    ``np.ndarray`` without column names, cleaning is skipped (a
-    limitation shared with ``detect_feature_types``); the list of dropped
-    columns is stored in ``runner.dropped_features_``.
+    its feature set, and ``X`` must not be changed. For ``np.ndarray``
+    without column names, cleaning is skipped (a limitation shared with
+    ``detect_feature_types``). The cleaned matrix is returned in the plan;
+    the input ``X`` is not mutated.
+
+    Args:
+        X (Any): The (validated) feature matrix.
+        request (HpoRequest): The run settings.
+
+    Returns:
+        PreprocessingPlan: The cleaned matrix, the column lists, the
+            preprocessor and the feature counts.
     """
-    runner.dropped_features_ = []
-    if runner.preprocessor is None and isinstance(runner.X, pd.DataFrame):
-        cleaned = _clean_uninformative_features(runner.X)
-        runner.dropped_features_ = [
-            col for col in runner.X.columns if col not in cleaned.columns
-        ]
-        if runner.dropped_features_:
-            runner.X = cleaned
-            # Explicitly passed column lists are reconciled with the
-            # cleaned feature set: otherwise build_preprocessor would fail
-            # on missing columns (Unknown feature name).
-            if runner.categorical_features is not None:
-                runner.categorical_features = [
-                    col
-                    for col in runner.categorical_features
-                    if col in runner.X.columns
-                ]
-            if runner.numerical_features is not None:
-                runner.numerical_features = [
-                    col for col in runner.numerical_features if col in runner.X.columns
-                ]
-    if runner.preprocessor is None:
+    algo = request.algo_name.lower()
+    categorical = _copy(request.categorical_features)
+    numerical = _copy(request.numerical_features)
+    preprocessor = request.preprocessor
+    dropped: list[str] = []
+    if preprocessor is None and isinstance(X, pd.DataFrame):
+        cleaned = _clean_uninformative_features(X)
+        dropped = [col for col in X.columns if col not in cleaned.columns]
+        if dropped:
+            X = cleaned
+            # Explicitly passed column lists are reconciled with the cleaned
+            # feature set: otherwise build_preprocessor would fail on missing
+            # columns (Unknown feature name).
+            if categorical is not None:
+                categorical = [col for col in categorical if col in X.columns]
+            if numerical is not None:
+                numerical = [col for col in numerical if col in X.columns]
+    if preprocessor is None:
         # Guard for an unknown algorithm: the preprocessor cannot be
         # assembled (``resolve_preprocessing_preset`` would raise). The
         # search-space resolution raises the proper ``HyperoptError``
         # afterwards; skipping the preprocessor here preserves the exact
         # error contract for unknown algorithms.
-        if resolve_algorithm_name(runner.algo) not in AVAILABLE_ALGORITHMS:
-            runner.n_features_eff = max(1, int(runner.X.shape[1]))
-            runner.n_features_size = max(1, int(runner.X.shape[1]))
-            return
-        encoding_strategy: EncodingStrategy = runner.encoding or "one_hot"
-        # Automatic preset selection + application of an explicit override.
-        # The preset is resolved once before training (performance) and
-        # logged for observability.
-        preset = resolve_preprocessing_preset(
-            runner.algo, runner.preprocessing_override
-        )
-        log.info(
-            "Resolved preprocessing preset for algorithm '%s': %s",
-            runner.algo,
-            preset,
-        )
-        if (
-            runner.categorical_features is not None
-            or runner.numerical_features is not None
-        ):
-            # Explicitly passed column lists (the main path from
-            # training_engine)
-            if isinstance(runner.X, pd.DataFrame):
-                runner.preprocessor = build_preprocessor(
-                    list(runner.X.columns),
-                    runner.categorical_features or [],
-                    runner.numerical_features or [],
-                    encoding=encoding_strategy,
-                    imputation_strategy=preset.imputation_strategy,
-                    scaling=preset.scaling,
-                    high_cardinality_threshold=runner.high_cardinality_threshold,
-                    high_cardinality_encoding=runner.high_cardinality_encoding,
-                    hashing_n_components=runner.hashing_n_components,
-                    target_encoding_smoothing=runner.target_encoding_smoothing,
-                    target_encoding_fallback=runner.target_encoding_fallback,
-                    random_state=runner.random_state,
-                    force_dense_output=requires_dense_input(runner.algo),
-                    add_indicator=_missing_indicator_enabled(runner.algo),
-                )
-            else:
-                log.warning(
-                    "categorical/numerical_features provided, but X is not a "
-                    "pandas.DataFrame — skipping automatic preprocessor."
-                )
-        elif isinstance(runner.X, pd.DataFrame):
-            # Autodetect categories (default behavior when called outside
-            # the engine). The preprocessor is built when ANY features
-            # (categorical or numerical) are present: this guarantees that
-            # on a purely numerical DataFrame the HPO phase applies
-            # scaling just like the final ModelTrainer.
-            cats, nums = detect_feature_types(runner.X)
-            # Store the detected lists so that the isotonic numeric block
-            # (``n_numeric_eff``) is determinable from the same feature
-            # set that built the preprocessor.
-            runner.categorical_features = cats
-            runner.numerical_features = nums
-            if cats or nums:
-                runner.preprocessor = build_preprocessor(
-                    list(runner.X.columns),
-                    cats,
-                    nums,
-                    encoding=encoding_strategy,
-                    imputation_strategy=preset.imputation_strategy,
-                    scaling=preset.scaling,
-                    high_cardinality_threshold=runner.high_cardinality_threshold,
-                    high_cardinality_encoding=runner.high_cardinality_encoding,
-                    hashing_n_components=runner.hashing_n_components,
-                    target_encoding_smoothing=runner.target_encoding_smoothing,
-                    target_encoding_fallback=runner.target_encoding_fallback,
-                    random_state=runner.random_state,
-                    force_dense_output=requires_dense_input(runner.algo),
-                    add_indicator=_missing_indicator_enabled(runner.algo),
-                )
-        else:
-            log.warning(
-                "X is not a pandas.DataFrame and categorical_features/"
-                "numerical_features were not provided — categorical columns "
-                "(if any) will be treated as numeric."
+        if resolve_algorithm_name(algo) not in AVAILABLE_ALGORITHMS:
+            n_columns = max(1, int(X.shape[1]))
+            return PreprocessingPlan(
+                X=X,
+                dropped_features=dropped,
+                categorical_features=categorical,
+                numerical_features=numerical,
+                preprocessor=None,
+                n_features_eff=n_columns,
+                n_numeric_eff=None,
+                n_features_size=n_columns,
+                isotonic_max_feature_index=_isotonic_max_feature_index(
+                    None, False, n_columns, int(X.shape[1])
+                ),
             )
+        preprocessor, categorical, numerical = _build_trial_preprocessor(
+            X, algo, request, categorical, numerical
+        )
 
     # The number of features the model actually sees after preprocessing
     # (including one-hot and missing-value indicators). Used by the
@@ -212,7 +161,14 @@ def build_trial_pipeline(runner: _OptimizeRunner) -> None:
     # the feature count (``max_features``, ``colsample_bytree``).
     # Computed deterministically once per phase — the same value in every
     # HPO phase and in the subprocesses.
-    runner.n_features_eff = _estimate_n_features_after_preprocessing(runner)
+    n_features_eff = _estimate_n_features_after_preprocessing(
+        X,
+        preprocessor=preprocessor,
+        categorical_features=categorical,
+        numerical_features=numerical,
+        encoding=request.encoding,
+        algo=algo,
+    )
     # The number of ORIGINAL columns (a categorical column counts as 1,
     # before the one-hot expansion). Used by the adaptive complexity
     # guard for the size-mode ratio ``n / p`` only. Without a preprocessor
@@ -221,36 +177,197 @@ def build_trial_pipeline(runner: _OptimizeRunner) -> None:
     # post-preprocessing count — this preserves the legacy behavior of
     # direct optimize() calls (no one-hot expansion, the guard sees the
     # same p it always did).
-    runner.n_features_size = max(
-        1,
-        int(runner.X.shape[1])
-        if runner.preprocessor is not None
-        else runner.n_features_eff,
+    n_features_size = max(
+        1, int(X.shape[1]) if preprocessor is not None else n_features_eff
     )
-    # The number of NUMERICAL features after preprocessing: the isotonic
-    # ``feature_index`` is restricted to this range (numeric columns only;
-    # one-hot dummies are not meaningful inputs). Deterministic — one
-    # column per numerical feature (isotonic disables missing indicators
-    # and never expands numeric columns).
-    if runner.preprocessor is not None and not (
-        runner.categorical_features or runner.numerical_features
-    ):
+    n_numeric_eff = _numeric_feature_count(X, preprocessor, categorical, numerical)
+    return PreprocessingPlan(
+        X=X,
+        dropped_features=dropped,
+        categorical_features=categorical,
+        numerical_features=numerical,
+        preprocessor=preprocessor,
+        n_features_eff=n_features_eff,
+        n_numeric_eff=n_numeric_eff,
+        n_features_size=n_features_size,
+        isotonic_max_feature_index=_isotonic_max_feature_index(
+            n_numeric_eff,
+            preprocessor is not None,
+            n_features_eff,
+            int(getattr(X, "shape", (0, 1))[1]),
+        ),
+    )
+
+
+def _copy(columns: list[str] | None) -> list[str] | None:
+    """A copy of a column list (``None`` stays ``None``)."""
+    return None if columns is None else list(columns)
+
+
+def _build_trial_preprocessor(
+    X: Any,
+    algo: str,
+    request: HpoRequest,
+    categorical: list[str] | None,
+    numerical: list[str] | None,
+) -> tuple[Any, list[str] | None, list[str] | None]:
+    """Build the trial preprocessor from the column lists or the detected types.
+
+    Args:
+        X (Any): The cleaned feature matrix.
+        algo (str): The lower-cased algorithm name.
+        request (HpoRequest): The run settings.
+        categorical (list[str] | None): The explicit categorical columns.
+        numerical (list[str] | None): The explicit numerical columns.
+
+    Returns:
+        tuple[Any, list[str] | None, list[str] | None]: The preprocessor (or
+            ``None``) and the column lists it was built from (the detected
+            lists when none were passed).
+    """
+    encoding_strategy: EncodingStrategy = request.encoding.encoding or "one_hot"
+    # Automatic preset selection + application of an explicit override.
+    # The preset is resolved once before training (performance) and
+    # logged for observability.
+    preset = resolve_preprocessing_preset(algo, request.preprocessing_override)
+    log.info(
+        "Resolved preprocessing preset for algorithm '%s': %s",
+        algo,
+        preset,
+    )
+    if categorical is not None or numerical is not None:
+        # Explicitly passed column lists (the main path from
+        # training_engine)
+        if not isinstance(X, pd.DataFrame):
+            log.warning(
+                "categorical/numerical_features provided, but X is not a "
+                "pandas.DataFrame — skipping automatic preprocessor."
+            )
+            return None, categorical, numerical
+        cats, nums = categorical or [], numerical or []
+    elif isinstance(X, pd.DataFrame):
+        # Autodetect categories (default behavior when called outside
+        # the engine). The preprocessor is built when ANY features
+        # (categorical or numerical) are present: this guarantees that
+        # on a purely numerical DataFrame the HPO phase applies
+        # scaling just like the final ModelTrainer. The detected lists are
+        # kept so that the isotonic numeric block (``n_numeric_eff``) is
+        # determinable from the same feature set that built the
+        # preprocessor.
+        cats, nums = detect_feature_types(X)
+        categorical, numerical = cats, nums
+        if not (cats or nums):
+            return None, categorical, numerical
+    else:
+        log.warning(
+            "X is not a pandas.DataFrame and categorical_features/"
+            "numerical_features were not provided — categorical columns "
+            "(if any) will be treated as numeric."
+        )
+        return None, categorical, numerical
+    encoding = request.encoding
+    preprocessor = build_preprocessor(
+        list(X.columns),
+        cats,
+        nums,
+        encoding=encoding_strategy,
+        imputation_strategy=preset.imputation_strategy,
+        scaling=preset.scaling,
+        high_cardinality_threshold=encoding.high_cardinality_threshold,
+        high_cardinality_encoding=encoding.high_cardinality_encoding,
+        hashing_n_components=encoding.hashing_n_components,
+        target_encoding_smoothing=encoding.target_encoding_smoothing,
+        target_encoding_fallback=encoding.target_encoding_fallback,
+        random_state=request.random_state,
+        force_dense_output=requires_dense_input(algo),
+        add_indicator=_missing_indicator_enabled(algo),
+    )
+    return preprocessor, categorical, numerical
+
+
+def _numeric_feature_count(
+    X: Any,
+    preprocessor: Any,
+    categorical: list[str] | None,
+    numerical: list[str] | None,
+) -> int | None:
+    """The number of NUMERICAL features after preprocessing.
+
+    The isotonic ``feature_index`` is restricted to this range (numeric
+    columns only; one-hot dummies are not meaningful inputs). Deterministic —
+    one column per numerical feature (isotonic disables missing indicators
+    and never expands numeric columns).
+
+    Args:
+        X (Any): The cleaned feature matrix.
+        preprocessor (Any): The trial preprocessor, or ``None``.
+        categorical (list[str] | None): The categorical columns.
+        numerical (list[str] | None): The numerical columns.
+
+    Returns:
+        int | None: The count, or ``None`` when not determinable.
+    """
+    if preprocessor is not None and not (categorical or numerical):
         # An external preprocessor without explicit column lists: the
         # numerical block is not determinable.
-        runner.n_numeric_eff = None
-    elif runner.preprocessor is None and not isinstance(runner.X, pd.DataFrame):
+        return None
+    if preprocessor is None and not isinstance(X, pd.DataFrame):
         # ndarray without column lists: no preprocessor is built and every
         # column is treated as numeric, so the feature_index is positional
         # over the whole matrix.
-        runner.n_numeric_eff = None
+        return None
+    nums = list(numerical or [])
+    if not nums and isinstance(X, pd.DataFrame):
+        _, nums = detect_feature_types(X)
+    return max(0, len(nums))
+
+
+def _isotonic_max_feature_index(
+    n_numeric_eff: int | None,
+    has_preprocessor: bool,
+    n_features_eff: int,
+    n_columns: int,
+) -> int:
+    """The upper bound of the isotonic ``feature_index`` search range.
+
+    Candidates are restricted to numerical features (one-hot dummies are
+    not meaningful inputs): the count comes from the numerical feature
+    list (``n_numeric_eff``). When the numeric block is not determinable
+    (``n_numeric_eff is None``):
+
+    * an already-built preprocessor — fall back to its estimated output
+      width (``n_features_eff``);
+    * no preprocessor (ndarray without column lists) — every column is
+      treated as numeric and the index is positional over the raw matrix.
+
+    Args:
+        n_numeric_eff (int | None): The number of numerical features after
+            preprocessing.
+        has_preprocessor (bool): Whether a preprocessor is built.
+        n_features_eff (int): The number of features after preprocessing.
+        n_columns (int): The number of columns of the raw matrix.
+
+    Returns:
+        int: The inclusive upper bound of the index range (>= 0).
+    """
+    if n_numeric_eff is not None:
+        n_features = int(n_numeric_eff)
+    elif has_preprocessor:
+        n_features = int(n_features_eff)
     else:
-        nums = list(runner.numerical_features or [])
-        if not nums and isinstance(runner.X, pd.DataFrame):
-            _, nums = detect_feature_types(runner.X)
-        runner.n_numeric_eff = max(0, len(nums))
+        n_features = int(n_columns)
+    return max(0, n_features - 1)
 
 
-def _estimate_n_features_after_preprocessing(runner: _OptimizeRunner) -> int:
+def _estimate_n_features_after_preprocessing(
+    X: Any,
+    *,
+    preprocessor: Any,
+    categorical_features: list[str] | None,
+    numerical_features: list[str] | None,
+    encoding: EncodingSettings,
+    algo: str,
+) -> int:
     """Estimate the number of features after the preprocessor.
 
     The number of columns the model actually sees: numerical features
@@ -274,41 +391,54 @@ def _estimate_n_features_after_preprocessing(runner: _OptimizeRunner) -> int:
     ``encoding`` strategy (matches
     :class:`~configurable_automl_engine.preprocessing.SplitCategoricalEncoder`).
 
+    Args:
+        X (Any): The cleaned feature matrix.
+        preprocessor (Any): The trial preprocessor, or ``None``.
+        categorical_features (list[str] | None): The categorical columns.
+        numerical_features (list[str] | None): The numerical columns.
+        encoding (EncodingSettings): The categorical encoding settings.
+        algo (str): The lower-cased algorithm name.
+
     Returns:
         int: The estimated feature count (>= 1).
     """
-    if runner.preprocessor is not None:
-        n_out = getattr(runner.preprocessor, "n_features_out_", None)
+    if preprocessor is not None:
+        n_out = getattr(preprocessor, "n_features_out_", None)
         if n_out is not None and int(n_out) >= 1:
             return int(n_out)
 
     # Explicitly passed column lists (the engine path) — the accurate
     # source; otherwise fall back to auto-detected types.
-    cats = list(runner.categorical_features or [])
-    nums = list(runner.numerical_features or [])
-    if not cats and not nums and isinstance(runner.X, pd.DataFrame):
-        cats, nums = detect_feature_types(runner.X)
+    cats = list(categorical_features or [])
+    nums = list(numerical_features or [])
+    if not cats and not nums and isinstance(X, pd.DataFrame):
+        cats, nums = detect_feature_types(X)
 
     return estimate_n_features_after_preprocessing(
-        runner.X,
+        X,
         categorical_features=cats,
         numerical_features=nums,
-        encoding=cast(EncodingStrategy, runner.encoding or "one_hot"),
-        high_cardinality_threshold=runner.high_cardinality_threshold,
-        high_cardinality_encoding=runner.high_cardinality_encoding,
-        hashing_n_components=int(getattr(runner, "hashing_n_components", 16)),
-        add_indicator=_missing_indicator_added(runner),
+        encoding=cast(EncodingStrategy, encoding.encoding or "one_hot"),
+        high_cardinality_threshold=encoding.high_cardinality_threshold,
+        high_cardinality_encoding=encoding.high_cardinality_encoding,
+        hashing_n_components=int(encoding.hashing_n_components),
+        add_indicator=_missing_indicator_added(algo),
     )
 
 
-def _missing_indicator_added(runner: _OptimizeRunner) -> bool:
+def _missing_indicator_added(algo: str) -> bool:
     """Whether missing-value indicators are added for numerical features."""
-    return _missing_indicator_enabled(runner.algo)
+    return _missing_indicator_enabled(algo)
 
 
 def assemble_estimator(
-    runner: _OptimizeRunner,
     model_impl: Any,
+    preprocessing: PreprocessingPlan,
+    *,
+    is_isotonic: bool,
+    fs_cfg: FeatureSelectionCfg,
+    oversampling: OversamplingSettings,
+    random_state: int | None,
     apply_fs: bool = False,
     feature_index: int | None = None,
 ) -> Any:
@@ -328,38 +458,50 @@ def assemble_estimator(
 
     Args:
         model_impl: The base regressor.
+        preprocessing: The preprocessing plan (the preprocessor and the
+            numerical block width).
+        is_isotonic: Whether the algorithm is ``isotonic_regression``.
+        fs_cfg: The feature selection configuration.
+        oversampling: The oversampling settings.
+        random_state: The run seed (the feature selector seed).
         apply_fs: Flag to enable the ``feature_selector`` step.
         feature_index: The ordinal feature index for the isotonic data
             adapter (``None`` — 0).
+
+    Returns:
+        Any: The trial pipeline (or the bare model when it has no other
+            step).
     """
     steps: list[tuple[str, Any]] = []
-    if runner.preprocessor is not None:
-        steps.append(("preprocessor", runner.preprocessor))
-    if runner.is_isotonic:
+    if preprocessing.preprocessor is not None:
+        steps.append(("preprocessor", preprocessing.preprocessor))
+    if is_isotonic:
         steps.append(
             (
                 "isotonic_selector",
                 IsotonicDataTransformer(
                     feature_index=feature_index if feature_index is not None else 0,
-                    n_numeric=runner.n_numeric_eff,
+                    n_numeric=preprocessing.n_numeric_eff,
                 ),
             )
         )
     # New step: feature selection is activated strictly between the
     # preprocessor and the oversampler.
     if apply_fs:
-        steps.append(("feature_selector", _fs_transformer_factory(runner)))
-    if runner.oversampling_config["active"]:
         steps.append(
-            ("sampler", DataOversampler(**runner.oversampling_config["params"]))
+            ("feature_selector", _fs_transformer_factory(fs_cfg, random_state))
         )
+    if oversampling.enable:
+        steps.append(("sampler", DataOversampler(**oversampling.sampler_params())))
     steps.append(("model", model_impl))
     if len(steps) == 1:
         return model_impl
     return ImbPipeline(steps)
 
 
-def _resolve_apply_fs(runner: _OptimizeRunner, trial: Trial) -> bool:
+def _resolve_apply_fs(
+    trial: Trial, fs_mode: FeatureSelectionMode, is_isotonic: bool
+) -> bool:
     """Determine whether feature selection is needed for the current trial.
 
     In 'auto' mode Optuna itself explores the decision space (whether
@@ -372,66 +514,79 @@ def _resolve_apply_fs(runner: _OptimizeRunner, trial: Trial) -> bool:
 
     Args:
         trial (Trial): The current Optuna trial object.
+        fs_mode (FeatureSelectionMode): The feature selection mode.
+        is_isotonic (bool): Whether the algorithm is ``isotonic_regression``.
     Returns:
         bool: Whether the ``feature_selector`` step should be added to the pipeline.
     """
-    if runner.fs_mode == FeatureSelectionMode.auto and not runner.is_isotonic:
+    if fs_mode == FeatureSelectionMode.auto and not is_isotonic:
         apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
-    elif runner.fs_mode == FeatureSelectionMode.always:
+    elif fs_mode == FeatureSelectionMode.always:
         apply_fs = True
     else:
         apply_fs = False
     # Isotonic regression requires exactly one feature and uses its own
     # IsotonicDataTransformer — selection is forcibly disabled (including
     # when 'always' or enqueued initial_params carried the flag).
-    if runner.is_isotonic:
+    if is_isotonic:
         apply_fs = False
     return apply_fs
 
 
 def _resolve_isotonic_feature_name(
-    runner: _OptimizeRunner, feature_index: int
+    preprocessor: Any,
+    n_numeric_eff: int | None,
+    X: Any,
+    y: Any,
+    feature_index: int,
 ) -> str | None:
     """Resolve the name of the numerical feature selected by isotonic.
 
     The preprocessor emits the categorical block first and the numerical
     block last, so the selected numerical feature occupies the absolute
     position ``(n_columns - n_numeric) + feature_index`` in the
-    preprocessed matrix. The name is resolved from the fitted
-    preprocessor's ``get_feature_names_out`` (the preprocessor is fitted
-    once on the full data); ``None`` is returned when the names are not
-    available (np.ndarray input without column lists) or the resolution
-    fails (the estimate does not match a fitted output — non-fatal).
+    preprocessed matrix. The name is resolved from the preprocessor's
+    ``get_feature_names_out`` (a clone is fitted once on the full data when
+    the preprocessor itself is not fitted; the preprocessor is not
+    modified); ``None`` is returned when the names are not available
+    (np.ndarray input without column lists) or the resolution fails (the
+    estimate does not match a fitted output — non-fatal).
 
     Args:
+        preprocessor: The trial preprocessor, or ``None``.
+        n_numeric_eff: The number of numerical features after preprocessing.
+        X: The feature matrix of the run.
+        y: The target vector of the run.
         feature_index: The numeric-block-relative index of the best trial.
 
     Returns:
         The resolved feature name, or ``None``.
     """
-    if runner.preprocessor is None or runner.n_numeric_eff is None:
+    if preprocessor is None or n_numeric_eff is None:
         return None
     try:
         # The preprocessor used by the trials is only ever fitted through
         # clones (per fold), so fit a copy once on the full data to obtain
         # the stable output names (the numerical block width and the
         # ``num__<col>`` names are data-independent for the numeric block).
-        names = runner.preprocessor.get_feature_names_out()
+        names = preprocessor.get_feature_names_out()
     except Exception:  # noqa: BLE001 — best-effort name resolution
         try:
-            probe = clone(runner.preprocessor).fit(runner.X, runner.y)
+            probe = clone(preprocessor).fit(X, y)
             names = probe.get_feature_names_out()
         except Exception:  # noqa: BLE001 — best-effort name resolution
             return None
     names_list = list(names)
     n_cols = len(names_list)
-    if n_cols < runner.n_numeric_eff or feature_index >= runner.n_numeric_eff:
+    if n_cols < n_numeric_eff or feature_index >= n_numeric_eff:
         return None
-    absolute = (n_cols - int(runner.n_numeric_eff)) + feature_index
+    absolute = (n_cols - int(n_numeric_eff)) + feature_index
     return str(names_list[absolute])
 
 
-def _fs_transformer_factory(runner: _OptimizeRunner) -> FeatureSelector:
+def _fs_transformer_factory(
+    fs_cfg: FeatureSelectionCfg, random_state: int | None
+) -> FeatureSelector:
     """Create a fresh feature selector instance for a pipeline step.
 
     Each call returns a new ``FeatureSelector`` with a deterministic
@@ -441,12 +596,19 @@ def _fs_transformer_factory(runner: _OptimizeRunner) -> FeatureSelector:
     selection still uses the fixed seed 42: otherwise each factory call
     would create a selector with a new random seed and selection would be
     irreproducible even with all other pipeline stages deterministic.
+
+    Args:
+        fs_cfg: The feature selection configuration.
+        random_state: The run seed.
+
+    Returns:
+        FeatureSelector: A new, unfitted selector.
     """
     return FeatureSelector(
-        method=runner.fs_cfg.method.value,
-        percentile=runner.fs_cfg.percentile,
-        min_features=runner.fs_cfg.min_features,
-        variance_threshold=runner.fs_cfg.variance_threshold,
-        n_estimators=runner.fs_cfg.n_estimators,
-        random_state=runner.random_state if runner.random_state is not None else 42,
+        method=fs_cfg.method.value,
+        percentile=fs_cfg.percentile,
+        min_features=fs_cfg.min_features,
+        variance_threshold=fs_cfg.variance_threshold,
+        n_estimators=fs_cfg.n_estimators,
+        random_state=random_state if random_state is not None else 42,
     )

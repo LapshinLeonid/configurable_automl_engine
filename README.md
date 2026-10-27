@@ -154,11 +154,13 @@ If you contribute, please ensure your code:
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   └── validation_utils.py         # Low-level data validation and effective train size
 │       ├── hpo                             # Hyperparameter optimization engine behind tuner.optimize
-│       │   ├── evaluation.py               # Trial scoring: hold-out, fold-wise with pruning reports, pooled OOF
-│       │   ├── pruning.py                  # Early stopping (pruning) configuration
-│       │   ├── runner.py                   # _OptimizeRunner: run state and loop, circuit breaker, best trial
-│       │   ├── search_space.py             # Search spaces, complexity guard, boundary warnings
-│       │   ├── trial_pipeline.py           # Trial preprocessor and pipeline assembly
+│       │   ├── evaluation.py               # Trial scoring (score_trial): hold-out, fold-wise with pruning reports, pooled OOF
+│       │   ├── plans.py                    # Frozen plans returned by the pure setup steps (validation, preprocessing, ...)
+│       │   ├── pruning.py                  # Early stopping (pruning) plan
+│       │   ├── request.py                  # HpoRequest: the settings of one HPO run
+│       │   ├── runner.py                   # _OptimizeRunner: run loop, circuit breaker, best trial; plan_validation
+│       │   ├── search_space.py             # Search space plan, complexity guard, boundary warnings
+│       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── training_engine                 # Core orchestration and execution logic
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report

@@ -9,6 +9,7 @@ Parameterized tests for configurable_automl_engine.tuner.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +32,7 @@ from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.hpo import runner as hpo_runner
 from configurable_automl_engine.hpo import search_space as hpo_search_space
+from configurable_automl_engine.hpo.trial_pipeline import plan_preprocessing
 from configurable_automl_engine.hpo.request import (
     EncodingSettings,
     HpoRequest,
@@ -615,7 +617,7 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
         with (
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
@@ -650,7 +652,7 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
         with (
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
@@ -918,7 +920,7 @@ class TestTunerObjective:
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.search_space._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner.np.isfinite") as mock_finite,
@@ -962,7 +964,7 @@ class TestTunerObjective:
                 return_value=np.nan,
             ),
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -988,7 +990,7 @@ class TestTunerObjective:
                 "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1014,7 +1016,7 @@ class TestTunerObjective:
                 "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1048,7 +1050,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.hpo.evaluation.iter_splits") as mock_iter_splits,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.search_space._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
@@ -1072,9 +1074,11 @@ class TestTunerObjective:
 
             mock_iter_splits.side_effect = fresh_iter
 
-            # Model: fit always fails with RuntimeError
+            # Model: fit always fails with RuntimeError. The trial pipeline
+            # is cloned before fitting: the clone is the scripted mock itself.
             mock_model = MagicMock()
             mock_model.fit.side_effect = RuntimeError("fatal failure")
+            mock_model.__sklearn_clone__ = lambda: mock_model
             mock_create.return_value = mock_model
             mock_scorer_factory.return_value = MagicMock()
 
@@ -1093,7 +1097,7 @@ class TestTunerObjective:
             patch("configurable_automl_engine.hpo.evaluation.iter_splits") as mock_iter_splits,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.search_space._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
@@ -1125,6 +1129,9 @@ class TestTunerObjective:
                 None,  # trial 5 success → _objective returns score
                 None,  # final best_model.fit(X, y)
             ]
+            # The trial pipeline is cloned before fitting: the clone is the
+            # scripted mock itself.
+            mock_model.__sklearn_clone__ = lambda: mock_model
             mock_create.return_value = mock_model
 
             # The scorer returns 0.85 on a successful call
@@ -1151,7 +1158,7 @@ class TestTunerObjective:
                 "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1188,7 +1195,7 @@ class TestTunerObjective:
                 "configurable_automl_engine.hpo.evaluation._evaluate_with_intermediate_reports"
             ) as mock_eval,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1239,7 +1246,7 @@ class TestTunerObjective:
                 "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1575,7 +1582,7 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
     ):
@@ -1969,7 +1976,7 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
@@ -2158,7 +2165,7 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
@@ -2297,7 +2304,7 @@ def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
         ),
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
     ):
         with pytest.raises(MemoryError, match="model constructor boom"):
             optimize(
@@ -2327,7 +2334,7 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
             "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score"
         ) as mock_cv,
         patch("configurable_automl_engine.hpo.runner.create_model"),
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -2434,28 +2441,23 @@ def test_optimize_numpy_input_skips_cleaning():
 def test_runner_dropped_features_recorded():
     """_OptimizeRunner records the list of dropped columns for diagnostics."""
     X, y = _tuner_garbage_data()
-    runner = hpo_runner._OptimizeRunner(
-        X,
-        y,
-        HpoRequest(
-            algo_name='ridge',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
-        ),
+    request = HpoRequest(
+        algo_name='ridge',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X, request)
 
-    assert set(runner.dropped_features_) == {
+    assert set(plan.dropped_features) == {
         "const_num",
         "all_nan",
         "almost_empty",
         "const_cat",
     }
-    assert set(runner.X.columns) == {"x1", "x2"}
-    assert runner.preprocessor is not None
+    assert set(plan.X.columns) == {"x1", "x2"}
+    assert plan.preprocessor is not None
 
 
 def test_runner_n_features_size_uses_original_columns():
@@ -2475,24 +2477,19 @@ def test_runner_n_features_size_uses_original_columns():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hpo_runner._OptimizeRunner(
-        X,
-        y,
-        HpoRequest(
-            algo_name='random_forest',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
-        ),
+    request = HpoRequest(
+        algo_name='random_forest',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X, request)
 
     # 5 original columns (4 categorical + 1 numerical).
-    assert runner.n_features_size == 5
+    assert plan.n_features_size == 5
     # After one-hot: 4 categorical * 10 categories + 1 numerical = 41.
-    assert runner.n_features_eff == 41
+    assert plan.n_features_eff == 41
 
 
 def test_runner_n_features_eff_ignores_missing_categories():
@@ -2513,22 +2510,17 @@ def test_runner_n_features_eff_ignores_missing_categories():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hpo_runner._OptimizeRunner(
-        X,
-        y,
-        HpoRequest(
-            algo_name='random_forest',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
-        ),
+    request = HpoRequest(
+        algo_name='random_forest',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X, request)
 
     # c0: 3 categories, c1: 3 non-missing categories + 1 numerical = 7.
-    assert runner.n_features_eff == 7
+    assert plan.n_features_eff == 7
 
 
 def test_runner_n_features_eff_respects_high_cardinality_split():
@@ -2553,28 +2545,30 @@ def test_runner_n_features_eff_respects_high_cardinality_split():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hpo_runner._OptimizeRunner(
-        X,
-        y,
-        HpoRequest(
-            algo_name='random_forest',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=10),
-        ),
+    request = HpoRequest(
+        algo_name='random_forest',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=10),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X, request)
 
     # low one-hot (3) + high frequency (1) + numerical (1) = 5.
-    assert runner.n_features_eff == 5
+    assert plan.n_features_eff == 5
 
     # Threshold above all cardinalities: both columns are one-hot.
-    runner.high_cardinality_threshold = 10_000
-    runner.build_trial_pipeline()
+    wide = plan_preprocessing(
+        X,
+        dataclasses.replace(
+            request,
+            encoding=dataclasses.replace(
+                request.encoding, high_cardinality_threshold=10_000
+            ),
+        ),
+    )
     # low (3) + high (60) + numerical (1) = 64.
-    assert runner.n_features_eff == 64
+    assert wide.n_features_eff == 64
 
 
 def test_runner_n_features_size_aligned_without_preprocessor():
@@ -2591,25 +2585,20 @@ def test_runner_n_features_size_aligned_without_preprocessor():
     X_arr = rng.normal(size=(100, 8))
     y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
 
-    runner = hpo_runner._OptimizeRunner(
-        X_arr,
-        y_arr,
-        HpoRequest(
-            algo_name='random_forest',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
-        ),
+    request = HpoRequest(
+        algo_name='random_forest',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X_arr, request)
 
     # No preprocessor was assembled for an ndarray without column lists.
-    assert runner.preprocessor is None
+    assert plan.preprocessor is None
     # Both counts coincide: the guard sees the same p it always did.
-    assert runner.n_features_eff == 1
-    assert runner.n_features_size == runner.n_features_eff
+    assert plan.n_features_eff == 1
+    assert plan.n_features_size == plan.n_features_eff
 
 
 def test_optimize_external_preprocessor_skips_cleaning():
@@ -2623,23 +2612,18 @@ def test_optimize_external_preprocessor_skips_cleaning():
         transformers=[("num", StandardScaler(), ["x1", "x2"])]
     )
 
-    runner = hpo_runner._OptimizeRunner(
-        X,
-        y,
-        HpoRequest(
-            algo_name='ridge',
-            val_method='train_test_split',
-            n_trials=2,
-            random_state=0,
-            preprocessor=external,
-            encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
-        ),
+    request = HpoRequest(
+        algo_name='ridge',
+        val_method='train_test_split',
+        n_trials=2,
+        random_state=0,
+        preprocessor=external,
+        encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
     )
-    runner.resolve_validation()
-    runner.build_trial_pipeline()
+    plan = plan_preprocessing(X, request)
 
-    assert runner.dropped_features_ == []
-    assert set(runner.X.columns) == {
+    assert plan.dropped_features == []
+    assert set(plan.X.columns) == {
         "x1",
         "x2",
         "const_num",
@@ -2647,7 +2631,7 @@ def test_optimize_external_preprocessor_skips_cleaning():
         "almost_empty",
         "const_cat",
     }
-    assert runner.preprocessor is external
+    assert plan.preprocessor is external
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2765,7 +2749,7 @@ def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
     assert first is not None
 
     with (
-        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
