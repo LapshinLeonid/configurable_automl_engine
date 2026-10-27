@@ -101,8 +101,9 @@ __all__ = [
 #: the select step, NOT a configuration field: the ``general.sanity_gate.mode``
 #: field was removed, and the strategy is set explicitly in action='select'
 #: phases. The definition remains here (not exported in ``__all__``) because
-#: the robust-selection mechanism in ``training_engine/component.py`` imports
-#: this type directly; it is not used in the config schema.
+#: the robust-selection mechanism (``training_engine/state.py`` and
+#: ``training_engine/finalists.py``) imports this type directly; it is not
+#: used in the config schema.
 SanityGateMode = Literal["off", "active"]
 
 #: Shape of the finalist-pool corridor: multiplicative / additive / auto

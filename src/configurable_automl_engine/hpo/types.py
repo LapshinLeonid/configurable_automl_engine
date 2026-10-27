@@ -129,7 +129,7 @@ class OptimizeResult:
 # 1. Inside `_objective`: a non-finite trial avg_score is replaced with this
 #    constant (the trial completes, but with a deliberately worst score).
 # 2. On the orchestrator side: the `valid_results` filter in
-#    `training_engine/component.py` drops results whose score belongs to the
+#    `training_engine/component.py` (``_valid_phase_results``) drops results whose score belongs to the
 #    worst-score sentinel class — any score at or below WORST_SCORE_THRESHOLD —
 #    treating the algorithm as failed.
 HPO_WORST_SCORE = -3.4028235e38

@@ -407,7 +407,7 @@ def _check_training_data(X_prepared: Any, y_s: Any) -> None:
         raise TrainingError("Insufficient records for training")
 
     # Target guards — the same checks as at the pipeline entry point
-    # (prepare_dataset / tuner._validate_data): a non-numeric or
+    # (prepare_dataset / hpo.runner._validate_data): a non-numeric or
     # non-finite y would otherwise fail late (inside the validation
     # splits) with an unclear sklearn error, and a constant y makes
     # training meaningless (every model trivially reports a perfect

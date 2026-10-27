@@ -563,7 +563,7 @@ class ModelTrainer:
         self.feature_selection_cfg: FeatureSelectionCfg = (
             _validate_feature_selection_cfg(feature_selection_cfg)
         )
-        # Explicit flag from HPO/component.py (takes precedence over the config);
+        # Explicit flag from HPO via training_engine.artifact (takes precedence over the config);
         # None — the decision is made in fit() based on the configuration mode.
         self.feature_selection_active: bool | None = _validate_feature_selection_active(
             feature_selection_active

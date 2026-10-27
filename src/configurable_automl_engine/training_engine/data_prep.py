@@ -222,7 +222,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     datetime_expansion = datetime_expansion_map(X_raw, generated)
     check_target_constant(y)
     # Uninformative-feature cleaning at the same point where it runs in
-    # ModelTrainer.fit / tuner.build_trial_pipeline: fully empty and strictly
+    # ModelTrainer.fit / hpo.trial_pipeline.build_trial_pipeline: fully empty and strictly
     # constant columns (including datetime-derived components such as
     # ts_year that are constant on the sample) are removed BEFORE type
     # detection, so the column lists in PreparedData match the feature set

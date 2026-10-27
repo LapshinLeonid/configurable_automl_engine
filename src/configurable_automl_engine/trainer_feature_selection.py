@@ -90,7 +90,7 @@ def _resolve_feature_selection_active(
     Priority (strictly in this order):
     1. IsotonicRegression — selection is forcibly disabled (the algorithm
        is strictly univariate and uses its own ``IsotonicDataTransformer``);
-    2. the explicit ``feature_selection_active`` flag (from HPO/component.py)
+    2. the explicit ``feature_selection_active`` flag (from HPO via training_engine.artifact)
        takes precedence over the configuration;
     3. the mode from ``feature_selection_cfg.mode``: ``always`` → True,
        ``disabled`` → False, ``auto`` → Standalone Auto-Check.
@@ -117,7 +117,7 @@ def _resolve_feature_selection_active(
         )
         return False
 
-    # 2. The explicit flag from HPO/component.py takes precedence over the config.
+    # 2. The explicit flag from HPO (training_engine.artifact) takes precedence over the config.
     explicit_flag = getattr(trainer, "feature_selection_active", None)
     if explicit_flag is not None:
         return bool(explicit_flag)

@@ -724,7 +724,7 @@ def _prepare_search_space(
         space.update(remap_legacy_param_names(algo_name, user_overrides))
 
     # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
-    # y_train spread at runtime (tuner.resolve_search_space), so the
+    # y_train spread at runtime (hpo.search_space.resolve_search_space), so the
     # default blind range [1e-3, 1.0] from DEFAULT_SPACES is dropped. If the
     # user set epsilon explicitly — it is already in space
     # (space.update(user_overrides) above), and the user's priority is
