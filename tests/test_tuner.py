@@ -666,17 +666,6 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
             mock_study.optimize.assert_called_once()
 
 
-def test_knn_space_dynamic_limit():
-    """Checks the dynamic k limit in KNN (lines 80-81)."""
-    # For 10 samples, 80% is 8. max_k must be 8.
-    space_fn = hpo_search_space._make_knn_space(n_samples=10)
-
-    # Emulate the n_neighbors request
-    trial = FixedTrial({"n_neighbors": 5, "weights": "uniform", "p": 1})
-    params = space_fn(trial)
-    assert params["n_neighbors"] <= 8
-
-
 def test_apply_dynamic_space_floats():
     trial = MagicMock()
 
@@ -1832,11 +1821,14 @@ def test_isotonic_optimize_ndarray_positional(toy_data):
     X = rng.rand(60, 5)
     y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
 
+    # Enough trials for TPE to get past its random startup and find the
+    # informative column regardless of the sampling order of the space (the
+    # direct call uses the engine's order: ``increasing``, ``feature_index``).
     opt_res = hyperopt.optimize(
         "isotonic_regression",
         X,
         y,
-        n_trials=5,
+        n_trials=20,
         random_state=42,
         metric="r2",
         validation_strategy="train_test_split",

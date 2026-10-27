@@ -332,7 +332,12 @@ class _OptimizeRunner:
         # Names of parameters set explicitly by the user
         # (``algo.hyperparameters``); the complexity guard treats them as
         # "user ranges" (intersected, with ``user_range_policy`` on conflict).
-        self.user_hyperparameter_keys = list(user_hyperparameter_keys or [])
+        # ``None`` (a direct call that did not pass the list) — resolved in
+        # ``resolve_search_space`` to the keys of the dict override; the
+        # training engine always passes the list (an empty one included).
+        self.user_hyperparameter_keys: list[str] | None = (
+            None if user_hyperparameter_keys is None else list(user_hyperparameter_keys)
+        )
         # Restrict the search to the user-listed parameters only: the space
         # dict passed via ``space_overrides`` is used as-is (NO adaptive SVR
         # epsilon injection, NO DEFAULT_SPACES fallback). Mirrors

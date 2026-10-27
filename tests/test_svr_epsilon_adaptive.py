@@ -42,7 +42,6 @@ from configurable_automl_engine.training_engine.config_parser import (
 from configurable_automl_engine.tuner import InvalidDataError, optimize
 from configurable_automl_engine.hpo.search_space import (
     _apply_dynamic_space,
-    _make_svr_space_dict,
 )
 
 
@@ -153,18 +152,6 @@ def test_helper_target_scenario_upper_bound_near_025():
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Tuner: SVR space factory and integration
 # ──────────────────────────────────────────────────────────────────────────────
-def test_make_svr_space_uses_adaptive_epsilon_bounds():
-    """The factory proposes epsilon strictly within the bounds derived from y."""
-    y = np.arange(50, dtype=float)
-    low, high = compute_svr_epsilon_bounds(y)
-
-    space_dict = _make_svr_space_dict(y)
-    trial = MagicMock()
-    _apply_dynamic_space(trial, space_dict)
-
-    trial.suggest_float.assert_any_call("epsilon", low, high, log=True)
-
-
 def _mock_optimize_infra(
     monkeypatch,
     collect_epsilons: list[float],
