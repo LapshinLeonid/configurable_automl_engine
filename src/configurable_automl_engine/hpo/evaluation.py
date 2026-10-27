@@ -38,10 +38,7 @@ from .types import (
     InvalidDataError,
 )
 
-# The records keep the logger name of the pre-split ``tuner`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-log = _logging.getLogger("configurable_automl_engine.tuner")
+log = _logging.getLogger(__name__)
 
 
 def _build_scorer(name: str) -> Any:

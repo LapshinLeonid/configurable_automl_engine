@@ -27,11 +27,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     compute_svr_epsilon_bounds,
 )
 from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    PreparedData,
     execute_phases,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.state import PhaseResult, PreparedData
 from configurable_automl_engine.hpo.search_space import build_search_space
 from configurable_automl_engine.training_engine.config_parser import (
     Config,

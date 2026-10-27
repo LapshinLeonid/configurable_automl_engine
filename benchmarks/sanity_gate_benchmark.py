@@ -62,12 +62,9 @@ import numpy as np
 import pandas as pd
 
 import configurable_automl_engine.training_engine.hpo_phases as _hpo_phases
-from configurable_automl_engine.training_engine.component import (
-    PhaseContext,
-    PhaseResult,
-    execute_phases,
-    prepare_dataset,
-)
+from configurable_automl_engine.training_engine.component import execute_phases
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
+from configurable_automl_engine.training_engine.state import PhaseContext, PhaseResult
 from configurable_automl_engine.training_engine.config_parser import Config
 
 from tests.data_factory import (

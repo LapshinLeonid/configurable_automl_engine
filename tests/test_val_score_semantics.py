@@ -37,7 +37,8 @@ from configurable_automl_engine.trainer import (
     ModelTrainer,
     TrainingError,
 )
-from configurable_automl_engine.training_engine.component import PhaseResult, train_best_model
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.metrics import (
     get_scorer_object,
     is_non_additive_metric,

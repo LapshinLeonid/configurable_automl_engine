@@ -44,10 +44,7 @@ from .state import (
     SelectOutcome,
 )
 
-# The records keep the logger name of the pre-split ``component`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-_LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
+_LOG = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #

@@ -34,15 +34,16 @@ import numpy as np
 from sklearn.datasets import load_diabetes, make_friedman3, make_regression
 
 import configurable_automl_engine.training_engine.component as component
+import configurable_automl_engine.training_engine.data_prep as data_prep_mod
 import configurable_automl_engine.training_engine.finalists as finalists_mod
 import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
     execute_phases,
-    prepare_dataset,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.state import _HpoPhaseSpec
@@ -1028,7 +1029,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
                     "configurable_automl_engine.training_engine.artifact._fit_and_save"
                 )
             )
-            with caplog.at_level(logging.DEBUG, logger=component.__name__):
+            with caplog.at_level(logging.DEBUG, logger=data_prep_mod.__name__):
                 train_best_model(
                     config=base_config_dict, df=sample_df, target="target"
                 )
@@ -1042,7 +1043,7 @@ def test_train_best_model_debug_logs_formatted_no_logging_error(
     debug_msgs = [
         record.getMessage()
         for record in caplog.records
-        if record.levelno == logging.DEBUG and record.name == component.__name__
+        if record.levelno == logging.DEBUG and record.name == data_prep_mod.__name__
     ]
     assert any(
         msg.startswith("CONFIG TYPE:") and "<class 'dict'>" in msg

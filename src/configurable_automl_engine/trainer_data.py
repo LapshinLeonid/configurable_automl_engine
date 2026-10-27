@@ -43,8 +43,7 @@ from .models import requires_dense_input
 from .trainer_errors import TrainingError
 from .trainer_state import PreparedFeatures, TrainerPreprocessor, TrainingData
 
-# The records keep the logger name of ``ModelTrainer`` (its ``logger``).
-_LOG = logging.getLogger("configurable_automl_engine.trainer")
+_LOG = logging.getLogger(__name__)
 
 
 def extract_feature_names(X: Any) -> list[str] | None:

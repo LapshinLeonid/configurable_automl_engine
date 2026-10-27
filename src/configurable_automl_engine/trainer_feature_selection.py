@@ -33,8 +33,7 @@ from .models import resolve_algorithm_name
 from .trainer_errors import TrainingError
 from .trainer_scoring import StepsFactory
 
-# The records keep the logger name of ``ModelTrainer`` (its ``logger``).
-_LOG = logging.getLogger("configurable_automl_engine.trainer")
+_LOG = logging.getLogger(__name__)
 
 #: Minimum number of rows for the standalone feature selection check (mode
 #: ``auto``). The threshold ensures that both parts of the hold-out split (80/20)

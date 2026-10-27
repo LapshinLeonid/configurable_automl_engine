@@ -3,7 +3,8 @@
 The exceptions (``HyperoptError`` and its subclasses), the self-documenting
 phase result ``OptimizeResult`` and the worst-score sentinel constants
 (``HPO_WORST_SCORE`` / ``WORST_SCORE_THRESHOLD``). They are re-exported by
-``configurable_automl_engine.tuner``, their documented import path. The
+``configurable_automl_engine.tuner``, their documented import path (the
+classes are defined here, so ``__module__`` names this module). The
 module holds definitions only and must not import any other module of the
 ``hpo`` package.
 """
@@ -21,28 +22,13 @@ from optuna.trial import FrozenTrial
 class HyperoptError(Exception):
     """Base error of the hyperparameter optimisation module."""
 
-    # The documented identity: the class is imported as
-    # ``configurable_automl_engine.tuner.HyperoptError`` (re-exported there), and
-    # tracebacks and pickles keep that path.
-    __module__ = "configurable_automl_engine.tuner"
-
 
 class InvalidAlgorithmError(HyperoptError):
     """Error raised when an algorithm is not found or is marked as unused."""
 
-    # The documented identity: the class is imported as
-    # ``configurable_automl_engine.tuner.InvalidAlgorithmError`` (re-exported there), and
-    # tracebacks and pickles keep that path.
-    __module__ = "configurable_automl_engine.tuner"
-
 
 class InvalidDataError(HyperoptError):
     """Error raised when invalid X or y data structures are passed."""
-
-    # The documented identity: the class is imported as
-    # ``configurable_automl_engine.tuner.InvalidDataError`` (re-exported there), and
-    # tracebacks and pickles keep that path.
-    __module__ = "configurable_automl_engine.tuner"
 
 
 class HPOHistoryError(HyperoptError):
@@ -57,11 +43,6 @@ class HPOHistoryError(HyperoptError):
       validated, and silently dropping the history would degrade refine to a
       cold run (the exact bug this feature fixes).
     """
-
-    # The documented identity: the class is imported as
-    # ``configurable_automl_engine.tuner.HPOHistoryError`` (re-exported there), and
-    # tracebacks and pickles keep that path.
-    __module__ = "configurable_automl_engine.tuner"
 
 
 @dataclass

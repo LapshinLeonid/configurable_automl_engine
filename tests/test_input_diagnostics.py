@@ -25,7 +25,7 @@ from configurable_automl_engine.common.validation_utils import (
 )
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 from configurable_automl_engine.training_engine import train_best_model
-from configurable_automl_engine.training_engine.component import prepare_dataset
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
 from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -919,7 +919,7 @@ def test_train_best_model_holdout_artifact_predicts_on_raw_datetime(tmp_path):
 # ──────────────────────────────────────────────────────────────────────────────
 def test_hpo_worker_forwards_diagnostics_policies():
     """The HPO request carries the configured policies to the HPO run."""
-    from configurable_automl_engine.hpo.request import InputPolicies
+    from configurable_automl_engine.common.settings import InputPolicies
     from configurable_automl_engine.training_engine.hpo_phases import (
         _hpo_phase_worker,
     )

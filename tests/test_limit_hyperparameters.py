@@ -28,10 +28,8 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     DEFAULT_SPACES,
     SearchSpaceEntry,
 )
-from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    train_best_model,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.hpo.search_space import build_search_space
 from configurable_automl_engine.training_engine.hpo_phases import _hpo_phase_worker
 from configurable_automl_engine.training_engine.config_parser import AlgoCfg

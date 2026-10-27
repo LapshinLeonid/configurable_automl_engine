@@ -36,10 +36,7 @@ from .metrics import is_error_metric, oof_rmse, to_user_value, user_direction
 from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .state import FinalistCandidate, PhaseResult, PreparedData, RobustWinnerResult
 
-# The records keep the logger name of the pre-split ``component`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-_LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
+_LOG = logging.getLogger(__name__)
 
 
 def is_valid_winner_score(score: Any) -> bool:

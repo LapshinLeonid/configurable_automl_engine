@@ -1350,7 +1350,7 @@ def test_metric_calculation_debug_log_formats_val_score(caplog):
 
     model_trainer = ModelTrainer(algorithm="ridge")
 
-    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine"):
         model_trainer.fit(X, y)
 
     # The placeholder literal must not appear in the log
@@ -1459,7 +1459,7 @@ def test_trainer_logs_resolved_preset(caplog):
     """The selected preset is recorded in the logs."""
     import logging as _logging
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(algorithm="random_forest", hyperparams={"n_estimators": 5}).fit(
             X, y
         )
@@ -1487,7 +1487,7 @@ def test_trainer_logs_preprocessed_matrix_dimensions(caplog):
     )
     y = df["num"] * 2.0 + rng.normal(0, 0.1, 60)
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(df, y)
 
     assert re.search(
@@ -1508,7 +1508,7 @@ def test_trainer_logs_preprocessed_matrix_sparse_for_high_cardinality(caplog):
     df = pd.DataFrame({"id": [f"id_{i}" for i in range(n)], "num": rng.normal(size=n)})
     y = df["num"] * 2.0 + rng.normal(0, 0.1, n)
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(
             algorithm="ridge",
             hyperparams={"alpha": 0.1},
@@ -1832,7 +1832,7 @@ def test_feature_selection_auto_all_important_disables():
 def test_feature_selection_auto_logs_info_message(caplog):
     """INFO log of the standalone check strictly in the given format."""
     X, y = _fs_noisy_dataset()
-    with caplog.at_level(logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(
             algorithm="nearest_neighbors_regression",
             hyperparams={"n_neighbors": 20},
@@ -1964,7 +1964,7 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=exploding_scorer,
         ),
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
     ):
         trainer.fit(X, y)
 
@@ -1986,7 +1986,7 @@ def test_feature_selection_isotonic_forced_disabled(caplog):
     X = pd.DataFrame({"f": f})
     y = pd.Series(f**2)
 
-    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="isotonic_regression", feature_selection_cfg={"mode": "always"}
         ).fit(X, y)
@@ -2353,7 +2353,7 @@ def test_feature_selection_auto_tiny_dataset_warning(caplog):
     X = pd.DataFrame(rng.normal(size=(8, 3)))
     y = pd.Series(X[0] * 2.0 + rng.normal(0, 0.1, 8))
 
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge", feature_selection_cfg={"mode": "auto"}
         ).fit(X, y)
@@ -2548,7 +2548,7 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=flaky_scorer,
         ),
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
     ):
         trainer.fit(X, y)
 

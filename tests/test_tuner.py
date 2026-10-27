@@ -33,11 +33,11 @@ from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.hpo import runner as hpo_runner
 from configurable_automl_engine.hpo import search_space as hpo_search_space
 from configurable_automl_engine.hpo.trial_pipeline import plan_preprocessing
-from configurable_automl_engine.hpo.request import (
+from configurable_automl_engine.common.settings import (
     EncodingSettings,
-    HpoRequest,
     OversamplingSettings,
 )
+from configurable_automl_engine.hpo.request import HpoRequest
 from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     SearchSpaceEntry,
@@ -1464,7 +1464,7 @@ def test_optimize_logs_resolved_preset(toy_data, caplog):
     """In the HPO phase, the resolved preset is recorded in the logs."""
     X, y = toy_data
 
-    with caplog.at_level("INFO", logger="configurable_automl_engine.tuner"):
+    with caplog.at_level("INFO", logger="configurable_automl_engine.hpo"):
         hyperopt.optimize(
             "ridge",
             X,

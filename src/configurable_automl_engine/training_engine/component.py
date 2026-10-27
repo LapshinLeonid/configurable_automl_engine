@@ -14,8 +14,9 @@ Two-stage winner selection is performed by an explicit pipeline select step:
       audited candidates by RMSE_oof (active mode);
     - select with strategy: cv_best — deterministic ranking by CV score without
       audit (the equivalent of the legacy path with mode: off).
-This module only orchestrates the steps; they live in dedicated modules and
-their public names are re-exported here:
+This module only orchestrates the steps and is the only one that mutates the
+``PhaseContext``: the steps are pure functions that return outcomes, applied
+here. The steps live in dedicated modules (import them from there):
     - state: Shared dataclasses (PhaseResult, PreparedData, PhaseContext, ...).
     - data_prep: load_config, prepare_dataset.
     - hpo_phases: HPO phase execution (_run_hpo).
@@ -51,13 +52,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 
 from .artifact import persist_artifact
 from .data_prep import load_config, prepare_dataset
-from .finalists import (
-    FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
-    is_valid_winner_score,
-    select_finalists,
-    select_robust_winner,
-    select_winner,
-)
+from .finalists import is_valid_winner_score
 from .hpo_phases import (
     _algorithms_as_dict,
     _apply_target_domain_guard,
@@ -68,36 +63,16 @@ from .hpo_phases import (
 )
 from .select_steps import select_step_outcome
 from .state import (
-    FinalistCandidate,
     PhaseContext,
     PhaseResult,
     PreparedData,
-    RobustWinnerResult,
     SelectOutcome,
     WorkerOutcome,
     _HpoPhaseSpec,
 )
 from .thread_pool import run_parallel
 
-# The public names of the pipeline steps are re-exported: they were defined
-# here before the steps moved to dedicated modules.
-__all__ = [
-    "FAMILY_DIVERSITY_MULTIPLIER_DEFAULT",
-    "FinalistCandidate",
-    "PhaseContext",
-    "PhaseResult",
-    "PreparedData",
-    "RobustWinnerResult",
-    "execute_phases",
-    "is_valid_winner_score",
-    "load_config",
-    "persist_artifact",
-    "prepare_dataset",
-    "select_finalists",
-    "select_robust_winner",
-    "select_winner",
-    "train_best_model",
-]
+__all__ = ["execute_phases", "train_best_model"]
 
 _LOG = logging.getLogger(__name__)
 

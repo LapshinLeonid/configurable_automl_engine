@@ -23,11 +23,11 @@ from typing import Any
 
 import pytest
 
-from configurable_automl_engine.training_engine.component import (
+from configurable_automl_engine.training_engine.finalists import (
     FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
-    PhaseResult,
     select_finalists,
 )
+from configurable_automl_engine.training_engine.state import PhaseResult
 
 R = dict[str, PhaseResult]
 

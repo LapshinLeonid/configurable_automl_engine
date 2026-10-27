@@ -20,12 +20,14 @@ import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
-from configurable_automl_engine.common.target_domain import check_target_domain
-from configurable_automl_engine.hpo.request import (
+from configurable_automl_engine.common.settings import (
     EncodingSettings,
-    HpoRequest,
     InputPolicies,
     OversamplingSettings,
+)
+from configurable_automl_engine.common.target_domain import check_target_domain
+from configurable_automl_engine.hpo.request import (
+    HpoRequest,
     as_complexity_guard_config,
 )
 from configurable_automl_engine.hpo.runner import run_optimization
@@ -51,10 +53,7 @@ from .state import (
     _HPOWorkerResult,
 )
 
-# The records keep the logger name of the pre-split ``component`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-_LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
+_LOG = logging.getLogger(__name__)
 
 
 def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:

@@ -34,11 +34,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 from configurable_automl_engine.trainer import ModelTrainer
-from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    prepare_dataset,
-    train_best_model,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.config_parser import (
     AUTO_HOLDOUT_FRACTION,
     AUTO_HOLDOUT_MIN_ROWS,
@@ -495,7 +493,7 @@ def test_holdout_artifact_refit_on_all_data(tmp_path):
 
 def test_persist_artifact_adds_oof_and_trials_keys():
     """persist_artifact adds oof_score and n_trials_evaluated from the input."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=19)
     cfg = Config.model_validate(_cfg(model_path="model.pkl"))
@@ -529,7 +527,7 @@ def test_persist_artifact_adds_oof_and_trials_keys():
 
 def test_persist_artifact_omits_trials_key_when_zero():
     """n_trials_evaluated=0 (unknown, legacy tuners) omits the key."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=53)
     cfg = Config.model_validate(_cfg(model_path="model.pkl"))
@@ -556,7 +554,7 @@ def test_persist_artifact_omits_trials_key_when_zero():
 def test_persist_artifact_omits_keys_when_unavailable():
     """Without OOF predictions and with an unknown trial count the keys are
     omitted (backward compatibility)."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=23)
     cfg = Config.model_validate(_cfg(model_path="model.pkl"))
@@ -589,7 +587,7 @@ def test_persist_artifact_omits_keys_when_unavailable():
 
 def test_persist_artifact_oof_shape_mismatch_omits_key():
     """An OOF vector whose length does not match the target → no oof_score."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=29)
     cfg = Config.model_validate(_cfg(model_path="model.pkl"))
@@ -620,7 +618,7 @@ def test_persist_artifact_oof_shape_mismatch_omits_key():
 def test_persist_artifact_oof_fallback_to_rmse_oof():
     """When the pooled value is impossible, oof_score falls back to the
     trainer's RMSE_oof in the comparison metric semantics."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=31)
     cfg = Config.model_validate(_cfg(metric="rmse", model_path="model.pkl"))
@@ -664,7 +662,7 @@ def test_persist_artifact_oof_fallback_to_rmse_oof():
 def test_persist_artifact_oof_score_metric_fallback_omitted():
     """For score metrics the RMSE_oof fallback is not an estimate of the
     comparison metric — the key is omitted."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=43)
     cfg = Config.model_validate(_cfg(metric="r2", model_path="model.pkl"))
@@ -705,7 +703,7 @@ def test_persist_artifact_oof_score_metric_fallback_omitted():
 def test_persist_artifact_oof_non_rmse_error_fallback_omitted():
     """For a non-RMSE error metric (MAE/MSE) the RMSE_oof fallback would
     silently substitute a DIFFERENT metric — the key is omitted instead."""
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=59)
     cfg = Config.model_validate(_cfg(metric="mae", model_path="model.pkl"))
@@ -747,7 +745,7 @@ def test_persist_artifact_oof_unknown_metric_warns(caplog):
     """An unresolvable comparison metric → a warning and no oof_score."""
     import logging
 
-    from configurable_automl_engine.training_engine.component import persist_artifact
+    from configurable_automl_engine.training_engine.artifact import persist_artifact
 
     df = _noisy_regression(n=60, p=4, seed=37)
     cfg = Config.model_validate(_cfg(model_path="model.pkl"))

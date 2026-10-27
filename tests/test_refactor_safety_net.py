@@ -419,33 +419,34 @@ PUBLIC_IMPORTS = {
     ],
 }
 
-#: Public names (no leading underscore) defined in
-#: ``training_engine/component.py`` at the refactor baseline (v0.4.1).
-COMPONENT_PUBLIC_NAMES = [
-    "FAMILY_DIVERSITY_MULTIPLIER_DEFAULT",
-    "FinalistCandidate",
-    "PhaseContext",
-    "PhaseResult",
-    "PreparedData",
-    "RobustWinnerResult",
-    "execute_phases",
-    "is_valid_winner_score",
-    "load_config",
-    "persist_artifact",
-    "prepare_dataset",
-    "select_finalists",
-    "select_robust_winner",
-    "select_winner",
-    "train_best_model",
-]
+#: The names that ``training_engine/component.py`` re-exported up to 0.4.x
+#: and the modules that define them (0.5.0 removed the re-exports: the
+#: component exports only ``execute_phases`` and ``train_best_model``).
+PIPELINE_NAMES = {
+    "FAMILY_DIVERSITY_MULTIPLIER_DEFAULT": "finalists",
+    "FinalistCandidate": "state",
+    "PhaseContext": "state",
+    "PhaseResult": "state",
+    "PreparedData": "state",
+    "RobustWinnerResult": "state",
+    "execute_phases": "component",
+    "is_valid_winner_score": "finalists",
+    "load_config": "data_prep",
+    "persist_artifact": "artifact",
+    "prepare_dataset": "data_prep",
+    "select_finalists": "finalists",
+    "select_robust_winner": "finalists",
+    "select_winner": "finalists",
+    "train_best_model": "component",
+}
 
 
 @pytest.mark.parametrize(
     ("module", "name"),
     [(m, n) for m, names in PUBLIC_IMPORTS.items() for n in names]
     + [
-        ("configurable_automl_engine.training_engine.component", n)
-        for n in COMPONENT_PUBLIC_NAMES
+        (f"configurable_automl_engine.training_engine.{m}", n)
+        for n, m in PIPELINE_NAMES.items()
     ],
 )
 def test_public_import(module: str, name: str) -> None:
@@ -454,12 +455,16 @@ def test_public_import(module: str, name: str) -> None:
     assert hasattr(mod, name), f"{module}.{name} is missing"
 
 
-def test_component_public_names_unchanged() -> None:
-    """The public names of ``component`` are a superset of the baseline set."""
+def test_component_exports_only_the_pipeline_entry_points() -> None:
+    """``component`` exports the two entry points; the steps live elsewhere."""
     from configurable_automl_engine.training_engine import component
 
-    for name in COMPONENT_PUBLIC_NAMES:
-        assert hasattr(component, name), name
+    assert sorted(component.__all__) == ["execute_phases", "train_best_model"]
+    for name, module in PIPELINE_NAMES.items():
+        path = f"{PACKAGE}.training_engine.{module}"
+        obj = getattr(importlib.import_module(path), name)
+        if callable(obj):  # functions and classes are defined there
+            assert obj.__module__ == path, name
 
 
 def test_pickled_classes_stay_defined_in_their_modules() -> None:

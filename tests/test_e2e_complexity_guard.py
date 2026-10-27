@@ -67,7 +67,7 @@ def _single_phase_config(complexity_guard: dict | None = None) -> dict:
 def test_e2e_small_data_guard_applies_and_reports(caplog):
     """On small data the guard adapts the ranges and reports them."""
     df = _small_frame()
-    with caplog.at_level(logging.INFO, logger="configurable_automl_engine.tuner"):
+    with caplog.at_level(logging.INFO, logger="configurable_automl_engine.hpo"):
         res = train_best_model(_single_phase_config(), df, target="target")
 
     # The report section is present with per-parameter records.
@@ -544,7 +544,7 @@ def test_e2e_fixed_param_no_boundary_warning(caplog):
             "ridge": {"enable": True},
         },
     }
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.hpo"):
         res = train_best_model(cfg, df, target="target")
     assert res["algorithm"] in {"decision_tree", "ridge"}
     # The fixed min_samples_leaf must never appear in a "widen it" warning
@@ -591,7 +591,7 @@ def test_e2e_guard_narrowed_range_no_boundary_warning(caplog):
             "ridge": {"enable": True},
         },
     }
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.tuner"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.hpo"):
         res = train_best_model(cfg, df, target="target")
     assert res["algorithm"] in {"xgboosting", "decision_tree", "ridge"}
     # Any max_depth warning may only reference the default-space LOW bound

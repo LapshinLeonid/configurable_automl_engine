@@ -24,10 +24,8 @@ import pytest
 from pydantic import ValidationError
 
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
-from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    train_best_model,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.config_parser import (
     Config,

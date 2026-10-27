@@ -33,11 +33,13 @@ from configurable_automl_engine.hpo.plans import (
     ValidationPlan,
 )
 from configurable_automl_engine.hpo.pruning import plan_pruning
-from configurable_automl_engine.hpo.request import (
+from configurable_automl_engine.common.settings import (
     EncodingSettings,
-    HpoRequest,
     InputPolicies,
     OversamplingSettings,
+)
+from configurable_automl_engine.hpo.request import (
+    HpoRequest,
     as_complexity_guard_config,
 )
 from configurable_automl_engine.hpo.runner import (

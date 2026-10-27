@@ -43,7 +43,7 @@ from configurable_automl_engine.common.dependency_utils import is_installed
 
 Algorithm = str
 
-logger = logging.getLogger("configurable_automl_engine.models")
+logger = logging.getLogger(__name__)
 
 #: Default random seed injected into stochastic estimators by
 #: :func:`create_model` (trees, forests, boosting, elasticnet, ridge, ...).

@@ -138,6 +138,26 @@ If you contribute, please ensure your code:
 * Has 0 errors when checked by the mypy static analyzer.
 * All docstrings written in English.
 
+# Architecture
+
+The engine is a pipeline of steps over a few state objects, each with a single
+owner:
+
+* `hpo.runner._OptimizeRunner` — one HPO run of one algorithm (`tuner.optimize`);
+* `trainer.ModelTrainer` — the training, validation and saving of one model;
+* `training_engine.state.PhaseContext` — the state of the phase pipeline,
+  owned by `training_engine/component.py`.
+
+Only the owner mutates its state. The computational steps are pure functions:
+they read their inputs and return a frozen result — a plan
+(`hpo/plans.py`), a trainer state group (`trainer_state.py`) or an outcome
+(`SelectOutcome`, `WorkerOutcome`, `TargetDomainOutcome` in
+`training_engine/state.py`) — and the owner assigns it in one visible line.
+`tests/test_ownership.py` checks the rule statically, and the pure steps have
+direct unit tests (inputs unchanged, two calls give equal results). Every
+module logs under its own name (`logging.getLogger(__name__)`). Breaking
+changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
 # Project Structure
 
 ```
@@ -151,6 +171,7 @@ If you contribute, please ensure your code:
 │       │   ├── dependency_utils.py         # Optional library and dependency checks
 │       │   ├── hyperopt_defaults.py        # Default search spaces, clipping, and constraints
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
+│       │   ├── settings.py                 # Setting groups shared by HPO and the trainer (encoding, oversampling, input policies)
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   └── validation_utils.py         # Low-level data validation and effective train size
 │       ├── hpo                             # Hyperparameter optimization engine behind tuner.optimize
@@ -164,7 +185,7 @@ If you contribute, please ensure your code:
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── training_engine                 # Core orchestration and execution logic
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
-│       │   ├── component.py                # Main orchestrator: train_best_model and the phase loop
+│       │   ├── component.py                # Main orchestrator: train_best_model, the phase loop; applies the step outcomes
 │       │   ├── config_parser.py            # Configuration parsing and validation
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
@@ -172,8 +193,8 @@ If you contribute, please ensure your code:
 │       │   ├── logger.py                   # Centralized logging management
 │       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
-│       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies
-│       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, ...)
+│       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies (return a SelectOutcome)
+│       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, step outcomes, ...)
 │       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
 │       ├── feature_selection.py            # Optional feature selection step
 │       ├── models.py                       # Model factory, hyperparameter cleaning
@@ -186,11 +207,13 @@ If you contribute, please ensure your code:
 │       ├── trainer_feature_selection.py    # ModelTrainer feature selection decision and auto-check
 │       ├── trainer_params.py               # ModelTrainer constructor argument validation
 │       ├── trainer_scoring.py              # ModelTrainer validation scoring and the OOF channel
+│       ├── trainer_state.py                # ModelTrainer state groups (TrainerSettings, ...) and the artifact format version
 │       ├── tuner.py                        # Public HPO entry point optimize() (façade over hpo)
 │       └── validation.py                   # High-level cross-validation strategies
 ├── tests                                   # Unit and integration test suites
 ├── agents.md                               # Instructions for AI agents in the CI pipeline
 ├── API_REFERENCE.md                        # User guide and API reference
+├── CHANGELOG.md                            # Release notes (breaking changes)
 ├── config.schema.json                      # JSON Schema of the config (generated)
 ├── example.py                              # Quick start example
 └── schema_generator.py                     # Generates config.schema.json from the Pydantic models

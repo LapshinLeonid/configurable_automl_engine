@@ -37,11 +37,11 @@ import configurable_automl_engine.training_engine.finalists as finalists_mod
 import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 import configurable_automl_engine.training_engine.select_steps as select_steps_mod
 from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
     execute_phases,
-    prepare_dataset,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.config_parser import (
     ERR_REMOVED_REFINE_WINNER,
     ERR_REMOVED_SANITY_GATE_MODE,

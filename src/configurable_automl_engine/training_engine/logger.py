@@ -25,6 +25,9 @@ DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 # same logging configuration as the rest of the library.
 _LOGGER = logging.getLogger(__name__)
 
+#: The package root logger: every module logs under ``__name__`` below it.
+_PACKAGE_LOGGER_NAME = __name__.partition(".")[0]
+
 # Use Any for the dynamic handler to avoid a type conflict in mypy
 HandlerClass: Any
 
@@ -86,7 +89,7 @@ def setup_logging(
         max_bytes (int): Maximum size of a single file before rotation (in bytes).
         backup_count (int): Number of archived files kept on disk.
     """
-    base_logger = logging.getLogger("configurable_automl_engine")
+    base_logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
 
     # Set the overall level on the base logger
     base_logger.setLevel(level)

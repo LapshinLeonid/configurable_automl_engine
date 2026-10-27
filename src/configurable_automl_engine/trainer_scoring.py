@@ -38,8 +38,7 @@ from .trainer_state import ValidationScores
 #: ``make_steps(feature_selection_active, X_for_estimate)``.
 StepsFactory = Callable[[bool, Any], list[tuple[str, Any]]]
 
-# The records keep the logger name of ``ModelTrainer`` (its ``logger``).
-_LOG = logging.getLogger("configurable_automl_engine.trainer")
+_LOG = logging.getLogger(__name__)
 
 
 def score_on_validation_splits(

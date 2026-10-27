@@ -46,13 +46,8 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
 )
 
-from .hpo.request import (
-    EncodingSettings,
-    HpoRequest,
-    InputPolicies,
-    OversamplingSettings,
-    as_complexity_guard_config,
-)
+from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
+from .hpo.request import HpoRequest, as_complexity_guard_config
 from .hpo.runner import run_optimization
 from .hpo.types import (
     HPO_WORST_SCORE,

@@ -10,6 +10,7 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
 * **Project Layout:** Code in `src/configurable_automl_engine/`, tests in `tests/`.
 * **Docstrings:** Google-style in English for all public modules, classes, and functions (`Args:`, `Returns:`, `Raises:`).
 * **Code Quality Baseline:** Zero Ruff warnings in /src/, 100% strict Mypy compliance in /src/, passing Pytest suite.
+* **State ownership:** Do not mutate `_OptimizeRunner` / `ModelTrainer` / `PhaseContext` outside their owner (`hpo/runner.py`, `trainer.py`, `training_engine/component.py`). New computational steps are pure functions: they return a frozen plan / result / outcome and the owner assigns it (`tests/test_ownership.py` enforces this). Log with `logging.getLogger(__name__)`.
 
 ---
 

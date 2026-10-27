@@ -429,7 +429,7 @@ def test_oof_train_test_split_partial_coverage_warning(caplog):
     over the covered subset and equals the RMSE on the hold-out part.
     """
     X, y = _noisy_regression(n=80, p=5, seed=21)
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge",
             metric="r2",
@@ -499,7 +499,7 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
     model = _ConstRegressor(value=1.5, nan_condition=lambda Xa: Xa[:, 0] > 0.5)
 
     with (
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
         patch(
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
@@ -538,7 +538,7 @@ def test_oof_nan_in_y_reduced_coverage(caplog):
     model = _ConstRegressor(value=1.5)
 
     with (
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
         patch(
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
@@ -560,7 +560,7 @@ def test_oof_very_small_n_warning(caplog):
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
 
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge",
             metric="r2",
