@@ -10,11 +10,9 @@ module holds definitions only and must not import any other module of the
 
 from __future__ import annotations
 
-# ─────────────────────────────── stdlib
 from dataclasses import dataclass
 from typing import Any
 
-# ──────────────────────────── third-party
 import numpy as np
 from optuna.trial import FrozenTrial
 

@@ -2,22 +2,23 @@
 
 Normalizes the ``general.pruning`` settings and builds the Optuna pruner
 (median / hyperband). It may import ``hpo.types`` only and must not import
-``hpo.runner`` or ``configurable_automl_engine.tuner``.
+``hpo.runner`` at runtime (type checking only) or
+``configurable_automl_engine.tuner``.
 """
 
 from __future__ import annotations
 
-# ─────────────────────────────── stdlib
 import logging as _logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-# ──────────────────────────── third-party
 import optuna
 
-# ──────────────────────────── project
 from .types import (
     HyperoptError,
 )
+
+if TYPE_CHECKING:
+    from .runner import _OptimizeRunner
 
 # The records keep the logger name of the pre-split ``tuner`` module: the
 # logger name is part of the observable behavior (handlers, filters and
@@ -114,3 +115,35 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
     raise HyperoptError(
         f"Unknown pruning strategy: '{strategy}'. Must be 'median' or 'hyperband'."
     )
+
+
+def handle_pruning(runner: _OptimizeRunner) -> None:
+    """Configure early stopping (pruning) for the selected validation (step 5).
+
+    Normalizes the early stopping configuration and builds an Optuna
+    pruner. Pruning applies only when there are natural evaluation steps
+    (k_fold / loo); for hold-out (train_test_split) there are no
+    intermediate steps, so early stopping is not applied (documented
+    behavior).
+    """
+    pruning_cfg = _normalize_pruning_config(runner.pruning)
+    runner.pruner = None
+    if pruning_cfg is not None:
+        runner.pruner = _build_pruner(pruning_cfg)
+        log.info(
+            "Early stopping enabled: strategy=%s, min_steps=%d, "
+            "n_startup_trials=%d, reduction_factor=%d",
+            pruning_cfg["strategy"],
+            pruning_cfg["min_steps"],
+            pruning_cfg["n_startup_trials"],
+            pruning_cfg["reduction_factor"],
+        )
+    runner.pruning_active = (
+        runner.pruner is not None and runner.val_method_eff != "train_test_split"
+    )
+    if runner.pruner is not None and not runner.pruning_active:
+        log.warning(
+            "Early stopping is enabled, but validation strategy '%s' has no "
+            "intermediate steps — pruning will not be applied.",
+            runner.val_method_eff,
+        )

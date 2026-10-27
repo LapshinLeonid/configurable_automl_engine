@@ -190,13 +190,13 @@ def _mock_optimize_infra(
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.hpo.runner._evaluate_pooled_cv",
+        "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv",
         lambda *a, **kw: 0.5,
     )
     # The additive-metric path (MAE and similar) still uses cross_val_score;
     # it is patched too so a metric change cannot break the helpers.
     monkeypatch.setattr(
-        "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 

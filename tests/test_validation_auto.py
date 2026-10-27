@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from sklearn.model_selection import KFold, LeaveOneOut
 
+from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.validation_utils import (
     choose_validation_method,
@@ -635,7 +636,7 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
     monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
     monkeypatch.setattr(
-        hpo_runner.model_selection, "cross_val_score", lambda *a, **k: [0.5, 0.5]
+        hpo_evaluation.model_selection, "cross_val_score", lambda *a, **k: [0.5, 0.5]
     )
 
     tuner.optimize(
@@ -701,7 +702,7 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
 
     monkeypatch.setattr(hpo_runner, "make_cv", fake_make_cv)
     monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
-    monkeypatch.setattr(hpo_runner, "iter_splits", fake_iter_splits)
+    monkeypatch.setattr(hpo_evaluation, "iter_splits", fake_iter_splits)
     monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
     monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
 

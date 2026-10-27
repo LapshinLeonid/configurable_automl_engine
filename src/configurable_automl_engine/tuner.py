@@ -26,18 +26,14 @@ delegates the run to ``hpo.runner._OptimizeRunner``; the exceptions,
 
 from __future__ import annotations
 
-# ─────────────────────────────── stdlib
 from collections.abc import Callable
 from typing import Any
 
-# ──────────────────────────── third-party
 from optuna.trial import FrozenTrial, Trial
 
 from configurable_automl_engine.common.complexity_guard import (
     ComplexityGuardConfig,
 )
-
-# ──────────────────────────── project
 from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,

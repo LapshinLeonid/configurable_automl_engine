@@ -95,7 +95,7 @@ def test_optimize_integration_clipping(monkeypatch):
 
     # 3. Mock cross-validation (in case the strategy changes)
     monkeypatch.setattr(
-        "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 
@@ -256,7 +256,7 @@ def test_knn_space_limit_uses_effective_size():
     trial.suggest_int.assert_any_call("n_neighbors", 1, 5)
 
 
-@patch("configurable_automl_engine.hpo.runner.clip_search_space")
+@patch("configurable_automl_engine.hpo.search_space.clip_search_space")
 @patch("configurable_automl_engine.hpo.runner.create_model")
 @patch("optuna.create_study")
 def test_optimize_calls_clipping_with_effective_size(

@@ -1095,11 +1095,11 @@ def test_optimize_direct_dict_override_retypes_C(monkeypatch):
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.hpo.runner._evaluate_pooled_cv",
+        "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv",
         lambda *a, **kw: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 

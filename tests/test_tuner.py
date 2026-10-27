@@ -610,7 +610,7 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
         with (
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
@@ -645,7 +645,7 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
         with (
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
@@ -849,7 +849,7 @@ def test_optimize_sklearn_non_additive_metrics_use_pooled_path(metric):
     y = pd.Series(np.abs(X.iloc[:, 0] * 2.0 + rng.randn(60)) + 1.0)
     space = {"ridge": lambda t: {"alpha": 0.1}}
 
-    with patch.object(hpo_runner, "_evaluate_pooled_cv") as mock_pooled:
+    with patch.object(hpo_evaluation, "_evaluate_pooled_cv") as mock_pooled:
         mock_pooled.return_value = 0.5
         opt_res = optimize(
             "ridge",
@@ -920,11 +920,11 @@ class TestTunerObjective:
         # 1. Patch the ENTIRE environment so no real function runs
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.runner._build_scorer"
+                "configurable_automl_engine.hpo.search_space._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner.np.isfinite") as mock_finite,
@@ -964,11 +964,11 @@ class TestTunerObjective:
         # Try patching mean in the tuner module's namespace
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv",
+                "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv",
                 return_value=np.nan,
             ),
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -991,10 +991,10 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1017,10 +1017,10 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1051,10 +1051,10 @@ class TestTunerObjective:
         """
         X, y = dummy_data
         with (
-            patch("configurable_automl_engine.hpo.runner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.hpo.evaluation.iter_splits") as mock_iter_splits,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.runner._build_scorer"
+                "configurable_automl_engine.hpo.search_space._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
@@ -1096,10 +1096,10 @@ class TestTunerObjective:
         """
         X, y = dummy_data
         with (
-            patch("configurable_automl_engine.hpo.runner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.hpo.evaluation.iter_splits") as mock_iter_splits,
             patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.hpo.runner._build_scorer"
+                "configurable_automl_engine.hpo.search_space._build_scorer"
             ) as mock_scorer_factory,
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
@@ -1154,10 +1154,10 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
+                "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1191,10 +1191,10 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_with_intermediate_reports"
+                "configurable_automl_engine.hpo.evaluation._evaluate_with_intermediate_reports"
             ) as mock_eval,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1242,10 +1242,10 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.evaluation._evaluate_pooled_cv"
             ) as mock_cv,
             patch("configurable_automl_engine.hpo.runner.create_model"),
-            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.search_space._build_scorer"),
             patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
             patch("configurable_automl_engine.hpo.runner._validate_data"),
             patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -1581,7 +1581,7 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
     ):
@@ -1972,11 +1972,11 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.hpo.runner.FeatureSelector", autospec=True
+            "configurable_automl_engine.hpo.trial_pipeline.FeatureSelector", autospec=True
         ) as mock_fs,
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2161,11 +2161,11 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
         patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.hpo.runner.FeatureSelector", autospec=True
+            "configurable_automl_engine.hpo.trial_pipeline.FeatureSelector", autospec=True
         ),
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2300,7 +2300,7 @@ def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
         ),
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
     ):
         with pytest.raises(MemoryError, match="model constructor boom"):
             optimize(
@@ -2327,10 +2327,10 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
     X, y = toy_data
     with (
         patch(
-            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
+            "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score"
         ) as mock_cv,
         patch("configurable_automl_engine.hpo.runner.create_model"),
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
@@ -2881,13 +2881,13 @@ def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
     assert first is not None
 
     with (
-        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.search_space._build_scorer"),
         patch("configurable_automl_engine.hpo.runner.create_model"),
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch("configurable_automl_engine.hpo.runner._validate_data"),
         patch("configurable_automl_engine.hpo.runner._get_estimator"),
         patch(
-            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
+            "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score"
         ) as mock_cv,
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2998,7 +2998,7 @@ def test_optimize_sampler_seed_controls_tpe_only(toy_data):
         tpe_patch,
         patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6, 0.7]),
         ),
     ):
@@ -3034,9 +3034,9 @@ def test_optimize_preprocessor_uses_random_state_not_sampler_seed(toy_data):
     _, tpe_patch = _capture_tpe_seed()
     with (
         tpe_patch,
-        patch("configurable_automl_engine.hpo.runner.build_preprocessor") as mock_bp,
+        patch("configurable_automl_engine.hpo.trial_pipeline.build_preprocessor") as mock_bp,
         patch(
-            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6]),
         ),
     ):
@@ -3067,7 +3067,7 @@ def test_optimize_sampler_seed_none_falls_back_to_random_state(toy_data):
     with (
         tpe_patch,
         patch(
-            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.evaluation.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6]),
         ),
     ):
