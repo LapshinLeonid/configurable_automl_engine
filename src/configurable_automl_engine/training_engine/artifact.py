@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import inspect
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,7 @@ _LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
 # --------------------------------------------------------------------------- #
 #  Final fit & save                                                           #
 # --------------------------------------------------------------------------- #
-def _build_trainer(  # noqa: C901
+def _build_trainer(
     algo_name: str,
     algo_cfg: AlgoCfg,
     best_params: dict[str, Any],
@@ -89,19 +90,7 @@ def _build_trainer(  # noqa: C901
             is ``None`` (a signal of a complete HPO failure).
         AttributeError: If the trainer module lacks a ``ModelTrainer`` class.
     """
-    if algo_cfg.trainer_module is None:
-        raise ValueError("Trainer module path is not configured")
-    if best_params is None:
-        raise ValueError(
-            f"Algorithm '{algo_name}' produced no hyperparameters "
-            "(best_params is None): HPO phase failed completely. The algorithm "
-            "should have been excluded before the final fit."
-        )
-    trainer_module = _load_module(algo_cfg.trainer_module)
-    if not hasattr(trainer_module, "ModelTrainer"):
-        raise AttributeError(
-            f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
-        )
+    trainer_module = _load_trainer_module(algo_name, algo_cfg, best_params)
 
     # The HPO winner's feature selection decision: in 'auto' mode the
     # "use_feature_selection" key is fixed in the Optuna best_params; in
@@ -126,15 +115,12 @@ def _build_trainer(  # noqa: C901
     trainer_accepts_var_kwargs = any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in trainer_sig.parameters.values()
     )
-    trainer_has_fs_cfg = "feature_selection_cfg" in trainer_sig.parameters
-    trainer_has_fs_active = "feature_selection_active" in trainer_sig.parameters
-    trainer_has_os_target_bins = (
-        "data_oversampling_target_bins" in trainer_sig.parameters
-    )
-    trainer_has_os_noise = (
-        "data_oversampling_add_noise" in trainer_sig.parameters
-        and "data_oversampling_noise_level" in trainer_sig.parameters
-    )
+
+    def accepts(*names: str) -> bool:
+        """Whether the trainer declares all ``names`` (or accepts **kwargs)."""
+        return trainer_accepts_var_kwargs or all(
+            name in trainer_sig.parameters for name in names
+        )
 
     trainer_kwargs: dict[str, Any] = {
         "algorithm": algo_name,
@@ -161,18 +147,104 @@ def _build_trainer(  # noqa: C901
     # support it (custom trainers without the argument fall back to the
     # engine default 8) — the same signature-aware contract as for feature
     # selection.
-    if trainer_has_os_target_bins or trainer_accepts_var_kwargs:
+    if accepts("data_oversampling_target_bins"):
         trainer_kwargs["data_oversampling_target_bins"] = cfg.oversampling.target_bins
     # Gaussian noise settings: same signature-aware contract (custom trainers
     # without the arguments keep the no-noise behavior).
-    if trainer_has_os_noise or trainer_accepts_var_kwargs:
+    if accepts("data_oversampling_add_noise", "data_oversampling_noise_level"):
         trainer_kwargs["data_oversampling_add_noise"] = cfg.oversampling.add_noise
         trainer_kwargs["data_oversampling_noise_level"] = cfg.oversampling.noise_level
+    trainer_kwargs.update(
+        _feature_selection_trainer_kwargs(accepts, algo_cfg, cfg, fs_active)
+    )
+    trainer_kwargs.update(
+        _validation_trainer_kwargs(
+            accepts,
+            algo_cfg,
+            validation_strategy=validation_strategy,
+            n_folds=n_folds,
+            test_size=test_size,
+        )
+    )
+
+    # Input-data diagnostics policies: forwarded so that the final fit treats
+    # ±inf / datetime / ID-like columns exactly as the pipeline entry point
+    # (prepare_dataset has already applied them; re-validation is a no-op on
+    # the already-repaired data). The ID-like WARNING is suppressed there:
+    # prepare_dataset already reported it once (B2 — no double warnings).
+    for name, value in (
+        ("inf_policy", cfg.general.inf_policy),
+        ("datetime_policy", cfg.general.datetime_policy),
+        ("drop_id_like_columns", cfg.general.drop_id_like_columns),
+        ("warn_id_like", False),
+        # The engine seed: the ModelTrainer's data splits and model seeds
+        # follow ``general.random_state`` (None — a non-reproducible final
+        # fit).
+        ("random_state", random_state),
+    ):
+        if accepts(name):
+            trainer_kwargs[name] = value
+
+    return trainer_module.ModelTrainer(**trainer_kwargs)
+
+
+def _load_trainer_module(
+    algo_name: str, algo_cfg: AlgoCfg, best_params: dict[str, Any]
+) -> Any:
+    """Validate the inputs of ``_build_trainer`` and load the trainer module.
+
+    Args:
+        algo_name (str): The name of the selected algorithm.
+        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
+        best_params (Dict[str, Any]): The found optimal hyperparameters.
+
+    Returns:
+        Any: The trainer module (it provides a ``ModelTrainer`` class).
+
+    Raises:
+        ValueError: If ``algo_cfg.trainer_module`` is not set or ``best_params``
+            is ``None``.
+        AttributeError: If the trainer module lacks a ``ModelTrainer`` class.
+    """
+    if algo_cfg.trainer_module is None:
+        raise ValueError("Trainer module path is not configured")
+    if best_params is None:
+        raise ValueError(
+            f"Algorithm '{algo_name}' produced no hyperparameters "
+            "(best_params is None): HPO phase failed completely. The algorithm "
+            "should have been excluded before the final fit."
+        )
+    trainer_module = _load_module(algo_cfg.trainer_module)
+    if not hasattr(trainer_module, "ModelTrainer"):
+        raise AttributeError(
+            f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
+        )
+    return trainer_module
+
+
+def _feature_selection_trainer_kwargs(
+    accepts: Callable[..., bool],
+    algo_cfg: AlgoCfg,
+    cfg: Config,
+    fs_active: bool | None,
+) -> dict[str, Any]:
+    """Feature selection arguments of the trainer (signature-aware).
+
+    Args:
+        accepts (Callable[..., bool]): Whether the trainer accepts arguments.
+        algo_cfg (AlgoCfg): The algorithm configuration (for the messages).
+        cfg (Config): The common configuration object.
+        fs_active (bool | None): The HPO winner's feature selection decision.
+
+    Returns:
+        dict[str, Any]: The feature selection arguments the trainer accepts.
+    """
+    kwargs: dict[str, Any] = {}
     # Feature selection: the root Config configuration plus the HPO winner's
     # decision. Arguments are passed only to trainers that support them; when
     # feature selection is active we warn about silent ignoring.
-    if trainer_has_fs_cfg or trainer_accepts_var_kwargs:
-        trainer_kwargs["feature_selection_cfg"] = cfg.general.feature_selection
+    if accepts("feature_selection_cfg"):
+        kwargs["feature_selection_cfg"] = cfg.general.feature_selection
     elif _feature_selection_mode(cfg.general.feature_selection) not in (
         None,
         "disabled",
@@ -184,8 +256,8 @@ def _build_trainer(  # noqa: C901
             _feature_selection_mode(cfg.general.feature_selection),
         )
 
-    if trainer_has_fs_active or trainer_accepts_var_kwargs:
-        trainer_kwargs["feature_selection_active"] = fs_active
+    if accepts("feature_selection_active"):
+        kwargs["feature_selection_active"] = fs_active
     elif fs_active is not None:
         _LOG.warning(
             "ModelTrainer %s does not accept `feature_selection_active`; "
@@ -194,7 +266,31 @@ def _build_trainer(  # noqa: C901
             algo_cfg.trainer_module,
             fs_active,
         )
+    return kwargs
 
+
+def _validation_trainer_kwargs(
+    accepts: Callable[..., bool],
+    algo_cfg: AlgoCfg,
+    *,
+    validation_strategy: ValidationStrategy | str | None,
+    n_folds: int | None,
+    test_size: float | None,
+) -> dict[str, Any]:
+    """Validation arguments of the trainer (signature-aware).
+
+    Args:
+        accepts (Callable[..., bool]): Whether the trainer accepts arguments.
+        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
+        validation_strategy (ValidationStrategy | str | None): The resolved
+            validation strategy.
+        n_folds (int | None): The number of folds (for 'k_fold').
+        test_size (float | int | None): The hold-out size.
+
+    Returns:
+        dict[str, Any]: The validation arguments the trainer accepts.
+    """
+    kwargs: dict[str, Any] = {}
     # Validation parameters: the resolved values (method + number of folds /
     # hold-out size) are passed to the final fit instead of the 'auto' string,
     # so the final val_score is computed with the same method as the model
@@ -202,11 +298,8 @@ def _build_trainer(  # noqa: C901
     # arguments do not receive the new keys (the signature is checked as for
     # feature selection); the ModelTrainer default behavior then matches.
     if validation_strategy is not None:
-        if (
-            "validation_strategy" in trainer_sig.parameters
-            or trainer_accepts_var_kwargs
-        ):
-            trainer_kwargs["validation_strategy"] = validation_strategy
+        if accepts("validation_strategy"):
+            kwargs["validation_strategy"] = validation_strategy
         else:
             _LOG.warning(
                 "ModelTrainer %s does not accept `validation_strategy`; "
@@ -214,39 +307,11 @@ def _build_trainer(  # noqa: C901
                 algo_cfg.trainer_module,
                 validation_strategy,
             )
-    if n_folds is not None and (
-        "n_folds" in trainer_sig.parameters or trainer_accepts_var_kwargs
-    ):
-        trainer_kwargs["n_folds"] = n_folds
-    if test_size is not None and (
-        "test_size" in trainer_sig.parameters or trainer_accepts_var_kwargs
-    ):
-        trainer_kwargs["test_size"] = test_size
-
-    # Input-data diagnostics policies: forwarded so that the final fit treats
-    # ±inf / datetime / ID-like columns exactly as the pipeline entry point
-    # (prepare_dataset has already applied them; re-validation is a no-op on
-    # the already-repaired data). The ID-like WARNING is suppressed there:
-    # prepare_dataset already reported it once (B2 — no double warnings).
-    trainer_has_inf_policy = "inf_policy" in trainer_sig.parameters
-    trainer_has_datetime_policy = "datetime_policy" in trainer_sig.parameters
-    trainer_has_drop_id_like = "drop_id_like_columns" in trainer_sig.parameters
-    trainer_has_warn_id_like = "warn_id_like" in trainer_sig.parameters
-    if trainer_has_inf_policy or trainer_accepts_var_kwargs:
-        trainer_kwargs["inf_policy"] = cfg.general.inf_policy
-    if trainer_has_datetime_policy or trainer_accepts_var_kwargs:
-        trainer_kwargs["datetime_policy"] = cfg.general.datetime_policy
-    if trainer_has_drop_id_like or trainer_accepts_var_kwargs:
-        trainer_kwargs["drop_id_like_columns"] = cfg.general.drop_id_like_columns
-    if trainer_has_warn_id_like or trainer_accepts_var_kwargs:
-        trainer_kwargs["warn_id_like"] = False
-
-    # The engine seed: the ModelTrainer's data splits and model seeds follow
-    # ``general.random_state`` (None — a non-reproducible final fit).
-    if "random_state" in trainer_sig.parameters or trainer_accepts_var_kwargs:
-        trainer_kwargs["random_state"] = random_state
-
-    return trainer_module.ModelTrainer(**trainer_kwargs)
+    if n_folds is not None and accepts("n_folds"):
+        kwargs["n_folds"] = n_folds
+    if test_size is not None and accepts("test_size"):
+        kwargs["test_size"] = test_size
+    return kwargs
 
 
 def _fit_and_save(

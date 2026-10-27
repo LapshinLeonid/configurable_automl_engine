@@ -14,7 +14,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from typing import Any
 
@@ -149,7 +149,7 @@ def _family_of(algo_name: str, algorithm_families: Mapping[str, str] | None) -> 
     return algorithm_families.get(algo_name, algo_name)
 
 
-def select_finalists(  # noqa: C901
+def select_finalists(
     results: dict[str, PhaseResult],
     *,
     metric_user: str,
@@ -246,19 +246,13 @@ def select_finalists(  # noqa: C901
             ``corridor_delta`` < 0, ``family_diversity_multiplier`` <= 0,
             unknown ``corridor_mode``) or the metric name cannot be resolved.
     """
-    if not results:
-        raise RuntimeError("Cannot build a finalists pool from empty results")
-    if top_k_candidates < 1:
-        raise ValueError("top_k_candidates must be >= 1")
-    if corridor_delta < 0:
-        raise ValueError("corridor_delta must be >= 0")
-    if corridor_mode not in ("multiplicative", "additive", "auto"):
-        raise ValueError(
-            f"corridor_mode must be 'multiplicative', 'additive' or 'auto'; "
-            f"got {corridor_mode!r}"
-        )
-    if family_diversity_multiplier <= 0:
-        raise ValueError("family_diversity_multiplier must be > 0")
+    _validate_finalists_args(
+        results,
+        top_k_candidates=top_k_candidates,
+        corridor_delta=corridor_delta,
+        corridor_mode=corridor_mode,
+        family_diversity_multiplier=family_diversity_multiplier,
+    )
 
     # Circuit breaker: disqualified algorithms never enter the pool.
     # The iterable is materialized BEFORE the dict-comprehension: a generator
@@ -296,18 +290,7 @@ def select_finalists(  # noqa: C901
     # corridor form) rather than inside _in_corridor for each candidate (O(n²)).
     score_spread = max(user_scores.values()) - min(user_scores.values())
 
-    if corridor_mode == "auto":
-        if is_error_metric(metric_user):
-            # Error → multiplicative, except the degenerate case best≈0
-            # (MAE≈0): the multiplicative form yields a threshold ≈0 and
-            # collapses the pool to the leader — switch to the additive form.
-            effective_mode: CorridorMode = (
-                "additive" if abs(best_score) <= _CORRIDOR_EPS else "multiplicative"
-            )
-        else:
-            effective_mode = "additive"
-    else:
-        effective_mode = corridor_mode
+    effective_mode = _effective_corridor_mode(corridor_mode, metric_user, best_score)
 
     def _in_corridor(name: str, mode: CorridorMode, delta: float) -> bool:
         """Check whether a candidate falls inside the corridor of the given form
@@ -369,51 +352,139 @@ def select_finalists(  # noqa: C901
     # added families are also restricted to allowed_families. Behavior matches
     # the documentation.
     if enforce_family_diversity and len(pool) < top_k_candidates:
-        pool_families = {_family_of(name, algorithm_families) for name in pool}
-        single_pool_family = (
-            next(iter(pool_families)) if len(pool_families) == 1 else None
+        _family_diversity_topup(
+            pool,
+            candidates=list(candidates),
+            ordered=ordered,
+            top_k_candidates=top_k_candidates,
+            extended_delta=corridor_delta * family_diversity_multiplier,
+            algorithm_families=algorithm_families,
+            allowed_families=allowed_families,
+            in_corridor=lambda name, delta: _in_corridor(name, effective_mode, delta),
         )
-        if single_pool_family is not None and (
-            allowed_families is None or single_pool_family in allowed_families
-        ):
-            extended_delta = corridor_delta * family_diversity_multiplier
-            extended_members = [
-                name
-                for name in candidates
-                if _in_corridor(name, effective_mode, extended_delta)
-            ]
-            extended_set = set(extended_members)
-            missing_families = {
-                _family_of(name, algorithm_families)
-                for name in candidates
-                if _family_of(name, algorithm_families) != single_pool_family
-            }
-            if allowed_families is not None:
-                missing_families &= allowed_families
-
-            pool_names = set(pool)
-            remaining = set(missing_families)
-            while len(pool) < top_k_candidates and remaining:
-                picked: str | None = None
-                for name in ordered:
-                    family = _family_of(name, algorithm_families)
-                    if (
-                        name not in pool_names
-                        and name in extended_set
-                        and family in remaining
-                    ):
-                        picked = name
-                        break
-                if picked is None:
-                    break
-                pool.append(picked)
-                pool_names.add(picked)
-                remaining.remove(_family_of(picked, algorithm_families))
 
     # Final stable ordering: added families are weaker than base pool members,
     # but the re-sort makes the invariant explicit.
     pool.sort(key=lambda n: candidates[n].score, reverse=True)
     return pool
+
+
+def _validate_finalists_args(
+    results: dict[str, PhaseResult],
+    *,
+    top_k_candidates: int,
+    corridor_delta: float,
+    corridor_mode: CorridorMode,
+    family_diversity_multiplier: float,
+) -> None:
+    """Validate the arguments of ``select_finalists``.
+
+    Raises:
+        RuntimeError: If ``results`` is empty — no finalists exist.
+        ValueError: If a parameter is out of bounds.
+    """
+    if not results:
+        raise RuntimeError("Cannot build a finalists pool from empty results")
+    if top_k_candidates < 1:
+        raise ValueError("top_k_candidates must be >= 1")
+    if corridor_delta < 0:
+        raise ValueError("corridor_delta must be >= 0")
+    if corridor_mode not in ("multiplicative", "additive", "auto"):
+        raise ValueError(
+            f"corridor_mode must be 'multiplicative', 'additive' or 'auto'; "
+            f"got {corridor_mode!r}"
+        )
+    if family_diversity_multiplier <= 0:
+        raise ValueError("family_diversity_multiplier must be > 0")
+
+
+def _effective_corridor_mode(
+    corridor_mode: CorridorMode, metric_user: str, best_score: float
+) -> CorridorMode:
+    """Resolve the ``auto`` corridor form by the metric type.
+
+    Args:
+        corridor_mode (CorridorMode): The configured corridor form.
+        metric_user (str): The user-facing metric name.
+        best_score (float): The leader's score in user semantics.
+
+    Returns:
+        CorridorMode: ``'multiplicative'`` or ``'additive'``.
+    """
+    if corridor_mode == "auto":
+        if is_error_metric(metric_user):
+            # Error → multiplicative, except the degenerate case best≈0
+            # (MAE≈0): the multiplicative form yields a threshold ≈0 and
+            # collapses the pool to the leader — switch to the additive form.
+            effective_mode: CorridorMode = (
+                "additive" if abs(best_score) <= _CORRIDOR_EPS else "multiplicative"
+            )
+        else:
+            effective_mode = "additive"
+    else:
+        effective_mode = corridor_mode
+    return effective_mode
+
+
+def _family_diversity_topup(
+    pool: list[str],
+    *,
+    candidates: list[str],
+    ordered: list[str],
+    top_k_candidates: int,
+    extended_delta: float,
+    algorithm_families: Mapping[str, str] | None,
+    allowed_families: set[str] | None,
+    in_corridor: Callable[[str, float], bool],
+) -> None:
+    """Soft family top-up of a single-family finalists pool (in place).
+
+    Args:
+        pool (list[str]): The finalists pool (extended in place).
+        candidates (list[str]): The valid candidates in insertion order.
+        ordered (list[str]): The candidates ordered by the raw score.
+        top_k_candidates (int): The hard cap on the pool size.
+        extended_delta (float): The width of the extended corridor.
+        algorithm_families (Mapping[str, str] | None): Algorithm → family map.
+        allowed_families (set[str] | None): Families permitted by the config.
+        in_corridor (Callable[[str, float], bool]): Whether a candidate is
+            inside the corridor of the given width.
+    """
+    pool_families = {_family_of(name, algorithm_families) for name in pool}
+    single_pool_family = next(iter(pool_families)) if len(pool_families) == 1 else None
+    if single_pool_family is not None and (
+        allowed_families is None or single_pool_family in allowed_families
+    ):
+        extended_members = [
+            name for name in candidates if in_corridor(name, extended_delta)
+        ]
+        extended_set = set(extended_members)
+        missing_families = {
+            _family_of(name, algorithm_families)
+            for name in candidates
+            if _family_of(name, algorithm_families) != single_pool_family
+        }
+        if allowed_families is not None:
+            missing_families &= allowed_families
+
+        pool_names = set(pool)
+        remaining = set(missing_families)
+        while len(pool) < top_k_candidates and remaining:
+            picked: str | None = None
+            for name in ordered:
+                family = _family_of(name, algorithm_families)
+                if (
+                    name not in pool_names
+                    and name in extended_set
+                    and family in remaining
+                ):
+                    picked = name
+                    break
+            if picked is None:
+                break
+            pool.append(picked)
+            pool_names.add(picked)
+            remaining.remove(_family_of(picked, algorithm_families))
 
 
 # --------------------------------------------------------------------------- #

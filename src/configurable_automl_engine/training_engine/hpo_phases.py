@@ -108,7 +108,7 @@ def _load_module(path: str) -> ModuleType:
 # --------------------------------------------------------------------------- #
 #  HPO wrapper                                                                #
 # --------------------------------------------------------------------------- #
-def _run_hpo(  # noqa: C901
+def _run_hpo(
     *,
     algo_name: str,
     algo_cfg: AlgoCfg,
@@ -256,6 +256,198 @@ def _run_hpo(  # noqa: C901
             message).
         AttributeError: If the tuner module lacks an `optimize` function.
     """
+    tuner, sig, tuner_accepts_var_kwargs = _load_tuner(
+        algo_cfg, algo_name, previous_trials
+    )
+
+    kwargs: dict[str, Any] = {
+        "algo_name": algo_name,
+        "X": X,
+        "y": y,
+        "metric": metric_name_sklearn,
+        "n_trials": n_trials,
+        "validation_strategy": validation_strategy,
+    }
+    kwargs.update(
+        _supported_kwargs(
+            sig,
+            [
+                # pass the data-split seed if the tuner supports it (mandatory
+                # for the bundled tuner: every HPO phase and the final fit
+                # must use the same folds/preprocessor — general.random_state)
+                ("random_state", random_state, True),
+                # pass the per-phase TPE sampler seed if the tuner supports it
+                # (mandatory for the bundled tuner: each HPO phase uses a
+                # different seed so that TPE startup points do not repeat,
+                # while the folds stay fixed)
+                ("sampler_seed", sampler_seed, True),
+                # pass n_folds if the module supports it
+                (
+                    "n_folds",
+                    n_folds,
+                    validation_strategy == ValidationStrategy.k_fold
+                    and n_folds is not None,
+                ),
+                # pass the resolved hold-out size: for 'auto' →
+                # 'train_test_split' choose_validation_method returns an
+                # integer number of rows, which must match both in HPO and in
+                # the final fit.
+                ("train_test_split_test_size", train_test_split_test_size, True),
+                # pass oversampling parameters if the tuner supports them
+                ("data_oversampling", data_oversampling, True),
+                ("data_oversampling_multiplier", data_oversampling_multiplier, True),
+                ("data_oversampling_algorithm", data_oversampling_algorithm, True),
+                (
+                    "data_oversampling_target_bins",
+                    data_oversampling_target_bins,
+                    True,
+                ),
+                ("data_oversampling_add_noise", data_oversampling_add_noise, True),
+                (
+                    "data_oversampling_noise_level",
+                    data_oversampling_noise_level,
+                    True,
+                ),
+                # pass the custom search space if provided: a dict
+                # {algo_name: hyperparameters_dict}
+                (
+                    "space_overrides",
+                    {algo_name: search_space_override},
+                    search_space_override is not None,
+                ),
+                # pass initial_params if available (for the refine phase)
+                ("initial_params", initial_params, initial_params is not None),
+            ],
+        )
+    )
+
+    # pass the TPE history of the previous phase (refine) if available;
+    # a ``**kwargs`` tuner receives the key as well (it decides what to do)
+    if previous_trials and (
+        "previous_trials" in sig.parameters or tuner_accepts_var_kwargs
+    ):
+        kwargs["previous_trials"] = previous_trials
+
+    # pass the detected categorical/numerical columns so that the HPO phase
+    # builds its preprocessor consistently with the final training
+    kwargs.update(
+        _supported_kwargs(
+            sig,
+            [
+                ("categorical_features", categorical_features, True),
+                ("numerical_features", numerical_features, True),
+            ],
+        )
+    )
+
+    kwargs.update(_encoding_kwargs(sig, algo_cfg, encoding))
+
+    # pass the preprocessing preset override: an explicit user setting from the
+    # configuration applies both in HPO and in the final training
+    preprocessing_override = getattr(algo_cfg, "preprocessing", None)
+    kwargs.update(
+        _supported_kwargs(
+            sig,
+            [
+                ("preprocessing_override", preprocessing_override, True),
+                # pass the early stopping (pruning) settings if the tuner
+                # supports them; custom tuners without the `pruning` argument
+                # are unaffected
+                ("pruning", pruning, pruning is not None),
+                # pass the high-cardinality encoding parameters and the new
+                # strategies if the tuner supports them; consistent with the
+                # final training
+                ("high_cardinality_threshold", high_cardinality_threshold, True),
+                ("high_cardinality_encoding", high_cardinality_encoding, True),
+                ("hashing_n_components", hashing_n_components, True),
+                ("target_encoding_smoothing", target_encoding_smoothing, True),
+                ("target_encoding_fallback", target_encoding_fallback, True),
+            ],
+        )
+    )
+
+    kwargs.update(
+        _feature_selection_kwargs(
+            sig, tuner_accepts_var_kwargs, algo_cfg, feature_selection_cfg
+        )
+    )
+
+    kwargs.update(
+        _supported_kwargs(
+            sig,
+            [
+                # pass the adaptive complexity guard settings if the tuner
+                # supports them; custom tuners without the arguments are
+                # unaffected
+                (
+                    "complexity_guard_cfg",
+                    complexity_guard_cfg,
+                    complexity_guard_cfg is not None,
+                ),
+                (
+                    "user_hyperparameter_keys",
+                    user_hyperparameter_keys,
+                    bool(user_hyperparameter_keys),
+                ),
+                ("limit_hyperparameters", limit_hyperparameters, limit_hyperparameters),
+                # The HPO phase needs only the best parameters and score — the
+                # final model is trained later by the engine's own trainer. Ask
+                # a tuner that supports skipping the final full-data fit to do
+                # so: otherwise one redundant full training per algorithm per
+                # phase is wasted (the model is discarded below).
+                ("fit_best_model", False, True),
+                # pass the HPO phase name if the tuner supports it: the bundled
+                # tuner uses it to deduplicate the WARNING about the
+                # pooled-metric fallback (emitted once per algorithm and phase).
+                ("phase_name", phase_name, phase_name is not None),
+                # Input-data diagnostics policies: the same values as for the
+                # final ModelTrainer (_build_trainer), so the tuner's own data
+                # validation follows the configuration instead of its own
+                # defaults. On the engine path the data is already repaired in
+                # prepare_dataset, so re-validation is a no-op; the forwarding
+                # keeps custom tuners consistent with the final fit.
+                ("inf_policy", inf_policy, inf_policy is not None),
+                ("datetime_policy", datetime_policy, datetime_policy is not None),
+                (
+                    "drop_id_like_columns",
+                    drop_id_like_columns,
+                    drop_id_like_columns is not None,
+                ),
+                # BBC-CV input: the out-of-fold predictions of every trial.
+                # Only the bundled tuner (or a custom one with the same
+                # argument) supports it; for the others the BBC-CV estimate is
+                # simply not reported.
+                ("collect_oof", True, collect_oof),
+            ],
+        )
+    )
+
+    return _call_tuner(tuner, kwargs, algo_name)
+
+
+def _load_tuner(
+    algo_cfg: AlgoCfg,
+    algo_name: str,
+    previous_trials: list[FrozenTrial] | None,
+) -> tuple[ModuleType, inspect.Signature, bool]:
+    """Load the tuner module of an algorithm and inspect its ``optimize``.
+
+    Args:
+        algo_cfg (AlgoCfg): The algorithm configuration with the tuner path.
+        algo_name (str): The algorithm name (for the error message).
+        previous_trials (list[FrozenTrial] | None): The TPE history to be
+            transferred (refine).
+
+    Returns:
+        tuple[ModuleType, inspect.Signature, bool]: The tuner module, the
+            signature of its ``optimize`` and whether it accepts ``**kwargs``.
+
+    Raises:
+        ValueError: If the tuner path is not configured.
+        AttributeError: If the tuner module lacks an ``optimize`` function.
+        HPOHistoryError: If non-empty history must be transferred to a tuner
+            that does not accept ``previous_trials``.
+    """
     if algo_cfg.tuner is None:
         raise ValueError("Tuner path is not configured")
     tuner = _load_module(algo_cfg.tuner)
@@ -288,138 +480,85 @@ def _run_hpo(  # noqa: C901
             f"`previous_trials` (list of optuna FrozenTrial) or drop the "
             f"refine phase for this algorithm."
         )
+    return tuner, sig, tuner_accepts_var_kwargs
 
-    kwargs: dict[str, Any] = {
-        "algo_name": algo_name,
-        "X": X,
-        "y": y,
-        "metric": metric_name_sklearn,
-        "n_trials": n_trials,
-        "validation_strategy": validation_strategy,
+
+def _supported_kwargs(
+    sig: inspect.Signature,
+    entries: Iterable[tuple[str, Any, bool]],
+) -> dict[str, Any]:
+    """Select the wanted tuner arguments that the tuner signature declares.
+
+    Args:
+        sig (inspect.Signature): The signature of the tuner's ``optimize``.
+        entries (Iterable[tuple[str, Any, bool]]): ``(name, value, wanted)``
+            triples in the order the arguments are added.
+
+    Returns:
+        dict[str, Any]: The wanted arguments declared by the signature, in
+            the order of ``entries``.
+    """
+    return {
+        name: value
+        for name, value, wanted in entries
+        if wanted and name in sig.parameters
     }
 
-    # pass the data-split seed if the tuner supports it (mandatory for the
-    # bundled tuner: every HPO phase and the final fit must use the same
-    # folds/preprocessor — general.random_state)
-    if "random_state" in sig.parameters:
-        kwargs["random_state"] = random_state
 
-    # pass the per-phase TPE sampler seed if the tuner supports it (mandatory
-    # for the bundled tuner: each HPO phase uses a different seed so that TPE
-    # startup points do not repeat, while the folds stay fixed)
-    if "sampler_seed" in sig.parameters:
-        kwargs["sampler_seed"] = sampler_seed
+def _encoding_kwargs(
+    sig: inspect.Signature, algo_cfg: AlgoCfg, encoding: str
+) -> dict[str, Any]:
+    """Pass the encoding strategy if the tuner supports it (else warn).
 
-    # pass n_folds if the module supports it
-    if (
-        validation_strategy == ValidationStrategy.k_fold
-        and n_folds is not None
-        and "n_folds" in sig.parameters
-    ):
-        kwargs["n_folds"] = n_folds
+    Args:
+        sig (inspect.Signature): The signature of the tuner's ``optimize``.
+        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
+        encoding (str): The categorical encoding strategy.
 
-    # pass the resolved hold-out size: for 'auto' → 'train_test_split'
-    # choose_validation_method returns an integer number of rows, which must
-    # match both in HPO and in the final fit.
-    if "train_test_split_test_size" in sig.parameters:
-        kwargs["train_test_split_test_size"] = train_test_split_test_size
-
-    # pass oversampling parameters if the tuner supports them
-    if "data_oversampling" in sig.parameters:
-        kwargs["data_oversampling"] = data_oversampling
-
-    if "data_oversampling_multiplier" in sig.parameters:
-        kwargs["data_oversampling_multiplier"] = data_oversampling_multiplier
-
-    if "data_oversampling_algorithm" in sig.parameters:
-        kwargs["data_oversampling_algorithm"] = data_oversampling_algorithm
-
-    if "data_oversampling_target_bins" in sig.parameters:
-        kwargs["data_oversampling_target_bins"] = data_oversampling_target_bins
-
-    if "data_oversampling_add_noise" in sig.parameters:
-        kwargs["data_oversampling_add_noise"] = data_oversampling_add_noise
-
-    if "data_oversampling_noise_level" in sig.parameters:
-        kwargs["data_oversampling_noise_level"] = data_oversampling_noise_level
-
-    # pass the custom search space if provided
-    if search_space_override is not None:
-        # We pass a dict {algo_name: hyperparameters_dict}
-        overrides = {algo_name: search_space_override}
-        if "space_overrides" in sig.parameters:
-            kwargs["space_overrides"] = overrides
-
-    # pass initial_params if available (for the refine phase)
-    if initial_params is not None and "initial_params" in sig.parameters:
-        kwargs["initial_params"] = initial_params
-
-    # pass the TPE history of the previous phase (refine) if available;
-    # a ``**kwargs`` tuner receives the key as well (it decides what to do)
-    if previous_trials and (
-        "previous_trials" in sig.parameters or tuner_accepts_var_kwargs
-    ):
-        kwargs["previous_trials"] = previous_trials
-
-    # pass the detected categorical/numerical columns so that the HPO phase
-    # builds its preprocessor consistently with the final training
-    if "categorical_features" in sig.parameters:
-        kwargs["categorical_features"] = categorical_features
-
-    if "numerical_features" in sig.parameters:
-        kwargs["numerical_features"] = numerical_features
-
-    # pass the encoding strategy if the tuner supports it
+    Returns:
+        dict[str, Any]: ``{"encoding": encoding}`` or an empty dict.
+    """
     if "encoding" in sig.parameters:
-        kwargs["encoding"] = encoding
-    else:
-        # The custom tuner does not accept encoding: the strategy is silently
-        # ignored during HPO but applied in the final training -> a mismatch in
-        # the feature representation. Warn so the user can update the tuner to
-        # one supporting the `encoding` argument.
-        _LOG.warning(
-            "Tuner %s does not accept `encoding`; categorical_encoding=%r "
-            "will NOT be applied during HPO (final fit may diverge).",
-            algo_cfg.tuner,
-            encoding,
-        )
+        return {"encoding": encoding}
+    # The custom tuner does not accept encoding: the strategy is silently
+    # ignored during HPO but applied in the final training -> a mismatch in
+    # the feature representation. Warn so the user can update the tuner to
+    # one supporting the `encoding` argument.
+    _LOG.warning(
+        "Tuner %s does not accept `encoding`; categorical_encoding=%r "
+        "will NOT be applied during HPO (final fit may diverge).",
+        algo_cfg.tuner,
+        encoding,
+    )
+    return {}
 
-    # pass the preprocessing preset override: an explicit user setting from the
-    # configuration applies both in HPO and in the final training
-    preprocessing_override = getattr(algo_cfg, "preprocessing", None)
-    if "preprocessing_override" in sig.parameters:
-        kwargs["preprocessing_override"] = preprocessing_override
 
-    # pass the early stopping (pruning) settings if the tuner supports them;
-    # custom tuners without the `pruning` argument are unaffected
-    if pruning is not None and "pruning" in sig.parameters:
-        kwargs["pruning"] = pruning
+def _feature_selection_kwargs(
+    sig: inspect.Signature,
+    tuner_accepts_var_kwargs: bool,
+    algo_cfg: AlgoCfg,
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Pass the feature selection config to a tuner that supports it.
 
-    # pass the high-cardinality encoding parameters and the new strategies if
-    # the tuner supports them; consistent with the final training
-    if "high_cardinality_threshold" in sig.parameters:
-        kwargs["high_cardinality_threshold"] = high_cardinality_threshold
+    Args:
+        sig (inspect.Signature): The signature of the tuner's ``optimize``.
+        tuner_accepts_var_kwargs (bool): Whether the tuner accepts ``**kwargs``.
+        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
+        feature_selection_cfg (FeatureSelectionCfg | dict | None): The feature
+            selection config.
 
-    if "high_cardinality_encoding" in sig.parameters:
-        kwargs["high_cardinality_encoding"] = high_cardinality_encoding
-
-    if "hashing_n_components" in sig.parameters:
-        kwargs["hashing_n_components"] = hashing_n_components
-
-    if "target_encoding_smoothing" in sig.parameters:
-        kwargs["target_encoding_smoothing"] = target_encoding_smoothing
-
-    if "target_encoding_fallback" in sig.parameters:
-        kwargs["target_encoding_fallback"] = target_encoding_fallback
-
+    Returns:
+        dict[str, Any]: ``{"feature_selection_cfg": ...}`` or an empty dict.
+    """
     # pass the feature selection config if the tuner supports the
     # `feature_selection_cfg` argument or accepts **kwargs; custom tuners
     # without support are unaffected. When feature selection is active, warn
     # about the HPO ↔ final fit mismatch (as with encoding): the configuration
     # will not be applied during the search phase.
     if "feature_selection_cfg" in sig.parameters or tuner_accepts_var_kwargs:
-        kwargs["feature_selection_cfg"] = feature_selection_cfg
-    elif _feature_selection_mode(feature_selection_cfg) not in (None, "disabled"):
+        return {"feature_selection_cfg": feature_selection_cfg}
+    if _feature_selection_mode(feature_selection_cfg) not in (None, "disabled"):
         _LOG.warning(
             "Tuner %s does not accept `feature_selection_cfg`; feature "
             "selection mode=%r will NOT be applied during HPO "
@@ -427,109 +566,29 @@ def _run_hpo(  # noqa: C901
             algo_cfg.tuner,
             _feature_selection_mode(feature_selection_cfg),
         )
+    return {}
 
-    # pass the adaptive complexity guard settings if the tuner supports them;
-    # custom tuners without the arguments are unaffected
-    if complexity_guard_cfg is not None and "complexity_guard_cfg" in sig.parameters:
-        kwargs["complexity_guard_cfg"] = complexity_guard_cfg
 
-    if user_hyperparameter_keys and "user_hyperparameter_keys" in sig.parameters:
-        kwargs["user_hyperparameter_keys"] = user_hyperparameter_keys
+def _call_tuner(
+    tuner: ModuleType, kwargs: dict[str, Any], algo_name: str
+) -> PhaseResult | None:
+    """Run the tuner and map its result and exceptions.
 
-    if limit_hyperparameters and "limit_hyperparameters" in sig.parameters:
-        kwargs["limit_hyperparameters"] = limit_hyperparameters
+    Args:
+        tuner (ModuleType): The tuner module.
+        kwargs (dict[str, Any]): The arguments of ``tuner.optimize``.
+        algo_name (str): The algorithm name.
 
-    # The HPO phase needs only the best parameters and score — the final model
-    # is trained later by the engine's own trainer. Ask a tuner that supports
-    # skipping the final full-data fit to do so: otherwise one redundant full
-    # training per algorithm per phase is wasted (the model is discarded
-    # below).
-    if "fit_best_model" in sig.parameters:
-        kwargs["fit_best_model"] = False
+    Returns:
+        PhaseResult | None: The phase result, or ``None`` if HPO failed.
 
-    # pass the HPO phase name if the tuner supports it: the bundled tuner
-    # uses it to deduplicate the WARNING about the pooled-metric fallback
-    # (emitted once per algorithm and phase).
-    if phase_name is not None and "phase_name" in sig.parameters:
-        kwargs["phase_name"] = phase_name
-
-    # Input-data diagnostics policies: the same values as for the final
-    # ModelTrainer (_build_trainer), so the tuner's own data validation follows
-    # the configuration instead of its own defaults. On the engine path the data is already repaired in
-    # prepare_dataset, so re-validation is a no-op; the forwarding keeps
-    # custom tuners consistent with the final fit.
-    for key, value in (
-        ("inf_policy", inf_policy),
-        ("datetime_policy", datetime_policy),
-        ("drop_id_like_columns", drop_id_like_columns),
-    ):
-        if value is not None and key in sig.parameters:
-            kwargs[key] = value
-
-    # BBC-CV input: the out-of-fold predictions of every trial. Only the
-    # bundled tuner (or a custom one with the same argument) supports it; for
-    # the others the BBC-CV estimate is simply not reported.
-    if collect_oof and "collect_oof" in sig.parameters:
-        kwargs["collect_oof"] = True
-
+    Raises:
+        _CanonicalIAE: If the tuner reports that the algorithm is incompatible
+            with the data.
+        HPOHistoryError: If the TPE history transfer failed.
+    """
     try:
-        result = tuner.optimize(**kwargs)
-        if result is None:
-            # Tuner couldn't get a valid result: either all trials failed
-            # (optuna.TrialPruned) or it failed otherwise. Return None so the
-            # main loop knows the algorithm didn't pass: the dummy candidate
-            # with score -3.4e38 and params=None should no longer end up in
-            # phase_results.
-            _LOG.error(
-                "Algorithm %s failed during HPO: no valid result (tuner returned None)",
-                algo_name,
-            )
-            return None
-        if isinstance(result, OptimizeResult):
-            # The bundled tuner: a self-documenting result with the phase's
-            # own trials (transferred history excluded).
-            best_score, best_params, trials = (
-                result.score,
-                result.params,
-                list(result.trials),
-            )
-            complexity_guard_logs: list[dict[str, Any]] = list(
-                result.complexity_guard or []
-            )
-            # The honest number of trials the best score was selected from
-            # (own COMPLETED trials of the phase).
-            n_trials_evaluated = int(result.n_trials_evaluated or 0)
-            oof_predictions = result.oof_predictions
-        else:
-            # A legacy custom tuner returning the (model, params, score)
-            # triple; the trials are unavailable (empty history).
-            _, best_params, best_score = result
-            trials = []
-            complexity_guard_logs = []
-            n_trials_evaluated = 0
-            oof_predictions = None
-        if best_score is None or best_params is None:
-            # Tuner couldn't get a valid result: either all trials failed
-            # (optuna.TrialPruned) or it failed otherwise. Return None so the
-            # main loop knows the algorithm didn't pass: the dummy candidate
-            # with score -3.4e38 and params=None should no longer end up in
-            # phase_results.
-            _LOG.error(
-                "Algorithm %s failed during HPO: no valid result "
-                "(best_score=%r, best_params=%r)",
-                algo_name,
-                best_score,
-                best_params,
-            )
-            return None
-        return PhaseResult(
-            score=best_score,
-            params=best_params,
-            trials=trials,
-            complexity_guard=complexity_guard_logs,
-            n_trials_evaluated=n_trials_evaluated,
-            oof_predictions=oof_predictions,
-        )
+        return _to_phase_result(tuner.optimize(**kwargs), algo_name)
     except Exception as err:
         if err.__class__.__name__ == "InvalidAlgorithmError":
             raise _CanonicalIAE(str(err)) from err
@@ -541,6 +600,77 @@ def _run_hpo(  # noqa: C901
         _LOG.error("Algorithm %s failed during HPO: %s", algo_name, err, exc_info=True)
         # Return None so the main loop knows the algorithm didn't pass.
         return None
+
+
+def _to_phase_result(result: Any, algo_name: str) -> PhaseResult | None:
+    """Map the tuner's return value onto a ``PhaseResult``.
+
+    Args:
+        result (Any): The value returned by ``tuner.optimize``: an
+            ``OptimizeResult``, a legacy ``(model, params, score)`` triple or
+            ``None``.
+        algo_name (str): The algorithm name.
+
+    Returns:
+        PhaseResult | None: The phase result, or ``None`` when the tuner
+            produced no valid result.
+    """
+    if result is None:
+        # Tuner couldn't get a valid result: either all trials failed
+        # (optuna.TrialPruned) or it failed otherwise. Return None so the
+        # main loop knows the algorithm didn't pass: the dummy candidate
+        # with score -3.4e38 and params=None should no longer end up in
+        # phase_results.
+        _LOG.error(
+            "Algorithm %s failed during HPO: no valid result (tuner returned None)",
+            algo_name,
+        )
+        return None
+    if isinstance(result, OptimizeResult):
+        # The bundled tuner: a self-documenting result with the phase's
+        # own trials (transferred history excluded).
+        best_score, best_params, trials = (
+            result.score,
+            result.params,
+            list(result.trials),
+        )
+        complexity_guard_logs: list[dict[str, Any]] = list(
+            result.complexity_guard or []
+        )
+        # The honest number of trials the best score was selected from
+        # (own COMPLETED trials of the phase).
+        n_trials_evaluated = int(result.n_trials_evaluated or 0)
+        oof_predictions = result.oof_predictions
+    else:
+        # A legacy custom tuner returning the (model, params, score)
+        # triple; the trials are unavailable (empty history).
+        _, best_params, best_score = result
+        trials = []
+        complexity_guard_logs = []
+        n_trials_evaluated = 0
+        oof_predictions = None
+    if best_score is None or best_params is None:
+        # Tuner couldn't get a valid result: either all trials failed
+        # (optuna.TrialPruned) or it failed otherwise. Return None so the
+        # main loop knows the algorithm didn't pass: the dummy candidate
+        # with score -3.4e38 and params=None should no longer end up in
+        # phase_results.
+        _LOG.error(
+            "Algorithm %s failed during HPO: no valid result "
+            "(best_score=%r, best_params=%r)",
+            algo_name,
+            best_score,
+            best_params,
+        )
+        return None
+    return PhaseResult(
+        score=best_score,
+        params=best_params,
+        trials=trials,
+        complexity_guard=complexity_guard_logs,
+        n_trials_evaluated=n_trials_evaluated,
+        oof_predictions=oof_predictions,
+    )
 
 
 def _prepare_search_space(
