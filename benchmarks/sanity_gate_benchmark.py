@@ -407,7 +407,7 @@ def _execute(
     with patch.object(
         _hpo_phases,
         "_run_hpo",
-        side_effect=lambda **kwargs: stub_hpo(kwargs["algo_name"]),
+        side_effect=lambda **kwargs: stub_hpo(kwargs["request"].algo_name),
     ):
         return execute_phases(cfg, prepared)
 

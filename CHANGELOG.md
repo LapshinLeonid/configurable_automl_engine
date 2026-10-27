@@ -41,6 +41,15 @@ give the same winner, parameters, scores and predictions as 0.4.x, in both
   `selected_features_mask_`. **Assigning to them raises `AttributeError`.**
   Pass the values to the constructor, or build changed settings with
   `dataclasses.replace(trainer.settings, ...)`.
+- The other constructor arguments are no longer instance attributes; read
+  them from the setting groups: `trainer.settings.encoding`
+  (`high_cardinality_threshold`, `high_cardinality_encoding`,
+  `hashing_n_components`, `target_encoding_smoothing`,
+  `target_encoding_fallback`), `trainer.settings.oversampling` (`enable`,
+  `multiplier`, `algorithm`, `target_bins`, `add_noise`, `noise_level` — the
+  `data_oversampling*` arguments), `trainer.settings.policies` (`inf_policy`,
+  `datetime_policy`, `drop_id_like_columns`) and `trainer.settings.id_column`
+  / `preprocessing_override`.
 - The constructor arguments and `fit` / `predict` / `save` / `load` are
   unchanged.
 
