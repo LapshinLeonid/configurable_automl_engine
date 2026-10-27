@@ -28,6 +28,9 @@ from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 
 from configurable_automl_engine import tuner as hyperopt
+from configurable_automl_engine.hpo import evaluation as hpo_evaluation
+from configurable_automl_engine.hpo import runner as hpo_runner
+from configurable_automl_engine.hpo import search_space as hpo_search_space
 from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     SearchSpaceEntry,
@@ -35,15 +38,10 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.trainer import ModelTrainer
-from configurable_automl_engine.tuner import (
-    HPO_WORST_SCORE,
-    HyperoptError,
-    _apply_dynamic_space,
-    _build_scorer,
-    _can_stratify,
-    _missing_indicator_enabled,
-    optimize,
-)
+from configurable_automl_engine.tuner import HPO_WORST_SCORE, HyperoptError, optimize
+from configurable_automl_engine.hpo.evaluation import _build_scorer, _can_stratify
+from configurable_automl_engine.hpo.search_space import _apply_dynamic_space
+from configurable_automl_engine.hpo.trial_pipeline import _missing_indicator_enabled
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0. Make the package visible and import the module
@@ -144,8 +142,8 @@ def test_dict_space_override_remaps_legacy_names_once(toy_data):
     }
 
     with patch(
-        "configurable_automl_engine.tuner.create_model",
-        wraps=hyperopt.create_model,
+        "configurable_automl_engine.hpo.runner.create_model",
+        wraps=hpo_runner.create_model,
     ) as mock_create:
         opt_res = hyperopt.optimize(
             "ardregression",
@@ -263,7 +261,7 @@ def test_validate_data_mismatch():
     X = np.zeros((10, 2))
     y = np.zeros(5)
     with pytest.raises(hyperopt.InvalidDataError, match="Size mismatch"):
-        hyperopt._validate_data(X, y)
+        hpo_runner._validate_data(X, y)
 
 
 def test_validate_data_invalid_y_type():
@@ -271,7 +269,7 @@ def test_validate_data_invalid_y_type():
     X = np.zeros((5, 2))
     y = {1: 0, 2: 0}  # dict is not in ok_types
     with pytest.raises(hyperopt.InvalidDataError, match="y must be"):
-        hyperopt._validate_data(X, y)
+        hpo_runner._validate_data(X, y)
 
 
 def test_validate_data_non_numeric_y():
@@ -284,7 +282,7 @@ def test_validate_data_non_numeric_y():
     X = np.zeros((5, 2))
     bad_y = np.array(["a", "b", "c", "d", "e"])
     with pytest.raises(hyperopt.InvalidDataError, match="numeric"):
-        hyperopt._validate_data(X, bad_y)
+        hpo_runner._validate_data(X, bad_y)
 
 
 def test_validate_data_none_in_object_y_rejected_as_non_finite():
@@ -296,7 +294,7 @@ def test_validate_data_none_in_object_y_rejected_as_non_finite():
     X = np.zeros((5, 2))
     bad_y = np.array([1, 2, None, 4, 5], dtype=object)
     with pytest.raises(hyperopt.InvalidDataError, match="non-finite"):
-        hyperopt._validate_data(X, bad_y)
+        hpo_runner._validate_data(X, bad_y)
 
 
 @pytest.mark.parametrize(
@@ -317,7 +315,7 @@ def test_validate_data_non_finite_y(bad_y, fragment):
     """
     X = np.zeros((5, 2))
     with pytest.raises(hyperopt.InvalidDataError, match=fragment):
-        hyperopt._validate_data(X, bad_y)
+        hpo_runner._validate_data(X, bad_y)
 
 
 def test_validate_data_non_finite_y_pandas_series():
@@ -325,18 +323,18 @@ def test_validate_data_non_finite_y_pandas_series():
     X = np.zeros((5, 2))
     y = pd.Series([1.0, np.nan, 3.0, 4.0, 5.0])
     with pytest.raises(hyperopt.InvalidDataError, match="NaN"):
-        hyperopt._validate_data(X, y)
+        hpo_runner._validate_data(X, y)
 
 
 def test_validate_data_y_dataframe_column_is_validated():
     """A single-column DataFrame y is allowed and checked for finiteness."""
     X = np.zeros((5, 2))
     y_good = pd.DataFrame({"t": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    hyperopt._validate_data(X, y_good)  # must not raise
+    hpo_runner._validate_data(X, y_good)  # must not raise
 
     y_bad = pd.DataFrame({"t": [1.0, np.nan, 3.0, 4.0, 5.0]})
     with pytest.raises(hyperopt.InvalidDataError, match="NaN"):
-        hyperopt._validate_data(X, y_bad)
+        hpo_runner._validate_data(X, y_bad)
 
 
 def test_validate_data_duplicate_columns_rejected():
@@ -344,7 +342,7 @@ def test_validate_data_duplicate_columns_rejected():
     X = pd.DataFrame(np.ones((4, 3)), columns=["a", "b", "a"])
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(hyperopt.InvalidDataError, match="duplicate column names"):
-        hyperopt._validate_data(X, y)
+        hpo_runner._validate_data(X, y)
 
 
 def test_validate_data_inf_policy_error():
@@ -352,14 +350,14 @@ def test_validate_data_inf_policy_error():
     X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
     with pytest.raises(hyperopt.InvalidDataError, match="[Ii]nfinite"):
-        hyperopt._validate_data(X, y, inf_policy="error")
+        hpo_runner._validate_data(X, y, inf_policy="error")
 
 
 def test_validate_data_inf_policy_default_as_missing():
     """±inf is replaced with NaN by default (as general.inf_policy)."""
     X = pd.DataFrame({"a": [1.0, np.inf, 3.0, 4.0], "b": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
-    repaired = hyperopt._validate_data(X, y)
+    repaired = hpo_runner._validate_data(X, y)
     assert np.isnan(repaired["a"].iloc[1])
 
 
@@ -369,7 +367,7 @@ def test_validate_data_datetime_expands_by_default():
         {"ts": pd.to_datetime(["2024-01-01", "2024-01-02"]), "b": [1.0, 2.0]}
     )
     y = pd.Series([1.0, 2.0])
-    repaired = hyperopt._validate_data(X, y)
+    repaired = hpo_runner._validate_data(X, y)
     assert "ts" not in repaired.columns
     assert "ts_day" in repaired.columns
 
@@ -384,13 +382,13 @@ def test_validate_data_multi_column_y_rejected():
     X = np.zeros((5, 2))
     y_2d = np.zeros((5, 2))
     with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
-        hyperopt._validate_data(X, y_2d)
+        hpo_runner._validate_data(X, y_2d)
 
     y_2col = pd.DataFrame(
         {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [1.0, 2.0, 3.0, 4.0, 5.0]}
     )
     with pytest.raises(hyperopt.InvalidDataError, match="single column of numbers"):
-        hyperopt._validate_data(X, y_2col)
+        hpo_runner._validate_data(X, y_2col)
 
 
 def test_optimize_rejects_nan_in_y_before_any_trial(toy_data):
@@ -541,11 +539,11 @@ def test_can_stratify_negative():
     """Checks the conditions under which stratification is impossible (lines 182-183)."""
     # Many unique values (regression)
     y_reg = np.linspace(0, 1, 100)
-    assert hyperopt._can_stratify(y_reg) is False
+    assert hpo_evaluation._can_stratify(y_reg) is False
 
     # Multi-dimensional y
     y_multi = np.zeros((10, 2))
-    assert hyperopt._can_stratify(y_multi) is False
+    assert hpo_evaluation._can_stratify(y_multi) is False
 
 
 def test_split_train_test_fallback():
@@ -555,7 +553,7 @@ def test_split_train_test_fallback():
     y = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
 
     # The method must complete without errors, catching the ValueError internally
-    res = hyperopt._split_train_test(X, y, test_size=0.5)
+    res = hpo_evaluation._split_train_test(X, y, test_size=0.5)
     assert len(res) == 4
 
 
@@ -602,7 +600,7 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
     X, y = toy_data
     initial_params = {"alpha": 0.5, "l1_ratio": 0.3}
 
-    with patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create:
+    with patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create:
         mock_study = MagicMock()
         mock_study.best_params = {"alpha": 0.6, "l1_ratio": 0.4}
         mock_study.best_value = 0.9
@@ -610,11 +608,11 @@ def test_optimize_with_initial_params_enqueues_trial(toy_data):
 
         # Mock create_model and _validate_data/_get_estimator
         with (
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_model = MagicMock()
@@ -638,18 +636,18 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
     """Checks that without initial_params, enqueue_trial is NOT called."""
     X, y = toy_data
 
-    with patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create:
+    with patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create:
         mock_study = MagicMock()
         mock_study.best_params = {"alpha": 0.6}
         mock_study.best_value = 0.9
         mock_create.return_value = mock_study
 
         with (
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_model = MagicMock()
@@ -671,7 +669,7 @@ def test_optimize_without_initial_params_does_not_enqueue(toy_data):
 def test_knn_space_dynamic_limit():
     """Checks the dynamic k limit in KNN (lines 80-81)."""
     # For 10 samples, 80% is 8. max_k must be 8.
-    space_fn = hyperopt._make_knn_space(n_samples=10)
+    space_fn = hpo_search_space._make_knn_space(n_samples=10)
 
     # Emulate the n_neighbors request
     trial = FixedTrial({"n_neighbors": 5, "weights": "uniform", "p": 1})
@@ -851,7 +849,7 @@ def test_optimize_sklearn_non_additive_metrics_use_pooled_path(metric):
     y = pd.Series(np.abs(X.iloc[:, 0] * 2.0 + rng.randn(60)) + 1.0)
     space = {"ridge": lambda t: {"alpha": 0.1}}
 
-    with patch.object(hyperopt, "_evaluate_pooled_cv") as mock_pooled:
+    with patch.object(hpo_runner, "_evaluate_pooled_cv") as mock_pooled:
         mock_pooled.return_value = 0.5
         opt_res = optimize(
             "ridge",
@@ -897,7 +895,7 @@ def test_optimize_raises_when_no_search_space(monkeypatch):
         return DummyModel()
 
     # --- make the algorithm valid ---
-    monkeypatch.setattr(hyperopt, "_get_estimator", lambda algo: True)
+    monkeypatch.setattr(hpo_runner, "_get_estimator", lambda algo: True)
 
     with pytest.raises(HyperoptError, match="No search space for algorithm"):
         optimize("fake_algo", X, y, n_trials=1)
@@ -922,16 +920,16 @@ class TestTunerObjective:
         # 1. Patch the ENTIRE environment so no real function runs
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
             ) as mock_cv,
-            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.tuner._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner.np.isfinite") as mock_finite,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner.np.isfinite") as mock_finite,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             # WE GUARANTEE:
             # 1. We are in the k-fold branch
@@ -966,14 +964,14 @@ class TestTunerObjective:
         # Try patching mean in the tuner module's namespace
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_pooled_cv",
+                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv",
                 return_value=np.nan,
             ),
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             opt_res = optimize(
@@ -993,13 +991,13 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
             ) as mock_cv,
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # Each pooled evaluation call raises RuntimeError
@@ -1019,13 +1017,13 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
             ) as mock_cv,
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # 4 errors in a row, then success
@@ -1053,14 +1051,14 @@ class TestTunerObjective:
         """
         X, y = dummy_data
         with (
-            patch("configurable_automl_engine.tuner.iter_splits") as mock_iter_splits,
-            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch("configurable_automl_engine.hpo.runner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.tuner._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             # Force train_test_split
             mock_make_cv.return_value = ("train_test_split", None, None)
@@ -1098,14 +1096,14 @@ class TestTunerObjective:
         """
         X, y = dummy_data
         with (
-            patch("configurable_automl_engine.tuner.iter_splits") as mock_iter_splits,
-            patch("configurable_automl_engine.tuner.create_model") as mock_create,
+            patch("configurable_automl_engine.hpo.runner.iter_splits") as mock_iter_splits,
+            patch("configurable_automl_engine.hpo.runner.create_model") as mock_create,
             patch(
-                "configurable_automl_engine.tuner._build_scorer"
+                "configurable_automl_engine.hpo.runner._build_scorer"
             ) as mock_scorer_factory,
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("train_test_split", None, None)
 
@@ -1156,13 +1154,13 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner.model_selection.cross_val_score"
+                "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
             ) as mock_cv,
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # All 10 cross_val_score calls raise ValueError
@@ -1193,13 +1191,13 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_with_intermediate_reports"
+                "configurable_automl_engine.hpo.runner._evaluate_with_intermediate_reports"
             ) as mock_eval,
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             # Trial 1 — fatal failure; trial 2 — pruned as expected;
@@ -1244,13 +1242,13 @@ class TestTunerObjective:
         X, y = dummy_data
         with (
             patch(
-                "configurable_automl_engine.tuner._evaluate_pooled_cv"
+                "configurable_automl_engine.hpo.runner._evaluate_pooled_cv"
             ) as mock_cv,
-            patch("configurable_automl_engine.tuner.create_model"),
-            patch("configurable_automl_engine.tuner._build_scorer"),
-            patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-            patch("configurable_automl_engine.tuner._validate_data"),
-            patch("configurable_automl_engine.tuner._get_estimator"),
+            patch("configurable_automl_engine.hpo.runner.create_model"),
+            patch("configurable_automl_engine.hpo.runner._build_scorer"),
+            patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+            patch("configurable_automl_engine.hpo.runner._validate_data"),
+            patch("configurable_automl_engine.hpo.runner._get_estimator"),
         ):
             mock_make_cv.return_value = ("k_fold", MagicMock(), None)
             mock_cv.side_effect = [
@@ -1529,7 +1527,7 @@ def _run_optimize_with_captured_study(
         sampler=optuna.samplers.TPESampler(seed=kwargs.get("random_state") or 42),
     )
     with patch(
-        "configurable_automl_engine.tuner.optuna.create_study", return_value=real_study
+        "configurable_automl_engine.hpo.runner.optuna.create_study", return_value=real_study
     ):
         opt_res = hyperopt.optimize(*args, **kwargs)
         assert opt_res is not None
@@ -1580,12 +1578,12 @@ def test_auto_mode_winner_false_omits_feature_selector_in_final_model(toy_data):
     """
     X, y = toy_data
     with (
-        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
-        patch("configurable_automl_engine.tuner._build_scorer"),
-        patch("configurable_automl_engine.tuner.create_model"),
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner.create_model"),
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
         mock_study = MagicMock()
@@ -1971,14 +1969,14 @@ def test_fs_transformer_factory_uses_fixed_seed_when_random_state_none(toy_data)
     """
     X, y = toy_data
     with (
-        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
-        patch("configurable_automl_engine.tuner._build_scorer"),
-        patch("configurable_automl_engine.tuner.create_model"),
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner.create_model"),
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.tuner.FeatureSelector", autospec=True
+            "configurable_automl_engine.hpo.runner.FeatureSelector", autospec=True
         ) as mock_fs,
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2160,14 +2158,14 @@ def test_fs_service_key_does_not_leak_into_model_constructor(toy_data):
     X, y = toy_data
     initial_params = {"alpha": 0.5, "use_feature_selection": True}
     with (
-        patch("configurable_automl_engine.tuner.optuna.create_study") as mock_create,
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
-        patch("configurable_automl_engine.tuner._build_scorer"),
-        patch("configurable_automl_engine.tuner.create_model") as mock_create_model,
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner.optuna.create_study") as mock_create,
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner.create_model") as mock_create_model,
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.tuner.FeatureSelector", autospec=True
+            "configurable_automl_engine.hpo.runner.FeatureSelector", autospec=True
         ),
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2262,7 +2260,7 @@ def test_space_fn_error_marks_trial_failed_and_propagates(toy_data):
         raise ValueError("user space fn boom")
 
     with patch(
-        "configurable_automl_engine.tuner.optuna.create_study", return_value=real_study
+        "configurable_automl_engine.hpo.runner.optuna.create_study", return_value=real_study
     ):
         with pytest.raises(ValueError, match="user space fn boom"):
             optimize(
@@ -2293,16 +2291,16 @@ def test_create_model_error_marks_trial_failed_and_propagates(toy_data):
 
     with (
         patch(
-            "configurable_automl_engine.tuner.optuna.create_study",
+            "configurable_automl_engine.hpo.runner.optuna.create_study",
             return_value=real_study,
         ),
         patch(
-            "configurable_automl_engine.tuner.create_model",
+            "configurable_automl_engine.hpo.runner.create_model",
             side_effect=exploding_model,
         ),
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
-        patch("configurable_automl_engine.tuner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
     ):
         with pytest.raises(MemoryError, match="model constructor boom"):
             optimize(
@@ -2329,13 +2327,13 @@ def test_scoring_valueerror_still_prunes_not_fatal(toy_data):
     X, y = toy_data
     with (
         patch(
-            "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
         ) as mock_cv,
-        patch("configurable_automl_engine.tuner.create_model"),
-        patch("configurable_automl_engine.tuner._build_scorer"),
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner.create_model"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
         # All 10 cross_val_score calls (evaluation stage) raise ValueError
@@ -2439,7 +2437,7 @@ def test_optimize_numpy_input_skips_cleaning():
 def test_runner_dropped_features_recorded():
     """_OptimizeRunner records the list of dropped columns for diagnostics."""
     X, y = _tuner_garbage_data()
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="ridge",
         X=X,
         y=y,
@@ -2499,7 +2497,7 @@ def test_runner_n_features_size_uses_original_columns():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="random_forest",
         X=X,
         y=y,
@@ -2556,7 +2554,7 @@ def test_runner_n_features_eff_ignores_missing_categories():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="random_forest",
         X=X,
         y=y,
@@ -2615,7 +2613,7 @@ def test_runner_n_features_eff_respects_high_cardinality_split():
     X = pd.concat([cats, pd.DataFrame({"x1": rng.normal(size=n)})], axis=1)
     y = pd.Series(rng.normal(size=n))
 
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="random_forest",
         X=X,
         y=y,
@@ -2672,7 +2670,7 @@ def test_runner_n_features_size_aligned_without_preprocessor():
     X_arr = rng.normal(size=(100, 8))
     y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
 
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="random_forest",
         X=X_arr,
         y=y_arr,
@@ -2723,7 +2721,7 @@ def test_optimize_external_preprocessor_skips_cleaning():
         transformers=[("num", StandardScaler(), ["x1", "x2"])]
     )
 
-    runner = hyperopt._OptimizeRunner(
+    runner = hpo_runner._OptimizeRunner(
         algo_name="ridge",
         X=X,
         y=y,
@@ -2883,13 +2881,13 @@ def test_optimize_transferred_history_does_not_mask_total_failure(toy_data):
     assert first is not None
 
     with (
-        patch("configurable_automl_engine.tuner._build_scorer"),
-        patch("configurable_automl_engine.tuner.create_model"),
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
-        patch("configurable_automl_engine.tuner._validate_data"),
-        patch("configurable_automl_engine.tuner._get_estimator"),
+        patch("configurable_automl_engine.hpo.runner._build_scorer"),
+        patch("configurable_automl_engine.hpo.runner.create_model"),
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner._validate_data"),
+        patch("configurable_automl_engine.hpo.runner._get_estimator"),
         patch(
-            "configurable_automl_engine.tuner.model_selection.cross_val_score"
+            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score"
         ) as mock_cv,
     ):
         mock_make_cv.return_value = ("k_fold", MagicMock(), None)
@@ -2929,7 +2927,7 @@ def test_optimize_fit_best_model_disabled_skips_final_fit(toy_data, monkeypatch)
             "_fit_best_model must not run when fit_best_model=False"
         )
 
-    monkeypatch.setattr(hyperopt._OptimizeRunner, "_fit_best_model", _forbidden)
+    monkeypatch.setattr(hpo_runner._OptimizeRunner, "_fit_best_model", _forbidden)
 
     result = hyperopt.optimize(
         "ridge",
@@ -2985,7 +2983,7 @@ def _capture_tpe_seed() -> tuple[dict[str, object], Any]:
         return real_tpe(*args, **kwargs)
 
     return captured, patch(
-        "configurable_automl_engine.tuner.optuna.samplers.TPESampler",
+        "configurable_automl_engine.hpo.runner.optuna.samplers.TPESampler",
         side_effect=capturing_tpe,
     )
 
@@ -2998,9 +2996,9 @@ def test_optimize_sampler_seed_controls_tpe_only(toy_data):
     captured, tpe_patch = _capture_tpe_seed()
     with (
         tpe_patch,
-        patch("configurable_automl_engine.tuner.make_cv") as mock_make_cv,
+        patch("configurable_automl_engine.hpo.runner.make_cv") as mock_make_cv,
         patch(
-            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6, 0.7]),
         ),
     ):
@@ -3036,9 +3034,9 @@ def test_optimize_preprocessor_uses_random_state_not_sampler_seed(toy_data):
     _, tpe_patch = _capture_tpe_seed()
     with (
         tpe_patch,
-        patch("configurable_automl_engine.tuner.build_preprocessor") as mock_bp,
+        patch("configurable_automl_engine.hpo.runner.build_preprocessor") as mock_bp,
         patch(
-            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6]),
         ),
     ):
@@ -3069,7 +3067,7 @@ def test_optimize_sampler_seed_none_falls_back_to_random_state(toy_data):
     with (
         tpe_patch,
         patch(
-            "configurable_automl_engine.tuner.model_selection.cross_val_score",
+            "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
             return_value=np.array([0.5, 0.6]),
         ),
     ):
@@ -3152,9 +3150,9 @@ def test_optimize_typeerror_on_one_fold_does_not_abort_hpo(toy_data, caplog):
             return np.zeros(len(Xte))
 
     with (
-        patch.object(hyperopt, "create_model", return_value=TypeErrorOnFirstFold()),
+        patch.object(hpo_runner, "create_model", return_value=TypeErrorOnFirstFold()),
         patch.object(
-            hyperopt._OptimizeRunner,
+            hpo_runner._OptimizeRunner,
             "assemble_estimator",
             side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
@@ -3203,9 +3201,9 @@ def test_optimize_linalgerror_on_all_folds_prunes_trial_not_fatal(toy_data):
             return np.zeros(len(Xte))
 
     with (
-        patch.object(hyperopt, "create_model", return_value=AlwaysLinAlgFail()),
+        patch.object(hpo_runner, "create_model", return_value=AlwaysLinAlgFail()),
         patch.object(
-            hyperopt._OptimizeRunner,
+            hpo_runner._OptimizeRunner,
             "assemble_estimator",
             side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),
@@ -3251,9 +3249,9 @@ def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
             return np.zeros(len(Xte))
 
     with (
-        patch.object(hyperopt, "create_model", return_value=AlwaysOOM()),
+        patch.object(hpo_runner, "create_model", return_value=AlwaysOOM()),
         patch.object(
-            hyperopt._OptimizeRunner,
+            hpo_runner._OptimizeRunner,
             "assemble_estimator",
             side_effect=lambda model, apply_fs=False, feature_index=None: model,
         ),

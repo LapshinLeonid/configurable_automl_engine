@@ -217,7 +217,7 @@ def test_tuner_limit_suppresses_svr_adaptive_epsilon():
     the y spread) when the user did not list it; with the flag the space is
     exactly what the user listed (only ``C`` here).
     """
-    import configurable_automl_engine.tuner as tuner_module
+    from configurable_automl_engine.hpo import runner as hpo_runner
 
     X = pd.DataFrame(np.random.default_rng(0).standard_normal((40, 3)))
     y = pd.Series(np.arange(40, dtype=float))
@@ -238,9 +238,9 @@ def test_tuner_limit_suppresses_svr_adaptive_epsilon():
         with (
             pytest.MonkeyPatch.context() as mp,
         ):
-            mp.setattr(tuner_module, "create_model", capturing_create_model)
+            mp.setattr(hpo_runner, "create_model", capturing_create_model)
             mp.setattr(
-                tuner_module._OptimizeRunner,
+                hpo_runner._OptimizeRunner,
                 "assemble_estimator",
                 lambda self, model, apply_fs=False, feature_index=None: model,
             )
@@ -287,11 +287,11 @@ def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path)
     """
     from unittest.mock import patch
 
-    import configurable_automl_engine.tuner as tuner_module
+    from configurable_automl_engine.hpo import runner as hpo_runner
 
     df = create_mock_df(rows=60, cols=4, target="target")
 
-    real_create_model = tuner_module.create_model
+    real_create_model = hpo_runner.create_model
     seen: list[dict[str, object]] = []
 
     def capturing(algo: str, **params):
@@ -326,7 +326,7 @@ def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path)
         tree["hyperparameters"] = {"min_samples_leaf": [1, 5]}
         return {"decision_tree": tree}
 
-    with patch.object(tuner_module, "create_model", side_effect=capturing):
+    with patch.object(hpo_runner, "create_model", side_effect=capturing):
         train_best_model(
             config={**base_cfg, "algorithms": tree_algos(limit=True)},
             df=df,
@@ -336,7 +336,7 @@ def test_e2e_decision_tree_limit_false_has_more_params_than_true(tmp_path: Path)
     limited_seen = list(seen)
     seen.clear()
 
-    with patch.object(tuner_module, "create_model", side_effect=capturing):
+    with patch.object(hpo_runner, "create_model", side_effect=capturing):
         train_best_model(
             config={**base_cfg, "algorithms": tree_algos(limit=False)},
             df=df,

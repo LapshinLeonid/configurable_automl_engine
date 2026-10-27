@@ -1,0 +1,2213 @@
+"""The HPO run of a single algorithm (``_OptimizeRunner``).
+
+Holds the state of one ``optimize()`` call and the run loop: input
+validation, the Optuna study with the TPE history transfer, the objective
+with the circuit breaker for fatal failures, the best-trial selection and
+the final fit of the best model. The search space, the trial evaluation,
+the pruning configuration and the pipeline assembly are delegated to the
+other ``hpo`` modules. It must not import ``configurable_automl_engine.tuner``
+(the façade imports this module).
+"""
+
+from __future__ import annotations
+
+# ─────────────────────────────── stdlib
+import logging as _logging
+import math
+from collections.abc import Callable
+from functools import partial
+from typing import Any, NoReturn, cast
+
+# ──────────────────────────── third-party
+import numpy as np
+import optuna
+import pandas as pd
+from imblearn.pipeline import Pipeline as ImbPipeline
+from optuna.trial import FrozenTrial, Trial
+from scipy import sparse as sp
+from sklearn import model_selection
+from sklearn.base import clone
+from sklearn.utils import _safe_indexing
+
+from configurable_automl_engine.common.complexity_guard import (
+    ComplexityGuardConfig,
+    apply_complexity_guard,
+)
+
+# ──────────────────────────── project
+from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.hyperopt_defaults import (
+    DEFAULT_SPACES,
+    CategoricalSpace,
+    SearchSpaceEntry,
+    clip_search_space,
+    normalize_hyperparameter_entry,
+)
+from configurable_automl_engine.common.validation_utils import (
+    check_target_numeric,
+    get_effective_train_size,
+    validate_features,
+)
+from configurable_automl_engine.feature_selection import FeatureSelector
+from configurable_automl_engine.models import (
+    AVAILABLE_ALGORITHMS,
+    create_model,
+    remap_legacy_param_names,
+    requires_dense_input,
+    resolve_algorithm_name,
+)
+from configurable_automl_engine.oversampling import DataOversampler
+from configurable_automl_engine.preprocessing import (
+    EncodingStrategy,
+    _clean_uninformative_features,
+    build_preprocessor,
+    detect_feature_types,
+    estimate_n_features_after_preprocessing,
+)
+from configurable_automl_engine.preprocessing_presets import (
+    PreprocessingOverride,
+    resolve_preprocessing_preset,
+)
+from configurable_automl_engine.trainer import IsotonicDataTransformer
+from configurable_automl_engine.training_engine.config_parser import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+)
+from configurable_automl_engine.training_engine.metrics import (
+    is_non_additive_metric,
+)
+from configurable_automl_engine.validation import iter_splits, make_cv, norm_val_method
+
+from .evaluation import (
+    _build_scorer,
+    _evaluate_pooled_cv,
+    _evaluate_with_intermediate_reports,
+)
+from .pruning import (
+    _build_pruner,
+    _normalize_pruning_config,
+)
+from .search_space import (
+    _apply_dynamic_space,
+    _DistributionRecorder,
+    _make_knn_space,
+    _make_svr_space_dict,
+    _svr_adaptive_epsilon_entry,
+)
+from .trial_pipeline import (
+    _missing_indicator_enabled,
+)
+from .types import (
+    HPO_WORST_SCORE,
+    WORST_SCORE_THRESHOLD,
+    HPOHistoryError,
+    HyperoptError,
+    InvalidAlgorithmError,
+    InvalidDataError,
+    OptimizeResult,
+)
+
+# The records keep the logger name of the pre-split ``tuner`` module: the
+# logger name is part of the observable behavior (handlers, filters and
+# ``caplog`` assertions select records by it).
+log = _logging.getLogger("configurable_automl_engine.tuner")
+
+
+def _validate_data(
+    X: Any,
+    y: Any,
+    *,
+    inf_policy: str = "as_missing",
+    datetime_policy: str = "expand",
+    drop_id_like_columns: bool = False,
+) -> Any:
+    """Validate the types and sizes of the input data X and y.
+
+    The target ``y`` is additionally required to be a NUMERIC vector
+    without NaN/±inf: a non-finite target makes per-fold evaluations depend
+    on which rows happen to land in which fold (the folds containing the
+    values crash, the rest look "clean"), so the HPO budget is spent on
+    randomly clean folds and the final full-data fit fails with an unclear
+    error. The numeric/finite/shape checks are shared with the pipeline
+    entry point (``check_target_numeric``) so both callers reject a bad
+    target identically.
+
+    Feature diagnostics mirror the pipeline entry point and honor the
+    configurable policies: duplicate column names are always rejected;
+    ±inf in numeric features follows ``inf_policy`` (``"as_missing"`` by
+    default, as in ``general.inf_policy``; ``"error"`` rejects the data);
+    datetime/timedelta columns follow ``datetime_policy`` (``"expand"`` by
+    default — the derived components keep them from being silently dropped
+    by the preprocessor); ID-like columns follow ``drop_id_like_columns``.
+    The ID-like WARNING is suppressed here — it is emitted by the pipeline
+    entry point (``prepare_dataset``) for engine runs and by the standalone
+    ``optimize()`` for direct callers.
+
+    Args:
+        X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
+        y (Any): Target variable vector
+            (expected np.ndarray, pd.Series or pd.DataFrame).
+        inf_policy: Policy for ±inf in numeric features (default
+            ``"as_missing"`` — replace with NaN and warn; ``"error"`` —
+            reject with InvalidDataError).
+        datetime_policy: Policy for datetime/timedelta columns (default
+            ``"expand"`` — replace with derived components).
+        drop_id_like_columns: Whether ID-like columns are dropped (default
+            ``False``).
+    Returns:
+        The (possibly repaired) feature matrix ``X``: for a ``pd.DataFrame``
+        with datetime columns the expanded frame is returned; otherwise the
+        original ``X`` is returned unchanged.
+    Raises:
+        InvalidDataError: If the data types are not supported
+            or the sizes of X and y do not match, or the target y is
+            non-numeric or contains NaN/±inf, or the features contain
+            duplicate column names / infinite values (when the policy
+            rejects them).
+    """
+    ok_types = (np.ndarray, pd.DataFrame)
+    if not isinstance(X, ok_types):
+        raise InvalidDataError("X must be a numpy.ndarray or pandas.DataFrame")
+    if not isinstance(y, ok_types + (pd.Series,)):
+        raise InvalidDataError(
+            "y must be a numpy.ndarray, pandas.Series, or pandas.DataFrame"
+        )
+    if len(X) != len(y):
+        raise InvalidDataError(f"Size mismatch: X={len(X)} and y={len(y)}")
+    try:
+        check_target_numeric(y)
+    except ValueError as err:
+        raise InvalidDataError(str(err)) from err
+    # Feature diagnostics: duplicate columns are always rejected (a duplicated
+    # name makes X[col] return a DataFrame — an unclear pandas error
+    # downstream); ±inf / datetime / ID-like columns follow the configured
+    # policies.
+    if isinstance(X, pd.DataFrame):
+        try:
+            repaired, _ = validate_features(
+                X,
+                inf_policy=inf_policy,
+                datetime_policy=datetime_policy,
+                drop_id_like_columns=drop_id_like_columns,
+                warn_id_like=False,
+            )
+        except ValueError as err:
+            raise InvalidDataError(str(err)) from err
+        return repaired
+    return X
+
+
+def _get_estimator(algo: str) -> Any:
+    """Check the availability and validity of the given algorithm.
+
+    Args:
+        algo (str): Algorithm name.
+    Returns:
+        Any: Returns True if the model is created successfully by the base factory.
+    Raises:
+        InvalidAlgorithmError: If the algorithm is not supported or a required
+            dependency (library) is missing.
+    """
+    try:
+        # Try to create a model with minimal parameters to check existence
+        create_model(algo)
+        return True
+    except (ValueError, ImportError) as err:
+        # If the algorithm is not found in models.py or the package is not
+        #  installed (e.g. XGBoost)
+        raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
+
+
+class _OptimizeRunner:
+    """A single hyperparameter optimisation run, split into steps.
+
+    ``optimize()`` remains the public entry point with its original signature
+    and delegates all the work to this class. The monolithic logic of the
+    original function is split into isolated steps:
+
+        run()
+         ├─ resolve_validation()
+         ├─ build_trial_pipeline()               (before the search space:
+         │                                        the complexity guard needs p)
+         ├─ resolve_search_space()
+         ├─ handle_pruning()
+         ├─ transfer_previous_trials()        (TPE history warm-start)
+         ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
+         ├─ select_best_trial()
+         └─ _fit_best_model()  (skipped when ``fit_best_model=False``)
+
+    TPE history transfer: when ``previous_trials`` is passed, the trials are
+    added to the study with ``study.add_trials`` AFTER ``create_study`` and
+    BEFORE ``enqueue_trial``/``optimize``. The boundary of the current phase's
+    own trials (``phase_start_number``) is fixed right after the transfer, so
+    ``select_best_trial`` counts and ranks ONLY the trials of the current
+    phase — the transferred history feeds the TPE sampler but cannot mask a
+    total failure of the current phase (the no-fallback refine contract).
+
+    The run state is stored in instance attributes: each step fills in its own
+    fields, and subsequent steps (as well as the Optuna objective) read them
+    without long argument chains.
+    """
+
+    MAX_FATAL_FAILURES = 5
+    """Limit of consecutive fatal failures before the algorithm is disqualified."""
+
+    def __init__(
+        self,
+        *,
+        algo_name: str,
+        X: Any,
+        y: Any,
+        data_oversampling: bool,
+        data_oversampling_multiplier: float,
+        data_oversampling_algorithm: str,
+        data_oversampling_target_bins: int = 8,
+        data_oversampling_add_noise: bool = False,
+        data_oversampling_noise_level: float = 0.01,
+        metric: str,
+        val_method: ValidationStrategy | str,
+        validation_strategy: ValidationStrategy | str | None,
+        n_folds: int,
+        n_trials: int,
+        random_state: int | None,
+        sampler_seed: int | None,
+        train_test_split_test_size: float,
+        space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None,
+        initial_params: dict[str, Any] | None,
+        previous_trials: list[FrozenTrial] | None = None,
+        preprocessor: Any | None,
+        categorical_features: list[str] | None,
+        numerical_features: list[str] | None,
+        encoding: EncodingStrategy | None,
+        preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
+        pruning: dict[str, Any] | None,
+        high_cardinality_threshold: int | None,
+        high_cardinality_encoding: EncodingStrategy | None,
+        hashing_n_components: int,
+        target_encoding_smoothing: float,
+        target_encoding_fallback: float | None,
+        feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
+        complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
+        user_hyperparameter_keys: list[str] | None = None,
+        limit_hyperparameters: bool = False,
+        fit_best_model: bool = True,
+        phase_name: str | None = None,
+        inf_policy: str = "as_missing",
+        datetime_policy: str = "expand",
+        drop_id_like_columns: bool = False,
+        collect_oof: bool = False,
+    ) -> None:
+        """Store the parameters of a single optimisation run.
+
+        Args:
+            All arguments mirror the identically named ``optimize()``
+            parameters — see its docstring for the semantics.
+        """
+        self.algo_name = algo_name
+        self.X = X
+        self.y = y
+        self.metric = metric
+        # Whether the metric is non-additive (RMSE, MSE, R², nRMSE) and must
+        # therefore be evaluated over the pooled out-of-fold vector instead of
+        # the average of per-fold values (required for LOO, applied everywhere
+        # with multiple folds). MAE and similar per-sample means stay on the
+        # fold-average path (their fold mean equals the pooled value).
+        self.pool_metric = is_non_additive_metric(metric)
+        self.val_method = val_method
+        self.validation_strategy = validation_strategy
+        self.n_folds = n_folds
+        self.n_trials = n_trials
+        self.random_state = random_state
+        # The seed of the TPE sampler. Deliberately separate from
+        # ``random_state`` (which drives the data splits and the preprocessor):
+        # each HPO phase may use a different ``sampler_seed`` so that TPE
+        # startup points do not repeat, while the folds/splits stay the same
+        # (RANDOM_STATE) — otherwise every phase would re-evaluate models on
+        # other folds, breaking score monotonicity and mixing incomparable
+        # estimates in the transferred TPE history. ``None`` (the default for
+        # direct callers) falls back to ``random_state`` to preserve the old
+        # behavior.
+        self.sampler_seed = sampler_seed
+        self.train_test_split_test_size = train_test_split_test_size
+        self.space_overrides = space_overrides
+        self.initial_params = initial_params
+        self.previous_trials = previous_trials
+        self.preprocessor = preprocessor
+        self.categorical_features = categorical_features
+        self.numerical_features = numerical_features
+        self.encoding = encoding
+        self.preprocessing_override = preprocessing_override
+        self.pruning = pruning
+        self.high_cardinality_threshold = high_cardinality_threshold
+        self.high_cardinality_encoding = high_cardinality_encoding
+        self.hashing_n_components = hashing_n_components
+        self.target_encoding_smoothing = target_encoding_smoothing
+        self.target_encoding_fallback = target_encoding_fallback
+        self.feature_selection_cfg = feature_selection_cfg
+        # The adaptive complexity guard config (trees/boosting on small data).
+        # ``None`` — the defaults of ``general.complexity_guard`` (mode
+        # 'apply'), so direct ``optimize`` callers get the same search spaces
+        # as the engine; the guard is disabled with ``{"mode": "off"}``. The
+        # training engine passes the config from ``general.complexity_guard``.
+        if complexity_guard_cfg is None:
+            self.complexity_guard_cfg = ComplexityGuardConfig()
+        elif isinstance(complexity_guard_cfg, ComplexityGuardConfig):
+            self.complexity_guard_cfg = complexity_guard_cfg
+        else:
+            self.complexity_guard_cfg = ComplexityGuardConfig.from_dict(
+                complexity_guard_cfg
+            )
+        # Names of parameters set explicitly by the user
+        # (``algo.hyperparameters``); the complexity guard treats them as
+        # "user ranges" (intersected, with ``user_range_policy`` on conflict).
+        self.user_hyperparameter_keys = list(user_hyperparameter_keys or [])
+        # Restrict the search to the user-listed parameters only: the space
+        # dict passed via ``space_overrides`` is used as-is (NO adaptive SVR
+        # epsilon injection, NO DEFAULT_SPACES fallback). Mirrors
+        # ``AlgoCfg.limit_hyperparameters``.
+        self.limit_hyperparameters = limit_hyperparameters
+        # Number of features after preprocessing (what the model sees).
+        # Filled in build_trial_pipeline (falls back to the raw column count).
+        self.n_features_eff: int = 1
+        # Number of NUMERICAL features after preprocessing (one column per
+        # numerical feature for isotonic — no one-hot expansion, no missing
+        # indicators). Used to size the isotonic ``feature_index`` search
+        # range: only numeric columns are meaningful inputs for the strictly
+        # univariate model. ``None`` — not determinable (an external
+        # preprocessor without explicit column lists).
+        self.n_numeric_eff: int | None = None
+        # Number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used only by the complexity guard
+        # for the size-mode ratio ``n / p``; filled in build_trial_pipeline.
+        self.n_features_size: int = 1
+        # Whether to train the best model on all data after the Optuna loop
+        # (``_fit_best_model``). Set to False when the caller only needs the
+        # best parameters and score (e.g. the training engine's HPO phase):
+        # the full-data fit is then skipped and the ``model`` field of the
+        # returned ``OptimizeResult`` is None.
+        self.fit_best_model = fit_best_model
+        # Whether to keep the out-of-fold predictions of every completed
+        # trial (the BBC-CV input): trial number -> OOF vector of len(X).
+        self.collect_oof = collect_oof
+        self.trial_oof: dict[int, np.ndarray] = {}
+        # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
+        # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
+        self.phase_name = phase_name
+
+        # Input-data diagnostics policies for the fail-fast feature checks:
+        # defaults mirror the pipeline behavior for direct ``optimize()``
+        # callers (S2 — the policies are configurable instead of hard-coded).
+        self.inf_policy = inf_policy
+        self.datetime_policy = datetime_policy
+        self.drop_id_like_columns = drop_id_like_columns
+
+        # Names of columns dropped by cleaning uninformative features.
+        # Filled in build_trial_pipeline for diagnostics; empty by default.
+        self.dropped_features_: list[str] = []
+
+        # Oversampling config for pipeline assembly (single point of truth).
+        self.oversampling_config: dict[str, Any] = {
+            "active": data_oversampling,
+            "params": {
+                "multiplier": data_oversampling_multiplier,
+                "algorithm": data_oversampling_algorithm,
+                "target_bins": data_oversampling_target_bins,
+                "add_noise": data_oversampling_add_noise,
+                "noise_level": data_oversampling_noise_level,
+            },
+        }
+
+        # ── Fields populated by the run() steps ───────────────────────────────
+        self.algo: str = ""
+        self.fs_cfg = FeatureSelectionCfg()
+        self.fs_mode = self.fs_cfg.mode
+        self.is_isotonic = False
+        self.n_samples_eff: int = 0
+        self.val_method_eff: str = ""
+        self.cv_obj: Any = None
+        self.auto_decision: dict[str, Any] | None = None
+        self.resolved_via_auto = False
+        self.effective_n_folds = self.n_folds
+        # A placeholder until the search space is resolved (step 2); replaced
+        # in resolve_search_space(). run() always calls resolve_search_space
+        # before the Optuna loop, so the real placeholder call is impossible.
+        self.space_fn: Callable[[Trial], dict[str, Any]] = lambda trial: {}
+        # The resolved dict search space (parameter name -> SearchSpaceEntry or
+        # constant) for dict-based spaces; empty for function/callable spaces.
+        # Used to warn when the best trial lies at a range boundary.
+        self.search_space_dict: dict[str, Any] = {}
+        self.scorer: Any = None
+        self.pruner: optuna.pruners.BasePruner | None = None
+        self.pruning_active = False
+        self.study: optuna.Study
+        # The trial-number boundary between the transferred TPE history and the
+        # current phase's own trials: fixed in run() right after
+        # study.add_trials(previous_trials) and before enqueue_trial/optimize.
+        self.phase_start_number = 0
+        # Trials of the current phase only (number >= phase_start_number);
+        # filled in run() after the Optuna loop and returned in OptimizeResult.
+        self.phase_trials: list[FrozenTrial] = []
+        self.consecutive_fatal_failures = 0
+        self.best_params: dict[str, Any]
+        self.best_score: float
+        self.clean_model_params: dict[str, Any]
+        self.best_apply_fs: bool
+        # The number of trials actually evaluated by the phase (own COMPLETED
+        # trials; transferred history never counts), reported in
+        # ``OptimizeResult.n_trials_evaluated`` as the honest denominator next
+        # to the best-trial score.
+        self.n_trials_evaluated: int = 0
+        # Log records of the adaptive complexity guard, filled in
+        # resolve_search_space; travels with OptimizeResult for the report.
+        self.complexity_guard_logs: list[dict[str, Any]] = []
+
+    def run(self) -> OptimizeResult | None:
+        """Run the full optimisation cycle, split into steps.
+
+        Returns:
+            OptimizeResult: The result of the phase — the final model, the
+                best params, the best score, and the trials of the current
+                phase ONLY (transferred ``previous_trials`` are excluded).
+            None: The "no valid result" signal — ``n_trials=0`` or no
+                COMPLETED trial of the current phase. Transferred history
+                does NOT count toward the current phase validity.
+        """
+        if not self._validate_n_trials():
+            return None
+
+        self.resolve_validation()
+        # The preprocessor must be built BEFORE the search space is resolved:
+        # the adaptive complexity guard needs ``p`` — the number of features
+        # after preprocessing (one-hot, missing-value indicators).
+        self.build_trial_pipeline()
+        self.resolve_search_space()
+        self.handle_pruning()
+
+        # If early stopping is disabled, explicitly disable any pruner
+        # (NopPruner) so that trials are guaranteed to run to completion.
+        # The TPE sampler uses ``sampler_seed`` (per-phase, so startup points
+        # do not repeat between HPO phases); the data splits and the
+        # preprocessor keep ``random_state`` (RANDOM_STATE from the engine),
+        # so every phase evaluates models on the same folds.
+        sampler_seed = (
+            self.sampler_seed if self.sampler_seed is not None else self.random_state
+        )
+        self.study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=sampler_seed),
+            pruner=self.pruner if self.pruning_active else optuna.pruners.NopPruner(),
+        )
+        # TPE history transfer BEFORE enqueue_trial/optimize: the transferred
+        # trials feed the TPE sampler (incl. the n_startup_trials window) but
+        # are NOT part of the current phase's own trial set (the boundary
+        # phase_start_number is fixed right after add_trials).
+        self._transfer_previous_trials()
+        self.phase_start_number = len(self.study.get_trials(deepcopy=False))
+        # If there are parameters from the previous phase, enqueue them as the first trial
+        if self.initial_params is not None:
+            initial_params = self._enqueueable_initial_params(self.initial_params)
+            self.study.enqueue_trial(initial_params)
+            log.info("Enqueued initial params from previous phase: %s", initial_params)
+        try:
+            self.study.optimize(self._objective, n_trials=self.n_trials)
+        except InvalidAlgorithmError:
+            log.warning(
+                "Algorithm %s disqualified after %d consecutive fatal failures",
+                self.algo,
+                self.MAX_FATAL_FAILURES,
+            )
+            raise
+
+        # The current phase's own trials (transferred ones have smaller
+        # numbers and are excluded). Returned with the result so the caller
+        # can warm-start the next phase with them.
+        self.phase_trials = [
+            t
+            for t in self.study.get_trials(deepcopy=False)
+            if t.number >= self.phase_start_number
+        ]
+        if not self.select_best_trial():
+            return None
+        self._log_best_result()
+        oof_predictions = self._phase_oof_matrix()
+        if not self.fit_best_model:
+            # HPO-only mode (e.g. the training engine's phases): the caller
+            # needs only the best parameters and score — the final model is
+            # trained later by its own trainer. The redundant full-data fit
+            # is skipped, saving one full training per algorithm per phase;
+            # the model slot of the OptimizeResult stays None.
+            return OptimizeResult(
+                model=None,
+                params=self.best_params,
+                score=self.best_score,
+                trials=self.phase_trials,
+                complexity_guard=self.complexity_guard_logs or None,
+                n_trials_evaluated=self.n_trials_evaluated,
+                oof_predictions=oof_predictions,
+            )
+        return OptimizeResult(
+            model=self._fit_best_model(),
+            params=self.best_params,
+            score=self.best_score,
+            trials=self.phase_trials,
+            complexity_guard=self.complexity_guard_logs or None,
+            n_trials_evaluated=self.n_trials_evaluated,
+            oof_predictions=oof_predictions,
+        )
+
+    def _phase_oof_matrix(self) -> np.ndarray | None:
+        """Stack the kept OOF vectors of the phase's own COMPLETED trials.
+
+        Returns:
+            np.ndarray | None: A ``(n_trials, n_rows)`` matrix in trial
+                order, or ``None`` when OOF collection is off or no
+                completed trial kept its predictions.
+        """
+        if not self.collect_oof:
+            return None
+        rows = [
+            self.trial_oof[t.number]
+            for t in self.phase_trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.number in self.trial_oof
+        ]
+        if not rows:
+            return None
+        return np.vstack(rows)
+
+    # ─────────────────── run steps ─────────────────────────────────────────
+
+    def _transfer_previous_trials(self) -> None:
+        """Transfer the TPE history of the previous phase into the study.
+
+        Fails fast (``HPOHistoryError``) instead of silently skipping the
+        history:
+        - when some transferred trial has a parameter whose distribution does
+          not match the current search space (a search space change between
+          phases would break the TPE state in an obscure way during the first
+          trial of the new phase);
+        - when the current search space cannot be reproduced by the
+          distribution pre-check (an exotic custom ``space_fn``) — the
+          transfer cannot be validated, and silently dropping the history
+          would degrade refine to a cold run;
+        - an empty list is a no-op (``previous_trials=[]`` is allowed).
+        """
+        if not self.previous_trials:
+            return
+        canonical = self._canonical_distributions()
+        if canonical is None:
+            # The search space cannot be reproduced by the pre-check (an
+            # exotic custom ``space_fn``, e.g. one using legacy ``suggest_*``
+            # methods the recorder does not implement). Transferring the
+            # history blind would risk a silent ``study.add_trials`` desync,
+            # and skipping the transfer would silently degrade refine to a
+            # cold run — both violate the fail-fast contract: raise.
+            raise HPOHistoryError(
+                f"Cannot transfer TPE history for algorithm '{self.algo}': "
+                "the search space cannot be reproduced for the distribution "
+                "compatibility check (the space function uses constructs the "
+                "check does not support). TPE history transfer requires a "
+                "search space that can be replayed for validation."
+            )
+        for trial in self.previous_trials:
+            for name, dist in trial.distributions.items():
+                expected = canonical.get(name)
+                if expected is None or expected != dist:
+                    raise HPOHistoryError(
+                        f"Cannot transfer trial #{trial.number} of algorithm "
+                        f"'{self.algo}': parameter '{name}' has distribution "
+                        f"{dist}, incompatible with the current search space "
+                        f"({expected!r}). TPE history transfer requires the "
+                        f"same search space between HPO phases."
+                    )
+        self.study.add_trials(self.previous_trials)
+        log.info(
+            "Transferred %d trial(s) from the previous phase", len(self.previous_trials)
+        )
+
+    def _enqueueable_initial_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Drop initial params whose value type does not fit the search space.
+
+        A value carried over from an older space (e.g. SVR ``gamma="scale"``
+        from the former categorical default, now a numeric ``float_log``
+        range) would make Optuna fail the enqueued trial. Such a key is
+        dropped with a warning and sampled from the space instead; numeric
+        values outside the range are kept as is (Optuna handles them).
+
+        Args:
+            params: The initial params from the previous phase.
+
+        Returns:
+            dict[str, Any]: The params that can be enqueued.
+        """
+        kept: dict[str, Any] = {}
+        for name, value in params.items():
+            entry = self.search_space_dict.get(name)
+            if isinstance(entry, SearchSpaceEntry):
+                config = entry.config
+                if isinstance(config, CategoricalSpace):
+                    compatible = value in config.options
+                else:
+                    compatible = isinstance(
+                        value, (int, float, np.integer, np.floating)
+                    ) and not isinstance(value, bool)
+                if not compatible:
+                    log.warning(
+                        "Initial param %s=%r does not fit the search space of "
+                        "'%s' (%s); it is sampled instead",
+                        name,
+                        value,
+                        self.algo,
+                        entry.dist_type,
+                    )
+                    continue
+            kept[name] = value
+        return kept
+
+    def _canonical_distributions(self) -> dict[str, Any] | None:
+        """Compute the canonical distributions of the current phase space.
+
+        Runs ``space_fn`` (plus the feature selection suggestion) on a
+        ``_DistributionRecorder`` — the distributions the phase WOULD produce
+        for its trials. If the space function cannot be reproduced (a custom
+        exotic ``space_fn``, e.g. one using legacy ``suggest_*`` methods the
+        recorder does not implement), ``None`` is returned — the caller
+        (``_transfer_previous_trials``) fails fast with ``HPOHistoryError``:
+        the history transfer cannot be validated, and silently dropping it
+        would degrade refine to a cold run.
+
+        Returns:
+            dict[str, Any]: Parameter name → Optuna distribution; ``None`` —
+                the space cannot be reproduced (the caller fails fast).
+        """
+        try:
+            recorder = _DistributionRecorder()
+            # The recorder is a Trial-compatible stand-in: it implements the
+            # suggest_* methods (and the ``number`` attribute) that space_fn
+            # and _resolve_apply_fs call.
+            trial_like = cast(Trial, recorder)
+            self.space_fn(trial_like)
+            self._resolve_apply_fs(trial_like)
+        except Exception as err:  # noqa: BLE001 — the pre-check is best-effort
+            log.warning(
+                "Cannot reproduce the search space for the history transfer "
+                "check of algorithm '%s': %s. Skipping the distribution "
+                "pre-check.",
+                self.algo,
+                err,
+            )
+            return None
+        return recorder.distributions
+
+    def resolve_validation(self) -> None:
+        """Resolve the validation strategy and related quantities (step 1).
+
+        Performs input normalization (the ``validation_strategy`` alias), data
+        and algorithm availability checks, normalization of the feature
+        selection configuration, and picks the CV strategy via ``make_cv``.
+        The results are stored in instance attributes for later steps.
+        """
+        # the alias takes precedence
+        if self.validation_strategy is not None:
+            self.val_method = self.validation_strategy
+
+        self.algo = self.algo_name.lower()
+        # _validate_data may return a repaired feature matrix (e.g. datetime
+        # columns expanded); the None return is kept for backward compatibility
+        # with callers/mocks that treat the helper as a pure validator.
+        _validated = _validate_data(
+            self.X,
+            self.y,
+            inf_policy=self.inf_policy,
+            datetime_policy=self.datetime_policy,
+            drop_id_like_columns=self.drop_id_like_columns,
+        )
+        if isinstance(_validated, (pd.DataFrame, np.ndarray)):
+            self.X = _validated
+
+        _get_estimator(self.algo)
+
+        # Normalize the feature selection configuration: None -> default
+        # (mode='disabled'), dict -> FeatureSelectionCfg (validated at run
+        # time), FeatureSelectionCfg object -> as is. Isotonic regression is
+        # strictly univariate and uses its own IsotonicDataTransformer, so
+        # selection is forcibly disabled for it regardless of the mode.
+        fs_cfg = self.feature_selection_cfg
+        if fs_cfg is None:
+            self.fs_cfg = FeatureSelectionCfg()
+        elif isinstance(fs_cfg, FeatureSelectionCfg):
+            self.fs_cfg = fs_cfg
+        elif isinstance(fs_cfg, dict):
+            try:
+                self.fs_cfg = FeatureSelectionCfg.model_validate(fs_cfg)
+            except Exception as err:
+                raise HyperoptError(f"Invalid feature_selection_cfg: {err}") from err
+        else:
+            raise TypeError(
+                "feature_selection_cfg must be a FeatureSelectionCfg, dict or None, "
+                f"got {type(fs_cfg).__name__}"
+            )
+        self.fs_mode = self.fs_cfg.mode
+        self.is_isotonic = resolve_algorithm_name(self.algo) == "isotonic_regression"
+        log.info(
+            "Feature selection mode for algorithm '%s': %s",
+            self.algo,
+            self.fs_mode.value,
+        )
+
+        # Determine how many rows the model actually "sees" during training
+        # inside CV/Split, and resolve the validation strategy (incl. 'auto').
+        n_samples = len(self.y)
+        n_features = self.X.shape[1]
+        self.n_samples_eff = get_effective_train_size(
+            n_total=n_samples,
+            strategy=self.validation_strategy or self.val_method,
+            n_folds=self.n_folds,
+            test_size=self.train_test_split_test_size,
+            n_features=n_features,
+        )
+        self.val_method_eff, self.cv_obj, self.auto_decision = make_cv(
+            n_samples,
+            val_method=self.val_method,
+            n_folds=self.n_folds,
+            random_state=self.random_state,
+            test_size=self.train_test_split_test_size,
+            n_features=n_features,
+        )
+        # 'auto' is resolved exactly once (here, in make_cv). The resulting
+        # decision is passed to iter_splits so that the test size is not
+        # recomputed and cannot diverge between n_samples_eff and the actual
+        # split.
+        self.resolved_via_auto = norm_val_method(self.val_method) == "auto"
+
+        # A single fold count for the early stopping branch (k_fold). The
+        # 'auto' strategy could resolve to kfold with a number of folds k that
+        # differs from the original n_folds: in that case the pruning branch
+        # must use the computed k, otherwise iter_splits inside
+        # _evaluate_with_intermediate_reports would fall back to the default
+        # n_folds and the evaluation would diverge from
+        # cross_val_score(cv=cv_obj).
+        if self.val_method_eff == "k_fold":
+            # Take the fold count from the ready cv_obj (for k_fold it is
+            # guaranteed to be non-None — make_cv always creates a KFold in
+            # this branch). One formula covers auto→kfold (k from the
+            # decision), the 'auto' fallback without P (clamped to max(2, k)),
+            # and an explicit k_fold.
+            assert self.cv_obj is not None
+            self.effective_n_folds = int(self.cv_obj.get_n_splits())
+        else:
+            # Explicit loo / train_test_split: the fold count is not used.
+            self.effective_n_folds = self.n_folds
+
+    def _resolve_complexity_guard(
+        self, space: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Apply the adaptive complexity guard to a dict search space.
+
+        The guard depends on ``n`` (the effective training-fold rows,
+        ``self.n_samples_eff``) and the feature counts: the size-mode ratio
+        uses ``self.n_features_size`` — the number of ORIGINAL columns (a
+        categorical column counts as 1, before one-hot), while the rules for
+        ``max_features``/``colsample_bytree`` use ``self.n_features_eff`` —
+        the number of features after preprocessing. Both are computed once
+        per phase and are the same in every HPO phase (deterministic between
+        phases) and in the subprocesses (identical inputs -> identical
+        results), so the TPE history transfer between phases stays valid.
+
+        When the guard is disabled (``mode='off'``) the space is returned
+        unchanged and no records are produced.
+
+        Args:
+            space: The already physically-clipped search space.
+
+        Returns:
+            tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly
+                adjusted) space and the guard log records.
+        """
+        cfg = self.complexity_guard_cfg
+        if cfg.mode == "off":
+            return space, []
+        user_keys = set(self.user_hyperparameter_keys or ())
+        adjusted, logs = apply_complexity_guard(
+            space,
+            self.algo,
+            n=self.n_samples_eff,
+            p=self.n_features_eff,
+            config=cfg,
+            user_space_keys=user_keys,
+            p_size=self.n_features_size,
+        )
+        return adjusted, logs
+
+    def _log_complexity_guard(self) -> None:
+        """Log the adaptive complexity guard records at INFO level.
+
+        One record per (algorithm, phase, parameter): "was → became" with
+        the reason, e.g. ``max_depth 3–20 → 2–3: n=15, p=5, mode=small,
+        leaf_min=2``.
+        """
+        cfg_mode = self.complexity_guard_cfg.mode
+        cfg_policy = self.complexity_guard_cfg.user_range_policy
+        for record in self.complexity_guard_logs:
+            before = record["before"]
+            after = record["after"]
+
+            def fmt(v: Any) -> str:
+                if v is None:
+                    return "n/a"
+                return str(v) if isinstance(v, int) else f"{v:g}"
+
+            if record.get("applied"):
+                message = (
+                    f"[complexity_guard] {record['algo']} {record['param']} "
+                    f"{fmt(before[0])}–{fmt(before[1])} → "
+                    f"{fmt(after[0])}–{fmt(after[1])}: n={record['n']}, "
+                    f"p={record['p']}, p_size={fmt(record['p_size'])}, "
+                    f"mode={record['size_mode']}, "
+                    f"leaf_min={fmt(record['leaf_min'])}, level={record['level']}"
+                )
+                if record.get("conflict"):
+                    message += " (user range conflict, engine wins)"
+                if record.get("fixed"):
+                    message += " (parameter fixed)"
+                log.info("%s: %s", message, record["reason"])
+            elif record.get("conflict"):
+                rule_range = record.get("rule_range") or [None, None]
+                if cfg_mode == "warn":
+                    # In the warn mode nothing is applied at all — report the
+                    # conflict without claiming that the user range wins.
+                    log.warning(
+                        "[complexity_guard] %s %s user range %s–%s conflicts "
+                        "with the guard range %s–%s; computed but not applied "
+                        "(mode='warn', user_range_policy='%s')",
+                        record["algo"],
+                        record["param"],
+                        fmt(before[0]),
+                        fmt(before[1]),
+                        fmt(rule_range[0]),
+                        fmt(rule_range[1]),
+                        cfg_policy,
+                    )
+                else:
+                    log.warning(
+                        "[complexity_guard] %s %s user range %s–%s conflicts "
+                        "with the guard range %s–%s; keeping the user range "
+                        "(user_range_policy='%s')",
+                        record["algo"],
+                        record["param"],
+                        fmt(before[0]),
+                        fmt(before[1]),
+                        fmt(rule_range[0]),
+                        fmt(rule_range[1]),
+                        cfg_policy,
+                    )
+            else:
+                # Computed but not applied (e.g. mode='warn'): report the
+                # would-be change without claiming a conflict.
+                log.info(
+                    "[complexity_guard] %s %s %s–%s → %s–%s: computed but "
+                    "not applied (mode=%s): %s",
+                    record["algo"],
+                    record["param"],
+                    fmt(before[0]),
+                    fmt(before[1]),
+                    fmt(after[0]),
+                    fmt(after[1]),
+                    cfg_mode,
+                    record["reason"],
+                )
+
+    def _normalize_space_dict(self, space_dict: dict[str, Any]) -> dict[str, Any]:
+        """Re-resolve inferred range types in a dict search space.
+
+        The same normalization the Config path applies (see
+        ``Config._normalize_hyperparameter_types``): a range whose type was
+        inferred from the boundary numbers (``[1, 50]`` in the list shorthand,
+        two-element lists passed directly to ``space_overrides``) is re-typed
+        against the parameter type (the default search space or the estimator
+        signature). So ``space_overrides={"svr": {"C": [1, 50]}}`` searches
+        ``C`` as a real range (``float_log``), not as an integer-only range.
+        A parameter whose default space entry is
+        ``float_log`` (e.g. ``alpha_1`` of an ARD regression) is likewise
+        searched on a logarithmic scale without an explicit type. Raw lists
+        (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;
+        explicitly typed entries and constants pass through unchanged.
+
+        Args:
+            space_dict: The parameter name → value mapping (``SearchSpaceEntry``
+                objects, raw lists, or constants).
+
+        Returns:
+            dict[str, Any]: A new dict with the same structure: every numeric
+                key holds a ``SearchSpaceEntry`` (raw lists are parsed),
+                inferred range types re-resolved against the parameter type.
+        """
+        normalized: dict[str, Any] = {}
+        for param, value in space_dict.items():
+            if isinstance(value, SearchSpaceEntry):
+                entry = value
+            elif isinstance(value, list):
+                # A raw list from a direct call: parse it the same way the
+                # Config path does. Constants (scalars) are never lists, so a
+                # list here is always a search-space shorthand.
+                entry = SearchSpaceEntry.model_validate(value)
+            else:
+                # A constant value — no normalization possible.
+                normalized[param] = value
+                continue
+            normalized[param] = normalize_hyperparameter_entry(self.algo, param, entry)
+        return normalized
+
+    def resolve_search_space(self) -> None:
+        """Resolve the hyperparameter search space and the scorer (step 2).
+
+        Supports the dynamic KNN space (depends on the effective sample
+        size), adaptive SVR epsilon (bounds scaled by the spread of
+        ``y_train``), direct function overrides, and dict-based YAML
+        configurations (SearchSpaceEntry). Stores ``space_fn`` and ``scorer``
+        in instance attributes.
+
+        Raises:
+            HyperoptError: If no search space is defined for the selected
+                algorithm.
+        """
+        base_space_fn: Callable[[Trial], dict[str, Any]] | None = None
+        base_space_dict: dict[str, Any] | None = None
+        if resolve_algorithm_name(self.algo) == "nearest_neighbors_regression":
+            base_space_fn = _make_knn_space(self.n_samples_eff)
+        elif resolve_algorithm_name(self.algo) == "gaussian_process_regression":
+            # GPR without an external config (including a direct
+            # optimize("gaussian_process_regression", X, y) call): the DEFAULT_SPACES search space
+            # (small: kernel family only).
+            base_space_dict = DEFAULT_SPACES["gaussian_process_regression"].copy()
+            base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
+        elif resolve_algorithm_name(self.algo) == "isotonic_regression":
+            # Isotonic without an external config (including a direct
+            # optimize("isotonic_regression", X, y) call): a data-dependent
+            # space. ``feature_index`` selects the NUMERICAL column fed to the
+            # strictly univariate model (consumed by
+            # ``IsotonicDataTransformer``); one-hot dummies are not meaningful
+            # inputs, so the range covers the numerical features only
+            # (``n_numeric_eff``); ``increasing`` is the single
+            # IsotonicRegression constructor parameter searched.
+            max_feature_index = self._isotonic_max_feature_index()
+            base_space_dict = {
+                "feature_index": SearchSpaceEntry.model_validate(
+                    [0, max_feature_index, "int"]
+                ),
+                "increasing": SearchSpaceEntry.model_validate(
+                    [[True, False], "categorical"]
+                ),
+            }
+            base_space_fn = partial(_apply_dynamic_space, space_dict=base_space_dict)
+
+        # Priority 1: Direct overrides (functions)
+        # Priority 2: Dynamic config from YAML (dict with SearchSpaceEntry)
+        external_config = (self.space_overrides or {}).get(self.algo)
+
+        # If a function was passed (the old mechanism), use it
+        if callable(external_config):
+            space_fn: Callable[[Trial], dict[str, Any]] | None = external_config
+        # If a dict was passed (new YAML mechanism), create a wrapper
+        elif isinstance(external_config, dict):
+            # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
+            # BEFORE the Optuna loop: otherwise clean_hyperparameters would
+            # log an identical "Remapped ..." line for every trial.
+            space_dict = self._normalize_space_dict(
+                remap_legacy_param_names(self.algo, external_config)
+            )
+            # SVR: adaptive epsilon bounds from the y_train spread, if the
+            # user did not set epsilon explicitly (prepare_search_space omits
+            # the default epsilon from DEFAULT_SPACES, so its absence in the
+            # dict means "not overridden"). The bounds are computed once
+            # BEFORE the Optuna loop. In the limited mode
+            # (``limit_hyperparameters: true``) the space is exactly what the
+            # user listed: no parameter is added beyond it, so the adaptive
+            # epsilon is NOT injected.
+            if (
+                self.algo == "svr"
+                and "epsilon" not in space_dict
+                and not self.limit_hyperparameters
+            ):
+                space_dict = {
+                    **space_dict,
+                    "epsilon": _svr_adaptive_epsilon_entry(self.y),
+                }
+            # Isotonic in the engine path: ``_prepare_search_space`` delivers
+            # only the DEFAULT_SPACES keys (``increasing``) plus user
+            # overrides, and without an explicit ``feature_index`` the tuner
+            # would take the external-dict branch and silently use the default
+            # index 0 (an arbitrary one-hot dummy column). Merge a data-driven
+            # ``feature_index`` over the NUMERICAL features into the dict when
+            # absent; an explicit user value is kept as is.
+            if (
+                resolve_algorithm_name(self.algo) == "isotonic_regression"
+                and "feature_index" not in space_dict
+            ):
+                space_dict = {
+                    **space_dict,
+                    "feature_index": SearchSpaceEntry.model_validate(
+                        [0, self._isotonic_max_feature_index(), "int"]
+                    ),
+                }
+            clipped_config = clip_search_space(space_dict, self.n_samples_eff)
+            clipped_config, guard_logs = self._resolve_complexity_guard(clipped_config)
+            self.complexity_guard_logs = guard_logs
+            self._log_complexity_guard()
+            space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
+            self.search_space_dict = clipped_config
+        else:
+            # SVR without an external config (including a direct
+            # optimize("svr", X, y) call): the default space with adaptive
+            # epsilon instead of the blind [1e-3, 1.0] range from
+            # DEFAULT_SPACES.
+            if self.algo == "svr":
+                base_space_dict = _make_svr_space_dict(self.y)
+                base_space_fn = partial(
+                    _apply_dynamic_space, space_dict=base_space_dict
+                )
+            space_fn = base_space_fn
+        if space_fn is None:
+            raise HyperoptError(f"No search space for algorithm '{self.algo}'")
+
+        self.space_fn = space_fn
+        if base_space_dict is not None:
+            self.search_space_dict = base_space_dict
+        self.scorer = _build_scorer(self.metric)
+
+    def build_trial_pipeline(self) -> None:
+        """Build the preprocessor for the HPO phase (step 3).
+
+        A single point of preprocessor assembly: categories -> one-hot (or
+        ordinal if encoding is set), numerics -> the preprocessing preset
+        selected automatically for the algorithm. The same logic is used in
+        the final training (trainer.ModelTrainer), so HPO and the final fit
+        stay consistent. The ready pipeline factory is ``assemble_estimator``.
+
+        Cleaning of uninformative features is applied here too — at the point
+        where ``detect_feature_types`` runs, before the HPO folds and before
+        the final training, so that both phases use a consistent feature set.
+        Cleaning runs only in the standalone branch (``self.preprocessor is
+        None``): if the user passed a ready preprocessor, it has already fixed
+        its feature set, and ``self.X`` must not be silently changed. For
+        ``np.ndarray`` without column names, cleaning is skipped (a
+        limitation shared with ``detect_feature_types``); the list of dropped
+        columns is stored in ``self.dropped_features_``.
+        """
+        self.dropped_features_ = []
+        if self.preprocessor is None and isinstance(self.X, pd.DataFrame):
+            cleaned = _clean_uninformative_features(self.X)
+            self.dropped_features_ = [
+                col for col in self.X.columns if col not in cleaned.columns
+            ]
+            if self.dropped_features_:
+                self.X = cleaned
+                # Explicitly passed column lists are reconciled with the
+                # cleaned feature set: otherwise build_preprocessor would fail
+                # on missing columns (Unknown feature name).
+                if self.categorical_features is not None:
+                    self.categorical_features = [
+                        col
+                        for col in self.categorical_features
+                        if col in self.X.columns
+                    ]
+                if self.numerical_features is not None:
+                    self.numerical_features = [
+                        col for col in self.numerical_features if col in self.X.columns
+                    ]
+        if self.preprocessor is None:
+            # Guard for an unknown algorithm: the preprocessor cannot be
+            # assembled (``resolve_preprocessing_preset`` would raise). The
+            # search-space resolution raises the proper ``HyperoptError``
+            # afterwards; skipping the preprocessor here preserves the exact
+            # error contract for unknown algorithms.
+            if resolve_algorithm_name(self.algo) not in AVAILABLE_ALGORITHMS:
+                self.n_features_eff = max(1, int(self.X.shape[1]))
+                self.n_features_size = max(1, int(self.X.shape[1]))
+                return
+            encoding_strategy: EncodingStrategy = self.encoding or "one_hot"
+            # Automatic preset selection + application of an explicit override.
+            # The preset is resolved once before training (performance) and
+            # logged for observability.
+            preset = resolve_preprocessing_preset(
+                self.algo, self.preprocessing_override
+            )
+            log.info(
+                "Resolved preprocessing preset for algorithm '%s': %s",
+                self.algo,
+                preset,
+            )
+            if (
+                self.categorical_features is not None
+                or self.numerical_features is not None
+            ):
+                # Explicitly passed column lists (the main path from
+                # training_engine)
+                if isinstance(self.X, pd.DataFrame):
+                    self.preprocessor = build_preprocessor(
+                        list(self.X.columns),
+                        self.categorical_features or [],
+                        self.numerical_features or [],
+                        encoding=encoding_strategy,
+                        imputation_strategy=preset.imputation_strategy,
+                        scaling=preset.scaling,
+                        high_cardinality_threshold=self.high_cardinality_threshold,
+                        high_cardinality_encoding=self.high_cardinality_encoding,
+                        hashing_n_components=self.hashing_n_components,
+                        target_encoding_smoothing=self.target_encoding_smoothing,
+                        target_encoding_fallback=self.target_encoding_fallback,
+                        random_state=self.random_state,
+                        force_dense_output=requires_dense_input(self.algo),
+                        add_indicator=_missing_indicator_enabled(self.algo),
+                    )
+                else:
+                    log.warning(
+                        "categorical/numerical_features provided, but X is not a "
+                        "pandas.DataFrame — skipping automatic preprocessor."
+                    )
+            elif isinstance(self.X, pd.DataFrame):
+                # Autodetect categories (default behavior when called outside
+                # the engine). The preprocessor is built when ANY features
+                # (categorical or numerical) are present: this guarantees that
+                # on a purely numerical DataFrame the HPO phase applies
+                # scaling just like the final ModelTrainer.
+                cats, nums = detect_feature_types(self.X)
+                # Store the detected lists so that the isotonic numeric block
+                # (``n_numeric_eff``) is determinable from the same feature
+                # set that built the preprocessor.
+                self.categorical_features = cats
+                self.numerical_features = nums
+                if cats or nums:
+                    self.preprocessor = build_preprocessor(
+                        list(self.X.columns),
+                        cats,
+                        nums,
+                        encoding=encoding_strategy,
+                        imputation_strategy=preset.imputation_strategy,
+                        scaling=preset.scaling,
+                        high_cardinality_threshold=self.high_cardinality_threshold,
+                        high_cardinality_encoding=self.high_cardinality_encoding,
+                        hashing_n_components=self.hashing_n_components,
+                        target_encoding_smoothing=self.target_encoding_smoothing,
+                        target_encoding_fallback=self.target_encoding_fallback,
+                        random_state=self.random_state,
+                        force_dense_output=requires_dense_input(self.algo),
+                        add_indicator=_missing_indicator_enabled(self.algo),
+                    )
+            else:
+                log.warning(
+                    "X is not a pandas.DataFrame and categorical_features/"
+                    "numerical_features were not provided — categorical columns "
+                    "(if any) will be treated as numeric."
+                )
+
+        # The number of features the model actually sees after preprocessing
+        # (including one-hot and missing-value indicators). Used by the
+        # adaptive complexity guard as ``p`` for the rules that depend on
+        # the feature count (``max_features``, ``colsample_bytree``).
+        # Computed deterministically once per phase — the same value in every
+        # HPO phase and in the subprocesses.
+        self.n_features_eff = self._estimate_n_features_after_preprocessing()
+        # The number of ORIGINAL columns (a categorical column counts as 1,
+        # before the one-hot expansion). Used by the adaptive complexity
+        # guard for the size-mode ratio ``n / p`` only. Without a preprocessor
+        # (np.ndarray input without explicit column lists) the model sees
+        # exactly the original columns, so the size count is aligned with the
+        # post-preprocessing count — this preserves the legacy behavior of
+        # direct optimize() calls (no one-hot expansion, the guard sees the
+        # same p it always did).
+        self.n_features_size = max(
+            1,
+            int(self.X.shape[1])
+            if self.preprocessor is not None
+            else self.n_features_eff,
+        )
+        # The number of NUMERICAL features after preprocessing: the isotonic
+        # ``feature_index`` is restricted to this range (numeric columns only;
+        # one-hot dummies are not meaningful inputs). Deterministic — one
+        # column per numerical feature (isotonic disables missing indicators
+        # and never expands numeric columns).
+        if self.preprocessor is not None and not (
+            self.categorical_features or self.numerical_features
+        ):
+            # An external preprocessor without explicit column lists: the
+            # numerical block is not determinable.
+            self.n_numeric_eff = None
+        elif self.preprocessor is None and not isinstance(self.X, pd.DataFrame):
+            # ndarray without column lists: no preprocessor is built and every
+            # column is treated as numeric, so the feature_index is positional
+            # over the whole matrix.
+            self.n_numeric_eff = None
+        else:
+            nums = list(self.numerical_features or [])
+            if not nums and isinstance(self.X, pd.DataFrame):
+                _, nums = detect_feature_types(self.X)
+            self.n_numeric_eff = max(0, len(nums))
+
+    def _estimate_n_features_after_preprocessing(self) -> int:
+        """Estimate the number of features after the preprocessor.
+
+        The number of columns the model actually sees: numerical features
+        plus their missing-value indicators (``add_indicator=True``) plus the
+        encoded categorical features. The estimate is computed
+        deterministically from the data and the encoding settings — the same
+        value in every HPO phase and in the subprocesses (no fitting, no
+        randomness). It is used by the adaptive complexity guard as ``p`` for
+        the rules that depend on the feature count (``max_features``,
+        ``colsample_bytree``); the size-mode ratio ``n / p`` uses the
+        original column count instead (``n_features_size``).
+
+        One-hot encoding expands each categorical column into its number of
+        unique categories; ordinal/target/frequency encoding keeps one column
+        per categorical column; hashing encoding expands into
+        ``n_components`` columns. In the automatic high-cardinality mode
+        (``high_cardinality_threshold`` + ``high_cardinality_encoding``), each
+        categorical column is counted with the strategy it actually receives
+        at fit time: columns whose cardinality is strictly greater than the
+        threshold use the high-cardinality strategy, the rest — the main
+        ``encoding`` strategy (matches
+        :class:`~configurable_automl_engine.preprocessing.SplitCategoricalEncoder`).
+
+        Returns:
+            int: The estimated feature count (>= 1).
+        """
+        if self.preprocessor is not None:
+            n_out = getattr(self.preprocessor, "n_features_out_", None)
+            if n_out is not None and int(n_out) >= 1:
+                return int(n_out)
+
+        # Explicitly passed column lists (the engine path) — the accurate
+        # source; otherwise fall back to auto-detected types.
+        cats = list(self.categorical_features or [])
+        nums = list(self.numerical_features or [])
+        if not cats and not nums and isinstance(self.X, pd.DataFrame):
+            cats, nums = detect_feature_types(self.X)
+
+        return estimate_n_features_after_preprocessing(
+            self.X,
+            categorical_features=cats,
+            numerical_features=nums,
+            encoding=cast(EncodingStrategy, self.encoding or "one_hot"),
+            high_cardinality_threshold=self.high_cardinality_threshold,
+            high_cardinality_encoding=self.high_cardinality_encoding,
+            hashing_n_components=int(getattr(self, "hashing_n_components", 16)),
+            add_indicator=self._missing_indicator_added(),
+        )
+
+    def _missing_indicator_added(self) -> bool:
+        """Whether missing-value indicators are added for numerical features."""
+        return _missing_indicator_enabled(self.algo)
+
+    def assemble_estimator(
+        self,
+        model_impl: Any,
+        apply_fs: bool = False,
+        feature_index: int | None = None,
+    ) -> Any:
+        """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
+
+        Oversampling receives already-encoded numerical features (one-hot), so
+        SMOTE/ADASYN always work with numerical data. Feature selection is
+        activated strictly between the preprocessor and the oversampler:
+        synthetic rows are generated only for informative features (the order
+        is consistent with ModelTrainer).
+
+        For ``isotonic_regression`` an ``IsotonicDataTransformer`` step is
+        inserted right after the preprocessor (before selection/oversampling):
+        the algorithm is strictly univariate and the adapter reduces the
+        preprocessed matrix to the single column selected via
+        ``feature_index`` (0 by default).
+
+        Args:
+            model_impl: The base regressor.
+            apply_fs: Flag to enable the ``feature_selector`` step.
+            feature_index: The ordinal feature index for the isotonic data
+                adapter (``None`` — 0).
+        """
+        steps: list[tuple[str, Any]] = []
+        if self.preprocessor is not None:
+            steps.append(("preprocessor", self.preprocessor))
+        if self.is_isotonic:
+            steps.append(
+                (
+                    "isotonic_selector",
+                    IsotonicDataTransformer(
+                        feature_index=feature_index if feature_index is not None else 0,
+                        n_numeric=self.n_numeric_eff,
+                    ),
+                )
+            )
+        # New step: feature selection is activated strictly between the
+        # preprocessor and the oversampler.
+        if apply_fs:
+            steps.append(("feature_selector", self._fs_transformer_factory()))
+        if self.oversampling_config["active"]:
+            steps.append(
+                ("sampler", DataOversampler(**self.oversampling_config["params"]))
+            )
+        steps.append(("model", model_impl))
+        if len(steps) == 1:
+            return model_impl
+        return ImbPipeline(steps)
+
+    def _resolve_apply_fs(self, trial: Trial) -> bool:
+        """Determine whether feature selection is needed for the current trial.
+
+        In 'auto' mode Optuna itself explores the decision space (whether
+        reducing features is beneficial); in 'always'/'disabled' the decision
+        strictly follows the configuration. For isotonic_regression the
+        use_feature_selection category is not offered even in 'auto' mode:
+        selection is forcibly disabled (a univariate algorithm with its own
+        IsotonicDataTransformer), so the suggestion would be meaningless and
+        the auxiliary key must not leak into best_params.
+
+        Args:
+            trial (Trial): The current Optuna trial object.
+        Returns:
+            bool: Whether the ``feature_selector`` step should be added to the pipeline.
+        """
+        if self.fs_mode == FeatureSelectionMode.auto and not self.is_isotonic:
+            apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
+        elif self.fs_mode == FeatureSelectionMode.always:
+            apply_fs = True
+        else:
+            apply_fs = False
+        # Isotonic regression requires exactly one feature and uses its own
+        # IsotonicDataTransformer — selection is forcibly disabled (including
+        # when 'always' or enqueued initial_params carried the flag).
+        if self.is_isotonic:
+            apply_fs = False
+        return apply_fs
+
+    def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
+        """Evaluate the assembled trial pipeline and return the target metric (step 4).
+
+        Delegates the evaluation to ``_score_trial``. With ``collect_oof`` the
+        out-of-fold predictions of the trial are kept in ``trial_oof`` when
+        the trial produced a valid score (the worst-score sentinel — a failed
+        fold or a non-finite metric — is not a selectable candidate and is
+        not kept).
+
+        Args:
+            trial (Trial): The current Optuna trial object.
+            current_estimator (Any): The pipeline/model of the current trial.
+        Returns:
+            float: The target metric value for the current parameter set.
+        Raises:
+            ValueError: Non-fatal evaluation error (the trial is pruned).
+            MemoryError, RuntimeError, InvalidDataError: Fatal failures —
+                counted in the ``handle_failure`` counter.
+            optuna.TrialPruned: Pruning by the early stopping pruner.
+        """
+        if not self.collect_oof:
+            return self._score_trial(trial, current_estimator, None)
+        oof = np.full(len(self.X), np.nan, dtype=float)
+        score = self._score_trial(trial, current_estimator, oof)
+        if score > WORST_SCORE_THRESHOLD:
+            self.trial_oof[trial.number] = oof
+        return score
+
+    def _score_trial(
+        self, trial: Trial, current_estimator: Any, oof_out: np.ndarray | None
+    ) -> float:
+        """Score the trial pipeline with the selected validation strategy.
+
+        Evaluates ``current_estimator`` with the selected validation strategy.
+        A non-finite result (+inf on an nrmse error or NaN) is replaced with
+        ``HPO_WORST_SCORE`` — the "worst outcome" sentinel. Hyperparameter
+        generation and pipeline assembly happen in ``_objective`` BEFORE this
+        method is invoked and outside try/except: errors from a user space
+        function or the model constructor must propagate (trial FAIL) rather
+        than turn into pruning/disqualification.
+
+        Args:
+            trial (Trial): The current Optuna trial object.
+            current_estimator (Any): The pipeline/model of the current trial.
+            oof_out (np.ndarray | None): A buffer of length ``len(self.X)``
+                that receives the out-of-fold predictions by position;
+                ``None`` — predictions are not collected.
+        Returns:
+            float: The target metric value for the current parameter set.
+        Raises:
+            ValueError: Non-fatal evaluation error (the trial is pruned).
+            MemoryError, RuntimeError, InvalidDataError: Fatal failures —
+                counted in the ``handle_failure`` counter.
+            optuna.TrialPruned: Pruning by the early stopping pruner.
+        """
+        # 1. evaluation according to the validation strategy
+        if self.val_method_eff == "train_test_split":
+            # If 'auto' was resolved in make_cv, use the already computed
+            # (dataset-dependent) integer test_size so that iter_splits does
+            # not recompute the decision. Otherwise — the fixed fraction.
+            if self.resolved_via_auto and self.auto_decision is not None:
+                split_test_size: float | int = int(self.auto_decision["test_size"])
+            else:
+                split_test_size = self.train_test_split_test_size
+            # Use iter_splits for uniformity; since it is a generator, take
+            # next()
+            if oof_out is None:
+                X_tr, X_te, y_tr, y_te = next(
+                    iter_splits(
+                        self.X,
+                        self.y,
+                        method="train_test_split",
+                        test_size=split_test_size,
+                        random_state=self.random_state,
+                    )
+                )
+                current_estimator.fit(X_tr, y_tr)
+                return float(self.scorer(current_estimator, X_te, y_te))
+            # OOF collection: the same split, with the test row positions.
+            X_tr, X_te, y_tr, y_te, test_idx = next(
+                iter_splits(
+                    self.X,
+                    self.y,
+                    method="train_test_split",
+                    test_size=split_test_size,
+                    random_state=self.random_state,
+                    include_indices=True,
+                )
+            )
+            current_estimator.fit(X_tr, y_tr)
+            oof_out[np.asarray(test_idx)] = np.asarray(
+                current_estimator.predict(X_te), dtype=float
+            ).reshape(-1)
+            return float(self.scorer(current_estimator, X_te, y_te))
+        if self.pruning_active:
+            # Early stopping: evaluate fold by fold and publish intermediate
+            # results for the Optuna pruner. For non-additive metrics the
+            # published value is the pooled metric over the predictions
+            # accumulated up to the current step.
+            avg_score = _evaluate_with_intermediate_reports(
+                trial,
+                current_estimator,
+                self.X,
+                self.y,
+                method=self.val_method_eff,
+                n_folds=self.effective_n_folds,
+                test_size=self.train_test_split_test_size,
+                random_state=self.random_state,
+                scorer=self.scorer,
+                pool_metric=self.pool_metric,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
+                oof_out=oof_out,
+            )
+            # If we got +inf (an nrmse error) or NaN, return the worst float
+            # (analog of the float32 minimum or float('-inf')).
+            if not np.isfinite(avg_score):
+                return HPO_WORST_SCORE
+            return avg_score
+        if self.pool_metric:
+            # Non-additive metrics (RMSE, MSE, R², nRMSE): evaluate over the
+            # pooled OOF vector at once (the same estimate the final
+            # ModelTrainer and the select phase use) instead of averaging
+            # per-fold values. The splits are the same as
+            # ``cross_val_score(cv=cv_obj)``.
+            avg_score = _evaluate_pooled_cv(
+                current_estimator,
+                self.X,
+                self.y,
+                method=self.val_method_eff,
+                n_folds=self.effective_n_folds,
+                test_size=self.train_test_split_test_size,
+                random_state=self.random_state,
+                scorer=self.scorer,
+                algo_name=self.algo_name,
+                phase_name=self.phase_name or "",
+                oof_out=oof_out,
+            )
+            # If we got +inf (an nrmse error) or NaN, return the worst float
+            # (analog of the float32 minimum or float('-inf')).
+            if not np.isfinite(avg_score):
+                return HPO_WORST_SCORE
+            return avg_score
+        if oof_out is not None:
+            # Additive metrics with OOF collection: the same fold scores as
+            # ``cross_val_score`` (same cv object and scorer), with the fold
+            # estimators kept to predict their test rows.
+            cv_res = model_selection.cross_validate(
+                current_estimator,
+                self.X,
+                self.y,
+                cv=self.cv_obj,
+                scoring=self.scorer,
+                n_jobs=1,
+                return_estimator=True,
+                return_indices=True,
+            )
+            avg_score = float(np.mean(cv_res["test_score"]))
+            if not np.isfinite(avg_score):
+                return HPO_WORST_SCORE
+            for fold_est, test_idx in zip(
+                cv_res["estimator"], cv_res["indices"]["test"], strict=True
+            ):
+                oof_out[test_idx] = np.asarray(
+                    fold_est.predict(_safe_indexing(self.X, test_idx)), dtype=float
+                ).reshape(-1)
+            return avg_score
+        # Additive metrics: the legacy fold-average path. cv_obj is guaranteed
+        # non-None here: a non-train_test_split and non-pruning branch means
+        # k_fold/loo, where make_cv always creates a cv object.
+        scores = model_selection.cross_val_score(
+            current_estimator,
+            self.X,
+            self.y,
+            cv=self.cv_obj,
+            scoring=self.scorer,
+            n_jobs=1,
+        )
+        avg_score = float(np.mean(scores))
+        # If we got +inf (an nrmse error) or NaN, return the worst float
+        # (analog of the float32 minimum or float('-inf')).
+        if not np.isfinite(avg_score):
+            return HPO_WORST_SCORE
+        return avg_score
+
+    def handle_pruning(self) -> None:
+        """Configure early stopping (pruning) for the selected validation (step 5).
+
+        Normalizes the early stopping configuration and builds an Optuna
+        pruner. Pruning applies only when there are natural evaluation steps
+        (k_fold / loo); for hold-out (train_test_split) there are no
+        intermediate steps, so early stopping is not applied (documented
+        behavior).
+        """
+        pruning_cfg = _normalize_pruning_config(self.pruning)
+        self.pruner = None
+        if pruning_cfg is not None:
+            self.pruner = _build_pruner(pruning_cfg)
+            log.info(
+                "Early stopping enabled: strategy=%s, min_steps=%d, "
+                "n_startup_trials=%d, reduction_factor=%d",
+                pruning_cfg["strategy"],
+                pruning_cfg["min_steps"],
+                pruning_cfg["n_startup_trials"],
+                pruning_cfg["reduction_factor"],
+            )
+        self.pruning_active = (
+            self.pruner is not None and self.val_method_eff != "train_test_split"
+        )
+        if self.pruner is not None and not self.pruning_active:
+            log.warning(
+                "Early stopping is enabled, but validation strategy '%s' has no "
+                "intermediate steps — pruning will not be applied.",
+                self.val_method_eff,
+            )
+
+    def _objective(self, trial: Trial) -> float:
+        """Optuna objective function: evaluate_trial + handle_failure.
+
+        Splits trial evaluation (``evaluate_trial``) and its failure handling
+        (``handle_failure``) into separate steps. Hyperparameter generation and
+        pipeline assembly run OUTSIDE try/except — as in the original
+        implementation: errors from a user space function or the model
+        constructor must propagate (trial FAIL and an exception from
+        ``study.optimize``) rather than silently become pruning /
+        disqualification. The consecutive fatal failure counter is reset on
+        any non-fatal outcome: success, pruner pruning (optuna.TrialPruned
+        from ``_evaluate_with_intermediate_reports``), or a non-fatal
+        ValueError.
+
+        Args:
+            trial (Trial): The current Optuna trial object.
+        Returns:
+            float: The target metric value for the current parameter set.
+        Raises:
+            optuna.TrialPruned: If the trial is pruned (by an error or the pruner).
+            InvalidAlgorithmError: When the fatal failure limit is exceeded.
+        """
+        # 1. hyperparameters, model and pipeline assembly — outside try/except
+        #    (contract of the original code: their errors are not fatal
+        #    evaluation failures and are not counted by the circuit breaker).
+        params = self.space_fn(trial)
+        model_kwargs = dict(params)
+        # The model seed follows the run's ``random_state`` (the engine seed),
+        # unless the user set ``random_state`` explicitly in the algorithm
+        # hyperparameters — an explicit value always wins (including an
+        # explicit None → a truly random fit, a WARNING is logged by
+        # ``create_model``).
+        if "random_state" not in model_kwargs:
+            model_kwargs["random_state"] = self.random_state
+        model = create_model(self.algo, **model_kwargs)
+        current_estimator = self.assemble_estimator(
+            model,
+            apply_fs=self._resolve_apply_fs(trial),
+            feature_index=params.get("feature_index"),
+        )
+
+        fatal_failure = False
+        try:
+            return self.evaluate_trial(trial, current_estimator)
+        except (ValueError, MemoryError, RuntimeError, InvalidDataError) as err:
+            fatal_failure = not isinstance(err, ValueError)
+            self.handle_failure(trial, err)
+            # Unreachable: handle_failure always raises (NoReturn). The stub
+            # is only needed by static analysis so the except branch has a
+            # return value.
+            return 0.0  # pragma: no cover
+        finally:
+            # Any non-fatal trial outcome breaks the sequence of fatal
+            # failures: a successful _score return, pruner pruning
+            # (optuna.TrialPruned), or a non-fatal ValueError. Without this
+            # reset, the counter would accumulate errors separated by normal
+            # trials and falsely disqualify the algorithm.
+            if not fatal_failure:
+                self.consecutive_fatal_failures = 0
+
+    def handle_failure(self, trial: Trial, err: Exception) -> NoReturn:
+        """Handle a trial evaluation failure according to the outcome contract (step 6).
+
+        A non-fatal ``ValueError`` simply prunes the trial
+        (``optuna.TrialPruned``) without counting it. ``MemoryError`` /
+        ``RuntimeError`` / ``InvalidDataError`` are considered fatal: they
+        increment the consecutive failure counter and disqualify the algorithm
+        once the limit is reached (``InvalidAlgorithmError``).
+
+        Args:
+            trial (Trial): The current Optuna trial (for the user_attr "fail_reason").
+            err (Exception): The caught evaluation exception.
+        Raises:
+            optuna.TrialPruned: Always (non-fatal or fatal failure).
+            InvalidAlgorithmError: If the fatal failure limit is reached.
+        """
+        trial.set_user_attr("fail_reason", str(err))
+        if isinstance(err, ValueError):
+            raise optuna.TrialPruned() from err
+        self.consecutive_fatal_failures += 1
+        if self.consecutive_fatal_failures >= self.MAX_FATAL_FAILURES:
+            raise InvalidAlgorithmError(
+                f"Algorithm '{self.algo}' disqualified after "
+                f"{self.consecutive_fatal_failures} consecutive fatal failures"
+            ) from err
+        raise optuna.TrialPruned() from err
+
+    def _natural_domain_bounds(
+        self, param: str, entry: SearchSpaceEntry
+    ) -> tuple[float | None, float | None]:
+        """Natural (physical) domain bounds of a parameter.
+
+        Returns ``(low, high)``; a side is ``None`` when the domain is
+        unbounded there. A boundary that coincides with a natural bound is not
+        actionable: the value cannot be pushed beyond it even by widening the
+        search range, so the "widen it" hint would be a false signal. Bounds
+        that depend on the data (leaf sizes, neighbor counts) are derived from
+        ``n_samples_eff`` / ``n_features_eff`` — these are the same physical
+        limits that ``clip_search_space`` enforces.
+
+        Args:
+            param: The hyperparameter name.
+            entry: The search-space entry (its distribution type decides the
+                fraction-vs-count interpretation of ``min_samples_leaf`` and
+                ``max_features``).
+
+        Returns:
+            tuple[float | None, float | None]: Natural ``(low, high)`` bounds.
+        """
+        low: float | None = None
+        high: float | None = None
+        dist_type = entry.dist_type
+        if param in {"subsample", "colsample_bytree"}:
+            # A row/feature sampling fraction: (0, 1].
+            high = 1.0
+        elif param == "min_samples_leaf":
+            if (
+                dist_type == "float"
+                and float(entry.low) < 1.0
+                and float(entry.high) <= 1.0
+            ):
+                # A fraction of the sample size: (0, 1].
+                high = 1.0
+            else:
+                # An absolute row count: at least 1 and at most n.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "min_samples_split":
+            low = 2.0
+            high = float(max(2, int(getattr(self, "n_samples_eff", 0))))
+        elif param == "n_neighbors":
+            low = 1.0
+            high = float(max(1, int(getattr(self, "n_samples_eff", 0)) - 1))
+        elif param == "max_features":
+            if dist_type == "float":
+                # A fraction of the features: (0, 1].
+                high = 1.0
+            else:
+                # An absolute feature count.
+                low = 1.0
+                high = float(max(1, int(getattr(self, "n_features_eff", 1))))
+        elif param == "l1_ratio":
+            low = 0.0
+            high = 1.0
+        elif param == "max_depth":
+            low = 1.0
+        elif param in {"min_child_weight", "gamma"}:
+            low = 0.0
+        elif param == "n_estimators":
+            low = 1.0
+        elif param == "p":
+            # The Minkowski power of the KNN space.
+            low = 1.0
+        elif param == "feature_index":
+            # The ordinal NUMERICAL column index consumed by
+            # IsotonicDataTransformer: the natural domain spans
+            # [0, n_numeric - 1] — only numeric features are meaningful
+            # inputs for the strictly univariate model (one-hot dummies are
+            # excluded), and neither side can be pushed beyond it even by
+            # widening the search range.
+            low = 0.0
+            high = float(max(0, self._isotonic_max_feature_index()))
+        return low, high
+
+    def _isotonic_max_feature_index(self) -> int:
+        """The upper bound of the isotonic ``feature_index`` search range.
+
+        Candidates are restricted to numerical features (one-hot dummies are
+        not meaningful inputs): the count comes from the numerical feature
+        list (``n_numeric_eff``). When the numeric block is not determinable
+        (``n_numeric_eff is None``):
+
+        * an already-built preprocessor — fall back to its estimated output
+          width (``n_features_eff``);
+        * no preprocessor (ndarray without column lists) — every column is
+          treated as numeric and the index is positional over the raw matrix.
+
+        Returns:
+            The inclusive upper bound of the index range (>= 0).
+        """
+        if self.n_numeric_eff is not None:
+            n_features = int(self.n_numeric_eff)
+        elif self.preprocessor is not None:
+            n_features = int(self.n_features_eff)
+        else:
+            n_features = int(getattr(self.X, "shape", (0, 1))[1])
+        return max(0, n_features - 1)
+
+    def _is_guard_boundary(self, param: str, value: float, tolerance: float) -> bool:
+        """Whether ``value`` lies on a bound introduced by the complexity guard.
+
+        The guard records the "before → after" bounds of every range it
+        actually narrowed. A bound is guard-introduced when the guard moved
+        that side of the range: the "after" bound differs from "before" (the
+        other side may be the user's or the default bound and stays a normal
+        "widen it" candidate). An optimum on a guard-moved bound is expected —
+        the range was tightened deliberately (e.g. ``max_depth`` 2–3 on small
+        data) — so the "widen it" warning would be a false signal.
+
+        Args:
+            param: The hyperparameter name.
+            value: The boundary value of the best trial.
+            tolerance: The same absolute tolerance the boundary check uses.
+
+        Returns:
+            bool: ``True`` when the value is a guard-introduced bound.
+        """
+        algo = resolve_algorithm_name(self.algo)
+        for record in getattr(self, "complexity_guard_logs", []):
+            if record.get("param") != param:
+                continue
+            if resolve_algorithm_name(str(record.get("algo", ""))) != algo:
+                continue
+            if not record.get("applied"):
+                continue
+            before = record.get("before")
+            after = record.get("after")
+            if not isinstance(before, list) or len(before) != 2:
+                continue
+            if not isinstance(after, list) or len(after) != 2:
+                continue
+            try:
+                before = [float(before[0]), float(before[1])]
+                after = [float(after[0]), float(after[1])]
+            except (TypeError, ValueError):
+                continue
+            # A side introduced by the guard: the after bound differs from
+            # the before one on that side.
+            moved_low = not math.isclose(
+                after[0], before[0], rel_tol=0.0, abs_tol=tolerance
+            )
+            moved_high = not math.isclose(
+                after[1], before[1], rel_tol=0.0, abs_tol=tolerance
+            )
+            if (
+                moved_low
+                and math.isclose(value, after[0], rel_tol=0.0, abs_tol=tolerance)
+            ) or (
+                moved_high
+                and math.isclose(value, after[1], rel_tol=0.0, abs_tol=tolerance)
+            ):
+                return True
+        return False
+
+    def _warn_if_optimum_at_boundary(self, best_params: dict[str, Any]) -> None:
+        """Warn when the best trial's value lies at a range boundary.
+
+        An optimum that coincides with the lower or upper bound of the search
+        range means the search was cut off: the true optimum may lie beyond
+        the range, and the user should widen it. Only dict-based numeric
+        search spaces (with ``SearchSpaceEntry`` bounds) are checked;
+        categorical parameters and constant values are skipped.
+
+        The warning is suppressed when the boundary is not actionable:
+        * a fixed parameter (``low == high``) — e.g. a user
+          ``min_samples_leaf [1, 1]`` or an XGBoost ``max_depth`` collapsed
+          to 3–3 — the optimum sits at the only possible value;
+        * a bound introduced by the adaptive complexity guard — the range
+          was narrowed deliberately (e.g. ``max_depth`` 2–3) and the optimum
+          is expected on it (an INFO line is logged instead);
+        * a natural (physical) domain boundary of the parameter —
+          ``subsample=1.0``, ``colsample_bytree=1.0``, ``min_samples_leaf=1``,
+          ``l1_ratio=0/1`` — the value cannot be pushed beyond it even by
+          widening the range.
+
+        Args:
+            best_params: The parameters of the best trial.
+        """
+        if not self.search_space_dict:
+            return
+        for name, entry in self.search_space_dict.items():
+            if not hasattr(entry, "dist_type"):
+                continue
+            dist_type = entry.dist_type
+            if dist_type not in ("int", "float", "float_log"):
+                continue
+            if name not in best_params:
+                continue
+            value = best_params[name]
+            try:
+                low = float(entry.low)
+                high = float(entry.high)
+                num = float(value)
+            except (TypeError, ValueError):
+                continue
+            if low == high:
+                # A fixed parameter: the optimum is at the only possible
+                # value, the "widen it" hint is meaningless.
+                continue
+            # Tolerance: 1e-6 of the range width (at least 1e-6 for tiny ranges).
+            # Exact equality is not enough because Optuna may return 1.0 vs
+            # a boundary 1.0000001. A relative tolerance is deliberately not
+            # used: on very wide ranges (e.g. [0, 1e9]) a rel_tol of 1e-9
+            # would already accept values ~1.0 away from the boundary — too
+            # coarse for a "widen the range" hint.
+            tolerance = 1e-6 * max(1.0, abs(high - low))
+            at_low = math.isclose(num, low, rel_tol=0.0, abs_tol=tolerance)
+            at_high = math.isclose(num, high, rel_tol=0.0, abs_tol=tolerance)
+            if not (at_low or at_high):
+                continue
+            boundary = "low" if at_low else "high"
+            bound_value = low if at_low else high
+
+            # A guard-introduced bound: the range was narrowed deliberately,
+            # the optimum on it is expected — INFO instead of a warning.
+            if self._is_guard_boundary(name, bound_value, tolerance):
+                log.info(
+                    "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                    "boundary of [%.6g, %.6g], set by the complexity_guard — "
+                    "expected, the range is narrowed deliberately, no 'widen "
+                    "it' warning",
+                    self.algo,
+                    name,
+                    num,
+                    boundary,
+                    low,
+                    high,
+                )
+                continue
+
+            # A natural (physical) domain boundary of the parameter: the value
+            # cannot be pushed beyond it even by widening the range.
+            natural_low, natural_high = self._natural_domain_bounds(name, entry)
+            natural_bound = natural_low if at_low else natural_high
+            if natural_bound is not None and math.isclose(
+                bound_value, natural_bound, rel_tol=0.0, abs_tol=tolerance
+            ):
+                log.info(
+                    "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                    "boundary of [%.6g, %.6g] — the natural domain boundary "
+                    "of the parameter, no 'widen it' warning",
+                    self.algo,
+                    name,
+                    num,
+                    boundary,
+                    low,
+                    high,
+                )
+                continue
+
+            log.warning(
+                "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
+                "boundary of the search range [%.6g, %.6g] — the true "
+                "optimum may lie beyond the range, widen it",
+                self.algo,
+                name,
+                num,
+                boundary,
+                low,
+                high,
+            )
+
+    def select_best_trial(self) -> bool:
+        """Select the best completed trial of the CURRENT phase (step 7).
+
+        Explicit trial state counting: the presence of a valid result is
+        determined by the number of completed (COMPLETED) trials of the
+        current phase (``number >= phase_start_number``) rather than by the
+        internal behavior of ``study.best_params``. Transferred trials
+        (``previous_trials``) feed the TPE sampler but are NEVER counted or
+        ranked here: they must not mask a total failure of the current phase
+        (otherwise a refine phase that wiped out all its own trials would
+        silently fall back to the previous phase's parameters — the forbidden
+        no-fallback contract). Counters are logged for observability ("no
+        valid result" must be explainable from the logs).
+
+        The best trial is selected EXPLICITLY by its value among the current
+        phase's COMPLETED trials; ``study.best_params`` is deliberately not
+        used — it would rank the transferred trials too.
+
+        Returns:
+            bool: True if there is a completed trial of the current phase;
+                False — the "no valid result" contract (all OWN trials
+                PRUNED/FAILED or an empty list).
+        """
+        assert self.study is not None
+        own_trials = self.phase_trials or [
+            t
+            for t in self.study.get_trials(deepcopy=False)
+            if t.number >= self.phase_start_number
+        ]
+        n_completed = sum(
+            1 for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE
+        )
+        n_pruned = sum(
+            1 for t in own_trials if t.state == optuna.trial.TrialState.PRUNED
+        )
+        n_failed = sum(1 for t in own_trials if t.state == optuna.trial.TrialState.FAIL)
+        if self.pruning_active:
+            log.info(
+                "Early stopping: pruned %d of %d trials (algo=%s)",
+                n_pruned,
+                len(own_trials),
+                self.algo,
+            )
+        log.info(
+            "Trial states for algorithm '%s': completed=%d, pruned=%d, failed=%d",
+            self.algo,
+            n_completed,
+            n_pruned,
+            n_failed,
+        )
+        if n_completed == 0:
+            # The "no valid result" contract: all OWN trials are pruned
+            # (PRUNED), failed (FAILED), or the trial list is empty. Transferred
+            # history is irrelevant here. Return False so the caller (_run_hpo)
+            # can tell a failure from a valid result and exclude the algorithm
+            # from the candidates.
+            log.warning(
+                "Algorithm '%s' produced no completed trials "
+                "(completed=%d, pruned=%d, failed=%d); returning no result",
+                self.algo,
+                n_completed,
+                n_pruned,
+                n_failed,
+            )
+            return False
+
+        # The honest evaluation count reported next to the best-trial score:
+        # the best score is the MAXIMUM over exactly these trials (the more
+        # trials were evaluated on the same folds, the more optimistic the
+        # score is expected to be). Transferred history never counts.
+        self.n_trials_evaluated = n_completed
+
+        best_trial = max(
+            (t for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE),
+            key=lambda t: cast(float, t.value),
+        )
+        self.best_score = float(cast(float, best_trial.value))
+        best_params = dict(best_trial.params)
+
+        self._warn_if_optimum_at_boundary(best_params)
+
+        # The feature selection decision comes from the best trial's params
+        # (mode='auto': the "use_feature_selection" key is already fixed by
+        # Optuna) or from the configuration mode ('always' -> True, 'disabled'
+        # -> False). For isotonic_regression selection is forcibly ignored.
+        best_apply_fs = bool(
+            best_params.get(
+                "use_feature_selection", self.fs_mode == FeatureSelectionMode.always
+            )
+        )
+        if self.is_isotonic:
+            best_apply_fs = False
+            # For isotonic_regression, the auxiliary key is also excluded from
+            # the returned best_params (a guard against initial_params carried
+            # through enqueue_trial from the previous phase with the
+            # use_feature_selection key).
+            best_params = {
+                k: v for k, v in best_params.items() if k != "use_feature_selection"
+            }
+            # Report the chosen NUMERICAL feature name in the params
+            # (``isotonic_feature``), resolved from the preprocessor's
+            # get_feature_names_out (the numerical block occupies the last
+            # ``n_numeric`` columns). Fitted only when the preprocessor is
+            # available and the name is resolvable.
+            if self.preprocessor is not None:
+                feature_name = self._resolve_isotonic_feature_name(
+                    best_params.get("feature_index", 0)
+                )
+                if feature_name is not None:
+                    best_params["isotonic_feature"] = feature_name
+        self.best_params = best_params
+        # The base model constructor parameters are cleaned of the tuner's
+        # auxiliary keys ("use_feature_selection" and the informational
+        # "isotonic_feature" are not model hyperparameters; ``create_model``
+        # rejects unknown names). They are built from the already filtered
+        # self.best_params (for isotonic_regression the key was excluded
+        # above) so the source is single; the best trial's params are
+        # not mutated and the key is guaranteed not to reach the model
+        # constructor.
+        self.clean_model_params = dict(self.best_params)
+        self.clean_model_params.pop("use_feature_selection", None)
+        self.clean_model_params.pop("isotonic_feature", None)
+        self.best_apply_fs = best_apply_fs
+        return True
+
+    def _resolve_isotonic_feature_name(self, feature_index: int) -> str | None:
+        """Resolve the name of the numerical feature selected by isotonic.
+
+        The preprocessor emits the categorical block first and the numerical
+        block last, so the selected numerical feature occupies the absolute
+        position ``(n_columns - n_numeric) + feature_index`` in the
+        preprocessed matrix. The name is resolved from the fitted
+        preprocessor's ``get_feature_names_out`` (the preprocessor is fitted
+        once on the full data); ``None`` is returned when the names are not
+        available (np.ndarray input without column lists) or the resolution
+        fails (the estimate does not match a fitted output — non-fatal).
+
+        Args:
+            feature_index: The numeric-block-relative index of the best trial.
+
+        Returns:
+            The resolved feature name, or ``None``.
+        """
+        if self.preprocessor is None or self.n_numeric_eff is None:
+            return None
+        try:
+            # The preprocessor used by the trials is only ever fitted through
+            # clones (per fold), so fit a copy once on the full data to obtain
+            # the stable output names (the numerical block width and the
+            # ``num__<col>`` names are data-independent for the numeric block).
+            names = self.preprocessor.get_feature_names_out()
+        except Exception:  # noqa: BLE001 — best-effort name resolution
+            try:
+                probe = clone(self.preprocessor).fit(self.X, self.y)
+                names = probe.get_feature_names_out()
+            except Exception:  # noqa: BLE001 — best-effort name resolution
+                return None
+        names_list = list(names)
+        n_cols = len(names_list)
+        if n_cols < self.n_numeric_eff or feature_index >= self.n_numeric_eff:
+            return None
+        absolute = (n_cols - int(self.n_numeric_eff)) + feature_index
+        return str(names_list[absolute])
+
+    def _log_best_result(self) -> None:
+        """Log the outcome of the best trial (shared by both return paths)."""
+        log.info(
+            "Hyperopt: algo=%s | val=%s | score=%.5f | params=%s",
+            self.algo,
+            self.val_method_eff,
+            self.best_score,
+            self.best_params,
+        )
+
+    def _fit_best_model(self) -> Any:
+        """Train the final model on all provided data (step 8).
+
+        Assembles the pipeline with the best parameters (taking the feature
+        selection decision from ``select_best_trial`` into account) and trains
+        it on the full dataset. If oversampling was enabled, the final model
+        goes through it as well. Skipped entirely when ``fit_best_model`` is
+        False (HPO-only callers). The trained model is stored in
+        ``self.best_model``.
+
+        Returns:
+            Any: The trained best model (``self.best_model``).
+        """
+        clean_params = dict(self.clean_model_params)
+        if "random_state" not in clean_params:
+            clean_params["random_state"] = self.random_state
+        best_model = self.assemble_estimator(
+            create_model(self.algo, **clean_params),
+            apply_fs=self.best_apply_fs,
+            feature_index=self.clean_model_params.get("feature_index"),
+        )
+        best_model.fit(self.X, self.y)
+
+        self.best_model = best_model
+        # Observability: the dimensionality and the storage format of the
+        # preprocessed matrix the final model received (dense
+        # one-hot on high-cardinality columns inflated the matrix with no log
+        # signal). Best-effort — the log must never break the optimization.
+        if self.preprocessor is not None:
+            try:
+                matrix = self.preprocessor.transform(self.X)
+                log.info(
+                    "preprocessed matrix: %d × %d (%s)",
+                    matrix.shape[0],
+                    matrix.shape[1],
+                    "sparse" if sp.issparse(matrix) else "dense",
+                )
+            except Exception:  # noqa: BLE001 — observability only
+                log.debug(
+                    "Could not log the preprocessed matrix dimensions for '%s'.",
+                    self.algo,
+                )
+        return best_model
+
+    # ─────────────────── private helpers ───────────────────────────────────
+
+    def _validate_n_trials(self) -> bool:
+        """Validate ``n_trials`` and the "no valid result" contract.
+
+        Returns:
+            bool: True if Optuna should run; False — return
+                ``None`` (the "no valid result" signal) without running.
+        Raises:
+            ValueError: If ``n_trials`` is negative or not an integer.
+        """
+        if not isinstance(self.n_trials, int) or self.n_trials < 0:
+            raise ValueError(
+                f"n_trials must be a non-negative integer, got {self.n_trials}"
+            )
+        if self.n_trials == 0:
+            # Empty trial list — the "no valid result" contract: return a
+            # plain None without running Optuna and without exceptions
+            # (including for algorithms without a search space).
+            log.warning(
+                "Algorithm '%s' requested with n_trials=0; no trials to run — "
+                "returning no result",
+                self.algo_name,
+            )
+            return False
+        return True
+
+    def _fs_transformer_factory(self) -> FeatureSelector:
+        """Create a fresh feature selector instance for a pipeline step.
+
+        Each call returns a new ``FeatureSelector`` with a deterministic
+        ``random_state`` (consistent with the final ModelTrainer training),
+        which guarantees reproducible selection across trials and threads.
+        With ``random_state=None`` (a fully non-deterministic Optuna run),
+        selection still uses the fixed seed 42: otherwise each factory call
+        would create a selector with a new random seed and selection would be
+        irreproducible even with all other pipeline stages deterministic.
+        """
+        return FeatureSelector(
+            method=self.fs_cfg.method.value,
+            percentile=self.fs_cfg.percentile,
+            min_features=self.fs_cfg.min_features,
+            variance_threshold=self.fs_cfg.variance_threshold,
+            n_estimators=self.fs_cfg.n_estimators,
+            random_state=self.random_state if self.random_state is not None else 42,
+        )

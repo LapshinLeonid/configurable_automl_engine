@@ -11,7 +11,8 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     clip_search_space,
     IntSpace,
 )
-from configurable_automl_engine.tuner import _make_knn_space, optimize
+from configurable_automl_engine.tuner import optimize
+from configurable_automl_engine.hpo.search_space import _make_knn_space
 
 from configurable_automl_engine.common.validation_utils import get_effective_train_size
 from configurable_automl_engine.common.definitions import ValidationStrategy
@@ -75,7 +76,7 @@ def test_optimize_integration_clipping(monkeypatch):
 
     # 1. Mock the metric so it always returns 0.5 (avoid NaN)
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.get_scorer_object",
+        "configurable_automl_engine.hpo.evaluation.get_scorer_object",
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
 
@@ -89,12 +90,12 @@ def test_optimize_integration_clipping(monkeypatch):
         return Ridge()
 
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.create_model", mock_create_model
+        "configurable_automl_engine.hpo.runner.create_model", mock_create_model
     )
 
     # 3. Mock cross-validation (in case the strategy changes)
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 
@@ -255,8 +256,8 @@ def test_knn_space_limit_uses_effective_size():
     trial.suggest_int.assert_any_call("n_neighbors", 1, 5)
 
 
-@patch("configurable_automl_engine.tuner.clip_search_space")
-@patch("configurable_automl_engine.tuner.create_model")
+@patch("configurable_automl_engine.hpo.runner.clip_search_space")
+@patch("configurable_automl_engine.hpo.runner.create_model")
 @patch("optuna.create_study")
 def test_optimize_calls_clipping_with_effective_size(
     mock_study, mock_create, mock_clip

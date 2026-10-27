@@ -28,7 +28,8 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     resolve_implicit_range_type,
 )
 from configurable_automl_engine.training_engine.config_parser import Config
-from configurable_automl_engine.tuner import _OptimizeRunner, optimize
+from configurable_automl_engine.tuner import optimize
+from configurable_automl_engine.hpo.runner import _OptimizeRunner
 
 # A minimal valid base config: elasticnet search + terminal select.
 BASE = {
@@ -1087,18 +1088,18 @@ def test_optimize_direct_dict_override_retypes_C(monkeypatch):
         return Ridge()
 
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.create_model", mock_create_model
+        "configurable_automl_engine.hpo.runner.create_model", mock_create_model
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.get_scorer_object",
+        "configurable_automl_engine.hpo.evaluation.get_scorer_object",
         lambda name, global_y=None: lambda model, X, y: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner._evaluate_pooled_cv",
+        "configurable_automl_engine.hpo.runner._evaluate_pooled_cv",
         lambda *a, **kw: 0.5,
     )
     monkeypatch.setattr(
-        "configurable_automl_engine.tuner.model_selection.cross_val_score",
+        "configurable_automl_engine.hpo.runner.model_selection.cross_val_score",
         lambda *a, **kw: [0.5, 0.5],
     )
 

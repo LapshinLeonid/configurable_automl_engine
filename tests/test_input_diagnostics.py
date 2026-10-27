@@ -32,7 +32,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     Config,
     ValidationStrategy,
 )
-from configurable_automl_engine.tuner import _validate_data
+from configurable_automl_engine.hpo.runner import _validate_data
 
 
 # ──────────────────────────────────────────────────────────────────────────────
