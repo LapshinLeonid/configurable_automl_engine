@@ -221,34 +221,3 @@ def test_model_trainer_ordinal_serialization_roundtrip(
 
     preds = loaded.predict(df.drop(columns=["target"]).head(10))
     assert np.isfinite(preds).all()
-
-
-def test_model_trainer_backward_compat_missing_encoding_strategy(
-    tmp_path: Path,
-) -> None:
-    """A model serialized before the encoding_strategy attribute existed
-    still loads and keeps working (backward compatibility)."""
-    df = _make_regression_df(n=60, seed=12)
-    trainer = ModelTrainer(
-        algorithm="elasticnet",
-        hyperparams={"alpha": 0.01},
-        metric="r2",
-    )
-    trainer.fit(df.drop(columns=["target"]), df["target"])
-
-    # Simulate a model created before the encoding_strategy parameter was
-    # introduced: the attribute is missing on the pickled object.
-    del trainer.encoding_strategy
-    path = tmp_path / "legacy.pkl"
-    trainer.save(path)
-
-    loaded = ModelTrainer.load(path)
-    assert not hasattr(loaded, "encoding_strategy")
-
-    # prediction works (uses the saved pipeline)...
-    preds = loaded.predict(df.drop(columns=["target"]).head(10))
-    assert np.isfinite(preds).all()
-
-    # ...and re-fitting does not fail: _build_preprocessor() falls back to one_hot.
-    loaded.fit(df.drop(columns=["target"]), df["target"])
-    assert loaded.pipeline is not None

@@ -357,8 +357,8 @@ def test_train_best_model_high_cardinality_auto_mode(tmp_path: Path) -> None:
 
     _assert_valid_result(result)
     loaded = ModelTrainer.load(str(result["model_path"]))
-    assert loaded.high_cardinality_threshold == 10
-    assert loaded.high_cardinality_encoding == "target"
+    assert loaded.settings.encoding.high_cardinality_threshold == 10
+    assert loaded.settings.encoding.high_cardinality_encoding == "target"
 
 
 def test_train_best_model_hashing_with_oversampling(tmp_path: Path) -> None:

@@ -6,12 +6,11 @@ Covers:
   come from ``DEFAULT_SPACES``);
 - parity of the searched Optuna distributions (after clipping and the
   complexity guard) between a direct call and the engine path
-  (``hpo_phases._run_hpo`` with the space prepared by
-  ``_prepare_search_space``): no user ranges, a partial range merged over the
+  (``hpo_phases._run_hpo`` with the request built by
+  ``_build_hpo_request``): no user ranges, a partial range merged over the
   defaults, and the same range with ``limit_hyperparameters=True``;
 - parity of the complexity guard records on small data;
-- idempotence of ``build_search_space`` (the engine passes the merged space
-  to the tuner, which merges it again);
+- idempotence of ``build_search_space``;
 - the engine always forwards ``user_hyperparameter_keys`` (an empty list
   included);
 - the error of an algorithm without a default space and without overrides.
@@ -37,13 +36,18 @@ from configurable_automl_engine.hpo.search_space import (
     _canonical_distributions,
     build_search_space,
 )
-from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
+from configurable_automl_engine.models import (
+    AVAILABLE_ALGORITHMS,
+    resolve_algorithm_name,
+)
 from configurable_automl_engine.training_engine import hpo_phases
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
-    ValidationStrategy,
+    FeatureSelectionMode,
+    HPOPhaseCfg,
 )
 from configurable_automl_engine.tuner import HyperoptError, optimize
+from tests.hpo_spec_factory import make_phase_spec
 
 
 def _algo_params() -> list[Any]:
@@ -93,18 +97,20 @@ class _SpaceSpy:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.records: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-        original = hpo_runner.resolve_search_space
+        original = hpo_runner.plan_search_space
 
-        def _spy(runner: Any) -> None:
-            original(runner)
-            self.records.append(
-                (
-                    _canonical_distributions(runner) or {},
-                    list(getattr(runner, "complexity_guard_logs", []) or []),
-                )
+        def _spy(algo: str, y: Any, **kwargs: Any) -> Any:
+            plan = original(algo, y, **kwargs)
+            distributions = _canonical_distributions(
+                plan.space_fn,
+                fs_mode=FeatureSelectionMode.disabled,
+                is_isotonic=resolve_algorithm_name(algo) == "isotonic_regression",
+                algo=algo,
             )
+            self.records.append((distributions or {}, list(plan.guard_records)))
+            return plan
 
-        monkeypatch.setattr(hpo_runner, "resolve_search_space", _spy)
+        monkeypatch.setattr(hpo_runner, "plan_search_space", _spy)
 
 
 def _direct(
@@ -145,24 +151,17 @@ def _engine(
         else None
     )
     a_cfg = AlgoCfg(hyperparameters=hyperparameters, limit_hyperparameters=limit)
-    space = hpo_phases._prepare_search_space(algo, a_cfg.hyperparameters, limit=limit)
-    hpo_phases._run_hpo(
-        algo_name=algo,
-        algo_cfg=a_cfg,
-        X=X,
+    spec = make_phase_spec(
+        phase=HPOPhaseCfg(name="coarse", n_trials=1, action="all_algorithms"),
         y=y,
-        metric_name_sklearn="r2",
-        n_trials=1,
-        validation_strategy=ValidationStrategy.k_fold,
-        n_folds=3,
-        search_space_override=space,
+        resolved_n_folds=3,
+        categorical_features=[],
+        numerical_features=list(X.columns),
         random_state=7,
         sampler_seed=7,
-        numerical_features=list(X.columns),
-        categorical_features=[],
-        user_hyperparameter_keys=list(a_cfg.hyperparameters or {}),
-        limit_hyperparameters=limit,
     )
+    request = hpo_phases._build_hpo_request(algo, a_cfg, spec)
+    hpo_phases._run_hpo(X=X, y=y, request=request)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -282,13 +281,14 @@ def test_direct_call_user_keys_default_to_override_keys(
 ) -> None:
     """Without ``user_hyperparameter_keys`` the override keys are the user ranges."""
     seen: list[Any] = []
-    original = hpo_runner.resolve_search_space
+    original = hpo_runner.plan_search_space
 
-    def _spy(runner: Any) -> None:
-        original(runner)
-        seen.append(runner.user_hyperparameter_keys)
+    def _spy(algo: str, y: Any, **kwargs: Any) -> Any:
+        plan = original(algo, y, **kwargs)
+        seen.append(plan.user_hyperparameter_keys)
+        return plan
 
-    monkeypatch.setattr(hpo_runner, "resolve_search_space", _spy)
+    monkeypatch.setattr(hpo_runner, "plan_search_space", _spy)
     X, y = _frame()
     _direct("random_forest", X, y, {"max_depth": [2, 5, "int"]}, False)
     _direct("random_forest", X, y, None, False)
@@ -304,39 +304,21 @@ def test_engine_always_passes_user_hyperparameter_keys(
     """An empty list is forwarded too (not dropped as "no keys")."""
     captured: dict[str, Any] = {}
 
-    def fake_optimize(
-        algo_name: str,
-        X: Any,
-        y: Any,
-        *,
-        user_hyperparameter_keys: list[str] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        captured["user_hyperparameter_keys"] = user_hyperparameter_keys
+    def fake_run(X: Any, y: Any, request: Any) -> None:
+        captured["user_hyperparameter_keys"] = request.user_hyperparameter_keys
         return None
 
-    import types
-
-    fake = types.SimpleNamespace(optimize=fake_optimize)
-    monkeypatch.setattr(hpo_phases, "_load_module", lambda path: fake)
+    monkeypatch.setattr(hpo_phases, "run_optimization", fake_run)
     X, y = _frame()
+    spec = make_phase_spec(y=y, numerical_features=list(X.columns))
     hpo_phases._run_hpo(
-        algo_name="ridge",
-        algo_cfg=AlgoCfg(),
-        X=X,
-        y=y,
-        metric_name_sklearn="r2",
-        n_trials=1,
-        validation_strategy=ValidationStrategy.k_fold,
-        n_folds=3,
-        search_space_override=hpo_phases._prepare_search_space("ridge", None),
-        user_hyperparameter_keys=None,
+        X=X, y=y, request=hpo_phases._build_hpo_request("ridge", AlgoCfg(), spec)
     )
     assert captured["user_hyperparameter_keys"] == []
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 5. Idempotence of the merge (the engine → tuner contract)
+# 5. Idempotence of the merge
 # ──────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("algo", sorted(DEFAULT_SPACES))
 @pytest.mark.parametrize("with_user", [False, True])

@@ -27,12 +27,11 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     compute_svr_epsilon_bounds,
 )
 from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    PreparedData,
     execute_phases,
     train_best_model,
 )
-from configurable_automl_engine.training_engine.hpo_phases import _prepare_search_space
+from configurable_automl_engine.training_engine.state import PhaseResult, PreparedData
+from configurable_automl_engine.hpo.search_space import build_search_space
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     GeneralCfg,
@@ -579,13 +578,23 @@ def _prepared_data() -> PreparedData:
     )
 
 
-def test_prepare_search_space_svr_default_omits_epsilon(
+def _searched_space(request):
+    """The dict space an HPO run merges from the request (before data tweaks)."""
+    overrides = (request.space_overrides or {}).get(request.algo_name)
+    return build_search_space(
+        request.algo_name,
+        overrides,
+        limit=request.limit_hyperparameters and overrides is not None,
+    )
+
+
+def testbuild_search_space_svr_default_omits_epsilon(
     tmp_path: Path, monkeypatch
 ):
-    """prepare_search_space: svr without a user epsilon → epsilon is omitted (adaptation in the tuner).
+    """build_search_space: svr without a user epsilon → epsilon is omitted (adaptation in the run).
 
     The default blind range DEFAULT_SPACES["svr"]["epsilon"]=[1e-3, 1.0] must
-    not end up in the final space: otherwise the tuner cannot tell it apart
+    not end up in the merged space: otherwise the run cannot tell it apart
     from an explicit user value.
     """
     cfg = _svr_config(tmp_path)
@@ -594,7 +603,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
     captured: dict[str, object] = {}
 
     def fake_run_hpo(**kwargs):
-        captured["search_space"] = kwargs.get("search_space_override")
+        captured["search_space"] = _searched_space(kwargs["request"])
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
@@ -609,7 +618,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
     space = captured["search_space"]
     assert "epsilon" not in space, (
         "default epsilon must not end up in the space — "
-        "its place is taken by adaptive bounds in the tuner"
+        "its place is taken by adaptive bounds in the run"
     )
     # The remaining default SVR parameters are kept.
     assert "C" in space
@@ -617,7 +626,7 @@ def test_prepare_search_space_svr_default_omits_epsilon(
     assert "gamma" in space
 
 
-def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch):
+def testbuild_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch):
     """prepare_search_space: an explicit user epsilon is kept (priority)."""
     cfg = _svr_config(tmp_path, hyperparameters={"epsilon": [0.5, 1.0]})
     prepared = _prepared_data()
@@ -625,7 +634,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
     captured: dict[str, object] = {}
 
     def fake_run_hpo(**kwargs):
-        captured["search_space"] = kwargs.get("search_space_override")
+        captured["search_space"] = _searched_space(kwargs["request"])
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     monkeypatch.setattr(
@@ -643,7 +652,7 @@ def test_prepare_search_space_svr_user_epsilon_kept(tmp_path: Path, monkeypatch)
     assert space["epsilon"].high == 1.0
 
 
-def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkeypatch):
+def testbuild_search_space_other_algorithms_unaffected(tmp_path: Path, monkeypatch):
     """prepare_search_space: behavior for the other algorithms is unchanged."""
     cfg_ridge = Config(
         general=GeneralCfg(
@@ -666,7 +675,7 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
     captured: dict[str, object] = {}
 
     def fake_run_hpo(**kwargs):
-        captured["search_space"] = kwargs.get("search_space_override")
+        captured["search_space"] = _searched_space(kwargs["request"])
         return PhaseResult(score=0.9, params={"alpha": 0.1})
 
     monkeypatch.setattr(
@@ -685,26 +694,26 @@ def test_prepare_search_space_other_algorithms_unaffected(tmp_path: Path, monkey
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Legacy-name remap in _prepare_search_space (n_iter → max_iter for ARD)
+# Legacy-name remap in build_search_space (n_iter → max_iter for ARD)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_prepare_search_space_remaps_ard_default_n_iter():
+def testbuild_search_space_remaps_ard_default_n_iter():
     """The default ARDRegression space exposes max_iter (not the legacy n_iter).
 
     The default space itself uses the modern name, so a per-trial remap ---
     and its repeated "Remapped ..." DEBUG log line --- is not needed.
     """
-    space = _prepare_search_space("ardregression", None)
+    space = build_search_space("ardregression", None)
     assert "max_iter" in space
     assert "n_iter" not in space
     assert space["max_iter"].low == 100
     assert space["max_iter"].high == 1000
 
 
-def test_prepare_search_space_remaps_ard_user_legacy_n_iter():
+def testbuild_search_space_remaps_ard_user_legacy_n_iter():
     """A user override with the legacy n_iter key is remapped once."""
-    space = _prepare_search_space(
+    space = build_search_space(
         "ardregression",
         {"n_iter": SearchSpaceEntry.model_validate([50, 500, "int", 50])},
     )
@@ -714,8 +723,8 @@ def test_prepare_search_space_remaps_ard_user_legacy_n_iter():
     assert space["max_iter"].high == 500
 
 
-def test_prepare_search_space_other_algos_not_remapped():
+def testbuild_search_space_other_algos_not_remapped():
     """Algorithms without legacy mappings keep their keys untouched."""
-    space = _prepare_search_space("elasticnet", {"alpha": [1e-4, 1.0]})
+    space = build_search_space("elasticnet", {"alpha": [1e-4, 1.0]})
     assert "alpha" in space
     assert "max_iter" not in space

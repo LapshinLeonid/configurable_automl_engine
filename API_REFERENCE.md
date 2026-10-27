@@ -899,8 +899,6 @@ algorithms:
 
 Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message.
 
-* `tuner`, `trainer_module` — (optional, advanced) dotted module paths of the tuner (default `"configurable_automl_engine.tuner"`, must provide `optimize`) and of the module with the `ModelTrainer` class (default `"configurable_automl_engine.trainer"`). They let you plug in a custom tuner or trainer per algorithm; leave them unset otherwise.
-
 ## Adaptive Feature Preprocessing (preprocessing presets)
 
 The engine automatically chooses the feature preprocessing strategy based on the selected regression algorithm. A **preprocessing preset** declaratively describes the numeric-feature handling rules: the missing-value imputation strategy and whether/how scaling is applied. Each supported algorithm is assigned to an **algorithm class** with common preprocessing requirements; membership is fixed in the default mapping table (see [`preprocessing_presets.py`](src/configurable_automl_engine/preprocessing_presets.py)) — adding a new algorithm only requires registering it there.
@@ -998,7 +996,7 @@ Gaussian noise injection is **not a separate algorithm** — it is enabled with 
 | `n_trials_evaluated` | when known | Completed trials of the winner in the step that produced `score`. |
 | `additional_metrics` | `general.additional_metrics` is non-empty | `{metric: value}` for the final model, same form as `score`. |
 | `holdout_score` | a hold-out is reserved (by default — data with ≥ 100 rows) | **Honest estimate**: the winner's metric on the rows reserved before tuning. |
-| `bbc_score` | no hold-out is reserved (by default — data with < 100 rows, or `holdout_fraction: null`) | **Honest estimate** without a hold-out: BBC-CV over all evaluated trials, see below. Absent over the memory budget or for custom tuners without `collect_oof`. |
+| `bbc_score` | no hold-out is reserved (by default — data with < 100 rows, or `holdout_fraction: null`) | **Honest estimate** without a hold-out: BBC-CV over all evaluated trials, see below. Absent only when keeping the out-of-fold predictions would exceed the memory budget (a WARNING is logged). |
 | `sanity_gate` | at least one Sanity Gate select step | Per-step report, see [Sanity Gate report](#sanity-gate-report). |
 | `disqualified_algorithms` | something was disqualified | `{algorithm: reason}` — failures during tuning, a target that does not fit a GLM, or a Sanity Gate rejection. |
 | `complexity_guard` | the guard changed a search range | One "before → after" record per changed parameter, see [Complexity guard](#complexity-guard-configuration-complexity_guard). |
@@ -1353,3 +1351,6 @@ replacement; nothing is translated silently.
 | Short algorithm aliases in the Python API (`create_model("rf")`, `ModelTrainer(algorithm="knn")`, `optimize("xgboost", ...)`, …) | The full names: `dt` → `decision_tree`, `rf` → `random_forest`, `et` → `extra_trees`, `gb` → `gradient_boosting`, `ab` → `adaboost`, `sgd` → `sgdregressor`, `knn` → `nearest_neighbors_regression`, `gpr` / `gaussianprocessregressor` → `gaussian_process_regression`, `isotonic` → `isotonic_regression`, `ard` → `ardregression`, `xgboost` → `xgboosting`, `ridge_regression` → `ridge`. |
 | Direct Python API relying on the old defaults (`optimize(val_method="k_fold", inf_policy="error", high-cardinality off, complexity guard off)`, `ModelTrainer(validation_strategy="train_test_split", high-cardinality off)`) | The direct API now has the same defaults as the config (`"auto"`, `"as_missing"`, `50` + `"frequency"`, guard `apply`). Pass the old values explicitly: `validation_strategy="k_fold"` / `"train_test_split"`, `inf_policy="error"`, `high_cardinality_threshold=None, high_cardinality_encoding=None`, `complexity_guard_cfg={"mode": "off"}`. |
 | `create_model(...)` / `ModelTrainer(hyperparams=...)` with hyperparameter names the estimator does not accept | Remove or fix the names: they now raise `ValueError` (as in the config) instead of being dropped silently. |
+| `algorithms.<name>.tuner` / `algorithms.<name>.trainer_module` (removed in 0.5.0) | Delete the keys. Custom tuner/trainer modules are no longer supported: the engine always uses its own HPO and `ModelTrainer`. |
+| A model saved by engine 0.4.x or older (`ModelTrainer.load` raises `TrainingError`: artifact format 1) | Retrain the model with 0.5.0: the saved `ModelTrainer` state changed (artifact format 2). |
+| Assigning `ModelTrainer` attributes after construction (`trainer.hyperparams = ...`) | Pass the values to the constructor: the attributes are read-only properties since 0.5.0. |

@@ -41,11 +41,11 @@ from sklearn.model_selection import KFold
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
-from configurable_automl_engine.training_engine.component import (
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.finalists import select_robust_winner
+from configurable_automl_engine.training_engine.state import (
     FinalistCandidate,
     PhaseResult,
-    select_robust_winner,
-    train_best_model,
 )
 from configurable_automl_engine.training_engine.finalists import (
     _circuit_rank,

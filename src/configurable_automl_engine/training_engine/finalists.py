@@ -36,10 +36,7 @@ from .metrics import is_error_metric, oof_rmse, to_user_value, user_direction
 from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .state import FinalistCandidate, PhaseResult, PreparedData, RobustWinnerResult
 
-# The records keep the logger name of the pre-split ``component`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-_LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
+_LOG = logging.getLogger(__name__)
 
 
 def is_valid_winner_score(score: Any) -> bool:
@@ -47,15 +44,14 @@ def is_valid_winner_score(score: Any) -> bool:
 
     A valid winner score must be:
     - numeric (int/float/np.floating): None, strings (including numeric ones
-      such as ``"0.5"``) and other "garbage" types from custom tuners are
-      rejected;
+      such as ``"0.5"``) and other "garbage" types are rejected;
     - finite (NaN and ±inf signal the absence of a valid metric);
     - strictly above the worst-score sentinel class: any score at or below the
       exact float32 minimum (``WORST_SCORE_THRESHOLD``) is treated as a
       sentinel. The threshold covers both the ``HPO_WORST_SCORE`` constant
       (returned by the tuner for non-finite metrics) and the raw
       ``float(np.finfo(np.float32).min)`` value (possible from numpy-cast
-      metrics or custom tuners), which the old ``math.isclose(rel_tol=1e-9)``
+      metrics), which the old ``math.isclose(rel_tol=1e-9)``
       filter let through (relative difference ≈ 9.88e-9 > 1e-9). Real metrics
       of such magnitude are practically impossible, so false exclusion is
       ruled out.
@@ -504,9 +500,9 @@ def _fit_finalist(
     cfg: Config,
     metric_name_sklearn: str,
     *,
-    validation_strategy: ValidationStrategy | str | None,
-    n_folds: int | None,
-    test_size: float | None,
+    validation_strategy: ValidationStrategy | str,
+    n_folds: int,
+    test_size: float,
     random_state: int | None,
 ) -> Any:
     """Train a finalist on 100% of the data and return its ``ModelTrainer``.
@@ -524,10 +520,10 @@ def _fit_finalist(
         best_params (dict[str, Any]): The best hyperparameters from HPO.
         cfg (Config): The root config.
         metric_name_sklearn (str): The metric name in sklearn semantics.
-        validation_strategy (ValidationStrategy | str | None): The resolved
+        validation_strategy (ValidationStrategy | str): The resolved
             validation strategy.
-        n_folds (int | None): The number of folds (for 'k_fold').
-        test_size (float | int | None): The hold-out size.
+        n_folds (int): The number of folds (for 'k_fold').
+        test_size (float | int): The hold-out size.
         random_state (int | None): The engine seed (``general.random_state``)
             for the finalist's splits and model seeds; ``None`` — a
             non-reproducible fit.
@@ -859,7 +855,7 @@ _AUDIT_BUDGET_SKIP_RE = re.compile(
 def _is_audit_budget_skip(reasons: list[str]) -> bool:
     """True if ALL candidate reasons are a time-budget audit skip.
 
-    Used in ``_execute_select_sanity_gate`` so that such candidates do not
+    Used in ``select_steps._gate_disqualifications`` so that such candidates do not
     enter the circuit breaker (``disqualified_algorithms``) — the phase
     budget must not throw the algorithm out of all subsequent phases.
 

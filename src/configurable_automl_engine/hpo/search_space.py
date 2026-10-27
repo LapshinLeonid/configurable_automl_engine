@@ -1,23 +1,23 @@
 """Search spaces of the HPO runner.
 
 Builds the dict search space of an algorithm (``build_search_space`` — the
-single merge of the user ranges over ``DEFAULT_SPACES``, shared with the
-training engine) and resolves the search space of a run
-(``resolve_search_space``): the range-type normalization, the data-dependent
-adjustments (the SVR adaptive epsilon, the isotonic feature index), the
-physical clipping and the adaptive complexity guard with its log. It also converts a dict space into
-Optuna suggestions (``_apply_dynamic_space``), records the canonical
-distributions used to validate the TPE history transfer, and warns when the
-best value lies at a range boundary. It may import ``hpo.types``,
-``hpo.evaluation`` and ``hpo.trial_pipeline``; it must not import
-``hpo.runner`` at runtime (type checking only) or
-``configurable_automl_engine.tuner``.
+single merge of the user ranges over ``DEFAULT_SPACES``) and plans the search
+space of a run (``plan_search_space``): the range-type normalization, the
+data-dependent adjustments (the SVR adaptive epsilon, the isotonic feature
+index), the physical clipping and the adaptive complexity guard. It also
+logs the guard records, converts a dict space into Optuna suggestions
+(``_apply_dynamic_space``), records the canonical distributions used to
+validate the TPE history transfer, and warns when the best value lies at a
+range boundary. Every function takes explicit inputs. It may import
+``hpo.types``, ``hpo.plans`` and ``hpo.trial_pipeline``; it must not import
+``hpo.runner`` or ``configurable_automl_engine.tuner``.
 """
 
 from __future__ import annotations
 
 import logging as _logging
 import math
+from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -26,6 +26,7 @@ import optuna
 from optuna.trial import Trial
 
 from configurable_automl_engine.common.complexity_guard import (
+    ComplexityGuardConfig,
     apply_complexity_guard,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
@@ -42,9 +43,7 @@ from configurable_automl_engine.models import (
     resolve_algorithm_name,
 )
 
-from .evaluation import (
-    _build_scorer,
-)
+from .plans import PreprocessingPlan, SearchSpacePlan
 from .trial_pipeline import (
     _resolve_apply_fs,
 )
@@ -53,12 +52,11 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from .runner import _OptimizeRunner
+    from configurable_automl_engine.training_engine.config_parser import (
+        FeatureSelectionMode,
+    )
 
-# The records keep the logger name of the pre-split ``tuner`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-log = _logging.getLogger("configurable_automl_engine.tuner")
+log = _logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════ search spaces ═══════════════════════════
@@ -69,7 +67,7 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
     """Build a SearchSpaceEntry for SVR epsilon with bounds scaled by y.
 
     The bounds are computed from the spread of ``y`` (σ(y) by default) ONCE —
-    before the Optuna loop (called from ``resolve_search_space``, not from
+    before the Optuna loop (called from ``plan_search_space``, not from
     ``space_fn``): otherwise every trial would have its own bounds and the
     TPE sampler would lose determinism.
 
@@ -90,10 +88,9 @@ def build_search_space(
 ) -> dict[str, Any]:
     """Build the dict search space of an algorithm from the user ranges.
 
-    The single merge rule of both paths: the training engine
-    (``hpo_phases._prepare_search_space``) and a direct ``optimize()`` call
-    (``resolve_search_space``) build the space here, so a direct call and a
-    config run with the same ranges search the same space.
+    The single merge rule of every HPO run (a direct ``optimize()`` call and
+    the training engine, which passes the user ranges of the config), so a
+    direct call and a config run with the same ranges search the same space.
 
     When ``limit`` is True the search is restricted to ONLY the parameters
     listed in ``user_overrides``: no ``DEFAULT_SPACES`` entries are added,
@@ -104,7 +101,7 @@ def build_search_space(
     The SVR ``epsilon`` default (a blind ``[1e-3, 1.0]`` range) is dropped
     unless the user set ``epsilon``: its absence means "use the adaptive
     range" (bounds scaled by the spread of ``y``), which
-    ``resolve_search_space`` injects once the data is known.
+    ``plan_search_space`` injects once the data is known.
 
     Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
     ARDRegression) are remapped ONCE here, before the Optuna loop — not at
@@ -113,8 +110,7 @@ def build_search_space(
 
     The merge is idempotent: merging an already-merged space again changes
     nothing (all ``DEFAULT_SPACES`` keys are already present, and a missing
-    SVR ``epsilon`` again means "adaptive"). The engine passes the merged
-    space to the tuner as ``space_overrides``, and the tuner merges it again.
+    SVR ``epsilon`` again means "adaptive").
 
     Args:
         algo_name (str): The algorithm name used to look up defaults.
@@ -145,7 +141,7 @@ def build_search_space(
         space.update(remap_legacy_param_names(algo_name, user_overrides))
 
     # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
-    # y_train spread at runtime (resolve_search_space), so the default blind
+    # y_train spread at runtime (plan_search_space), so the default blind
     # range [1e-3, 1.0] from DEFAULT_SPACES is dropped. If the user set
     # epsilon explicitly — it is already in space (space.update above), and
     # the user's priority is preserved: the adaptive logic does not
@@ -264,7 +260,7 @@ class _DistributionRecorder:
 
 
 def _enqueueable_initial_params(
-    runner: _OptimizeRunner, params: dict[str, Any]
+    params: dict[str, Any], space_dict: dict[str, Any], algo: str
 ) -> dict[str, Any]:
     """Drop initial params whose value type does not fit the search space.
 
@@ -276,13 +272,15 @@ def _enqueueable_initial_params(
 
     Args:
         params: The initial params from the previous phase.
+        space_dict: The resolved dict search space of the run.
+        algo: The algorithm name (for the message).
 
     Returns:
         dict[str, Any]: The params that can be enqueued.
     """
     kept: dict[str, Any] = {}
     for name, value in params.items():
-        entry = runner.search_space_dict.get(name)
+        entry = space_dict.get(name)
         if isinstance(entry, SearchSpaceEntry):
             config = entry.config
             if isinstance(config, CategoricalSpace):
@@ -297,7 +295,7 @@ def _enqueueable_initial_params(
                     "'%s' (%s); it is sampled instead",
                     name,
                     value,
-                    runner.algo,
+                    algo,
                     entry.dist_type,
                 )
                 continue
@@ -305,7 +303,13 @@ def _enqueueable_initial_params(
     return kept
 
 
-def _canonical_distributions(runner: _OptimizeRunner) -> dict[str, Any] | None:
+def _canonical_distributions(
+    space_fn: Callable[[Trial], dict[str, Any]],
+    *,
+    fs_mode: FeatureSelectionMode,
+    is_isotonic: bool,
+    algo: str,
+) -> dict[str, Any] | None:
     """Compute the canonical distributions of the current phase space.
 
     Runs ``space_fn`` (plus the feature selection suggestion) on a
@@ -317,6 +321,12 @@ def _canonical_distributions(runner: _OptimizeRunner) -> dict[str, Any] | None:
     the history transfer cannot be validated, and silently dropping it
     would degrade refine to a cold run.
 
+    Args:
+        space_fn: The search space function of the run.
+        fs_mode: The feature selection mode.
+        is_isotonic: Whether the algorithm is ``isotonic_regression``.
+        algo: The algorithm name (for the message).
+
     Returns:
         dict[str, Any]: Parameter name → Optuna distribution; ``None`` —
             the space cannot be reproduced (the caller fails fast).
@@ -327,14 +337,14 @@ def _canonical_distributions(runner: _OptimizeRunner) -> dict[str, Any] | None:
         # suggest_* methods (and the ``number`` attribute) that space_fn
         # and _resolve_apply_fs call.
         trial_like = cast(Trial, recorder)
-        runner.space_fn(trial_like)
-        _resolve_apply_fs(runner, trial_like)
+        space_fn(trial_like)
+        _resolve_apply_fs(trial_like, fs_mode, is_isotonic)
     except Exception as err:  # noqa: BLE001 — the pre-check is best-effort
         log.warning(
             "Cannot reproduce the search space for the history transfer "
             "check of algorithm '%s': %s. Skipping the distribution "
             "pre-check.",
-            runner.algo,
+            algo,
             err,
         )
         return None
@@ -342,17 +352,24 @@ def _canonical_distributions(runner: _OptimizeRunner) -> dict[str, Any] | None:
 
 
 def _resolve_complexity_guard(
-    runner: _OptimizeRunner, space: dict[str, Any]
+    space: dict[str, Any],
+    *,
+    algo: str,
+    config: ComplexityGuardConfig,
+    user_keys: list[str] | None,
+    n_samples_eff: int,
+    n_features_eff: int,
+    n_features_size: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Apply the adaptive complexity guard to a dict search space.
 
     The guard depends on ``n`` (the effective training-fold rows,
-    ``runner.n_samples_eff``) and the feature counts: the size-mode ratio
-    uses ``runner.n_features_size`` — the number of ORIGINAL columns (a
-    categorical column counts as 1, before one-hot), while the rules for
-    ``max_features``/``colsample_bytree`` use ``runner.n_features_eff`` —
-    the number of features after preprocessing. Both are computed once
-    per phase and are the same in every HPO phase (deterministic between
+    ``n_samples_eff``) and the feature counts: the size-mode ratio uses
+    ``n_features_size`` — the number of ORIGINAL columns (a categorical
+    column counts as 1, before one-hot), while the rules for
+    ``max_features``/``colsample_bytree`` use ``n_features_eff`` — the
+    number of features after preprocessing. Both are computed once per
+    phase and are the same in every HPO phase (deterministic between
     phases) and in the subprocesses (identical inputs -> identical
     results), so the TPE history transfer between phases stays valid.
 
@@ -361,37 +378,47 @@ def _resolve_complexity_guard(
 
     Args:
         space: The already physically-clipped search space.
+        algo: The algorithm name.
+        config: The complexity guard settings.
+        user_keys: The parameters treated as user ranges.
+        n_samples_eff: The number of rows a model sees in a training fold.
+        n_features_eff: The number of features after preprocessing.
+        n_features_size: The number of original columns.
 
     Returns:
         tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly
             adjusted) space and the guard log records.
     """
-    cfg = runner.complexity_guard_cfg
-    if cfg.mode == "off":
+    if config.mode == "off":
         return space, []
-    user_keys = set(runner.user_hyperparameter_keys or ())
     adjusted, logs = apply_complexity_guard(
         space,
-        runner.algo,
-        n=runner.n_samples_eff,
-        p=runner.n_features_eff,
-        config=cfg,
-        user_space_keys=user_keys,
-        p_size=runner.n_features_size,
+        algo,
+        n=n_samples_eff,
+        p=n_features_eff,
+        config=config,
+        user_space_keys=set(user_keys or ()),
+        p_size=n_features_size,
     )
     return adjusted, logs
 
 
-def _log_complexity_guard(runner: _OptimizeRunner) -> None:
+def log_complexity_guard(
+    records: list[dict[str, Any]], config: ComplexityGuardConfig
+) -> None:
     """Log the adaptive complexity guard records at INFO level.
 
     One record per (algorithm, phase, parameter): "was → became" with
     the reason, e.g. ``max_depth 3–20 → 2–3: n=15, p=5, mode=small,
     leaf_min=2``.
+
+    Args:
+        records: The guard records of the run (``SearchSpacePlan``).
+        config: The complexity guard settings.
     """
-    cfg_mode = runner.complexity_guard_cfg.mode
-    cfg_policy = runner.complexity_guard_cfg.user_range_policy
-    for record in runner.complexity_guard_logs:
+    cfg_mode = config.mode
+    cfg_policy = config.user_range_policy
+    for record in records:
         before = record["before"]
         after = record["after"]
 
@@ -461,9 +488,7 @@ def _log_complexity_guard(runner: _OptimizeRunner) -> None:
             )
 
 
-def _normalize_space_dict(
-    runner: _OptimizeRunner, space_dict: dict[str, Any]
-) -> dict[str, Any]:
+def _normalize_space_dict(algo: str, space_dict: dict[str, Any]) -> dict[str, Any]:
     """Re-resolve inferred range types in a dict search space.
 
     The same normalization the Config path applies (see
@@ -480,6 +505,7 @@ def _normalize_space_dict(
     explicitly typed entries and constants pass through unchanged.
 
     Args:
+        algo: The algorithm name.
         space_dict: The parameter name → value mapping (``SearchSpaceEntry``
             objects, raw lists, or constants).
 
@@ -501,61 +527,89 @@ def _normalize_space_dict(
             # A constant value — no normalization possible.
             normalized[param] = value
             continue
-        normalized[param] = normalize_hyperparameter_entry(runner.algo, param, entry)
+        normalized[param] = normalize_hyperparameter_entry(algo, param, entry)
     return normalized
 
 
-def resolve_search_space(runner: _OptimizeRunner) -> None:
-    """Resolve the hyperparameter search space and the scorer (step 2).
+def plan_search_space(
+    algo: str,
+    y: Any,
+    *,
+    space_override: Any,
+    limit_hyperparameters: bool,
+    user_hyperparameter_keys: list[str] | None,
+    complexity_guard: ComplexityGuardConfig,
+    n_samples_eff: int,
+    preprocessing: PreprocessingPlan,
+) -> SearchSpacePlan:
+    """Plan the hyperparameter search space of a run.
 
     A callable override (a custom ``space_fn``) is used as is. Otherwise the
-    dict search space is built by ``build_search_space`` — the same merge
-    the training engine uses — from the dict override (or from no user
-    ranges at all), so a direct ``optimize()`` call and a config run with
-    the same ranges search the same space. The data-dependent adjustments
-    then apply to every dict space: the adaptive SVR epsilon (bounds scaled
-    by the spread of ``y_train``), the isotonic ``feature_index`` over the
-    numerical features, the physical clipping (e.g. KNN ``n_neighbors`` ≤
-    ``n_samples_eff - 1``) and the adaptive complexity guard. Stores
-    ``space_fn``, ``search_space_dict`` and ``scorer`` in instance
-    attributes.
+    dict search space is built by ``build_search_space`` from the dict
+    override (or from no user ranges at all), so a direct ``optimize()``
+    call and a config run with the same ranges search the same space. The
+    data-dependent adjustments then apply to every dict space: the adaptive
+    SVR epsilon (bounds scaled by the spread of ``y_train``), the isotonic
+    ``feature_index`` over the numerical features, the physical clipping
+    (e.g. KNN ``n_neighbors`` ≤ ``n_samples_eff - 1``) and the adaptive
+    complexity guard. The guard records are returned in the plan (the
+    caller logs them with ``log_complexity_guard``).
 
-    When ``user_hyperparameter_keys`` was not passed (``None``), the guard
-    treats the keys of the dict override as the user ranges.
+    When ``user_hyperparameter_keys`` is ``None``, the guard treats the keys
+    of the dict override as the user ranges.
+
+    Args:
+        algo: The lower-cased algorithm name.
+        y: The target vector (the SVR epsilon bounds).
+        space_override: The override of the algorithm (a dict of ranges, a
+            callable space function or ``None``).
+        limit_hyperparameters: Search only the parameters of the override.
+        user_hyperparameter_keys: The parameters the user set explicitly.
+        complexity_guard: The complexity guard settings.
+        n_samples_eff: The number of rows a model sees in a training fold.
+        preprocessing: The preprocessing plan (the feature counts).
+
+    Returns:
+        SearchSpacePlan: The space function, the resolved dict space, the
+            guard records and the user keys.
 
     Raises:
         HyperoptError: If the algorithm has neither a default search space
             nor a ``space_overrides`` entry.
     """
-    # Priority 1: Direct overrides (functions)
+    # Priority 1: Direct overrides (functions) are used as is.
+    if callable(space_override):
+        return SearchSpacePlan(
+            space_fn=space_override,
+            space_dict={},
+            guard_records=[],
+            user_hyperparameter_keys=user_hyperparameter_keys,
+        )
+
     # Priority 2: Dict ranges (SearchSpaceEntry objects or shorthand lists)
-    #             merged over DEFAULT_SPACES; no override — DEFAULT_SPACES only
-    external_config = (runner.space_overrides or {}).get(runner.algo)
-
-    # If a function was passed (the old mechanism), use it as is
-    if callable(external_config):
-        runner.space_fn = external_config
-        runner.scorer = _build_scorer(runner.metric)
-        return
-
-    user_ranges = external_config if isinstance(external_config, dict) else None
+    # merged over DEFAULT_SPACES; no override — DEFAULT_SPACES only.
+    user_ranges = space_override if isinstance(space_override, dict) else None
     # The limited mode searches exactly the listed parameters; without a
     # dict override there is nothing listed, so the defaults are searched.
-    limit = bool(runner.limit_hyperparameters) and user_ranges is not None
-    if runner.user_hyperparameter_keys is None:
-        # A direct call: the user ranges are the keys the caller listed.
-        runner.user_hyperparameter_keys = list(user_ranges or {})
+    limit = bool(limit_hyperparameters) and user_ranges is not None
+    # A direct call without the list: the user ranges are the keys the
+    # caller listed.
+    user_keys = (
+        list(user_ranges or {})
+        if user_hyperparameter_keys is None
+        else list(user_hyperparameter_keys)
+    )
 
-    merged = build_search_space(runner.algo, user_ranges, limit=limit)
+    merged = build_search_space(algo, user_ranges, limit=limit)
     if user_ranges is None and not merged:
         raise HyperoptError(
-            f"No search space for algorithm '{runner.algo}': it has no "
+            f"No search space for algorithm '{algo}': it has no "
             "default search space; pass "
-            f"space_overrides={{'{runner.algo}': {{...}}}} with the ranges "
+            f"space_overrides={{'{algo}': {{...}}}} with the ranges "
             "to search (a dict of ranges or a callable space function)"
         )
 
-    space_dict = runner._normalize_space_dict(merged)
+    space_dict = _normalize_space_dict(algo, merged)
     # SVR: adaptive epsilon bounds from the y_train spread, if the
     # user did not set epsilon explicitly (build_search_space omits
     # the default epsilon from DEFAULT_SPACES, so its absence in the
@@ -565,40 +619,51 @@ def resolve_search_space(runner: _OptimizeRunner) -> None:
     # user listed: no parameter is added beyond it, so the adaptive
     # epsilon is NOT injected.
     if (
-        resolve_algorithm_name(runner.algo) == "svr"
+        resolve_algorithm_name(algo) == "svr"
         and "epsilon" not in space_dict
         and not limit
     ):
-        space_dict = {
-            **space_dict,
-            "epsilon": _svr_adaptive_epsilon_entry(runner.y),
-        }
+        space_dict = {**space_dict, "epsilon": _svr_adaptive_epsilon_entry(y)}
     # Isotonic: DEFAULT_SPACES holds only ``increasing``, and without an
     # explicit ``feature_index`` the model would silently use the default
     # index 0 (an arbitrary one-hot dummy column). Merge a data-driven
     # ``feature_index`` over the NUMERICAL features into the dict when
     # absent; an explicit user value is kept as is.
     if (
-        resolve_algorithm_name(runner.algo) == "isotonic_regression"
+        resolve_algorithm_name(algo) == "isotonic_regression"
         and "feature_index" not in space_dict
     ):
         space_dict = {
             **space_dict,
             "feature_index": SearchSpaceEntry.model_validate(
-                [0, _isotonic_max_feature_index(runner), "int"]
+                [0, preprocessing.isotonic_max_feature_index, "int"]
             ),
         }
-    clipped_config = clip_search_space(space_dict, runner.n_samples_eff)
-    clipped_config, guard_logs = _resolve_complexity_guard(runner, clipped_config)
-    runner.complexity_guard_logs = guard_logs
-    _log_complexity_guard(runner)
-    runner.space_fn = partial(_apply_dynamic_space, space_dict=clipped_config)
-    runner.search_space_dict = clipped_config
-    runner.scorer = _build_scorer(runner.metric)
+    clipped = clip_search_space(space_dict, n_samples_eff)
+    clipped, guard_records = _resolve_complexity_guard(
+        clipped,
+        algo=algo,
+        config=complexity_guard,
+        user_keys=user_keys,
+        n_samples_eff=n_samples_eff,
+        n_features_eff=preprocessing.n_features_eff,
+        n_features_size=preprocessing.n_features_size,
+    )
+    return SearchSpacePlan(
+        space_fn=partial(_apply_dynamic_space, space_dict=clipped),
+        space_dict=clipped,
+        guard_records=guard_records,
+        user_hyperparameter_keys=user_keys,
+    )
 
 
 def _natural_domain_bounds(
-    runner: _OptimizeRunner, param: str, entry: SearchSpaceEntry
+    param: str,
+    entry: SearchSpaceEntry,
+    *,
+    n_samples_eff: int,
+    n_features_eff: int,
+    isotonic_max_feature_index: int,
 ) -> tuple[float | None, float | None]:
     """Natural (physical) domain bounds of a parameter.
 
@@ -615,6 +680,10 @@ def _natural_domain_bounds(
         entry: The search-space entry (its distribution type decides the
             fraction-vs-count interpretation of ``min_samples_leaf`` and
             ``max_features``).
+        n_samples_eff: The number of rows a model sees in a training fold.
+        n_features_eff: The number of features after preprocessing.
+        isotonic_max_feature_index: The upper bound of the isotonic
+            ``feature_index`` range.
 
     Returns:
         tuple[float | None, float | None]: Natural ``(low, high)`` bounds.
@@ -632,13 +701,13 @@ def _natural_domain_bounds(
         else:
             # An absolute row count: at least 1 and at most n.
             low = 1.0
-            high = float(max(1, int(getattr(runner, "n_samples_eff", 0))))
+            high = float(max(1, int(n_samples_eff)))
     elif param == "min_samples_split":
         low = 2.0
-        high = float(max(2, int(getattr(runner, "n_samples_eff", 0))))
+        high = float(max(2, int(n_samples_eff)))
     elif param == "n_neighbors":
         low = 1.0
-        high = float(max(1, int(getattr(runner, "n_samples_eff", 0)) - 1))
+        high = float(max(1, int(n_samples_eff) - 1))
     elif param == "max_features":
         if dist_type == "float":
             # A fraction of the features: (0, 1].
@@ -646,7 +715,7 @@ def _natural_domain_bounds(
         else:
             # An absolute feature count.
             low = 1.0
-            high = float(max(1, int(getattr(runner, "n_features_eff", 1))))
+            high = float(max(1, int(n_features_eff)))
     elif param == "l1_ratio":
         low = 0.0
         high = 1.0
@@ -667,37 +736,16 @@ def _natural_domain_bounds(
         # excluded), and neither side can be pushed beyond it even by
         # widening the search range.
         low = 0.0
-        high = float(max(0, _isotonic_max_feature_index(runner)))
+        high = float(max(0, isotonic_max_feature_index))
     return low, high
 
 
-def _isotonic_max_feature_index(runner: _OptimizeRunner) -> int:
-    """The upper bound of the isotonic ``feature_index`` search range.
-
-    Candidates are restricted to numerical features (one-hot dummies are
-    not meaningful inputs): the count comes from the numerical feature
-    list (``n_numeric_eff``). When the numeric block is not determinable
-    (``n_numeric_eff is None``):
-
-    * an already-built preprocessor — fall back to its estimated output
-      width (``n_features_eff``);
-    * no preprocessor (ndarray without column lists) — every column is
-      treated as numeric and the index is positional over the raw matrix.
-
-    Returns:
-        The inclusive upper bound of the index range (>= 0).
-    """
-    if runner.n_numeric_eff is not None:
-        n_features = int(runner.n_numeric_eff)
-    elif runner.preprocessor is not None:
-        n_features = int(runner.n_features_eff)
-    else:
-        n_features = int(getattr(runner.X, "shape", (0, 1))[1])
-    return max(0, n_features - 1)
-
-
 def _is_guard_boundary(
-    runner: _OptimizeRunner, param: str, value: float, tolerance: float
+    algo: str,
+    guard_records: list[dict[str, Any]],
+    param: str,
+    value: float,
+    tolerance: float,
 ) -> bool:
     """Whether ``value`` lies on a bound introduced by the complexity guard.
 
@@ -710,6 +758,8 @@ def _is_guard_boundary(
     data) — so the "widen it" warning would be a false signal.
 
     Args:
+        algo: The algorithm name.
+        guard_records: The complexity guard records of the run.
         param: The hyperparameter name.
         value: The boundary value of the best trial.
         tolerance: The same absolute tolerance the boundary check uses.
@@ -717,8 +767,8 @@ def _is_guard_boundary(
     Returns:
         bool: ``True`` when the value is a guard-introduced bound.
     """
-    algo = resolve_algorithm_name(runner.algo)
-    for record in getattr(runner, "complexity_guard_logs", []):
+    algo = resolve_algorithm_name(algo)
+    for record in guard_records:
         if record.get("param") != param:
             continue
         if resolve_algorithm_name(str(record.get("algo", ""))) != algo:
@@ -754,7 +804,12 @@ def _is_guard_boundary(
 
 
 def _warn_if_optimum_at_boundary(
-    runner: _OptimizeRunner, best_params: dict[str, Any]
+    best_params: dict[str, Any],
+    search: SearchSpacePlan,
+    *,
+    algo: str,
+    n_samples_eff: int,
+    preprocessing: PreprocessingPlan,
 ) -> None:
     """Warn when the best trial's value lies at a range boundary.
 
@@ -778,10 +833,14 @@ def _warn_if_optimum_at_boundary(
 
     Args:
         best_params: The parameters of the best trial.
+        search: The search space plan of the run.
+        algo: The algorithm name.
+        n_samples_eff: The number of rows a model sees in a training fold.
+        preprocessing: The preprocessing plan (the feature counts).
     """
-    if not runner.search_space_dict:
+    if not search.space_dict:
         return
-    for name, entry in runner.search_space_dict.items():
+    for name, entry in search.space_dict.items():
         if not hasattr(entry, "dist_type"):
             continue
         dist_type = entry.dist_type
@@ -816,13 +875,13 @@ def _warn_if_optimum_at_boundary(
 
         # A guard-introduced bound: the range was narrowed deliberately,
         # the optimum on it is expected — INFO instead of a warning.
-        if _is_guard_boundary(runner, name, bound_value, tolerance):
+        if _is_guard_boundary(algo, search.guard_records, name, bound_value, tolerance):
             log.info(
                 "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
                 "boundary of [%.6g, %.6g], set by the complexity_guard — "
                 "expected, the range is narrowed deliberately, no 'widen "
                 "it' warning",
-                runner.algo,
+                algo,
                 name,
                 num,
                 boundary,
@@ -833,7 +892,13 @@ def _warn_if_optimum_at_boundary(
 
         # A natural (physical) domain boundary of the parameter: the value
         # cannot be pushed beyond it even by widening the range.
-        natural_low, natural_high = _natural_domain_bounds(runner, name, entry)
+        natural_low, natural_high = _natural_domain_bounds(
+            name,
+            entry,
+            n_samples_eff=n_samples_eff,
+            n_features_eff=preprocessing.n_features_eff,
+            isotonic_max_feature_index=preprocessing.isotonic_max_feature_index,
+        )
         natural_bound = natural_low if at_low else natural_high
         if natural_bound is not None and math.isclose(
             bound_value, natural_bound, rel_tol=0.0, abs_tol=tolerance
@@ -842,7 +907,7 @@ def _warn_if_optimum_at_boundary(
                 "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
                 "boundary of [%.6g, %.6g] — the natural domain boundary "
                 "of the parameter, no 'widen it' warning",
-                runner.algo,
+                algo,
                 name,
                 num,
                 boundary,
@@ -855,7 +920,7 @@ def _warn_if_optimum_at_boundary(
             "Algorithm '%s': the optimum of '%s'=%.6g lies at the %s "
             "boundary of the search range [%.6g, %.6g] — the true "
             "optimum may lie beyond the range, widen it",
-            runner.algo,
+            algo,
             name,
             num,
             boundary,

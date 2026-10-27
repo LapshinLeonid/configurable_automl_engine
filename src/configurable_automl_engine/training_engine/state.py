@@ -3,8 +3,10 @@
 The dataclasses exchanged between the pipeline steps: the per-algorithm HPO
 record (``PhaseResult``), the prepared data (``PreparedData``), the phase
 context (``PhaseContext``), the finalists and the robust winner result
-(``FinalistCandidate`` / ``RobustWinnerResult``) and the HPO worker payloads
-(``_HPOWorkerResult`` / ``_HpoPhaseSpec``). The module holds data only, so
+(``FinalistCandidate`` / ``RobustWinnerResult``), the HPO worker payloads
+(``_HPOWorkerResult`` / ``_HpoPhaseSpec``) and the step outcomes
+(``TargetDomainOutcome`` / ``WorkerOutcome`` / ``SelectOutcome``) that
+``component`` applies to the ``PhaseContext``. The module holds data only, so
 the step modules can share these types without importing each other. It must
 not import any other pipeline step module (``data_prep``, ``hpo_phases``,
 ``finalists``, ``select_steps``, ``artifact``, ``component``).
@@ -20,6 +22,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.training_engine.config_parser import (
+    AlgoCfg,
     FeatureSelectionCfg,
     HPOPhaseCfg,
     SanityGateMode,
@@ -46,24 +49,21 @@ class PhaseResult:
             invariant.
         params (dict[str, Any]): The best found hyperparameters.
         trials (list[FrozenTrial]): The Optuna trials of the current phase
-            ONLY (transferred TPE history is excluded). Empty for custom
-            tuners that do not expose trials; passed as ``previous_trials``
-            to the next HPO phase (refine warm-start).
+            ONLY (transferred TPE history is excluded); passed as
+            ``previous_trials`` to the next HPO phase (refine warm-start).
         complexity_guard (list[dict[str, Any]]): Log records of the adaptive
             complexity guard for the phase (one per restricted parameter,
-            "before → after" with the reason). Empty for custom tuners or
-            when the guard produced no records.
+            "before → after" with the reason). Empty when the guard
+            produced no records.
         n_trials_evaluated (int): The number of trials actually evaluated by
             the phase (own COMPLETED trials; transferred history never
             counts). Reported in ``result["n_trials_evaluated"]`` next to the
             best-trial ``score``: the score is the maximum over exactly these
             trials, so a larger count implies a more optimistic score.
-            Defaults to 0 for custom tuners and legacy code paths that do not
-            report the count.
+            Defaults to 0 when the count is unknown.
         oof_predictions (np.ndarray | None): The out-of-fold predictions of
             the phase's completed trials, shape ``(n_trials, n_rows)`` (the
-            BBC-CV input); ``None`` when OOF collection is off or the tuner
-            does not support it.
+            BBC-CV input); ``None`` when OOF collection is off.
     """
 
     score: float
@@ -210,7 +210,9 @@ class PhaseContext:
     """Explicit context shared between pipeline phases.
 
     Replaces the local ``phase_results`` variable: the context is created by
-    ``execute_phases`` once and is mutated sequentially by the phases. The
+    ``execute_phases`` once and only ``component`` mutates it — the step
+    functions return outcomes (``TargetDomainOutcome``, ``WorkerOutcome``,
+    ``SelectOutcome``) that ``component`` applies. The
     select step output REPLACES the working set (subsequent ``refine`` /
     ``select`` steps operate on it).
 
@@ -253,6 +255,70 @@ class PhaseContext:
     oof_pool: list[np.ndarray] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class TargetDomainOutcome:
+    """The result of the target-domain guard (``_apply_target_domain_guard``).
+
+    Attributes:
+        algorithms (dict[str, AlgoCfg]): The algorithms with the clipped
+            search spaces applied (unchanged configs are kept as is).
+        disqualified (dict[str, str]): The algorithms disqualified up front:
+            "algorithm → reason" (merged into the circuit breaker).
+    """
+
+    algorithms: dict[str, AlgoCfg] = field(compare=False)
+    disqualified: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerOutcome:
+    """The HPO worker results of a phase, sorted by their effect.
+
+    Built by ``_consume_worker_results``; ``component`` merges it into the
+    phase results and the ``PhaseContext``.
+
+    Attributes:
+        results (dict[str, PhaseResult]): The successful results
+            "algorithm → PhaseResult" (worker order).
+        disqualified (dict[str, str]): The circuit breaker additions
+            "algorithm → reason".
+        oof_pool (list[np.ndarray]): The OOF prediction matrices of the
+            successful results (the BBC-CV pool additions).
+    """
+
+    results: dict[str, PhaseResult] = field(compare=False)
+    disqualified: dict[str, str]
+    oof_pool: list[np.ndarray] = field(compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SelectOutcome:
+    """The new pipeline state after a select step (``select_step_outcome``).
+
+    Every field is the complete new value of the ``PhaseContext`` field of
+    the same name; ``component._apply_select_outcome`` assigns them.
+
+    Attributes:
+        working_set (dict[str, PhaseResult]): The step output.
+        winner_algo (str | None): The winner of a terminal step.
+        pre_trained_trainer (Any | None): The winner's full-fit trainer.
+        full_fit_trainers (dict[str, Any]): The full-fit trainers kept for
+            the output candidates.
+        disqualified_algorithms (dict[str, str]): The circuit breaker after
+            the step (gate disqualifications added, fallback candidates of
+            this step removed).
+        sanity_gate_section (dict[str, Any] | None): The report section of a
+            ``sanity_gate`` step (``None`` for ``cv_best``).
+    """
+
+    working_set: dict[str, PhaseResult] = field(compare=False)
+    winner_algo: str | None
+    pre_trained_trainer: Any | None = field(compare=False)
+    full_fit_trainers: dict[str, Any] = field(compare=False)
+    disqualified_algorithms: dict[str, str]
+    sanity_gate_section: dict[str, Any] | None = field(compare=False)
+
+
 @dataclass
 class _HPOWorkerResult:
     """Result of a single HPO worker (serialized between processes).
@@ -263,7 +329,7 @@ class _HPOWorkerResult:
         params (dict[str, Any] | None): The best parameters; ``None`` on
             failure.
         trials (list[FrozenTrial] | None): The phase's own Optuna trials;
-            ``None`` on failure or for tuners that do not expose trials.
+            ``None`` on failure.
         disqualify_reason (str | None): Circuit breaker disqualification
             reason; ``None`` — the algorithm is not disqualified.
         history_error (str | None): A TPE history transfer error
@@ -277,7 +343,7 @@ class _HPOWorkerResult:
             "processes" mode).
         n_trials_evaluated (int): The number of trials actually evaluated by
             the phase (own COMPLETED trials; transferred history never
-            counts); 0 for custom tuners that do not report the count.
+            counts); 0 when the count is unknown.
         oof_predictions (np.ndarray | None): The OOF predictions of the
             phase's completed trials (``(n_trials, n_rows)``); ``None`` when
             OOF collection is off.
@@ -345,13 +411,13 @@ class _HpoPhaseSpec:
             (``general.random_state + hpo_phase_ordinal`` — a different seed
             per HPO phase, so TPE random startup points do not repeat between
             phases); ``None`` — the sampler is not seeded.
-        inf_policy (str | None): ``general.inf_policy`` for the tuner's data
-            validation (``None`` — the tuner default).
-        datetime_policy (str | None): ``general.datetime_policy`` for the
-            tuner's data validation.
-        drop_id_like_columns (bool | None): ``general.drop_id_like_columns``
-            for the tuner's data validation.
-        collect_oof (bool): Whether the tuner keeps the OOF predictions of
+        inf_policy (str): ``general.inf_policy`` for the HPO data
+            validation.
+        datetime_policy (str): ``general.datetime_policy`` for the HPO data
+            validation.
+        drop_id_like_columns (bool): ``general.drop_id_like_columns`` for the
+            HPO data validation.
+        collect_oof (bool): Whether the HPO run keeps the OOF predictions of
             every trial for the BBC-CV estimate.
     """
 
@@ -382,7 +448,7 @@ class _HpoPhaseSpec:
     user_hyperparameter_keys: list[str] | None = None
     random_state: int | None = None
     sampler_seed: int | None = None
-    inf_policy: str | None = None
-    datetime_policy: str | None = None
-    drop_id_like_columns: bool | None = None
+    inf_policy: str = "as_missing"
+    datetime_policy: str = "expand"
+    drop_id_like_columns: bool = False
     collect_oof: bool = False

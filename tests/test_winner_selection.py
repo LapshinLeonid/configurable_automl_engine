@@ -41,13 +41,15 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
-from configurable_automl_engine.training_engine.component import (
-    FinalistCandidate,
-    PhaseResult,
+from configurable_automl_engine.training_engine.finalists import (
     is_valid_winner_score,
     select_finalists,
     select_robust_winner,
     select_winner,
+)
+from configurable_automl_engine.training_engine.state import (
+    FinalistCandidate,
+    PhaseResult,
 )
 from configurable_automl_engine.training_engine.metrics import oof_rmse
 from configurable_automl_engine.training_engine.sanity_gate import ModelSanityGate

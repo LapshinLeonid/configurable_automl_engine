@@ -1,3 +1,4 @@
+import dataclasses
 import re
 
 import pytest
@@ -29,6 +30,20 @@ from unittest.mock import MagicMock, patch
 from configurable_automl_engine.training_engine.logger import (
     setup_logging,
 )  # Import setup
+from tests.trainer_helpers import score_with_trainer, trainer_preprocessor
+from configurable_automl_engine.common.settings import InputPolicies
+from configurable_automl_engine.trainer_data import (
+    _detect_feature_types,
+    extract_feature_names,
+    load_training_data,
+    prepare_features,
+)
+
+
+def _prepare_data(X, y):
+    """Split and validate the training input (``load_training_data``)."""
+    data = load_training_data(X, y)
+    return data.X, data.y
 
 
 # Synthetic data for testing
@@ -172,11 +187,11 @@ def test_prepare_data_variants():
 
     # Unsupported type (e.g. list)
     with pytest.raises(TrainingError, match="Unsupported data type"):
-        trainer._prepare_data([1, 2], [1, 2])
+        _prepare_data([1, 2], [1, 2])
     # y as DataFrame (converted to Series)
     X = np.random.rand(10, 2)
     y_df = pd.DataFrame({"target": np.random.rand(10)})
-    X_res, y_res = trainer._prepare_data(X, y_df)
+    X_res, y_res = _prepare_data(X, y_df)
     assert isinstance(y_res, pd.Series)
     assert len(y_res) == 10
     # Error during splitting (too little data for train_test_split)
@@ -446,7 +461,7 @@ def test_prepare_data_empty_input_coverage():
 
     # Now we expect ValueError instead of TrainingError
     with pytest.raises(TrainingError, match="Data is empty"):
-        trainer._prepare_data(X_empty, y_empty)
+        _prepare_data(X_empty, y_empty)
 
 
 def test_fit_internal_unexpected_error():
@@ -681,7 +696,7 @@ def test_prepare_data_index_error_coverage():
     y_no_columns = pd.DataFrame(index=[0, 1])
 
     with pytest.raises(TrainingError, match="Data transformation error"):
-        trainer._prepare_data(X, y_no_columns)
+        _prepare_data(X, y_no_columns)
 
 
 def test_fit_raises_error_when_scorer_returns_none():
@@ -910,66 +925,52 @@ class TestModelTrainerCoverage:
     # 2. Test for _validate_features (missing columns)
     # Lines: missing = [col for col in specified_features if col not in X.columns] ... raise TrainingError
     def test_validate_features_missing_columns(self):
-        trainer = ModelTrainer(
-            categorical_features=["cat1"], numerical_features=["num1"]
-        )
         df = pd.DataFrame({"cat1": [1, 2], "wrong_col": [3, 4]})
 
         with pytest.raises(TrainingError) as excinfo:
-            trainer._validate_features(df)
+            _detect_feature_types(df, ["cat1"], ["num1"], None)
         assert "Specified columns not found in data: ['num1']" in str(excinfo.value)
 
     # 3. Test for _detect_feature_types (when both lists are specified)
     # Lines: if self.categorical_features is not None and self.numerical_features is not None: ... return
     def test_detect_feature_types_early_return(self):
-        trainer = ModelTrainer(
-            categorical_features=["cat_col"], numerical_features=["num_col"]
-        )
         df = pd.DataFrame({"cat_col": ["a"], "num_col": [1]})
 
-        # Call the method. If the condition works, it calls _validate_features and returns
-        # We can verify this by checking that auto-detection did not change the lists
-        trainer._detect_feature_types(df, target_column="target")
+        # Both lists are given: they are only validated, not re-detected.
+        cats, nums = _detect_feature_types(df, ["cat_col"], ["num_col"], None)
 
-        assert trainer.categorical_features == ["cat_col"]
-        assert trainer.numerical_features == ["num_col"]
+        assert cats == ["cat_col"]
+        assert nums == ["num_col"]
 
     # 4. Test for excluding id_column
     # Lines: if self.id_column: exclude.add(self.id_column)
     def test_detect_feature_types_exclude_id(self):
-        trainer = ModelTrainer(id_column="my_id")
-        # Create a DF with an ID, a target, and one useful feature
-        df = pd.DataFrame({"my_id": [1, 2], "target": [10, 20], "feature": [0.1, 0.2]})
+        # The id column is excluded from the auto-detection.
+        df = pd.DataFrame({"my_id": [1, 2], "feature": [0.1, 0.2]})
 
-        # The lists are initially None so that auto-detection kicks in
-        trainer._detect_feature_types(df, target_column="target")
+        cats, nums = _detect_feature_types(df, None, None, "my_id")
 
-        # Verify that my_id is not in either list
-        assert "my_id" not in trainer.categorical_features
-        assert "my_id" not in trainer.numerical_features
-        assert "feature" in trainer.numerical_features
+        assert "my_id" not in cats
+        assert "my_id" not in nums
+        assert "feature" in nums
 
     # 5. Test for _extract_metadata with objects having get_data_info
     # Lines: if hasattr(X, 'get_data_info'): return X.get_data_info()['columns']
     def test_extract_metadata_custom_object(self):
-        trainer = ModelTrainer()
-
         # Create a mock object mimicking SharedDataFrame or similar
         mock_data = MagicMock()
         mock_data.get_data_info.return_value = {"columns": ["custom1", "custom2"]}
 
-        cols = trainer._extract_metadata(mock_data)
+        cols = extract_feature_names(mock_data)
 
         assert cols == ["custom1", "custom2"]
         mock_data.get_data_info.assert_called_once()
 
     # 6. Additional test: no features at all
     def test_validate_features_empty_ok(self):
-        trainer = ModelTrainer(categorical_features=None, numerical_features=None)
         df = pd.DataFrame({"any": [1]})
-        # Should not raise any exceptions
-        trainer._validate_features(df)
-
+        # Empty explicit lists are valid: no exception, nothing detected.
+        assert _detect_feature_types(df, [], [], None) == ([], [])
 
 def test_build_preprocessor_no_features_matched(caplog):
     """
@@ -981,7 +982,7 @@ def test_build_preprocessor_no_features_matched(caplog):
     feature_names = ["some_random_column"]
 
     with caplog.at_level(logging.WARNING):
-        preprocessor = trainer._build_preprocessor(feature_names)
+        preprocessor = trainer_preprocessor(trainer, feature_names)
 
     assert "No features matched for preprocessing" in caplog.text
     assert isinstance(preprocessor, ColumnTransformer)
@@ -1003,7 +1004,7 @@ def test_prepare_data_target_str_x_not_dataframe():
         TrainingError,
         match="Target column 'target_column' specified, but X is not a DataFrame",
     ):
-        trainer._prepare_data(X_ndarray, y_str)
+        _prepare_data(X_ndarray, y_str)
 
 
 def test_prepare_data_target_str_success():
@@ -1013,11 +1014,11 @@ def test_prepare_data_target_str_success():
     trainer = ModelTrainer()
     df = pd.DataFrame({"feature1": [1, 2], "target": [0, 1]})
 
-    X_obj, y_obj = trainer._prepare_data(df, "target")
+    data = load_training_data(df, "target")
 
-    assert list(X_obj.columns) == ["feature1"]
-    assert list(y_obj) == [0, 1]
-    assert trainer.feature_names == ["feature1"]
+    assert list(data.X.columns) == ["feature1"]
+    assert list(data.y) == [0, 1]
+    assert data.feature_names == ["feature1"]
 
 
 def test_prepare_data_y_shared_dataframe_view():
@@ -1033,7 +1034,7 @@ def test_prepare_data_y_shared_dataframe_view():
     mock_shared_df.get_view.return_value = mock_view
 
     # Verify that get_view() is called and the first column is taken
-    _, y_obj = trainer._prepare_data(X, mock_shared_df)
+    _, y_obj = _prepare_data(X, mock_shared_df)
 
     assert isinstance(y_obj, pd.Series)
     assert y_obj.iloc[0] == 10
@@ -1049,7 +1050,7 @@ def test_prepare_data_y_as_ndarray_fallback():
     X = pd.DataFrame({"a": [1, 2]})
     y_list = [5, 6]
 
-    _, y_obj = trainer._prepare_data(X, y_list)
+    _, y_obj = _prepare_data(X, y_list)
 
     assert isinstance(y_obj, np.ndarray)
     assert y_obj[0] == 5
@@ -1067,7 +1068,7 @@ def test_prepare_data_empty_data_reraise():
     # We expect TrainingError("Data is empty") since this condition
     # is written inside the try block before transformation exceptions occur
     with pytest.raises(TrainingError) as exc_info:
-        trainer._prepare_data(empty_df, np.array([]))
+        _prepare_data(empty_df, np.array([]))
 
     assert str(exc_info.value) == "Data is empty"
 
@@ -1081,14 +1082,15 @@ def test_prepare_data_catch_and_raise_empty_data_string():
     trainer = ModelTrainer()
     X = pd.DataFrame({"a": [1, 2]})
     y = [10, 20]
-    # We simulate that the _extract_metadata method raises ValueError("Data is empty")
+    # We simulate that the name extraction raises ValueError("Data is empty")
     # This exception enters the except (ValueError, ...) block
     # And there the condition if str(e) == "Data is empty": raise triggers
-    with patch.object(
-        ModelTrainer, "_extract_metadata", side_effect=ValueError("Data is empty")
+    with patch(
+        "configurable_automl_engine.trainer_data.extract_feature_names",
+        side_effect=ValueError("Data is empty"),
     ):
         with pytest.raises(ValueError) as exc_info:
-            trainer._prepare_data(X, y)
+            _prepare_data(X, y)
 
         # Verify that exactly the original ValueError was raised,
         # not one wrapped in TrainingError
@@ -1247,65 +1249,28 @@ def test_fit_sets_feature_names_from_numerical_when_none():
 
 
 def test_fit_extracts_metadata_as_fallback():
+    """Without known feature names, the names are extracted from the frame.
+
+    Covers the fallback of ``prepare_features``: the input gave no feature
+    names, so they are extracted from the prepared matrix.
     """
-    Tests the line: self.feature_names = self._extract_metadata(X_prepared) or []
-    Condition: we forcibly reset feature_names before the preprocessor building stage.
-    """
-    X = pd.DataFrame({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
-    y = pd.Series([1, 0, 1, 0])
+    X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [5.0, 6.0, 7.0, 9.0]})
 
-    trainer = ModelTrainer()
-    # Patch the dependencies.
-    # IMPORTANT: make sure the path to 'create_model' etc. matches your structure
-    with (
-        patch.object(ModelTrainer, "_detect_feature_types"),
-        patch.object(ModelTrainer, "_extract_metadata") as mock_extract,
-        # A real lightweight estimator instead of MagicMock: validation scoring
-        # clones the model for each fold, and clone(MagicMock)
-        # causes RecursionError.
-        patch(
-            "configurable_automl_engine.trainer.create_model",
-            return_value=LinearRegression(),
-        ) as mock_create,
-        patch(
-            "configurable_automl_engine.trainer_scoring.get_scorer_object"
-        ) as mock_scorer_factory,
-        patch(
-            "configurable_automl_engine.trainer_scoring.direction_label",
-            return_value="min better",
-        ),
-    ):
-        # 1. Configure the returned names on the repeated extraction
-        mock_extract.return_value = ["a", "b"]
+    with patch(
+        "configurable_automl_engine.trainer_data.extract_feature_names",
+        wraps=extract_feature_names,
+    ) as mock_extract:
+        features = prepare_features(
+            X,
+            feature_names=None,
+            categorical_features=None,
+            numerical_features=None,
+            id_column=None,
+            policies=InputPolicies(),
+        )
 
-        # 3. Fix the MagicMock.__format__ error:
-        # Configure the scorer factory so that it returns a real scorer whose
-        # raw metric function returns a constant (a MagicMock would break the
-        # pooled path of the default r2 metric, which reads _score_func).
-        mock_scorer_func = make_scorer(lambda y_t, y_p: 0.85, greater_is_better=True)
-        mock_scorer_factory.return_value = mock_scorer_func
-
-        # We need self.feature_names to be None by "Stage 3" in the fit() method.
-        # Use a side_effect for _prepare_data to reset the field after it is filled.
-        original_prepare = trainer._prepare_data
-
-        def side_effect_prepare(X_in, y_in):
-            res_X, res_y = original_prepare(X_in, y_in)
-            trainer.feature_names = None  # Reset for the fallback branch test
-            return res_X, res_y
-
-        with patch.object(
-            ModelTrainer, "_prepare_data", side_effect=side_effect_prepare
-        ):
-            trainer.fit(X, y)
-
-        # CHECKS:
-        # Make sure the fallback worked and the names were extracted again
-        assert trainer.feature_names == ["a", "b"]
-        # Verify that the extractor was indeed called in Stage 3
-        assert mock_extract.called
-        # Verify that the metric was recorded correctly
-        assert trainer.val_score == 0.85
+    assert features.feature_names == ["a", "b"]
+    assert mock_extract.called
 
 
 def test_coverage_feature_names_from_numerical_fallback():
@@ -1336,9 +1301,12 @@ def test_coverage_feature_names_from_numerical_fallback():
         mock_scorer_factory.return_value = lambda p, x, y: 0.5
 
         # KEY POINT:
-        # We patch _extract_metadata to return None.
-        # This makes _prepare_data leave self.feature_names = None.
-        with patch.object(ModelTrainer, "_extract_metadata", return_value=None):
+        # We patch the name extraction to return None, so the feature names
+        # are not known before the features are prepared.
+        with patch(
+            "configurable_automl_engine.trainer_data.extract_feature_names",
+            return_value=None,
+        ):
             trainer.fit(X, y)
         # COVERAGE AND LOGIC CHECKS:
         # 1. Since this was a numpy array, numerical_features must have been created
@@ -1382,7 +1350,7 @@ def test_metric_calculation_debug_log_formats_val_score(caplog):
 
     model_trainer = ModelTrainer(algorithm="ridge")
 
-    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine"):
         model_trainer.fit(X, y)
 
     # The placeholder literal must not appear in the log
@@ -1491,7 +1459,7 @@ def test_trainer_logs_resolved_preset(caplog):
     """The selected preset is recorded in the logs."""
     import logging as _logging
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(algorithm="random_forest", hyperparams={"n_estimators": 5}).fit(
             X, y
         )
@@ -1519,7 +1487,7 @@ def test_trainer_logs_preprocessed_matrix_dimensions(caplog):
     )
     y = df["num"] * 2.0 + rng.normal(0, 0.1, 60)
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(df, y)
 
     assert re.search(
@@ -1540,7 +1508,7 @@ def test_trainer_logs_preprocessed_matrix_sparse_for_high_cardinality(caplog):
     df = pd.DataFrame({"id": [f"id_{i}" for i in range(n)], "num": rng.normal(size=n)})
     y = df["num"] * 2.0 + rng.normal(0, 0.1, n)
 
-    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(
             algorithm="ridge",
             hyperparams={"alpha": 0.1},
@@ -1864,7 +1832,7 @@ def test_feature_selection_auto_all_important_disables():
 def test_feature_selection_auto_logs_info_message(caplog):
     """INFO log of the standalone check strictly in the given format."""
     X, y = _fs_noisy_dataset()
-    with caplog.at_level(logging.INFO, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.INFO, logger="configurable_automl_engine"):
         ModelTrainer(
             algorithm="nearest_neighbors_regression",
             hyperparams={"n_neighbors": 20},
@@ -1996,7 +1964,7 @@ def test_feature_selection_auto_check_exception_falls_back(caplog):
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=exploding_scorer,
         ),
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
     ):
         trainer.fit(X, y)
 
@@ -2018,7 +1986,7 @@ def test_feature_selection_isotonic_forced_disabled(caplog):
     X = pd.DataFrame({"f": f})
     y = pd.Series(f**2)
 
-    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.DEBUG, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="isotonic_regression", feature_selection_cfg={"mode": "always"}
         ).fit(X, y)
@@ -2333,7 +2301,9 @@ def test_feature_selection_save_load_roundtrip(tmp_path):
     assert restored_pkl.feature_selection_cfg.mode == "always"
 
     joblib_path = tmp_path / "fs_model.joblib"
-    trainer.serialization_format = SerializationFormat.joblib
+    trainer.settings = dataclasses.replace(
+        trainer.settings, serialization_format=SerializationFormat.joblib
+    )
     trainer.save(joblib_path)
     restored_joblib = ModelTrainer.load(
         joblib_path, fmt=SerializationFormat.joblib
@@ -2374,7 +2344,7 @@ def test_feature_selection_active_none_and_bool_accepted():
     """bool and None are accepted; None means "decision by configuration"."""
     for flag in (None, True, False):
         trainer_obj = ModelTrainer(feature_selection_active=flag)
-        assert trainer_obj.feature_selection_active is flag
+        assert trainer_obj.settings.feature_selection_active is flag
 
 
 def test_feature_selection_auto_tiny_dataset_warning(caplog):
@@ -2383,7 +2353,7 @@ def test_feature_selection_auto_tiny_dataset_warning(caplog):
     X = pd.DataFrame(rng.normal(size=(8, 3)))
     y = pd.Series(X[0] * 2.0 + rng.normal(0, 0.1, 8))
 
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge", feature_selection_cfg={"mode": "auto"}
         ).fit(X, y)
@@ -2410,29 +2380,6 @@ def test_feature_selection_passthrough_when_p_le_min_features():
     assert trainer.selected_features_mask_ is not None
     assert trainer.selected_features_mask_.all()
     assert trainer.pipeline.named_steps["model"].n_features_in_ == 3
-
-
-def test_feature_selection_old_model_without_new_attrs_compatible():
-    """An instance without the new attributes (imitating an old pickle):
-    fit/predict work as before (disabled behavior)."""
-    X, y = _fs_dataset()
-    trainer = ModelTrainer(algorithm="ridge")
-    for attr in (
-        "feature_selection_cfg",
-        "feature_selection_active",
-        "feature_selection_active_",
-        "selected_features_mask_",
-    ):
-        if hasattr(trainer, attr):
-            delattr(trainer, attr)
-
-    trainer.fit(X, y)
-    assert trainer.pipeline is not None
-    assert "feature_selector" not in trainer.pipeline.named_steps
-    # _fit_internal records the actual status even for an "old" object.
-    assert trainer.feature_selection_active_ is False
-    assert trainer.selected_features_mask_ is None
-    assert len(trainer.predict(X)) == len(y)
 
 
 def test_feature_selection_numpy_input_always():
@@ -2492,7 +2439,9 @@ def test_feature_selection_refit_resets_state():
     assert trainer.feature_selection_active_ is True
     assert trainer.selected_features_mask_ is not None
 
-    trainer.feature_selection_cfg = FeatureSelectionCfg(mode="disabled")
+    trainer.settings = dataclasses.replace(
+        trainer.settings, feature_selection_cfg=FeatureSelectionCfg(mode="disabled")
+    )
     trainer.fit(X, y)
     assert trainer.feature_selection_active_ is False
     assert trainer.selected_features_mask_ is None
@@ -2599,7 +2548,7 @@ def test_feature_selection_auto_scorer_none_falls_back(caplog):
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=flaky_scorer,
         ),
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
     ):
         trainer.fit(X, y)
 

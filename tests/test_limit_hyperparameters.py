@@ -1,13 +1,13 @@
 """Tests of the ``limit_hyperparameters`` flag semantics.
 
 Coverage:
-- Unit tests of :func:`_prepare_search_space`: with ``limit=True`` the space
+- Unit tests of :func:`build_search_space`: with ``limit=True`` the space
   contains ONLY the user-listed parameters (no ``DEFAULT_SPACES`` entries);
   with ``limit=False`` (default) the user ranges override and are merged into
   ``DEFAULT_SPACES``.
 - The flag is threaded from ``AlgoCfg`` through the HPO phase worker to the
-  tuner: the tuner receives ``limit_hyperparameters=True`` and the restricted
-  search space.
+  HPO request: the run receives ``limit_hyperparameters=True`` and the
+  restricted search space.
 - The SVR adaptive epsilon is NOT injected in the limited mode (the space is
   exactly what the user listed).
 - Config validation: ``limit_hyperparameters: true`` without a non-empty
@@ -28,28 +28,24 @@ from configurable_automl_engine.common.hyperopt_defaults import (
     DEFAULT_SPACES,
     SearchSpaceEntry,
 )
-from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    train_best_model,
-)
-from configurable_automl_engine.training_engine.hpo_phases import (
-    _execute_hpo_phase,
-    _hpo_phase_worker,
-    _prepare_search_space,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.state import PhaseResult
+from configurable_automl_engine.hpo.search_space import build_search_space
+from configurable_automl_engine.training_engine.hpo_phases import _hpo_phase_worker
 from configurable_automl_engine.training_engine.config_parser import AlgoCfg
 from tests.data_factory import create_mock_df
+from tests.hpo_spec_factory import make_phase_spec
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Unit: _prepare_search_space(limit=...)
+# Unit: build_search_space(limit=...)
 # ──────────────────────────────────────────────────────────────────────────────
 def test_prepare_search_space_limit_true_only_user_params():
     """limit=True keeps ONLY the user-listed parameters (no DEFAULT_SPACES)."""
     user = {
         "alpha": SearchSpaceEntry.model_validate([0.1, 1.0]),
     }
-    space = _prepare_search_space("ridge", user, limit=True)
+    space = build_search_space("ridge", user, limit=True)
     assert set(space) == {"alpha"}
     assert space["alpha"].low == 0.1
     assert space["alpha"].high == 1.0
@@ -60,7 +56,7 @@ def test_prepare_search_space_limit_true_remaps_legacy_names():
     user = {
         "n_iter": SearchSpaceEntry.model_validate([50, 500, "int", 50]),
     }
-    space = _prepare_search_space("ardregression", user, limit=True)
+    space = build_search_space("ardregression", user, limit=True)
     assert set(space) == {"max_iter"}
     assert "n_iter" not in space
     assert space["max_iter"].low == 50
@@ -75,7 +71,7 @@ def test_prepare_search_space_limit_false_merges_into_defaults():
     user = {
         "alpha": SearchSpaceEntry.model_validate([0.1, 1.0]),
     }
-    space = _prepare_search_space("elasticnet", user, limit=False)
+    space = build_search_space("elasticnet", user, limit=False)
     assert set(space) == set(DEFAULT_SPACES["elasticnet"]) | {"alpha"}
     assert space["alpha"].low == 0.1  # the user value wins
     assert space["l1_ratio"].low == DEFAULT_SPACES["elasticnet"]["l1_ratio"].low
@@ -83,7 +79,7 @@ def test_prepare_search_space_limit_false_merges_into_defaults():
 
 def test_prepare_search_space_limit_true_without_user_overrides_empty():
     """limit=True without user overrides produces an empty space."""
-    assert _prepare_search_space("ridge", None, limit=True) == {}
+    assert build_search_space("ridge", None, limit=True) == {}
 
 
 def test_prepare_search_space_limit_true_svr_no_epsilon_adaptive_hook():
@@ -94,7 +90,7 @@ def test_prepare_search_space_limit_true_svr_no_epsilon_adaptive_hook():
     adaptive one.
     """
     user = {"C": SearchSpaceEntry.model_validate([0.1, 1.0, "float_log"])}
-    space = _prepare_search_space("svr", user, limit=True)
+    space = build_search_space("svr", user, limit=True)
     assert set(space) == {"C"}
 
 
@@ -130,62 +126,21 @@ def test_algo_cfg_limit_false_without_hyperparameters_ok():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Threading: AlgoCfg → worker → tuner
+# Threading: AlgoCfg → worker → HPO request
 # ──────────────────────────────────────────────────────────────────────────────
 def test_hpo_phase_worker_passes_limit_and_restricted_space(monkeypatch):
-    """The worker passes the limited space and the limit flag to the tuner."""
+    """The worker passes the limited space and the limit flag to the HPO run."""
     algo_cfg = AlgoCfg(
         enable=True,
         limit_hyperparameters=True,
         hyperparameters={"alpha": [0.1, 1.0]},
     )
-    spec = MagicMock()
-    spec.phase.action = "all_algorithms"
-    spec.phase.name = "coarse"
-    spec.phase.n_trials = 1
-    spec.prev_results = {}
-    spec.metric_sklearn = "neg_root_mean_squared_error"
+    spec = make_phase_spec(metric_sklearn="neg_root_mean_squared_error")
 
     captured: dict[str, object] = {}
 
-    def fake_execute(*args, **kwargs):
-        # search_space is the 8th positional arg: (phase_name, algo, a_cfg,
-        # n_trials, spec, X, search_space, ...)
-        captured["search_space"] = (
-            kwargs.get("search_space") if "search_space" in kwargs else args[6]
-        )
-        captured["limit"] = (
-            kwargs.get("limit_hyperparameters")
-            if "limit_hyperparameters" in kwargs
-            else args[10]
-        )
-        return PhaseResult(score=-0.9, params={"alpha": 0.5})
-
-    monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.hpo_phases._execute_hpo_phase",
-        fake_execute,
-    )
-
-    result = _hpo_phase_worker("ridge", algo_cfg, spec, object())
-    assert result is not None
-    assert captured["limit"] is True
-    assert set(captured["search_space"]) == {"alpha"}  # type: ignore[arg-type]
-
-
-def test_execute_hpo_phase_forwards_limit_flag(monkeypatch):
-    """_execute_hpo_phase forwards limit_hyperparameters to _run_hpo."""
-    algo_cfg = AlgoCfg(
-        enable=True,
-        limit_hyperparameters=True,
-        hyperparameters={"alpha": [0.1, 1.0]},
-        trainer_module="configurable_automl_engine.trainer",
-    )
-    spec = MagicMock()
-    spec.metric_sklearn = "neg_root_mean_squared_error"
-    captured: dict[str, object] = {}
-
-    def fake_run_hpo(**kwargs):
-        captured.update(kwargs)
+    def fake_run_hpo(*, X, y, request):
+        captured["request"] = request
         return PhaseResult(score=-0.9, params={"alpha": 0.5})
 
     monkeypatch.setattr(
@@ -193,18 +148,15 @@ def test_execute_hpo_phase_forwards_limit_flag(monkeypatch):
         fake_run_hpo,
     )
 
-    result = _execute_hpo_phase(
-        "coarse",
-        "ridge",
-        algo_cfg,
-        1,
-        spec,
-        object(),
-        search_space={"alpha": SearchSpaceEntry.model_validate([0.1, 1.0])},
-        limit_hyperparameters=True,
-    )
-    assert result is not None
-    assert captured["limit_hyperparameters"] is True
+    result = _hpo_phase_worker("ridge", algo_cfg, spec, object())
+    assert result.score == -0.9
+    request = captured["request"]
+    assert request.limit_hyperparameters is True
+    assert set(request.space_overrides["ridge"]) == {"alpha"}
+    # The limited run builds exactly the listed space.
+    assert set(
+        build_search_space("ridge", request.space_overrides["ridge"], limit=True)
+    ) == {"alpha"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

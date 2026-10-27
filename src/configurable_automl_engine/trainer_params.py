@@ -3,9 +3,9 @@
 Every helper validates (and, where documented, normalizes) one group of the
 constructor arguments and raises ``TrainingError`` with the same messages as
 before, so invalid values are rejected at initialization time, before
-training starts. ``ModelTrainer.__init__`` calls the helpers in the original
-validation order and assigns the attributes itself (attribute names are
-part of the pickle contract). The module must not import
+training starts. ``build_trainer_settings`` calls the helpers in the original
+validation order and returns the frozen ``TrainerSettings`` that
+``ModelTrainer`` keeps. The module must not import
 ``configurable_automl_engine.trainer``.
 """
 
@@ -21,8 +21,12 @@ from configurable_automl_engine.validation import (
     norm_val_method,
 )
 
-from .common.definitions import ValidationStrategy
+from .common.definitions import SerializationFormat, ValidationStrategy
+from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
 from .trainer_errors import TrainingError
+from .trainer_feature_selection import _validate_feature_selection_cfg
+from .trainer_state import TrainerSettings
+from .training_engine.config_parser import FeatureSelectionCfg
 
 _ENCODING_STRATEGIES = ("one_hot", "ordinal", "target", "frequency", "hashing")
 
@@ -261,3 +265,105 @@ def _validate_feature_lists(categorical_features: Any, numerical_features: Any) 
             raise TrainingError(
                 f"Parameter {attr_name} must be a list of strings (column names)"
             )
+
+
+def build_trainer_settings(
+    *,
+    algorithm: Any,
+    hyperparams: Any,
+    metric: str,
+    random_state: int | None,
+    serialization_format: SerializationFormat,
+    categorical_features: list[str] | None,
+    numerical_features: list[str] | None,
+    id_column: str | None,
+    encoding_strategy: str,
+    high_cardinality_threshold: int | None,
+    high_cardinality_encoding: str | None,
+    hashing_n_components: int,
+    target_encoding_smoothing: float,
+    target_encoding_fallback: float | None,
+    additional_metrics: Iterable[str] | None,
+    preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
+    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
+    feature_selection_active: Any,
+    validation_strategy: ValidationStrategy | str,
+    n_folds: int,
+    test_size: float,
+    oversampling: OversamplingSettings,
+    policies: InputPolicies,
+    warn_id_like: bool,
+) -> TrainerSettings:
+    """Validate the ``ModelTrainer`` constructor arguments into settings.
+
+    The helpers run in the original validation order, so the first invalid
+    argument is reported as before. The arguments are not mutated.
+
+    Returns:
+        TrainerSettings: The validated and normalized settings.
+
+    Raises:
+        TrainingError: If an argument is invalid.
+    """
+    algorithm = _validate_algorithm(algorithm)
+    hyperparams = _validate_hyperparams(hyperparams)
+    _validate_input_policies(
+        inf_policy=policies.inf_policy,
+        datetime_policy=policies.datetime_policy,
+        drop_id_like_columns=policies.drop_id_like_columns,
+        warn_id_like=warn_id_like,
+    )
+    encoding = _validate_encoding_strategy(encoding_strategy)
+    _validate_high_cardinality(
+        high_cardinality_threshold=high_cardinality_threshold,
+        high_cardinality_encoding=high_cardinality_encoding,
+        hashing_n_components=hashing_n_components,
+        target_encoding_smoothing=target_encoding_smoothing,
+    )
+    metrics = _normalize_additional_metrics(additional_metrics)
+    override = _validate_preprocessing_override(preprocessing_override)
+    fs_cfg = _validate_feature_selection_cfg(feature_selection_cfg)
+    fs_active = _validate_feature_selection_active(feature_selection_active)
+    strategy = _validate_validation_strategy(validation_strategy, n_folds)
+    test_size = _validate_test_size(test_size)
+    _validate_oversampling(
+        multiplier=oversampling.multiplier,
+        algorithm=oversampling.algorithm,
+        target_bins=oversampling.target_bins,
+        noise_level=oversampling.noise_level,
+    )
+    _validate_feature_lists(categorical_features, numerical_features)
+    return TrainerSettings(
+        algorithm=algorithm,
+        hyperparams=hyperparams,
+        metric=metric.lower(),
+        random_state=random_state,
+        serialization_format=serialization_format,
+        categorical_features=(
+            None if categorical_features is None else list(categorical_features)
+        ),
+        numerical_features=(
+            None if numerical_features is None else list(numerical_features)
+        ),
+        id_column=id_column,
+        encoding=EncodingSettings(
+            encoding=encoding,
+            high_cardinality_threshold=high_cardinality_threshold,
+            high_cardinality_encoding=cast(
+                EncodingStrategy | None, high_cardinality_encoding
+            ),
+            hashing_n_components=hashing_n_components,
+            target_encoding_smoothing=target_encoding_smoothing,
+            target_encoding_fallback=target_encoding_fallback,
+        ),
+        policies=policies,
+        warn_id_like=warn_id_like,
+        additional_metrics=metrics,
+        preprocessing_override=override,
+        feature_selection_cfg=fs_cfg,
+        feature_selection_active=fs_active,
+        validation_strategy=strategy,
+        n_folds=n_folds,
+        test_size=test_size,
+        oversampling=oversampling,
+    )

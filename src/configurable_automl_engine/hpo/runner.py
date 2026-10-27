@@ -1,19 +1,21 @@
 """The HPO run of a single algorithm (``_OptimizeRunner``).
 
-Holds the state of one ``optimize()`` call and the run loop: input
-validation and the validation strategy (``resolve_validation``), the Optuna
+Holds the state of one ``optimize()`` call and the run loop: the Optuna
 study with the TPE history transfer, the objective with the circuit breaker
 for fatal failures, the best-trial selection and the final fit of the best
-model. The search space, the trial evaluation,
-the pruning configuration and the pipeline assembly are delegated to the
-other ``hpo`` modules. It must not import ``configurable_automl_engine.tuner``
-(the façade imports this module).
+model. The setup is a chain of pure steps that return plans
+(``hpo.plans``): ``plan_validation`` (here: input validation and the
+validation strategy) → ``plan_preprocessing`` (``hpo.trial_pipeline``) →
+``plan_search_space`` (``hpo.search_space``) → ``plan_pruning``
+(``hpo.pruning``); the trial evaluation is ``score_trial``
+(``hpo.evaluation``). Only the runner's own methods mutate the runner. It
+must not import ``configurable_automl_engine.tuner`` (the façade imports
+this module).
 """
 
 from __future__ import annotations
 
 import logging as _logging
-from collections.abc import Callable
 from typing import Any, NoReturn, cast
 
 import numpy as np
@@ -22,10 +24,6 @@ import pandas as pd
 from optuna.trial import FrozenTrial, Trial
 from scipy import sparse as sp
 
-from configurable_automl_engine.common.complexity_guard import (
-    ComplexityGuardConfig,
-)
-from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
     get_effective_train_size,
@@ -34,12 +32,6 @@ from configurable_automl_engine.common.validation_utils import (
 from configurable_automl_engine.models import (
     create_model,
     resolve_algorithm_name,
-)
-from configurable_automl_engine.preprocessing import (
-    EncodingStrategy,
-)
-from configurable_automl_engine.preprocessing_presets import (
-    PreprocessingOverride,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
@@ -51,24 +43,31 @@ from configurable_automl_engine.training_engine.metrics import (
 from configurable_automl_engine.validation import make_cv, norm_val_method
 
 from .evaluation import (
+    _build_scorer,
     _phase_oof_matrix,
-    _score_trial,
+    score_trial,
 )
-from .pruning import (
-    handle_pruning,
+from .plans import (
+    BestTrial,
+    PreprocessingPlan,
+    PruningPlan,
+    SearchSpacePlan,
+    ValidationPlan,
 )
+from .pruning import plan_pruning
+from .request import HpoRequest
 from .search_space import (
     _canonical_distributions,
     _enqueueable_initial_params,
-    _normalize_space_dict,
     _warn_if_optimum_at_boundary,
-    resolve_search_space,
+    log_complexity_guard,
+    plan_search_space,
 )
 from .trial_pipeline import (
     _resolve_apply_fs,
     _resolve_isotonic_feature_name,
     assemble_estimator,
-    build_trial_pipeline,
+    plan_preprocessing,
 )
 from .types import (
     WORST_SCORE_THRESHOLD,
@@ -79,10 +78,7 @@ from .types import (
     OptimizeResult,
 )
 
-# The records keep the logger name of the pre-split ``tuner`` module: the
-# logger name is part of the observable behavior (handlers, filters and
-# ``caplog`` assertions select records by it).
-log = _logging.getLogger("configurable_automl_engine.tuner")
+log = _logging.getLogger(__name__)
 
 
 def _validate_data(
@@ -194,19 +190,25 @@ class _OptimizeRunner:
     """A single hyperparameter optimisation run, split into steps.
 
     ``optimize()`` remains the public entry point with its original signature
-    and delegates all the work to this class. The monolithic logic of the
-    original function is split into isolated steps:
+    and delegates all the work to this class through ``run_optimization``:
 
         run()
-         ├─ resolve_validation()
-         ├─ build_trial_pipeline()               (before the search space:
-         │                                        the complexity guard needs p)
-         ├─ resolve_search_space()
-         ├─ handle_pruning()
-         ├─ transfer_previous_trials()        (TPE history warm-start)
-         ├─ evaluate_trial() / handle_failure()  (in the Optuna loop)
-         ├─ select_best_trial()
+         ├─ plan_validation()        → ValidationPlan   (repaired X)
+         ├─ plan_preprocessing()     → PreprocessingPlan (cleaned X; before
+         │                             the search space: the complexity
+         │                             guard needs p)
+         ├─ plan_search_space()      → SearchSpacePlan
+         ├─ plan_pruning()           → PruningPlan
+         ├─ _transfer_previous_trials()  (TPE history warm-start)
+         ├─ _objective() → score_trial() / handle_failure()  (Optuna loop)
+         ├─ select_best_trial()      → BestTrial
          └─ _fit_best_model()  (skipped when ``fit_best_model=False``)
+
+    The setup steps are pure functions; the runner stores their plans and
+    passes them explicitly to the trial evaluation. When a step changes the
+    feature matrix (the validation repairs it, the preprocessing plan drops
+    uninformative columns) the plan returns the new matrix and ``run()``
+    replaces ``self.X`` in one visible line.
 
     TPE history transfer: when ``previous_trials`` is passed, the trials are
     added to the study with ``study.add_trials`` AFTER ``create_study`` and
@@ -215,208 +217,39 @@ class _OptimizeRunner:
     ``select_best_trial`` counts and ranks ONLY the trials of the current
     phase — the transferred history feeds the TPE sampler but cannot mask a
     total failure of the current phase (the no-fallback refine contract).
-
-    The run state is stored in instance attributes: each step fills in its own
-    fields, and subsequent steps (as well as the Optuna objective) read them
-    without long argument chains.
     """
 
     MAX_FATAL_FAILURES = 5
     """Limit of consecutive fatal failures before the algorithm is disqualified."""
 
-    def __init__(
-        self,
-        *,
-        algo_name: str,
-        X: Any,
-        y: Any,
-        data_oversampling: bool,
-        data_oversampling_multiplier: float,
-        data_oversampling_algorithm: str,
-        data_oversampling_target_bins: int = 8,
-        data_oversampling_add_noise: bool = False,
-        data_oversampling_noise_level: float = 0.01,
-        metric: str,
-        val_method: ValidationStrategy | str,
-        validation_strategy: ValidationStrategy | str | None,
-        n_folds: int,
-        n_trials: int,
-        random_state: int | None,
-        sampler_seed: int | None,
-        train_test_split_test_size: float,
-        space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None,
-        initial_params: dict[str, Any] | None,
-        previous_trials: list[FrozenTrial] | None = None,
-        preprocessor: Any | None,
-        categorical_features: list[str] | None,
-        numerical_features: list[str] | None,
-        encoding: EncodingStrategy | None,
-        preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
-        pruning: dict[str, Any] | None,
-        high_cardinality_threshold: int | None,
-        high_cardinality_encoding: EncodingStrategy | None,
-        hashing_n_components: int,
-        target_encoding_smoothing: float,
-        target_encoding_fallback: float | None,
-        feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
-        complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
-        user_hyperparameter_keys: list[str] | None = None,
-        limit_hyperparameters: bool = False,
-        fit_best_model: bool = True,
-        phase_name: str | None = None,
-        inf_policy: str = "as_missing",
-        datetime_policy: str = "expand",
-        drop_id_like_columns: bool = False,
-        collect_oof: bool = False,
-    ) -> None:
-        """Store the parameters of a single optimisation run.
+    validation: ValidationPlan
+    preprocessing: PreprocessingPlan
+    search: SearchSpacePlan
+    pruning: PruningPlan
+    scorer: Any
+    study: optuna.Study
+    best: BestTrial
+    best_model: Any
+
+    def __init__(self, X: Any, y: Any, request: HpoRequest) -> None:
+        """Store the data and the settings of a single optimisation run.
 
         Args:
-            All arguments mirror the identically named ``optimize()``
-            parameters — see its docstring for the semantics.
+            X (Any): The feature matrix.
+            y (Any): The target vector.
+            request (HpoRequest): The run settings (see ``optimize()`` for
+                the semantics of every field).
         """
-        self.algo_name = algo_name
+        self.request = request
         self.X = X
         self.y = y
-        self.metric = metric
+        self.algo = request.algo_name.lower()
         # Whether the metric is non-additive (RMSE, MSE, R², nRMSE) and must
         # therefore be evaluated over the pooled out-of-fold vector instead of
         # the average of per-fold values (required for LOO, applied everywhere
         # with multiple folds). MAE and similar per-sample means stay on the
         # fold-average path (their fold mean equals the pooled value).
-        self.pool_metric = is_non_additive_metric(metric)
-        self.val_method = val_method
-        self.validation_strategy = validation_strategy
-        self.n_folds = n_folds
-        self.n_trials = n_trials
-        self.random_state = random_state
-        # The seed of the TPE sampler. Deliberately separate from
-        # ``random_state`` (which drives the data splits and the preprocessor):
-        # each HPO phase may use a different ``sampler_seed`` so that TPE
-        # startup points do not repeat, while the folds/splits stay the same
-        # (RANDOM_STATE) — otherwise every phase would re-evaluate models on
-        # other folds, breaking score monotonicity and mixing incomparable
-        # estimates in the transferred TPE history. ``None`` (the default for
-        # direct callers) falls back to ``random_state`` to preserve the old
-        # behavior.
-        self.sampler_seed = sampler_seed
-        self.train_test_split_test_size = train_test_split_test_size
-        self.space_overrides = space_overrides
-        self.initial_params = initial_params
-        self.previous_trials = previous_trials
-        self.preprocessor = preprocessor
-        self.categorical_features = categorical_features
-        self.numerical_features = numerical_features
-        self.encoding = encoding
-        self.preprocessing_override = preprocessing_override
-        self.pruning = pruning
-        self.high_cardinality_threshold = high_cardinality_threshold
-        self.high_cardinality_encoding = high_cardinality_encoding
-        self.hashing_n_components = hashing_n_components
-        self.target_encoding_smoothing = target_encoding_smoothing
-        self.target_encoding_fallback = target_encoding_fallback
-        self.feature_selection_cfg = feature_selection_cfg
-        # The adaptive complexity guard config (trees/boosting on small data).
-        # ``None`` — the defaults of ``general.complexity_guard`` (mode
-        # 'apply'), so direct ``optimize`` callers get the same search spaces
-        # as the engine; the guard is disabled with ``{"mode": "off"}``. The
-        # training engine passes the config from ``general.complexity_guard``.
-        if complexity_guard_cfg is None:
-            self.complexity_guard_cfg = ComplexityGuardConfig()
-        elif isinstance(complexity_guard_cfg, ComplexityGuardConfig):
-            self.complexity_guard_cfg = complexity_guard_cfg
-        else:
-            self.complexity_guard_cfg = ComplexityGuardConfig.from_dict(
-                complexity_guard_cfg
-            )
-        # Names of parameters set explicitly by the user
-        # (``algo.hyperparameters``); the complexity guard treats them as
-        # "user ranges" (intersected, with ``user_range_policy`` on conflict).
-        # ``None`` (a direct call that did not pass the list) — resolved in
-        # ``resolve_search_space`` to the keys of the dict override; the
-        # training engine always passes the list (an empty one included).
-        self.user_hyperparameter_keys: list[str] | None = (
-            None if user_hyperparameter_keys is None else list(user_hyperparameter_keys)
-        )
-        # Restrict the search to the user-listed parameters only: the space
-        # dict passed via ``space_overrides`` is used as-is (NO adaptive SVR
-        # epsilon injection, NO DEFAULT_SPACES fallback). Mirrors
-        # ``AlgoCfg.limit_hyperparameters``.
-        self.limit_hyperparameters = limit_hyperparameters
-        # Number of features after preprocessing (what the model sees).
-        # Filled in build_trial_pipeline (falls back to the raw column count).
-        self.n_features_eff: int = 1
-        # Number of NUMERICAL features after preprocessing (one column per
-        # numerical feature for isotonic — no one-hot expansion, no missing
-        # indicators). Used to size the isotonic ``feature_index`` search
-        # range: only numeric columns are meaningful inputs for the strictly
-        # univariate model. ``None`` — not determinable (an external
-        # preprocessor without explicit column lists).
-        self.n_numeric_eff: int | None = None
-        # Number of ORIGINAL columns (a categorical column counts as 1,
-        # before the one-hot expansion). Used only by the complexity guard
-        # for the size-mode ratio ``n / p``; filled in build_trial_pipeline.
-        self.n_features_size: int = 1
-        # Whether to train the best model on all data after the Optuna loop
-        # (``_fit_best_model``). Set to False when the caller only needs the
-        # best parameters and score (e.g. the training engine's HPO phase):
-        # the full-data fit is then skipped and the ``model`` field of the
-        # returned ``OptimizeResult`` is None.
-        self.fit_best_model = fit_best_model
-        # Whether to keep the out-of-fold predictions of every completed
-        # trial (the BBC-CV input): trial number -> OOF vector of len(X).
-        self.collect_oof = collect_oof
-        self.trial_oof: dict[int, np.ndarray] = {}
-        # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
-        # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
-        self.phase_name = phase_name
-
-        # Input-data diagnostics policies for the fail-fast feature checks:
-        # defaults mirror the pipeline behavior for direct ``optimize()``
-        # callers (S2 — the policies are configurable instead of hard-coded).
-        self.inf_policy = inf_policy
-        self.datetime_policy = datetime_policy
-        self.drop_id_like_columns = drop_id_like_columns
-
-        # Names of columns dropped by cleaning uninformative features.
-        # Filled in build_trial_pipeline for diagnostics; empty by default.
-        self.dropped_features_: list[str] = []
-
-        # Oversampling config for pipeline assembly (single point of truth).
-        self.oversampling_config: dict[str, Any] = {
-            "active": data_oversampling,
-            "params": {
-                "multiplier": data_oversampling_multiplier,
-                "algorithm": data_oversampling_algorithm,
-                "target_bins": data_oversampling_target_bins,
-                "add_noise": data_oversampling_add_noise,
-                "noise_level": data_oversampling_noise_level,
-            },
-        }
-
-        # ── Fields populated by the run() steps ───────────────────────────────
-        self.algo: str = ""
-        self.fs_cfg = FeatureSelectionCfg()
-        self.fs_mode = self.fs_cfg.mode
-        self.is_isotonic = False
-        self.n_samples_eff: int = 0
-        self.val_method_eff: str = ""
-        self.cv_obj: Any = None
-        self.auto_decision: dict[str, Any] | None = None
-        self.resolved_via_auto = False
-        self.effective_n_folds = self.n_folds
-        # A placeholder until the search space is resolved (step 2); replaced
-        # in resolve_search_space(). run() always calls resolve_search_space
-        # before the Optuna loop, so the real placeholder call is impossible.
-        self.space_fn: Callable[[Trial], dict[str, Any]] = lambda trial: {}
-        # The resolved dict search space (parameter name -> SearchSpaceEntry or
-        # constant) for dict-based spaces; empty for function/callable spaces.
-        # Used to warn when the best trial lies at a range boundary.
-        self.search_space_dict: dict[str, Any] = {}
-        self.scorer: Any = None
-        self.pruner: optuna.pruners.BasePruner | None = None
-        self.pruning_active = False
-        self.study: optuna.Study
+        self.pool_metric = is_non_additive_metric(request.metric)
         # The trial-number boundary between the transferred TPE history and the
         # current phase's own trials: fixed in run() right after
         # study.add_trials(previous_trials) and before enqueue_trial/optimize.
@@ -425,18 +258,9 @@ class _OptimizeRunner:
         # filled in run() after the Optuna loop and returned in OptimizeResult.
         self.phase_trials: list[FrozenTrial] = []
         self.consecutive_fatal_failures = 0
-        self.best_params: dict[str, Any]
-        self.best_score: float
-        self.clean_model_params: dict[str, Any]
-        self.best_apply_fs: bool
-        # The number of trials actually evaluated by the phase (own COMPLETED
-        # trials; transferred history never counts), reported in
-        # ``OptimizeResult.n_trials_evaluated`` as the honest denominator next
-        # to the best-trial score.
-        self.n_trials_evaluated: int = 0
-        # Log records of the adaptive complexity guard, filled in
-        # resolve_search_space; travels with OptimizeResult for the report.
-        self.complexity_guard_logs: list[dict[str, Any]] = []
+        # The out-of-fold predictions of every completed trial with a valid
+        # score (the BBC-CV input): trial number -> OOF vector of len(X).
+        self.trial_oof: dict[int, np.ndarray] = {}
 
     def run(self) -> OptimizeResult | None:
         """Run the full optimisation cycle, split into steps.
@@ -452,27 +276,48 @@ class _OptimizeRunner:
         if not self._validate_n_trials():
             return None
 
-        self.resolve_validation()
-        # The preprocessor must be built BEFORE the search space is resolved:
-        # the adaptive complexity guard needs ``p`` — the number of features
+        request = self.request
+        self.validation = plan_validation(self.X, self.y, request)
+        self.X = self.validation.X
+        # The preprocessor must be planned BEFORE the search space: the
+        # adaptive complexity guard needs ``p`` — the number of features
         # after preprocessing (one-hot, missing-value indicators).
-        self.build_trial_pipeline()
-        self.resolve_search_space()
-        self.handle_pruning()
+        self.preprocessing = plan_preprocessing(self.X, request)
+        self.X = self.preprocessing.X
+        self.search = plan_search_space(
+            self.algo,
+            self.y,
+            space_override=(request.space_overrides or {}).get(self.algo),
+            limit_hyperparameters=request.limit_hyperparameters,
+            user_hyperparameter_keys=request.user_hyperparameter_keys,
+            complexity_guard=request.complexity_guard,
+            n_samples_eff=self.validation.n_samples_eff,
+            preprocessing=self.preprocessing,
+        )
+        log_complexity_guard(self.search.guard_records, request.complexity_guard)
+        self.scorer = _build_scorer(request.metric)
+        self.pruning = plan_pruning(request.pruning, self.validation.method)
 
         # If early stopping is disabled, explicitly disable any pruner
         # (NopPruner) so that trials are guaranteed to run to completion.
         # The TPE sampler uses ``sampler_seed`` (per-phase, so startup points
         # do not repeat between HPO phases); the data splits and the
         # preprocessor keep ``random_state`` (RANDOM_STATE from the engine),
-        # so every phase evaluates models on the same folds.
+        # so every phase evaluates models on the same folds. ``None`` falls
+        # back to ``random_state`` (the behavior of direct callers).
         sampler_seed = (
-            self.sampler_seed if self.sampler_seed is not None else self.random_state
+            request.sampler_seed
+            if request.sampler_seed is not None
+            else request.random_state
         )
         self.study = optuna.create_study(
             direction="maximize",
             sampler=optuna.samplers.TPESampler(seed=sampler_seed),
-            pruner=self.pruner if self.pruning_active else optuna.pruners.NopPruner(),
+            pruner=(
+                self.pruning.pruner
+                if self.pruning.active
+                else optuna.pruners.NopPruner()
+            ),
         )
         # TPE history transfer BEFORE enqueue_trial/optimize: the transferred
         # trials feed the TPE sampler (incl. the n_startup_trials window) but
@@ -481,12 +326,14 @@ class _OptimizeRunner:
         self._transfer_previous_trials()
         self.phase_start_number = len(self.study.get_trials(deepcopy=False))
         # If there are parameters from the previous phase, enqueue them as the first trial
-        if self.initial_params is not None:
-            initial_params = _enqueueable_initial_params(self, self.initial_params)
+        if request.initial_params is not None:
+            initial_params = _enqueueable_initial_params(
+                request.initial_params, self.search.space_dict, self.algo
+            )
             self.study.enqueue_trial(initial_params)
             log.info("Enqueued initial params from previous phase: %s", initial_params)
         try:
-            self.study.optimize(self._objective, n_trials=self.n_trials)
+            self.study.optimize(self._objective, n_trials=request.n_trials)
         except InvalidAlgorithmError:
             log.warning(
                 "Algorithm %s disqualified after %d consecutive fatal failures",
@@ -506,29 +353,20 @@ class _OptimizeRunner:
         if not self.select_best_trial():
             return None
         self._log_best_result()
-        oof_predictions = _phase_oof_matrix(self)
-        if not self.fit_best_model:
-            # HPO-only mode (e.g. the training engine's phases): the caller
-            # needs only the best parameters and score — the final model is
-            # trained later by its own trainer. The redundant full-data fit
-            # is skipped, saving one full training per algorithm per phase;
-            # the model slot of the OptimizeResult stays None.
-            return OptimizeResult(
-                model=None,
-                params=self.best_params,
-                score=self.best_score,
-                trials=self.phase_trials,
-                complexity_guard=self.complexity_guard_logs or None,
-                n_trials_evaluated=self.n_trials_evaluated,
-                oof_predictions=oof_predictions,
-            )
+        oof_predictions = _phase_oof_matrix(self.phase_trials, self.trial_oof)
+        # HPO-only mode (``fit_best_model=False``, e.g. the training engine's
+        # phases): the caller needs only the best parameters and score — the
+        # final model is trained later by its own trainer. The redundant
+        # full-data fit is skipped, saving one full training per algorithm
+        # per phase; the model slot of the OptimizeResult stays None.
+        model = self._fit_best_model() if request.fit_best_model else None
         return OptimizeResult(
-            model=self._fit_best_model(),
-            params=self.best_params,
-            score=self.best_score,
+            model=model,
+            params=self.best.params,
+            score=self.best.score,
             trials=self.phase_trials,
-            complexity_guard=self.complexity_guard_logs or None,
-            n_trials_evaluated=self.n_trials_evaluated,
+            complexity_guard=self.search.guard_records or None,
+            n_trials_evaluated=self.best.n_trials_evaluated,
             oof_predictions=oof_predictions,
         )
 
@@ -549,9 +387,15 @@ class _OptimizeRunner:
           would degrade refine to a cold run;
         - an empty list is a no-op (``previous_trials=[]`` is allowed).
         """
-        if not self.previous_trials:
+        previous_trials = self.request.previous_trials
+        if not previous_trials:
             return
-        canonical = _canonical_distributions(self)
+        canonical = _canonical_distributions(
+            self.search.space_fn,
+            fs_mode=self.validation.fs_mode,
+            is_isotonic=self.validation.is_isotonic,
+            algo=self.algo,
+        )
         if canonical is None:
             # The search space cannot be reproduced by the pre-check (an
             # exotic custom ``space_fn``, e.g. one using legacy ``suggest_*``
@@ -566,7 +410,7 @@ class _OptimizeRunner:
                 "check does not support). TPE history transfer requires a "
                 "search space that can be replayed for validation."
             )
-        for trial in self.previous_trials:
+        for trial in previous_trials:
             for name, dist in trial.distributions.items():
                 expected = canonical.get(name)
                 if expected is None or expected != dist:
@@ -577,26 +421,10 @@ class _OptimizeRunner:
                         f"({expected!r}). TPE history transfer requires the "
                         f"same search space between HPO phases."
                     )
-        self.study.add_trials(self.previous_trials)
+        self.study.add_trials(previous_trials)
         log.info(
-            "Transferred %d trial(s) from the previous phase", len(self.previous_trials)
+            "Transferred %d trial(s) from the previous phase", len(previous_trials)
         )
-
-    def resolve_validation(self) -> None:
-        """Resolve the validation strategy (step 1); see ``evaluation``."""
-        resolve_validation(self)
-
-    def _normalize_space_dict(self, space_dict: dict[str, Any]) -> dict[str, Any]:
-        """Re-resolve inferred range types; see ``search_space._normalize_space_dict``."""
-        return _normalize_space_dict(self, space_dict)
-
-    def resolve_search_space(self) -> None:
-        """Resolve the search space and the scorer (step 2); see ``search_space``."""
-        resolve_search_space(self)
-
-    def build_trial_pipeline(self) -> None:
-        """Build the preprocessor for the HPO phase (step 3); see ``trial_pipeline``."""
-        build_trial_pipeline(self)
 
     def assemble_estimator(
         self,
@@ -605,12 +433,21 @@ class _OptimizeRunner:
         feature_index: int | None = None,
     ) -> Any:
         """Assemble the trial pipeline; see ``trial_pipeline.assemble_estimator``."""
-        return assemble_estimator(self, model_impl, apply_fs, feature_index)
+        return assemble_estimator(
+            model_impl,
+            self.preprocessing,
+            is_isotonic=self.validation.is_isotonic,
+            fs_cfg=self.validation.fs_cfg,
+            oversampling=self.request.oversampling,
+            random_state=self.request.random_state,
+            apply_fs=apply_fs,
+            feature_index=feature_index,
+        )
 
     def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
-        """Evaluate the assembled trial pipeline and return the target metric (step 4).
+        """Evaluate the assembled trial pipeline and return the target metric.
 
-        Delegates the evaluation to ``_score_trial``. With ``collect_oof`` the
+        Delegates the evaluation to ``score_trial``. With ``collect_oof`` the
         out-of-fold predictions of the trial are kept in ``trial_oof`` when
         the trial produced a valid score (the worst-score sentinel — a failed
         fold or a non-finite metric — is not a selectable candidate and is
@@ -627,17 +464,24 @@ class _OptimizeRunner:
                 counted in the ``handle_failure`` counter.
             optuna.TrialPruned: Pruning by the early stopping pruner.
         """
-        if not self.collect_oof:
-            return _score_trial(self, trial, current_estimator, None)
-        oof = np.full(len(self.X), np.nan, dtype=float)
-        score = _score_trial(self, trial, current_estimator, oof)
-        if score > WORST_SCORE_THRESHOLD:
-            self.trial_oof[trial.number] = oof
-        return score
-
-    def handle_pruning(self) -> None:
-        """Configure early stopping (step 5); see ``pruning.handle_pruning``."""
-        handle_pruning(self)
+        request = self.request
+        result = score_trial(
+            current_estimator,
+            self.X,
+            self.y,
+            trial=trial,
+            validation=self.validation,
+            scorer=self.scorer,
+            pruning_active=self.pruning.active,
+            pool_metric=self.pool_metric,
+            random_state=request.random_state,
+            algo_name=request.algo_name,
+            phase_name=request.phase_name or "",
+            collect_oof=request.collect_oof,
+        )
+        if result.oof is not None and result.value > WORST_SCORE_THRESHOLD:
+            self.trial_oof[trial.number] = result.oof
+        return result.value
 
     def _objective(self, trial: Trial) -> float:
         """Optuna objective function: evaluate_trial + handle_failure.
@@ -664,7 +508,7 @@ class _OptimizeRunner:
         # 1. hyperparameters, model and pipeline assembly — outside try/except
         #    (contract of the original code: their errors are not fatal
         #    evaluation failures and are not counted by the circuit breaker).
-        params = self.space_fn(trial)
+        params = self.search.space_fn(trial)
         model_kwargs = dict(params)
         # The model seed follows the run's ``random_state`` (the engine seed),
         # unless the user set ``random_state`` explicitly in the algorithm
@@ -672,11 +516,13 @@ class _OptimizeRunner:
         # explicit None → a truly random fit, a WARNING is logged by
         # ``create_model``).
         if "random_state" not in model_kwargs:
-            model_kwargs["random_state"] = self.random_state
+            model_kwargs["random_state"] = self.request.random_state
         model = create_model(self.algo, **model_kwargs)
         current_estimator = self.assemble_estimator(
             model,
-            apply_fs=_resolve_apply_fs(self, trial),
+            apply_fs=_resolve_apply_fs(
+                trial, self.validation.fs_mode, self.validation.is_isotonic
+            ),
             feature_index=params.get("feature_index"),
         )
 
@@ -700,7 +546,7 @@ class _OptimizeRunner:
                 self.consecutive_fatal_failures = 0
 
     def handle_failure(self, trial: Trial, err: Exception) -> NoReturn:
-        """Handle a trial evaluation failure according to the outcome contract (step 6).
+        """Handle a trial evaluation failure according to the outcome contract.
 
         A non-fatal ``ValueError`` simply prunes the trial
         (``optuna.TrialPruned``) without counting it. ``MemoryError`` /
@@ -726,12 +572,8 @@ class _OptimizeRunner:
             ) from err
         raise optuna.TrialPruned() from err
 
-    def _warn_if_optimum_at_boundary(self, best_params: dict[str, Any]) -> None:
-        """Warn when the best value lies at a range boundary; see ``search_space``."""
-        _warn_if_optimum_at_boundary(self, best_params)
-
     def select_best_trial(self) -> bool:
-        """Select the best completed trial of the CURRENT phase (step 7).
+        """Select the best completed trial of the CURRENT phase.
 
         Explicit trial state counting: the presence of a valid result is
         determined by the number of completed (COMPLETED) trials of the
@@ -746,14 +588,14 @@ class _OptimizeRunner:
 
         The best trial is selected EXPLICITLY by its value among the current
         phase's COMPLETED trials; ``study.best_params`` is deliberately not
-        used — it would rank the transferred trials too.
+        used — it would rank the transferred trials too. The result is stored
+        in ``self.best``.
 
         Returns:
             bool: True if there is a completed trial of the current phase;
                 False — the "no valid result" contract (all OWN trials
                 PRUNED/FAILED or an empty list).
         """
-        assert self.study is not None
         own_trials = self.phase_trials or [
             t
             for t in self.study.get_trials(deepcopy=False)
@@ -766,7 +608,7 @@ class _OptimizeRunner:
             1 for t in own_trials if t.state == optuna.trial.TrialState.PRUNED
         )
         n_failed = sum(1 for t in own_trials if t.state == optuna.trial.TrialState.FAIL)
-        if self.pruning_active:
+        if self.pruning.active:
             log.info(
                 "Early stopping: pruned %d of %d trials (algo=%s)",
                 n_pruned,
@@ -796,77 +638,101 @@ class _OptimizeRunner:
             )
             return False
 
-        # The honest evaluation count reported next to the best-trial score:
-        # the best score is the MAXIMUM over exactly these trials (the more
-        # trials were evaluated on the same folds, the more optimistic the
-        # score is expected to be). Transferred history never counts.
-        self.n_trials_evaluated = n_completed
-
         best_trial = max(
             (t for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE),
             key=lambda t: cast(float, t.value),
         )
-        self.best_score = float(cast(float, best_trial.value))
         best_params = dict(best_trial.params)
 
-        self._warn_if_optimum_at_boundary(best_params)
+        _warn_if_optimum_at_boundary(
+            best_params,
+            self.search,
+            algo=self.algo,
+            n_samples_eff=self.validation.n_samples_eff,
+            preprocessing=self.preprocessing,
+        )
 
         # The feature selection decision comes from the best trial's params
         # (mode='auto': the "use_feature_selection" key is already fixed by
         # Optuna) or from the configuration mode ('always' -> True, 'disabled'
         # -> False). For isotonic_regression selection is forcibly ignored.
-        best_apply_fs = bool(
+        apply_fs = bool(
             best_params.get(
-                "use_feature_selection", self.fs_mode == FeatureSelectionMode.always
+                "use_feature_selection",
+                self.validation.fs_mode == FeatureSelectionMode.always,
             )
         )
-        if self.is_isotonic:
-            best_apply_fs = False
-            # For isotonic_regression, the auxiliary key is also excluded from
-            # the returned best_params (a guard against initial_params carried
-            # through enqueue_trial from the previous phase with the
-            # use_feature_selection key).
-            best_params = {
-                k: v for k, v in best_params.items() if k != "use_feature_selection"
-            }
-            # Report the chosen NUMERICAL feature name in the params
-            # (``isotonic_feature``), resolved from the preprocessor's
-            # get_feature_names_out (the numerical block occupies the last
-            # ``n_numeric`` columns). Fitted only when the preprocessor is
-            # available and the name is resolvable.
-            if self.preprocessor is not None:
-                feature_name = _resolve_isotonic_feature_name(
-                    self, best_params.get("feature_index", 0)
-                )
-                if feature_name is not None:
-                    best_params["isotonic_feature"] = feature_name
-        self.best_params = best_params
+        if self.validation.is_isotonic:
+            apply_fs = False
+            best_params = self._isotonic_best_params(best_params)
         # The base model constructor parameters are cleaned of the tuner's
         # auxiliary keys ("use_feature_selection" and the informational
         # "isotonic_feature" are not model hyperparameters; ``create_model``
         # rejects unknown names). They are built from the already filtered
-        # self.best_params (for isotonic_regression the key was excluded
-        # above) so the source is single; the best trial's params are
-        # not mutated and the key is guaranteed not to reach the model
-        # constructor.
-        self.clean_model_params = dict(self.best_params)
-        self.clean_model_params.pop("use_feature_selection", None)
-        self.clean_model_params.pop("isotonic_feature", None)
-        self.best_apply_fs = best_apply_fs
+        # best params (for isotonic_regression the key was excluded above)
+        # so the source is single; the best trial's params are not mutated
+        # and the key is guaranteed not to reach the model constructor.
+        model_params = {
+            k: v
+            for k, v in best_params.items()
+            if k not in ("use_feature_selection", "isotonic_feature")
+        }
+        self.best = BestTrial(
+            params=best_params,
+            score=float(cast(float, best_trial.value)),
+            model_params=model_params,
+            apply_fs=apply_fs,
+            # The honest evaluation count reported next to the best-trial
+            # score: the best score is the MAXIMUM over exactly these trials
+            # (the more trials were evaluated on the same folds, the more
+            # optimistic the score is expected to be). Transferred history
+            # never counts.
+            n_trials_evaluated=n_completed,
+        )
         return True
 
+    def _isotonic_best_params(self, best_params: dict[str, Any]) -> dict[str, Any]:
+        """The reported best params of ``isotonic_regression``.
+
+        The auxiliary ``use_feature_selection`` key is excluded (a guard
+        against initial_params carried through enqueue_trial from the
+        previous phase with the key), and the chosen NUMERICAL feature name
+        is reported as ``isotonic_feature`` when it is resolvable from the
+        preprocessor's ``get_feature_names_out`` (the numerical block
+        occupies the last ``n_numeric`` columns).
+
+        Args:
+            best_params: The parameters of the best trial.
+
+        Returns:
+            dict[str, Any]: The reported params.
+        """
+        params = {k: v for k, v in best_params.items() if k != "use_feature_selection"}
+        preprocessor = self.preprocessing.preprocessor
+        if preprocessor is not None:
+            feature_name = _resolve_isotonic_feature_name(
+                preprocessor,
+                self.preprocessing.n_numeric_eff,
+                self.X,
+                self.y,
+                params.get("feature_index", 0),
+            )
+            if feature_name is not None:
+                params["isotonic_feature"] = feature_name
+        return params
+
     def _log_best_result(self) -> None:
-        """Log the outcome of the best trial (shared by both return paths)."""
+        """Log the outcome of the best trial."""
         log.info(
             "Hyperopt: algo=%s | val=%s | score=%.5f | params=%s",
             self.algo,
-            self.val_method_eff,
-            self.best_score,
-            self.best_params,
+            self.validation.method,
+            self.best.score,
+            self.best.params,
         )
 
     def _fit_best_model(self) -> Any:
-        """Train the final model on all provided data (step 8).
+        """Train the final model on all provided data.
 
         Assembles the pipeline with the best parameters (taking the feature
         selection decision from ``select_best_trial`` into account) and trains
@@ -878,13 +744,13 @@ class _OptimizeRunner:
         Returns:
             Any: The trained best model (``self.best_model``).
         """
-        clean_params = dict(self.clean_model_params)
-        if "random_state" not in clean_params:
-            clean_params["random_state"] = self.random_state
+        params = dict(self.best.model_params)
+        if "random_state" not in params:
+            params["random_state"] = self.request.random_state
         best_model = self.assemble_estimator(
-            create_model(self.algo, **clean_params),
-            apply_fs=self.best_apply_fs,
-            feature_index=self.clean_model_params.get("feature_index"),
+            create_model(self.algo, **params),
+            apply_fs=self.best.apply_fs,
+            feature_index=self.best.model_params.get("feature_index"),
         )
         best_model.fit(self.X, self.y)
 
@@ -893,9 +759,10 @@ class _OptimizeRunner:
         # preprocessed matrix the final model received (dense
         # one-hot on high-cardinality columns inflated the matrix with no log
         # signal). Best-effort — the log must never break the optimization.
-        if self.preprocessor is not None:
+        preprocessor = self.preprocessing.preprocessor
+        if preprocessor is not None:
             try:
-                matrix = self.preprocessor.transform(self.X)
+                matrix = preprocessor.transform(self.X)
                 log.info(
                     "preprocessed matrix: %d × %d (%s)",
                     matrix.shape[0],
@@ -920,103 +787,130 @@ class _OptimizeRunner:
         Raises:
             ValueError: If ``n_trials`` is negative or not an integer.
         """
-        if not isinstance(self.n_trials, int) or self.n_trials < 0:
-            raise ValueError(
-                f"n_trials must be a non-negative integer, got {self.n_trials}"
-            )
-        if self.n_trials == 0:
+        n_trials = self.request.n_trials
+        if not isinstance(n_trials, int) or n_trials < 0:
+            raise ValueError(f"n_trials must be a non-negative integer, got {n_trials}")
+        if n_trials == 0:
             # Empty trial list — the "no valid result" contract: return a
             # plain None without running Optuna and without exceptions
             # (including for algorithms without a search space).
             log.warning(
                 "Algorithm '%s' requested with n_trials=0; no trials to run — "
                 "returning no result",
-                self.algo_name,
+                self.request.algo_name,
             )
             return False
         return True
 
 
-def resolve_validation(runner: _OptimizeRunner) -> None:
-    """Resolve the validation strategy and related quantities (step 1).
+def _normalize_feature_selection_cfg(value: Any) -> FeatureSelectionCfg:
+    """Normalize the feature selection configuration of a run.
 
-    Performs input normalization (the ``validation_strategy`` alias), data
-    and algorithm availability checks, normalization of the feature
-    selection configuration, and picks the CV strategy via ``make_cv``.
-    The results are stored in instance attributes for later steps.
+    ``None`` -> default (mode='disabled'), dict -> ``FeatureSelectionCfg``
+    (validated at run time), ``FeatureSelectionCfg`` object -> as is.
+
+    Args:
+        value: The ``feature_selection_cfg`` of the request.
+
+    Returns:
+        FeatureSelectionCfg: The validated configuration.
+
+    Raises:
+        HyperoptError: If a dict with invalid values is passed.
+        TypeError: If an object of an unsupported type is passed.
     """
-    # the alias takes precedence
-    if runner.validation_strategy is not None:
-        runner.val_method = runner.validation_strategy
+    if value is None:
+        return FeatureSelectionCfg()
+    if isinstance(value, FeatureSelectionCfg):
+        return value
+    if isinstance(value, dict):
+        try:
+            return FeatureSelectionCfg.model_validate(value)
+        except Exception as err:
+            raise HyperoptError(f"Invalid feature_selection_cfg: {err}") from err
+    raise TypeError(
+        "feature_selection_cfg must be a FeatureSelectionCfg, dict or None, "
+        f"got {type(value).__name__}"
+    )
 
-    runner.algo = runner.algo_name.lower()
+
+def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
+    """Validate the input and resolve the validation strategy.
+
+    Performs the data and algorithm availability checks, normalizes the
+    feature selection configuration, and picks the CV strategy via
+    ``make_cv``. The input data is not mutated: a repaired feature matrix
+    (e.g. expanded datetime columns) is returned in the plan.
+
+    Args:
+        X (Any): The feature matrix.
+        y (Any): The target vector.
+        request (HpoRequest): The run settings.
+
+    Returns:
+        ValidationPlan: The repaired matrix and the resolved validation.
+
+    Raises:
+        InvalidDataError: If the data is invalid.
+        InvalidAlgorithmError: If the algorithm is not available.
+        HyperoptError: If the feature selection configuration is invalid.
+    """
+    algo = request.algo_name.lower()
+    policies = request.policies
     # _validate_data may return a repaired feature matrix (e.g. datetime
     # columns expanded); the None return is kept for backward compatibility
     # with callers/mocks that treat the helper as a pure validator.
-    _validated = _validate_data(
-        runner.X,
-        runner.y,
-        inf_policy=runner.inf_policy,
-        datetime_policy=runner.datetime_policy,
-        drop_id_like_columns=runner.drop_id_like_columns,
+    validated = _validate_data(
+        X,
+        y,
+        inf_policy=policies.inf_policy,
+        datetime_policy=policies.datetime_policy,
+        drop_id_like_columns=policies.drop_id_like_columns,
     )
-    if isinstance(_validated, (pd.DataFrame, np.ndarray)):
-        runner.X = _validated
+    if isinstance(validated, (pd.DataFrame, np.ndarray)):
+        X = validated
 
-    _get_estimator(runner.algo)
+    _get_estimator(algo)
 
-    # Normalize the feature selection configuration: None -> default
-    # (mode='disabled'), dict -> FeatureSelectionCfg (validated at run
-    # time), FeatureSelectionCfg object -> as is. Isotonic regression is
-    # strictly univariate and uses its own IsotonicDataTransformer, so
-    # selection is forcibly disabled for it regardless of the mode.
-    fs_cfg = runner.feature_selection_cfg
-    if fs_cfg is None:
-        runner.fs_cfg = FeatureSelectionCfg()
-    elif isinstance(fs_cfg, FeatureSelectionCfg):
-        runner.fs_cfg = fs_cfg
-    elif isinstance(fs_cfg, dict):
-        try:
-            runner.fs_cfg = FeatureSelectionCfg.model_validate(fs_cfg)
-        except Exception as err:
-            raise HyperoptError(f"Invalid feature_selection_cfg: {err}") from err
-    else:
-        raise TypeError(
-            "feature_selection_cfg must be a FeatureSelectionCfg, dict or None, "
-            f"got {type(fs_cfg).__name__}"
-        )
-    runner.fs_mode = runner.fs_cfg.mode
-    runner.is_isotonic = resolve_algorithm_name(runner.algo) == "isotonic_regression"
+    # Isotonic regression is strictly univariate and uses its own
+    # IsotonicDataTransformer, so selection is forcibly disabled for it
+    # regardless of the mode.
+    fs_cfg = _normalize_feature_selection_cfg(request.feature_selection_cfg)
+    is_isotonic = resolve_algorithm_name(algo) == "isotonic_regression"
     log.info(
         "Feature selection mode for algorithm '%s': %s",
-        runner.algo,
-        runner.fs_mode.value,
+        algo,
+        fs_cfg.mode.value,
     )
 
     # Determine how many rows the model actually "sees" during training
     # inside CV/Split, and resolve the validation strategy (incl. 'auto').
-    n_samples = len(runner.y)
-    n_features = runner.X.shape[1]
-    runner.n_samples_eff = get_effective_train_size(
+    n_samples = len(y)
+    n_features = X.shape[1]
+    n_samples_eff = get_effective_train_size(
         n_total=n_samples,
-        strategy=runner.validation_strategy or runner.val_method,
-        n_folds=runner.n_folds,
-        test_size=runner.train_test_split_test_size,
+        strategy=request.val_method,
+        n_folds=request.n_folds,
+        test_size=request.train_test_split_test_size,
         n_features=n_features,
     )
-    runner.val_method_eff, runner.cv_obj, runner.auto_decision = make_cv(
+    method, cv_obj, auto_decision = make_cv(
         n_samples,
-        val_method=runner.val_method,
-        n_folds=runner.n_folds,
-        random_state=runner.random_state,
-        test_size=runner.train_test_split_test_size,
+        val_method=request.val_method,
+        n_folds=request.n_folds,
+        random_state=request.random_state,
+        test_size=request.train_test_split_test_size,
         n_features=n_features,
     )
     # 'auto' is resolved exactly once (here, in make_cv). The resulting
     # decision is passed to iter_splits so that the test size is not
     # recomputed and cannot diverge between n_samples_eff and the actual
     # split.
-    runner.resolved_via_auto = norm_val_method(runner.val_method) == "auto"
+    resolved_via_auto = norm_val_method(request.val_method) == "auto"
+    if method == "train_test_split" and resolved_via_auto and auto_decision is not None:
+        split_test_size: float | int = int(auto_decision["test_size"])
+    else:
+        split_test_size = request.train_test_split_test_size
 
     # A single fold count for the early stopping branch (k_fold). The
     # 'auto' strategy could resolve to kfold with a number of folds k that
@@ -1025,14 +919,46 @@ def resolve_validation(runner: _OptimizeRunner) -> None:
     # _evaluate_with_intermediate_reports would fall back to the default
     # n_folds and the evaluation would diverge from
     # cross_val_score(cv=cv_obj).
-    if runner.val_method_eff == "k_fold":
+    if method == "k_fold":
         # Take the fold count from the ready cv_obj (for k_fold it is
         # guaranteed to be non-None — make_cv always creates a KFold in
         # this branch). One formula covers auto→kfold (k from the
         # decision), the 'auto' fallback without P (clamped to max(2, k)),
         # and an explicit k_fold.
-        assert runner.cv_obj is not None
-        runner.effective_n_folds = int(runner.cv_obj.get_n_splits())
+        assert cv_obj is not None
+        n_folds = int(cv_obj.get_n_splits())
     else:
         # Explicit loo / train_test_split: the fold count is not used.
-        runner.effective_n_folds = runner.n_folds
+        n_folds = request.n_folds
+    return ValidationPlan(
+        X=X,
+        algo=algo,
+        fs_cfg=fs_cfg,
+        is_isotonic=is_isotonic,
+        n_samples_eff=n_samples_eff,
+        method=method,
+        cv=cv_obj,
+        auto_decision=auto_decision,
+        resolved_via_auto=resolved_via_auto,
+        n_folds=n_folds,
+        test_size=request.train_test_split_test_size,
+        split_test_size=split_test_size,
+    )
+
+
+def run_optimization(X: Any, y: Any, request: HpoRequest) -> OptimizeResult | None:
+    """Run the hyperparameter search of one algorithm.
+
+    The single entry point behind ``tuner.optimize`` and the training
+    engine's HPO phases.
+
+    Args:
+        X (Any): The feature matrix.
+        y (Any): The target vector.
+        request (HpoRequest): The run settings.
+
+    Returns:
+        OptimizeResult | None: The phase result, or ``None`` — the "no valid
+            result" signal (see ``optimize()``).
+    """
+    return _OptimizeRunner(X, y, request).run()

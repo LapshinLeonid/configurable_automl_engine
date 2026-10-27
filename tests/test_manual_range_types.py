@@ -29,7 +29,11 @@ from configurable_automl_engine.common.hyperopt_defaults import (
 )
 from configurable_automl_engine.training_engine.config_parser import Config
 from configurable_automl_engine.tuner import optimize
-from configurable_automl_engine.hpo.runner import _OptimizeRunner
+from configurable_automl_engine.hpo.plans import PreprocessingPlan, SearchSpacePlan
+from configurable_automl_engine.hpo.search_space import (
+    _normalize_space_dict,
+    _warn_if_optimum_at_boundary,
+)
 
 # A minimal valid base config: elasticnet search + terminal select.
 BASE = {
@@ -311,14 +315,50 @@ def test_resolve_implicit_non_scale_unknown_param_none():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _runner_with_space(space: dict) -> _OptimizeRunner:
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "ridge"
-    runner.search_space_dict = space
-    runner.complexity_guard_logs = []
-    runner.n_samples_eff = 100
-    runner.n_features_eff = 5
-    return runner
+class _BoundaryCase:
+    """The inputs of ``_warn_if_optimum_at_boundary`` for one scenario.
+
+    The fields mirror the run state the check reads (the algorithm, the
+    resolved space, the guard records and the feature counts); the check
+    itself is the pure ``search_space._warn_if_optimum_at_boundary``.
+    """
+
+    def __init__(self, space: dict) -> None:
+        self.algo = "ridge"
+        self.search_space_dict = space
+        self.complexity_guard_logs: list[dict] = []
+        self.n_samples_eff = 100
+        self.n_features_eff = 5
+
+    def _warn_if_optimum_at_boundary(self, best_params: dict) -> None:
+        search = SearchSpacePlan(
+            space_fn=lambda trial: {},
+            space_dict=self.search_space_dict,
+            guard_records=self.complexity_guard_logs,
+            user_hyperparameter_keys=[],
+        )
+        preprocessing = PreprocessingPlan(
+            X=None,
+            dropped_features=[],
+            categorical_features=None,
+            numerical_features=None,
+            preprocessor=None,
+            n_features_eff=self.n_features_eff,
+            n_numeric_eff=None,
+            n_features_size=self.n_features_eff,
+            isotonic_max_feature_index=max(0, self.n_features_eff - 1),
+        )
+        _warn_if_optimum_at_boundary(
+            best_params,
+            search,
+            algo=self.algo,
+            n_samples_eff=self.n_samples_eff,
+            preprocessing=preprocessing,
+        )
+
+
+def _runner_with_space(space: dict) -> _BoundaryCase:
+    return _BoundaryCase(space)
 
 
 def test_warn_at_high_boundary(caplog):
@@ -420,7 +460,7 @@ def test_skips_param_missing_from_best_params(caplog):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _runner_with_guard(space: dict, logs: list[dict]) -> _OptimizeRunner:
+def _runner_with_guard(space: dict, logs: list[dict]) -> _BoundaryCase:
     runner = _runner_with_space(space)
     runner.complexity_guard_logs = logs
     return runner
@@ -1008,10 +1048,8 @@ def test_dump_reload_round_trip_dict_form_int_preserved():
 
 def test_normalize_space_dict_retypes_inferred_entry():
     """_normalize_space_dict re-resolves [1, 50] for C of an SVR to float_log."""
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "svr"
     space = {"C": [1, 50], "kernel": [["rbf", "linear"], "categorical"]}
-    normalized = runner._normalize_space_dict(space)
+    normalized = _normalize_space_dict("svr", space)
     assert isinstance(normalized["C"], SearchSpaceEntry)
     assert normalized["C"].dist_type == "float_log"
     # Categorical lists are parsed to SearchSpaceEntry too (no longer constants).
@@ -1026,10 +1064,8 @@ def test_normalize_space_dict_retypes_float_log_default_param():
     SCALE_PARAMS, but its DEFAULT_SPACES entry is float_log, so an inferred
     range must be searched on a logarithmic scale.
     """
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "ardregression"
     space = {"alpha_1": [1e-6, 0.1], "max_iter": 500}
-    normalized = runner._normalize_space_dict(space)
+    normalized = _normalize_space_dict("ardregression", space)
     assert normalized["alpha_1"].dist_type == "float_log"
     assert isinstance(normalized["alpha_1"].config, FloatSpace)
     assert normalized["max_iter"] == 500
@@ -1037,30 +1073,24 @@ def test_normalize_space_dict_retypes_float_log_default_param():
 
 def test_normalize_space_dict_keeps_explicit_types():
     """Explicitly typed entries in space_overrides are not rewritten."""
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "svr"
     space = {
         "C": [1, 50, "int"],  # Explicitly int, even for a float param.
         "epsilon": SearchSpaceEntry.model_validate([0.5, 1.0, "float_log"]),
     }
-    normalized = runner._normalize_space_dict(space)
+    normalized = _normalize_space_dict("svr", space)
     assert normalized["C"].dist_type == "int"
     assert normalized["epsilon"].dist_type == "float_log"
 
 
 def test_normalize_space_dict_keeps_constants():
     """Plain constants pass through unchanged."""
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "svr"
-    normalized = runner._normalize_space_dict({"max_iter": 1000})
+    normalized = _normalize_space_dict("svr", {"max_iter": 1000})
     assert normalized == {"max_iter": 1000}
 
 
 def test_normalize_space_dict_int_param_stays_int():
     """n_estimators [10, 500] for a random forest stays int."""
-    runner = _OptimizeRunner.__new__(_OptimizeRunner)
-    runner.algo = "random_forest"
-    normalized = runner._normalize_space_dict({"n_estimators": [10, 500]})
+    normalized = _normalize_space_dict("random_forest", {"n_estimators": [10, 500]})
     assert normalized["n_estimators"].dist_type == "int"
     assert isinstance(normalized["n_estimators"].config, IntSpace)
 

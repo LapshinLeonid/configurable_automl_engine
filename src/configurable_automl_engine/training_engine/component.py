@@ -14,11 +14,12 @@ Two-stage winner selection is performed by an explicit pipeline select step:
       audited candidates by RMSE_oof (active mode);
     - select with strategy: cv_best — deterministic ranking by CV score without
       audit (the equivalent of the legacy path with mode: off).
-This module only orchestrates the steps; they live in dedicated modules and
-their public names are re-exported here:
+This module only orchestrates the steps and is the only one that mutates the
+``PhaseContext``: the steps are pure functions that return outcomes, applied
+here. The steps live in dedicated modules (import them from there):
     - state: Shared dataclasses (PhaseResult, PreparedData, PhaseContext, ...).
     - data_prep: load_config, prepare_dataset.
-    - hpo_phases: HPO phase execution through external tuners (_run_hpo).
+    - hpo_phases: HPO phase execution (_run_hpo).
     - finalists: select_winner, select_finalists, select_robust_winner.
     - select_steps: The explicit select steps (cv_best / sanity_gate).
     - artifact: Final model training on the full dataset, persist_artifact.
@@ -51,13 +52,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 
 from .artifact import persist_artifact
 from .data_prep import load_config, prepare_dataset
-from .finalists import (
-    FAMILY_DIVERSITY_MULTIPLIER_DEFAULT,
-    is_valid_winner_score,
-    select_finalists,
-    select_robust_winner,
-    select_winner,
-)
+from .finalists import is_valid_winner_score
 from .hpo_phases import (
     _algorithms_as_dict,
     _apply_target_domain_guard,
@@ -66,36 +61,18 @@ from .hpo_phases import (
     _hpo_phase_worker,
     _merge_complexity_guard_records,
 )
-from .select_steps import _execute_select_phase
+from .select_steps import select_step_outcome
 from .state import (
-    FinalistCandidate,
     PhaseContext,
     PhaseResult,
     PreparedData,
-    RobustWinnerResult,
+    SelectOutcome,
+    WorkerOutcome,
     _HpoPhaseSpec,
 )
 from .thread_pool import run_parallel
 
-# The public names of the pipeline steps are re-exported: they were defined
-# here before the steps moved to dedicated modules.
-__all__ = [
-    "FAMILY_DIVERSITY_MULTIPLIER_DEFAULT",
-    "FinalistCandidate",
-    "PhaseContext",
-    "PhaseResult",
-    "PreparedData",
-    "RobustWinnerResult",
-    "execute_phases",
-    "is_valid_winner_score",
-    "load_config",
-    "persist_artifact",
-    "prepare_dataset",
-    "select_finalists",
-    "select_robust_winner",
-    "select_winner",
-    "train_best_model",
-]
+__all__ = ["execute_phases", "train_best_model"]
 
 _LOG = logging.getLogger(__name__)
 
@@ -108,9 +85,8 @@ def execute_phases(
 
     Pipeline step 3. Contains the phase loop, parallel HPO execution,
     synchronous select steps, circuit breaker disqualification, and filtering
-    of invalid results. The HPO worker ``_hpo_phase_worker`` and the helpers
-    ``_prepare_search_space`` / ``_execute_hpo_phase`` are module-level
-    functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
+    of invalid results. The HPO worker ``_hpo_phase_worker`` and the helper
+    ``_execute_hpo_phase`` are module-level functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
     worker is serializable in the "processes" mode. The feature matrix ``X``
     is passed as a separate argument and transferred via ``run_parallel``
     shared memory / disk in that mode.
@@ -167,8 +143,7 @@ def execute_phases(
         RuntimeError: If an HPO phase produced no valid score, a select step
             received an empty working set, or no finalist was trained on the
             full dataset.
-        HPOHistoryError: If a refine phase passes TPE history to a tuner that
-            does not accept ``previous_trials``, or the transferred history is
+        HPOHistoryError: If the transferred TPE history of a refine phase is
             incompatible with the current search space (fail fast).
     """
     ctx = PhaseContext()
@@ -178,7 +153,11 @@ def execute_phases(
     # Target-domain guard (before any trial): GLMs whose loss domain does not
     # fit y are disqualified up front, a partly invalid Tweedie power range
     # is clipped to its valid part.
-    all_algorithms = _apply_target_domain_guard(all_algorithms, prepared.y, ctx)
+    guard = _apply_target_domain_guard(
+        all_algorithms, prepared.y, ctx.disqualified_algorithms
+    )
+    all_algorithms = guard.algorithms
+    ctx.disqualified_algorithms.update(guard.disqualified)
     # Disqualified algorithms (circuit breaker): name -> reason.
     # Disqualification does not abort the run: the algorithm is excluded from
     # candidates and results, the rest continue training.
@@ -206,7 +185,9 @@ def execute_phases(
         if phase.action == "select":
             # The select step runs synchronously (outside run_parallel): it
             # operates on already-finished HPO results.
-            _execute_select_phase(phase=phase, cfg=cfg, prepared=prepared, ctx=ctx)
+            _apply_select_outcome(
+                ctx, select_step_outcome(phase, cfg, prepared, ctx), phase.name
+            )
             continue
 
         phase_seed = (
@@ -512,11 +493,49 @@ def _run_phase_workers(
                 else cfg.general.task_timeout
             ),
         )
-        _consume_worker_results(results, phase_results, ctx)
+        _apply_worker_outcome(ctx, phase_results, _consume_worker_results(results))
     else:
         for n, a in current_candidates.items():
             res = _hpo_phase_worker(n, a, spec, X)
-            _consume_worker_results([res], phase_results, ctx)
+            _apply_worker_outcome(ctx, phase_results, _consume_worker_results([res]))
+
+
+def _apply_worker_outcome(
+    ctx: PhaseContext,
+    phase_results: dict[str, PhaseResult],
+    outcome: WorkerOutcome,
+) -> None:
+    """Merge the HPO worker outcome into the phase results and the context.
+
+    Args:
+        ctx (PhaseContext): The pipeline phase context (disqualifications and
+            the BBC-CV pool are extended).
+        phase_results (dict[str, PhaseResult]): The phase results (extended).
+        outcome (WorkerOutcome): The sorted worker results.
+    """
+    ctx.disqualified_algorithms.update(outcome.disqualified)
+    ctx.oof_pool.extend(outcome.oof_pool)
+    phase_results.update(outcome.results)
+
+
+def _apply_select_outcome(
+    ctx: PhaseContext, outcome: SelectOutcome, phase_name: str
+) -> None:
+    """Replace the pipeline state with the outcome of a select step.
+
+    Args:
+        ctx (PhaseContext): The pipeline phase context (mutated).
+        outcome (SelectOutcome): The new state returned by the select step.
+        phase_name (str): The select phase name (the key of its gate report
+            section).
+    """
+    ctx.working_set = outcome.working_set
+    ctx.winner_algo = outcome.winner_algo
+    ctx.pre_trained_trainer = outcome.pre_trained_trainer
+    ctx.full_fit_trainers = outcome.full_fit_trainers
+    ctx.disqualified_algorithms = outcome.disqualified_algorithms
+    if outcome.sanity_gate_section is not None:
+        ctx.sanity_gate_sections[phase_name] = outcome.sanity_gate_section
 
 
 def _valid_phase_results(
@@ -529,12 +548,12 @@ def _valid_phase_results(
     minimum (WORST_SCORE_THRESHOLD): it covers both the HPO_WORST_SCORE
     constant (returned by the tuner when a trial metric is non-finite) and
     the raw float(np.finfo(np.float32).min) value (possible from numpy-cast
-    metrics or custom tuners), which the old math.isclose(rel_tol=1e-9)
+    metrics), which the old math.isclose(rel_tol=1e-9)
     check missed (relative difference ≈ 9.88e-9). Real metrics of such
     magnitude are practically impossible, so the threshold cannot drop a
     legitimate winner. params must be a dict (the tuner failure signal is
-    params=None); garbage score types from custom tuners (None, strings,
-    etc.) are rejected by is_valid_winner_score.
+    params=None); garbage score types (None, strings, etc.) are rejected
+    by is_valid_winner_score.
 
     Args:
         phase_results (dict[str, PhaseResult]): The raw phase results.
@@ -654,8 +673,8 @@ def train_best_model(
     final_params = winner_record.params
     # The honest evaluation count of the winner's HPO phase: the number of
     # trials actually evaluated (own COMPLETED trials; transferred history
-    # never counts). 0 means "unknown" (legacy custom tuners that do not
-    # report the count) — persist_artifact then omits the key.
+    # never counts). 0 means "unknown" — persist_artifact then omits the
+    # key.
     n_trials_evaluated = int(winner_record.n_trials_evaluated or 0)
     # Final invariant: the winner's score must be finite and strictly above the
     # worst-score sentinel class before entering result["score"]. Otherwise the

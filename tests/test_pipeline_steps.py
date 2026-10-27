@@ -37,15 +37,19 @@ import configurable_automl_engine.training_engine.component as component
 import configurable_automl_engine.training_engine.artifact as artifact_mod
 import configurable_automl_engine.training_engine.data_prep as data_prep_mod
 import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
+from configurable_automl_engine.training_engine.artifact import persist_artifact
 from configurable_automl_engine.training_engine.component import (
+    execute_phases,
+    train_best_model,
+)
+from configurable_automl_engine.training_engine.data_prep import (
+    load_config,
+    prepare_dataset,
+)
+from configurable_automl_engine.training_engine.state import (
     PhaseContext,
     PhaseResult,
     PreparedData,
-    execute_phases,
-    load_config,
-    persist_artifact,
-    prepare_dataset,
-    train_best_model,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
@@ -125,8 +129,6 @@ def _cfg_dict(
     for name in algorithms or ["random_forest"]:
         algos[name] = {
             "enable": True,
-            "tuner": "mock.mock_tuner",
-            "trainer_module": "mock.mock_trainer",
         }
     return {
         "general": {
@@ -405,7 +407,7 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
+        return PhaseResult(score=scores[kw["request"].algo_name], params={"p": 1})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo) as mock_hpo:
         ctx = execute_phases(cfg, prepared)
@@ -422,7 +424,7 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     assert mock_hpo.call_count == 2
     # The HPO phase name travels to _run_hpo → tuner.optimize(phase_name=...)
     # for the pooled-fallback WARNING deduplication.
-    assert all(call.kwargs["phase_name"] == "coarse" for call in mock_hpo.call_args_list)
+    assert all(call.kwargs["request"].phase_name == "coarse" for call in mock_hpo.call_args_list)
 
 
 def test_execute_phases_select_cv_best_top_k_replaces_working_set():
@@ -448,7 +450,7 @@ def test_execute_phases_select_cv_best_top_k_replaces_working_set():
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
-        return PhaseResult(score=scores[kw["algo_name"]], params={"p": 1})
+        return PhaseResult(score=scores[kw["request"].algo_name], params={"p": 1})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
         ctx = execute_phases(cfg, prepared)
@@ -479,8 +481,8 @@ def test_execute_phases_refine_uses_initial_params_for_all_candidates():
     calls: list[tuple[str, Any]] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        algo = kw["algo_name"]
-        calls.append((algo, kw.get("initial_params")))
+        algo = kw["request"].algo_name
+        calls.append((algo, kw["request"].initial_params))
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[algo], params={"p": 1})
 
@@ -532,8 +534,8 @@ def test_execute_phases_refine_after_select_warm_starts_from_select_output():
     calls: list[tuple[str, Any]] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        algo = kw["algo_name"]
-        calls.append((algo, kw.get("initial_params")))
+        algo = kw["request"].algo_name
+        calls.append((algo, kw["request"].initial_params))
         scores = {"random_forest": 0.9, "extra_trees": 0.8}
         return PhaseResult(score=scores[algo], params={"p": 1})
 
@@ -600,7 +602,7 @@ def test_execute_phases_filters_worst_score_sentinel():
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        if kw["algo_name"] == "random_forest":
+        if kw["request"].algo_name == "random_forest":
             return PhaseResult(score=HPO_WORST_SCORE, params={"p": 1})  # sentinel -> excluded
         return PhaseResult(score=0.7, params={"p": 2})
 
@@ -619,7 +621,7 @@ def test_execute_phases_disqualifies_invalid_algorithm():
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        if kw["algo_name"] == "random_forest":
+        if kw["request"].algo_name == "random_forest":
             raise InvalidAlgorithmError("incompatible with data")
         return PhaseResult(score=0.7, params={"p": 2})
 
@@ -1061,9 +1063,9 @@ def test_execute_phases_refine_passes_previous_trials():
     history = _completed_trial()
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        algo = kw["algo_name"]
-        prev = kw.get("previous_trials")
-        calls.append((algo, kw.get("initial_params"), None if prev is None else list(prev)))
+        algo = kw["request"].algo_name
+        prev = kw["request"].previous_trials
+        calls.append((algo, kw["request"].initial_params, None if prev is None else list(prev)))
         return PhaseResult(score=0.9, params={"p": 1}, trials=[history])
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
@@ -1098,7 +1100,7 @@ def test_execute_phases_refine_total_failure_raises_with_history():
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
     def fake_run_hpo(**kw: Any) -> Any:
-        if kw.get("initial_params") is None:
+        if kw["request"].initial_params is None:
             # phase 1 succeeds and produces a COMPLETED trial (transferred history).
             return PhaseResult(score=0.9, params={"p": 1}, trials=[_completed_trial()])
         # refine: all new trials fail (None) despite the transferred history.
@@ -1130,8 +1132,8 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
     split_seeds: list[int] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        sampler_seeds.append(kw["sampler_seed"])
-        split_seeds.append(kw["random_state"])
+        sampler_seeds.append(kw["request"].sampler_seed)
+        split_seeds.append(kw["request"].random_state)
         return PhaseResult(score=0.9, params={"p": 1})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
@@ -1172,8 +1174,8 @@ def test_hpo_phases_use_general_random_state_for_splits_and_sampler_base():
     split_seeds: list[int] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        sampler_seeds.append(kw["sampler_seed"])
-        split_seeds.append(kw["random_state"])
+        sampler_seeds.append(kw["request"].sampler_seed)
+        split_seeds.append(kw["request"].random_state)
         return PhaseResult(score=0.9, params={"p": 1})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
@@ -1210,7 +1212,7 @@ def test_hpo_phases_none_random_state_unseeded_and_warns(caplog):
     seen: list[tuple[Any, Any]] = []
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
-        seen.append((kw.get("random_state"), kw.get("sampler_seed")))
+        seen.append((kw["request"].random_state, kw["request"].sampler_seed))
         return PhaseResult(score=0.9, params={"p": 1})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):

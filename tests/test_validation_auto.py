@@ -704,7 +704,11 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
     monkeypatch.setattr(hpo_evaluation, "iter_splits", fake_iter_splits)
     monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
-    monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
+    model = MagicMock()
+    # The hold-out scorer fits a clone of the pipeline (the trial estimator
+    # stays unfitted): the mock model clones to itself.
+    model.__sklearn_clone__ = lambda: model
+    monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: model)
 
     tuner.optimize(
         "nearest_neighbors_regression",

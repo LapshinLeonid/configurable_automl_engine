@@ -24,10 +24,8 @@ import pytest
 from pydantic import ValidationError
 
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
-from configurable_automl_engine.training_engine.component import (
-    PhaseResult,
-    train_best_model,
-)
+from configurable_automl_engine.training_engine.component import train_best_model
+from configurable_automl_engine.training_engine.state import PhaseResult
 from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
@@ -429,8 +427,6 @@ def _component_config(additional: list[str] | None = None) -> dict:
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -550,13 +546,9 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
     cfg["algorithms"] = {
         "elasticnet": {
             "enable": True,
-            "tuner": "unittest.mock",
-            "trainer_module": "unittest.mock",
         },
         "ridge": {
             "enable": True,
-            "tuner": "unittest.mock",
-            "trainer_module": "unittest.mock",
         },
     }
 
@@ -564,7 +556,7 @@ def test_additional_metrics_do_not_affect_winner_selection(tiny_df):
         # ridge gives the best MAE (0.60) — it must win.
         # "Raw" scorer values are negative (-MAE): maximization
         # picks the larger one (-0.60 > -0.95).
-        if kwargs["algo_name"] == "ridge":
+        if kwargs["request"].algo_name == "ridge":
             return PhaseResult(score=-0.60, params={"alpha": 0.5})
         return PhaseResult(score=-0.95, params={"alpha": 0.1})
 
@@ -605,8 +597,8 @@ def test_fit_and_save_forwards_additional_metrics(tmp_path, tiny_df):
     algo_cfg = cfg.algorithms.elasticnet
 
     with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=fake_module,
+        "configurable_automl_engine.training_engine.artifact.ModelTrainer",
+        fake_module.ModelTrainer,
     ):
         trainer = _fit_and_save(
             "elasticnet",
@@ -641,8 +633,8 @@ def test_fit_and_save_forwards_empty_additional_metrics(tmp_path, tiny_df):
     algo_cfg = cfg.algorithms.elasticnet
 
     with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=fake_module,
+        "configurable_automl_engine.training_engine.artifact.ModelTrainer",
+        fake_module.ModelTrainer,
     ):
         trainer = _fit_and_save(
             "elasticnet",

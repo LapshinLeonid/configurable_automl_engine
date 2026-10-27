@@ -25,7 +25,6 @@ Key features:
 from __future__ import annotations
 
 import logging
-import re
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -45,6 +44,29 @@ from pydantic_core import PydanticCustomError
 # ValidationError instead of the hint text, which is subject to change.
 ERR_REMOVED_REFINE_WINNER = "removed_refine_winner_action"
 ERR_REMOVED_SANITY_GATE_MODE = "removed_sanity_gate_mode"
+ERR_REMOVED_PLUGIN_KEY = "removed_plugin_module_key"
+
+#: The per-algorithm keys of the custom tuner/trainer plug-in, removed in 0.5.0.
+REMOVED_ALGORITHM_KEYS = ("tuner", "trainer_module")
+
+
+def _removed_plugin_key_error(path: str) -> PydanticCustomError:
+    """The targeted error for a removed custom tuner/trainer key.
+
+    Args:
+        path: The config path of the key (e.g. ``algorithms.ridge.tuner``).
+
+    Returns:
+        PydanticCustomError: The error with the ``ERR_REMOVED_PLUGIN_KEY``
+            type and a migration hint.
+    """
+    return PydanticCustomError(
+        ERR_REMOVED_PLUGIN_KEY,
+        f"`{path}` was removed in 0.5.0: custom tuner/trainer modules are no "
+        "longer supported; delete the key. See 'Migrating older configs' in "
+        "API_REFERENCE.md.",
+    )
+
 
 from configurable_automl_engine.common.definitions import (
     ALGO_PACKAGE_MAPPING,
@@ -68,8 +90,6 @@ from configurable_automl_engine.training_engine.metrics import (
 # Build the type on the fly. *AVAILABLE_METRICS unpacks the list into Literal arguments
 ComparisonMetric = Literal[*AVAILABLE_METRICS]  # type: ignore
 
-
-_DOTTED_PATH_RE = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
 
 __all__ = [
     "AlgoCfg",
@@ -1642,19 +1662,37 @@ class OversamplingCfg(BaseModel):
 class AlgoCfg(BaseModel):
     """Technical configuration of a specific ML algorithm in the pipeline.
 
-    Stores the algorithm enablement settings, overridden search spaces,
-    and paths to the trainer and tuner modules.
+    Stores the algorithm enablement settings, the overridden search space
+    and the preprocessing preset override.
     Attributes:
         enable (bool): Flag for the algorithm's participation in the current experiment.
         limit_hyperparameters (bool): Restrict the search to the user-listed
             hyperparameters only (no DEFAULT_SPACES entries).
         hyperparameters (Dict | None): Custom parameter bounds
             overriding the default values.
-        tuner (str): Dotted path to the optimizer module.
-        trainer_module (str): Dotted path to the model training implementation.
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_plugin_keys(cls, data: Any) -> Any:
+        """Reject the removed ``tuner`` / ``trainer_module`` keys with a hint.
+
+        Args:
+            data: Raw input data of the algorithm section.
+
+        Returns:
+            Any: The data unchanged, if no removed key is present.
+
+        Raises:
+            PydanticCustomError: If a removed key is present.
+        """
+        if isinstance(data, dict):
+            for key in REMOVED_ALGORITHM_KEYS:
+                if key in data:
+                    raise _removed_plugin_key_error(key)
+        return data
 
     enable: bool = Field(
         default=True, description="Whether to use this algorithm in the AutoML pipeline"
@@ -1685,17 +1723,6 @@ class AlgoCfg(BaseModel):
             "('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'). "
             "Takes precedence over the automatic choice based on the algorithm "
             "class. None — automatic selection."
-        ),
-    )
-    tuner: str | None = Field(
-        default="configurable_automl_engine.tuner",
-        description="Path to the tuner module for hyperparameter optimization",
-    )
-    trainer_module: str | None = Field(
-        default="configurable_automl_engine.trainer",
-        description=(
-            "Dotted path to the module containing the `ModelTrainer` class"
-            "(for example, 'configurable_automl_engine.trainer')."
         ),
     )
 
@@ -1739,18 +1766,6 @@ class AlgoCfg(BaseModel):
 
         return [k for k in self.hyperparameters if k not in allowed]
 
-    @field_validator("tuner", "trainer_module")
-    @classmethod
-    def _must_not_be_empty(cls, v: str) -> str:
-        if v is None:
-            return v
-        if not _DOTTED_PATH_RE.fullmatch(v):
-            raise ValueError(
-                f"'{v}' is not a valid dotted path "
-                "(expecting 'package.module' or 'a.b.c.Class' format)"
-            )
-        return v
-
     @model_validator(mode="after")
     def _limit_requires_hyperparameters(self) -> AlgoCfg:
         """Reject the meaningless ``limit_hyperparameters: true`` without ``hyperparameters``.
@@ -1771,6 +1786,32 @@ class AlgoCfg(BaseModel):
 
 class _AlgorithmsConfigBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_plugin_keys(cls, data: Any) -> Any:
+        """Reject ``algorithms.<name>.tuner`` / ``trainer_module`` with a hint.
+
+        Checked here, before the per-algorithm validation, so that the message
+        names the full config path of the key.
+
+        Args:
+            data: Raw input data of the ``algorithms`` section.
+
+        Returns:
+            Any: The data unchanged, if no removed key is present.
+
+        Raises:
+            PydanticCustomError: If an algorithm section has a removed key.
+        """
+        if isinstance(data, dict):
+            for name, section in data.items():
+                if not isinstance(section, dict):
+                    continue
+                for key in REMOVED_ALGORITHM_KEYS:
+                    if key in section:
+                        raise _removed_plugin_key_error(f"algorithms.{name}.{key}")
+        return data
 
 
 AlgorithmsConfig = create_model(

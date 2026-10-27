@@ -31,9 +31,9 @@ from configurable_automl_engine.training_engine import component
 import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 from configurable_automl_engine.training_engine.component import (
     execute_phases,
-    prepare_dataset,
     train_best_model,
 )
+from configurable_automl_engine.training_engine.data_prep import prepare_dataset
 from configurable_automl_engine.training_engine.artifact import (
     _bbc_score_in_user_metric,
 )

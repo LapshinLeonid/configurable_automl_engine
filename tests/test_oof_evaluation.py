@@ -39,6 +39,7 @@ from configurable_automl_engine.models import create_model
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.metrics import oof_rmse
 from configurable_automl_engine.validation import iter_splits
+from tests.trainer_helpers import score_with_trainer, trainer_preprocessor
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -73,11 +74,11 @@ def _manual_oof(
 ) -> np.ndarray:
     """Recompute the OOF vector by hand: the same splits and pipeline clones per fold.
 
-    Repeats the logic of ``_score_on_validation_splits`` independently to
+    Repeats the logic of ``score_on_validation_splits`` independently to
     verify the absence of leakage: each row is predicted by a pipeline
     trained without it (the test part of the fold).
     """
-    preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
+    preprocessor = trainer_preprocessor(trainer, trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     oof = np.full(len(X), np.nan, dtype=float)
     for X_tr, X_te, y_tr, y_te, test_idx in iter_splits(
@@ -230,7 +231,7 @@ def test_oof_rmse_approx_mean_fold_rmse_equal_folds():
         random_state=7,
     ).fit(X, y)
 
-    preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
+    preprocessor = trainer_preprocessor(trainer, trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     fold_rmse: list[float] = []
     fold_mse: list[float] = []
@@ -399,7 +400,7 @@ def test_oof_unequal_fold_sizes_pooled_rmse_exact():
         random_state=3,
     ).fit(X, y)
 
-    preprocessor = trainer._build_preprocessor(trainer.feature_names or [])
+    preprocessor = trainer_preprocessor(trainer, trainer.feature_names or [])
     model = create_model(trainer.algorithm, **trainer.hyperparams)
     fold_mse: list[float] = []
     fold_n: list[int] = []
@@ -428,7 +429,7 @@ def test_oof_train_test_split_partial_coverage_warning(caplog):
     over the covered subset and equals the RMSE on the hold-out part.
     """
     X, y = _noisy_regression(n=80, p=5, seed=21)
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge",
             metric="r2",
@@ -491,32 +492,29 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="k_fold", n_folds=3
     )
-    trainer.feature_names = ["f0", "f1"]
-    trainer.categorical_features = []
-    trainer.numerical_features = ["f0", "f1"]
-    preprocessor = trainer._build_preprocessor(["f0", "f1"])
+    preprocessor = trainer_preprocessor(
+        trainer, ["f0", "f1"], categorical=[], numerical=["f0", "f1"]
+    )
     # The model returns NaN for rows with f0 > 0.5 (white box).
     model = _ConstRegressor(value=1.5, nan_condition=lambda Xa: Xa[:, 0] > 0.5)
 
     with (
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
         patch(
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
         ),
     ):
-        trainer._score_on_validation_splits(
-            X, y, preprocessor, model, feature_selection_active=False
-        )
+        scores = score_with_trainer(trainer, X, y, preprocessor, model)
 
     valid_mask = X["f0"] <= 0.5
     expected = float(
         np.sqrt(mean_squared_error(y[valid_mask], np.full(valid_mask.sum(), 1.5)))
     )
-    assert trainer.oof_coverage_ == pytest.approx(valid_mask.mean(), rel=1e-9)
-    assert trainer.oof_score_ == pytest.approx(expected, rel=1e-9)
+    assert scores.oof_coverage == pytest.approx(valid_mask.mean(), rel=1e-9)
+    assert scores.oof_score == pytest.approx(expected, rel=1e-9)
     assert "excluded from RMSE_oof" in caplog.text
-    assert trainer.val_score == pytest.approx(0.5)
+    assert scores.val_score == pytest.approx(0.5)
 
 
 def test_oof_nan_in_y_reduced_coverage(caplog):
@@ -533,30 +531,27 @@ def test_oof_nan_in_y_reduced_coverage(caplog):
     trainer = ModelTrainer(
         algorithm="ridge", metric="r2", validation_strategy="k_fold", n_folds=3
     )
-    trainer.feature_names = ["f0", "f1"]
-    trainer.categorical_features = []
-    trainer.numerical_features = ["f0", "f1"]
-    preprocessor = trainer._build_preprocessor(["f0", "f1"])
+    preprocessor = trainer_preprocessor(
+        trainer, ["f0", "f1"], categorical=[], numerical=["f0", "f1"]
+    )
     # The model ignores y during fit — a white box isolating the OOF channel.
     model = _ConstRegressor(value=1.5)
 
     with (
-        caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"),
+        caplog.at_level(logging.WARNING, logger="configurable_automl_engine"),
         patch(
             "configurable_automl_engine.trainer_scoring.get_scorer_object",
             return_value=lambda est, Xv, yv: 0.5,
         ),
     ):
-        trainer._score_on_validation_splits(
-            X, y, preprocessor, model, feature_selection_active=False
-        )
+        scores = score_with_trainer(trainer, X, y, preprocessor, model)
 
     valid_mask = y.notna()
     expected = float(
         np.sqrt(mean_squared_error(y[valid_mask], np.full(valid_mask.sum(), 1.5)))
     )
-    assert trainer.oof_coverage_ == pytest.approx(valid_mask.mean(), rel=1e-9)
-    assert trainer.oof_score_ == pytest.approx(expected, rel=1e-9)
+    assert scores.oof_coverage == pytest.approx(valid_mask.mean(), rel=1e-9)
+    assert scores.oof_score == pytest.approx(expected, rel=1e-9)
     assert "excluded from RMSE_oof" in caplog.text
 
 
@@ -565,7 +560,7 @@ def test_oof_very_small_n_warning(caplog):
     X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 3.0, 4.0])
 
-    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.trainer"):
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine"):
         trainer = ModelTrainer(
             algorithm="ridge",
             metric="r2",

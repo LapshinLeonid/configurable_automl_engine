@@ -46,7 +46,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.compose import ColumnTransformer
 
 from configurable_automl_engine.common.definitions import (
@@ -58,19 +58,19 @@ from configurable_automl_engine.common.serialization_utils import (
     resolve_load_formats,
     save_artifact,
 )
+from configurable_automl_engine.common.settings import (
+    InputPolicies,
+    OversamplingSettings,
+)
 from configurable_automl_engine.common.validation_utils import (
     apply_inf_policy,
     expand_datetime_columns,
 )
 from configurable_automl_engine.feature_selection import FeatureSelector
 from configurable_automl_engine.oversampling import DataOversampler
-from configurable_automl_engine.preprocessing import (
-    EncodingStrategy,
-)
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     PreprocessingPreset,
-    resolve_preprocessing_preset,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
@@ -84,6 +84,7 @@ from configurable_automl_engine.training_engine.thread_pool import SharedDataFra
 from .common.artifact_metadata import (
     _collect_artifact_metadata,
     _warn_on_version_mismatch,
+    check_artifact_format,
 )
 from .models import (
     create_model,
@@ -92,41 +93,22 @@ from .models import (
 from .trainer_data import (
     _align_predict_columns,
     _align_predict_shared_dataframe,
-    _build_preprocessor,
-    _check_training_data,
-    _detect_feature_types,
     _isotonic_n_numeric,
     _isotonic_n_total_estimate,
-    _log_preprocessed_matrix,
-    _prepare_data,
-    _prepare_training_features,
-    _reset_fit_state,
     _resolve_isotonic_feature_index,
+    build_trainer_preprocessor,
+    load_training_data,
+    log_preprocessed_matrix,
+    prepare_features,
 )
 from .trainer_errors import TrainingError
-from .trainer_feature_selection import (
-    _resolve_feature_selection_active,
-    _run_feature_selection_auto_check,
-    _validate_feature_selection_cfg,
-)
-from .trainer_params import (
-    _normalize_additional_metrics,
-    _validate_algorithm,
-    _validate_encoding_strategy,
-    _validate_feature_lists,
-    _validate_feature_selection_active,
-    _validate_high_cardinality,
-    _validate_hyperparams,
-    _validate_input_policies,
-    _validate_oversampling,
-    _validate_preprocessing_override,
-    _validate_test_size,
-    _validate_validation_strategy,
-)
-from .trainer_scoring import (
-    _align_oof_vector,
-    _finalize_oof,
-    _score_on_validation_splits,
+from .trainer_feature_selection import _resolve_feature_selection_active
+from .trainer_params import build_trainer_settings as _build_settings
+from .trainer_scoring import StepsFactory, score_on_validation_splits
+from .trainer_state import (
+    FeatureSelectionResult,
+    PreparedFeatures,
+    ValidationScores,
 )
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
@@ -309,6 +291,14 @@ class ModelTrainer:
     Automates the construction of a pipeline that includes feature preprocessing
     (imputation, scaling, encoding), synthetic sample enlargement
     (oversampling), and training of the selected algorithm with mandatory validation.
+
+    The state is grouped: the validated constructor settings
+    (``settings``), the fit results of the pure steps (the prepared features,
+    the validation estimate, the feature selection outcome) and the final
+    ``pipeline``. The attributes below are read-only views of these groups,
+    except ``pipeline``, ``preprocessing_preset``, ``datetime_expansion_``
+    and ``artifact_metadata_``. The saved artifact records its format
+    version (``trainer_state.ARTIFACT_FORMAT_VERSION``).
     Attributes:
         algorithm (str): Algorithm name
             (e.g., 'elasticnet', 'xgboosting').
@@ -336,9 +326,9 @@ class ModelTrainer:
         preprocessing_override (PreprocessingOverride | dict | None): Explicit
             override of the feature preprocessing preset. It may be specified
             partially or fully and takes precedence over automatic selection.
-        os_enable (bool): Flag enabling dataset balancing/enlargement.
-        os_multiplier (float): Coefficient for generating synthetic data.
-        os_algorithm (str): Oversampling algorithm ('random', 'smote', 'adasyn').
+        settings (TrainerSettings): All validated constructor settings in
+            one frozen object (the oversampling, encoding and input-policy
+            groups included); the settings above are read-only views of it.
         pipeline (Pipeline | None): Final pipeline object after calling fit().
         val_score (float | None): Value of the primary metric computed on the
             hold-out part of the data (``train_test_split``) or — for
@@ -419,9 +409,6 @@ class ModelTrainer:
         lock (threading.RLock): Recursive lock for thread-safe training.
     """
 
-    # Set by ``_prepare_data`` during fit() (the dtypes of the training frame).
-    _detected_dtypes: Any
-
     def __init__(
         self,
         algorithm: str = "elasticnet",
@@ -491,252 +478,237 @@ class ModelTrainer:
         """
 
         self.logger = logging.getLogger(__name__)
-
         self.lock = threading.RLock()
-
-        # Validate the algorithm
-        self.algorithm = _validate_algorithm(algorithm)
-
-        # hyperparams
-        self.hyperparams = _validate_hyperparams(hyperparams)
-
-        # Remaining parameters
-        self.metric = metric.lower()
-        self.random_state = random_state
-        self.serialization_format = serialization_format
-        self.categorical_features = categorical_features
-        self.numerical_features = numerical_features
-        self.id_column = id_column
-        # ---------- input-data diagnostics policies ----------
-        # Validated immediately: invalid policy values are rejected at
-        # initialization time, before training starts.
-        _validate_input_policies(
-            inf_policy=inf_policy,
-            datetime_policy=datetime_policy,
-            drop_id_like_columns=drop_id_like_columns,
-            warn_id_like=warn_id_like,
-        )
-        self.inf_policy: str = inf_policy
-        self.datetime_policy: str = datetime_policy
-        self.drop_id_like_columns: bool = drop_id_like_columns
-        self.warn_id_like: bool = warn_id_like
-        # Categorical encoding strategy: 'one_hot' (default), 'ordinal',
-        # 'target', 'frequency' or 'hashing'. Stored as a string primitive
-        # to remain pickle-compatible.
-        self.encoding_strategy: EncodingStrategy = _validate_encoding_strategy(
-            encoding_strategy
-        )
-
-        # High-cardinality encoding parameters and new strategies.
-        # Validated immediately so that invalid values are rejected at
-        # initialization time, before training starts.
-        self.high_cardinality_threshold = high_cardinality_threshold
-        self.high_cardinality_encoding = high_cardinality_encoding
-        self.hashing_n_components = hashing_n_components
-        self.target_encoding_smoothing = target_encoding_smoothing
-        self.target_encoding_fallback = target_encoding_fallback
-        _validate_high_cardinality(
+        # The constructor arguments are validated immediately (invalid values
+        # are rejected at initialization time, before expensive training) and
+        # kept as one frozen settings object.
+        self.settings = _build_settings(
+            algorithm=algorithm,
+            hyperparams=hyperparams,
+            metric=metric,
+            random_state=random_state,
+            serialization_format=serialization_format,
+            categorical_features=categorical_features,
+            numerical_features=numerical_features,
+            id_column=id_column,
+            encoding_strategy=encoding_strategy,
             high_cardinality_threshold=high_cardinality_threshold,
             high_cardinality_encoding=high_cardinality_encoding,
             hashing_n_components=hashing_n_components,
             target_encoding_smoothing=target_encoding_smoothing,
+            target_encoding_fallback=target_encoding_fallback,
+            additional_metrics=additional_metrics,
+            preprocessing_override=preprocessing_override,
+            feature_selection_cfg=feature_selection_cfg,
+            feature_selection_active=feature_selection_active,
+            validation_strategy=validation_strategy,
+            n_folds=n_folds,
+            test_size=test_size,
+            oversampling=OversamplingSettings(
+                enable=data_oversampling,
+                multiplier=data_oversampling_multiplier,
+                algorithm=data_oversampling_algorithm,
+                target_bins=data_oversampling_target_bins,
+                add_noise=data_oversampling_add_noise,
+                noise_level=data_oversampling_noise_level,
+            ),
+            policies=InputPolicies(
+                inf_policy=inf_policy,
+                datetime_policy=datetime_policy,
+                drop_id_like_columns=drop_id_like_columns,
+            ),
+            warn_id_like=warn_id_like,
         )
-
-        # ---------- additional (informational) metrics ----------
-        self.additional_metrics: list[str] = _normalize_additional_metrics(
-            additional_metrics
-        )
-        self.additional_scores: dict[str, float] = {}
-
-        # Explicit override of the preprocessing preset: validate it immediately
-        # so that invalid values are rejected at initialization time.
-        self.preprocessing_override: PreprocessingOverride | None = (
-            _validate_preprocessing_override(preprocessing_override)
-        )
-        # The resolved preset is populated in _build_preprocessor during fit().
-        self.preprocessing_preset: PreprocessingPreset | None = None
-
-        # ---------- feature selection ----------
-        # Validate the feature selection configuration immediately so that
-        # invalid values (percentile=150, unknown method/mode, extra keys)
-        # are rejected at initialization time, before expensive training.
-        self.feature_selection_cfg: FeatureSelectionCfg = (
-            _validate_feature_selection_cfg(feature_selection_cfg)
-        )
-        # Explicit flag from HPO via training_engine.artifact (takes precedence over the config);
-        # None — the decision is made in fit() based on the configuration mode.
-        self.feature_selection_active: bool | None = _validate_feature_selection_active(
-            feature_selection_active
-        )
-        # Actual selection status in the final training (populated in fit()).
-        self.feature_selection_active_: bool = False
-        # Boolean mask of the selected columns in post-preprocessor dimensionality.
-        self.selected_features_mask_: np.ndarray | None = None
-
-        # ---------- validation ----------
-        # Quality assessment strategy for the final model. Stored as a string
-        # primitive (pickle compatibility); strings are normalized via
-        # validation.norm_val_method — a single mapping source shared with HPO
-        # (validation.make_cv / iter_splits).
-        self.validation_strategy: str = _validate_validation_strategy(
-            validation_strategy, n_folds
-        )
-        self.n_folds: int = n_folds
-        self.test_size: float = _validate_test_size(test_size)
-
-        # ---------- oversampling ----------
-        self.os_enable = data_oversampling
-        self.os_multiplier = data_oversampling_multiplier
-        self.os_algorithm = data_oversampling_algorithm
-        self.os_target_bins = data_oversampling_target_bins
-        self.os_add_noise = data_oversampling_add_noise
-        self.os_noise_level = data_oversampling_noise_level
-        _validate_oversampling(
-            multiplier=self.os_multiplier,
-            algorithm=self.os_algorithm,
-            target_bins=self.os_target_bins,
-            noise_level=self.os_noise_level,
-        )
-
-        # Fields populated after fit(...)
+        # ── State populated by fit() (grouped results of the pure steps) ──
+        # The final pipeline trained on 100% of the data.
         self.pipeline: Pipeline | None = None
-        self.base_model: Any = None
-        self.val_score: float | None = None
-        # OOF candidate evaluation channel: a metric on all rows without
-        # training leakage (for hyperparameters selected on the same splits it
-        # still carries the selection bias). Each row is predicted by a model that has not seen it
-        # during training; predictions from validation folds are collected into
-        # a single y_pred_oof vector aligned to the original row order, and
-        # RMSE_oof is computed on the whole vector at once.
-        self.oof_score_: float | None = None
-        self.oof_predictions_: pd.Series | np.ndarray | None = None
-        self.oof_coverage_: float | None = None
-        self.feature_names: list[str] | None = None
-        # Names of columns removed by cleaning uninformative features.
-        # Populated in fit() for pd.DataFrame inputs; empty list by default
-        # (pickle-compatible attribute).
-        self.dropped_features_: list[str] = []
+        # The prepared features (names, column lists, dropped columns).
+        self._features: PreparedFeatures | None = None
+        # The validation estimate (val_score, additional scores, OOF channel).
+        self._scores: ValidationScores | None = None
+        # The feature selection outcome of the final fit.
+        self._selection = FeatureSelectionResult()
+        # The resolved preprocessing preset (documented attribute).
+        self.preprocessing_preset: PreprocessingPreset | None = None
         # Datetime expansion applied to the training data: source column →
-        # generated component columns (``datetime_policy="expand"``). predict()
-        # applies the same expansion to raw input data, so a model trained on
-        # a frame with datetime columns can predict on the same raw schema.
-        # Populated in fit() and by register_datetime_expansion() (the engine
-        # expands the data in prepare_dataset, before the trainer sees it).
+        # generated component columns (``datetime_policy="expand"``).
+        # predict() applies the same expansion to raw input data, so a model
+        # trained on a frame with datetime columns can predict on the same
+        # raw schema. Populated in fit() and by register_datetime_expansion()
+        # (the engine expands the data in prepare_dataset, before the trainer
+        # sees it).
         self.datetime_expansion_: dict[str, list[str]] = {}
-        self._last_train_y: pd.Series | None = None
-        self._last_val_y: pd.Series | None = None
         # Artifact metadata, populated by :meth:`save` (and read back by
-        # :meth:`load` when the saved object carries it). Contains the engine
-        # version, dependency versions, the creation timestamp, the algorithm,
-        # hyperparameters and a hash of the artifact configuration.
+        # :meth:`load`). Contains the artifact format version, the engine
+        # version, dependency versions, the creation timestamp, the
+        # algorithm, hyperparameters and a hash of the artifact configuration.
         self.artifact_metadata_: dict[str, Any] | None = None
 
-        _validate_feature_lists(categorical_features, numerical_features)
+    # ── read-only views of the settings and of the fit results ────────────
+    @property
+    def algorithm(self) -> str:
+        """The algorithm name."""
+        return self.settings.algorithm
 
-    def _validate_features(self, X: pd.DataFrame) -> None:
-        """Verify that all specified feature names are present in the given DataFrame."""
+    @property
+    def hyperparams(self) -> dict[str, Any]:
+        """The model hyperparameters."""
+        return self.settings.hyperparams
 
-        specified_features = (self.categorical_features or []) + (
-            self.numerical_features or []
-        )
-        missing = [col for col in specified_features if col not in X.columns]
-        if missing:
-            raise TrainingError(f"Specified columns not found in data: {missing}")
+    @property
+    def metric(self) -> str:
+        """The primary metric (lower-cased)."""
+        return self.settings.metric
 
-    def _detect_feature_types(self, X: pd.DataFrame, target_column: str) -> None:
-        """Automatically classify columns into numerical and categorical ones.
+    @property
+    def random_state(self) -> int | None:
+        """The seed of the splits and the model."""
+        return self.settings.random_state
 
-        See :func:`trainer_data._detect_feature_types`.
-        """
-        _detect_feature_types(self, X, target_column)
+    @property
+    def serialization_format(self) -> SerializationFormat:
+        """The artifact format of :meth:`save`."""
+        return self.settings.serialization_format
 
-    def _resolve_preprocessing_preset(self) -> PreprocessingPreset:
-        """Resolve the preprocessing preset for the current algorithm.
+    @property
+    def encoding_strategy(self) -> str:
+        """The categorical encoding strategy."""
+        return cast(str, self.settings.encoding.encoding)
 
-        Automatic selection based on the lookup table
-        (:func:`resolve_preprocessing_preset`) plus application of an explicit
-        user override.
+    @property
+    def additional_metrics(self) -> list[str]:
+        """The additional (informational) metrics."""
+        return self.settings.additional_metrics
 
-        Returns:
-            The final preprocessing preset.
-        """
-        override = getattr(self, "preprocessing_override", None)
-        return resolve_preprocessing_preset(self.algorithm, override)
+    @property
+    def feature_selection_cfg(self) -> FeatureSelectionCfg:
+        """The validated feature selection configuration."""
+        return self.settings.feature_selection_cfg
 
-    def _extract_metadata(self, X: Any) -> list[str] | None:
-        """Extract column names from various data structures
-        without copying the contents."""
-        if hasattr(X, "get_data_info"):
-            return cast(list[str], X.get_data_info()["columns"])
-        if isinstance(X, pd.DataFrame):
-            return X.columns.tolist()
-        if hasattr(X, "shape") and len(X.shape) > 1:
-            return [str(f"col_{i}") for i in range(X.shape[1])]
-        return None
+    @property
+    def validation_strategy(self) -> str:
+        """The validation strategy of the final model."""
+        return self.settings.validation_strategy
 
+    @property
+    def n_folds(self) -> int:
+        """The number of folds of ``k_fold``."""
+        return self.settings.n_folds
+
+    @property
+    def test_size(self) -> float:
+        """The hold-out size of ``train_test_split``."""
+        return self.settings.test_size
+
+    @property
+    def categorical_features(self) -> list[str] | None:
+        """The categorical columns (the detected ones after fit())."""
+        if self._features is not None:
+            return self._features.categorical_features
+        return self.settings.categorical_features
+
+    @property
+    def numerical_features(self) -> list[str] | None:
+        """The numerical columns (the detected ones after fit())."""
+        if self._features is not None:
+            return self._features.numerical_features
+        return self.settings.numerical_features
+
+    @property
+    def feature_names(self) -> list[str] | None:
+        """The feature names identified during training (``None`` before)."""
+        return None if self._features is None else self._features.feature_names
+
+    @property
+    def dropped_features_(self) -> list[str]:
+        """The columns removed as uninformative in the last fit()."""
+        return [] if self._features is None else self._features.dropped_features
+
+    @property
+    def val_score(self) -> float | None:
+        """The primary metric on held-out data (``None`` before fit())."""
+        return None if self._scores is None else self._scores.val_score
+
+    @property
+    def additional_scores(self) -> dict[str, float]:
+        """The additional metrics on held-out data (empty before fit())."""
+        return {} if self._scores is None else self._scores.additional_scores
+
+    @property
+    def oof_predictions_(self) -> pd.Series | np.ndarray | None:
+        """The out-of-fold prediction vector (``None`` before fit())."""
+        return None if self._scores is None else self._scores.oof_predictions
+
+    @property
+    def oof_score_(self) -> float | None:
+        """``RMSE_oof`` over the OOF vector (``None`` when impossible)."""
+        return None if self._scores is None else self._scores.oof_score
+
+    @property
+    def oof_coverage_(self) -> float | None:
+        """The fraction of rows covered by OOF predictions."""
+        return None if self._scores is None else self._scores.oof_coverage
+
+    @property
+    def feature_selection_active_(self) -> bool:
+        """Whether the final pipeline has the feature selection step."""
+        return self._selection.active
+
+    @property
+    def selected_features_mask_(self) -> np.ndarray | None:
+        """The selected-column mask of the post-preprocessor matrix."""
+        return self._selection.mask
+
+    # ── persistence of the object state ────────────────────────────────────
     def __getstate__(self) -> dict[str, Any]:
         """Control the object state for correct serialization
         (excluding lock and logger)."""
         state = self.__dict__.copy()
-        # Remove unpicklable entries
-        if "lock" in state:
-            del state["lock"]
-        if "logger" in state:
-            del state["logger"]
+        state.pop("lock", None)
+        state.pop("logger", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore the object state after deserialization,
-        initializing a thread-safe lock and a logger."""
+        initializing a thread-safe lock and a logger.
+
+        The state is restored as is: ``load`` checks the artifact format
+        version before using the object (``check_artifact_format``).
+        """
         self.__dict__.update(state)
-        # Re-initialize the lock after unpickling
         self.lock = threading.RLock()
-        # Re-initialize logger if necessary
         self.logger = logging.getLogger(__name__)
 
-    def _build_preprocessor(self, feature_names: list[str]) -> ColumnTransformer:
-        """Build a ColumnTransformer for separate handling of data types.
+    # ── training ───────────────────────────────────────────────────────────
+    def _create_base_model(self) -> Any:
+        """Create the regressor via the model factory.
 
-        See :func:`trainer_data._build_preprocessor`.
+        The model seed follows the trainer's ``random_state`` (the engine
+        seed from ``general.random_state``), unless the user set
+        ``random_state`` explicitly in the hyperparameters — an explicit
+        value always wins. ``random_state=None`` (trainer or explicit
+        hyperparameter) produces a truly random fit. Auxiliary keys of the
+        HPO result ``params`` are not model hyperparameters:
+        ``use_feature_selection`` (the 'auto' mode decision), the data
+        adapter hint ``feature_index`` and the informational
+        ``isotonic_feature`` are popped, so that
+        ``ModelTrainer(hyperparams=res["params"])`` does not fail on the
+        strict ``create_model`` name check.
+
+        Raises:
+            TrainingError: If the model cannot be created (an unknown
+                algorithm, an invalid hyperparameter or a missing package).
         """
-        return _build_preprocessor(self, feature_names)
-
-    def _prepare_data(self, X: Any, y: Any) -> tuple[Any, Any]:
-        """Validate the input data types and separate features from the target.
-
-        See :func:`trainer_data._prepare_data`.
-        """
-        return _prepare_data(self, X, y)
-
-    def _resolve_feature_selection_active(
-        self,
-        X_train: Any,
-        y_train: Any,
-        preprocessor: ColumnTransformer,
-        base_model: Any,
-    ) -> bool:
-        """Resolve the actual feature selection activity for fit().
-
-        See :func:`trainer_feature_selection._resolve_feature_selection_active`.
-        """
-        return _resolve_feature_selection_active(
-            self, X_train, y_train, preprocessor, base_model
-        )
-
-    def _run_feature_selection_auto_check(
-        self,
-        X_train: Any,
-        y_train: Any,
-        preprocessor: ColumnTransformer,
-        base_model: Any,
-    ) -> bool:
-        """Run the Standalone Auto-Check of feature selection usefulness.
-
-        See :func:`trainer_feature_selection._run_feature_selection_auto_check`.
-        """
-        return _run_feature_selection_auto_check(
-            self, X_train, y_train, preprocessor, base_model
-        )
+        try:
+            model_kwargs = self.hyperparams.copy()
+            model_kwargs.pop("feature_index", None)
+            model_kwargs.pop("use_feature_selection", None)
+            model_kwargs.pop("isotonic_feature", None)
+            if "random_state" not in model_kwargs:
+                model_kwargs["random_state"] = self.random_state
+            return create_model(self.algorithm, **model_kwargs)
+        except (ValueError, ImportError) as e:
+            raise TrainingError(f"Error creating model: {e}")
 
     def _assemble_steps(
         self,
@@ -776,16 +748,24 @@ class ModelTrainer:
         Returns:
             A list of ``(name, transformer)`` tuples for building the Pipeline.
         """
+        settings = self.settings
         steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
-        if resolve_algorithm_name(self.algorithm) == "isotonic_regression":
+        if resolve_algorithm_name(settings.algorithm) == "isotonic_regression":
             steps.append(
                 (
                     "isotonic_selector",
                     IsotonicDataTransformer(
-                        feature_index=_resolve_isotonic_feature_index(self),
-                        n_numeric=_isotonic_n_numeric(self),
+                        feature_index=_resolve_isotonic_feature_index(
+                            settings.hyperparams
+                        ),
+                        n_numeric=_isotonic_n_numeric(self.numerical_features),
                         n_total=(
-                            _isotonic_n_total_estimate(self, X_for_estimate)
+                            _isotonic_n_total_estimate(
+                                X_for_estimate,
+                                categorical_features=self.categorical_features,
+                                numerical_features=self.numerical_features,
+                                encoding=settings.encoding,
+                            )
                             if X_for_estimate is not None
                             else None
                         ),
@@ -793,12 +773,7 @@ class ModelTrainer:
                 )
             )
         if feature_selection_active:
-            # Backward compatibility with old pickles: the configuration is read
-            # via getattr (similar to encoding_strategy in _build_preprocessor);
-            # a missing attribute yields the FeatureSelectionCfg() default.
-            cfg = getattr(self, "feature_selection_cfg", None)
-            if not isinstance(cfg, FeatureSelectionCfg):
-                cfg = FeatureSelectionCfg()
+            cfg = settings.feature_selection_cfg
             selector = FeatureSelector(
                 method=cfg.method.value,
                 percentile=cfg.percentile,
@@ -806,24 +781,43 @@ class ModelTrainer:
                 variance_threshold=cfg.variance_threshold,
                 n_estimators=cfg.n_estimators,
                 # Fixed fallback seed for selection (consistent with the tuner
-                # and _check_auto_feature_selection): with random_state=None in
-                # the main training, the selector must still use the fixed seed
-                # 42, otherwise selection is not reproducible between fit() calls
+                # and the auto-check): with random_state=None in the main
+                # training, the selector must still use the fixed seed 42,
+                # otherwise selection is not reproducible between fit() calls
                 # and diverges from the HPO phase.
-                random_state=self.random_state if self.random_state is not None else 42,
+                random_state=(
+                    settings.random_state if settings.random_state is not None else 42
+                ),
             )
             steps.append(("feature_selector", selector))
-        if self.os_enable:
+        oversampling = settings.oversampling
+        if oversampling.enable:
             oversampler = DataOversampler(
-                algorithm=self.os_algorithm,
-                multiplier=self.os_multiplier,
-                target_bins=self.os_target_bins,
-                add_noise=self.os_add_noise,
-                noise_level=float(self.os_noise_level),
+                algorithm=oversampling.algorithm,
+                multiplier=oversampling.multiplier,
+                target_bins=oversampling.target_bins,
+                add_noise=oversampling.add_noise,
+                noise_level=float(oversampling.noise_level),
             )
             steps.append(("oversampler", oversampler))
         steps.append(("model", base_model))
         return steps
+
+    def _steps_factory(self, preprocessor: Any, base_model: Any) -> StepsFactory:
+        """Build fresh pipeline steps from clones (the validation folds and
+        the feature selection auto-check never share a fitted step)."""
+
+        def make_steps(
+            feature_selection_active: bool, X_for_estimate: Any
+        ) -> list[tuple[str, Any]]:
+            return self._assemble_steps(
+                clone(preprocessor),
+                clone(base_model),
+                feature_selection_active=feature_selection_active,
+                X_for_estimate=X_for_estimate,
+            )
+
+        return make_steps
 
     def _fit_internal(
         self,
@@ -849,19 +843,18 @@ class ModelTrainer:
         # If pipeline.fit fails, the trainer must not retain values from the
         # previous training. After a successful fit the values are overwritten
         # in step 4.
-        self.feature_selection_active_ = False
-        self.selected_features_mask_ = None
-        # 1) Assemble the pipeline steps
-        steps = self._assemble_steps(
-            preprocessor,
-            base_model,
-            feature_selection_active=feature_selection_active,
-            X_for_estimate=X_train,
+        self._selection = FeatureSelectionResult()
+        # 1) Assemble the pipeline steps and initialize the pipeline (imblearn's
+        # Pipeline so that resampling steps work correctly)
+        self.pipeline = Pipeline(
+            steps=self._assemble_steps(
+                preprocessor,
+                base_model,
+                feature_selection_active=feature_selection_active,
+                X_for_estimate=X_train,
+            )
         )
-        # 2) Initialize the pipeline
-        # Use imblearn's Pipeline so that resampling steps work correctly
-        self.pipeline = Pipeline(steps=steps)
-        # 3) Run the training
+        # 2) Run the training
         try:
             self.pipeline.fit(X_train, y_train)
         except (ValueError, TypeError):
@@ -875,19 +868,33 @@ class ModelTrainer:
             self.logger.debug("Unexpected pipeline fit failure trace:", exc_info=True)
             self.logger.error(f"Unexpected error in pipeline fit: {e}")
             raise TrainingError(f"Internal training failure: {e}")
-        # 4) Record the actual selection status and the selected-column mask.
+        # 3) Record the actual selection status and the selected-column mask.
         # The mask is taken from the selector step inside the pipeline and has
         # the dimensionality of the post-preprocessor matrix (after one-hot
         # expansion/scaling).
-        self.feature_selection_active_ = feature_selection_active
         selector_step = self.pipeline.named_steps.get("feature_selector")
-        if selector_step is not None and hasattr(selector_step, "support_"):
-            self.selected_features_mask_ = np.asarray(
-                selector_step.support_, dtype=bool
-            )
-        else:
-            self.selected_features_mask_ = None
+        mask = (
+            np.asarray(selector_step.support_, dtype=bool)
+            if selector_step is not None and hasattr(selector_step, "support_")
+            else None
+        )
+        self._selection = FeatureSelectionResult(
+            active=feature_selection_active, mask=mask
+        )
         return self.pipeline
+
+    def _reset_fit_state(self) -> None:
+        """Reset the training state at the start of ``fit()``.
+
+        If training fails at any stage (data preparation, activity
+        resolution, validation scoring, pipeline.fit), the trainer must not
+        retain values from the previous training.
+        """
+        self.pipeline = None
+        self._features = None
+        self._scores = None
+        self._selection = FeatureSelectionResult()
+        self.datetime_expansion_ = {}
 
     def fit(self, X: Any, y: Any) -> ModelTrainer:
         """Run the full cycle of data preparation, model training, and metric evaluation.
@@ -909,74 +916,88 @@ class ModelTrainer:
         pipeline is trained on the full data: the artifact stores a training on
         100% of the sample, while ``val_score`` remains an honest quality
         estimate (not a train score).
-        """
 
+        The steps are pure functions (``load_training_data``,
+        ``prepare_features``, ``build_trainer_preprocessor``,
+        ``score_on_validation_splits``); the trainer keeps their results.
+        """
+        settings = self.settings
         with self.lock:
-            _reset_fit_state(self)
+            self._reset_fit_state()
 
             # Stage 1: Validation and data preparation
-            X_prepared, y_s = self._prepare_data(X, y)
-            _check_training_data(X_prepared, y_s)
-            X_prepared = _prepare_training_features(self, X_prepared)
+            data = load_training_data(X, y)
+            features = prepare_features(
+                data.X,
+                feature_names=data.feature_names,
+                detected_dtypes=data.detected_dtypes,
+                categorical_features=settings.categorical_features,
+                numerical_features=settings.numerical_features,
+                id_column=settings.id_column,
+                policies=settings.policies,
+                warn_id_like=settings.warn_id_like,
+            )
+            self._features = features
+            self.datetime_expansion_ = dict(features.datetime_expansion)
 
-            # Stage 3: Create the model via the factory.
-            # Done BEFORE preprocessor assembly so that an unknown algorithm
-            # (a typo in the name) is rejected here with a clear message rather
-            # than being masked by the default preprocessing preset.
-            # The model seed follows the trainer's ``random_state`` (the engine
-            # seed from ``general.random_state``), unless the user set
-            # ``random_state`` explicitly in the hyperparameters — an explicit
-            # value always wins. ``random_state=None`` (trainer or explicit
-            # hyperparameter) produces a truly random fit.
-            try:
-                # Auxiliary keys of the HPO result ``params`` are not model
-                # hyperparameters: ``use_feature_selection`` (the 'auto' mode
-                # decision) and the informational ``isotonic_feature`` are
-                # popped like in the engine and the tuner, so that
-                # ``ModelTrainer(hyperparams=res["params"])`` does not fail on
-                # the strict ``create_model`` name check.
-                model_kwargs = self.hyperparams.copy()
-                model_kwargs.pop("feature_index", None)
-                model_kwargs.pop("use_feature_selection", None)
-                model_kwargs.pop("isotonic_feature", None)
-                if "random_state" not in model_kwargs:
-                    model_kwargs["random_state"] = self.random_state
-                base_model = create_model(self.algorithm, **model_kwargs)
-            except (ValueError, ImportError) as e:
-                raise TrainingError(f"Error creating model: {e}")
+            # Stage 2: Create the model via the factory. Done BEFORE
+            # preprocessor assembly so that an unknown algorithm (a typo in
+            # the name) is rejected here with a clear message rather than
+            # being masked by the default preprocessing preset.
+            base_model = self._create_base_model()
 
-            # Stage 4: Build the preprocessor via delegation
-            if self.feature_names is None:
-                # If there are no names, try to extract them again or create an empty list
-                self.feature_names = self._extract_metadata(X_prepared) or []
-            preprocessor = self._build_preprocessor(self.feature_names)
+            # Stage 3: Build the preprocessor and resolve its preset.
+            setup = build_trainer_preprocessor(
+                settings.algorithm,
+                features.categorical_features,
+                features.numerical_features,
+                feature_names=features.feature_names,
+                encoding=settings.encoding,
+                override=settings.preprocessing_override,
+                random_state=settings.random_state,
+            )
+            self.preprocessing_preset = setup.preset
+            make_steps = self._steps_factory(setup.preprocessor, base_model)
 
-            # Stage 4.5: Resolve feature selection activity.
+            # Stage 4: Resolve feature selection activity.
             # Priority: isotonic bypass -> explicit flag -> configuration mode
             # (always/disabled) -> standalone auto-check for mode='auto'.
-            feature_selection_active = self._resolve_feature_selection_active(
-                X_prepared, y_s, preprocessor, base_model
+            feature_selection_active = _resolve_feature_selection_active(
+                features.X,
+                data.y,
+                make_steps,
+                algorithm=settings.algorithm,
+                explicit_flag=settings.feature_selection_active,
+                fs_cfg=settings.feature_selection_cfg,
+                metric=settings.metric,
+                random_state=settings.random_state,
             )
 
             # Stage 5: Validation scoring. Quality evaluation is performed with
             # the same split method used for model comparison in HPO
             # (validation.iter_splits), so that val_score/additional_scores are
             # honest hold-out/CV estimates rather than train scores.
-            self._score_on_validation_splits(
-                X_prepared,
-                y_s,
-                preprocessor,
-                base_model,
+            self._scores = score_on_validation_splits(
+                features.X,
+                data.y,
+                make_steps,
                 feature_selection_active=feature_selection_active,
+                metric=settings.metric,
+                additional_metrics=settings.additional_metrics,
+                validation_strategy=settings.validation_strategy,
+                n_folds=settings.n_folds,
+                test_size=settings.test_size,
+                random_state=settings.random_state,
+                algorithm=settings.algorithm,
             )
 
             # Stage 6: Final training on the full data (the artifact as before):
             # the pipeline is trained on 100% of the sample, while val_score
             # remains the estimate computed on held-out data (stage 5).
-            self.pipeline = self._fit_internal(
-                X_prepared,
-                y_s,
-                preprocessor,
+            self._fit_internal(
+                features.X,
+                data.y,
+                setup.preprocessor,
                 base_model,
                 feature_selection_active=feature_selection_active,
             )
@@ -984,57 +1005,9 @@ class ModelTrainer:
             # Observability: the dimensionality and the representation of the
             # preprocessed matrix that the model actually received (one-hot
             # expansion, missing-value indicators, sparse/dense storage).
-            _log_preprocessed_matrix(self, preprocessor, X_prepared)
+            log_preprocessed_matrix(setup.preprocessor, features.X)
 
             return self
-
-    def _score_on_validation_splits(
-        self,
-        X: Any,
-        y: Any,
-        preprocessor: ColumnTransformer,
-        base_model: Any,
-        *,
-        feature_selection_active: bool,
-    ) -> None:
-        """Evaluate model quality on held-out data.
-
-        See :func:`trainer_scoring._score_on_validation_splits`.
-        """
-        _score_on_validation_splits(
-            self,
-            X,
-            y,
-            preprocessor,
-            base_model,
-            feature_selection_active=feature_selection_active,
-        )
-
-    def _finalize_oof(
-        self,
-        oof_pred: np.ndarray,
-        oof_y: np.ndarray,
-        X: Any,
-        n_samples: int,
-        *,
-        method: str,
-    ) -> None:
-        """Finalize the OOF evaluation channel.
-
-        See :func:`trainer_scoring._finalize_oof`.
-        """
-        _finalize_oof(self, oof_pred, oof_y, X, n_samples, method=method)
-
-    def _align_oof_vector(
-        self,
-        oof_pred: np.ndarray,
-        X: Any,
-    ) -> pd.Series | np.ndarray:
-        """Align the OOF vector ``y_pred_oof`` to the original row order.
-
-        See :func:`trainer_scoring._align_oof_vector`.
-        """
-        return _align_oof_vector(oof_pred, X)
 
     def register_datetime_expansion(self, expansion: dict[str, list[str]]) -> None:
         """Record a datetime expansion applied to the data before ``fit``.
@@ -1063,10 +1036,9 @@ class ModelTrainer:
                 "(source column → generated component columns)"
             )
         with self.lock:
-            current = getattr(self, "datetime_expansion_", None) or {}
             self.datetime_expansion_ = {
                 **{src: list(names) for src, names in expansion.items()},
-                **current,
+                **self.datetime_expansion_,
             }
 
     def predict(self, X: Any) -> np.ndarray:
@@ -1115,13 +1087,11 @@ class ModelTrainer:
                 X_input: Any
                 if isinstance(X, pd.DataFrame):
                     X_input = _align_predict_columns(
-                        self,
-                        expand_datetime_columns(
-                            X, getattr(self, "datetime_expansion_", None) or {}
-                        ),
+                        self.feature_names,
+                        expand_datetime_columns(X, self.datetime_expansion_),
                     )
                 elif isinstance(X, SharedDataFrame):
-                    X_input = _align_predict_shared_dataframe(self, X)
+                    X_input = _align_predict_shared_dataframe(self.feature_names, X)
                 elif isinstance(X, (pd.Series, np.ndarray)):
                     X_input = X
                 else:
@@ -1133,8 +1103,7 @@ class ModelTrainer:
                 if isinstance(X_input, (pd.DataFrame, np.ndarray)):
                     try:
                         X_input = apply_inf_policy(
-                            X_input,
-                            str(getattr(self, "inf_policy", "as_missing")),
+                            X_input, self.settings.policies.inf_policy
                         )
                     except ValueError as err:
                         raise TrainingError(str(err)) from err
@@ -1162,7 +1131,7 @@ class ModelTrainer:
                 if it does not exist.
         """
         with self.lock:
-            if self.pipeline is None and self.base_model is None:
+            if self.pipeline is None:
                 raise TrainingError("Nothing to save: model is not trained")
 
             path_obj = Path(path)
@@ -1172,7 +1141,7 @@ class ModelTrainer:
             # Enrich the artifact with environment and configuration metadata
             # so that load() can detect version mismatches and the engine can
             # audit the provenance of the artifact.
-            self.artifact_metadata_ = _collect_artifact_metadata(self)
+            self.artifact_metadata_ = _collect_artifact_metadata(self.settings)
 
             # Call the new utility instead of pickle.dump
             save_artifact(obj=self, path=path_obj, fmt=self.serialization_format)
@@ -1190,9 +1159,11 @@ class ModelTrainer:
         tried first, then pickle. When an explicit ``fmt`` is passed, only
         that format is tried (as before).
 
-        After a successful load, a WARNING is logged when the artifact's
-        engine or scikit-learn major/minor version differs from the one in the
-        current environment.
+        The artifact format version is checked first: an artifact saved by
+        another format (every engine up to 0.4.x) is refused with a clear
+        error that says to retrain the model. After a successful load, a
+        WARNING is logged when the artifact's engine or scikit-learn
+        major/minor version differs from the one in the current environment.
 
         Args:
             path: Path to the saved artifact.
@@ -1205,8 +1176,9 @@ class ModelTrainer:
 
         Raises:
             TrainingError: If the file does not exist, cannot be deserialized
-                with any candidate format, or does not contain a
-                ``ModelTrainer`` instance.
+                with any candidate format, does not contain a
+                ``ModelTrainer`` instance, or was saved in another artifact
+                format version.
         """
         path_obj = Path(path)
 
@@ -1229,12 +1201,13 @@ class ModelTrainer:
         if not isinstance(obj, cls):
             raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
 
+        # The artifact format version is checked before anything else of
+        # the object is used: the state of another format cannot be read.
+        metadata = obj.__dict__.get("artifact_metadata_")
+        check_artifact_format(metadata)
         # Warn about a major/minor version mismatch of the engine or
-        # scikit-learn against the current environment (best effort: only
-        # artifacts saved by a recent version carry artifact_metadata_).
-        metadata = getattr(obj, "artifact_metadata_", None)
-        if metadata is not None:
-            _warn_on_version_mismatch(metadata, obj.logger)
+        # scikit-learn against the current environment.
+        _warn_on_version_mismatch(metadata, obj.logger)
 
         return obj
 
