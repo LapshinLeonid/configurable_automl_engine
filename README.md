@@ -145,6 +145,7 @@ If you contribute, please ensure your code:
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
 │       ├── common                          # Shared utilities and helper functions
+│       │   ├── artifact_metadata.py        # Saved-artifact metadata and load-time version warnings
 │       │   ├── complexity_guard.py         # Adaptive tightening of tree/boosting search spaces on small data
 │       │   ├── definitions.py              # Constants, enums, and schema definitions
 │       │   ├── dependency_utils.py         # Optional library and dependency checks
@@ -152,12 +153,25 @@ If you contribute, please ensure your code:
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   └── validation_utils.py         # Low-level data validation and effective train size
+│       ├── hpo                             # Hyperparameter optimization engine behind tuner.optimize
+│       │   ├── evaluation.py               # Trial scoring: hold-out, fold-wise with pruning reports, pooled OOF
+│       │   ├── pruning.py                  # Early stopping (pruning) configuration
+│       │   ├── runner.py                   # _OptimizeRunner: run state and loop, circuit breaker, best trial
+│       │   ├── search_space.py             # Search spaces, complexity guard, boundary warnings
+│       │   ├── trial_pipeline.py           # Trial preprocessor and pipeline assembly
+│       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── training_engine                 # Core orchestration and execution logic
-│       │   ├── component.py                # Main orchestrator: train_best_model, phases, select steps, artifact saving
+│       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
+│       │   ├── component.py                # Main orchestrator: train_best_model and the phase loop
 │       │   ├── config_parser.py            # Configuration parsing and validation
+│       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
+│       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
+│       │   ├── hpo_phases.py               # HPO phase execution through pluggable tuners
 │       │   ├── logger.py                   # Centralized logging management
 │       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
+│       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies
+│       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, ...)
 │       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
 │       ├── feature_selection.py            # Optional feature selection step
 │       ├── models.py                       # Model factory, hyperparameter cleaning
@@ -165,7 +179,12 @@ If you contribute, please ensure your code:
 │       ├── preprocessing.py                # Feature preprocessing: imputation, scaling, encoding
 │       ├── preprocessing_presets.py        # Per-algorithm preprocessing presets
 │       ├── trainer.py                      # ModelTrainer: training, validation and saving of a single model
-│       ├── tuner.py                        # Hyperparameter optimization, circuit breaker
+│       ├── trainer_data.py                 # ModelTrainer input data: X/y, diagnostics, preprocessor, alignment
+│       ├── trainer_errors.py               # TrainingError
+│       ├── trainer_feature_selection.py    # ModelTrainer feature selection decision and auto-check
+│       ├── trainer_params.py               # ModelTrainer constructor argument validation
+│       ├── trainer_scoring.py              # ModelTrainer validation scoring and the OOF channel
+│       ├── tuner.py                        # Public HPO entry point optimize() (façade over hpo)
 │       └── validation.py                   # High-level cross-validation strategies
 ├── tests                                   # Unit and integration test suites
 ├── agents.md                               # Instructions for AI agents in the CI pipeline
