@@ -917,7 +917,7 @@ def _terminate_worker_by_pid(
     return not _pid_exists(pid)
 
 
-def run_parallel(
+def run_parallel(  # noqa: C901
     func: Callable[..., Any],
     args_seq: Iterable[Sequence[Any]] | None = None,
     kwargs_seq: Iterable[Mapping[str, Any]] | None = None,

@@ -257,7 +257,7 @@ def _family_of(algo_name: str, algorithm_families: Mapping[str, str] | None) -> 
     return algorithm_families.get(algo_name, algo_name)
 
 
-def select_finalists(
+def select_finalists(  # noqa: C901
     results: dict[str, PhaseResult],
     *,
     metric_user: str,
@@ -1201,7 +1201,7 @@ def _load_module(path: str) -> ModuleType:
 # --------------------------------------------------------------------------- #
 #  HPO wrapper                                                                #
 # --------------------------------------------------------------------------- #
-def _run_hpo(
+def _run_hpo(  # noqa: C901
     *,
     algo_name: str,
     algo_cfg: AlgoCfg,
@@ -1639,7 +1639,7 @@ def _run_hpo(
 # --------------------------------------------------------------------------- #
 #  Final fit & save                                                           #
 # --------------------------------------------------------------------------- #
-def _build_trainer(
+def _build_trainer(  # noqa: C901
     algo_name: str,
     algo_cfg: AlgoCfg,
     best_params: dict[str, Any],

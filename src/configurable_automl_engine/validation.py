@@ -253,7 +253,7 @@ def iter_splits(
 ) -> Generator[SplitWithIndices, None, None]: ...
 
 
-def iter_splits(
+def iter_splits(  # noqa: C901
     X: np.ndarray | pd.DataFrame,
     y: np.ndarray | pd.Series | None = None,
     *,

@@ -672,7 +672,7 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
     return cast(_InfInput, out_arr)
 
 
-def validate_features(
+def validate_features(  # noqa: C901
     X: pd.DataFrame,
     *,
     inf_policy: str = "as_missing",

@@ -650,7 +650,7 @@ def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
     )
 
 
-def _evaluate_with_intermediate_reports(
+def _evaluate_with_intermediate_reports(  # noqa: C901
     trial: Trial,
     estimator: Any,
     X: Any,

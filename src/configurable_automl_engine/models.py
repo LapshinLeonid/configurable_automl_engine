@@ -460,7 +460,7 @@ def resolve_algorithm_name(algorithm: str) -> str:
     return algorithm.lower()
 
 
-def create_model(
+def create_model(  # noqa: C901
     algorithm: Algorithm = "elasticnet", **hyperparams: Any
 ) -> RegressorMixin:
     """

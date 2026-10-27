@@ -578,7 +578,7 @@ class ModelTrainer:
         lock (threading.RLock): Recursive lock for thread-safe training.
     """
 
-    def __init__(
+    def __init__(  # noqa: C901
         self,
         algorithm: str = "elasticnet",
         hyperparams: dict[str, Any] | None = None,
@@ -1604,7 +1604,7 @@ class ModelTrainer:
             self.selected_features_mask_ = None
         return self.pipeline
 
-    def fit(self, X: Any, y: Any) -> ModelTrainer:
+    def fit(self, X: Any, y: Any) -> ModelTrainer:  # noqa: C901
         """Run the full cycle of data preparation, model training, and metric evaluation.
 
         Quality evaluation (``val_score`` / ``additional_scores``) is performed
@@ -1866,7 +1866,7 @@ class ModelTrainer:
                 "Could not log the preprocessed matrix dimensions: %s", err
             )
 
-    def _score_on_validation_splits(
+    def _score_on_validation_splits(  # noqa: C901
         self,
         X: Any,
         y: Any,
