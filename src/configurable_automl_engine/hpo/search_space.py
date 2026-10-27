@@ -90,10 +90,9 @@ def build_search_space(
 ) -> dict[str, Any]:
     """Build the dict search space of an algorithm from the user ranges.
 
-    The single merge rule of both paths: the training engine
-    (``hpo_phases._prepare_search_space``) and a direct ``optimize()`` call
-    (``resolve_search_space``) build the space here, so a direct call and a
-    config run with the same ranges search the same space.
+    The single merge rule of every HPO run (a direct ``optimize()`` call and
+    the training engine, which passes the user ranges of the config), so a
+    direct call and a config run with the same ranges search the same space.
 
     When ``limit`` is True the search is restricted to ONLY the parameters
     listed in ``user_overrides``: no ``DEFAULT_SPACES`` entries are added,
@@ -113,8 +112,7 @@ def build_search_space(
 
     The merge is idempotent: merging an already-merged space again changes
     nothing (all ``DEFAULT_SPACES`` keys are already present, and a missing
-    SVR ``epsilon`` again means "adaptive"). The engine passes the merged
-    space to the tuner as ``space_overrides``, and the tuner merges it again.
+    SVR ``epsilon`` again means "adaptive").
 
     Args:
         algo_name (str): The algorithm name used to look up defaults.

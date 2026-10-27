@@ -430,7 +430,7 @@ def test_auto_resolved_once_and_forwarded_to_final_fit(tmp_path):
 
 
 def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
-    """auto → train_test_split: the integer test_size reaches the tuner and trainer."""
+    """auto → train_test_split: the integer test_size reaches HPO and the trainer."""
     df = pd.DataFrame({"a": np.arange(50, dtype=float)})
     df["target"] = np.arange(50, dtype=float)
 
@@ -493,8 +493,8 @@ def test_auto_split_test_size_forwarded_to_hpo_and_fit(tmp_path):
     ):
         train_best_model(config=cfg, df=df, target="target")
 
-    assert captured_hpo["validation_strategy"].value == "train_test_split"
-    assert captured_hpo["train_test_split_test_size"] == 15
+    assert captured_hpo["request"].val_method.value == "train_test_split"
+    assert captured_hpo["request"].train_test_split_test_size == 15
     save_kwargs = mock_save.call_args.kwargs
     assert save_kwargs["validation_strategy"].value == "train_test_split"
     assert save_kwargs["test_size"] == 15

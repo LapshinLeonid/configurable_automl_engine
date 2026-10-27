@@ -18,7 +18,7 @@ This module only orchestrates the steps; they live in dedicated modules and
 their public names are re-exported here:
     - state: Shared dataclasses (PhaseResult, PreparedData, PhaseContext, ...).
     - data_prep: load_config, prepare_dataset.
-    - hpo_phases: HPO phase execution through external tuners (_run_hpo).
+    - hpo_phases: HPO phase execution (_run_hpo).
     - finalists: select_winner, select_finalists, select_robust_winner.
     - select_steps: The explicit select steps (cv_best / sanity_gate).
     - artifact: Final model training on the full dataset, persist_artifact.
@@ -108,9 +108,8 @@ def execute_phases(
 
     Pipeline step 3. Contains the phase loop, parallel HPO execution,
     synchronous select steps, circuit breaker disqualification, and filtering
-    of invalid results. The HPO worker ``_hpo_phase_worker`` and the helpers
-    ``_prepare_search_space`` / ``_execute_hpo_phase`` are module-level
-    functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
+    of invalid results. The HPO worker ``_hpo_phase_worker`` and the helper
+    ``_execute_hpo_phase`` are module-level functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
     worker is serializable in the "processes" mode. The feature matrix ``X``
     is passed as a separate argument and transferred via ``run_parallel``
     shared memory / disk in that mode.
@@ -167,8 +166,7 @@ def execute_phases(
         RuntimeError: If an HPO phase produced no valid score, a select step
             received an empty working set, or no finalist was trained on the
             full dataset.
-        HPOHistoryError: If a refine phase passes TPE history to a tuner that
-            does not accept ``previous_trials``, or the transferred history is
+        HPOHistoryError: If the transferred TPE history of a refine phase is
             incompatible with the current search space (fail fast).
     """
     ctx = PhaseContext()
@@ -529,12 +527,12 @@ def _valid_phase_results(
     minimum (WORST_SCORE_THRESHOLD): it covers both the HPO_WORST_SCORE
     constant (returned by the tuner when a trial metric is non-finite) and
     the raw float(np.finfo(np.float32).min) value (possible from numpy-cast
-    metrics or custom tuners), which the old math.isclose(rel_tol=1e-9)
+    metrics), which the old math.isclose(rel_tol=1e-9)
     check missed (relative difference ≈ 9.88e-9). Real metrics of such
     magnitude are practically impossible, so the threshold cannot drop a
     legitimate winner. params must be a dict (the tuner failure signal is
-    params=None); garbage score types from custom tuners (None, strings,
-    etc.) are rejected by is_valid_winner_score.
+    params=None); garbage score types (None, strings, etc.) are rejected
+    by is_valid_winner_score.
 
     Args:
         phase_results (dict[str, PhaseResult]): The raw phase results.
@@ -654,8 +652,8 @@ def train_best_model(
     final_params = winner_record.params
     # The honest evaluation count of the winner's HPO phase: the number of
     # trials actually evaluated (own COMPLETED trials; transferred history
-    # never counts). 0 means "unknown" (legacy custom tuners that do not
-    # report the count) — persist_artifact then omits the key.
+    # never counts). 0 means "unknown" — persist_artifact then omits the
+    # key.
     n_trials_evaluated = int(winner_record.n_trials_evaluated or 0)
     # Final invariant: the winner's score must be finite and strictly above the
     # worst-score sentinel class before entering result["score"]. Otherwise the

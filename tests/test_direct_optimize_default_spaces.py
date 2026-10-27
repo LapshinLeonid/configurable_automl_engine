@@ -6,12 +6,11 @@ Covers:
   come from ``DEFAULT_SPACES``);
 - parity of the searched Optuna distributions (after clipping and the
   complexity guard) between a direct call and the engine path
-  (``hpo_phases._run_hpo`` with the space prepared by
-  ``_prepare_search_space``): no user ranges, a partial range merged over the
+  (``hpo_phases._run_hpo`` with the request built by
+  ``_build_hpo_request``): no user ranges, a partial range merged over the
   defaults, and the same range with ``limit_hyperparameters=True``;
 - parity of the complexity guard records on small data;
-- idempotence of ``build_search_space`` (the engine passes the merged space
-  to the tuner, which merges it again);
+- idempotence of ``build_search_space``;
 - the engine always forwards ``user_hyperparameter_keys`` (an empty list
   included);
 - the error of an algorithm without a default space and without overrides.
@@ -41,9 +40,10 @@ from configurable_automl_engine.models import AVAILABLE_ALGORITHMS
 from configurable_automl_engine.training_engine import hpo_phases
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
-    ValidationStrategy,
+    HPOPhaseCfg,
 )
 from configurable_automl_engine.tuner import HyperoptError, optimize
+from tests.hpo_spec_factory import make_phase_spec
 
 
 def _algo_params() -> list[Any]:
@@ -145,24 +145,17 @@ def _engine(
         else None
     )
     a_cfg = AlgoCfg(hyperparameters=hyperparameters, limit_hyperparameters=limit)
-    space = hpo_phases._prepare_search_space(algo, a_cfg.hyperparameters, limit=limit)
-    hpo_phases._run_hpo(
-        algo_name=algo,
-        algo_cfg=a_cfg,
-        X=X,
+    spec = make_phase_spec(
+        phase=HPOPhaseCfg(name="coarse", n_trials=1, action="all_algorithms"),
         y=y,
-        metric_name_sklearn="r2",
-        n_trials=1,
-        validation_strategy=ValidationStrategy.k_fold,
-        n_folds=3,
-        search_space_override=space,
+        resolved_n_folds=3,
+        categorical_features=[],
+        numerical_features=list(X.columns),
         random_state=7,
         sampler_seed=7,
-        numerical_features=list(X.columns),
-        categorical_features=[],
-        user_hyperparameter_keys=list(a_cfg.hyperparameters or {}),
-        limit_hyperparameters=limit,
     )
+    request = hpo_phases._build_hpo_request(algo, a_cfg, spec)
+    hpo_phases._run_hpo(X=X, y=y, request=request)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -304,39 +297,21 @@ def test_engine_always_passes_user_hyperparameter_keys(
     """An empty list is forwarded too (not dropped as "no keys")."""
     captured: dict[str, Any] = {}
 
-    def fake_optimize(
-        algo_name: str,
-        X: Any,
-        y: Any,
-        *,
-        user_hyperparameter_keys: list[str] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        captured["user_hyperparameter_keys"] = user_hyperparameter_keys
+    def fake_run(X: Any, y: Any, request: Any) -> None:
+        captured["user_hyperparameter_keys"] = request.user_hyperparameter_keys
         return None
 
-    import types
-
-    fake = types.SimpleNamespace(optimize=fake_optimize)
-    monkeypatch.setattr(hpo_phases, "_load_module", lambda path: fake)
+    monkeypatch.setattr(hpo_phases, "run_optimization", fake_run)
     X, y = _frame()
+    spec = make_phase_spec(y=y, numerical_features=list(X.columns))
     hpo_phases._run_hpo(
-        algo_name="ridge",
-        algo_cfg=AlgoCfg(),
-        X=X,
-        y=y,
-        metric_name_sklearn="r2",
-        n_trials=1,
-        validation_strategy=ValidationStrategy.k_fold,
-        n_folds=3,
-        search_space_override=hpo_phases._prepare_search_space("ridge", None),
-        user_hyperparameter_keys=None,
+        X=X, y=y, request=hpo_phases._build_hpo_request("ridge", AlgoCfg(), spec)
     )
     assert captured["user_hyperparameter_keys"] == []
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# 5. Idempotence of the merge (the engine → tuner contract)
+# 5. Idempotence of the merge
 # ──────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("algo", sorted(DEFAULT_SPACES))
 @pytest.mark.parametrize("with_user", [False, True])

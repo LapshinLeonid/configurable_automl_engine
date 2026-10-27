@@ -102,13 +102,9 @@ def _cfg_dict(
         "algorithms": {
             "ridge": {
                 "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
             },
             "extra_trees": {
                 "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
             },
         },
         "oversampling": {"data_oversampling": False},
@@ -159,8 +155,8 @@ def _houndstooth_hpo(**kwargs: Any) -> PhaseResult:
     is called with ``initial_params`` from the gate context (verified below)
     and returns improved (score', params').
     """
-    algo = kwargs["algo_name"]
-    if kwargs.get("initial_params") is None:
+    algo = kwargs["request"].algo_name
+    if kwargs["request"].initial_params is None:
         # coarse (all_algorithms): gate-context parameters of phase 1.
         return {
             "ridge": PhaseResult(score=-0.10, params={"alpha": 1.0}),
@@ -168,9 +164,9 @@ def _houndstooth_hpo(**kwargs: Any) -> PhaseResult:
         }[algo]
     # refine: warm start from the output parameters of the first select (gate context).
     if algo == "ridge":
-        assert kwargs["initial_params"] == {"alpha": 1.0}, kwargs["initial_params"]
+        assert kwargs["request"].initial_params == {"alpha": 1.0}, kwargs["request"].initial_params
         return PhaseResult(score=-0.09, params={"alpha": 1.5})
-    assert kwargs["initial_params"] == {"n_estimators": 10}, kwargs["initial_params"]
+    assert kwargs["request"].initial_params == {"n_estimators": 10}, kwargs["request"].initial_params
     return PhaseResult(score=-0.07, params={"n_estimators": 20})
 
 
@@ -243,11 +239,11 @@ def test_e2e_target_dag_refine_select_persist_without_retraining(tmp_path: Path)
     refine_calls = [
         call
         for call in mock_hpo.call_args_list
-        if call.kwargs.get("initial_params") is not None
+        if call.kwargs["request"].initial_params is not None
     ]
     assert len(refine_calls) == 2
     refine_params = {
-        call.kwargs["algo_name"]: call.kwargs["initial_params"]
+        call.kwargs["request"].algo_name: call.kwargs["request"].initial_params
         for call in refine_calls
     }
     assert refine_params == {

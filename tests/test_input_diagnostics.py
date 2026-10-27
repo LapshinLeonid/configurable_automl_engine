@@ -315,8 +315,6 @@ def _cfg_dict(
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "mock.mock_tuner",
-                    "trainer_module": "mock.mock_trainer",
                 }
             },
             "oversampling": {"data_oversampling": False},
@@ -917,74 +915,32 @@ def test_train_best_model_holdout_artifact_predicts_on_raw_datetime(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Review S8: the diagnostics policies are forwarded to the tuner
+# Review S8: the diagnostics policies are forwarded to the HPO run
 # ──────────────────────────────────────────────────────────────────────────────
-def test_run_hpo_forwards_diagnostics_policies():
-    """_run_hpo passes the configured policies to tuners that accept them."""
-    received: dict[str, object] = {}
+def test_hpo_worker_forwards_diagnostics_policies():
+    """The HPO request carries the configured policies to the HPO run."""
+    from configurable_automl_engine.hpo.request import InputPolicies
+    from configurable_automl_engine.training_engine.hpo_phases import (
+        _hpo_phase_worker,
+    )
+    from configurable_automl_engine.tuner import OptimizeResult
+    from tests.hpo_spec_factory import make_phase_spec
 
-    class PolicyTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            inf_policy="error",
-            datetime_policy="expand",
-            drop_id_like_columns=False,
-        ):
-            received.update(
-                inf_policy=inf_policy,
-                datetime_policy=datetime_policy,
-                drop_id_like_columns=drop_id_like_columns,
-            )
-            return ("model", {"p": 1}, 0.5)
+    spec = make_phase_spec(
+        y=pd.Series([1.0, 2.0]),
+        resolved_validation=ValidationStrategy.train_test_split,
+        inf_policy="as_missing",
+        datetime_policy="drop",
+        drop_id_like_columns=True,
+    )
+    with patch(
+        "configurable_automl_engine.training_engine.hpo_phases.run_optimization",
+        return_value=OptimizeResult(model=None, params={"p": 1}, score=0.5, trials=[]),
+    ) as mock_run:
+        res = _hpo_phase_worker("ridge", AlgoCfg(), spec, pd.DataFrame({"a": [1.0, 2.0]}))
 
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=PolicyTuner()):
-        _run_hpo(
-            algo_name="ridge",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1.0, 2.0]}),
-            y=pd.Series([1.0, 2.0]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            inf_policy="as_missing",
-            datetime_policy="drop",
-            drop_id_like_columns=True,
-        )
-    assert received == {
-        "inf_policy": "as_missing",
-        "datetime_policy": "drop",
-        "drop_id_like_columns": True,
-    }
-
-
-def test_run_hpo_omits_policies_for_tuner_without_them():
-    """Tuners without the policy parameters do not receive the keys."""
-    received: dict[str, object] = {}
-
-    class PlainTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            received["called"] = True
-            return ("model", {"p": 1}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=PlainTuner()):
-        _run_hpo(
-            algo_name="ridge",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1.0, 2.0]}),
-            y=pd.Series([1.0, 2.0]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            inf_policy="as_missing",
-        )
-    assert received == {"called": True}
+    assert res.score == 0.5
+    request = mock_run.call_args.args[2]
+    assert request.policies == InputPolicies(
+        inf_policy="as_missing", datetime_policy="drop", drop_id_like_columns=True
+    )

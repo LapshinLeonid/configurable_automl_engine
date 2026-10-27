@@ -22,10 +22,6 @@ import pandas as pd
 from optuna.trial import FrozenTrial, Trial
 from scipy import sparse as sp
 
-from configurable_automl_engine.common.complexity_guard import (
-    ComplexityGuardConfig,
-)
-from configurable_automl_engine.common.definitions import ValidationStrategy
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
     get_effective_train_size,
@@ -34,12 +30,6 @@ from configurable_automl_engine.common.validation_utils import (
 from configurable_automl_engine.models import (
     create_model,
     resolve_algorithm_name,
-)
-from configurable_automl_engine.preprocessing import (
-    EncodingStrategy,
-)
-from configurable_automl_engine.preprocessing_presets import (
-    PreprocessingOverride,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
@@ -57,6 +47,7 @@ from .evaluation import (
 from .pruning import (
     handle_pruning,
 )
+from .request import HpoRequest
 from .search_space import (
     _canonical_distributions,
     _enqueueable_initial_params,
@@ -224,57 +215,18 @@ class _OptimizeRunner:
     MAX_FATAL_FAILURES = 5
     """Limit of consecutive fatal failures before the algorithm is disqualified."""
 
-    def __init__(
-        self,
-        *,
-        algo_name: str,
-        X: Any,
-        y: Any,
-        data_oversampling: bool,
-        data_oversampling_multiplier: float,
-        data_oversampling_algorithm: str,
-        data_oversampling_target_bins: int = 8,
-        data_oversampling_add_noise: bool = False,
-        data_oversampling_noise_level: float = 0.01,
-        metric: str,
-        val_method: ValidationStrategy | str,
-        validation_strategy: ValidationStrategy | str | None,
-        n_folds: int,
-        n_trials: int,
-        random_state: int | None,
-        sampler_seed: int | None,
-        train_test_split_test_size: float,
-        space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None,
-        initial_params: dict[str, Any] | None,
-        previous_trials: list[FrozenTrial] | None = None,
-        preprocessor: Any | None,
-        categorical_features: list[str] | None,
-        numerical_features: list[str] | None,
-        encoding: EncodingStrategy | None,
-        preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
-        pruning: dict[str, Any] | None,
-        high_cardinality_threshold: int | None,
-        high_cardinality_encoding: EncodingStrategy | None,
-        hashing_n_components: int,
-        target_encoding_smoothing: float,
-        target_encoding_fallback: float | None,
-        feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
-        complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
-        user_hyperparameter_keys: list[str] | None = None,
-        limit_hyperparameters: bool = False,
-        fit_best_model: bool = True,
-        phase_name: str | None = None,
-        inf_policy: str = "as_missing",
-        datetime_policy: str = "expand",
-        drop_id_like_columns: bool = False,
-        collect_oof: bool = False,
-    ) -> None:
-        """Store the parameters of a single optimisation run.
+    def __init__(self, X: Any, y: Any, request: HpoRequest) -> None:
+        """Store the data and the settings of a single optimisation run.
 
         Args:
-            All arguments mirror the identically named ``optimize()``
-            parameters — see its docstring for the semantics.
+            X (Any): The feature matrix.
+            y (Any): The target vector.
+            request (HpoRequest): The run settings (see ``optimize()`` for
+                the semantics of every field).
         """
+        self.request = request
+        algo_name = request.algo_name
+        metric = request.metric
         self.algo_name = algo_name
         self.X = X
         self.y = y
@@ -285,11 +237,11 @@ class _OptimizeRunner:
         # with multiple folds). MAE and similar per-sample means stay on the
         # fold-average path (their fold mean equals the pooled value).
         self.pool_metric = is_non_additive_metric(metric)
-        self.val_method = val_method
-        self.validation_strategy = validation_strategy
-        self.n_folds = n_folds
-        self.n_trials = n_trials
-        self.random_state = random_state
+        self.val_method = request.val_method
+        self.validation_strategy = None
+        self.n_folds = request.n_folds
+        self.n_trials = request.n_trials
+        self.random_state = request.random_state
         # The seed of the TPE sampler. Deliberately separate from
         # ``random_state`` (which drives the data splits and the preprocessor):
         # each HPO phase may use a different ``sampler_seed`` so that TPE
@@ -299,36 +251,29 @@ class _OptimizeRunner:
         # estimates in the transferred TPE history. ``None`` (the default for
         # direct callers) falls back to ``random_state`` to preserve the old
         # behavior.
-        self.sampler_seed = sampler_seed
-        self.train_test_split_test_size = train_test_split_test_size
-        self.space_overrides = space_overrides
-        self.initial_params = initial_params
-        self.previous_trials = previous_trials
-        self.preprocessor = preprocessor
-        self.categorical_features = categorical_features
-        self.numerical_features = numerical_features
-        self.encoding = encoding
-        self.preprocessing_override = preprocessing_override
-        self.pruning = pruning
-        self.high_cardinality_threshold = high_cardinality_threshold
-        self.high_cardinality_encoding = high_cardinality_encoding
-        self.hashing_n_components = hashing_n_components
-        self.target_encoding_smoothing = target_encoding_smoothing
-        self.target_encoding_fallback = target_encoding_fallback
-        self.feature_selection_cfg = feature_selection_cfg
+        self.sampler_seed = request.sampler_seed
+        self.train_test_split_test_size = request.train_test_split_test_size
+        self.space_overrides = request.space_overrides
+        self.initial_params = request.initial_params
+        self.previous_trials = request.previous_trials
+        self.preprocessor = request.preprocessor
+        self.categorical_features = request.categorical_features
+        self.numerical_features = request.numerical_features
+        self.encoding = request.encoding.encoding
+        self.preprocessing_override = request.preprocessing_override
+        self.pruning = request.pruning
+        self.high_cardinality_threshold = request.encoding.high_cardinality_threshold
+        self.high_cardinality_encoding = request.encoding.high_cardinality_encoding
+        self.hashing_n_components = request.encoding.hashing_n_components
+        self.target_encoding_smoothing = request.encoding.target_encoding_smoothing
+        self.target_encoding_fallback = request.encoding.target_encoding_fallback
+        self.feature_selection_cfg = request.feature_selection_cfg
         # The adaptive complexity guard config (trees/boosting on small data).
         # ``None`` — the defaults of ``general.complexity_guard`` (mode
         # 'apply'), so direct ``optimize`` callers get the same search spaces
         # as the engine; the guard is disabled with ``{"mode": "off"}``. The
         # training engine passes the config from ``general.complexity_guard``.
-        if complexity_guard_cfg is None:
-            self.complexity_guard_cfg = ComplexityGuardConfig()
-        elif isinstance(complexity_guard_cfg, ComplexityGuardConfig):
-            self.complexity_guard_cfg = complexity_guard_cfg
-        else:
-            self.complexity_guard_cfg = ComplexityGuardConfig.from_dict(
-                complexity_guard_cfg
-            )
+        self.complexity_guard_cfg = request.complexity_guard
         # Names of parameters set explicitly by the user
         # (``algo.hyperparameters``); the complexity guard treats them as
         # "user ranges" (intersected, with ``user_range_policy`` on conflict).
@@ -336,13 +281,15 @@ class _OptimizeRunner:
         # ``resolve_search_space`` to the keys of the dict override; the
         # training engine always passes the list (an empty one included).
         self.user_hyperparameter_keys: list[str] | None = (
-            None if user_hyperparameter_keys is None else list(user_hyperparameter_keys)
+            None
+            if request.user_hyperparameter_keys is None
+            else list(request.user_hyperparameter_keys)
         )
         # Restrict the search to the user-listed parameters only: the space
         # dict passed via ``space_overrides`` is used as-is (NO adaptive SVR
         # epsilon injection, NO DEFAULT_SPACES fallback). Mirrors
         # ``AlgoCfg.limit_hyperparameters``.
-        self.limit_hyperparameters = limit_hyperparameters
+        self.limit_hyperparameters = request.limit_hyperparameters
         # Number of features after preprocessing (what the model sees).
         # Filled in build_trial_pipeline (falls back to the raw column count).
         self.n_features_eff: int = 1
@@ -362,21 +309,21 @@ class _OptimizeRunner:
         # best parameters and score (e.g. the training engine's HPO phase):
         # the full-data fit is then skipped and the ``model`` field of the
         # returned ``OptimizeResult`` is None.
-        self.fit_best_model = fit_best_model
+        self.fit_best_model = request.fit_best_model
         # Whether to keep the out-of-fold predictions of every completed
         # trial (the BBC-CV input): trial number -> OOF vector of len(X).
-        self.collect_oof = collect_oof
+        self.collect_oof = request.collect_oof
         self.trial_oof: dict[int, np.ndarray] = {}
         # The pipeline phase name (e.g. 'coarse'/'refine') for the fallback
         # WARNING deduplication: ``None`` for direct ``optimize()`` callers.
-        self.phase_name = phase_name
+        self.phase_name = request.phase_name
 
         # Input-data diagnostics policies for the fail-fast feature checks:
         # defaults mirror the pipeline behavior for direct ``optimize()``
         # callers (S2 — the policies are configurable instead of hard-coded).
-        self.inf_policy = inf_policy
-        self.datetime_policy = datetime_policy
-        self.drop_id_like_columns = drop_id_like_columns
+        self.inf_policy = request.policies.inf_policy
+        self.datetime_policy = request.policies.datetime_policy
+        self.drop_id_like_columns = request.policies.drop_id_like_columns
 
         # Names of columns dropped by cleaning uninformative features.
         # Filled in build_trial_pipeline for diagnostics; empty by default.
@@ -384,14 +331,8 @@ class _OptimizeRunner:
 
         # Oversampling config for pipeline assembly (single point of truth).
         self.oversampling_config: dict[str, Any] = {
-            "active": data_oversampling,
-            "params": {
-                "multiplier": data_oversampling_multiplier,
-                "algorithm": data_oversampling_algorithm,
-                "target_bins": data_oversampling_target_bins,
-                "add_noise": data_oversampling_add_noise,
-                "noise_level": data_oversampling_noise_level,
-            },
+            "active": request.oversampling.enable,
+            "params": request.oversampling.sampler_params(),
         }
 
         # ── Fields populated by the run() steps ───────────────────────────────
@@ -1036,3 +977,21 @@ def resolve_validation(runner: _OptimizeRunner) -> None:
     else:
         # Explicit loo / train_test_split: the fold count is not used.
         runner.effective_n_folds = runner.n_folds
+
+
+def run_optimization(X: Any, y: Any, request: HpoRequest) -> OptimizeResult | None:
+    """Run the hyperparameter search of one algorithm.
+
+    The single entry point behind ``tuner.optimize`` and the training
+    engine's HPO phases.
+
+    Args:
+        X (Any): The feature matrix.
+        y (Any): The target vector.
+        request (HpoRequest): The run settings.
+
+    Returns:
+        OptimizeResult | None: The phase result, or ``None`` — the "no valid
+            result" signal (see ``optimize()``).
+    """
+    return _OptimizeRunner(X, y, request).run()

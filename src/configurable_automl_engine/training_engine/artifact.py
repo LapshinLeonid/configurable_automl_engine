@@ -12,15 +12,14 @@ dict (``persist_artifact``). It may import ``state``, ``data_prep`` and
 from __future__ import annotations
 
 import copy
-import inspect
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -28,7 +27,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 from .data_prep import _register_datetime_expansion
-from .hpo_phases import _algorithms_as_dict, _feature_selection_mode, _load_module
+from .hpo_phases import _algorithms_as_dict
 from .metrics import (
     bbc_cv_score,
     get_scorer_object,
@@ -54,11 +53,11 @@ def _build_trainer(
     cfg: Config,
     metric_name_sklearn: str = "r2",
     *,
-    validation_strategy: ValidationStrategy | str | None = None,
-    n_folds: int | None = None,
-    test_size: float | None = None,
+    validation_strategy: ValidationStrategy | str = "auto",
+    n_folds: int = 5,
+    test_size: float = 0.2,
     random_state: int | None = None,
-) -> Any:
+) -> ModelTrainer:
     """Construct a ``ModelTrainer`` for an algorithm from its configuration.
 
     The single assembly point for the trainer, used both by the final training
@@ -69,37 +68,40 @@ def _build_trainer(
 
     Args:
         algo_name (str): The name of the selected algorithm.
-        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
+        algo_cfg (AlgoCfg): The algorithm configuration.
         best_params (Dict[str, Any]): The found optimal hyperparameters.
         cfg (Config): The common configuration object.
         metric_name_sklearn (str): The main metric name in sklearn format.
-        validation_strategy (ValidationStrategy | str | None): The resolved
-            validation strategy. ``None`` — the ``ModelTrainer`` default
-            ('train_test_split').
-        n_folds (int | None): The number of folds (for 'k_fold').
-        test_size (float | int | None): The hold-out size.
+        validation_strategy (ValidationStrategy | str): The resolved
+            validation strategy (the engine passes the method resolved once
+            in ``prepare_dataset``, so the final ``val_score`` is computed
+            with the same method as the model comparison estimate in HPO).
+        n_folds (int): The number of folds (for 'k_fold').
+        test_size (float | int): The hold-out size.
         random_state (int | None): The engine seed from
             ``general.random_state``; drives the ModelTrainer's data splits
             and model seeds. ``None`` — non-reproducible final training.
 
     Returns:
-        Any: The constructed (but not yet trained) ``ModelTrainer``.
+        ModelTrainer: The constructed (but not yet trained) trainer.
 
     Raises:
-        ValueError: If ``algo_cfg.trainer_module`` is not set or ``best_params``
-            is ``None`` (a signal of a complete HPO failure).
-        AttributeError: If the trainer module lacks a ``ModelTrainer`` class.
+        ValueError: If ``best_params`` is ``None`` (a signal of a complete HPO
+            failure).
     """
-    trainer_module = _load_trainer_module(algo_name, algo_cfg, best_params)
-
+    if best_params is None:
+        raise ValueError(
+            f"Algorithm '{algo_name}' produced no hyperparameters "
+            "(best_params is None): HPO phase failed completely. The algorithm "
+            "should have been excluded before the final fit."
+        )
     # The HPO winner's feature selection decision: in 'auto' mode the
     # "use_feature_selection" key is fixed in the Optuna best_params; in
     # 'always'/'disabled' modes the key is absent -> None, and ModelTrainer
     # resolves the activity itself from the configuration. The helper key is
     # popped from a copy: the original best_params (also returned in
     # result["params"]) is not mutated, and "use_feature_selection" is
-    # guaranteed not to leak into the ModelTrainer hyperparameters (previously
-    # it was dropped only implicitly through clean_hyperparameters).
+    # guaranteed not to leak into the ModelTrainer hyperparameters.
     # ``isotonic_feature`` is the informational name of the numerical feature
     # selected by the isotonic HPO (reported in the params, not a constructor
     # or data-adapter hyperparameter) — it is popped for the same reason.
@@ -107,211 +109,49 @@ def _build_trainer(
     fs_active = trainer_params.pop("use_feature_selection", None)
     trainer_params.pop("isotonic_feature", None)
 
-    # Check the ModelTrainer signature (same as for tuners in _run_hpo):
-    # custom trainers without feature selection support must not receive new
-    # arguments (otherwise a TypeError). A signature with **kwargs is
-    # considered compatible — the trainer decides what to do with extra keys.
-    trainer_sig = inspect.signature(trainer_module.ModelTrainer)
-    trainer_accepts_var_kwargs = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in trainer_sig.parameters.values()
-    )
-
-    def accepts(*names: str) -> bool:
-        """Whether the trainer declares all ``names`` (or accepts **kwargs)."""
-        return trainer_accepts_var_kwargs or all(
-            name in trainer_sig.parameters for name in names
-        )
-
-    trainer_kwargs: dict[str, Any] = {
-        "algorithm": algo_name,
-        "hyperparams": trainer_params,
-        "metric": metric_name_sklearn,
-        # Pass the oversampling settings from the config to the trainer
-        "data_oversampling": cfg.oversampling.enable,
-        "data_oversampling_multiplier": cfg.oversampling.multiplier,
-        "data_oversampling_algorithm": cfg.oversampling.algorithm,
-        "serialization_format": cfg.general.serialization_format,
-        "encoding_strategy": cfg.general.categorical_encoding,
-        "additional_metrics": cfg.general.additional_metrics,
+    general = cfg.general
+    oversampling = cfg.oversampling
+    return ModelTrainer(
+        algorithm=algo_name,
+        hyperparams=trainer_params,
+        metric=metric_name_sklearn,
+        # The engine seed: the ModelTrainer's data splits and model seeds
+        # follow ``general.random_state`` (None — a non-reproducible fit).
+        random_state=random_state,
+        data_oversampling=oversampling.enable,
+        data_oversampling_multiplier=oversampling.multiplier,
+        data_oversampling_algorithm=oversampling.algorithm,
+        data_oversampling_target_bins=oversampling.target_bins,
+        data_oversampling_add_noise=oversampling.add_noise,
+        data_oversampling_noise_level=oversampling.noise_level,
+        serialization_format=general.serialization_format,
+        encoding_strategy=general.categorical_encoding,
+        additional_metrics=general.additional_metrics,
         # Explicit preprocessing preset override from the config: applied
         # consistently with the HPO phase.
-        "preprocessing_override": getattr(algo_cfg, "preprocessing", None),
-        # High-cardinality encoding parameters and the new strategies
-        "high_cardinality_threshold": cfg.general.high_cardinality_threshold,
-        "high_cardinality_encoding": cfg.general.high_cardinality_encoding,
-        "hashing_n_components": cfg.general.hashing_n_components,
-        "target_encoding_smoothing": cfg.general.target_encoding_smoothing,
-        "target_encoding_fallback": cfg.general.target_encoding_fallback,
-    }
-    # The regression oversampling bin count is passed only to trainers that
-    # support it (custom trainers without the argument fall back to the
-    # engine default 8) — the same signature-aware contract as for feature
-    # selection.
-    if accepts("data_oversampling_target_bins"):
-        trainer_kwargs["data_oversampling_target_bins"] = cfg.oversampling.target_bins
-    # Gaussian noise settings: same signature-aware contract (custom trainers
-    # without the arguments keep the no-noise behavior).
-    if accepts("data_oversampling_add_noise", "data_oversampling_noise_level"):
-        trainer_kwargs["data_oversampling_add_noise"] = cfg.oversampling.add_noise
-        trainer_kwargs["data_oversampling_noise_level"] = cfg.oversampling.noise_level
-    trainer_kwargs.update(
-        _feature_selection_trainer_kwargs(accepts, algo_cfg, cfg, fs_active)
+        preprocessing_override=algo_cfg.preprocessing,
+        high_cardinality_threshold=general.high_cardinality_threshold,
+        high_cardinality_encoding=general.high_cardinality_encoding,
+        hashing_n_components=general.hashing_n_components,
+        target_encoding_smoothing=general.target_encoding_smoothing,
+        target_encoding_fallback=general.target_encoding_fallback,
+        # Feature selection: the root configuration plus the HPO winner's
+        # decision.
+        feature_selection_cfg=general.feature_selection,
+        feature_selection_active=fs_active,
+        validation_strategy=validation_strategy,
+        n_folds=n_folds,
+        test_size=test_size,
+        # Input-data diagnostics policies: the final fit treats ±inf /
+        # datetime / ID-like columns exactly as the pipeline entry point
+        # (prepare_dataset has already applied them; re-validation is a
+        # no-op on the already-repaired data). The ID-like WARNING is
+        # suppressed: prepare_dataset already reported it once.
+        inf_policy=general.inf_policy,
+        datetime_policy=general.datetime_policy,
+        drop_id_like_columns=general.drop_id_like_columns,
+        warn_id_like=False,
     )
-    trainer_kwargs.update(
-        _validation_trainer_kwargs(
-            accepts,
-            algo_cfg,
-            validation_strategy=validation_strategy,
-            n_folds=n_folds,
-            test_size=test_size,
-        )
-    )
-
-    # Input-data diagnostics policies: forwarded so that the final fit treats
-    # ±inf / datetime / ID-like columns exactly as the pipeline entry point
-    # (prepare_dataset has already applied them; re-validation is a no-op on
-    # the already-repaired data). The ID-like WARNING is suppressed there:
-    # prepare_dataset already reported it once (B2 — no double warnings).
-    for name, value in (
-        ("inf_policy", cfg.general.inf_policy),
-        ("datetime_policy", cfg.general.datetime_policy),
-        ("drop_id_like_columns", cfg.general.drop_id_like_columns),
-        ("warn_id_like", False),
-        # The engine seed: the ModelTrainer's data splits and model seeds
-        # follow ``general.random_state`` (None — a non-reproducible final
-        # fit).
-        ("random_state", random_state),
-    ):
-        if accepts(name):
-            trainer_kwargs[name] = value
-
-    return trainer_module.ModelTrainer(**trainer_kwargs)
-
-
-def _load_trainer_module(
-    algo_name: str, algo_cfg: AlgoCfg, best_params: dict[str, Any]
-) -> Any:
-    """Validate the inputs of ``_build_trainer`` and load the trainer module.
-
-    Args:
-        algo_name (str): The name of the selected algorithm.
-        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
-        best_params (Dict[str, Any]): The found optimal hyperparameters.
-
-    Returns:
-        Any: The trainer module (it provides a ``ModelTrainer`` class).
-
-    Raises:
-        ValueError: If ``algo_cfg.trainer_module`` is not set or ``best_params``
-            is ``None``.
-        AttributeError: If the trainer module lacks a ``ModelTrainer`` class.
-    """
-    if algo_cfg.trainer_module is None:
-        raise ValueError("Trainer module path is not configured")
-    if best_params is None:
-        raise ValueError(
-            f"Algorithm '{algo_name}' produced no hyperparameters "
-            "(best_params is None): HPO phase failed completely. The algorithm "
-            "should have been excluded before the final fit."
-        )
-    trainer_module = _load_module(algo_cfg.trainer_module)
-    if not hasattr(trainer_module, "ModelTrainer"):
-        raise AttributeError(
-            f"Module {algo_cfg.trainer_module} lacks `ModelTrainer` class"
-        )
-    return trainer_module
-
-
-def _feature_selection_trainer_kwargs(
-    accepts: Callable[..., bool],
-    algo_cfg: AlgoCfg,
-    cfg: Config,
-    fs_active: bool | None,
-) -> dict[str, Any]:
-    """Feature selection arguments of the trainer (signature-aware).
-
-    Args:
-        accepts (Callable[..., bool]): Whether the trainer accepts arguments.
-        algo_cfg (AlgoCfg): The algorithm configuration (for the messages).
-        cfg (Config): The common configuration object.
-        fs_active (bool | None): The HPO winner's feature selection decision.
-
-    Returns:
-        dict[str, Any]: The feature selection arguments the trainer accepts.
-    """
-    kwargs: dict[str, Any] = {}
-    # Feature selection: the root Config configuration plus the HPO winner's
-    # decision. Arguments are passed only to trainers that support them; when
-    # feature selection is active we warn about silent ignoring.
-    if accepts("feature_selection_cfg"):
-        kwargs["feature_selection_cfg"] = cfg.general.feature_selection
-    elif _feature_selection_mode(cfg.general.feature_selection) not in (
-        None,
-        "disabled",
-    ):
-        _LOG.warning(
-            "ModelTrainer %s does not accept `feature_selection_cfg`; "
-            "feature selection mode=%r will NOT be applied in the final fit.",
-            algo_cfg.trainer_module,
-            _feature_selection_mode(cfg.general.feature_selection),
-        )
-
-    if accepts("feature_selection_active"):
-        kwargs["feature_selection_active"] = fs_active
-    elif fs_active is not None:
-        _LOG.warning(
-            "ModelTrainer %s does not accept `feature_selection_active`; "
-            "the HPO decision use_feature_selection=%r will NOT be applied "
-            "in the final fit.",
-            algo_cfg.trainer_module,
-            fs_active,
-        )
-    return kwargs
-
-
-def _validation_trainer_kwargs(
-    accepts: Callable[..., bool],
-    algo_cfg: AlgoCfg,
-    *,
-    validation_strategy: ValidationStrategy | str | None,
-    n_folds: int | None,
-    test_size: float | None,
-) -> dict[str, Any]:
-    """Validation arguments of the trainer (signature-aware).
-
-    Args:
-        accepts (Callable[..., bool]): Whether the trainer accepts arguments.
-        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
-        validation_strategy (ValidationStrategy | str | None): The resolved
-            validation strategy.
-        n_folds (int | None): The number of folds (for 'k_fold').
-        test_size (float | int | None): The hold-out size.
-
-    Returns:
-        dict[str, Any]: The validation arguments the trainer accepts.
-    """
-    kwargs: dict[str, Any] = {}
-    # Validation parameters: the resolved values (method + number of folds /
-    # hold-out size) are passed to the final fit instead of the 'auto' string,
-    # so the final val_score is computed with the same method as the model
-    # comparison estimate in HPO. Custom trainers without support for the
-    # arguments do not receive the new keys (the signature is checked as for
-    # feature selection); the ModelTrainer default behavior then matches.
-    if validation_strategy is not None:
-        if accepts("validation_strategy"):
-            kwargs["validation_strategy"] = validation_strategy
-        else:
-            _LOG.warning(
-                "ModelTrainer %s does not accept `validation_strategy`; "
-                "the resolved strategy %r will NOT be applied in the final fit.",
-                algo_cfg.trainer_module,
-                validation_strategy,
-            )
-    if n_folds is not None and accepts("n_folds"):
-        kwargs["n_folds"] = n_folds
-    if test_size is not None and accepts("test_size"):
-        kwargs["test_size"] = test_size
-    return kwargs
 
 
 def _fit_and_save(
@@ -324,12 +164,12 @@ def _fit_and_save(
     cfg: Config,
     metric_name_sklearn: str = "r2",
     *,
-    validation_strategy: ValidationStrategy | str | None = None,
-    n_folds: int | None = None,
-    test_size: float | None = None,
+    validation_strategy: ValidationStrategy | str = "auto",
+    n_folds: int = 5,
+    test_size: float = 0.2,
     random_state: int | None = None,
     datetime_expansion: dict[str, list[str]] | None = None,
-) -> Any:
+) -> ModelTrainer:
     """Train the final model and save the result to disk.
     Args:
         algo_name (str): The name of the selected algorithm.
@@ -341,12 +181,11 @@ def _fit_and_save(
         cfg (Config): The common configuration object used to obtain the
             oversampling settings.
         metric_name_sklearn (str): The main metric name in sklearn format.
-        validation_strategy (ValidationStrategy | str | None): The resolved
-            validation strategy of the final model. ``None`` — the
-            ``ModelTrainer`` default ('auto').
-        n_folds (int | None): The number of folds (for 'k_fold').
-        test_size (float | int | None): The hold-out size (a fraction or a
-            number of rows after 'auto' resolution).
+        validation_strategy (ValidationStrategy | str): The resolved
+            validation strategy of the final model.
+        n_folds (int): The number of folds (for 'k_fold').
+        test_size (float | int): The hold-out size (a fraction or a number
+            of rows after 'auto' resolution).
         random_state (int | None): The engine seed (``general.random_state``)
             for the final model's splits and model seeds.
         datetime_expansion (dict[str, list[str]] | None): The datetime
@@ -354,10 +193,9 @@ def _fit_and_save(
             registered on the trainer before saving so that the artifact
             accepts the raw input schema.
     Returns:
-        Any: The ``ModelTrainer`` instance after training and saving (used to
-            access the additional metric values).
+        ModelTrainer: The trainer after training and saving (used to access
+            the additional metric values).
     Raises:
-        AttributeError: If the trainer module lacks a `ModelTrainer` class.
         ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
             no valid hyperparameters (protection against the TypeError
             'NoneType' object is not iterable).
@@ -374,7 +212,7 @@ def _fit_and_save(
         random_state=random_state,
     )
     trainer.fit(X, y)
-    _register_datetime_expansion(trainer, datetime_expansion, algo_cfg)
+    _register_datetime_expansion(trainer, datetime_expansion)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
     return trainer
@@ -496,8 +334,7 @@ def _compute_holdout_score(
     """
     try:
         # The trainer is assembled through the same single point as the final
-        # fit (``_build_trainer``): the custom ``trainer_module`` of the
-        # winning algorithm is honored, and the feature-selection helper key
+        # fit (``_build_trainer``): the feature-selection helper key
         # (``use_feature_selection``) is popped from a copy by the same
         # contract. The validation parameters are forwarded so the pipeline
         # matches the engine's fit.
@@ -609,9 +446,8 @@ def persist_artifact(
             guard produced at least one record.
         n_trials_evaluated (int | None): The number of trials actually
             evaluated by the winner's HPO phase (own COMPLETED trials;
-            transferred history never counts). ``None`` or 0 (unknown — e.g.
-            legacy custom tuners without the count) — the key is omitted from
-            the result.
+            transferred history never counts). ``None`` or 0 (unknown) — the
+            key is omitted from the result.
         oof_pool (list[np.ndarray] | None): The OOF prediction matrices of
             all evaluated trials (``PhaseContext.oof_pool``); empty or
             ``None`` — ``bbc_score`` is not reported.
@@ -647,9 +483,7 @@ def persist_artifact(
     try:
         if pre_trained_trainer is not None and prepared.holdout_X is None:
             trainer = pre_trained_trainer
-            _register_datetime_expansion(
-                trainer, prepared.datetime_expansion, winner_cfg
-            )
+            _register_datetime_expansion(trainer, prepared.datetime_expansion)
             model_path.parent.mkdir(parents=True, exist_ok=True)
             trainer.save(model_path)
         else:
@@ -705,7 +539,7 @@ def persist_artifact(
         result["oof_score"] = oof_score
     # Honest evaluation count of the winner's HPO phase: reported next to the
     # best-trial score as the denominator of the "best of N" maximum. Omitted
-    # when the count is unknown (None or 0 — legacy custom tuners).
+    # when the count is unknown (None or 0).
     if n_trials_evaluated is not None and int(n_trials_evaluated) > 0:
         result["n_trials_evaluated"] = int(n_trials_evaluated)
     # Circuit breaker diagnostics: which algorithms were disqualified and why.

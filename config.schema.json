@@ -2,7 +2,7 @@
   "$defs": {
     "AlgoCfg": {
       "additionalProperties": false,
-      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, overridden search spaces,\nand paths to the trainer and tuner modules.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.\n    tuner (str): Dotted path to the optimizer module.\n    trainer_module (str): Dotted path to the model training implementation.",
+      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, the overridden search space\nand the preprocessing preset override.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.",
       "properties": {
         "enable": {
           "default": true,
@@ -43,32 +43,6 @@
           ],
           "default": null,
           "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
-        },
-        "tuner": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": "configurable_automl_engine.tuner",
-          "description": "Path to the tuner module for hyperparameter optimization",
-          "title": "Tuner"
-        },
-        "trainer_module": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": "configurable_automl_engine.trainer",
-          "description": "Dotted path to the module containing the `ModelTrainer` class(for example, 'configurable_automl_engine.trainer').",
-          "title": "Trainer Module"
         }
       },
       "title": "AlgoCfg",

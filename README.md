@@ -166,7 +166,7 @@ If you contribute, please ensure your code:
 │       │   ├── config_parser.py            # Configuration parsing and validation
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
-│       │   ├── hpo_phases.py               # HPO phase execution through pluggable tuners
+│       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
 │       │   ├── logger.py                   # Centralized logging management
 │       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models

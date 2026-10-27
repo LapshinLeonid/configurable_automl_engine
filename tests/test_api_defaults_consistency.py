@@ -21,7 +21,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     GeneralCfg,
 )
 from configurable_automl_engine.tuner import optimize
-from configurable_automl_engine.hpo.runner import _OptimizeRunner
+from configurable_automl_engine.hpo.request import HpoRequest, as_complexity_guard_config
 
 
 def _general_default(field: str) -> object:
@@ -93,41 +93,13 @@ def test_model_trainer_defaults_match_config(
 
 def test_optimize_complexity_guard_defaults_match_config() -> None:
     """``complexity_guard_cfg=None`` means the ``general.complexity_guard`` defaults."""
-    runner = _OptimizeRunner(
-        algo_name="random_forest",
-        X=None,
-        y=None,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="auto",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=1,
-        random_state=42,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding=None,
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
-        complexity_guard_cfg=None,
-    )
-    assert runner.complexity_guard_cfg == ComplexityGuardConfig.from_dict(
-        ComplexityGuardCfg()
-    )
-    assert runner.complexity_guard_cfg.mode == "apply"
+    request = HpoRequest(algo_name="random_forest")
+    expected = ComplexityGuardConfig.from_dict(ComplexityGuardCfg())
+    # optimize(complexity_guard_cfg=None) normalizes through the same helper.
+    assert as_complexity_guard_config(None) == expected
+    assert request.complexity_guard == expected
+    assert request.complexity_guard.mode == "apply"
+
 
 
 def test_create_model_rejects_unknown_hyperparameters() -> None:

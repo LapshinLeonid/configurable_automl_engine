@@ -94,13 +94,9 @@ def _cfg_dict(
     algorithms: dict[str, dict[str, Any]] = {
         "ridge": {
             "enable": True,
-            "tuner": "mock.mock_tuner",
-            "trainer_module": "mock.mock_trainer",
         },
         "extra_trees": {
             "enable": True,
-            "tuner": "mock.mock_tuner",
-            "trainer_module": "mock.mock_trainer",
         },
     }
     if extra_algorithms:
@@ -205,7 +201,7 @@ def _patch_hpo():
         hpo_phases_mod,
         "_run_hpo",
         side_effect=lambda **kw: (
-            PhaseResult(score=-0.10, params={"p": 1}) if kw["algo_name"] == "ridge" else PhaseResult(score=-0.08, params={"p": 1})
+            PhaseResult(score=-0.10, params={"p": 1}) if kw["request"].algo_name == "ridge" else PhaseResult(score=-0.08, params={"p": 1})
         ),
     )
 
@@ -710,8 +706,6 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
             extra_algorithms={
                 "svr": {
                     "enable": True,
-                    "tuner": "mock.mock_tuner",
-                    "trainer_module": "mock.mock_trainer",
                 }
             },
         )

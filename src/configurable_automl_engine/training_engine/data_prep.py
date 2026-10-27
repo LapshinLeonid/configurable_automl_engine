@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -34,7 +34,6 @@ from configurable_automl_engine.preprocessing import (
 from configurable_automl_engine.training_engine.config_parser import (
     AUTO_HOLDOUT_FRACTION,
     AUTO_HOLDOUT_MIN_ROWS,
-    AlgoCfg,
     Config,
     ValidationStrategy,
     read_config,
@@ -45,6 +44,9 @@ from .logger import setup_logging
 from .metrics import to_sklearn_name
 from .state import PreparedData
 
+if TYPE_CHECKING:
+    from configurable_automl_engine.trainer import ModelTrainer
+
 # The records keep the logger name of the pre-split ``component`` module: the
 # logger name is part of the observable behavior (handlers, filters and
 # ``caplog`` assertions select records by it).
@@ -52,35 +54,18 @@ _LOG = logging.getLogger("configurable_automl_engine.training_engine.component")
 
 
 def _register_datetime_expansion(
-    trainer: Any,
+    trainer: ModelTrainer,
     expansion: dict[str, list[str]] | None,
-    algo_cfg: AlgoCfg,
 ) -> None:
     """Register an upstream datetime expansion on a trainer before saving.
 
-    Custom trainers without ``register_datetime_expansion`` are skipped with a
-    WARNING: their artifact then expects the expanded columns at inference.
-
     Args:
-        trainer (Any): The trained trainer instance.
+        trainer (ModelTrainer): The trained trainer instance.
         expansion (dict[str, list[str]] | None): Source column → generated
             component columns; nothing is done when empty.
-        algo_cfg (AlgoCfg): The algorithm configuration (for the message).
     """
-    if not expansion:
-        return
-    register = getattr(trainer, "register_datetime_expansion", None)
-    if callable(register):
-        register(expansion)
-        return
-    _LOG.warning(
-        "ModelTrainer %s does not provide `register_datetime_expansion`; the "
-        "saved model expects the expanded datetime components %s instead of "
-        "the raw column(s) %s at prediction time.",
-        algo_cfg.trainer_module,
-        sorted(name for names in expansion.values() for name in names),
-        sorted(expansion),
-    )
+    if expansion:
+        trainer.register_datetime_expansion(expansion)
 
 
 # --------------------------------------------------------------------------- #

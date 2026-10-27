@@ -18,8 +18,9 @@ Key features:
     5. Metric Agnostic: Optimisation against any standard or custom Sklearn
        metric (R² by default).
 
-This module is the public façade: ``optimize()`` keeps its signature and
-delegates the run to ``hpo.runner._OptimizeRunner``; the exceptions,
+This module is the public façade: ``optimize()`` keeps its signature,
+collects its arguments into an ``hpo.request.HpoRequest`` and delegates the
+run to ``hpo.runner.run_optimization``; the exceptions,
 ``OptimizeResult`` and the sentinel constants are re-exported from
 ``hpo.types``. The implementation lives in the ``hpo`` package.
 """
@@ -45,7 +46,14 @@ from configurable_automl_engine.training_engine.config_parser import (
     FeatureSelectionCfg,
 )
 
-from .hpo.runner import _OptimizeRunner
+from .hpo.request import (
+    EncodingSettings,
+    HpoRequest,
+    InputPolicies,
+    OversamplingSettings,
+    as_complexity_guard_config,
+)
+from .hpo.runner import run_optimization
 from .hpo.types import (
     HPO_WORST_SCORE,
     WORST_SCORE_THRESHOLD,
@@ -342,48 +350,57 @@ def optimize(
         HPOHistoryError: If ``previous_trials`` contain distributions
             incompatible with the current search space (fail fast).
     """
-    # Thin wrapper: all run logic is moved into the _OptimizeRunner steps so
-    # that optimize() stays a readable entry point.
-    return _OptimizeRunner(
+    # Thin wrapper: the keyword arguments are collected into one request
+    # object, and the run itself lives in ``hpo.runner``.
+    request = HpoRequest(
         algo_name=algo_name,
-        X=X,
-        y=y,
-        data_oversampling=data_oversampling,
-        data_oversampling_multiplier=data_oversampling_multiplier,
-        data_oversampling_algorithm=data_oversampling_algorithm,
-        data_oversampling_target_bins=data_oversampling_target_bins,
-        data_oversampling_add_noise=data_oversampling_add_noise,
-        data_oversampling_noise_level=data_oversampling_noise_level,
         metric=metric,
-        val_method=val_method,
-        validation_strategy=validation_strategy,
-        n_folds=n_folds,
         n_trials=n_trials,
+        # the alias takes precedence
+        val_method=validation_strategy
+        if validation_strategy is not None
+        else val_method,
+        n_folds=n_folds,
+        train_test_split_test_size=train_test_split_test_size,
         random_state=random_state,
         sampler_seed=sampler_seed,
-        train_test_split_test_size=train_test_split_test_size,
         space_overrides=space_overrides,
+        user_hyperparameter_keys=(
+            None if user_hyperparameter_keys is None else list(user_hyperparameter_keys)
+        ),
+        limit_hyperparameters=limit_hyperparameters,
+        complexity_guard=as_complexity_guard_config(complexity_guard_cfg),
         initial_params=initial_params,
         previous_trials=previous_trials,
         preprocessor=preprocessor,
         categorical_features=categorical_features,
         numerical_features=numerical_features,
-        encoding=encoding,
+        encoding=EncodingSettings(
+            encoding=encoding,
+            high_cardinality_threshold=high_cardinality_threshold,
+            high_cardinality_encoding=high_cardinality_encoding,
+            hashing_n_components=hashing_n_components,
+            target_encoding_smoothing=target_encoding_smoothing,
+            target_encoding_fallback=target_encoding_fallback,
+        ),
         preprocessing_override=preprocessing_override,
-        pruning=pruning,
-        high_cardinality_threshold=high_cardinality_threshold,
-        high_cardinality_encoding=high_cardinality_encoding,
-        hashing_n_components=hashing_n_components,
-        target_encoding_smoothing=target_encoding_smoothing,
-        target_encoding_fallback=target_encoding_fallback,
         feature_selection_cfg=feature_selection_cfg,
-        complexity_guard_cfg=complexity_guard_cfg,
-        user_hyperparameter_keys=user_hyperparameter_keys,
-        limit_hyperparameters=limit_hyperparameters,
+        oversampling=OversamplingSettings(
+            enable=data_oversampling,
+            multiplier=data_oversampling_multiplier,
+            algorithm=data_oversampling_algorithm,
+            target_bins=data_oversampling_target_bins,
+            add_noise=data_oversampling_add_noise,
+            noise_level=data_oversampling_noise_level,
+        ),
+        pruning=pruning,
+        policies=InputPolicies(
+            inf_policy=inf_policy,
+            datetime_policy=datetime_policy,
+            drop_id_like_columns=drop_id_like_columns,
+        ),
         fit_best_model=fit_best_model,
         phase_name=phase_name,
-        inf_policy=inf_policy,
-        datetime_policy=datetime_policy,
-        drop_id_like_columns=drop_id_like_columns,
         collect_oof=collect_oof,
-    ).run()
+    )
+    return run_optimization(X, y, request)

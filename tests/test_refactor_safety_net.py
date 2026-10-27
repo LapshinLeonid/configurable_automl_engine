@@ -12,8 +12,7 @@ The tests pin the observable behavior of the package BEFORE the large modules
    referenced by the pickle of a fitted ``ModelTrainer`` and its instance
    attribute names match the committed snapshot (an artifact saved by an
    older version keeps loading).
-3. Public API — the documented import paths keep working, and the config
-   defaults for ``tuner`` / ``trainer_module`` resolve to usable modules.
+3. Public API — the documented import paths keep working.
 4. Imports — ``import configurable_automl_engine`` stays lightweight, and
    every module of the package imports on its own (no import cycles).
 
@@ -466,17 +465,6 @@ def test_pickled_classes_stay_defined_in_trainer() -> None:
 
     assert trainer.ModelTrainer.__module__ == f"{PACKAGE}.trainer"
     assert trainer.IsotonicDataTransformer.__module__ == f"{PACKAGE}.trainer"
-
-
-def test_config_default_module_paths_resolve() -> None:
-    """The ``tuner`` / ``trainer_module`` config defaults resolve to usable modules."""
-    from configurable_automl_engine.training_engine.config_parser import AlgoCfg
-
-    cfg = AlgoCfg()
-    assert cfg.tuner == f"{PACKAGE}.tuner"
-    assert cfg.trainer_module == f"{PACKAGE}.trainer"
-    assert callable(importlib.import_module(cfg.tuner).optimize)
-    assert isinstance(importlib.import_module(cfg.trainer_module).ModelTrainer, type)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

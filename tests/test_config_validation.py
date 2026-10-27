@@ -16,6 +16,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     SanityGateCfg,
     ERR_REMOVED_REFINE_WINNER,
     ERR_REMOVED_SANITY_GATE_MODE,
+    ERR_REMOVED_PLUGIN_KEY,
 )
 from configurable_automl_engine.common.hyperopt_defaults import (
     NumericSpace,
@@ -511,27 +512,47 @@ def test_general_cfg_unknown_datetime_policy_rejected():
         GeneralCfg(phases=[], datetime_policy="bogus")
 
 
-# 3. Tests for AlgoCfg._must_not_be_empty
-def test_algo_cfg_empty_paths():
-    """Checks that an empty string is rejected in module paths."""
+# 3. The removed custom tuner/trainer plug-in keys (0.5.0)
+@pytest.mark.parametrize("key", ["tuner", "trainer_module"])
+def test_config_with_removed_plugin_key_fails_with_targeted_message(key):
+    """A config with ``tuner`` / ``trainer_module`` fails with a targeted
+    message naming the full key path, not pydantic's generic extra-key error."""
+    data = {
+        "general": {"comparison_metric": "rmse"},
+        "algorithms": {"ridge": {"enable": True, key: "my.module"}},
+    }
     with pytest.raises(ValidationError) as exc_info:
-        AlgoCfg(tuner="", hyperparameters={})
+        Config.model_validate(data)
 
-    error_msg = str(exc_info.value)
+    errors = exc_info.value.errors()
+    assert errors[0]["type"] == ERR_REMOVED_PLUGIN_KEY
+    message = str(exc_info.value)
+    assert f"`algorithms.ridge.{key}` was removed in 0.5.0" in message
+    assert "custom tuner/trainer modules are no longer supported" in message
+    assert "delete the key" in message
+    assert "Extra inputs are not permitted" not in message
 
-    # Assert specific parts of the message
-    assert "tuner" in error_msg
-    assert "not a valid dotted path" in error_msg
-    assert "Value error" in error_msg
 
+@pytest.mark.parametrize("key", ["tuner", "trainer_module"])
+def test_algo_cfg_with_removed_plugin_key_fails_with_targeted_message(key):
+    """``AlgoCfg`` built directly rejects the removed keys the same way."""
     with pytest.raises(ValidationError) as exc_info:
-        AlgoCfg(trainer_module="")
+        AlgoCfg(**{key: None})
 
-    error_msg = str(exc_info.value)
+    assert exc_info.value.errors()[0]["type"] == ERR_REMOVED_PLUGIN_KEY
+    assert f"`{key}` was removed in 0.5.0" in str(exc_info.value)
 
-    assert "trainer_module" in error_msg
-    assert "not a valid dotted path" in error_msg
-    assert "Value error" in error_msg
+
+def test_yaml_config_with_removed_plugin_key_fails(tmp_path):
+    """The targeted message also reaches a YAML config file."""
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        "general:\n  comparison_metric: rmse\n"
+        "algorithms:\n  ridge:\n    tuner: configurable_automl_engine.tuner\n",
+        "utf-8",
+    )
+    with pytest.raises(ValidationError, match=r"`algorithms\.ridge\.tuner` was removed"):
+        read_config(cfg_file)
 
 
 # Additional test for the n_folds logic (boundary conditions)
@@ -578,16 +599,6 @@ def test_general_cfg_coverage_line_83():
             validation_strategy=strategy,
             n_folds=0,  # This triggers the raise on line 83
         )
-
-
-# Successful return of v in AlgoCfg
-def test_algo_cfg_coverage_line_205():
-    """The module path value is returned successfully."""
-    # When creating a valid AlgoCfg, the _must_not_be_empty validator
-    # should return the value v (line 205)
-    algo = AlgoCfg(tuner="path.to.tuner", trainer_module="path.to.trainer")
-    assert algo.tuner == "path.to.tuner"
-    assert algo.trainer_module == "path.to.trainer"
 
 
 @patch("configurable_automl_engine.training_engine.config_parser.is_installed")
@@ -897,22 +908,6 @@ def test_get_unknown_hyperparameters_unknown():
     )
 
     assert cfg.get_unknown_hyperparameters("elasticnet") == ["bad_param"]
-
-
-def test_validator_allows_none():
-    cfg = AlgoCfg(tuner=None, trainer_module=None)
-    assert cfg.tuner is None
-    assert cfg.trainer_module is None
-
-
-def test_validator_valid_path():
-    cfg = AlgoCfg(tuner="a.b", trainer_module="x.y.z")
-    assert cfg.tuner == "a.b"
-
-
-def test_validator_invalid_path():
-    with pytest.raises(ValueError):
-        AlgoCfg(tuner="invalid-path")
 
 
 # --- Tests for the preprocessing override ---
@@ -2258,10 +2253,10 @@ def test_refine_phase_executes_with_warm_start():
     # all_algorithms phase (without initial_params) + 1 call in the refine
     # phase (with a warm start).
     assert mock_hpo.call_count == 2
-    first_call = mock_hpo.call_args_list[0].kwargs
-    refine_call = mock_hpo.call_args_list[1].kwargs
-    assert first_call.get("initial_params") is None
-    assert refine_call.get("initial_params") == {"alpha": 0.1}
+    first_call = mock_hpo.call_args_list[0].kwargs["request"]
+    refine_call = mock_hpo.call_args_list[1].kwargs["request"]
+    assert first_call.initial_params is None
+    assert refine_call.initial_params == {"alpha": 0.1}
 
 
 def test_select_phase_executes_in_pipeline():

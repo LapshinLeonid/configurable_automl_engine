@@ -48,10 +48,7 @@ class InvalidDataError(HyperoptError):
 class HPOHistoryError(HyperoptError):
     """Error raised when TPE history cannot be transferred between HPO phases.
 
-    Raised in three situations:
-    - the tuner does not accept the ``previous_trials`` argument, but the
-      pipeline needs to transfer history (e.g. a custom tuner in a refine
-      phase) — fail fast instead of silently degrading refine to a cold run;
+    Raised in two situations:
     - the transferred trials have distributions incompatible with the current
       search space (``study.add_trials`` desync) — fail fast instead of
       silently skipping the history;

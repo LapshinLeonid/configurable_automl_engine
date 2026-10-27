@@ -45,25 +45,30 @@ from configurable_automl_engine.training_engine.component import (
 )
 from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
+from configurable_automl_engine.training_engine.state import _HpoPhaseSpec
+from tests.hpo_spec_factory import make_phase_spec
+from configurable_automl_engine.hpo.request import HpoRequest
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     AlgoCfg,
     FeatureSelectionCfg,
     FeatureSelectionMode,
+    HPOPhaseCfg,
     ValidationStrategy,
 )
 from configurable_automl_engine.tuner import (
     HPO_WORST_SCORE,
     HPOHistoryError,
     InvalidAlgorithmError,
+    OptimizeResult,
 )
 
 import textwrap
 
-# The processes-mode tests patch ``_load_module`` in the parent process; the
-# patch only reaches the pool workers when they are forked. Under spawn
+# The processes-mode tests patch ``run_optimization`` in the parent process;
+# the patch only reaches the pool workers when they are forked. Under spawn
 # (Windows, macOS) or forkserver (the Linux default on Python 3.14+) the
-# workers re-import the real module and cannot resolve the mock tuners.
+# workers re-import the real module and run the real HPO.
 _START_METHOD = (
     multiprocessing.get_start_method(allow_none=True)
     or multiprocessing.get_all_start_methods()[0]
@@ -83,6 +88,15 @@ TERMINAL_SELECT = {
 }
 
 _MODULE = "configurable_automl_engine.training_engine.component"
+_HPO_PHASES = "configurable_automl_engine.training_engine.hpo_phases"
+_ARTIFACT = "configurable_automl_engine.training_engine.artifact"
+
+
+def _optimize_result(
+    params: dict | None, score: float | None, **extra: Any
+) -> OptimizeResult:
+    """An ``OptimizeResult`` of a fake HPO run (no model, no trials)."""
+    return OptimizeResult(model=None, params=params, score=score, trials=[], **extra)
 
 
 def _hpo_only_cfg_and_prepared(
@@ -108,8 +122,6 @@ def _hpo_only_cfg_and_prepared(
         or {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -377,16 +389,8 @@ algorithms:
 # --------------------------------------------------------------------------- #
 #  UNSUPPORTED ALGORITHM SHOULD RAISE
 # --------------------------------------------------------------------------- #
-def _make_iae(message: str):
-    """
-    Creates an exception instance whose __class__.__name__ == 'InvalidAlgorithmError'.
-    This is needed because _run_hpo checks the class name as a string
-    rather than with isinstance, which allows catching an IAE from any module.
-    """
-
-    class InvalidAlgorithmError(Exception):
-        pass
-
+def _make_iae(message: str) -> InvalidAlgorithmError:
+    """The circuit-breaker signal of an HPO run."""
     return InvalidAlgorithmError(message)
 
 
@@ -402,13 +406,10 @@ def test_unsupported_algorithm(tmp_path: Path, small_dataset):
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(HAPPY_CFG.format(model_path="dummy_path"), "utf-8")
 
-    # Simulate a tuner whose optimize() raises InvalidAlgorithmError
-    mock_tuner = MagicMock()
-    mock_tuner.optimize.side_effect = _make_iae("Algorithm not supported")
-
+    # Simulate an HPO run that raises InvalidAlgorithmError
     with patch(
-        "configurable_automl_engine.training_engine.hpo_phases._load_module",
-        return_value=mock_tuner,
+        f"{_HPO_PHASES}.run_optimization",
+        side_effect=_make_iae("Algorithm not supported"),
     ):
         with pytest.raises(RuntimeError) as excinfo:
             train_best_model(
@@ -438,51 +439,35 @@ general:
 algorithms:
   ridge:
     enable: true
-    tuner: "mock.tuner_ridge"
-    trainer_module: "configurable_automl_engine.trainer"
     hyperparameters:
       alpha: [0.1, 1.0]
   random_forest:
     enable: true
-    tuner: "mock.tuner_rf"
-    trainer_module: "configurable_automl_engine.trainer"
     hyperparameters:
       n_estimators: [10, 20]
 """
 
 
 def _make_broken_tuner(message: str) -> MagicMock:
-    """A tuner that always raises InvalidAlgorithmError."""
-    tuner = MagicMock()
-    tuner.optimize.side_effect = _make_iae(message)
-    return tuner
+    """An HPO run that always raises InvalidAlgorithmError."""
+    return MagicMock(side_effect=_make_iae(message))
 
 
 def _make_good_tuner(
     best_params: dict, best_score: float = 0.9
 ) -> MagicMock:
-    """A tuner that successfully returns (model, best_params, best_score)."""
-    tuner = MagicMock()
-    tuner.optimize.return_value = (None, best_params, best_score)
-    return tuner
+    """An HPO run that successfully returns best_params and best_score."""
+    return MagicMock(return_value=_optimize_result(best_params, best_score))
 
 
 def _patch_load_modules(broken_tuner, good_tuner):
-    """Patches _load_module so that different tuners are returned
-    for the different module paths specified in the config."""
+    """Patch the HPO run: ridge gets the broken run, the rest the good one."""
 
-    def fake_load(path: str):
-        if path == "mock.tuner_ridge":
-            return broken_tuner
-        if path == "mock.tuner_rf":
-            return good_tuner
-        # All other paths (e.g., trainer_module) are really imported
-        return importlib.import_module(path)
+    def fake_run(X, y, request):
+        run = broken_tuner if request.algo_name == "ridge" else good_tuner
+        return run(X, y, request)
 
-    return patch(
-        "configurable_automl_engine.training_engine.hpo_phases._load_module",
-        side_effect=fake_load,
-    )
+    return patch(f"{_HPO_PHASES}.run_optimization", side_effect=fake_run)
 
 
 def test_circuit_breaker_disqualifies_only_broken_algorithm(
@@ -583,8 +568,6 @@ def sample_df():
 def mock_algo_cfg():
     return AlgoCfg(
         enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
         hyperparameters=None,
     )
 
@@ -617,8 +600,6 @@ def base_config_dict():
         "algorithms": {
             "random_forest": {
                 "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
             }
         },
         "oversampling": {"data_oversampling": False},
@@ -626,50 +607,23 @@ def base_config_dict():
 
 
 class TestTrainingEngineCoverage:
-    @patch("configurable_automl_engine.training_engine.hpo_phases._load_module")
-    def test_run_hpo_invalid_algorithm_error(self, mock_load, mock_algo_cfg, sample_df):
-        mock_tuner = MagicMock()
-
-        # Dynamically create a class with the EXACT name the code expects
-        CustomIAE = type("InvalidAlgorithmError", (Exception,), {})
-
-        mock_tuner.optimize.side_effect = CustomIAE("Test Error")
-        mock_load.return_value = mock_tuner
-        # We expect the canonical InvalidAlgorithmError exception to be propagated
-        # (imported in the component as _CanonicalIAE)
-        with pytest.raises(InvalidAlgorithmError) as excinfo:
-            _run_hpo(
-                algo_name="random_forest",
-                algo_cfg=mock_algo_cfg,
-                X=sample_df.drop(columns="target"),
-                y=sample_df["target"],
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold,
-            )
+    def test_run_hpo_invalid_algorithm_error(self, sample_df):
+        """InvalidAlgorithmError from the HPO run propagates (the worker
+        disqualifies the algorithm)."""
+        request = HpoRequest(algo_name="random_forest", metric="mae", n_trials=1)
+        with patch(
+            f"{_HPO_PHASES}.run_optimization",
+            side_effect=InvalidAlgorithmError("Test Error"),
+        ):
+            with pytest.raises(InvalidAlgorithmError) as excinfo:
+                _run_hpo(
+                    X=sample_df.drop(columns="target"),
+                    y=sample_df["target"],
+                    request=request,
+                )
 
         # Check that the error text was preserved
         assert "Test Error" in str(excinfo.value)
-
-    # Fixed test for a missing ModelTrainer
-    @patch("configurable_automl_engine.training_engine.artifact._load_module")
-    def test_fit_and_save_missing_trainer_class(
-        self, mock_load, mock_algo_cfg, sample_df, base_config_dict
-    ):
-        mock_load.return_value = MagicMock(spec=[])
-        # Use a valid config instead of an incomplete dictionary
-        cfg = Config.model_validate(base_config_dict)
-
-        with pytest.raises(AttributeError, match="lacks `ModelTrainer` class"):
-            _fit_and_save(
-                "random_forest",
-                mock_algo_cfg,
-                sample_df,
-                sample_df["target"],
-                {},
-                Path("mod.pkl"),
-                cfg,
-            )
 
     # Fixed logging test
     @patch("configurable_automl_engine.training_engine.data_prep.setup_logging")
@@ -727,136 +681,111 @@ class TestTrainingEngineCoverage:
             train_best_model(config={}, df=pd.DataFrame())
 
 
-# Check the absence of the optimize function in the tuner
-def test_run_hpo_lacks_optimize_attr():
-    # Create a mock module without the optimize attribute
-    mock_tuner = MagicMock(spec=[])
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=mock_tuner):
-        with pytest.raises(AttributeError, match="lacks `optimize`"):
-            _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1]}),
-                y=pd.Series([1]),
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold,
-            )
-
-
 # Check the successful return from the try block in _run_hpo
 def test_run_hpo_success_return():
-    mock_tuner = MagicMock()
-    # Configure the mock so that it returns the tuple (model, params, score)
-    mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=mock_tuner):
+    request = HpoRequest(algo_name="ridge", metric="mae", n_trials=1)
+    with patch(
+        f"{_HPO_PHASES}.run_optimization",
+        return_value=_optimize_result({"param": 1}, 0.95, n_trials_evaluated=3),
+    ) as mock_run:
         result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-        )
-        score = result.score
-        params = result.params
-
-        assert score == 0.95
-        assert params == {"param": 1}
-
-
-def test_run_hpo_forwards_resolved_test_size_to_tuner():
-    """The resolved test_size is forwarded to tuners that support it.
-
-    With 'auto' → 'train_test_split' choose_validation_method returns an integer
-    number of rows; HPO must evaluate models on the same split as the final fit,
-    otherwise the scores will diverge.
-    """
-    received: dict[str, object] = {}
-
-    class SplitAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            train_test_split_test_size=0.2,
-        ):
-            received["test_size"] = train_test_split_test_size
-            received["strategy"] = validation_strategy
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=SplitAwareTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            train_test_split_test_size=15,
-        )
-        score = result.score
-        params = result.params
-
-
-    assert score == 0.95
-    assert params == {"param": 1}
-    assert received["test_size"] == 15
-    assert received["strategy"] == ValidationStrategy.train_test_split
-
-
-def test_run_hpo_forwards_oversampling_noise_to_tuner():
-    """The Gaussian noise settings are forwarded to tuners that support them."""
-    received: dict[str, object] = {}
-
-    class NoiseAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            data_oversampling=False,
-            data_oversampling_add_noise=False,
-            data_oversampling_noise_level=0.01,
-        ):
-            received["enable"] = data_oversampling
-            received["add_noise"] = data_oversampling_add_noise
-            received["noise_level"] = data_oversampling_noise_level
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=NoiseAwareTuner()):
-        _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            data_oversampling=True,
-            data_oversampling_add_noise=True,
-            data_oversampling_noise_level=0.05,
+            X=pd.DataFrame({"a": [1]}), y=pd.Series([1]), request=request
         )
 
-    assert received == {"enable": True, "add_noise": True, "noise_level": 0.05}
+    assert result == PhaseResult(score=0.95, params={"param": 1}, n_trials_evaluated=3)
+    # The engine calls the HPO run directly with the request it built.
+    assert mock_run.call_args.args[2] is request
+
+
+def _spec(**overrides: Any) -> _HpoPhaseSpec:
+    """An HPO phase snapshot with neutral defaults."""
+    return make_phase_spec(**overrides)
+
+
+def test_build_hpo_request_forwards_the_phase_settings():
+    """Every engine setting reaches the HPO request explicitly."""
+    pruning_cfg = {
+        "enable": True,
+        "strategy": "median",
+        "min_steps": 1,
+        "n_startup_trials": 1,
+        "reduction_factor": 3,
+    }
+    spec = _spec(
+        resolved_validation=ValidationStrategy.train_test_split,
+        resolved_test_size=15,
+        oversampling_enabled=True,
+        oversampling_add_noise=True,
+        oversampling_noise_level=0.05,
+        pruning_cfg=pruning_cfg,
+        random_state=42,
+        sampler_seed=43,
+        inf_policy="error",
+        datetime_policy="drop",
+        drop_id_like_columns=True,
+        collect_oof=True,
+    )
+    algo_cfg = AlgoCfg(
+        hyperparameters={"alpha": [0.1, 1.0]},
+        preprocessing={"scaling": "robust"},
+    )
+
+    request = hpo_phases_mod._build_hpo_request(
+        "ridge", algo_cfg, spec, initial_params={"alpha": 0.5}, previous_trials=[]
+    )
+
+    assert request.algo_name == "ridge"
+    assert request.metric == "r2"
+    assert request.n_trials == 3
+    # The resolved validation: the hold-out size (an integer number of rows
+    # after 'auto') is the same in HPO and in the final fit.
+    assert request.val_method == ValidationStrategy.train_test_split
+    assert request.train_test_split_test_size == 15
+    assert request.n_folds == 4
+    # The fixed data-split seed and the per-phase sampler seed.
+    assert request.random_state == 42
+    assert request.sampler_seed == 43
+    assert request.oversampling.enable is True
+    assert request.oversampling.add_noise is True
+    assert request.oversampling.noise_level == pytest.approx(0.05)
+    assert request.pruning == pruning_cfg
+    # The final model is trained by the engine itself: no full-data fit.
+    assert request.fit_best_model is False
+    assert request.phase_name == "coarse"
+    assert request.collect_oof is True
+    assert request.initial_params == {"alpha": 0.5}
+    # An empty history is no history.
+    assert request.previous_trials is None
+    # The user ranges (merged by the run) and the user keys of the guard.
+    assert set(request.space_overrides["ridge"]) == {"alpha"}
+    assert request.user_hyperparameter_keys == ["alpha"]
+    assert request.preprocessing_override == algo_cfg.preprocessing
+    assert request.categorical_features == ["c"]
+    assert request.numerical_features == ["a"]
+    assert request.policies.inf_policy == "error"
+    assert request.policies.datetime_policy == "drop"
+    assert request.policies.drop_id_like_columns is True
+
+
+def test_build_hpo_request_without_user_ranges():
+    """No ``hyperparameters`` → no override (the run searches the defaults)."""
+    request = hpo_phases_mod._build_hpo_request("ridge", AlgoCfg(), _spec())
+
+    assert request.space_overrides is None
+    assert request.user_hyperparameter_keys == []
+    assert request.limit_hyperparameters is False
+    assert request.initial_params is None
+    assert request.previous_trials is None
+
+
+def test_build_hpo_request_forwards_previous_trials():
+    """The previous-phase TPE history is forwarded as is."""
+    trials = ["trial-1"]
+    request = hpo_phases_mod._build_hpo_request(
+        "ridge", AlgoCfg(), _spec(), previous_trials=trials
+    )
+
+    assert request.previous_trials == ["trial-1"]
 
 
 def test_build_trainer_forwards_oversampling_noise(base_config_dict):
@@ -871,127 +800,11 @@ def test_build_trainer_forwards_oversampling_noise(base_config_dict):
     }
     cfg = Config.model_validate(base_config_dict)
     algo_cfg = hpo_phases_mod._algorithms_as_dict(cfg.algorithms)["random_forest"]
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=importlib.import_module("configurable_automl_engine.trainer"),
-    ):
-        built = _build_trainer("random_forest", algo_cfg, {}, cfg)
+    built = _build_trainer("random_forest", algo_cfg, {}, cfg)
 
+    assert isinstance(built, ModelTrainer)
     assert built.os_add_noise is True
     assert built.os_noise_level == pytest.approx(0.07)
-
-
-def test_run_hpo_skips_test_size_for_legacy_tuner():
-    """A custom tuner without the parameter does not receive train_test_split_test_size."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["test_size_passed"] = "train_test_split_test_size" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            train_test_split_test_size=0.25,
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["test_size_passed"] is False
-
-
-# The data-split seed (random_state) and the TPE sampler seed
-# (sampler_seed) are forwarded separately to tuners.
-def test_run_hpo_forwards_sampler_seed_and_fixed_random_state():
-    """The engine forwards the fixed data-split seed as random_state and the
-    per-phase sampler seed as sampler_seed to tuners that accept both."""
-    received: dict[str, object] = {}
-
-    class TwoSeedTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            random_state=None,
-            sampler_seed=None,
-        ):
-            received["random_state"] = random_state
-            received["sampler_seed"] = sampler_seed
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=TwoSeedTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            random_state=42,
-            sampler_seed=43,
-        )
-        score = result.score
-        params = result.params
-
-    assert score == 0.95
-    assert params == {"param": 1}
-    assert received["random_state"] == 42
-    assert received["sampler_seed"] == 43
-
-
-def test_run_hpo_skips_sampler_seed_for_legacy_tuner():
-    """A custom tuner without the sampler_seed argument does not receive it
-    (unaffected); it still gets the fixed data-split random_state."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            random_state=None,
-        ):
-            calls["sampler_seed_passed"] = "sampler_seed" in locals()
-            calls["random_state"] = random_state
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            random_state=42,
-            sampler_seed=43,
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["sampler_seed_passed"] is False
-    assert calls["random_state"] == 42
 
 
 def test_execute_phases_splits_sampler_and_split_seeds():
@@ -1000,7 +813,7 @@ def test_execute_phases_splits_sampler_and_split_seeds():
     captured: list[tuple[Any, Any]] = []
 
     def hpo_side_effect(**kwargs):
-        captured.append((kwargs.get("random_state"), kwargs.get("sampler_seed")))
+        captured.append((kwargs["request"].random_state, kwargs["request"].sampler_seed))
         return PhaseResult(score=0.5, params={"alpha": 0.5})
 
     df = pd.DataFrame({"a": [1, 2, 3, 4], "target": [1.0, 2.0, 3.0, 4.0]})
@@ -1017,246 +830,6 @@ def test_execute_phases_splits_sampler_and_split_seeds():
     # Phase 1 (all_algorithms): folds=42 (RANDOM_STATE), sampler=42.
     # Phase 2 (refine): folds stay 42 (the same splits), sampler=43.
     assert captured == [(42, 42), (42, 43)]
-
-
-# Early stopping (pruning): forwarding the settings to the tuner
-def test_run_hpo_passes_pruning_when_tuner_supports_it():
-    """Early-stopping settings are passed to a tuner that supports `pruning`."""
-    received: dict[str, object] = {}
-
-    class PruningAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            pruning=None,
-        ):
-            received["pruning"] = pruning
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    pruning_cfg = {
-        "enable": True,
-        "strategy": "median",
-        "min_steps": 1,
-        "n_startup_trials": 1,
-        "reduction_factor": 3,
-    }
-    with patch("importlib.import_module", return_value=PruningAwareTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            pruning=pruning_cfg,
-        )
-        score = result.score
-        params = result.params
-
-
-    assert score == 0.95
-    assert params == {"param": 1}
-    assert received["pruning"] == pruning_cfg
-
-
-def test_run_hpo_skips_pruning_for_legacy_tuner():
-    """A custom tuner without the `pruning` argument does not receive it (it is unaffected)."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["pruning_passed"] = "pruning" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            pruning={"enable": True, "strategy": "median"},
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["pruning_passed"] is False
-
-
-# The HPO phase does not need the final full-data fit: tuners that support
-# `fit_best_model` are asked to skip it (the engine trains the final model
-# itself with ModelTrainer).
-def test_run_hpo_asks_tuner_to_skip_final_fit():
-    """fit_best_model=False is forwarded to a tuner that supports the argument."""
-    received: dict[str, object] = {}
-
-    class FitAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            fit_best_model=True,
-        ):
-            received["fit_best_model"] = fit_best_model
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=FitAwareTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-        )
-
-    assert result == PhaseResult(score=0.95, params={"param": 1})
-    assert received["fit_best_model"] is False
-
-
-def test_run_hpo_forwards_phase_name_to_tuner():
-    """The HPO phase name is forwarded to tuners that support it."""
-    received: dict[str, object] = {}
-
-    class PhaseAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            phase_name=None,
-        ):
-            received["phase_name"] = phase_name
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=PhaseAwareTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            phase_name="coarse",
-        )
-
-    assert result == PhaseResult(score=0.95, params={"param": 1})
-    assert received["phase_name"] == "coarse"
-
-
-def test_run_hpo_skips_phase_name_for_legacy_tuner():
-    """A custom tuner without `phase_name` does not receive the argument."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["phase_name_passed"] = "phase_name" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            phase_name="coarse",
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["phase_name_passed"] is False
-
-
-def test_run_hpo_skips_fit_best_model_for_legacy_tuner():
-    """A custom tuner without the `fit_best_model` argument does not receive it."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["fit_best_model_passed"] = "fit_best_model" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["fit_best_model_passed"] is False
-
-
-def test_run_hpo_var_kwargs_tuner_receives_previous_trials():
-    """A tuner with a ``**kwargs`` signature is compatible with
-    ``previous_trials``: the key is forwarded (the tuner decides what to do)
-    instead of being rejected with ``HPOHistoryError``."""
-    received: dict[str, object] = {}
-
-    class KwargsTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            **kwargs,
-        ):
-            received["previous_trials"] = kwargs.get("previous_trials")
-            return ("model", {"param": 1}, 0.95)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=KwargsTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2]}),
-            y=pd.Series([1, 2]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-            previous_trials=["trial-1"],
-        )
-
-    assert result == PhaseResult(score=0.95, params={"param": 1})
-    assert received["previous_trials"] == ["trial-1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1287,13 +860,9 @@ def test_execute_phases_parallel_hpo_history_error_fails_fast():
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             },
             "ridge": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             },
         },
         "oversampling": {"enable": False},
@@ -1336,8 +905,6 @@ def test_train_best_model_empty_phases_raises_runtime_error():
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -1371,13 +938,9 @@ def test_train_best_model_config_from_dict_and_refine_flow():
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             },
             "ridge": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             },
         },
         "oversampling": {"enable": False, "multiplier": 1.0, "algorithm": "random"},
@@ -1393,7 +956,7 @@ def test_train_best_model_config_from_dict_and_refine_flow():
     calls: list[tuple[str, dict | None]] = []
 
     def hpo_side_effect(**kwargs):
-        calls.append((kwargs["algo_name"], kwargs.get("initial_params")))
+        calls.append((kwargs["request"].algo_name, kwargs["request"].initial_params))
         return PhaseResult(score=0.9, params={"C": 1.0})
 
     # Patch _run_hpo (called inside the nested _execute_hpo_phase)
@@ -1528,8 +1091,6 @@ def test_log_to_file_captures_orchestrator_messages(tmp_path):
             "algorithms": {
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 }
             },
             "oversampling": {"enable": False},
@@ -1585,8 +1146,6 @@ def test_refine_uses_initial_params_from_phase1():
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -1604,7 +1163,7 @@ def test_refine_uses_initial_params_from_phase1():
             # Phase 1: MAE = 0.9 (raw = -0.9)
             return PhaseResult(score=-0.9, params={"alpha": 0.5, "l1_ratio": 0.3})
         # Phase 2 (refine): initial_params must contain the Phase 1 parameters
-        assert kwargs["initial_params"] == {"alpha": 0.5, "l1_ratio": 0.3}, (
+        assert kwargs["request"].initial_params == {"alpha": 0.5, "l1_ratio": 0.3}, (
             f"expected Phase 1 params, got {kwargs['initial_params']}"
         )
         # Return an improved score: MAE = 0.8 (raw = -0.8)
@@ -1656,8 +1215,6 @@ def test_result_score_matches_logged_user_value(caplog):
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -1710,7 +1267,7 @@ def test_refine_first_phase_runs_without_warm_start():
 
     def hpo_side_effect(**kwargs):
         # The first phase — warm-start has nowhere to come from
-        assert kwargs.get("initial_params") is None
+        assert kwargs["request"].initial_params is None
         return PhaseResult(score=0.9, params={"alpha": 0.5})
 
     cfg, prepared = _hpo_only_cfg_and_prepared(
@@ -1731,26 +1288,12 @@ def test_refine_first_phase_runs_without_warm_start():
 
 # 1. Test for logging an error in _run_hpo
 def test_run_hpo_logs_error_on_exception():
+    request = HpoRequest(algo_name="test_algo", metric="neg_mean_absolute_error")
     with patch(
-        "configurable_automl_engine.training_engine.hpo_phases._load_module"
-    ) as mock_load:
-        # Simulate an error in the tuner
-        mock_tuner = MagicMock()
-        mock_tuner.optimize.side_effect = Exception("HPO failure")
-        mock_load.return_value = mock_tuner
-
-        with patch(
-            "configurable_automl_engine.training_engine.hpo_phases._LOG"
-        ) as mock_log:
-            result = _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=MagicMock(),
-                X=MagicMock(),
-                y=MagicMock(),
-                metric_name_sklearn="accuracy",
-                n_trials=1,
-                validation_strategy=MagicMock(),
-            )
+        f"{_HPO_PHASES}.run_optimization", side_effect=Exception("HPO failure")
+    ):
+        with patch(f"{_HPO_PHASES}._LOG") as mock_log:
+            result = _run_hpo(X=MagicMock(), y=MagicMock(), request=request)
 
             assert result is None
             # Check that the logger error was called
@@ -1758,91 +1301,22 @@ def test_run_hpo_logs_error_on_exception():
 
 
 # ---------------------------------------------------------------- #
-# 1️⃣ Test ValueError when tuner is None
-# ---------------------------------------------------------------- #
-def test_run_hpo_raises_when_tuner_none():
-    algo_cfg = AlgoCfg(
-        tuner=None, trainer_module="some.module", enable=True, hyperparameters={}
-    )
-    X = pd.DataFrame({"a": [1, 2]})
-    y = pd.Series([0, 1])
-
-    from configurable_automl_engine.training_engine.config_parser import (
-        ValidationStrategy,
-    )
-
-    with pytest.raises(ValueError, match="Tuner path is not configured"):
-        _run_hpo(
-            algo_name="dummy_algo",
-            algo_cfg=algo_cfg,
-            X=X,
-            y=y,
-            metric_name_sklearn="accuracy",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-        )
-
-
-# ---------------------------------------------------------------- #
-# 2️⃣ Test ValueError when trainer_module is None
-# ---------------------------------------------------------------- #
-def test_fit_and_save_raises_when_trainer_module_none(tmp_path):
-    algo_cfg = AlgoCfg(
-        tuner="some.tuner", trainer_module=None, enable=True, hyperparameters={}
-    )
-    cfg = Mock()
-    cfg.oversampling.enable = False
-    cfg.oversampling.multiplier = 1.0
-    cfg.oversampling.algorithm = "random"
-    cfg.general.serialization_format = "pickle"
-
-    X = pd.DataFrame({"a": [1, 2]})
-    y = pd.Series([0, 1])
-    best_params = {"param": 1}
-    model_path = tmp_path / "model.pkl"
-
-    with pytest.raises(ValueError, match="Trainer module path is not configured"):
-        _fit_and_save(
-            algo_name="dummy_algo",
-            algo_cfg=algo_cfg,
-            X=X,
-            y=y,
-            best_params=best_params,
-            model_path=model_path,
-            cfg=cfg,
-        )
-
-
-# ---------------------------------------------------------------- #
-# 3️⃣ _run_hpo: the tuner signals failure
+# _run_hpo: the HPO run signals failure
 # ---------------------------------------------------------------- #
 def test_run_hpo_returns_none_when_tuner_reports_failure():
-    """A tuner without a valid result → _run_hpo returns None.
+    """An HPO run without a valid result → _run_hpo returns None.
 
-    Covers both failure signals from tuner.optimize:
-    - (model, None, HPO_WORST_SCORE) — the old "dummy" result;
-    - (None, None, None) — the new canonical failure signal.
+    Covers both failure signals of the run:
+    - an ``OptimizeResult`` without params (the "dummy" result);
+    - ``None`` — the canonical "no valid result" signal.
     In both cases the orchestrator must exclude the algorithm from the
     candidates rather than carry params=None up to the final training.
     """
-    cases = [
-        ("model", None, HPO_WORST_SCORE),
-        (None, None, None),
-    ]
-    for tuner_result in cases:
-        mock_tuner = MagicMock()
-        mock_tuner.optimize.return_value = tuner_result
-        algo_cfg = MagicMock(spec=AlgoCfg)
-        algo_cfg.tuner = "some.module"
-        with patch("importlib.import_module", return_value=mock_tuner):
+    request = HpoRequest(algo_name="test_algo", metric="neg_mean_absolute_error")
+    for run_result in (_optimize_result(None, HPO_WORST_SCORE), None):
+        with patch(f"{_HPO_PHASES}.run_optimization", return_value=run_result):
             result = _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1]}),
-                y=pd.Series([1]),
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.train_test_split,
+                X=pd.DataFrame({"a": [1]}), y=pd.Series([1]), request=request
             )
         assert result is None
 
@@ -1868,6 +1342,15 @@ def test_fit_and_save_rejects_none_params(tmp_path, mock_algo_cfg, base_config_d
 
 # The module path where _run_hpo and _fit_and_save actually live
 _MODULE = "configurable_automl_engine.training_engine.component"
+_HPO_PHASES = "configurable_automl_engine.training_engine.hpo_phases"
+_ARTIFACT = "configurable_automl_engine.training_engine.artifact"
+
+
+def _optimize_result(
+    params: dict | None, score: float | None, **extra: Any
+) -> OptimizeResult:
+    """An ``OptimizeResult`` of a fake HPO run (no model, no trials)."""
+    return OptimizeResult(model=None, params=params, score=score, trials=[], **extra)
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -2010,7 +1493,7 @@ class TestExecuteHpoPhaseReturnsNone:
             train_best_model(config=config_single_algo, df=minimal_df, target="target")
 
         assert mock_hpo.call_count == 1
-        assert mock_hpo.call_args.kwargs["algo_name"] == "random_forest"
+        assert mock_hpo.call_args.kwargs["request"].algo_name == "random_forest"
 
 
 # ── Test 2: Two algorithms — one None, the second valid ────────────────────
@@ -2028,7 +1511,7 @@ class TestPartialNoneResults:
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return None
             # comparison_metric='rmse': the "raw" scorer value is -RMSE,
             # the user is returned a positive RMSE
@@ -2051,7 +1534,7 @@ class TestPartialNoneResults:
         self, mock_hpo, mock_save, minimal_df, config_two_algos
     ):
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return None
             return PhaseResult(score=0.42, params={"n_estimators": 10})
 
@@ -2096,7 +1579,7 @@ class TestWorstScoreResultsExcluded:
     ):
         """One algorithm with HPO_WORST_SCORE, the second valid → the second wins."""
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return PhaseResult(score=HPO_WORST_SCORE, params={"n_estimators": 10})
             # comparison_metric='rmse': the "raw" scorer value is -RMSE,
             # the user is returned a positive RMSE
@@ -2129,7 +1612,7 @@ class TestWorstScoreResultsExcluded:
         raw_f32_min = float(np.finfo(np.float32).min)
 
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return PhaseResult(score=raw_f32_min, params={"n_estimators": 10})
             return PhaseResult(score=-0.42, params={"n_estimators": 10})
 
@@ -2244,13 +1727,9 @@ class TestWorstScoreResultsExcluded:
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
             },
             "oversampling": {"enable": False},
@@ -2258,7 +1737,7 @@ class TestWorstScoreResultsExcluded:
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return None  # complete HPO failure (all trials cut off)
             return PhaseResult(score=-0.8, params={"alpha": 0.5})  # MAE 0.8
 
@@ -2295,29 +1774,22 @@ class TestWorstScoreResultsExcluded:
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "mock.tuner_rf",
-                    "trainer_module": "unittest.mock",
                 },
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "mock.tuner_en",
-                    "trainer_module": "unittest.mock",
                 },
             },
             "oversampling": {"enable": False},
         }
 
     def _processes_fake_load(self, rf_tuner, en_tuner):
-        """Replacement of _load_module for the processes mode (real _run_hpo)."""
+        """Replacement of the HPO run for the processes mode (real _run_hpo)."""
 
-        def fake_load(path: str):
-            if path == "mock.tuner_rf":
-                return rf_tuner
-            if path == "mock.tuner_en":
-                return en_tuner
-            return importlib.import_module(path)
+        def fake_run(X, y, request):
+            run = rf_tuner if request.algo_name == "random_forest" else en_tuner
+            return run(X, y, request)
 
-        return fake_load
+        return fake_run
 
     @requires_fork
     @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
@@ -2334,13 +1806,11 @@ class TestWorstScoreResultsExcluded:
         config_dict = self._processes_config(str(tmp_path / "model.pkl"))
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
-        rf_tuner = MagicMock()
-        rf_tuner.optimize.return_value = (None, {"n_estimators": 10}, -0.4)  # MAE 0.4
-        en_tuner = MagicMock()
-        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.8)  # MAE 0.8
+        rf_tuner = MagicMock(return_value=_optimize_result({"n_estimators": 10}, -0.4))  # MAE 0.4
+        en_tuner = MagicMock(return_value=_optimize_result({"alpha": 0.5}, -0.8))  # MAE 0.8
 
         with patch(
-            "configurable_automl_engine.training_engine.hpo_phases._load_module",
+            f"{_HPO_PHASES}.run_optimization",
             side_effect=self._processes_fake_load(rf_tuner, en_tuner),
         ):
             result = train_best_model(config=config_dict, df=df, target="target")
@@ -2378,14 +1848,12 @@ class TestWorstScoreResultsExcluded:
         config_dict = self._processes_config(str(tmp_path / "model.pkl"))
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
-        rf_tuner = MagicMock()
-        rf_tuner.optimize.return_value = (None, {"n_estimators": 10}, -0.4)
-        en_tuner = MagicMock()
-        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.8)
+        rf_tuner = MagicMock(return_value=_optimize_result({"n_estimators": 10}, -0.4))
+        en_tuner = MagicMock(return_value=_optimize_result({"alpha": 0.5}, -0.8))
 
         with (
             patch(
-                "configurable_automl_engine.training_engine.hpo_phases._load_module",
+                f"{_HPO_PHASES}.run_optimization",
                 side_effect=self._processes_fake_load(rf_tuner, en_tuner),
             ),
             patch(
@@ -2419,19 +1887,12 @@ class TestWorstScoreResultsExcluded:
         config_dict = self._processes_config(str(tmp_path / "model.pkl"))
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
-        def _make_iae(message: str):
-            class InvalidAlgorithmError(Exception):
-                pass
-
-            return InvalidAlgorithmError(message)
-
         rf_tuner = MagicMock()
-        rf_tuner.optimize.side_effect = _make_iae("not supported")
-        en_tuner = MagicMock()
-        en_tuner.optimize.return_value = (None, {"alpha": 0.5}, -0.5)  # MAE 0.5
+        rf_tuner.side_effect = _make_iae("not supported")
+        en_tuner = MagicMock(return_value=_optimize_result({"alpha": 0.5}, -0.5))  # MAE 0.5
 
         with patch(
-            "configurable_automl_engine.training_engine.hpo_phases._load_module",
+            f"{_HPO_PHASES}.run_optimization",
             side_effect=self._processes_fake_load(rf_tuner, en_tuner),
         ):
             result = train_best_model(config=config_dict, df=df, target="target")
@@ -2458,7 +1919,7 @@ class TestWorstScoreResultsExcluded:
         df = pd.DataFrame({"f": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
 
         def hpo_side_effect(**kwargs):
-            if kwargs["algo_name"] == "random_forest":
+            if kwargs["request"].algo_name == "random_forest":
                 return None  # complete HPO failure (all trials pruned)
             return PhaseResult(score=-0.8, params={"alpha": 0.5})  # MAE 0.8
 
@@ -2500,8 +1961,6 @@ class TestWorstScoreResultsExcluded:
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
             },
             "oversampling": {"enable": False},
@@ -2609,11 +2068,10 @@ class TestWorstScoreResultsExcluded:
 class TestWorstScoreIntegrationThroughTuner:
     """Full path: a real _run_hpo + a tuner that returned HPO_WORST_SCORE."""
 
-    @patch("configurable_automl_engine.training_engine.hpo_phases._load_module")
     def test_tuner_worst_score_excluded_end_to_end(
-        self, mock_load, minimal_df, config_single_algo
+        self, minimal_df, config_single_algo
     ):
-        """The tuner returned (model, params, HPO_WORST_SCORE) → the algorithm is excluded.
+        """The HPO run returned HPO_WORST_SCORE → the algorithm is excluded.
 
         Integration scenario (reviewer's note to
         test_optimize_pruning_nonfinite_score_uses_worst_score): we do not mock
@@ -2621,22 +2079,22 @@ class TestWorstScoreIntegrationThroughTuner:
         valid_results filter → RuntimeError. The final training is not called,
         and the TypeError 'NoneType' object is not iterable does not occur.
         """
+        worst = OptimizeResult(
+            model=object(),
+            params={"n_estimators": 10},
+            score=HPO_WORST_SCORE,
+            trials=[],
+        )
 
-        class WorstScoreTuner:
-            def optimize(self, **kwargs):
-                del kwargs
-                return object(), {"n_estimators": 10}, HPO_WORST_SCORE
-
-        mock_load.return_value = WorstScoreTuner()
-
-        with patch("configurable_automl_engine.training_engine.artifact._fit_and_save") as mock_save:
-            with pytest.raises(
-                RuntimeError, match="No algorithms produced valid scores"
-            ):
-                train_best_model(
-                    config=config_single_algo, df=minimal_df, target="target"
-                )
-            mock_save.assert_not_called()
+        with patch(f"{_HPO_PHASES}.run_optimization", return_value=worst):
+            with patch(f"{_ARTIFACT}._fit_and_save") as mock_save:
+                with pytest.raises(
+                    RuntimeError, match="No algorithms produced valid scores"
+                ):
+                    train_best_model(
+                        config=config_single_algo, df=minimal_df, target="target"
+                    )
+                mock_save.assert_not_called()
 
 
 # ── Test 4: a complete refine failure does not corrupt the result ─────────────
@@ -2668,8 +2126,6 @@ class TestRefineFailureCleanup:
             "algorithms": {
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 }
             },
             "oversampling": {"enable": False},
@@ -2732,13 +2188,9 @@ class TestMultiPhaseFailureExclusion:
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
             },
             "oversampling": {"enable": False},
@@ -2747,7 +2199,7 @@ class TestMultiPhaseFailureExclusion:
         calls: dict[str, int] = {}
 
         def hpo_side_effect(**kwargs):
-            algo = kwargs["algo_name"]
+            algo = kwargs["request"].algo_name
             calls[algo] = calls.get(algo, 0) + 1
             if algo == "random_forest":
                 if calls[algo] == 1:
@@ -2792,8 +2244,6 @@ class TestMultiPhaseFailureExclusion:
             "algorithms": {
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 }
             },
             "oversampling": {"enable": False},
@@ -2839,13 +2289,9 @@ class TestMultiPhaseFailureExclusion:
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
                 "elasticnet": {
                     "enable": True,
-                    "tuner": "unittest.mock",
-                    "trainer_module": "unittest.mock",
                 },
             },
             "oversampling": {"enable": False},
@@ -2854,7 +2300,7 @@ class TestMultiPhaseFailureExclusion:
         calls: dict[str, int] = {}
 
         def hpo_side_effect(**kwargs):
-            algo = kwargs["algo_name"]
+            algo = kwargs["request"].algo_name
             calls[algo] = calls.get(algo, 0) + 1
             if algo == "random_forest":
                 if calls[algo] == 1:
@@ -2912,14 +2358,10 @@ general:
 algorithms:
   ridge:
     enable: true
-    tuner: "mock.tuner_ridge"
-    trainer_module: "configurable_automl_engine.trainer"
     hyperparameters:
       alpha: [0.1, 1.0]
   random_forest:
     enable: true
-    tuner: "mock.tuner_rf"
-    trainer_module: "configurable_automl_engine.trainer"
     hyperparameters:
       n_estimators: [10, 20]
 """
@@ -2942,82 +2384,35 @@ algorithms:
     }
     # Ridge was NOT re-run in the second all_algorithms phase: the tuner was called
     # exactly once (only in phase 1, where the disqualification happened).
-    assert broken_tuner.optimize.call_count == 1
+    assert broken_tuner.call_count == 1
     # The working algorithm ran in both phases.
-    assert good_tuner.optimize.call_count == 2
+    assert good_tuner.call_count == 2
 
 
 # --------------------------------------------------------------------------- #
 #  Adaptive preprocessing preset override propagation
 # --------------------------------------------------------------------------- #
-def test_run_hpo_passes_preprocessing_override_to_tuner():
-    """The preprocessing block from the algorithm config is passed to tuner.optimize."""
+def test_build_hpo_request_passes_preprocessing_override():
+    """The preprocessing block from the algorithm config reaches the HPO request."""
     from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 
-    class FakeTuner:
-        """A tuner with a real optimize signature (accepts preprocessing_override)."""
-
-        def __init__(self) -> None:
-            self.received: dict = {}
-
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric="r2",
-            n_trials=1,
-            validation_strategy="k_fold",
-            *,
-            preprocessing_override=None,
-            **kwargs,
-        ):
-            self.received["preprocessing_override"] = preprocessing_override
-            return ("model", {"param": 1}, 0.95)
-
-    fake_tuner = FakeTuner()
     algo_cfg = AlgoCfg(
-        tuner="some.module",
         preprocessing={"imputation_strategy": "median", "scaling": "none"},
     )
 
-    with patch("importlib.import_module", return_value=fake_tuner):
-        _run_hpo(
-            algo_name="random_forest",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-        )
+    request = hpo_phases_mod._build_hpo_request("random_forest", algo_cfg, _spec())
 
-    received = fake_tuner.received["preprocessing_override"]
+    received = request.preprocessing_override
     assert isinstance(received, PreprocessingOverride)
     assert received.scaling == "none"
     assert received.imputation_strategy == "median"
 
 
-def test_run_hpo_no_override_when_absent():
-    """Without a preprocessing block the tuner receives None."""
-    mock_tuner = MagicMock()
-    mock_tuner.optimize.return_value = ("model", {"param": 1}, 0.95)
+def test_build_hpo_request_no_override_when_absent():
+    """Without a preprocessing block the HPO request carries None."""
+    request = hpo_phases_mod._build_hpo_request("ridge", AlgoCfg(), _spec())
 
-    algo_cfg = AlgoCfg(tuner="some.module")
-
-    with patch("importlib.import_module", return_value=mock_tuner):
-        _run_hpo(
-            algo_name="ridge",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="r2",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.train_test_split,
-        )
-
-    kwargs = mock_tuner.optimize.call_args.kwargs
-    assert kwargs.get("preprocessing_override") is None
+    assert request.preprocessing_override is None
 
 
 def test_train_best_model_applies_preprocessing_override(tmp_path, regression_dataset):
@@ -3081,207 +2476,15 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
 # --------------------------------------------------------------------------- #
 
 
-def test_run_hpo_passes_feature_selection_cfg_when_tuner_supports_it():
-    """feature_selection_cfg from the root Config is forwarded to tuner.optimize."""
-    received: dict[str, object] = {}
-
-    class FsAwareTuner:
-        def optimize(
-            self,
-            algo_name,
-            X,
-            y,
-            metric,
-            n_trials,
-            validation_strategy,
-            feature_selection_cfg=None,
-        ):
-            received["feature_selection_cfg"] = feature_selection_cfg
-            return ("model", {"param": 1}, 0.95)
-
+def test_build_hpo_request_forwards_feature_selection_cfg():
+    """feature_selection_cfg from the root Config reaches the HPO request."""
     fs_cfg = FeatureSelectionCfg(mode=FeatureSelectionMode.always)
 
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.module"
-    with patch("importlib.import_module", return_value=FsAwareTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1, 2, 3]}),
-            y=pd.Series([1, 2, 3]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            feature_selection_cfg=fs_cfg,
-        )
-        score = result.score
-        params = result.params
+    request = hpo_phases_mod._build_hpo_request(
+        "ridge", AlgoCfg(), _spec(feature_selection_cfg=fs_cfg)
+    )
 
-
-    assert score == 0.95
-    assert params == {"param": 1}
-    assert received["feature_selection_cfg"] is fs_cfg
-
-
-def test_run_hpo_skips_feature_selection_cfg_for_legacy_tuner():
-    """A custom tuner without the feature_selection_cfg argument is unaffected."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["fs_passed"] = "feature_selection_cfg" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            feature_selection_cfg=FeatureSelectionCfg(
-                mode=FeatureSelectionMode.always
-            ),
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["fs_passed"] is False
-
-
-def test_run_hpo_warns_when_fs_cfg_unsupported_but_mode_active(caplog):
-    """A legacy tuner + an active selection mode → a warning about the mismatch."""
-    calls: dict[str, object] = {}
-
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            calls["fs_passed"] = "feature_selection_cfg" in locals()
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        with caplog.at_level("WARNING", logger=component.__name__):
-            result = _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1]}),
-                y=pd.Series([1]),
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold,
-                feature_selection_cfg=FeatureSelectionCfg(
-                    mode=FeatureSelectionMode.always
-                ),
-            )
-
-    # The tuner is untouched, but the user is warned
-    assert result == PhaseResult(score=0.5, params={})
-    assert calls["fs_passed"] is False
-    assert "does not accept `feature_selection_cfg`" in caplog.text
-    assert "will NOT be applied during HPO" in caplog.text
-
-
-def test_run_hpo_no_warning_when_fs_disabled_for_legacy_tuner(caplog):
-    """The 'disabled' mode (or None) for a legacy tuner — no warning needed."""
-    class LegacyTuner:
-        def optimize(self, algo_name, X, y, metric, n_trials, validation_strategy):
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.legacy.module"
-    with patch("importlib.import_module", return_value=LegacyTuner()):
-        with caplog.at_level("WARNING", logger=component.__name__):
-            _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1]}),
-                y=pd.Series([1]),
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold,
-                feature_selection_cfg=FeatureSelectionCfg(),  # disabled by default
-            )
-
-    assert "does not accept `feature_selection_cfg`" not in caplog.text
-
-
-def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner(caplog):
-    """A tuner with **kwargs is considered compatible (symmetric with _fit_and_save).
-
-    Previously ``_run_hpo`` only checked for the presence of the name
-    ``feature_selection_cfg`` in the signature, so a ``**kwargs`` tuner received
-    a misleading mismatch warning even though the config could be safely
-    forwarded — with an active selection mode this led to a silent mismatch
-    between HPO and the final fit.
-    """
-    received: dict[str, object] = {}
-
-    class VarKwargsTuner:
-        def optimize(
-            self, algo_name, X, y, metric, n_trials, validation_strategy, **kwargs
-        ):
-            received["feature_selection_cfg"] = kwargs.get("feature_selection_cfg")
-            return ("model", {"param": 1}, 0.95)
-
-    fs_cfg = FeatureSelectionCfg(mode=FeatureSelectionMode.always)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.var_kwargs.module"
-    with patch("importlib.import_module", return_value=VarKwargsTuner()):
-        with caplog.at_level("WARNING", logger=component.__name__):
-            result = _run_hpo(
-                algo_name="test_algo",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1, 2, 3]}),
-                y=pd.Series([1, 2, 3]),
-                metric_name_sklearn="mae",
-                n_trials=1,
-                validation_strategy=ValidationStrategy.k_fold,
-                feature_selection_cfg=fs_cfg,
-            )
-            score = result.score
-            params = result.params
-
-
-    assert score == 0.95
-    assert params == {"param": 1}
-    # The config was delivered through **kwargs, no mismatch warning present
-    assert received["feature_selection_cfg"] is fs_cfg
-    assert "does not accept `feature_selection_cfg`" not in caplog.text
-
-
-def test_run_hpo_passes_fs_cfg_to_var_kwargs_tuner_in_disabled_mode():
-    """A tuner with **kwargs receives the config even in the 'disabled' mode."""
-    received: dict[str, object] = {}
-
-    class VarKwargsTuner:
-        def optimize(
-            self, algo_name, X, y, metric, n_trials, validation_strategy, **kwargs
-        ):
-            received["feature_selection_cfg"] = kwargs.get("feature_selection_cfg")
-            return ("model", {}, 0.5)
-
-    algo_cfg = MagicMock(spec=AlgoCfg)
-    algo_cfg.tuner = "some.var_kwargs.module"
-    with patch("importlib.import_module", return_value=VarKwargsTuner()):
-        result = _run_hpo(
-            algo_name="test_algo",
-            algo_cfg=algo_cfg,
-            X=pd.DataFrame({"a": [1]}),
-            y=pd.Series([1]),
-            metric_name_sklearn="mae",
-            n_trials=1,
-            validation_strategy=ValidationStrategy.k_fold,
-            feature_selection_cfg=FeatureSelectionCfg(),  # disabled by default
-        )
-
-    assert result == PhaseResult(score=0.5, params={})
-    assert isinstance(received["feature_selection_cfg"], FeatureSelectionCfg)
-    assert received["feature_selection_cfg"].mode == FeatureSelectionMode.disabled
+    assert request.feature_selection_cfg is fs_cfg
 
 
 def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
@@ -3292,8 +2495,6 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
 
     algo_cfg = AlgoCfg(
         enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
         hyperparameters=None,
     )
     cfg = Config.model_validate(
@@ -3321,8 +2522,6 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "mock.mock_tuner",
-                    "trainer_module": "mock.mock_trainer",
                 }
             },
         }
@@ -3333,10 +2532,7 @@ def test_fit_and_save_passes_fs_active_and_cfg_to_trainer():
         "use_feature_selection": True,
     }
 
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=Mock(ModelTrainer=mock_trainer_cls),
-    ):
+    with patch(f"{_ARTIFACT}.ModelTrainer", mock_trainer_cls):
         _fit_and_save(
             algo_name="random_forest",
             algo_cfg=algo_cfg,
@@ -3367,8 +2563,6 @@ def test_fit_and_save_fs_active_none_when_key_absent():
 
     algo_cfg = AlgoCfg(
         enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
         hyperparameters=None,
     )
     cfg = Config.model_validate(
@@ -3396,17 +2590,12 @@ def test_fit_and_save_fs_active_none_when_key_absent():
             "algorithms": {
                 "random_forest": {
                     "enable": True,
-                    "tuner": "mock.mock_tuner",
-                    "trainer_module": "mock.mock_trainer",
                 }
             },
         }
     )
 
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=Mock(ModelTrainer=mock_trainer_cls),
-    ):
+    with patch(f"{_ARTIFACT}.ModelTrainer", mock_trainer_cls):
         _fit_and_save(
             algo_name="random_forest",
             algo_cfg=algo_cfg,
@@ -3435,8 +2624,6 @@ def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
 
     algo_cfg = AlgoCfg(
         enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
         hyperparameters=None,
     )
     cfg = Config.model_validate(_fs_cfg_dict("auto"))
@@ -3446,10 +2633,7 @@ def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
         "use_feature_selection": False,
     }
 
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=Mock(ModelTrainer=mock_trainer_cls),
-    ):
+    with patch(f"{_ARTIFACT}.ModelTrainer", mock_trainer_cls):
         _fit_and_save(
             algo_name="random_forest",
             algo_cfg=algo_cfg,
@@ -3467,43 +2651,6 @@ def test_fit_and_save_fs_active_false_when_winner_rejected_selection():
     assert "use_feature_selection" not in call_kwargs["hyperparams"]
     # The original best_params (returned in result["params"]) is not mutated
     assert best_params["use_feature_selection"] is False
-
-
-class _LegacyTrainerNoFs:
-    """A custom ModelTrainer WITHOUT feature-selection arguments.
-
-    The signature covers all the "old" arguments that ``_fit_and_save``
-    passes, but does not contain ``feature_selection_cfg`` /
-    ``feature_selection_active`` and does not accept ``**kwargs`` — previously
-    such a trainer would fail with a TypeError.
-    """
-
-    def __init__(
-        self,
-        algorithm="elasticnet",
-        hyperparams=None,
-        metric="r2",
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        serialization_format="pickle",
-        encoding_strategy="one_hot",
-        additional_metrics=None,
-        preprocessing_override=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-    ):
-        self.hyperparams = dict(hyperparams or {})
-        self.additional_scores = {}
-
-    def fit(self, X, y):
-        return self
-
-    def save(self, path):
-        return None
 
 
 def _fs_cfg_dict(mode: str) -> dict:
@@ -3529,95 +2676,9 @@ def _fs_cfg_dict(mode: str) -> dict:
         "algorithms": {
             "random_forest": {
                 "enable": True,
-                "tuner": "mock.mock_tuner",
-                "trainer_module": "mock.mock_trainer",
             }
         },
     }
-
-
-def test_feature_selection_mode_helper():
-    """_feature_selection_mode: FeatureSelectionCfg/dict/None → a mode string."""
-    from configurable_automl_engine.training_engine.hpo_phases import (
-        _feature_selection_mode,
-    )
-
-    assert _feature_selection_mode(None) is None
-    assert _feature_selection_mode({}) is None
-    assert _feature_selection_mode({"mode": "always"}) == "always"
-    assert _feature_selection_mode({"mode": FeatureSelectionMode.auto}) == "auto"
-    assert _feature_selection_mode(FeatureSelectionCfg()) == "disabled"
-    assert _feature_selection_mode(FeatureSelectionCfg(mode=FeatureSelectionMode.always)) == "always"
-    assert _feature_selection_mode("not-a-cfg") is None
-
-
-def test_fit_and_save_skips_fs_kwargs_for_legacy_trainer(caplog, tmp_path):
-    """A legacy ModelTrainer without the fs arguments does not receive them (warning).
-
-    Previously ``_fit_and_save`` passed ``feature_selection_cfg`` /
-    ``feature_selection_active`` unconditionally → TypeError for custom
-    trainers without these arguments.
-    """
-    algo_cfg = AlgoCfg(
-        enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
-        hyperparameters=None,
-    )
-    cfg = Config.model_validate(_fs_cfg_dict("always"))
-
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
-    ):
-        with caplog.at_level("WARNING", logger=component.__name__):
-            trainer = _fit_and_save(
-                algo_name="random_forest",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
-                y=pd.Series([1, 2, 3]),
-                best_params={"n_estimators": 50, "use_feature_selection": True},
-                model_path=tmp_path / "mod.pkl",
-                cfg=cfg,
-            )
-
-    # Training/saving passed without a TypeError, the helper key is cleaned out
-    assert isinstance(trainer, _LegacyTrainerNoFs)
-    assert trainer.hyperparams == {"n_estimators": 50}
-    # The user is warned about the silent ignoring of both arguments
-    assert "does not accept `feature_selection_cfg`" in caplog.text
-    assert "does not accept `feature_selection_active`" in caplog.text
-
-
-def test_fit_and_save_no_warning_for_legacy_trainer_when_fs_disabled(
-    caplog, tmp_path
-):
-    """The 'disabled' mode for a legacy trainer — no warnings."""
-    algo_cfg = AlgoCfg(
-        enable=True,
-        tuner="mock.mock_tuner",
-        trainer_module="mock.mock_trainer",
-        hyperparameters=None,
-    )
-    cfg = Config.model_validate(_fs_cfg_dict("disabled"))
-
-    with patch(
-        "configurable_automl_engine.training_engine.artifact._load_module",
-        return_value=Mock(ModelTrainer=_LegacyTrainerNoFs),
-    ):
-        with caplog.at_level("WARNING", logger=component.__name__):
-            _fit_and_save(
-                algo_name="random_forest",
-                algo_cfg=algo_cfg,
-                X=pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}),
-                y=pd.Series([1, 2, 3]),
-                best_params={"n_estimators": 50},
-                model_path=tmp_path / "mod.pkl",
-                cfg=cfg,
-            )
-
-    assert "does not accept `feature_selection_cfg`" not in caplog.text
-    assert "does not accept `feature_selection_active`" not in caplog.text
 
 
 def test_refine_preserves_feature_selection_status_between_phases():
@@ -3636,8 +2697,6 @@ def test_refine_preserves_feature_selection_status_between_phases():
         "algorithms": {
             "elasticnet": {
                 "enable": True,
-                "tuner": "unittest.mock",
-                "trainer_module": "unittest.mock",
             }
         },
         "oversampling": {"enable": False},
@@ -3654,7 +2713,7 @@ def test_refine_preserves_feature_selection_status_between_phases():
             # Phase 1: the candidate recorded use_feature_selection=True
             return PhaseResult(score=0.8, params={"alpha": 0.5, "l1_ratio": 0.3, "use_feature_selection": True})
         # Phase 2 (refine): initial_params must contain the selection status from phase 1
-        assert kwargs.get("initial_params") == {
+        assert kwargs["request"].initial_params == {
             "alpha": 0.5,
             "l1_ratio": 0.3,
             "use_feature_selection": True,

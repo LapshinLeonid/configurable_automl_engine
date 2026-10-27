@@ -31,6 +31,11 @@ from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.hpo import runner as hpo_runner
 from configurable_automl_engine.hpo import search_space as hpo_search_space
+from configurable_automl_engine.hpo.request import (
+    EncodingSettings,
+    HpoRequest,
+    OversamplingSettings,
+)
 from configurable_automl_engine.common.hyperopt_defaults import (
     FloatSpace,
     SearchSpaceEntry,
@@ -1730,8 +1735,8 @@ def test_isotonic_optimize_multifeature_default_space(toy_data):
 def test_isotonic_optimize_dict_space_merges_feature_index(toy_data):
     """The engine path (dict ``space_overrides`` without feature_index).
 
-    ``_prepare_search_space`` passes only DEFAULT_SPACES (``increasing``) plus
-    user overrides; the tuner must merge a data-driven ``feature_index`` over
+    ``build_search_space`` yields only DEFAULT_SPACES (``increasing``) plus
+    user overrides; the run must merge a data-driven ``feature_index`` over
     the NUMERICAL features into the dict, so the index is tuned
     instead of silently staying at the default 0.
     """
@@ -2430,34 +2435,15 @@ def test_runner_dropped_features_recorded():
     """_OptimizeRunner records the list of dropped columns for diagnostics."""
     X, y = _tuner_garbage_data()
     runner = hpo_runner._OptimizeRunner(
-        algo_name="ridge",
-        X=X,
-        y=y,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding=None,
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X,
+        y,
+        HpoRequest(
+            algo_name='ridge',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
@@ -2490,34 +2476,15 @@ def test_runner_n_features_size_uses_original_columns():
     y = pd.Series(rng.normal(size=n))
 
     runner = hpo_runner._OptimizeRunner(
-        algo_name="random_forest",
-        X=X,
-        y=y,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding="one_hot",
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X,
+        y,
+        HpoRequest(
+            algo_name='random_forest',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
@@ -2547,34 +2514,15 @@ def test_runner_n_features_eff_ignores_missing_categories():
     y = pd.Series(rng.normal(size=n))
 
     runner = hpo_runner._OptimizeRunner(
-        algo_name="random_forest",
-        X=X,
-        y=y,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding="one_hot",
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X,
+        y,
+        HpoRequest(
+            algo_name='random_forest',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
@@ -2606,34 +2554,15 @@ def test_runner_n_features_eff_respects_high_cardinality_split():
     y = pd.Series(rng.normal(size=n))
 
     runner = hpo_runner._OptimizeRunner(
-        algo_name="random_forest",
-        X=X,
-        y=y,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding="one_hot",
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=10,
-        high_cardinality_encoding="frequency",
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X,
+        y,
+        HpoRequest(
+            algo_name='random_forest',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=10),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
@@ -2663,34 +2592,15 @@ def test_runner_n_features_size_aligned_without_preprocessor():
     y_arr = X_arr[:, 0] * 2.0 - X_arr[:, 1] + rng.normal(0, 0.1, 100)
 
     runner = hpo_runner._OptimizeRunner(
-        algo_name="random_forest",
-        X=X_arr,
-        y=y_arr,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=None,
-        categorical_features=None,
-        numerical_features=None,
-        encoding="one_hot",
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X_arr,
+        y_arr,
+        HpoRequest(
+            algo_name='random_forest',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            encoding=EncodingSettings(encoding='one_hot', high_cardinality_threshold=None, high_cardinality_encoding=None),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
@@ -2714,34 +2624,16 @@ def test_optimize_external_preprocessor_skips_cleaning():
     )
 
     runner = hpo_runner._OptimizeRunner(
-        algo_name="ridge",
-        X=X,
-        y=y,
-        data_oversampling=False,
-        data_oversampling_multiplier=1.0,
-        data_oversampling_algorithm="random",
-        metric="r2",
-        val_method="train_test_split",
-        validation_strategy=None,
-        n_folds=5,
-        n_trials=2,
-        random_state=0,
-        sampler_seed=None,
-        train_test_split_test_size=0.2,
-        space_overrides=None,
-        initial_params=None,
-        preprocessor=external,
-        categorical_features=None,
-        numerical_features=None,
-        encoding=None,
-        preprocessing_override=None,
-        pruning=None,
-        high_cardinality_threshold=None,
-        high_cardinality_encoding=None,
-        hashing_n_components=16,
-        target_encoding_smoothing=20.0,
-        target_encoding_fallback=None,
-        feature_selection_cfg=None,
+        X,
+        y,
+        HpoRequest(
+            algo_name='ridge',
+            val_method='train_test_split',
+            n_trials=2,
+            random_state=0,
+            preprocessor=external,
+            encoding=EncodingSettings(high_cardinality_threshold=None, high_cardinality_encoding=None),
+        ),
     )
     runner.resolve_validation()
     runner.build_trial_pipeline()
