@@ -21,7 +21,12 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import Trial
 from sklearn.base import clone
 
-from configurable_automl_engine.feature_selection import FeatureSelector
+from configurable_automl_engine.feature_selection import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+    FeatureSelector,
+)
+from configurable_automl_engine.isotonic import IsotonicDataTransformer
 from configurable_automl_engine.models import (
     AVAILABLE_ALGORITHMS,
     requires_dense_input,
@@ -38,11 +43,6 @@ from configurable_automl_engine.preprocessing import (
 from configurable_automl_engine.preprocessing_presets import (
     requires_missing_indicator,
     resolve_preprocessing_preset,
-)
-from configurable_automl_engine.trainer import IsotonicDataTransformer
-from configurable_automl_engine.training_engine.config_parser import (
-    FeatureSelectionCfg,
-    FeatureSelectionMode,
 )
 
 from .plans import PreprocessingPlan

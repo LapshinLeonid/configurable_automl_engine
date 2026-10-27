@@ -17,17 +17,17 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import make_scorer
 
 
-from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine import trainer
 from configurable_automl_engine.trainer import (
     ModelTrainer,
     TrainingError,
-    IsotonicDataTransformer,
     train_model,
 )
+from configurable_automl_engine.isotonic import IsotonicDataTransformer
 from configurable_automl_engine.common.definitions import SerializationFormat
 from unittest.mock import MagicMock, patch
-from configurable_automl_engine.training_engine.logger import (
+from configurable_automl_engine.common.log_setup import (
     setup_logging,
 )  # Import setup
 from tests.trainer_helpers import score_with_trainer, trainer_preprocessor

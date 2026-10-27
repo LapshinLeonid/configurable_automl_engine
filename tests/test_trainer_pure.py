@@ -19,7 +19,7 @@ from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import Ridge
 
-from configurable_automl_engine.common.artifact_metadata import (
+from configurable_automl_engine.trainer_artifact import (
     _collect_artifact_metadata,
     check_artifact_format,
 )
@@ -41,7 +41,7 @@ from configurable_automl_engine.trainer_data import (
     log_preprocessed_matrix,
     prepare_features,
 )
-from configurable_automl_engine.trainer_errors import TrainingError
+from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.trainer_feature_selection import (
     _resolve_feature_selection_active,
     _run_feature_selection_auto_check,
@@ -53,7 +53,7 @@ from configurable_automl_engine.trainer_scoring import (
     score_on_validation_splits,
 )
 from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
-from configurable_automl_engine.training_engine.config_parser import (
+from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
 from tests.purity import assert_pure

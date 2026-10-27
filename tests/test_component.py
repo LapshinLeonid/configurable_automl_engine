@@ -49,11 +49,13 @@ from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.state import _HpoPhaseSpec
 from tests.hpo_spec_factory import make_phase_spec
 from configurable_automl_engine.hpo.request import HpoRequest
+from configurable_automl_engine.feature_selection import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+)
 from configurable_automl_engine.training_engine.config_parser import (
     Config,
     AlgoCfg,
-    FeatureSelectionCfg,
-    FeatureSelectionMode,
     HPOPhaseCfg,
     ValidationStrategy,
 )
@@ -1832,7 +1834,7 @@ class TestWorstScoreResultsExcluded:
         via ``shared_args_indices``: one shared memory segment serves all
         algorithms of the phase.
         """
-        from configurable_automl_engine.training_engine.thread_pool import (
+        from configurable_automl_engine.common.shared_frame import (
             SharedDataFrame,
         )
 

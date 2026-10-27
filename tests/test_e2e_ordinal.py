@@ -142,7 +142,7 @@ def test_train_best_model_ordinal_encoding(tmp_path: Path) -> None:
 def test_tuner_optimize_ordinal_not_pruned() -> None:
     """tuner.optimize(..., encoding='ordinal') returns a trained model
     and a finite score (no pruned trials)."""
-    from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+    from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
     from configurable_automl_engine.tuner import optimize
 
     df = _make_regression_df(n=120, seed=3)

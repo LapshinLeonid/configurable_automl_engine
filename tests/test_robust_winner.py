@@ -57,7 +57,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     GeneralCfg,
     SanityGateCfg,
 )
-from configurable_automl_engine.training_engine.metrics import oof_rmse
+from configurable_automl_engine.common.metrics import oof_rmse
 from configurable_automl_engine.training_engine.sanity_gate import (
     ModelSanityGate,
     SanityCheckResult,

@@ -19,7 +19,9 @@ import numpy as np
 import pandas as pd
 from scipy import sparse as sp
 
+from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.settings import EncodingSettings, InputPolicies
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine.common.validation_utils import (
     check_target_constant,
     check_target_numeric,
@@ -37,10 +39,8 @@ from configurable_automl_engine.preprocessing_presets import (
     requires_missing_indicator,
     resolve_preprocessing_preset,
 )
-from configurable_automl_engine.training_engine.thread_pool import SharedDataFrame
 
 from .models import requires_dense_input
-from .trainer_errors import TrainingError
 from .trainer_state import PreparedFeatures, TrainerPreprocessor, TrainingData
 
 _LOG = logging.getLogger(__name__)

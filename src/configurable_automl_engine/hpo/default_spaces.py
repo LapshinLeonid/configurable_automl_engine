@@ -11,6 +11,8 @@ import numpy as np
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from configurable_automl_engine.models import get_param_numeric_type
+
 T = TypeVar("T", str, int, float, bool)
 
 
@@ -622,10 +624,6 @@ def infer_param_numeric_type(algo_name: str, param_name: str) -> str | None:
     default = _default_dist_type(algo_name, param_name)
     if default in ("int", "float", "float_log"):
         return default
-    # Lazy import: the estimator factory is only needed for parameters not
-    # present in DEFAULT_SPACES, and this module stays lightweight otherwise.
-    from configurable_automl_engine.models import get_param_numeric_type
-
     return get_param_numeric_type(algo_name, param_name)
 
 

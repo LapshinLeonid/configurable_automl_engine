@@ -490,7 +490,7 @@ def test_resolve_load_formats_case_insensitive() -> None:
 # Internal version helpers (branch coverage)
 # ══════════════════════════════════════════════════════════════════════════
 
-from configurable_automl_engine.common.artifact_metadata import (  # noqa: E402
+from configurable_automl_engine.trainer_artifact import (  # noqa: E402
     _installed_module_version,
     _major_minor,
     _version_tuple,

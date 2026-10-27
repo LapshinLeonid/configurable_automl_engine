@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     CategoricalSpace,
     FloatSpace,
     IntSpace,

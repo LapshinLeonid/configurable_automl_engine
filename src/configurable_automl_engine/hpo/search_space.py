@@ -25,11 +25,11 @@ import numpy as np
 import optuna
 from optuna.trial import Trial
 
-from configurable_automl_engine.common.complexity_guard import (
+from configurable_automl_engine.hpo.complexity_guard import (
     ComplexityGuardConfig,
     apply_complexity_guard,
 )
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     DEFAULT_SPACES,
     CategoricalSpace,
     FloatSpace,
@@ -52,7 +52,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from configurable_automl_engine.training_engine.config_parser import (
+    from configurable_automl_engine.feature_selection import (
         FeatureSelectionMode,
     )
 

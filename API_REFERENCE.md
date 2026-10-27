@@ -375,7 +375,7 @@ general:
 The optional `general.complexity_guard` block is an **adaptive complexity
 guard** for the search spaces of trees and boosting on small data. It extends
 the existing data-dependent clipping layer (`clip_search_space` in
-`common/hyperopt_defaults.py`): on small data the default ranges of
+`hpo/default_spaces.py`): on small data the default ranges of
 tree/boosting hyperparameters are too wide (e.g. `max_depth` 2–32 on
 a 15-row training fold), trials are spent on values that do not change the
 model, the TPE surface has flat regions and the search drifts toward overfit

@@ -17,6 +17,10 @@
       "configurable_automl_engine.common.settings.EncodingSettings",
       "configurable_automl_engine.common.settings.InputPolicies",
       "configurable_automl_engine.common.settings.OversamplingSettings",
+      "configurable_automl_engine.feature_selection.FeatureSelectionCfg",
+      "configurable_automl_engine.feature_selection.FeatureSelectionMethod",
+      "configurable_automl_engine.feature_selection.FeatureSelectionMode",
+      "configurable_automl_engine.isotonic.IsotonicDataTransformer",
       "configurable_automl_engine.oversampling.DataOversampler",
       "configurable_automl_engine.preprocessing.ColumnNameSelector",
       "configurable_automl_engine.preprocessing.FrequencyEncodingTransformer",
@@ -24,15 +28,11 @@
       "configurable_automl_engine.preprocessing._to_string_array",
       "configurable_automl_engine.preprocessing_presets.AlgorithmClass",
       "configurable_automl_engine.preprocessing_presets.PreprocessingPreset",
-      "configurable_automl_engine.trainer.IsotonicDataTransformer",
       "configurable_automl_engine.trainer.ModelTrainer",
       "configurable_automl_engine.trainer_state.FeatureSelectionResult",
       "configurable_automl_engine.trainer_state.PreparedFeatures",
       "configurable_automl_engine.trainer_state.TrainerSettings",
-      "configurable_automl_engine.trainer_state.ValidationScores",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionCfg",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionMethod",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionMode"
+      "configurable_automl_engine.trainer_state.ValidationScores"
     ]
   },
   "ridge_fs_oversampling": {
@@ -53,6 +53,9 @@
       "configurable_automl_engine.common.settings.EncodingSettings",
       "configurable_automl_engine.common.settings.InputPolicies",
       "configurable_automl_engine.common.settings.OversamplingSettings",
+      "configurable_automl_engine.feature_selection.FeatureSelectionCfg",
+      "configurable_automl_engine.feature_selection.FeatureSelectionMethod",
+      "configurable_automl_engine.feature_selection.FeatureSelectionMode",
       "configurable_automl_engine.feature_selection.FeatureSelector",
       "configurable_automl_engine.oversampling.DataOversampler",
       "configurable_automl_engine.preprocessing.ColumnNameSelector",
@@ -65,10 +68,7 @@
       "configurable_automl_engine.trainer_state.FeatureSelectionResult",
       "configurable_automl_engine.trainer_state.PreparedFeatures",
       "configurable_automl_engine.trainer_state.TrainerSettings",
-      "configurable_automl_engine.trainer_state.ValidationScores",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionCfg",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionMethod",
-      "configurable_automl_engine.training_engine.config_parser.FeatureSelectionMode"
+      "configurable_automl_engine.trainer_state.ValidationScores"
     ]
   }
 }

@@ -18,12 +18,12 @@ import math
 
 import pytest
 
-from configurable_automl_engine.common.complexity_guard import (
+from configurable_automl_engine.hpo.complexity_guard import (
     ComplexityGuardConfig,
     apply_complexity_guard,
     resolve_size_mode,
 )
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     DEFAULT_SPACES,
     FloatSpace,
     IntSpace,

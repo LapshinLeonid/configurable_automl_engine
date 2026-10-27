@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import optuna
     from optuna.trial import Trial
 
-    from configurable_automl_engine.training_engine.config_parser import (
+    from configurable_automl_engine.feature_selection import (
         FeatureSelectionCfg,
         FeatureSelectionMode,
     )

@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from configurable_automl_engine.common.log_setup import setup_logging
+from configurable_automl_engine.common.metrics import to_sklearn_name
 from configurable_automl_engine.common.validation_utils import (
     check_target_constant,
     check_target_exists,
@@ -40,8 +42,6 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.validation import make_cv
 
-from .logger import setup_logging
-from .metrics import to_sklearn_name
 from .state import PreparedData
 
 if TYPE_CHECKING:

@@ -19,8 +19,8 @@ from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import Ridge
 from sklearn.utils.validation import check_is_fitted
 
-from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
-from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
+from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
+from configurable_automl_engine.hpo.default_spaces import SearchSpaceEntry
 from configurable_automl_engine.hpo.evaluation import (
     _build_scorer,
     _phase_oof_matrix,
@@ -68,7 +68,7 @@ from configurable_automl_engine.hpo.trial_pipeline import (
     plan_preprocessing,
 )
 from configurable_automl_engine.hpo.types import HPO_WORST_SCORE, HyperoptError
-from configurable_automl_engine.training_engine.config_parser import (
+from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
 )
@@ -579,7 +579,7 @@ def test_score_trial_is_pure(metric: str, kwargs: dict, collect_oof: bool) -> No
     X, y = _numeric_frame(n=24)
     validation = _validation(X, y, **kwargs)
     estimator = Ridge(alpha=0.5)
-    from configurable_automl_engine.training_engine.metrics import (
+    from configurable_automl_engine.common.metrics import (
         is_non_additive_metric,
     )
 

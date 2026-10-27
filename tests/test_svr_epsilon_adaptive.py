@@ -21,7 +21,7 @@ import pytest
 from sklearn.linear_model import Ridge
 
 from configurable_automl_engine.hpo import runner as hpo_runner
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     SVR_EPSILON_FALLBACK,
     SearchSpaceEntry,
     compute_svr_epsilon_bounds,

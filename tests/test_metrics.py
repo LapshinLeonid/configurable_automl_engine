@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import logging
 from unittest.mock import MagicMock
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.metrics import (
     _rmse,
     _nrmse,
     direction_label,
@@ -245,7 +245,7 @@ def test_is_greater_better_scorer_without_sign_fallback(monkeypatch):
     Covers the defensive branch for hypothetical custom scorers whose
     direction is not exposed.
     """
-    import configurable_automl_engine.training_engine.metrics as metrics_mod
+    import configurable_automl_engine.common.metrics as metrics_mod
 
     class NoSignScorer:
         pass
@@ -265,7 +265,7 @@ def test_is_greater_better_reflects_registry_mutation():
     """
     from sklearn.metrics import make_scorer, mean_squared_error
 
-    import configurable_automl_engine.training_engine.metrics as metrics_mod
+    import configurable_automl_engine.common.metrics as metrics_mod
 
     custom_name = "dyn_registry_metric"
     assert custom_name not in metrics_mod._SCORER_OBJECTS

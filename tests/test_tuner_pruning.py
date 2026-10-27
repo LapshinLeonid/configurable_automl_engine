@@ -34,7 +34,7 @@ from sklearn.model_selection import KFold
 from configurable_automl_engine.hpo import search_space as hpo_search_space
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.hpo import runner as hpo_runner
-from configurable_automl_engine.training_engine.metrics import get_scorer_object
+from configurable_automl_engine.common.metrics import get_scorer_object
 from configurable_automl_engine.tuner import HPO_WORST_SCORE, HyperoptError, optimize
 from configurable_automl_engine.hpo.evaluation import (
     _evaluate_pooled_cv,

@@ -39,7 +39,7 @@ from configurable_automl_engine.trainer import (
 )
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.training_engine.state import PhaseResult
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     is_non_additive_metric,
     to_user_value,

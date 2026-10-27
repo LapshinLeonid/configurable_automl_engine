@@ -38,7 +38,7 @@ from configurable_automl_engine.common.settings import (
     OversamplingSettings,
 )
 from configurable_automl_engine.hpo.request import HpoRequest
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     FloatSpace,
     SearchSpaceEntry,
 )

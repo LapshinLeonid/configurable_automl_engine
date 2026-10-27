@@ -13,7 +13,7 @@ import inspect
 import numpy as np
 import pytest
 
-from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
+from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.trainer import ModelTrainer, train_model
 from configurable_automl_engine.training_engine.config_parser import (

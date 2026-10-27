@@ -16,22 +16,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
 from configurable_automl_engine.common.settings import (
     EncodingSettings,
     InputPolicies,
     OversamplingSettings,
 )
+from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
 
 if TYPE_CHECKING:
     from optuna.trial import FrozenTrial
 
     from configurable_automl_engine.common.definitions import ValidationStrategy
+    from configurable_automl_engine.feature_selection import (
+        FeatureSelectionCfg,
+    )
     from configurable_automl_engine.preprocessing_presets import (
         PreprocessingOverride,
-    )
-    from configurable_automl_engine.training_engine.config_parser import (
-        FeatureSelectionCfg,
     )
 
 

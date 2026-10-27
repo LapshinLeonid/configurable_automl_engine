@@ -37,7 +37,7 @@ from sklearn.metrics import mean_squared_error
 
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.trainer import ModelTrainer
-from configurable_automl_engine.training_engine.metrics import oof_rmse
+from configurable_automl_engine.common.metrics import oof_rmse
 from configurable_automl_engine.validation import iter_splits
 from tests.trainer_helpers import score_with_trainer, trainer_preprocessor
 

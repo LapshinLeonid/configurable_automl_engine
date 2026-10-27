@@ -1,7 +1,7 @@
 """Adaptive complexity guard for tree and boosting search spaces.
 
 The module extends the existing data-dependent clipping layer
-(:mod:`configurable_automl_engine.common.hyperopt_defaults`): on small data
+(:mod:`configurable_automl_engine.hpo.default_spaces`): on small data
 the search ranges of tree/boosting hyperparameters are too wide, trials are
 spent on values that do not change the model, the TPE surface has flat
 regions and the search drifts toward overfit models. This guard tightens the
@@ -50,12 +50,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,
     align_entry_bounds,
 )
+from configurable_automl_engine.models import resolve_algorithm_name
 
 # ─────────────────────────────── configuration ─────────────────────────────── #
 
@@ -1200,8 +1201,6 @@ def apply_complexity_guard(
             changes; in ``off`` mode both are empty.
     """
     cfg = config or ComplexityGuardConfig()
-    from configurable_automl_engine.models import resolve_algorithm_name
-
     algo = resolve_algorithm_name(algo)
     if cfg.mode == "off":
         return dict(space), []

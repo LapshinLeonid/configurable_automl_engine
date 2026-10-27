@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from configurable_automl_engine.common.hyperopt_defaults import SearchSpaceEntry
-from configurable_automl_engine.common.target_domain import (
+from configurable_automl_engine.hpo.default_spaces import SearchSpaceEntry
+from configurable_automl_engine.hpo.target_domain import (
     check_target_domain,
     tweedie_power_is_valid,
 )

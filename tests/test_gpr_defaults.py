@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.datasets import make_regression
 
-from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 from configurable_automl_engine.models import create_model
 from configurable_automl_engine.tuner import (
     HyperoptError,

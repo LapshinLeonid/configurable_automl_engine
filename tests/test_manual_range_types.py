@@ -20,7 +20,7 @@ import logging
 
 import pytest
 
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     FloatSpace,
     IntSpace,
     SearchSpaceEntry,

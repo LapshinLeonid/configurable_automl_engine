@@ -11,6 +11,7 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
 * **Docstrings:** Google-style in English for all public modules, classes, and functions (`Args:`, `Returns:`, `Raises:`).
 * **Code Quality Baseline:** Zero Ruff warnings in /src/, 100% strict Mypy compliance in /src/, passing Pytest suite.
 * **State ownership:** Do not mutate `_OptimizeRunner` / `ModelTrainer` / `PhaseContext` outside their owner (`hpo/runner.py`, `trainer.py`, `training_engine/component.py`). New computational steps are pure functions: they return a frozen plan / result / outcome and the owner assigns it (`tests/test_ownership.py` enforces this). Log with `logging.getLogger(__name__)`.
+* **Import layers:** Imports go only downward: `training_engine` → `hpo`/`tuner`/trainer → building blocks → `common`. If a lower module needs something from above, move that thing down. `hpo` and the trainer modules (`trainer.py`, `trainer_*.py`) do not import each other. Package imports stay at module level (no imports inside functions; the only exception is the lazy `train_best_model` proxy in `training_engine/__init__.py`), and `TYPE_CHECKING` imports follow the same rule. The layers are listed in README ("Import layers") and enforced by the `import-linter` contracts in `pyproject.toml`: run `lint-imports` before committing.
 
 ---
 
@@ -42,6 +43,7 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
      ruff check src/
      ruff format --check src/
      mypy src --install-types --non-interactive
+     lint-imports
      pytest --cov=src --cov-report=term-missing
      ```
     After your changes all tests must pass. If you changes breaks some old test you must fix that tests.

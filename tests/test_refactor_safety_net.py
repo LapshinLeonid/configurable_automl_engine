@@ -471,15 +471,16 @@ def test_pickled_classes_stay_defined_in_their_modules() -> None:
     """The classes of the saved trainer state live at their documented paths.
 
     A pickle references every class by its module path, so the path is part
-    of the artifact format: ``ModelTrainer`` / ``IsotonicDataTransformer`` in
-    ``trainer``, the state groups in ``trainer_state`` and the setting groups
+    of the artifact format: ``ModelTrainer`` in ``trainer``,
+    ``IsotonicDataTransformer`` in ``isotonic``, the state groups in ``trainer_state`` and the setting groups
     in ``common.settings``.
     """
-    from configurable_automl_engine import trainer, trainer_state
+    from configurable_automl_engine import isotonic, trainer, trainer_state
     from configurable_automl_engine.common import settings
 
     assert trainer.ModelTrainer.__module__ == f"{PACKAGE}.trainer"
-    assert trainer.IsotonicDataTransformer.__module__ == f"{PACKAGE}.trainer"
+    assert trainer.IsotonicDataTransformer is isotonic.IsotonicDataTransformer
+    assert isotonic.IsotonicDataTransformer.__module__ == f"{PACKAGE}.isotonic"
     for cls in (
         trainer_state.TrainerSettings,
         trainer_state.PreparedFeatures,

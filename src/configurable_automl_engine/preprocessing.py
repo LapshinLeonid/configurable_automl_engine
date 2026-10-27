@@ -71,7 +71,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -90,14 +90,13 @@ from sklearn.preprocessing import (
 )
 from sklearn.utils.validation import check_is_fitted
 
+from configurable_automl_engine.common.definitions import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import (
     ImputationStrategy,
     ScalingType,
 )
 
 logger = logging.getLogger(__name__)
-
-EncodingStrategy = Literal["one_hot", "ordinal", "target", "frequency", "hashing"]
 
 _VALID_ENCODING_STRATEGIES = (
     "one_hot",

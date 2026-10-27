@@ -158,58 +158,81 @@ direct unit tests (inputs unchanged, two calls give equal results). Every
 module logs under its own name (`logging.getLogger(__name__)`). Breaking
 changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
+## Import layers
+
+The modules form four layers. Each layer imports only from itself and from
+the layers below it — top-level, function-level and `TYPE_CHECKING` imports
+alike — and there are no import cycles:
+
+| Layer | Modules |
+|---|---|
+| 3 — orchestration | `training_engine/` (config schema, phases, selection, artifact saving, `run_parallel`) |
+| 2 — engines | `hpo/`, `tuner.py`; `trainer.py`, `trainer_*.py`. HPO and the trainer modules do not import each other; `tuner.py` is the façade over `hpo` |
+| 1 — ML building blocks | `models`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic` |
+| 0 — shared utilities | `common/` (and the generated `_version`) |
+
+The package `__init__` is the public façade on top; it loads
+`training_engine.component` (and with it Optuna) only on the first call of
+`train_best_model`. The rules are `import-linter` contracts in
+`pyproject.toml`, checked in CI by `lint-imports`; package imports inside
+functions are not allowed (except the lazy `train_best_model` proxy in
+`training_engine/__init__.py`). If a lower module needs something from above,
+move that thing down.
+
 # Project Structure
 
 ```
 ├── benchmarks                              # Quality benchmarks of Sanity Gate, Complexity Guard, oversampling
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
-│       ├── common                          # Shared utilities and helper functions
-│       │   ├── artifact_metadata.py        # Saved-artifact metadata and load-time version warnings
-│       │   ├── complexity_guard.py         # Adaptive tightening of tree/boosting search spaces on small data
-│       │   ├── definitions.py              # Constants, enums, and schema definitions
+│       ├── common                          # Layer 0: shared utilities (imports nothing above common)
+│       │   ├── definitions.py              # Constants, enums and literals (validation, encoding, serialization)
 │       │   ├── dependency_utils.py         # Optional library and dependency checks
-│       │   ├── hyperopt_defaults.py        # Default search spaces, clipping, and constraints
+│       │   ├── errors.py                   # TrainingError
+│       │   ├── log_setup.py                # Centralized logging setup (setup_logging)
+│       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
 │       │   ├── settings.py                 # Setting groups shared by HPO and the trainer (encoding, oversampling, input policies)
-│       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
+│       │   ├── shared_frame.py             # SharedDataFrame: a DataFrame passed between processes through shared memory
 │       │   └── validation_utils.py         # Low-level data validation and effective train size
-│       ├── hpo                             # Hyperparameter optimization engine behind tuner.optimize
+│       ├── hpo                             # Layer 2: hyperparameter optimization engine behind tuner.optimize
+│       │   ├── complexity_guard.py         # Adaptive tightening of tree/boosting search spaces on small data
+│       │   ├── default_spaces.py           # Default search spaces, clipping, and constraints
 │       │   ├── evaluation.py               # Trial scoring (score_trial): hold-out, fold-wise with pruning reports, pooled OOF
 │       │   ├── plans.py                    # Frozen plans returned by the pure setup steps (validation, preprocessing, ...)
 │       │   ├── pruning.py                  # Early stopping (pruning) plan
 │       │   ├── request.py                  # HpoRequest: the settings of one HPO run
 │       │   ├── runner.py                   # _OptimizeRunner: run loop, circuit breaker, best trial; plan_validation
 │       │   ├── search_space.py             # Search space plan, complexity guard, boundary warnings
+│       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
-│       ├── training_engine                 # Core orchestration and execution logic
+│       ├── training_engine                 # Layer 3: orchestration
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
 │       │   ├── component.py                # Main orchestrator: train_best_model, the phase loop; applies the step outcomes
 │       │   ├── config_parser.py            # Configuration parsing and validation
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
-│       │   ├── logger.py                   # Centralized logging management
-│       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
 │       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies (return a SelectOutcome)
 │       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, step outcomes, ...)
-│       │   └── thread_pool.py              # Multi-threading, parallel execution, watchdog
-│       ├── feature_selection.py            # Optional feature selection step
-│       ├── models.py                       # Model factory, hyperparameter cleaning
-│       ├── oversampling.py                 # Experimental target-aware oversampling
-│       ├── preprocessing.py                # Feature preprocessing: imputation, scaling, encoding
-│       ├── preprocessing_presets.py        # Per-algorithm preprocessing presets
-│       ├── trainer.py                      # ModelTrainer: training, validation and saving of a single model
-│       ├── trainer_data.py                 # ModelTrainer input data: X/y, diagnostics, preprocessor, alignment
-│       ├── trainer_errors.py               # TrainingError
-│       ├── trainer_feature_selection.py    # ModelTrainer feature selection decision and auto-check
-│       ├── trainer_params.py               # ModelTrainer constructor argument validation
-│       ├── trainer_scoring.py              # ModelTrainer validation scoring and the OOF channel
-│       ├── trainer_state.py                # ModelTrainer state groups (TrainerSettings, ...) and the artifact format version
-│       ├── tuner.py                        # Public HPO entry point optimize() (façade over hpo)
-│       └── validation.py                   # High-level cross-validation strategies
+│       │   └── thread_pool.py              # run_parallel: thread/process pools, disk cache, watchdog
+│       ├── feature_selection.py            # Layer 1: optional feature selection step and its config (FeatureSelectionCfg)
+│       ├── isotonic.py                     # Layer 1: IsotonicDataTransformer, the isotonic regression data adapter
+│       ├── models.py                       # Layer 1: model factory, hyperparameter cleaning
+│       ├── oversampling.py                 # Layer 1: experimental target-aware oversampling
+│       ├── preprocessing.py                # Layer 1: feature preprocessing: imputation, scaling, encoding
+│       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets
+│       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
+│       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks
+│       ├── trainer_data.py                 # Layer 2: ModelTrainer input data: X/y, diagnostics, preprocessor, alignment
+│       ├── trainer_feature_selection.py    # Layer 2: ModelTrainer feature selection decision and auto-check
+│       ├── trainer_params.py               # Layer 2: ModelTrainer constructor argument validation
+│       ├── trainer_scoring.py              # Layer 2: ModelTrainer validation scoring and the OOF channel
+│       ├── trainer_state.py                # Layer 2: ModelTrainer state groups (TrainerSettings, ...) and the artifact format version
+│       ├── tuner.py                        # Layer 2: public HPO entry point optimize() (façade over hpo)
+│       └── validation.py                   # Layer 1: high-level cross-validation strategies
 ├── tests                                   # Unit and integration test suites
 ├── agents.md                               # Instructions for AI agents in the CI pipeline
 ├── API_REFERENCE.md                        # User guide and API reference

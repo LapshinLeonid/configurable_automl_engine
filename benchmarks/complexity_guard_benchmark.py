@@ -46,8 +46,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from configurable_automl_engine.common.complexity_guard import ComplexityGuardConfig
-from configurable_automl_engine.common.hyperopt_defaults import DEFAULT_SPACES
+from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
+from configurable_automl_engine.hpo.default_spaces import DEFAULT_SPACES
 from configurable_automl_engine.tuner import optimize
 
 __all__ = [

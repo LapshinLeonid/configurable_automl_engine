@@ -32,11 +32,12 @@ skip_timing_on_windows = pytest.mark.skipif(
     reason="spawn-based pool restarts on Windows exceed the timing budget",
 )
 
+from configurable_automl_engine.common import shared_frame
 from configurable_automl_engine.training_engine import thread_pool
 
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine.training_engine.thread_pool import (
     run_parallel,
-    SharedDataFrame,
     DiskPersistenceManager,
     _worker_proxy,
     _perform_cleanup,
@@ -297,7 +298,7 @@ def test_shared_dataframe_creation_uses_os_generated_name():
     df = pd.DataFrame({"a": [1, 2, 3]})
     buffer = memoryview(bytearray(df.to_numpy().nbytes))
     with patch(
-        "configurable_automl_engine.training_engine.thread_pool.shared_memory.SharedMemory"
+        "configurable_automl_engine.common.shared_frame.shared_memory.SharedMemory"
     ) as mock_shm:
         mock_shm.return_value.name = "psm_test_segment"
         mock_shm.return_value.buf = buffer
@@ -1825,11 +1826,11 @@ def test_shared_dataframe_creation_failure_cleans_segment():
     df = pd.DataFrame({"a": [1, 2, 3]})
     with (
         patch(
-            "configurable_automl_engine.training_engine.thread_pool."
+            "configurable_automl_engine.common.shared_frame."
             "shared_memory.SharedMemory"
         ) as mock_shm,
         patch(
-            "configurable_automl_engine.training_engine.thread_pool.np.ndarray",
+            "configurable_automl_engine.common.shared_frame.np.ndarray",
             side_effect=RuntimeError("simulated buffer failure"),
         ),
     ):
@@ -1861,10 +1862,8 @@ import multiprocessing as mp
 
 import pandas as pd
 
-from configurable_automl_engine.training_engine.thread_pool import (
-    run_parallel,
-    SharedDataFrame,
-)
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.training_engine.thread_pool import run_parallel
 
 
 def worker_mixed_dtypes(df):
@@ -2148,7 +2147,7 @@ def test_is_compatible_duplicate_column_names_no_crash():
     assert SharedDataFrame.is_compatible(df_big) is False
 
     # Direct helper call on an int+float duplicated frame.
-    from configurable_automl_engine.training_engine.thread_pool import (
+    from configurable_automl_engine.common.shared_frame import (
         _ints_fit_float64,
     )
 
@@ -2158,7 +2157,7 @@ def test_is_compatible_duplicate_column_names_no_crash():
 
 def test_numpy_result_dtype_helper():
     """Direct coverage of _numpy_result_dtype (decomposition)."""
-    from configurable_automl_engine.training_engine.thread_pool import (
+    from configurable_automl_engine.common.shared_frame import (
         _numpy_result_dtype,
     )
 
@@ -2187,7 +2186,7 @@ def test_numpy_result_dtype_helper():
 
 def test_ints_fit_float64_helper():
     """Direct coverage of _ints_fit_float64 (decomposition)."""
-    from configurable_automl_engine.training_engine.thread_pool import (
+    from configurable_automl_engine.common.shared_frame import (
         _ints_fit_float64,
     )
 
@@ -2398,10 +2397,8 @@ import multiprocessing as mp
 
 import pandas as pd
 
-from configurable_automl_engine.training_engine.thread_pool import (
-    run_parallel,
-    SharedDataFrame,
-)
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.training_engine.thread_pool import run_parallel
 
 
 def worker_int64_float64(df):
@@ -2489,10 +2486,8 @@ import multiprocessing as mp
 
 import pandas as pd
 
-from configurable_automl_engine.training_engine.thread_pool import (
-    run_parallel,
-    SharedDataFrame,
-)
+from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.training_engine.thread_pool import run_parallel
 
 
 def worker_extension(df):
@@ -2557,19 +2552,19 @@ if __name__ == "__main__":
 def test_shm_backing_path_uses_dev_shm(monkeypatch):
     """The check targets /dev/shm when it exists (Linux layout)."""
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool.os.path.exists",
+        "configurable_automl_engine.common.shared_frame.os.path.exists",
         lambda path: path == "/dev/shm",
     )
-    assert thread_pool._shm_backing_path() == "/dev/shm"
+    assert shared_frame._shm_backing_path() == "/dev/shm"
 
 
 def test_shm_backing_path_missing_dev_shm_returns_none(monkeypatch):
     """No /dev/shm (e.g. a minimal container without the mount) → None."""
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool.os.path.exists",
+        "configurable_automl_engine.common.shared_frame.os.path.exists",
         lambda path: False,
     )
-    assert thread_pool._shm_backing_path() is None
+    assert shared_frame._shm_backing_path() is None
 
 
 def test_shm_has_free_space_no_backing_path_returns_true(monkeypatch):
@@ -2580,11 +2575,11 @@ def test_shm_has_free_space_no_backing_path_returns_true(monkeypatch):
     behaviour (an attempt that may fail with ENOMEM) is preserved.
     """
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: None,
     )
-    assert thread_pool._shm_has_free_space(10**9) is True
+    assert shared_frame._shm_has_free_space(10**9) is True
 
 
 @requires_statvfs
@@ -2595,12 +2590,12 @@ def test_shm_has_free_space_enough_room(monkeypatch):
     st.f_bavail = 262144
     st.f_frsize = 4096
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: "/dev/shm",
     )
     monkeypatch.setattr(os, "statvfs", lambda path: st)
-    assert thread_pool._shm_has_free_space(256 * 1024 * 1024) is True
+    assert shared_frame._shm_has_free_space(256 * 1024 * 1024) is True
 
 
 @requires_statvfs
@@ -2610,13 +2605,13 @@ def test_shm_has_free_space_not_enough_room(monkeypatch):
     st.f_bavail = 16  # 64 KiB free
     st.f_frsize = 4096
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: "/dev/shm",
     )
     monkeypatch.setattr(os, "statvfs", lambda path: st)
     # 1 MiB > 64 KiB free → rejected even without the margin
-    assert thread_pool._shm_has_free_space(1024 * 1024) is False
+    assert shared_frame._shm_has_free_space(1024 * 1024) is False
 
 
 @requires_statvfs
@@ -2627,29 +2622,29 @@ def test_shm_has_free_space_margin_enforced(monkeypatch):
     st.f_bavail = 25
     st.f_frsize = 4
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: "/dev/shm",
     )
     monkeypatch.setattr(os, "statvfs", lambda path: st)
     # 80 bytes would fit without a margin but not with the 30% margin
-    assert thread_pool._shm_has_free_space(80) is False
+    assert shared_frame._shm_has_free_space(80) is False
     # 40 bytes fits with the margin (40 * 1.3 = 52 <= 100)
-    assert thread_pool._shm_has_free_space(40) is True
+    assert shared_frame._shm_has_free_space(40) is True
 
 
 @requires_statvfs
 def test_shm_has_free_space_statvfs_error_rejects(monkeypatch):
     """A broken /dev/shm statvfs must report no room (data → disk fallback)."""
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: "/dev/shm",
     )
     monkeypatch.setattr(
         os, "statvfs", lambda path: (_ for _ in ()).throw(OSError("broken mount"))
     )
-    assert thread_pool._shm_has_free_space(1) is False
+    assert shared_frame._shm_has_free_space(1) is False
 
 
 @requires_statvfs
@@ -2658,14 +2653,14 @@ def test_shm_has_free_space_statvfs_valueerror_rejects(monkeypatch):
     the same as OSError: no room is reported and the data goes to the disk
     cache instead of crashing with SIGBUS."""
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_backing_path",
         lambda: "/dev/shm",
     )
     monkeypatch.setattr(
         os, "statvfs", lambda path: (_ for _ in ()).throw(ValueError("invalid path"))
     )
-    assert thread_pool._shm_has_free_space(1) is False
+    assert shared_frame._shm_has_free_space(1) is False
 
 
 def test_shared_dataframe_creation_no_room_raises_oserror(monkeypatch):
@@ -2678,7 +2673,7 @@ def test_shared_dataframe_creation_no_room_raises_oserror(monkeypatch):
     """
     df = pd.DataFrame({"a": [1, 2, 3]})
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_has_free_space",
         lambda size: False,
     )
@@ -2696,7 +2691,7 @@ def test_run_parallel_no_room_routes_frame_to_disk(caplog, monkeypatch):
     df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     assert SharedDataFrame.is_compatible(df) is True
 
-    real_has_free_space = thread_pool._shm_has_free_space
+    real_has_free_space = shared_frame._shm_has_free_space
 
     def fake_has_free_space(size: int) -> bool:
         if size == df.to_numpy().nbytes:
@@ -2704,7 +2699,7 @@ def test_run_parallel_no_room_routes_frame_to_disk(caplog, monkeypatch):
         return real_has_free_space(size)
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_has_free_space",
         fake_has_free_space,
     )
@@ -2753,7 +2748,7 @@ def test_run_parallel_no_room_disk_full_falls_back_to_pickle(caplog, monkeypatch
     """
     df = pd.DataFrame({"a": [1, 5]})
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_has_free_space",
         lambda size: False,
     )
@@ -2791,7 +2786,7 @@ def test_run_parallel_shm_segment_created_before_failure_still_cleaned(
     df1 = pd.DataFrame({"a": [1, 2, 3]})  # fits → SHM segment created (24 B)
     df2 = pd.DataFrame({"b": [4, 5, 6], "c": [7, 8, 9]})  # 48 B → no room
 
-    real_has_free_space = thread_pool._shm_has_free_space
+    real_has_free_space = shared_frame._shm_has_free_space
 
     def fake_has_free_space(size: int) -> bool:
         if size == df2.to_numpy().nbytes:
@@ -2799,7 +2794,7 @@ def test_run_parallel_shm_segment_created_before_failure_still_cleaned(
         return real_has_free_space(size)
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_has_free_space",
         fake_has_free_space,
     )
@@ -3003,7 +2998,7 @@ def test_run_parallel_large_processes_with_forced_no_disk_uses_pickle(
     """
     df = pd.DataFrame({"a": [10, 20, 30]})
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool."
+        "configurable_automl_engine.common.shared_frame."
         "_shm_has_free_space",
         lambda size: False,
     )

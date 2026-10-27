@@ -4,9 +4,9 @@ import numpy as np
 import math
 from unittest.mock import MagicMock, patch
 from sklearn.linear_model import Ridge
-from configurable_automl_engine.common.hyperopt_defaults import FloatSpace
+from configurable_automl_engine.hpo.default_spaces import FloatSpace
 
-from configurable_automl_engine.common.hyperopt_defaults import (
+from configurable_automl_engine.hpo.default_spaces import (
     SearchSpaceEntry,
     clip_search_space,
     IntSpace,
@@ -402,7 +402,7 @@ def test_align_high_to_step_matches_optuna():
     reproduce the same values so the stored bounds describe the real search
     grid.
     """
-    from configurable_automl_engine.common.hyperopt_defaults import (
+    from configurable_automl_engine.hpo.default_spaces import (
         align_high_to_step,
     )
 

@@ -19,18 +19,18 @@ import numpy as np
 from imblearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 
-from configurable_automl_engine.training_engine.config_parser import (
-    FeatureSelectionCfg,
-    FeatureSelectionMode,
-)
-from configurable_automl_engine.training_engine.metrics import (
+from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.metrics import (
     direction_label,
     get_scorer_object,
     to_user_value,
 )
+from configurable_automl_engine.feature_selection import (
+    FeatureSelectionCfg,
+    FeatureSelectionMode,
+)
 
 from .models import resolve_algorithm_name
-from .trainer_errors import TrainingError
 from .trainer_scoring import StepsFactory
 
 _LOG = logging.getLogger(__name__)
