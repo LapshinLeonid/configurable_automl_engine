@@ -1821,11 +1821,14 @@ def test_isotonic_optimize_ndarray_positional(toy_data):
     X = rng.rand(60, 5)
     y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
 
+    # Enough trials for TPE to get past its random startup and find the
+    # informative column regardless of the sampling order of the space (the
+    # direct call uses the engine's order: ``increasing``, ``feature_index``).
     opt_res = hyperopt.optimize(
         "isotonic_regression",
         X,
         y,
-        n_trials=5,
+        n_trials=20,
         random_state=42,
         metric="r2",
         validation_strategy="train_test_split",
