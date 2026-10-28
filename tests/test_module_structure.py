@@ -43,7 +43,6 @@ MAX_CLASS_LINES = {
 #: The only functions that may keep a ``# noqa: C901`` marker:
 #: (module path, function name).
 ALLOWED_C901_NOQA = {
-    ("training_engine/thread_pool.py", "run_parallel"),
     ("oversampling.py", "_fit_resample"),
     ("common/validation_utils.py", "validate_features"),
     ("training_engine/sanity_gate.py", "_permutation_impl"),

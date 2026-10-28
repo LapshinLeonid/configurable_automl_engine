@@ -20,8 +20,12 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from configurable_automl_engine.training_engine import thread_pool
-from configurable_automl_engine.training_engine.thread_pool import run_parallel
+from configurable_automl_engine.training_engine import parallel_executor
+from configurable_automl_engine.training_engine.thread_pool import (
+    MAX_CRASH_ATTEMPTS,
+    run_parallel,
+    run_parallel_outcomes,
+)
 
 from . import parallel_tasks as tasks
 
@@ -30,8 +34,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 #: The name through which the processes path creates its executor.
-POOL_FACTORY_TARGET = f"{thread_pool.__name__}.ProcessPoolExecutor"
-_REAL_POOL = thread_pool.ProcessPoolExecutor
+POOL_FACTORY_TARGET = f"{parallel_executor.__name__}.ProcessPoolExecutor"
+_REAL_POOL = parallel_executor.ProcessPoolExecutor
 
 
 def _leak_candidates() -> set[str]:
@@ -257,10 +261,9 @@ def test_no_leaks_on_exit_path(action, no_leaks):
     assert results[0] == (3 if action == "ok" else None)
 
 
-# ── known defects (fixed by the run_parallel refactor) ────────────────────
+# ── fixed defects: crash recovery, empty input, narrow fallback ───────────
 
 
-@pytest.mark.xfail(strict=True, reason="a crashed worker loses the whole batch")
 def test_crashed_worker_loses_only_its_task(no_leaks):
     results = run_parallel(
         tasks.sleep_or_crash,
@@ -271,7 +274,6 @@ def test_crashed_worker_loses_only_its_task(no_leaks):
     assert results == [0, None, 20, 30, 40, 50]
 
 
-@pytest.mark.xfail(strict=True, reason="args_seq=[] runs the function once")
 def test_empty_args_seq_runs_nothing():
     calls: list[int] = []
 
@@ -283,9 +285,6 @@ def test_empty_args_seq_runs_nothing():
     assert calls == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a failed pool restart reruns everything in threads"
-)
 def test_failed_restart_after_timeout_does_not_rerun_in_threads(
     replacement_pool_fails, no_leaks
 ):
@@ -308,3 +307,166 @@ def test_failed_restart_after_timeout_does_not_rerun_in_threads(
     assert results[0] == "fast"
     assert results[1] is None
     assert elapsed < 3.5
+
+
+# ── outcomes ──────────────────────────────────────────────────────────────
+
+
+def test_crash_outcome_names_the_crashed_task(no_leaks):
+    outcomes = run_parallel_outcomes(
+        tasks.sleep_or_crash,
+        args_seq=[(i, 1) for i in range(6)],
+        mode="processes",
+        max_workers=2,
+    )
+    assert [o.status for o in outcomes] == ["ok", "crashed", "ok", "ok", "ok", "ok"]
+    assert [o.value for o in outcomes] == [0, None, 20, 30, 40, 50]
+    crashed = outcomes[1]
+    assert crashed.attempts == MAX_CRASH_ATTEMPTS
+    assert crashed.reason() == "worker process crashed (exit code 1)"
+
+
+def test_task_crashing_every_attempt_is_given_up(no_leaks):
+    started = time.time()
+    outcomes = run_parallel_outcomes(
+        tasks.always_crash, args_seq=[(), ()], mode="processes", max_workers=2
+    )
+    assert [o.status for o in outcomes] == ["crashed", "crashed"]
+    assert all(o.attempts == MAX_CRASH_ATTEMPTS for o in outcomes)
+    assert "exit code 3" in outcomes[0].reason()
+    assert time.time() - started < 15
+
+
+def test_no_leaks_on_crash(no_leaks):
+    results = run_parallel(
+        tasks.frame_then,
+        args_seq=[(_NUMERIC, "crash"), (_OBJECT, "ok")],
+        mode="processes",
+        max_workers=2,
+        shared_args_indices=[0],
+    )
+    assert results == [None, 3]
+
+
+def test_outcome_statuses_and_reasons(no_leaks):
+    outcomes = run_parallel_outcomes(
+        tasks.sleep_then,
+        args_seq=[("ok", 0.05), ("hung", 30.0)],
+        mode="processes",
+        max_workers=2,
+        task_timeout=0.5,
+        shutdown_grace_period=0.1,
+    )
+    assert outcomes[0].status == "ok" and outcomes[0].value == "ok"
+    assert outcomes[0].duration is not None and outcomes[0].duration < 5
+    assert outcomes[1].status == "timed_out"
+    assert outcomes[1].reason() == "timed out after 0.5 s"
+
+    failed = run_parallel_outcomes(
+        tasks.raise_value_error, args_seq=[("bad input",)], mode="processes"
+    )[0]
+    assert failed.status == "failed"
+    assert failed.reason() == "failed: ValueError: bad input"
+
+
+def test_global_timeout_cancels_tasks_that_never_started(no_leaks):
+    outcomes = run_parallel_outcomes(
+        tasks.sleep_then,
+        args_seq=[("a", 30.0), ("b", 30.0)],
+        mode="processes",
+        max_workers=1,
+        timeout=0.8,
+        shutdown_grace_period=0.1,
+    )
+    assert [o.status for o in outcomes] == ["timed_out", "cancelled"]
+    assert "global timeout of 0.8 s" in outcomes[0].reason()
+
+
+def test_threads_outcomes():
+    outcomes = run_parallel_outcomes(
+        tasks.raise_value_error, args_seq=[("x",)], mode="threads"
+    )
+    assert outcomes[0].status == "failed"
+    assert outcomes[0].error is not None and outcomes[0].error.type == "ValueError"
+
+
+def test_unknown_mode_is_rejected():
+    with pytest.raises(ValueError, match="mode must be"):
+        run_parallel(tasks.add, args_seq=[(1,)], mode="fibers")
+
+
+# ── fallback policy ───────────────────────────────────────────────────────
+
+
+def test_pool_creation_failure_falls_back_to_threads(caplog):
+    with (
+        patch(POOL_FACTORY_TARGET, side_effect=OSError("no semaphores")),
+        caplog.at_level(logging.WARNING),
+    ):
+        results = run_parallel(
+            tasks.add, args_seq=[(1, 2), (3, 4)], mode="processes", task_timeout=5
+        )
+    assert results == [3, 7]
+    record = next(r for r in caplog.records if "falling back to threads" in r.message)
+    assert record.levelno == logging.WARNING
+    assert "timeouts are dropped" in record.message
+    assert "no semaphores" in record.message
+
+
+def test_pool_creation_programming_error_propagates():
+    with (
+        patch(POOL_FACTORY_TARGET, side_effect=TypeError("bad argument")),
+        pytest.raises(TypeError, match="bad argument"),
+    ):
+        run_parallel(tasks.add, args_seq=[(1, 2)], mode="processes")
+
+
+def test_failed_restart_marks_unfinished_tasks_failed(replacement_pool_fails, no_leaks):
+    outcomes = run_parallel_outcomes(
+        tasks.sleep_then,
+        args_seq=[("fast", 0.05), ("hung", 4.0), ("queued", 0.05)],
+        mode="processes",
+        max_workers=1,
+        task_timeout=0.7,
+        shutdown_grace_period=0.1,
+    )
+    assert [o.status for o in outcomes] == ["ok", "timed_out", "failed"]
+    assert "cannot create the replacement pool" in outcomes[2].reason()
+
+
+def test_failed_restart_after_crash_keeps_finished_results(
+    replacement_pool_fails, no_leaks
+):
+    outcomes = run_parallel_outcomes(
+        tasks.sleep_or_crash,
+        args_seq=[(0, 1, 0.01), (1, 1), (2, 1, 0.01)],
+        mode="processes",
+        max_workers=1,
+    )
+    assert outcomes[0].status == "ok" and outcomes[0].value == 0
+    assert [o.status for o in outcomes[1:]] == ["failed", "failed"]
+
+
+def test_programming_error_after_start_propagates_without_leaks(no_leaks):
+    """An error raised after tasks started is not hidden behind a fallback."""
+    created: list[int] = []
+
+    def factory(*args, **kwargs):
+        created.append(1)
+        if len(created) > 1:
+            raise AttributeError("bug in the restart")
+        return _REAL_POOL(*args, **kwargs)
+
+    with (
+        patch(POOL_FACTORY_TARGET, side_effect=factory),
+        pytest.raises(AttributeError, match="bug in the restart"),
+    ):
+        run_parallel(
+            tasks.frame_then,
+            args_seq=[(_NUMERIC, "hang"), (_NUMERIC, "ok")],
+            mode="processes",
+            max_workers=1,
+            shared_args_indices=[0],
+            task_timeout=0.5,
+            shutdown_grace_period=0.1,
+        )

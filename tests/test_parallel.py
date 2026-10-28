@@ -36,11 +36,13 @@ from configurable_automl_engine.common import shared_frame
 from configurable_automl_engine.training_engine import thread_pool
 
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.training_engine import parallel_executor
+from configurable_automl_engine.training_engine.parallel_executor import (
+    force_shutdown,
+)
 from configurable_automl_engine.training_engine.thread_pool import (
     run_parallel,
     DiskPersistenceManager,
-    _force_shutdown_processes,
-    _terminate_worker_by_pid,
 )
 from configurable_automl_engine.training_engine.parallel_transport import (
     _perform_cleanup,
@@ -97,22 +99,6 @@ def test_run_parallel_processes_cpu_bound():
 
     assert len(results) == 3
     assert all(isinstance(r, str) for r in results)
-
-
-def test_run_parallel_fallback_mechanism(caplog):
-    """Updated: check the fallback when initialization fails."""
-    args = [(1, 10)]
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor",
-        side_effect=RuntimeError("OS Error"),
-    ):
-        with caplog.at_level(logging.ERROR):
-            results = run_parallel(simple_task, args_seq=args, mode="processes")
-
-    assert results == [11]
-    # The code logs: "Error in process pool, falling back to threads: OS Error"
-    assert "falling back to threads" in caplog.text
-    assert "OS Error" in caplog.text
 
 
 def test_run_parallel_error_propagation(caplog):
@@ -222,22 +208,19 @@ def test_run_parallel_generic_exception_logged_and_returns_none(caplog):
     assert "boom" in caplog.text
 
 
-def test_run_parallel_process_pool_init_error_not_masked(caplog):
-    """The ProcessPoolExecutor constructor raising must surface through the
-    real outer fallback (threads), not be masked by the removed dead
-    try/except around the executor_cls assignment."""
+def test_run_parallel_process_pool_init_error_falls_back_to_threads(caplog):
+    """A failure to create the process pool (before any task is submitted)
+    falls back to threads with a WARNING that names the error."""
     args = [(1, 10)]
     with patch(
-        "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor",
+        "configurable_automl_engine.training_engine.parallel_executor."
+        "ProcessPoolExecutor",
         side_effect=RuntimeError("OS Error"),
     ):
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             results = run_parallel(simple_task, args_seq=args, mode="processes")
 
     assert results == [11]
-    # The dead-branch message no longer exists; only the real outer
-    # except handles pool-creation failures.
-    assert "Could not initialize ProcessPoolExecutor" not in caplog.text
     assert "falling back to threads" in caplog.text
     assert "OS Error" in caplog.text
 
@@ -246,7 +229,7 @@ def test_run_parallel_process_pool_missing_attr_propagates(monkeypatch):
     """A missing ProcessPoolExecutor attribute must produce an unmasked
     NameError out of run_parallel instead of a silent threads fallback:
     the absence of the import is detected at module import time."""
-    monkeypatch.delattr(thread_pool, "ProcessPoolExecutor", raising=False)
+    monkeypatch.delattr(parallel_executor, "ProcessPoolExecutor", raising=False)
 
     with pytest.raises(NameError):
         run_parallel(lambda x: x, args_seq=[(5,)], mode="processes")
@@ -885,46 +868,6 @@ def global_long_sleep_task(*args, **kwargs):
     time.sleep(10)
 
 
-def _raise_timeout_at_iteration(*args, **kwargs):
-    """Generator function: TimeoutError is raised during iteration (for fut in ...),
-    not when as_completed(...) is called. This is a correct simulation of the
-    behavior of a real as_completed generator."""
-    raise concurrent.futures.TimeoutError()
-    yield  # pragma: no cover
-
-
-def test_run_parallel_worker_hard_kill():
-    """Checks that tasks are marked as timed out when the global timeout expires."""
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.ProcessPoolExecutor"
-    ) as mock_executor_cls:
-        mock_pool = MagicMock()
-        mock_executor_cls.return_value = mock_pool
-
-        mock_future = MagicMock()
-        mock_pool.submit.return_value = mock_future
-
-        # as_completed raises TimeoutError on every iteration
-        with patch(
-            "configurable_automl_engine.training_engine.thread_pool.as_completed",
-            side_effect=_raise_timeout_at_iteration,
-        ):
-            with patch(
-                "configurable_automl_engine.training_engine.thread_pool.logger"
-            ) as mock_logger:
-                results = run_parallel(
-                    lambda: None,
-                    args_seq=[()],
-                    mode="processes",
-                    timeout=0.1,  # small timeout — the global limit will expire
-                )
-
-    assert results == [None]
-    # Check that logger.error was called with a timeout message
-    error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert any("Task 0 timed out" in msg for msg in error_messages)
-
-
 def test_run_parallel_threads_global_timeout_ignored(caplog):
     """In threads mode the global timeout is ignored with a warning.
 
@@ -1037,89 +980,90 @@ class TestParallelErrorHandling(unittest.TestCase):
             )
         )
 
-    # --- TESTS FOR run_parallel (Waiting loop) ---
-
-    @patch(f"{MODULE_PATH}.ThreadPoolExecutor")
-    def test_run_parallel_wait_loop_exception(self, mock_executor_cls):
-        """Coverage: except Exception as e: logger.error(Error while waiting for tasks)"""
-        mock_pool = MagicMock()
-        mock_executor_cls.return_value = mock_pool
-
-        mock_future = MagicMock()
-        mock_pool.submit.return_value = mock_future
-
-        def _raise_runtime_error(*args, **kwargs):
-            raise RuntimeError("Internal pool crash")
-
-        with patch(f"{MODULE_PATH}.as_completed") as mock_as_completed:
-            mock_as_completed.side_effect = _raise_runtime_error
-
-            with self.assertLogs(MODULE_PATH, level="ERROR") as cm:
-                run_parallel(lambda x: x, args_seq=[(1,)], mode="threads")
-
-        self.assertTrue(
-            any("Error while waiting for tasks" in log for log in cm.output)
-        )
-
-    # --- TESTS FOR run_parallel (Forced worker termination) ---
-
-    @patch(f"{MODULE_PATH}.ProcessPoolExecutor")
-    @patch(f"{MODULE_PATH}.time.sleep")
-    def test_worker_terminate_and_kill_exceptions(self, mock_sleep, mock_executor_cls):
-        """
-        Covers the blocks:
-        - except Exception: pass on w.terminate()
-        - except Exception: pass on w.kill()
-
-        The watchdog has been removed, so we check that _force_shutdown_processes
-        is called in the finally block for ProcessPoolExecutor.
-        """
-        mock_executor = mock_executor_cls.return_value
-
-        # Create a worker that does not want to die
-        mock_worker = MagicMock()
-        mock_worker.is_alive.return_value = True
-        mock_worker.pid = 777
-
-        # Configure errors on the termination system calls
-        mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
-        mock_worker.kill.side_effect = RuntimeError("Kill blocked")
-
-        # Replace the process list inside the Executor
-        mock_executor._processes = {0: mock_worker}
-
-        # Simulate a situation where tasks did not finish in time
-        with patch(f"{MODULE_PATH}.as_completed") as mock_as_completed:
-            mock_as_completed.side_effect = _raise_timeout_at_iteration
-
-            with self.assertLogs(MODULE_PATH, level="ERROR") as cm:
-                run_parallel(
-                    func=lambda x: x,
-                    args_seq=[(1,)],
-                    mode="processes",
-                    timeout=0.1,
-                    shutdown_grace_period=0.01,
-                )
-
-            # Check that the logs contain the timeout message
-            self.assertTrue(any("Task 0 timed out" in log for log in cm.output))
-
-        # Check that the methods were called (in the finally block of _force_shutdown_processes)
-        self.assertTrue(mock_worker.terminate.called)
-        self.assertTrue(mock_worker.kill.called)
-
 
 # ═══════════════════════════════════════════════════════════════
-#  Tests for as_completed + watchdog (deadlock prevention)
+#  force_shutdown (the executor adapter) on a fake pool
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_as_completed_normal_completion():
-    """Check that as_completed correctly collects results."""
+class _FakePool:
+    """Just enough of ProcessPoolExecutor for force_shutdown."""
+
+    def __init__(self, workers):
+        self._processes = {w.pid: w for w in workers}
+        self.shutdown_calls = []
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        self.shutdown_calls.append((wait, cancel_futures))
+        self._processes = None
+
+    def terminate_workers(self):  # Python 3.14+ API
+        workers = list(self._processes.values())
+        self.shutdown(wait=False, cancel_futures=True)
+        for w in workers:
+            w.terminate()
+
+    def kill_workers(self):  # Python 3.14+ API
+        workers = list(self._processes.values())
+        self.shutdown(wait=False, cancel_futures=True)
+        for w in workers:
+            w.kill()
+
+
+def _stubborn_worker(pid):
+    worker = MagicMock()
+    worker.pid = pid
+    worker.is_alive.return_value = True
+    worker.exitcode = None
+    return worker
+
+
+def test_force_shutdown_terminates_then_kills_a_stubborn_worker():
+    worker = _stubborn_worker(9999)
+    pool = _FakePool([worker])
+    exit_codes = force_shutdown(pool, grace_period=0.05)
+    worker.terminate.assert_called_once()
+    worker.kill.assert_called_once()
+    assert pool.shutdown_calls == [(False, True)]
+    assert exit_codes == {9999: None}
+
+
+def test_force_shutdown_terminate_and_kill_errors_are_swallowed():
+    worker = _stubborn_worker(777)
+    worker.terminate.side_effect = OSError("Terminate blocked")
+    worker.kill.side_effect = OSError("Kill blocked")
+    if parallel_executor._HAS_PUBLIC_TERMINATE:
+        pytest.skip("the 3.14 terminate_workers() path terminates internally")
+    force_shutdown(_FakePool([worker]), grace_period=0.01)
+    assert worker.terminate.called
+    assert worker.kill.called
+
+
+def test_force_shutdown_reports_exit_codes_of_exited_workers():
+    worker = MagicMock()
+    worker.pid = 42
+    worker.is_alive.return_value = False
+    worker.exitcode = -9
+    assert force_shutdown(_FakePool([worker]), grace_period=1.0) == {42: -9}
+
+
+def test_force_shutdown_of_an_already_shut_down_pool():
+    pool = _FakePool([])
+    pool._processes = None
+    assert force_shutdown(pool, grace_period=0.01) == {}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Threads mode collects every result
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_threads_collects_every_result():
+    """Threads mode collects every result in the input order."""
     results = run_parallel(
         simple_task, args_seq=[(1, 2), (3, 4), (5, 6)], mode="threads"
     )
-    assert sorted(results) == [3, 7, 11]
+    assert results == [3, 7, 11]
 
 
 def test_run_parallel_threads_task_timeout_ignored(caplog):
@@ -1212,88 +1156,14 @@ def test_run_parallel_never_starting_task_is_bounded():
     assert elapsed < 15  # finished in ~2*task_timeout + grace, not hung forever
 
 
-def test_watchdog_not_triggered_on_slow_but_alive_tasks():
-    """Check that the watchdog does NOT trigger on slow but alive tasks.
-
-    as_completed blocks and waits for the task to finish. If a task is simply
-    long — the watchdog does not increment the stale counter.
-    """
+def test_threads_slow_task_runs_to_completion():
+    """Threads mode has no timeout: a slow task simply runs to completion."""
     results = run_parallel(
         slow_task,
-        args_seq=[(2.0,)],  # a 2-second task
+        args_seq=[(0.5,)],
         mode="threads",
     )
     assert results == ["done"]  # the task must complete normally
-
-
-@patch("configurable_automl_engine.training_engine.thread_pool.as_completed")
-def test_watchdog_triggers_on_c_level_crash(mock_as_completed):
-    """Check that tasks are marked as timed out when the global timeout expires.
-
-    We mock as_completed to raise TimeoutError on every iteration,
-    simulating a hung process. A 0.1s global timeout will force the loop to exit.
-    """
-    mock_as_completed.side_effect = _raise_timeout_at_iteration
-
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.logger"
-    ) as mock_logger:
-        results = run_parallel(
-            lambda: None,
-            args_seq=[()],
-            mode="processes",
-            timeout=0.1,  # small timeout — the global limit will expire
-        )
-
-    assert results == [None]
-    error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert any("Task 0 timed out" in msg for msg in error_messages)
-
-
-@patch("configurable_automl_engine.training_engine.thread_pool.as_completed")
-def test_watchdog_not_triggered_when_global_timeout_expires(mock_as_completed):
-    """Check that the watchdog does NOT trigger when the global timeout has expired.
-
-    Even if as_completed raises TimeoutError, but remaining_global <= 0,
-    the stale counter is not incremented — a normal timeout exit happens.
-    We use a generator function so that TimeoutError is raised
-    during iteration (for fut in ...), not when it is called.
-    """
-    mock_as_completed.side_effect = _raise_timeout_at_iteration
-
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool._force_shutdown_processes"
-    ) as mock_shutdown:
-        with patch(
-            "configurable_automl_engine.training_engine.thread_pool.logger"
-        ) as mock_logger:
-            results = run_parallel(
-                lambda: None,
-                args_seq=[()],
-                mode="processes",
-                timeout=0.1,  # small global timeout
-            )
-
-    assert results == [None]
-    error_messages = [call[0][0] for call in mock_logger.error.call_args_list]
-    assert not any("WATCHDOG" in msg for msg in error_messages)  # the watchdog did not trigger
-    assert any("Task 0 timed out" in msg for msg in error_messages)  # normal timeout
-
-
-def test_force_shutdown_processes_terminate_and_kill():
-    """Check that _force_shutdown_processes correctly terminates processes."""
-    mock_worker = MagicMock()
-    mock_worker.is_alive.return_value = True
-    mock_worker.pid = 9999
-
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: mock_worker}
-
-    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
-        _force_shutdown_processes(mock_pool, shutdown_grace_period=0.1)
-
-    assert mock_worker.terminate.called
-    assert mock_worker.kill.called
 
 
 def test_run_parallel_generic_exception_no_timeout(caplog):
@@ -1480,50 +1350,6 @@ def test_run_parallel_processes_healthy_inflight_task_resubmitted():
     assert elapsed < 8
 
 
-def test_run_parallel_processes_poll_interval_caps_first_wait():
-    """as_completed must not sleep up to the queue deadline on the first wait.
-
-    While unstarted tasks exist (the start signals are written asynchronously
-    by the workers), the as_completed timeout is capped at POLL_INTERVAL — the
-    loop re-reads the signals and notices the deadline of a started task in
-    time instead of sleeping until submit + task_timeout + queue_budget.
-    """
-    recorded_timeouts = []
-    real_as_completed = thread_pool.as_completed
-
-    def recording_as_completed(fs, timeout=None):
-        recorded_timeouts.append(timeout)
-        yield from real_as_completed(fs, timeout=timeout)
-
-    with (
-        patch(
-            "configurable_automl_engine.training_engine.thread_pool.as_completed",
-            recording_as_completed,
-        ),
-        # Deterministic: the signals always report "not started yet", so every
-        # wait must be capped by the poll interval and never by the queue
-        # deadline (submit + task_timeout + queue_budget ≈ 4s). The tasks
-        # themselves still run and complete in the real workers.
-        patch.object(_StartSignal, "read", return_value=-1.0),
-    ):
-        results = run_parallel(
-            slow_task,
-            args_seq=[(0.2,), (0.2,)],
-            mode="processes",
-            max_workers=2,
-            task_timeout=2.0,
-            shutdown_grace_period=0.1,
-        )
-
-    assert results == ["done", "done"]
-    assert recorded_timeouts, "as_completed was never called"
-    # With the signals always unset the cap is active on every iteration: no
-    # as_completed wait may exceed the polling interval.
-    for timeout in recorded_timeouts:
-        assert timeout is not None
-        assert timeout <= thread_pool.POLL_INTERVAL + 0.1
-
-
 def test_run_parallel_processes_completed_results_survive_restart():
     """Results collected before a restart are preserved.
 
@@ -1563,155 +1389,6 @@ def test_start_signal_records_pid():
     finally:
         sig.close()
         sig.unlink()
-
-
-# --- _terminate_worker_by_pid ---
-
-
-def test_terminate_worker_by_pid_found_and_terminated():
-    """The worker with the given PID is terminated (dies on SIGTERM)."""
-    mock_worker = MagicMock()
-    mock_worker.pid = 4242
-    # The while-loop and the final is_alive() check both call is_alive().
-    mock_worker.is_alive.side_effect = [True, False, False]
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: mock_worker}
-
-    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
-        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.05)
-
-    assert found is True
-    mock_worker.terminate.assert_called_once()
-    mock_worker.kill.assert_not_called()
-
-
-def test_terminate_worker_by_pid_kill_fallback():
-    """If SIGTERM does not help, SIGKILL is sent."""
-    mock_worker = MagicMock()
-    mock_worker.pid = 4242
-    mock_worker.is_alive.return_value = True  # never exits gracefully
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: mock_worker}
-
-    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
-        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
-
-    assert found is True
-    mock_worker.terminate.assert_called_once()
-    mock_worker.kill.assert_called_once()
-
-
-def test_terminate_worker_by_pid_not_found():
-    """No worker with the given PID → False, nothing is terminated.
-
-    The pool has no worker with this PID and the OS probe reports a live
-    process elsewhere (a foreign process / PID reuse): the function reports
-    that it did not handle it.
-    """
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: MagicMock(pid=1111)}
-
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill"
-    ) as mock_kill:
-        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
-
-    assert found is False
-    mock_kill.assert_called_once_with(9999, 0)
-
-
-def test_terminate_worker_by_pid_already_dead_returns_true():
-    """A worker already exited (race) is reported as success.
-
-    The PID is not in the pool registry and the OS probe says the process is
-    gone: the hung task is not running anymore, so there is nothing to
-    terminate — the outcome is treated as success instead of a false
-    "not handled".
-    """
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: MagicMock(pid=1111)}
-
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill",
-        side_effect=ProcessLookupError("No such process"),
-    ):
-        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
-
-    assert found is True
-
-
-def test_terminate_worker_by_pid_not_registered_but_alive_elsewhere():
-    """A live unregistered PID (foreign process / PID reuse) → False.
-
-    ``os.kill(pid, 0)`` succeeding means some process claimed the PID, but it
-    is not a worker of this pool: the function must not kill it.
-    """
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: MagicMock(pid=1111)}
-
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill"
-    ) as mock_kill:
-        mock_kill.return_value = None  # the OS probe finds a live process
-        found = _terminate_worker_by_pid(mock_pool, 9999, shutdown_grace_period=0.01)
-
-    assert found is False
-    mock_kill.assert_called_once_with(9999, 0)
-
-
-def test_pid_exists():
-    """The OS existence probe covers the success/PermissionError branches."""
-    from configurable_automl_engine.training_engine.thread_pool import _pid_exists
-
-    assert _pid_exists(0) is False
-    assert _pid_exists(-5) is False
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill"
-    ) as mock_kill:
-        assert _pid_exists(1234) is True  # exists
-        assert mock_kill.call_count == 1
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill",
-        side_effect=ProcessLookupError("gone"),
-    ):
-        assert _pid_exists(1234) is False
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.os.kill",
-        side_effect=PermissionError("other user"),
-    ):
-        assert _pid_exists(1234) is True
-
-
-def test_terminate_worker_by_pid_terminate_error_is_swallowed():
-    """A failed terminate() call must not break the kill path."""
-    mock_worker = MagicMock()
-    mock_worker.pid = 4242
-    mock_worker.is_alive.return_value = True
-    mock_worker.terminate.side_effect = RuntimeError("Terminate blocked")
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: mock_worker}
-
-    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
-        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
-
-    assert found is True
-    mock_worker.kill.assert_called_once()
-
-
-def test_terminate_worker_by_pid_kill_error_is_swallowed():
-    """A failed kill() call must not propagate."""
-    mock_worker = MagicMock()
-    mock_worker.pid = 4242
-    mock_worker.is_alive.return_value = True
-    mock_worker.kill.side_effect = RuntimeError("Kill blocked")
-    mock_pool = MagicMock()
-    mock_pool._processes = {0: mock_worker}
-
-    with patch("configurable_automl_engine.training_engine.thread_pool.time.sleep"):
-        found = _terminate_worker_by_pid(mock_pool, 4242, shutdown_grace_period=0.01)
-
-    assert found is True
-    mock_worker.terminate.assert_called_once()
 
 
 # --- disk fallback reuses one parquet file per df object ---
