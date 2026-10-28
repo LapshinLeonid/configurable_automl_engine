@@ -25,6 +25,7 @@ Usage example:
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -42,6 +43,7 @@ from .parallel_supervisor import (
 from .parallel_transport import DiskPersistenceManager, PayloadTransport
 
 __all__ = [
+    "DEFAULT_START_METHOD",
     "MAX_CRASH_ATTEMPTS",
     "POLL_INTERVAL",
     "DiskPersistenceManager",
@@ -53,6 +55,22 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _MODES = ("threads", "processes")
+
+#: The start method of the worker processes when ``mp_context`` is None:
+#: ``forkserver`` where the platform has it, ``spawn`` otherwise — the same on
+#: every supported Python version. ``fork`` copies a multi-threaded parent
+#: (pandas/BLAS threads, the executor's own threads) and can deadlock the
+#: child; Python 3.12+ warns about it and 3.14 made ``forkserver`` the POSIX
+#: default, so pinning it keeps 3.11–3.14 consistent.
+DEFAULT_START_METHOD = (
+    "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+)
+
+
+def _importable_module(func: Callable[..., Any]) -> list[str]:
+    """The module of ``func`` if a worker can import it by name."""
+    module = getattr(func, "__module__", None)
+    return [module] if module and module != "__main__" else []
 
 
 def _normalize_tasks(
@@ -243,7 +261,10 @@ def run_parallel_outcomes(
         args_list,
         kwargs_list,
         max_workers=max_workers,
-        mp_context=resolve_context(mp_context),
+        mp_context=resolve_context(
+            DEFAULT_START_METHOD if mp_context is None else mp_context,
+            preload=_importable_module(func),
+        ),
         timeout=timeout,
         task_timeout=task_timeout,
         shared_args_indices=shared_args_indices,
@@ -263,6 +284,7 @@ def run_parallel(
     disk_args_indices: list[int] | None = None,
     shutdown_grace_period: float = 5.0,
     task_timeout: float | None = None,  # per-task timeout
+    mp_context: str | BaseContext | None = None,
 ) -> list[Any]:
     """Run a function in parallel with memory and lifecycle management.
 
@@ -312,6 +334,10 @@ def run_parallel(
             between SIGTERM and SIGKILL.
         task_timeout (float | None): Per-task timeout in seconds, from the
             real start in the worker (processes mode only).
+        mp_context (str | BaseContext | None): The start method of the
+            worker processes (``"forkserver"``, ``"spawn"``, ``"fork"``) or a
+            multiprocessing context; ``None`` — ``DEFAULT_START_METHOD``
+            (``forkserver`` where available, else ``spawn``).
 
     Returns:
         list[Any]: The results in the input order. A task that failed, timed
@@ -334,5 +360,6 @@ def run_parallel(
         disk_args_indices=disk_args_indices,
         shutdown_grace_period=shutdown_grace_period,
         task_timeout=task_timeout,
+        mp_context=mp_context,
     )
     return [o.value if o.status == "ok" else None for o in outcomes]

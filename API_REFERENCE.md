@@ -1264,24 +1264,33 @@ The engine config, `ModelTrainer` and `tuner.optimize` enable the automatic high
 
 `from configurable_automl_engine.training_engine.thread_pool import run_parallel`
 
-Executes a function in parallel across multiple workers with shared memory and disk persistence support.
+Executes a function in parallel across multiple workers (threads or processes) with shared memory and disk persistence support.
 
 **Parameters:**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `func` | `Callable` | — | Function to execute. |
-| `args_seq` | `Iterable[Sequence]` or `None` | `None` | Sequence of argument tuples. |
-| `kwargs_seq` | `Iterable[Mapping]` or `None` | `None` | Sequence of keyword argument dicts. |
+| `func` | `Callable` | — | Function to execute. In `"processes"` mode it must be picklable by reference (a module-level function). |
+| `args_seq` | `Iterable[Sequence]` or `None` | `None` | Sequence of argument tuples. `None` means **one call without arguments**; an empty sequence (`[]`) means **zero tasks**: `func` is never called and the result is `[]`. |
+| `kwargs_seq` | `Iterable[Mapping]` or `None` | `None` | Sequence of keyword argument dicts (same length as `args_seq`). |
 | `max_workers` | `int` or `None` | `None` | Max worker count (defaults to CPU count). |
-| `mode` | `str` | `"threads"` | `"threads"` or `"processes"`. |
-| `timeout` | `float` or `None` | `None` | Global timeout in seconds. Used only in `"processes"` mode (hard: hung workers are force-terminated). `None` — no limit. In `"threads"` mode it is ignored with a warning — a running Python function cannot be interrupted, so a soft timeout did not save time and only discarded ready results. |
-| `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds. Used only in `"processes"` mode. In `"threads"` mode it is ignored with a warning: the deadline counted from submit made queued tasks "expire" before starting. |
+| `mode` | `str` | `"threads"` | `"threads"` or `"processes"`. Any other value raises `ValueError`. |
+| `timeout` | `float` or `None` | `None` | Global timeout in seconds for the whole batch. Used only in `"processes"` mode (hard: the workers are terminated). A task still running when it expires is `timed_out`, a task that has not started yet is `cancelled`. `None` — no limit. In `"threads"` mode it is ignored with a warning — a running Python function cannot be interrupted, so a soft timeout did not save time and only discarded ready results. |
+| `task_timeout` | `float` or `None` | `None` | Per-task timeout in seconds, counted from the task's real start in the worker (the time spent in the queue does not count). A task that never starts is bounded by `submit + task_timeout + queue_budget`, `queue_budget = ceil(n_tasks / max_workers) * task_timeout`. When a task times out, its worker is terminated and the pool is restarted for the remaining tasks; a healthy task that was in flight at that moment is resubmitted from scratch. While tasks have not started, the wait loop polls every `POLL_INTERVAL` (0.5 s). Used only in `"processes"` mode. In `"threads"` mode it is ignored with a warning. |
 | `shared_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to share via shared memory. Data is passed positionally and the index is NOT transferred (the worker always receives a `RangeIndex(0, n)`); worker code must not align `X`/`y` by index. When the free space of the shared-memory file system is insufficient (in Docker/Kubernetes `/dev/shm` defaults to 64 MB), the frame is automatically routed through the disk cache (Parquet, falling back to the system temp directory) or pickle instead of crashing the process with a Bus error (SIGBUS, exit 135). |
 | `disk_args_indices` | `list[int]` or `None` | `None` | Indices of DataFrame args to persist to disk. |
-| `shutdown_grace_period` | `float` | `5.0` | After a timeout, seconds the hung worker processes get to exit before they are killed (`"processes"` mode only). |
+| `shutdown_grace_period` | `float` | `5.0` | When workers are terminated (a timeout, a crash, an error, an interrupt), the seconds between SIGTERM and SIGKILL (`"processes"` mode only). |
+| `mp_context` | `str`, `multiprocessing` context or `None` | `None` | The start method of the worker processes: `"forkserver"`, `"spawn"`, `"fork"` or a context object. `None` uses the engine default: **`"forkserver"` where the platform has it (Linux, macOS), otherwise `"spawn"` (Windows)** — the same on every supported Python version. Reason: `fork` copies a multi-threaded parent (pandas, BLAS, the executor's own threads) and can deadlock the child; Python 3.12+ warns about it and Python 3.14 made `forkserver` the POSIX default. Pinning the method keeps 3.11–3.14 consistent. Cost: the workers do not inherit the parent's memory, so patches made in the parent process do not reach them, and the function's module must be importable by name. To keep the worker start fast, the fork server preloads numpy/pandas and the function's module once per process. The queue deadline of a task (see `task_timeout`) also covers the worker start-up. |
 
-**Returns:** `list[Any]` — results in the same order as inputs; failed tasks return `None`.
+**Returns:** `list[Any]` — results in the same order as inputs. A task that failed, timed out, crashed its worker or was cancelled returns `None`.
+
+**Crash recovery (`"processes"` mode).** When a worker process dies (`os._exit`, a signal, a segfault in a C extension, the OOM killer), only its task is lost. The task is found by the PID of the worker that ran it and the worker's exit code; the pool is restarted and every unfinished task is resubmitted. A task that crashes its worker `MAX_CRASH_ATTEMPTS` times (2) is given up on (`crashed`), so the run always terminates.
+
+**Fallback to threads.** The batch falls back to `"threads"` mode only when nothing has run yet: the process pool cannot be created, or the payload transport cannot be set up. A `WARNING` is logged, saying that the timeouts are dropped. Once tasks have been submitted nothing is ever rerun in threads: an infrastructure failure (for example, the replacement pool cannot be created after a timeout) marks the unfinished tasks as failed and keeps the finished results; a programming error (`TypeError`, `AttributeError`, ...) propagates after cleanup.
+
+**Cleanup.** The shared-memory segments, the disk-cache temp files and the start-signal segments created by the run are removed on every exit path: success, timeout, crash, exception and `KeyboardInterrupt` (which is re-raised).
+
+**Outcomes.** The engine itself calls the internal `run_parallel_outcomes(...)` (same arguments), which returns a `TaskOutcome` per task: `status` (`ok` / `failed` / `timed_out` / `crashed` / `cancelled`), `value`, `error` (exception type and message), `attempts` and `duration`. An algorithm whose HPO worker did not return is listed in `disqualified_algorithms` with the reason, e.g. `"timed out after 600 s"`, `"worker process crashed (exit code -9)"` or `"failed: ValueError: ..."`.
 
 ---
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -20,7 +21,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from configurable_automl_engine.training_engine import parallel_executor
+from configurable_automl_engine.training_engine import parallel_executor, thread_pool
 from configurable_automl_engine.training_engine.thread_pool import (
     MAX_CRASH_ATTEMPTS,
     run_parallel,
@@ -36,6 +37,15 @@ pytestmark = pytest.mark.skipif(
 #: The name through which the processes path creates its executor.
 POOL_FACTORY_TARGET = f"{parallel_executor.__name__}.ProcessPoolExecutor"
 _REAL_POOL = parallel_executor.ProcessPoolExecutor
+
+
+@pytest.fixture(autouse=True, params=["fork", "forkserver"])
+def start_method(request, monkeypatch) -> str:
+    """Every test of this module runs with both POSIX start methods."""
+    if request.param not in multiprocessing.get_all_start_methods():
+        pytest.skip(f"{request.param} is not available")
+    monkeypatch.setattr(thread_pool, "DEFAULT_START_METHOD", request.param)
+    return request.param
 
 
 def _leak_candidates() -> set[str]:
@@ -178,11 +188,11 @@ def test_global_timeout_stops_the_run(no_leaks):
         args_seq=[("a", 0.05), ("b", 30.0), ("c", 30.0)],
         mode="processes",
         max_workers=3,
-        timeout=1.0,
+        timeout=3.0,  # room for the forkserver worker start-up
         shutdown_grace_period=0.1,
     )
     assert results == ["a", None, None]
-    assert time.time() - started < 6
+    assert time.time() - started < 8
 
 
 def test_threads_timeouts_are_ignored_with_warning(caplog):
@@ -332,7 +342,9 @@ def test_task_crashing_every_attempt_is_given_up(no_leaks):
         tasks.always_crash, args_seq=[(), ()], mode="processes", max_workers=2
     )
     assert [o.status for o in outcomes] == ["crashed", "crashed"]
-    assert all(o.attempts == MAX_CRASH_ATTEMPTS for o in outcomes)
+    # A task is charged only for the crashes of its own worker; when it was
+    # a bystander (not started yet) it is resubmitted without a charge.
+    assert all(o.attempts >= MAX_CRASH_ATTEMPTS for o in outcomes)
     assert "exit code 3" in outcomes[0].reason()
     assert time.time() - started < 15
 
@@ -354,13 +366,13 @@ def test_outcome_statuses_and_reasons(no_leaks):
         args_seq=[("ok", 0.05), ("hung", 30.0)],
         mode="processes",
         max_workers=2,
-        task_timeout=0.5,
+        task_timeout=2,  # room for the forkserver worker start-up
         shutdown_grace_period=0.1,
     )
     assert outcomes[0].status == "ok" and outcomes[0].value == "ok"
     assert outcomes[0].duration is not None and outcomes[0].duration < 5
     assert outcomes[1].status == "timed_out"
-    assert outcomes[1].reason() == "timed out after 0.5 s"
+    assert outcomes[1].reason() == "timed out after 2 s"
 
     failed = run_parallel_outcomes(
         tasks.raise_value_error, args_seq=[("bad input",)], mode="processes"
@@ -375,11 +387,11 @@ def test_global_timeout_cancels_tasks_that_never_started(no_leaks):
         args_seq=[("a", 30.0), ("b", 30.0)],
         mode="processes",
         max_workers=1,
-        timeout=0.8,
+        timeout=3.0,  # room for the forkserver worker start-up
         shutdown_grace_period=0.1,
     )
     assert [o.status for o in outcomes] == ["timed_out", "cancelled"]
-    assert "global timeout of 0.8 s" in outcomes[0].reason()
+    assert "global timeout of 3 s" in outcomes[0].reason()
 
 
 def test_threads_outcomes():

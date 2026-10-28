@@ -998,13 +998,13 @@ class _FakePool:
         self._processes = None
 
     def terminate_workers(self):  # Python 3.14+ API
-        workers = list(self._processes.values())
+        workers = list((self._processes or {}).values())
         self.shutdown(wait=False, cancel_futures=True)
         for w in workers:
             w.terminate()
 
     def kill_workers(self):  # Python 3.14+ API
-        workers = list(self._processes.values())
+        workers = list((self._processes or {}).values())
         self.shutdown(wait=False, cancel_futures=True)
         for w in workers:
             w.kill()

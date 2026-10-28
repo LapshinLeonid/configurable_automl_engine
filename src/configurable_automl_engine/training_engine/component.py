@@ -70,7 +70,7 @@ from .state import (
     WorkerOutcome,
     _HpoPhaseSpec,
 )
-from .thread_pool import run_parallel
+from .thread_pool import TaskOutcome, run_parallel_outcomes
 
 __all__ = ["execute_phases", "train_best_model"]
 
@@ -465,7 +465,7 @@ def _run_phase_workers(
     """
     # Execution (parallel or sequential)
     if cfg.general.parallel_strategy == "algorithms" and len(current_candidates) > 1:
-        results = run_parallel(
+        outcomes = run_parallel_outcomes(
             _hpo_phase_worker,
             args_seq=[(n, a, spec, X) for n, a in current_candidates.items()],
             max_workers=cfg.general.max_workers,
@@ -493,11 +493,37 @@ def _run_phase_workers(
                 else cfg.general.task_timeout
             ),
         )
+        ctx.disqualified_algorithms.update(
+            _lost_worker_reasons(list(current_candidates), outcomes)
+        )
+        results = [o.value if o.ok else None for o in outcomes]
         _apply_worker_outcome(ctx, phase_results, _consume_worker_results(results))
     else:
         for n, a in current_candidates.items():
             res = _hpo_phase_worker(n, a, spec, X)
             _apply_worker_outcome(ctx, phase_results, _consume_worker_results([res]))
+
+
+def _lost_worker_reasons(
+    names: list[str], outcomes: list[TaskOutcome]
+) -> dict[str, str]:
+    """The algorithms whose HPO worker returned nothing, with the reason.
+
+    A worker that timed out, crashed or failed in the pool leaves no result,
+    so the algorithm would silently disappear from the phase; it is recorded
+    in the circuit breaker instead, so the result and the log say why.
+
+    Args:
+        names (list[str]): The algorithm names, in the task order.
+        outcomes (list[TaskOutcome]): The task outcomes, in the same order.
+
+    Returns:
+        dict[str, str]: "algorithm → reason" for every non-``ok`` outcome.
+    """
+    lost = {n: o.reason() for n, o in zip(names, outcomes) if not o.ok}
+    for name, reason in lost.items():
+        _LOG.warning("Algorithm %s lost in the HPO phase: %s", name, reason)
+    return lost
 
 
 def _apply_worker_outcome(

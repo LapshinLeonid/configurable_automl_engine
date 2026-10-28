@@ -61,3 +61,40 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # The process-pool machinery depends on the interpreter: Python 3.14
+  # changed the default POSIX start method and added the public
+  # ProcessPoolExecutor.terminate_workers() / kill_workers(). The parallel
+  # and safety-net tests run on the oldest and the newest supported version.
+  parallel:
+    name: Parallel tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,test]"
+
+      - name: Run the parallel and safety-net tests
+        env:
+          PYTHONPATH: .
+        run: >-
+          pytest
+          tests/test_parallel.py
+          tests/test_parallel_behavior.py
+          tests/test_parallel_deadlines.py
+          tests/test_parallel_orchestrator.py
+          tests/test_parallel_supervisor.py
+          tests/test_refactor_safety_net.py

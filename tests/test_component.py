@@ -69,17 +69,21 @@ from configurable_automl_engine.tuner import (
 import textwrap
 
 # The processes-mode tests patch ``run_optimization`` in the parent process;
-# the patch only reaches the pool workers when they are forked. Under spawn
-# (Windows, macOS) or forkserver (the Linux default on Python 3.14+) the
-# workers re-import the real module and run the real HPO.
-_START_METHOD = (
-    multiprocessing.get_start_method(allow_none=True)
-    or multiprocessing.get_all_start_methods()[0]
-)
+# the patch only reaches the pool workers when they are forked. The engine
+# starts its workers with forkserver/spawn by default (the workers re-import
+# the real module and run the real HPO), so these tests pin ``fork``.
 requires_fork = pytest.mark.skipif(
-    _START_METHOD != "fork",
+    "fork" not in multiprocessing.get_all_start_methods(),
     reason="parent-process patches reach workers only with the fork start method",
 )
+
+
+@pytest.fixture
+def fork_workers(monkeypatch):
+    """Start the engine's worker processes with ``fork``."""
+    from configurable_automl_engine.training_engine import thread_pool
+
+    monkeypatch.setattr(thread_pool, "DEFAULT_START_METHOD", "fork")
 
 # Terminal select step: the last phase of any valid config.
 TERMINAL_SELECT = {
@@ -1795,6 +1799,7 @@ class TestWorstScoreResultsExcluded:
         return fake_run
 
     @requires_fork
+    @pytest.mark.usefixtures("fork_workers")
     @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_mode_produces_valid_winner(
         self, mock_save, minimal_df, tmp_path
@@ -1823,6 +1828,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
+    @pytest.mark.usefixtures("fork_workers")
     @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_mode_shares_X_via_shared_memory(
         self, mock_save, minimal_df, tmp_path
@@ -1876,6 +1882,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
+    @pytest.mark.usefixtures("fork_workers")
     @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     def test_processes_parallel_disqualification_propagates(
         self, mock_save, minimal_df, tmp_path
@@ -1906,6 +1913,7 @@ class TestWorstScoreResultsExcluded:
         mock_save.assert_called_once()
 
     @requires_fork
+    @pytest.mark.usefixtures("fork_workers")
     @patch("configurable_automl_engine.training_engine.artifact._fit_and_save")
     @patch("configurable_automl_engine.training_engine.hpo_phases._run_hpo")
     def test_processes_parallel_worker_failure_does_not_corrupt_others(

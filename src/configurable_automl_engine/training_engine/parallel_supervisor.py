@@ -140,6 +140,9 @@ class ProcessPoolSupervisor:
         self._attempts = [0] * n
         self._crashes = [0] * n
         self._running: dict[Future[Any], _Running] = {}
+        # Tasks not submitted yet because the pool broke while submitting
+        # (a worker crashed meanwhile): the crash recovery submits them.
+        self._unsubmitted: list[int] = []
         self._pool: ProcessPoolExecutor | None = None
         # True while the current pool holds a worker that runs an abandoned
         # (timed-out) task: the pool must then be stopped, not drained.
@@ -170,7 +173,7 @@ class ProcessPoolSupervisor:
         try:
             try:
                 self._submit(range(len(self._payloads)))
-                while self._running:
+                while self._running or self._unsubmitted:
                     self._step()
             except Exception as e:
                 if not is_infrastructure_error(e):
@@ -187,6 +190,11 @@ class ProcessPoolSupervisor:
     # ── the wait loop ──────────────────────────────────────────────────────
 
     def _step(self) -> None:
+        if not self._running:
+            # The pool broke before any submitted task was collected.
+            self._stop_pool()
+            self._resubmit_unfinished()
+            return
         now = time.time()
         if self._global_deadline is not None and now >= self._global_deadline:
             self._expire_all()
@@ -258,7 +266,7 @@ class ProcessPoolSupervisor:
             self._set(r.idx, "timed_out", TaskError("TaskTimeout", message), None)
             r.free()
             self._abandoned = True
-        if self._running:
+        if self._running or self._unsubmitted:
             # The hung worker keeps running its task: stop the pool and
             # rebuild it for the tasks still waiting.
             self._restart()
@@ -313,11 +321,11 @@ class ProcessPoolSupervisor:
                 self._set(r.idx, "crashed", TaskError("WorkerCrash", message), None)
             else:
                 logger.warning(f"Task {r.idx}: {message}; retrying")
-        if self._running:
+        if self._running or self._unsubmitted:
             logger.warning(
                 "A worker process crashed; restarting the pool for %d unfinished "
                 "task(s)",
-                len(self._running),
+                len(self._running) + len(self._unsubmitted),
             )
             self._resubmit_unfinished()
 
@@ -344,7 +352,8 @@ class ProcessPoolSupervisor:
         return blamed
 
     def _resubmit_unfinished(self) -> None:
-        pending = sorted(r.idx for r in self._running.values())
+        pending = sorted([r.idx for r in self._running.values()] + self._unsubmitted)
+        self._unsubmitted = []
         for r in self._running.values():
             r.free()
         self._running.clear()
@@ -358,7 +367,8 @@ class ProcessPoolSupervisor:
 
     def _submit(self, indices: Iterable[int]) -> None:
         assert self._pool is not None
-        for idx in indices:
+        queue = list(indices)
+        for pos, idx in enumerate(queue):
             p = self._payloads[idx]
             sig = _StartSignal()
             try:
@@ -371,6 +381,14 @@ class ProcessPoolSupervisor:
                     p.shm_info,
                     sig.name,
                 )
+            except BrokenProcessPool:
+                # A worker crashed while the batch was being submitted: the
+                # futures already submitted report it, and the crash recovery
+                # submits the rest to the replacement pool.
+                sig.close()
+                sig.unlink()
+                self._unsubmitted.extend(queue[pos:])
+                return
             except BaseException:
                 sig.close()
                 sig.unlink()

@@ -214,10 +214,16 @@ move that thing down.
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
+│       │   ├── parallel_deadlines.py       # run_parallel: pure deadline policy (task timeout, queue budget)
+│       │   ├── parallel_executor.py        # run_parallel: ProcessPoolExecutor adapter (forced shutdown, exit codes)
+│       │   ├── parallel_outcome.py         # run_parallel: TaskOutcome, the result of one task
+│       │   ├── parallel_supervisor.py      # run_parallel: process-pool supervisor (timeout and crash restarts)
+│       │   ├── parallel_transport.py       # run_parallel: shared memory / disk cache / pickle payload transport
+│       │   ├── parallel_worker.py          # run_parallel: worker side (start signal, argument restore)
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
 │       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies (return a SelectOutcome)
 │       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, step outcomes, ...)
-│       │   └── thread_pool.py              # run_parallel: thread/process pools, disk cache, watchdog
+│       │   └── thread_pool.py              # run_parallel / run_parallel_outcomes: threads runner, fallback policy
 │       ├── feature_selection.py            # Layer 1: optional feature selection step and its config (FeatureSelectionCfg)
 │       ├── isotonic.py                     # Layer 1: IsotonicDataTransformer, the isotonic regression data adapter
 │       ├── models.py                       # Layer 1: model factory, hyperparameter cleaning

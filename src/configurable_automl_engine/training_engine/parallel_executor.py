@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import time
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
@@ -29,13 +30,32 @@ _HAS_PUBLIC_TERMINATE = hasattr(ProcessPoolExecutor, "terminate_workers")
 _EXIT_POLL = 0.05
 
 
-def resolve_context(mp_context: str | BaseContext | None) -> BaseContext | None:
+#: Modules the fork server imports once, so that every worker forked from
+#: it starts with them (numpy / pandas and the worker side of run_parallel)
+#: instead of importing them again.
+_FORKSERVER_PRELOAD = (
+    "__main__",
+    "configurable_automl_engine.training_engine.parallel_worker",
+)
+
+
+def resolve_context(
+    mp_context: str | BaseContext | None, preload: Sequence[str] = ()
+) -> BaseContext | None:
     """Turn a start-method name into a multiprocessing context.
+
+    For ``forkserver`` the modules of ``preload`` (e.g. the module of the
+    task function) and the worker side of ``run_parallel`` are preloaded
+    into the fork server, so the workers do not import them on every start.
+    The preload only takes effect when the fork server starts (once per
+    process).
 
     Args:
         mp_context (str | BaseContext | None): ``"fork"``, ``"forkserver"``,
             ``"spawn"``, a context object, or ``None`` (the multiprocessing
             default of the running interpreter).
+        preload (Sequence[str]): Extra modules to preload into the fork
+            server.
 
     Returns:
         BaseContext | None: The context to pass to the executor.
@@ -43,9 +63,17 @@ def resolve_context(mp_context: str | BaseContext | None) -> BaseContext | None:
     Raises:
         ValueError: If the start method is not available on this platform.
     """
-    if mp_context is None or isinstance(mp_context, BaseContext):
-        return mp_context
-    return multiprocessing.get_context(mp_context)
+    if mp_context is None:
+        return None
+    ctx = (
+        mp_context
+        if isinstance(mp_context, BaseContext)
+        else multiprocessing.get_context(mp_context)
+    )
+    set_preload = getattr(ctx, "set_forkserver_preload", None)
+    if ctx.get_start_method() == "forkserver" and set_preload is not None:
+        set_preload(list(dict.fromkeys([*_FORKSERVER_PRELOAD, *preload])))
+    return ctx
 
 
 def create_process_pool(
