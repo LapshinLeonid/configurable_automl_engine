@@ -39,14 +39,20 @@ from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine.training_engine.thread_pool import (
     run_parallel,
     DiskPersistenceManager,
-    _worker_proxy,
-    _perform_cleanup,
     _force_shutdown_processes,
-    _StartSignal,
     _terminate_worker_by_pid,
+)
+from configurable_automl_engine.training_engine.parallel_transport import (
+    _perform_cleanup,
+)
+from configurable_automl_engine.training_engine.parallel_worker import (
+    _StartSignal,
+    _worker_proxy,
 )
 
 MODULE_PATH = "configurable_automl_engine.training_engine.thread_pool"
+TRANSPORT_PATH = "configurable_automl_engine.training_engine.parallel_transport"
+WORKER_PATH = "configurable_automl_engine.training_engine.parallel_worker"
 
 
 # --- Test functions ---
@@ -424,7 +430,7 @@ def test_run_parallel_reuses_shm_segment_for_same_df():
             super().__init__(*a, **kw)
 
     with patch(
-        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame",
+        "configurable_automl_engine.training_engine.parallel_transport.SharedDataFrame",
         CountingSharedDataFrame,
     ):
         results = run_parallel(
@@ -583,7 +589,7 @@ def test_worker_proxy_integration():
 
 
 def test_worker_proxy_disk_integration(tmp_path):
-    from configurable_automl_engine.training_engine.thread_pool import _worker_proxy
+    from configurable_automl_engine.training_engine.parallel_worker import _worker_proxy
 
     df = pd.DataFrame({"val": [30]})
     path = str(tmp_path / "test.parquet")
@@ -599,9 +605,7 @@ def test_worker_proxy_logic_direct_coverage():
     meta = ("test_shm_name", (1, 1), np.float64, ["a"])
 
     # Patch SharedDataFrame so it does not touch real OS memory
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame"
-    ) as mock_class:
+    with patch(f"{WORKER_PATH}.SharedDataFrame") as mock_class:
         mock_instance = mock_class.return_value
         mock_instance.to_df.return_value = pd.DataFrame({"a": [1.0]})
 
@@ -678,9 +682,7 @@ def test_shared_data_frame_is_compatible_coverage():
 def test_worker_proxy_close_exception():
     meta = ("name", (1, 2), np.int64, ["a", "b"])
 
-    with patch(
-        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame"
-    ) as mock_class:
+    with patch(f"{WORKER_PATH}.SharedDataFrame") as mock_class:
         mock_instance = mock_class.return_value
         mock_instance.to_df.return_value = pd.DataFrame({"a": [1], "b": [2]})
         mock_instance.close.side_effect = Exception("Simulated close error")
@@ -1013,7 +1015,7 @@ class TestParallelErrorHandling(unittest.TestCase):
         shm_mock = MagicMock(spec=SharedDataFrame)
         shm_mock.unlink.side_effect = ValueError("Fatal SHM error")
 
-        with self.assertLogs(MODULE_PATH, level="WARNING") as cm:
+        with self.assertLogs(TRANSPORT_PATH, level="WARNING") as cm:
             _perform_cleanup([shm_mock], None)
 
         self.assertTrue(
@@ -1025,7 +1027,7 @@ class TestParallelErrorHandling(unittest.TestCase):
         pm_mock = MagicMock(spec=DiskPersistenceManager)
         pm_mock.cleanup.side_effect = PermissionError("File locked")
 
-        with self.assertLogs(MODULE_PATH, level="ERROR") as cm:
+        with self.assertLogs(TRANSPORT_PATH, level="ERROR") as cm:
             _perform_cleanup(None, pm_mock)
 
         self.assertTrue(
@@ -1502,7 +1504,7 @@ def test_run_parallel_processes_poll_interval_caps_first_wait():
         # wait must be capped by the poll interval and never by the queue
         # deadline (submit + task_timeout + queue_budget ≈ 4s). The tasks
         # themselves still run and complete in the real workers.
-        patch.object(thread_pool._StartSignal, "read", return_value=-1.0),
+        patch.object(_StartSignal, "read", return_value=-1.0),
     ):
         results = run_parallel(
             slow_task,
@@ -1929,7 +1931,7 @@ def test_run_parallel_parquet_write_failure_falls_back_to_pickle(caplog):
 
     with (
         patch(
-            "configurable_automl_engine.training_engine.thread_pool."
+            "configurable_automl_engine.training_engine.parallel_transport."
             "SharedDataFrame.is_compatible",
             return_value=False,
         ),
@@ -1970,7 +1972,7 @@ def test_run_parallel_preparation_failure_cleans_shm_segments(caplog, monkeypatc
                 imported_names.append(self.name)
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame",
+        "configurable_automl_engine.training_engine.parallel_transport.SharedDataFrame",
         TrackingSharedDataFrame,
     )
     monkeypatch.setattr(
@@ -2808,7 +2810,7 @@ def test_run_parallel_shm_segment_created_before_failure_still_cleaned(
                 imported_names.append(self.name)
 
     monkeypatch.setattr(
-        "configurable_automl_engine.training_engine.thread_pool.SharedDataFrame",
+        "configurable_automl_engine.training_engine.parallel_transport.SharedDataFrame",
         TrackingSharedDataFrame,
     )
 
@@ -2889,7 +2891,7 @@ def test_disk_persistence_manager_full_dev_shm_uses_system_tmp(monkeypatch):
     manager.tmp_dir = "/dev/shm"
     with (
         patch(
-            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            "configurable_automl_engine.training_engine.parallel_transport.tempfile.mkstemp",
             side_effect=recording_mkstemp,
         ),
         patch(
@@ -2927,7 +2929,7 @@ def test_disk_persistence_manager_dev_shm_small_file_stays_on_dev_shm(
     manager.tmp_dir = "/dev/shm"
     with (
         patch(
-            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            "configurable_automl_engine.training_engine.parallel_transport.tempfile.mkstemp",
             side_effect=recording_mkstemp,
         ),
         patch(
@@ -2968,7 +2970,7 @@ def test_disk_persistence_manager_long_strings_route_to_system_tmp(monkeypatch):
     manager.tmp_dir = "/dev/shm"
     with (
         patch(
-            "configurable_automl_engine.training_engine.thread_pool.tempfile.mkstemp",
+            "configurable_automl_engine.training_engine.parallel_transport.tempfile.mkstemp",
             side_effect=recording_mkstemp,
         ),
         patch(

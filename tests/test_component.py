@@ -1860,7 +1860,7 @@ class TestWorstScoreResultsExcluded:
                 side_effect=self._processes_fake_load(rf_tuner, en_tuner),
             ),
             patch(
-                "configurable_automl_engine.training_engine.thread_pool."
+                "configurable_automl_engine.training_engine.parallel_transport."
                 "SharedDataFrame",
                 CountingSharedDataFrame,
             ),
