@@ -492,6 +492,8 @@ def _run_phase_workers(
                 if cfg.general.parallel_mode == "threads"
                 else cfg.general.task_timeout
             ),
+            # None — the run_parallel default (forkserver, else spawn).
+            mp_context=cfg.general.start_method,
         )
         ctx.disqualified_algorithms.update(
             _lost_worker_reasons(list(current_candidates), outcomes)

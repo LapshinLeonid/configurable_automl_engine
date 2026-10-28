@@ -95,6 +95,7 @@ jobs:
           tests/test_parallel.py
           tests/test_parallel_behavior.py
           tests/test_parallel_deadlines.py
+          tests/test_parallel_logging.py
           tests/test_parallel_orchestrator.py
           tests/test_parallel_supervisor.py
           tests/test_refactor_safety_net.py

@@ -8,7 +8,6 @@ leaked shared-memory segments and temp files.
 
 from __future__ import annotations
 
-import glob
 import logging
 import multiprocessing
 import os
@@ -16,6 +15,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
+from multiprocessing import shared_memory
 from unittest.mock import patch
 
 import pandas as pd
@@ -48,22 +48,48 @@ def start_method(request, monkeypatch) -> str:
     return request.param
 
 
-def _leak_candidates() -> set[str]:
-    """Shared-memory segments and Parquet temp files that exist right now."""
-    found: set[str] = set()
+def _segment_exists(name: str) -> bool:
     if os.path.isdir("/dev/shm"):
-        found.update(glob.glob("/dev/shm/psm_*"))
-        found.update(glob.glob("/dev/shm/*.parquet"))
-    found.update(glob.glob(os.path.join(tempfile.gettempdir(), "*.parquet")))
-    return found
+        return os.path.exists(os.path.join("/dev/shm", name.lstrip("/")))
+    try:
+        segment = shared_memory.SharedMemory(name=name)
+    except FileNotFoundError:
+        return False
+    segment.close()
+    return True
 
 
 @pytest.fixture
-def no_leaks() -> Iterator[None]:
-    """Fail the test if it leaves a segment or a temp file behind."""
-    before = _leak_candidates()
+def no_leaks(monkeypatch) -> Iterator[None]:
+    """Fail the test if a segment or a Parquet temp file it created survives.
+
+    Only the resources created by this test's own process are tracked (the
+    shared-memory segments it creates and the Parquet files it reserves), so
+    segments of other processes — e.g. another pytest-xdist worker — never
+    count as a leak.
+    """
+    segments: list[str] = []
+    files: list[str] = []
+    real_init = shared_memory.SharedMemory.__init__
+    real_mkstemp = tempfile.mkstemp
+    owner = os.getpid()
+
+    def tracking_init(self, name=None, create=False, size=0, *args, **kwargs):
+        real_init(self, name, create, size, *args, **kwargs)
+        if create and os.getpid() == owner:
+            segments.append(self.name)
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        if path.endswith(".parquet") and os.getpid() == owner:
+            files.append(path)
+        return fd, path
+
+    monkeypatch.setattr(shared_memory.SharedMemory, "__init__", tracking_init)
+    monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
     yield
-    leaked = _leak_candidates() - before
+    leaked = [n for n in segments if _segment_exists(n)]
+    leaked += [f for f in files if os.path.exists(f)]
     assert not leaked, f"leaked resources: {sorted(leaked)}"
 
 

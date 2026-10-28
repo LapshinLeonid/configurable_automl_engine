@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
@@ -77,10 +77,23 @@ def resolve_context(
 
 
 def create_process_pool(
-    max_workers: int | None, mp_context: BaseContext | None
+    max_workers: int | None,
+    mp_context: BaseContext | None,
+    initializer: Callable[..., object] | None = None,
+    initargs: tuple[Any, ...] = (),
 ) -> ProcessPoolExecutor:
-    """Create a process pool (the workers start lazily, on submit)."""
-    return ProcessPoolExecutor(max_workers, mp_context=mp_context)
+    """Create a process pool (the workers start lazily, on submit).
+
+    Args:
+        max_workers (int | None): The number of worker processes.
+        mp_context (BaseContext | None): The multiprocessing context.
+        initializer (Callable | None): Run in every worker before its first
+            task (the worker log forwarding).
+        initargs (tuple[Any, ...]): The initializer arguments.
+    """
+    return ProcessPoolExecutor(
+        max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs
+    )
 
 
 def _worker_processes(pool: ProcessPoolExecutor) -> list[BaseProcess]:

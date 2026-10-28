@@ -25,6 +25,7 @@ Key features:
 from __future__ import annotations
 
 import logging
+import multiprocessing
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -958,6 +959,9 @@ class GeneralCfg(BaseModel):
         parallel_strategy (str): Parallelization level (only by algorithms).
         max_workers (int | None): Limit on threads or processes.
         parallel_mode (str): Technical execution mode ('threads' or 'processes').
+        start_method (str | None): How the worker processes start in
+            'processes' mode ('forkserver', 'spawn' or 'fork'); None — the
+            engine default ('forkserver' where available, else 'spawn').
         feature_selection (FeatureSelectionCfg): Feature space reduction
             settings. By default mode='disabled' — feature selection is not applied.
     """
@@ -1146,6 +1150,20 @@ class GeneralCfg(BaseModel):
         description=(
             "Concurrency mode: threads (for I/O-bound tasks)"
             " or processes (for CPU-intensive computations)"
+        ),
+    )
+    start_method: Literal["forkserver", "spawn", "fork"] | None = Field(
+        default=None,
+        description=(
+            "How the worker processes start in parallel_mode='processes': "
+            "'forkserver', 'spawn' or 'fork'. None — the engine default: "
+            "'forkserver' where the platform has it (Linux, macOS), otherwise "
+            "'spawn'. With 'forkserver' and 'spawn' the workers re-import the "
+            "main script, so a script that calls train_best_model must guard "
+            "its top-level code with `if __name__ == \"__main__\":`. 'fork' "
+            "(POSIX only) does not re-import the script but copies the "
+            "multi-threaded parent process, which can deadlock a worker. "
+            "Setting it with parallel_mode='threads' is a config error."
         ),
     )
     phase_timeout: float | None = Field(
@@ -1453,6 +1471,34 @@ class GeneralCfg(BaseModel):
                 f"got threshold={threshold!r}, encoding={hc_encoding!r}. "
                 "Provide both parameters to enable automatic high-cardinality "
                 "encoding, or omit both to disable it."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_start_method(self) -> GeneralCfg:
+        """Check that ``start_method`` applies and is available here.
+
+        Returns:
+            GeneralCfg: The validated settings object.
+
+        Raises:
+            ValueError: If ``start_method`` is set with
+                ``parallel_mode='threads'``, or the platform does not support
+                it (``fork`` on Windows).
+        """
+        if self.start_method is None:
+            return self
+        if self.parallel_mode == "threads":
+            raise ValueError(
+                f"general.start_method={self.start_method!r} applies only to "
+                "parallel_mode='processes'; remove it or switch "
+                "general.parallel_mode to 'processes'."
+            )
+        available = multiprocessing.get_all_start_methods()
+        if self.start_method not in available:
+            raise ValueError(
+                f"general.start_method={self.start_method!r} is not available "
+                f"on this platform (available: {', '.join(available)})."
             )
         return self
 

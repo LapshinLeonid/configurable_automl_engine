@@ -189,6 +189,33 @@ general:
   task_timeout: 600      # seconds for one algorithm
 ```
 
+**A script that uses `parallel_mode: "processes"` must guard its top-level
+code.** The worker processes start with `forkserver` (Linux, macOS) or `spawn`
+(Windows), and both import the main script again in the worker processes, so
+every top-level statement of the script runs a second time. Without the
+guard, a script that calls `train_best_model` at the top level makes the
+workers start a nested run, which fails ("An attempt has been made to start a
+new process before the current process has finished its bootstrapping
+phase", see "Safe importing of main module" in the `multiprocessing`
+documentation). Other top-level side effects repeat as well: for example,
+`logging.basicConfig(filename=..., filemode="w")` truncates the log file in
+the middle of the run. Put the code under the guard:
+
+```python
+from configurable_automl_engine import train_best_model
+
+def main():
+    result = train_best_model("config.yaml", df, target="price")
+
+if __name__ == "__main__":
+    main()
+```
+
+A script that cannot be changed can set `start_method: "fork"` (POSIX only):
+`fork` does not import the script again, but it copies the multi-threaded
+parent process, which can deadlock a worker. Jupyter notebooks and the
+interactive interpreter need no guard. `threads` mode is not affected.
+
 **An honest final estimate on untouched rows.** By default
 (`holdout_fraction: "auto"`) 20 % of the rows are reserved before tuning when
 the data has at least 100 rows, and the result contains `holdout_score`. To
@@ -248,6 +275,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | `parallel_strategy` | `"algorithms"` | What runs in parallel. Currently only `"algorithms"` (different algorithms are tuned at the same time). |
 | `phase_timeout` | `null` (3600 s) | Time limit of one search step, seconds (≥ 1). **Only with `parallel_mode: "processes"`**, where hung workers are terminated. In `"threads"` mode setting it is a config error: a running Python thread cannot be stopped, so the limit would only throw away finished results. |
 | `task_timeout` | `null` (= `phase_timeout`) | Time limit of one algorithm, seconds (≥ 1). Only with `"processes"`, same reason. |
+| `start_method` | `null` | How the worker processes start with `"processes"`: `"forkserver"`, `"spawn"` or `"fork"`. `null` — `"forkserver"` where the platform has it (Linux, macOS), otherwise `"spawn"`. With `"forkserver"` and `"spawn"` the main script must guard its top-level code with `if __name__ == "__main__":` (see "A script that uses `parallel_mode: \"processes\"`" above); `"fork"` (POSIX only) does not need the guard but can deadlock a worker of a multi-threaded process. Setting it with `"threads"` is a config error, and so is a method the platform does not have. |
 
 **Data handling**
 
@@ -1287,6 +1315,10 @@ Executes a function in parallel across multiple workers (threads or processes) w
 **Crash recovery (`"processes"` mode).** When a worker process dies (`os._exit`, a signal, a segfault in a C extension, the OOM killer), only its task is lost. The task is found by the PID of the worker that ran it and the worker's exit code; the pool is restarted and every unfinished task is resubmitted. A task that crashes its worker `MAX_CRASH_ATTEMPTS` times (2) is given up on (`crashed`), so the run always terminates.
 
 **Fallback to threads.** The batch falls back to `"threads"` mode only when nothing has run yet: the process pool cannot be created, or the payload transport cannot be set up. A `WARNING` is logged, saying that the timeouts are dropped. Once tasks have been submitted nothing is ever rerun in threads: an infrastructure failure (for example, the replacement pool cannot be created after a timeout) marks the unfinished tasks as failed and keeps the finished results; a programming error (`TypeError`, `AttributeError`, ...) propagates after cleanup.
+
+**Logging.** The log records of the worker processes are forwarded to the parent process and handled by the parent's handlers (the `general.log_to_file` file, the console), with every start method: with `forkserver` and `spawn` the workers do not inherit the parent's logging configuration. The levels configured in the parent apply in the workers too.
+
+**The main script.** With `forkserver` and `spawn` the worker processes import the main script again, so a script must guard its top-level code with `if __name__ == "__main__":` (see "A script that uses `parallel_mode: \"processes\"`" in the configuration section). When the pool fails for that reason, the error message names the guard.
 
 **Cleanup.** The shared-memory segments, the disk-cache temp files and the start-signal segments created by the run are removed on every exit path: success, timeout, crash, exception and `KeyboardInterrupt` (which is re-raised).
 

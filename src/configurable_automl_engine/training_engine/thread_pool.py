@@ -29,11 +29,14 @@ import multiprocessing
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from functools import partial
 from multiprocessing.context import BaseContext
 from typing import Any
 
 from .parallel_deadlines import POLL_INTERVAL
 from .parallel_executor import create_process_pool, resolve_context
+from .parallel_logging import WorkerLogForwarding
 from .parallel_outcome import TaskError, TaskOutcome
 from .parallel_supervisor import (
     MAX_CRASH_ATTEMPTS,
@@ -192,18 +195,31 @@ def _run_processes(
     Threads are used instead only when nothing has run yet: the payload
     transport cannot be set up, or the process pool cannot be created.
     """
-    with PayloadTransport(shared_args_indices, disk_args_indices) as transport:
+    ctx = mp_context or multiprocessing.get_context()
+    with (
+        PayloadTransport(shared_args_indices, disk_args_indices) as transport,
+        ExitStack() as stack,
+    ):
         try:
             payloads = transport.prepare(args_list, kwargs_list)
+            # The workers' log records reach the parent's handlers (with
+            # forkserver/spawn the workers do not inherit them).
+            forwarding = stack.enter_context(
+                WorkerLogForwarding(ctx, _importable_module(func))
+            )
             supervisor = ProcessPoolSupervisor(
                 func,
                 payloads,
                 max_workers=max_workers,
-                mp_context=mp_context,
+                mp_context=ctx,
                 task_timeout=task_timeout,
                 timeout=timeout,
                 shutdown_grace_period=shutdown_grace_period,
-                pool_factory=create_process_pool,
+                pool_factory=partial(
+                    create_process_pool,
+                    initializer=forwarding.initializer,
+                    initargs=forwarding.initargs,
+                ),
             )
             supervisor.start()
         except Exception as e:

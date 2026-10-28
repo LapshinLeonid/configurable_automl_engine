@@ -63,3 +63,19 @@ def frame_then(df: pd.DataFrame, action: str) -> object:
     elif action == "interrupt":
         raise KeyboardInterrupt
     return n
+
+
+def log_records(tag: str) -> int:
+    """Log at several levels from the worker; return the worker PID."""
+    import logging
+
+    log = logging.getLogger("tests.parallel_tasks.worker")
+    log.debug("debug %s", tag)
+    log.info("info %s", tag)
+    log.warning("warning %s", tag)
+    try:
+        raise ValueError("inside the worker")
+    except ValueError:
+        log.exception("exception %s", tag)
+    logging.getLogger("tests.parallel_tasks.quiet").info("filtered %s", tag)
+    return os.getpid()

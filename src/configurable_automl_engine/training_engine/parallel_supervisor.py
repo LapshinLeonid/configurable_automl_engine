@@ -410,13 +410,25 @@ class ProcessPoolSupervisor:
         )
 
     def _fail_unfinished(self, exc: BaseException) -> None:
-        error = TaskError(type(exc).__name__, f"process pool failure: {exc}")
+        message = f"process pool failure: {exc}{self._reimport_hint()}"
+        error = TaskError(type(exc).__name__, message)
         for idx, outcome in enumerate(self._outcomes):
             if outcome is None:
-                logger.error(f"Task {idx} failed: process pool failure: {exc}")
+                logger.error(f"Task {idx} failed: {message}")
                 self._outcomes[idx] = TaskOutcome(
                     "failed", None, error, attempts=self._attempts[idx]
                 )
+
+    def _reimport_hint(self) -> str:
+        """A hint for the usual cause of a pool failing under forkserver/spawn."""
+        method = self._mp_context.get_start_method() if self._mp_context else None
+        if method not in ("forkserver", "spawn"):
+            return ""
+        return (
+            f" (with the {method!r} start method the workers re-import the main "
+            "script: guard its top-level code with "
+            "`if __name__ == \"__main__\":`, or use the 'fork' start method)"
+        )
 
     def _lost(self, idx: int) -> TaskOutcome:
         # Unreachable when run() returns normally; kept as a safe default.
