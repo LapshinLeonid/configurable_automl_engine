@@ -2,8 +2,8 @@
 
 Holds :class:`SanityCheckResult` (the verdict, the reasons, the soft warnings
 and the metrics of the four circuits), the severity mapping
-(``_compute_severity``) and the input conversion shared by the gate and the
-circuits (``_to_float_vector``). Like the gate, it depends only on numpy,
+(``_compute_severity``) and the input checks shared by the gate and the
+circuits (``_to_float_vector``, ``_validate_check_inputs``). Like the gate, it depends only on numpy,
 pandas and scikit-learn; it must not import the gate or the circuits.
 """
 
@@ -105,3 +105,44 @@ def _to_float_vector(values: Any, name: str) -> np.ndarray:
             "pass y / y_pred_oof / y_pred_full as flat arrays or Series."
         )
     return arr
+
+
+def _validate_check_inputs(
+    y: Any, y_pred_oof: Any, X: Any | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate the ``check()`` inputs and convert them to float vectors.
+
+    Args:
+        y: the true target.
+        y_pred_oof: OOF predictions aligned with ``y``.
+        X: the feature matrix (or None).
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: ``y`` and ``y_pred_oof`` as 1-D
+            float vectors.
+
+    Raises:
+        ValueError: when the input contract is violated (None arguments,
+            length mismatch between y/y_pred_oof/X).
+    """
+    y_arr = _to_float_vector(y, "y")
+    oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
+    if y_arr.shape != oof_arr.shape:
+        raise ValueError(
+            f"y and y_pred_oof must have the same length "
+            f"(got {y_arr.shape} and {oof_arr.shape})"
+        )
+    if X is not None:
+        if not hasattr(X, "shape"):
+            raise ValueError(
+                f"X must be array-like with a .shape attribute "
+                f"(ndarray, pandas.DataFrame or scipy sparse), got "
+                f"{type(X).__name__}"
+            )
+        x_len = X.shape[0]
+        if x_len != y_arr.shape[0]:
+            raise ValueError(
+                f"X and y must have the same number of rows "
+                f"(got {x_len} and {y_arr.shape[0]})"
+            )
+    return y_arr, oof_arr
