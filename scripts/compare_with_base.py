@@ -53,6 +53,9 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: Upper bound of one scenario run (a run normally takes 1-2 minutes); a hung
+#: run fails the comparison instead of blocking CI.
+RUN_TIMEOUT_SECONDS = 1200
 PACKAGE = "configurable_automl_engine"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -835,9 +838,20 @@ def _run_version(
         cmd += ["--base-artifacts", str(base_artifacts)]
     print(f"[compare] running the scenarios on the {label} version ({src})")
     started = time.perf_counter()
-    proc = subprocess.run(
-        cmd, env=env, cwd=workdir, text=True, capture_output=True, check=False
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            cwd=workdir,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"[compare] the {label} run did not finish in {RUN_TIMEOUT_SECONDS}s"
+        ) from exc
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout[-4000:] + proc.stderr[-8000:])
         raise SystemExit(f"[compare] the {label} run failed")
