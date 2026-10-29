@@ -21,6 +21,10 @@ import pandas as pd
 from scipy import sparse as sp
 from sklearn.compose import ColumnTransformer
 
+from configurable_automl_engine.common.datetime_features import (
+    datetime_expansion_map,
+    expand_datetime_columns,
+)
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.settings import EncodingSettings, InputPolicies
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
@@ -28,8 +32,6 @@ from configurable_automl_engine.common.validation_utils import (
     apply_inf_policy,
     check_target_constant,
     check_target_numeric,
-    datetime_expansion_map,
-    expand_datetime_columns,
     validate_features,
 )
 from configurable_automl_engine.feature_selection import FeatureSelector
