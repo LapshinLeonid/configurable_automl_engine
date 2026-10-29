@@ -21,7 +21,14 @@ setting has a sensible default.
 
 The machine-readable schema of the config is [config.schema.json](config.schema.json).
 A few cross-field rules cannot be expressed in JSON Schema; they live in
-[config_parser.py](/src/configurable_automl_engine/training_engine/config_parser.py)
+the config modules — the `general` section's in
+[config/general_rules.py](/src/configurable_automl_engine/training_engine/config/general_rules.py),
+the others next to their section
+([phases](/src/configurable_automl_engine/training_engine/config/phases.py),
+[sanity_gate](/src/configurable_automl_engine/training_engine/config/sanity_gate.py),
+[complexity_guard](/src/configurable_automl_engine/training_engine/config/complexity_guard.py),
+[algorithms](/src/configurable_automl_engine/training_engine/config/algorithms.py),
+[root](/src/configurable_automl_engine/training_engine/config/root.py)) —
 and are listed under "Validation rules" in each section below.
 
 # Quick start

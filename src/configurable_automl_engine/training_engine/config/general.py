@@ -4,14 +4,13 @@ Holds ``GeneralCfg`` — the fields only: its cross-field validators are thin
 ``@model_validator`` methods that call the rules in
 :mod:`.general_rules` — and the types of its fields (``ComparisonMetric``,
 ``InfPolicy``, ``DatetimePolicy``, the ``"auto"`` hold-out constants). It
-builds on the section modules (phases, Sanity Gate, complexity guard); only
-:mod:`.root` may import it.
+builds on the section modules (phases, Sanity Gate, complexity guard) and
+:mod:`.general_rules`; within the config package only :mod:`.root` imports
+it.
 """
 
 from __future__ import annotations
 
-import logging
-import multiprocessing
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,15 +27,16 @@ from configurable_automl_engine.common.definitions import (
     SerializationFormat,
     ValidationStrategy,
 )
-from configurable_automl_engine.common.dependency_utils import is_installed
 from configurable_automl_engine.common.metrics import (
     AVAILABLE_METRICS,
-    to_sklearn_name,
 )
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
 from configurable_automl_engine.preprocessing import EncodingStrategy
+from configurable_automl_engine.training_engine.config import (
+    general_rules as rules,
+)
 from configurable_automl_engine.training_engine.config.complexity_guard import (
     ComplexityGuardCfg,
 )
@@ -411,118 +411,31 @@ class GeneralCfg(BaseModel):
     def _deduplicate_additional_metrics(
         cls, v: list[ComparisonMetric]
     ) -> list[ComparisonMetric]:
-        """Remove duplicates from the list of additional metrics.
-
-        Documented behavior: the same metric specified several times is
-        computed and returned exactly once (the order of the first
-        occurrence is preserved). Deduplication is done using the
-        lowercased string representation of the metric: ``ComparisonMetric``
-        items are strings, so calling ``.lower()`` is type-safe and does not
-        depend on an arbitrary element type.
-        """
-        seen: set[str] = set()
-        result: list[ComparisonMetric] = []
-        for name in v:
-            key = name.lower()
-            if key not in seen:
-                seen.add(key)
-                result.append(name)
-        return result
+        """Remove duplicate additional metrics (see ``general_rules``)."""
+        return rules.deduplicate_additional_metrics(v)
 
     @model_validator(mode="after")
     def _exclude_comparison_from_additional(self) -> GeneralCfg:
-        """Exclude the main comparison metric from the additional metrics list.
-
-        The value of the main comparison metric is already returned in the
-        training results as ``score``, so duplicating it in
-        ``additional_metrics`` is unnecessary. The comparison is done by the
-        sklearn name of the metric, so aliases of the same metric
-        (for example, 'rmse' and 'neg_root_mean_squared_error') count as a
-        match.
-        """
-        comparison_sklearn = to_sklearn_name(self.comparison_metric)
-        filtered = [
-            m
-            for m in self.additional_metrics
-            if to_sklearn_name(m) != comparison_sklearn
-        ]
-        if len(filtered) != len(self.additional_metrics):
-            logging.getLogger(__name__).warning(
-                "additional_metrics contains the comparison metric '%s'; "
-                "its value is already returned as 'score' and will not be "
-                "duplicated in 'additional_metrics'.",
-                self.comparison_metric,
-            )
-        self.additional_metrics = filtered
+        """Drop the comparison metric from the additional metrics."""
+        self.additional_metrics = rules.exclude_comparison_from_additional(
+            self.comparison_metric, self.additional_metrics
+        )
         return self
 
     @model_validator(mode="after")
     def _check_n_folds(self) -> GeneralCfg:
-        """Check the logical consistency of validation and serialization settings.
-
-        Validation logic:
-        1. Checks that the `joblib` package is available when the corresponding format is selected.
-        2. Ensures `n_folds` is a positive number for any strategy.
-        3. Strict check for `k_fold`: the number of blocks must be at least 2.
-
-        Returns:
-            GeneralCfg: The validated settings object.
-
-        Raises:
-            ValueError: If the 'joblib' package is not installed or `n_folds` is
-                invalid for the selected strategy.
-        """
-        if self.serialization_format == SerializationFormat.joblib and not is_installed(
-            "joblib"
-        ):
-            raise ValueError(
-                "serialization_format='joblib' requires"
-                " the 'joblib' package to be installed"
-            )
-        if self.n_folds < 1:
-            raise ValueError("`n_folds` must be at least 1")
-        # Strict validation only for k-fold
-        if self.validation_strategy == ValidationStrategy.k_fold and self.n_folds < 2:
-            raise ValueError("n_folds must be ≥ 2 for k-fold validation")
+        """Check the validation and serialization settings."""
+        rules.check_n_folds(
+            self.serialization_format, self.n_folds, self.validation_strategy
+        )
         return self
 
     @model_validator(mode="after")
     def _check_pruning_consistency(self) -> GeneralCfg:
-        """Check the consistency of early stopping settings with validation.
-
-        Validation logic:
-        1. For 'k_fold' the pruner must be able to fire before the evaluation
-           finishes: min_steps cannot exceed n_folds.
-        2. For 'train_test_split' there are no natural steps — early stopping
-           is not applied; we emit a warning rather than an error (the
-           behavior is documented and safe).
-
-        Returns:
-            GeneralCfg: The validated settings object.
-
-        Raises:
-            ValueError: If the pruning settings conflict with validation.
-        """
-        if not self.pruning.enable:
-            return self
-
-        if (
-            self.validation_strategy == ValidationStrategy.k_fold
-            and self.pruning.min_steps > self.n_folds
-        ):
-            raise ValueError(
-                f"pruning.min_steps ({self.pruning.min_steps}) cannot be greater "
-                f"than general.n_folds ({self.n_folds}) for k-fold validation: "
-                "the pruner would never get enough intermediate steps. "
-                "Decrease pruning.min_steps or increase general.n_folds."
-            )
-
-        if self.validation_strategy == ValidationStrategy.train_test_split:
-            logging.getLogger(__name__).warning(
-                "pruning.enable=true with validation_strategy='train_test_split': "
-                "early stopping will NOT be applied because hold-out evaluation "
-                "has no intermediate steps."
-            )
+        """Check the early stopping settings against the validation."""
+        rules.check_pruning_consistency(
+            self.pruning, self.validation_strategy, self.n_folds
+        )
         return self
 
     @model_validator(mode="after")
@@ -534,151 +447,28 @@ class GeneralCfg(BaseModel):
         ``_check_high_cardinality_encoding``: pipeline structure errors (the
         root cause of a config) are guaranteed to be reported before errors
         in categorical column encoding.
-
-        Validation logic (an empty phase list is not checked — the guard
-        against missing phases stays in the ``train_best_model`` runtime):
-        1. ``select`` cannot be the first phase: before any search there is
-           nothing to audit/rank.
-        2. Phases after a terminal select (``output: winner``) are forbidden:
-           such a step yields a single winner, and any subsequent
-           fine-tuning would hide the selection result.
-        3. The last phase must be a ``select`` with ``output: winner``:
-           the final artifact is built only from the result of the terminal
-           selection step.
-
-        Returns:
-            GeneralCfg: The validated settings object.
-
-        Raises:
-            ValueError: If the phase sequence violates the pipeline rules.
         """
-        phases = self.phases
-        if not phases:
-            return self
-
-        if phases[0].action == "select":
-            raise ValueError(
-                f"phase '{phases[0].name}' (index 0): action 'select' cannot "
-                "be the first phase — there is nothing to rank/audit yet. "
-                "Start the pipeline with an 'all_algorithms' (or 'refine') "
-                "phase."
-            )
-
-        for index, phase in enumerate(phases[:-1]):
-            if phase.action == "select" and phase.output == "winner":
-                raise ValueError(
-                    f"phase '{phase.name}' (index {index}): select with "
-                    "output 'winner' is terminal — no phases are allowed "
-                    "after it. Move it to the last position or use "
-                    "output 'top_k'/'pool' to keep the pipeline going."
-                )
-
-        last = phases[-1]
-        if not (last.action == "select" and last.output == "winner"):
-            raise ValueError(
-                f"the last phase '{last.name}' (action '{last.action}') must "
-                "be a 'select' phase with output 'winner': the final artifact "
-                "is built from the result of the terminal select step. "
-                "Migration: append "
-                "{action: 'select', strategy: 'cv_best', output: 'winner'} "
-                "as the last phase. See 'Migrating older configs' in API_REFERENCE.md."
-            )
+        rules.validate_phase_pipeline(self.phases)
         return self
 
     @model_validator(mode="after")
     def _check_high_cardinality_encoding(self) -> GeneralCfg:
-        """Check the consistency of the high-cardinality encoding settings.
-
-        Validation logic:
-        1. ``high_cardinality_threshold`` and ``high_cardinality_encoding``
-           must be set together (otherwise the behavior is ambiguous — the
-           configuration is rejected before training starts).
-        2. The values of ``categorical_encoding`` / ``high_cardinality_encoding``
-           are validated by the ``EncodingStrategy`` type (an unsupported
-           strategy is rejected during config parsing).
-
-        Returns:
-            GeneralCfg: The validated settings object.
-
-        Raises:
-            ValueError: If only one of the high-cardinality encoding
-                parameters is set.
-        """
-        threshold = self.high_cardinality_threshold
-        hc_encoding = self.high_cardinality_encoding
-        if (threshold is None) != (hc_encoding is None):
-            raise ValueError(
-                "general.high_cardinality_threshold and "
-                "general.high_cardinality_encoding must be set together: "
-                f"got threshold={threshold!r}, encoding={hc_encoding!r}. "
-                "Provide both parameters to enable automatic high-cardinality "
-                "encoding, or omit both to disable it."
-            )
+        """Check that the high-cardinality settings are set together."""
+        rules.check_high_cardinality_encoding(
+            self.high_cardinality_threshold, self.high_cardinality_encoding
+        )
         return self
 
     @model_validator(mode="after")
     def _check_start_method(self) -> GeneralCfg:
-        """Check that ``start_method`` applies and is available here.
-
-        Returns:
-            GeneralCfg: The validated settings object.
-
-        Raises:
-            ValueError: If ``start_method`` is set with
-                ``parallel_mode='threads'``, or the platform does not support
-                it (``fork`` on Windows).
-        """
-        if self.start_method is None:
-            return self
-        if self.parallel_mode == "threads":
-            raise ValueError(
-                f"general.start_method={self.start_method!r} applies only to "
-                "parallel_mode='processes'; remove it or switch "
-                "general.parallel_mode to 'processes'."
-            )
-        available = multiprocessing.get_all_start_methods()
-        if self.start_method not in available:
-            raise ValueError(
-                f"general.start_method={self.start_method!r} is not available "
-                f"on this platform (available: {', '.join(available)})."
-            )
+        """Check that ``start_method`` applies and is available here."""
+        rules.check_start_method(self.start_method, self.parallel_mode)
         return self
 
     @model_validator(mode="after")
     def _check_threads_timeouts(self) -> GeneralCfg:
-        """Forbid timeouts in threads mode.
-
-        In ``parallel_mode='threads'`` timeouts are meaningless and harmful:
-                an already running Python function cannot be interrupted, so a soft
-                timeout does not save time — it only forces the phase to wait for
-                ``shutdown(wait=True)`` completion of all algorithms and then
-                discards their ready results. Therefore setting any of
-                ``phase_timeout`` / ``task_timeout`` together with
-                ``parallel_mode='threads'`` is a configuration error (a breaking
-                change; backward compatibility is not preserved).
-
-                Returns:
-                    GeneralCfg: The validated settings object.
-
-                Raises:
-                    ValueError: If ``parallel_mode='threads'`` and at least one of the
-                        timeouts ``phase_timeout`` / ``task_timeout`` is set.
-        """
-        if self.parallel_mode == "threads" and (
-            self.phase_timeout is not None or self.task_timeout is not None
-        ):
-            offenders = []
-            if self.phase_timeout is not None:
-                offenders.append(f"general.phase_timeout={self.phase_timeout!r}")
-            if self.task_timeout is not None:
-                offenders.append(f"general.task_timeout={self.task_timeout!r}")
-            raise ValueError(
-                "timeouts are not supported in parallel_mode='threads': an "
-                "already-running Python function cannot be "
-                "interrupted, so a soft timeout does not save time and only "
-                "discards the ready results of completed algorithms. "
-                f"Offending settings: {', '.join(offenders)}. "
-                "Remove the timeouts or switch general.parallel_mode to "
-                "'processes' (where timeouts are hard and enforced)."
-            )
+        """Forbid timeouts in threads mode."""
+        rules.check_threads_timeouts(
+            self.parallel_mode, self.phase_timeout, self.task_timeout
+        )
         return self

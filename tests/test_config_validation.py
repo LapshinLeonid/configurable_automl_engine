@@ -601,7 +601,7 @@ def test_general_cfg_coverage_line_83():
         )
 
 
-@patch("configurable_automl_engine.training_engine.config.general.is_installed")
+@patch("configurable_automl_engine.training_engine.config.general_rules.is_installed")
 def test_joblib_not_installed_raises_error(mock_is_installed):
     """Test for the exception raised when joblib is missing."""
     # Simulate the package being absent
