@@ -33,6 +33,7 @@ import pytest
 import configurable_automl_engine.training_engine.component as component
 import configurable_automl_engine.training_engine.artifact as artifact_mod
 import configurable_automl_engine.training_engine.finalists as finalists_mod
+import configurable_automl_engine.training_engine.robust_winner as robust_winner_mod
 import configurable_automl_engine.training_engine.hpo_phases as hpo_phases_mod
 import configurable_automl_engine.training_engine.select_steps as select_steps_mod
 from configurable_automl_engine.training_engine.artifact import persist_artifact
@@ -657,7 +658,7 @@ def test_select_sanity_gate_budget_skipped_not_permanently_disqualified():
     cfg = _hpo_cfg(**_GATE_THRESHOLDS)
     ctx = _make_ctx({"ridge": PhaseResult(score=-0.10, params={"p": 1}), "extra_trees": PhaseResult(score=-0.08, params={"p": 1})})
     # The reason format is taken from the code (single source).
-    budget_reason = finalists_mod._audit_budget_skip_reason(5.0)
+    budget_reason = robust_winner_mod._audit_budget_skip_reason(5.0)
 
     with (
         patch.object(
@@ -727,7 +728,7 @@ def test_select_sanity_gate_budget_skipped_outside_output_not_disqualified():
             "svr": PhaseResult(score=-0.12, params={"p": 1}),
         }
     )
-    budget_reason = finalists_mod._audit_budget_skip_reason(5.0)
+    budget_reason = robust_winner_mod._audit_budget_skip_reason(5.0)
 
     with (
         patch.object(
@@ -832,16 +833,16 @@ def test_is_audit_budget_skip_rejects_partial_prefix_match():
     '{prefix} (Ns) exceeded' format.
     """
     assert (
-        finalists_mod._is_audit_budget_skip(
+        robust_winner_mod._is_audit_budget_skip(
             ["Sanity audit skipped: audit time budget is not a reason"]
         )
         is False
     )
-    assert finalists_mod._is_audit_budget_skip(["Sanity audit skipped by user"]) is False
+    assert robust_winner_mod._is_audit_budget_skip(["Sanity audit skipped by user"]) is False
     # A candidate with a real reason plus a 'similar' one is also not 'skip only'.
     assert (
-        finalists_mod._is_audit_budget_skip(
-            [finalists_mod._audit_budget_skip_reason(5.0), "Sanity audit skipped by user"]
+        robust_winner_mod._is_audit_budget_skip(
+            [robust_winner_mod._audit_budget_skip_reason(5.0), "Sanity audit skipped by user"]
         )
         is False
     )
@@ -849,12 +850,12 @@ def test_is_audit_budget_skip_rejects_partial_prefix_match():
 
 def test_is_audit_budget_skip_detects_only_budget_reasons():
     """``_is_audit_budget_skip`` distinguishes a budget skip from a real failure."""
-    reason = finalists_mod._audit_budget_skip_reason(5.0)
-    assert finalists_mod._is_audit_budget_skip([reason]) is True
+    reason = robust_winner_mod._audit_budget_skip_reason(5.0)
+    assert robust_winner_mod._is_audit_budget_skip([reason]) is True
     # Mixed reasons (budget + circuit) — not 'skip only'.
-    assert finalists_mod._is_audit_budget_skip([reason, "Circuit A"]) is False
-    assert finalists_mod._is_audit_budget_skip(["Circuit A"]) is False
-    assert finalists_mod._is_audit_budget_skip([]) is False
+    assert robust_winner_mod._is_audit_budget_skip([reason, "Circuit A"]) is False
+    assert robust_winner_mod._is_audit_budget_skip(["Circuit A"]) is False
+    assert robust_winner_mod._is_audit_budget_skip([]) is False
 
 
 def test_select_after_select():

@@ -44,8 +44,10 @@ from sklearn.tree import DecisionTreeRegressor
 from configurable_automl_engine.training_engine.finalists import (
     is_valid_winner_score,
     select_finalists,
-    select_robust_winner,
     select_winner,
+)
+from configurable_automl_engine.training_engine.robust_winner import (
+    select_robust_winner,
 )
 from configurable_automl_engine.training_engine.state import (
     FinalistCandidate,

@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 import configurable_automl_engine.training_engine.finalists as finalists_mod
+import configurable_automl_engine.training_engine.robust_winner as robust_winner_mod
 import configurable_automl_engine.training_engine.select_steps as select_steps_mod
 from configurable_automl_engine.hpo.types import HPOHistoryError
 from configurable_automl_engine.training_engine import component
@@ -178,7 +179,7 @@ def test_gate_disqualifications_skip_budget_skips():
             "b": SanityCheckResult(
                 is_valid=False,
                 reasons=[
-                    f"{finalists_mod._AuditSkipReason.BUDGET_EXCEEDED.value} (5s) exceeded"
+                    f"{robust_winner_mod._AuditSkipReason.BUDGET_EXCEEDED.value} (5s) exceeded"
                 ],
             ),
         },

@@ -357,7 +357,7 @@ PIPELINE_NAMES = {
     "persist_artifact": "artifact",
     "prepare_dataset": "data_prep",
     "select_finalists": "finalists",
-    "select_robust_winner": "finalists",
+    "select_robust_winner": "robust_winner",
     "select_winner": "finalists",
     "train_best_model": "component",
 }

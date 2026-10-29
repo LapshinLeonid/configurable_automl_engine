@@ -26,13 +26,15 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 from .finalists import (
+    _train_finalists,
+    select_finalists,
+    select_winner,
+)
+from .robust_winner import (
     _fallback_sort_key,
     _fmt_audit_value,
     _is_audit_budget_skip,
-    _train_finalists,
-    select_finalists,
     select_robust_winner,
-    select_winner,
 )
 from .sanity_gate import ModelSanityGate, SanityCheckResult
 from .state import (
