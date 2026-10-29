@@ -119,13 +119,31 @@ so results are reproducible across runs for the same inputs.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
+
+from configurable_automl_engine.training_engine.sanity_circuits import (
+    _MSE_EPS,
+    _ZERO_RMSE_EPS,
+    _ZERO_VAR_EPS,
+    _copy_with_permuted_column,
+    _core_estimator,
+    _diversity_fails,
+    _fails_above,
+    _fails_below,
+    _PermutationAbort,
+    _r2_oof,
+    _rounding_decimals,
+)
+from configurable_automl_engine.training_engine.sanity_result import (
+    SanityCheckResult,
+    _compute_severity,
+    _to_float_vector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,267 +160,6 @@ __all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
 #: standalone gate module, and separately in ``config_parser.py`` (without an
 #: import, to keep the module independent of the rest of the engine).
 GeneralizationGapMode = Literal["warn", "reject"]
-
-
-# --------------------------------------------------------------------------- #
-#  Threshold comparisons: THE single place that fixes the comparison side (< or ≤)
-# --------------------------------------------------------------------------- #
-# Circuits A/B fail on a STRICT shortfall below the threshold; circuits C/D —
-# on a STRICT excess. Equality with the threshold is never a failure.
-# Tuning other behavior (≤ instead of <) is allowed only here.
-def _fails_below(value: float, threshold: float) -> bool:
-    """Fail on a strict shortfall: ``value < threshold`` (equality passes)."""
-    return value < threshold
-
-
-def _fails_above(value: float, threshold: float) -> bool:
-    """Fail on a strict excess: ``value > threshold`` (equality passes)."""
-    return value > threshold
-
-
-def _diversity_fails(
-    diversity: float, threshold: float, adaptive: bool, r2_oof: float
-) -> bool:
-    """Fail side of circuit A, fixed in one place (module level).
-
-    Non-adaptive mode: strict shortfall — ``diversity < threshold``, equality
-    with the threshold passes. Adaptive mode is the only documented exception
-    to the strict-``<`` convention: the reference is the constant model whose
-    prediction spread is exactly zero, so a tie with it (``diversity`` at the
-    numerical zero tolerance ``_ZERO_VAR_EPS``) fails — the model is not
-    strictly better than the constant baseline. In
-    the adaptive mode a model with a negative ``R²_oof`` (strictly worse than
-    the constant prediction) fails even when numerical round-off makes
-    ``diversity`` a tiny positive number.
-
-    Args:
-        diversity: ``Var(y_pred_oof) / Var(y)``.
-        threshold: effective threshold (``min_prediction_diversity``).
-        adaptive: whether the adaptive constant-model baseline is used.
-        r2_oof: out-of-fold R² of the predictions (used in the adaptive
-            mode only).
-
-    Returns:
-        bool: True when circuit A must fail for the given values.
-    """
-    if adaptive:
-        return diversity <= _ZERO_VAR_EPS or (np.isfinite(r2_oof) and r2_oof < 0.0)
-    return diversity < threshold
-
-
-def _r2_oof(y: np.ndarray, y_pred: np.ndarray) -> float:
-    """Out-of-fold R² of the predictions (constant-model baseline).
-
-    ``1 - Var(y - pred) / Var(y)`` — the fraction of variance explained.
-    Used by circuit A in the adaptive mode to reject models that are worse
-    than a constant prediction: a negative R² means the residual variance
-    exceeds the target variance, i.e. the model is strictly worse than
-    predicting the mean. The diversity ratio (``Var(pred) / Var(y)``) is
-    subject to round-off and may come out as a tiny positive number when the
-    predictions are numerically constant while R² is clearly negative, so
-    the explicit R² test is the authoritative negative-signal detector.
-
-    Args:
-        y: the target (on the valid pairs).
-        y_pred: the OOF predictions (on the same valid pairs).
-
-    Returns:
-        float: R²_oof, or NaN when ``Var(y) == 0`` (undefined).
-    """
-    var_y = float(np.var(y))
-    if var_y <= _ZERO_VAR_EPS:
-        return float("nan")
-    residual = y - y_pred
-    return float(1.0 - np.var(residual) / var_y)
-
-
-# Numerical tolerances and rounding constants.
-_ZERO_VAR_EPS = 1e-12  # target variance below this is treated as "constant y"
-_ZERO_RMSE_EPS = 1e-12  # RMSE below this is considered zero (division by zero)
-_MSE_EPS = 1e-12  # denominator stabilizer in the relative ΔMSE
-_FALLBACK_DECIMALS = 6  # rounding precision when std(y)==0
-_MIN_DECIMALS = -12
-_MAX_DECIMALS = 10
-
-_SEVERITY_CLEAN = 0
-_SEVERITY_WARNING = 1
-
-
-@dataclass(frozen=True)
-class SanityCheckResult:
-    """Result of a model degeneracy audit.
-
-    Attributes:
-        is_valid: True when no circuit disqualified the model. In ``warn_only``
-            mode it is always True (the gate does not disqualify).
-        reasons: disqualification reasons (each a string naming the circuit).
-        soft_warnings: signals for the report — they never disqualify alone.
-        diversity_ratio: ``Var(y_pred_oof) / Var(y)`` (circuit A); NaN when the
-            circuit is disabled or not computable.
-        unique_ratio: share of distinct (post-rounding) predictions
-            ``nunique / N`` (circuit B); NaN when the circuit is disabled.
-        dead_features_count: number of "dead" features (circuit C): zero
-            coefficients for linear models or permutation-insensitive columns
-            for nonlinear ones; 0 when the circuit is disabled.
-        generalization_gap: ``RMSE_oof / RMSE_full`` (circuit D); NaN when the
-            circuit is disabled or not computable, ``inf`` for the
-            division-by-zero cases (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``).
-            In ``generalization_gap_mode = "warn"`` every gap violation —
-            finite or infinite — is reported in ``soft_warnings`` and never
-            disqualifies; in ``"reject"`` mode it becomes a
-            disqualification reason.
-        severity: formalized severity for the fallback:
-            0 — clean; 1 — soft warnings only;
-            2/3/4 — one/two/three or more disqualification reasons.
-            In ``warn_only`` mode it never exceeds 1.
-    """
-
-    is_valid: bool
-    reasons: list[str] = field(default_factory=list)
-    soft_warnings: list[str] = field(default_factory=list)
-    diversity_ratio: float = float("nan")
-    unique_ratio: float = float("nan")
-    dead_features_count: int = 0
-    generalization_gap: float = float("nan")
-    severity: int = _SEVERITY_CLEAN
-
-
-def _compute_severity(
-    reasons: list[str], soft_warnings: list[str], warn_only: bool
-) -> int:
-    """Map reasons/warnings to a formalized severity level.
-
-    Args:
-        reasons: disqualification reasons.
-        soft_warnings: soft signals.
-        warn_only: True — the gate does not disqualify (severity ≤ 1).
-
-    Returns:
-        int: 0 — clean; 1 — warnings only; 2/3/4 — one/two/three+ reasons.
-            Not higher than 1 in ``warn_only`` mode.
-    """
-    if reasons:
-        severity = min(2 + len(reasons) - 1, 4)
-    elif soft_warnings:
-        severity = _SEVERITY_WARNING
-    else:
-        severity = _SEVERITY_CLEAN
-    return min(severity, _SEVERITY_WARNING) if warn_only else severity
-
-
-def _to_float_vector(values: Any, name: str) -> np.ndarray:
-    """Convert an input to a 1-D float array (with shape validation).
-
-    Args:
-        values: any array-like (numpy, pandas, list).
-        name: argument name used in error messages.
-
-    Returns:
-        np.ndarray: a 1-D float array.
-
-    Raises:
-        ValueError: if ``values`` is None, is not 1-D after collapsing
-            (n, 1)/(1, n), or cannot be converted to float.
-    """
-    if values is None:
-        raise ValueError(f"{name} must not be None")
-    arr = np.asarray(values, dtype=float)
-    if arr.ndim == 2 and 1 in arr.shape:
-        arr = arr.reshape(-1)
-    if arr.ndim != 1:
-        raise ValueError(
-            f"{name} must be a 1-D vector (got shape {arr.shape}); "
-            "pass y / y_pred_oof / y_pred_full as flat arrays or Series."
-        )
-    return arr
-
-
-def _rounding_decimals(std_y: float) -> int:
-    """Rounding precision for predictions derived from the target scale (B).
-
-    The rounding granularity equals 1% of the order of magnitude of ``std(y)``:
-    ``10 ** (floor(log10(std_y)) - 2)``. Relative to ``std(y)`` itself this is
-    0.1–1% — predictions that differ by less than roughly one hundredth of the
-    noise scale of the target are treated as equal. For a constant target
-    (``std_y == 0``) a fixed fallback of ``_FALLBACK_DECIMALS`` decimals is
-    used; note that for large-scale targets this may collapse predictions
-    differing by less than the fallback granularity — pre-scale ``y`` if finer
-    granularity is needed.
-
-    Args:
-        std_y: standard deviation of the target.
-
-    Returns:
-        int: number of decimals for ``np.round`` (may be negative for
-            large-scale y).
-    """
-    if not np.isfinite(std_y) or std_y <= 0.0:
-        return _FALLBACK_DECIMALS
-    order = math.floor(math.log10(std_y))
-    return int(min(max(2 - order, _MIN_DECIMALS), _MAX_DECIMALS))
-
-
-def _core_estimator(model: Any) -> Any:
-    """Unwrap sklearn/imblearn pipelines down to the final estimator.
-
-    Args:
-        model: a model object (possibly a Pipeline).
-
-    Returns:
-        Any: the final pipeline step (or ``model`` itself when not a pipeline).
-    """
-    seen: set[int] = set()
-    while hasattr(model, "named_steps"):
-        if id(model) in seen:
-            break
-        seen.add(id(model))
-        steps = model.named_steps
-        try:
-            values = list(steps.values())
-        except AttributeError:
-            break
-        if not values:
-            break
-        model = values[-1]
-    return model
-
-
-def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> Any:
-    """Return a copy of ``X`` with the values of column ``col`` shuffled.
-
-    Preserves the input type (a DataFrame stays a DataFrame with the same
-    columns) so that ``model.predict`` receives the expected shape. Scipy
-    sparse matrices (detected by duck typing via ``toarray``) are densified
-    for the subsample — ``np.array`` on a sparse matrix yields a 0-D object
-    array, which would crash column permutation.
-
-    Args:
-        X: the feature matrix (ndarray, DataFrame or scipy sparse).
-        col: index of the column to shuffle.
-        rng: randomness generator (deterministic for a fixed seed).
-
-    Returns:
-        Any: a copy of ``X`` with column ``col`` permuted.
-    """
-    perm = rng.permutation(X.shape[0])
-    if isinstance(X, pd.DataFrame):
-        X2: Any = X.copy()
-        col_name = X2.columns[col]
-        X2[col_name] = X2[col_name].to_numpy()[perm]
-        return X2
-    if hasattr(X, "toarray"):  # scipy sparse → dense copy (subsample only)
-        X = X.toarray()
-    X2 = np.array(X, copy=True)
-    X2[:, col] = X2[perm, col]
-    return X2
-
-
-class _PermutationAbort(Exception):
-    """Ends the permutation check early with a circuit-C reason."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass
