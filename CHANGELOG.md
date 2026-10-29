@@ -174,8 +174,11 @@ keep working.
   `ModelSanityGate.check` and `_permutation_impl`, `iter_splits`,
   `create_model`) are split into small private steps; ruff `C901` ≤ 15 now
   holds for the whole package with no `# noqa: C901` exception. Behavior is
-  unchanged: return values, random draws, log messages and exceptions are
-  pinned by `tests/test_characterization_complex_functions.py`.
+  unchanged: return values, random draws, log messages and exceptions were
+  checked against characterization snapshots taken on the code before the
+  split. The snapshots were removed after the merge: they hashed numeric
+  results of scikit-learn / imbalanced-learn and would break on a library
+  release with no code change.
 
 ### `run_parallel` and the `processes` mode
 
