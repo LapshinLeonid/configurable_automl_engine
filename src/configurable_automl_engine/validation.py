@@ -253,7 +253,7 @@ def iter_splits(
 ) -> Generator[SplitWithIndices, None, None]: ...
 
 
-def iter_splits(  # noqa: C901
+def iter_splits(
     X: np.ndarray | pd.DataFrame,
     y: np.ndarray | pd.Series | None = None,
     *,
@@ -314,40 +314,16 @@ def iter_splits(  # noqa: C901
         test_size=test_size,
         n_features=n_features,
     )
-    # 3. Generate the splits
+    # 3. Generate the splits: one generator of (train_idx, test_idx) pairs per
+    # strategy, one loop that yields the subsets.
     if final_method == "train_test_split":
-        # For 'auto' use the dynamic test size computed by
-        # choose_validation_method (an integer number of rows), not a fixed one.
-        effective_test_size: float | int = test_size
-        if method_str == "auto" and decision is not None:
-            effective_test_size = int(decision["test_size"])
-        # Split the POSITIONAL indices once, so that with include_indices=True we
-        # return the real positions of the validation rows in the original X, and the
-        # subsets themselves are obtained by indexing with the same positions. This
-        # guarantees the consistency of X_val/y_val/test_idx and correct behavior with
-        # random_state=None (two independent train_test_split calls would yield
-        # different permutations).
-        all_idx = np.arange(len(X))
-        train_idx, test_idx = train_test_split(
-            all_idx,
-            test_size=effective_test_size,
-            shuffle=True,
+        pairs = _holdout_pairs(
+            len(X),
+            test_size=test_size,
+            method_str=method_str,
+            decision=decision,
             random_state=random_state,
         )
-        if hasattr(X, "iloc"):
-            X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-        else:
-            X_tr, X_te = X[train_idx], X[test_idx]
-        y_tr, y_te = None, None
-        if y is not None:
-            if hasattr(y, "iloc"):
-                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-            else:
-                y_tr, y_te = y[train_idx], y[test_idx]
-        if include_indices:
-            yield X_tr, X_te, y_tr, y_te, test_idx
-        else:
-            yield X_tr, X_te, y_tr, y_te
     elif final_method in ("k_fold", "loo"):
         if cv is None:
             raise ValidationError(
@@ -355,22 +331,71 @@ def iter_splits(  # noqa: C901
                 f" initialized for strategy '{final_method}'"
             )
         # Combine the logic for all BaseCrossValidator objects (KFold, LeaveOneOut)
-        for train_idx, test_idx in cv.split(X):
-            # Safe indexing of X (Pandas vs Numpy)
-            if hasattr(X, "iloc"):
-                x_tr, x_te = X.iloc[train_idx], X.iloc[test_idx]
-            else:
-                x_tr, x_te = X[train_idx], X[test_idx]
+        pairs = cv.split(X)
+    else:
+        return
+    for train_idx, test_idx in pairs:
+        x_tr, x_te = _take(X, train_idx), _take(X, test_idx)
+        # y may be None: then y_train and y_val are None as well
+        y_tr = None if y is None else _take(y, train_idx)
+        y_te = None if y is None else _take(y, test_idx)
+        if include_indices:
+            yield x_tr, x_te, y_tr, y_te, np.asarray(test_idx)
+        else:
+            yield x_tr, x_te, y_tr, y_te
 
-            # Safe indexing of y (taking into account that it may be None)
-            y_tr, y_te = None, None
-            if y is not None:
-                if hasattr(y, "iloc"):
-                    y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-                else:
-                    y_tr, y_te = y[train_idx], y[test_idx]
 
-            if include_indices:
-                yield x_tr, x_te, y_tr, y_te, np.asarray(test_idx)
-            else:
-                yield x_tr, x_te, y_tr, y_te
+def _take(obj: Any, idx: np.ndarray) -> Any:
+    """Select rows by position (pandas via ``iloc``, numpy by indexing).
+
+    Args:
+        obj: A pandas object or a numpy array.
+        idx: Positional row indices.
+
+    Returns:
+        Any: The selected rows, of the same type as ``obj``.
+    """
+    if hasattr(obj, "iloc"):
+        return obj.iloc[idx]
+    return obj[idx]
+
+
+def _holdout_pairs(
+    n_samples: int,
+    *,
+    test_size: float,
+    method_str: str,
+    decision: dict[str, Any] | None,
+    random_state: int | None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return the single (train_idx, test_idx) pair of the hold-out split.
+
+    The POSITIONAL indices are split once, so that with ``include_indices=True``
+    ``iter_splits`` returns the real positions of the validation rows in the
+    original X, and the subsets themselves are obtained by indexing with the
+    same positions. This guarantees the consistency of X_val/y_val/test_idx and
+    correct behavior with ``random_state=None`` (two independent
+    train_test_split calls would yield different permutations).
+
+    Args:
+        n_samples: The number of rows.
+        test_size: The requested validation fraction.
+        method_str: The normalized requested method.
+        decision: The ``choose_validation_method`` decision ('auto' only).
+        random_state: The shuffling seed.
+
+    Returns:
+        list[tuple[np.ndarray, np.ndarray]]: One (train_idx, test_idx) pair.
+    """
+    # For 'auto' use the dynamic test size computed by
+    # choose_validation_method (an integer number of rows), not a fixed one.
+    effective_test_size: float | int = test_size
+    if method_str == "auto" and decision is not None:
+        effective_test_size = int(decision["test_size"])
+    train_idx, test_idx = train_test_split(
+        np.arange(n_samples),
+        test_size=effective_test_size,
+        shuffle=True,
+        random_state=random_state,
+    )
+    return [(train_idx, test_idx)]
