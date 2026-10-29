@@ -7,9 +7,8 @@ them from growing back:
   (docstrings included), except the modules listed in
   ``MODULE_SIZE_EXCEPTIONS``;
 - the classes listed in ``MAX_CLASS_LINES`` stay within their limit;
-- ruff ``C901`` is enabled with ``max-complexity = 15``, and the only
-  ``# noqa: C901`` markers left are on the functions tracked as separate
-  refactoring issues (``ALLOWED_C901_NOQA``).
+- ruff ``C901`` is enabled with ``max-complexity = 15`` and the package
+  has no ``# noqa: C901`` exception (``ALLOWED_C901_NOQA`` is empty).
 """
 
 from __future__ import annotations
@@ -40,9 +39,9 @@ MAX_CLASS_LINES = {
     ("trainer.py", "ModelTrainer"): 1300,
 }
 
-#: The only functions that may keep a ``# noqa: C901`` marker:
-#: (module path, function name).
-ALLOWED_C901_NOQA: set[tuple[str, str]] = set()
+#: Functions that may keep a ``# noqa: C901`` marker, as (module path,
+#: function name). Empty: the complexity limit has no exception.
+ALLOWED_C901_NOQA: frozenset[tuple[str, str]] = frozenset()
 
 
 def _modules() -> list[Path]:
@@ -87,16 +86,13 @@ def test_ruff_complexity_limit_is_configured() -> None:
     assert lint["mccabe"]["max-complexity"] == 15
 
 
-def test_c901_noqa_markers_only_on_tracked_functions() -> None:
-    """``# noqa: C901`` is allowed only on the out-of-scope functions."""
-    found: set[tuple[str, str]] = set()
+def test_no_c901_noqa_markers() -> None:
+    """``src/`` has no ``# noqa: C901``: the complexity limit has no exception."""
+    assert not ALLOWED_C901_NOQA
+    found: list[str] = []
     for path in _modules():
         lines = path.read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(lines):
-            if not re.search(r"#\s*noqa:.*\bC901\b", line):
-                continue
-            match = re.match(r"\s*(?:async\s+)?def\s+(\w+)", line)
-            assert match, f"{_rel(path)}:{i + 1}: noqa: C901 outside a def line"
-            found.add((_rel(path), match.group(1)))
-    unexpected = found - ALLOWED_C901_NOQA
-    assert not unexpected, f"unexpected noqa: C901 markers: {sorted(unexpected)}"
+            if re.search(r"#\s*noqa:.*\bC901\b", line):
+                found.append(f"{_rel(path)}:{i + 1}")
+    assert not found, f"noqa: C901 markers are not allowed: {found}"

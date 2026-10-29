@@ -169,6 +169,13 @@ keep working.
   `hpo_phases._consume_worker_results(results)` returns a `WorkerOutcome`, and
   `hpo_phases._apply_target_domain_guard(algorithms, y)` returns a
   `TargetDomainOutcome`.
+- The last six functions above the complexity limit
+  (`DataOversampler._fit_resample`, `validate_features`,
+  `ModelSanityGate.check` and `_permutation_impl`, `iter_splits`,
+  `create_model`) are split into small private steps; ruff `C901` ≤ 15 now
+  holds for the whole package with no `# noqa: C901` exception. Behavior is
+  unchanged: return values, random draws, log messages and exceptions are
+  pinned by `tests/test_characterization_complex_functions.py`.
 
 ### `run_parallel` and the `processes` mode
 
