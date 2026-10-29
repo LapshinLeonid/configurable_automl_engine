@@ -1,37 +1,30 @@
 """Safety net for the structural refactor of the engine modules.
 
-The tests pin the observable behavior of the package BEFORE the large modules
-(``training_engine/component.py``, ``tuner.py``, ``trainer.py``) are split:
+The tests pin properties of the package's behavior that do not depend on the
+installed library versions (no stored expected outputs):
 
-1. Golden run — ``train_best_model`` on two small fixed datasets (the BBC-CV
-   path and the hold-out path) reproduces the committed snapshot: winner,
-   best params, every reported score, ``n_trials_evaluated`` and the saved
-   artifact's predictions. The same run in ``processes`` mode yields the
-   same winner and params.
-2. Pickle format — the ``configurable_automl_engine.*`` globals referenced
-   by the pickle of a fitted ``ModelTrainer`` and its instance attribute
-   names match the committed snapshot: the saved state is an artifact format
-   (``trainer_state.ARTIFACT_FORMAT_VERSION``), so any change of it is
-   deliberate. The snapshot was regenerated once, for artifact format 2
-   (the grouped trainer state of 0.5.0); ``ModelTrainer.load`` refuses the
-   artifacts of other formats.
+1. Parallel mode — ``train_best_model`` on two small fixed datasets (the
+   BBC-CV path and the hold-out path) gives the same winner, parameters,
+   scores and predictions in sequential and in ``processes`` mode.
+2. Saved models — a fitted ``ModelTrainer`` saved and loaded in the same
+   process predicts identically; the classes of the saved state live at
+   their documented module paths (the pickle records them). An artifact of
+   an older format is refused with the "retrain the model" error
+   (``tests/test_artifact_metadata.py``).
 3. Public API — the documented import paths keep working.
 4. Imports — ``import configurable_automl_engine`` stays lightweight, and
    every module of the package imports on its own (no import cycles).
 
-Snapshots live in ``tests/snapshots/``. They were generated on the code
-BEFORE the refactor; regenerate them only for an intended behavior change
-with ``UPDATE_SNAPSHOTS=1 pytest tests/test_refactor_safety_net.py``.
+That a change keeps the results exactly is checked by
+``scripts/compare_with_base.py``: it runs the same scenarios on the base
+commit and on the current code, in the same environment, and compares the
+outputs (nothing is stored, so library versions do not matter).
 """
 
 from __future__ import annotations
 
 import importlib
 import json
-import math
-import os
-import pickle
-import pickletools
 import pkgutil
 import subprocess
 import sys
@@ -46,77 +39,11 @@ import configurable_automl_engine
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.component import train_best_model
 
-SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
-UPDATE_SNAPSHOTS = os.environ.get("UPDATE_SNAPSHOTS") == "1"
-REL_TOL = 1e-9
 PACKAGE = "configurable_automl_engine"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Snapshot helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _to_jsonable(value: Any) -> Any:
-    """Convert numpy scalars/arrays and containers into JSON-compatible values."""
-    if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_jsonable(v) for v in value]
-    if isinstance(value, np.ndarray):
-        return [_to_jsonable(v) for v in value.tolist()]
-    if isinstance(value, (bool, np.bool_)):
-        return bool(value)
-    if isinstance(value, (int, np.integer)):
-        return int(value)
-    if isinstance(value, (float, np.floating)):
-        return float(value)
-    return value
-
-
-def _assert_matches(actual: Any, expected: Any, path: str = "") -> None:
-    """Compare JSON-like values; floats with ``rel=REL_TOL``."""
-    if isinstance(expected, dict):
-        assert isinstance(actual, dict), f"{path}: expected a dict, got {actual!r}"
-        assert sorted(actual) == sorted(expected), f"{path}: keys differ"
-        for key in expected:
-            _assert_matches(actual[key], expected[key], f"{path}.{key}")
-        return
-    if isinstance(expected, list):
-        assert isinstance(actual, list), f"{path}: expected a list, got {actual!r}"
-        assert len(actual) == len(expected), f"{path}: lengths differ"
-        for i, (a, e) in enumerate(zip(actual, expected, strict=True)):
-            _assert_matches(a, e, f"{path}[{i}]")
-        return
-    if isinstance(expected, float) and not isinstance(expected, bool):
-        assert isinstance(actual, (int, float)) and not isinstance(actual, bool), (
-            f"{path}: expected a number, got {actual!r}"
-        )
-        if math.isnan(expected):
-            assert math.isnan(actual), f"{path}: expected NaN, got {actual!r}"
-        else:
-            assert actual == pytest.approx(expected, rel=REL_TOL), (
-                f"{path}: {actual!r} != {expected!r}"
-            )
-        return
-    assert actual == expected, f"{path}: {actual!r} != {expected!r}"
-
-
-def _check_snapshot(name: str, actual: Any) -> None:
-    """Compare ``actual`` with the committed snapshot (or write it)."""
-    path = SNAPSHOT_DIR / f"{name}.json"
-    data = _to_jsonable(actual)
-    if UPDATE_SNAPSHOTS:
-        SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        return
-    assert path.exists(), f"Missing snapshot {path}; run with UPDATE_SNAPSHOTS=1"
-    expected = json.loads(path.read_text())
-    _assert_matches(data, expected, name)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  1. Golden run
+#  1. Sequential vs processes mode
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -163,14 +90,14 @@ def _mixed_dataset() -> pd.DataFrame:
     return df
 
 
-def _golden_config(
+def _pipeline_config(
     model_path: Path,
     *,
     oversampling: bool,
     parallel_mode: str = "threads",
     max_workers: int | None = 1,
 ) -> dict[str, Any]:
-    """The golden-run config: 4 algorithms, refine, sanity-gate select."""
+    """The run config: 4 algorithms, refine, sanity-gate select."""
     return {
         "general": {
             "comparison_metric": "rmse",
@@ -209,131 +136,103 @@ def _golden_config(
     }
 
 
-def _golden_summary(result: dict[str, Any], model_path: Path, frame: pd.DataFrame):
-    """Collect the snapshot fields of a golden run."""
-    loaded = ModelTrainer.load(model_path)
-    preds = np.asarray(loaded.predict(frame), dtype=float).reshape(-1)
-    keys = (
-        "algorithm",
-        "params",
-        "score",
-        "oof_score",
-        "holdout_score",
-        "bbc_score",
-        "n_trials_evaluated",
-    )
-    summary = {key: result[key] for key in keys if key in result}
-    summary["predictions"] = preds
-    return summary
-
-
-_GOLDEN_CASES = {
-    "golden_numeric_bbc": (_numeric_dataset, True),
-    "golden_mixed_holdout": (_mixed_dataset, False),
+_CASES = {
+    "numeric_bbc": (_numeric_dataset, True),
+    "mixed_holdout": (_mixed_dataset, False),
 }
 
+_SUMMARY_KEYS = (
+    "algorithm",
+    "params",
+    "score",
+    "oof_score",
+    "holdout_score",
+    "bbc_score",
+    "n_trials_evaluated",
+    "disqualified_algorithms",
+)
 
-@pytest.mark.parametrize("case", sorted(_GOLDEN_CASES))
-def test_golden_run_sequential(case: str, tmp_path: Path) -> None:
-    """A sequential seeded run reproduces the committed snapshot exactly."""
-    make_df, oversampling = _GOLDEN_CASES[case]
+
+def _to_jsonable(value: Any) -> Any:
+    """Convert numpy scalars/arrays and containers into JSON-compatible values.
+
+    Floats pass through ``json`` unchanged (``repr`` round-trips), so the
+    comparison of the two modes stays exact.
+    """
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return float(value)
+    return value
+
+
+def _run_case(case: str, model_path: str, parallel_mode: str) -> dict[str, Any]:
+    """Run one case; return the reported fields and the saved model's predictions."""
+    make_df, oversampling = _CASES[case]
     df = make_df()
-    model_path = tmp_path / "model.pkl"
     result = train_best_model(
-        config=_golden_config(model_path, oversampling=oversampling),
+        config=_pipeline_config(
+            Path(model_path),
+            oversampling=oversampling,
+            parallel_mode=parallel_mode,
+            max_workers=2 if parallel_mode == "processes" else 1,
+        ),
         df=df,
         target="target",
     )
-    if case == "golden_numeric_bbc":
-        assert "bbc_score" in result and "holdout_score" not in result
-    else:
-        assert "holdout_score" in result and "bbc_score" not in result
+    summary = {key: result[key] for key in _SUMMARY_KEYS if key in result}
     frame = df.drop(columns=["target"]).iloc[:12]
-    _check_snapshot(case, _golden_summary(result, model_path, frame))
+    loaded = ModelTrainer.load(model_path)
+    summary["predictions"] = np.asarray(loaded.predict(frame), dtype=float)
+    return _to_jsonable(summary)
 
 
-def _run_processes_mode(case: str, model_path: str) -> dict[str, Any]:
-    """Run the golden case in ``processes`` mode; return the winner and params."""
-    make_df, oversampling = _GOLDEN_CASES[case]
-    result = train_best_model(
-        config=_golden_config(
-            Path(model_path),
-            oversampling=oversampling,
-            parallel_mode="processes",
-            max_workers=2,
-        ),
-        df=make_df(),
-        target="target",
-    )
-    return {"algorithm": result["algorithm"], "params": _to_jsonable(result["params"])}
+@pytest.mark.parametrize("case", sorted(_CASES))
+def test_sequential_and_processes_mode_agree(case: str, tmp_path: Path) -> None:
+    """Sequential and ``processes`` mode give the same winner, scores, predictions.
 
-
-@pytest.mark.parametrize("case", sorted(_GOLDEN_CASES))
-def test_golden_run_processes_mode(case: str, tmp_path: Path) -> None:
-    """The same run in ``processes`` mode completes with the same winner/params.
-
-    The run happens in a fresh interpreter: forking worker processes from the
-    multi-threaded pytest process (after other runs started thread pools) can
-    deadlock regardless of the engine code.
+    Each run happens in a fresh interpreter: forking worker processes from
+    the multi-threaded pytest process (after other runs started thread
+    pools) can deadlock regardless of the engine code.
     """
-    if UPDATE_SNAPSHOTS:
-        pytest.skip("snapshots are written by the sequential run")
     repo_root = Path(__file__).resolve().parent.parent
-    code = (
-        "import json, sys\n"
-        f"sys.path.insert(0, {str(repo_root)!r})\n"
-        "from tests.test_refactor_safety_net import _run_processes_mode\n"
-        f"out = _run_processes_mode({case!r}, {str(tmp_path / 'model.pkl')!r})\n"
-        "print('RESULT ' + json.dumps(out))\n"
-    )
-    proc = _run_python(code)
-    assert proc.returncode == 0, proc.stderr[-4000:]
-    line = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")][-1]
-    result = json.loads(line[len("RESULT ") :])
-    expected = json.loads((SNAPSHOT_DIR / f"{case}.json").read_text())
-    assert result["algorithm"] == expected["algorithm"]
-    _assert_matches(result["params"], expected["params"], "params")
+    results = {}
+    for mode in ("threads", "processes"):
+        code = (
+            "import json, sys\n"
+            f"sys.path.insert(0, {str(repo_root)!r})\n"
+            "from tests.test_refactor_safety_net import _run_case\n"
+            f"out = _run_case({case!r}, {str(tmp_path / f'{mode}.pkl')!r}, "
+            f"{mode!r})\n"
+            "print('RESULT ' + json.dumps(out))\n"
+        )
+        proc = _run_python(code)
+        assert proc.returncode == 0, proc.stderr[-4000:]
+        line = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+        results[mode] = line[-1][len("RESULT ") :]
+    sequential = json.loads(results["threads"])
+    if case == "numeric_bbc":
+        assert "bbc_score" in sequential and "holdout_score" not in sequential
+    else:
+        assert "holdout_score" in sequential and "bbc_score" not in sequential
+    # Compared as JSON text: exact floats, and NaN equals NaN.
+    assert results["threads"] == results["processes"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  2. Pickle compatibility
+#  2. Saved models
 # ──────────────────────────────────────────────────────────────────────────────
 
-_STRING_OPS = {"SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE"}
-_GET_OPS = {"BINGET", "LONG_BINGET", "GET"}
-_NON_PUSH_OPS = {"FRAME", "PROTO", "MEMOIZE", "STOP", "PUT", "BINPUT", "LONG_BINPUT"}
 
-
-def _pickled_globals(obj: Any) -> list[str]:
-    """Collect the ``configurable_automl_engine.*`` globals referenced by a pickle."""
-    data = pickle.dumps(obj)
-    found: set[str] = set()
-    pushed: list[Any] = []
-    memo: dict[int, Any] = {}
-    for op, arg, _pos in pickletools.genops(data):
-        name = op.name
-        if name in _STRING_OPS:
-            pushed.append(arg)
-        elif name == "MEMOIZE":
-            memo[len(memo)] = pushed[-1] if pushed else None
-        elif name in ("PUT", "BINPUT", "LONG_BINPUT"):
-            memo[int(arg)] = pushed[-1] if pushed else None
-        elif name in _GET_OPS:
-            pushed.append(memo.get(int(arg)))
-        elif name == "STACK_GLOBAL":
-            module, qualname = pushed[-2], pushed[-1]
-            found.add(f"{module}.{qualname}")
-            pushed.append(None)
-        elif name == "GLOBAL":
-            module, qualname = str(arg).split(" ", 1)
-            found.add(f"{module}.{qualname}")
-            pushed.append(None)
-        elif name not in _NON_PUSH_OPS:
-            pushed.append(None)
-    return sorted(g for g in found if g.startswith(f"{PACKAGE}."))
-
-
-def _pickle_frame() -> tuple[pd.DataFrame, pd.Series]:
+def _trainer_frame() -> tuple[pd.DataFrame, pd.Series]:
     rng = np.random.default_rng(11)
     n = 60
     X = pd.DataFrame(
@@ -349,45 +248,68 @@ def _pickle_frame() -> tuple[pd.DataFrame, pd.Series]:
     return X, y
 
 
-def test_pickle_compatibility_snapshot() -> None:
-    """Fitted trainers pickle the same package globals and attribute names."""
-    X, y = _pickle_frame()
-    trainers = {
-        # Preprocessing (categorical + numeric with missing values), feature
-        # selection and oversampling.
-        "ridge_fs_oversampling": ModelTrainer(
-            algorithm="ridge",
-            hyperparams={"alpha": 1.0},
-            metric="rmse",
-            random_state=3,
-            data_oversampling=True,
-            data_oversampling_multiplier=1.5,
-            feature_selection_cfg={"mode": "always"},
-            validation_strategy="k_fold",
-            n_folds=3,
-        ),
-        # The isotonic data adapter (IsotonicDataTransformer) plus oversampling.
-        "isotonic_oversampling": ModelTrainer(
-            algorithm="isotonic_regression",
-            hyperparams={"feature_index": 0},
-            metric="rmse",
-            random_state=3,
-            data_oversampling=True,
-            data_oversampling_multiplier=1.5,
-            validation_strategy="k_fold",
-            n_folds=3,
-        ),
-    }
-    snapshot: dict[str, Any] = {}
-    for name, trainer in trainers.items():
-        trainer.fit(X, y)
-        snapshot[name] = {
-            "globals": _pickled_globals(trainer),
-            "attributes": sorted(trainer.__dict__),
-        }
-        restored = pickle.loads(pickle.dumps(trainer))
-        assert sorted(restored.__dict__) == sorted(trainer.__dict__)
-    _check_snapshot("pickle_compatibility", snapshot)
+_ROUND_TRIP_TRAINERS: dict[str, dict[str, Any]] = {
+    # Preprocessing (categorical + numeric with missing values), feature
+    # selection and oversampling.
+    "ridge_fs_oversampling": {
+        "algorithm": "ridge",
+        "hyperparams": {"alpha": 1.0},
+        "data_oversampling": True,
+        "data_oversampling_multiplier": 1.5,
+        "feature_selection_cfg": {"mode": "always"},
+    },
+    # The isotonic data adapter (IsotonicDataTransformer) plus oversampling.
+    "isotonic_oversampling": {
+        "algorithm": "isotonic_regression",
+        "hyperparams": {"feature_index": 0},
+        "data_oversampling": True,
+        "data_oversampling_multiplier": 1.5,
+    },
+    # The categorical encoders of the preprocessing.
+    "target_encoding": {
+        "algorithm": "decision_tree",
+        "hyperparams": {"max_depth": 3},
+        "encoding_strategy": "target",
+    },
+    "frequency_hashing": {
+        "algorithm": "ridge",
+        "hyperparams": {"alpha": 0.5},
+        "encoding_strategy": "frequency",
+        "high_cardinality_threshold": 2,
+        "high_cardinality_encoding": "hashing",
+        "hashing_n_components": 4,
+    },
+    # SMOTE with noise (DataOversampler with a non-default algorithm).
+    "svr_smote_noise": {
+        "algorithm": "svr",
+        "hyperparams": {"C": 2.0},
+        "data_oversampling": True,
+        "data_oversampling_multiplier": 2.0,
+        "data_oversampling_algorithm": "smote",
+        "data_oversampling_add_noise": True,
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ROUND_TRIP_TRAINERS))
+def test_save_load_round_trip_predicts_identically(name: str, tmp_path: Path) -> None:
+    """A fitted trainer saved and loaded in the same process predicts identically."""
+    X, y = _trainer_frame()
+    trainer = ModelTrainer(
+        metric="rmse",
+        random_state=3,
+        validation_strategy="k_fold",
+        n_folds=3,
+        **_ROUND_TRIP_TRAINERS[name],
+    )
+    trainer.fit(X, y)
+    path = tmp_path / "model.pkl"
+    trainer.save(path)
+    restored = ModelTrainer.load(path)
+    assert sorted(restored.__dict__) == sorted(trainer.__dict__)
+    expected = np.asarray(trainer.predict(X), dtype=float)
+    actual = np.asarray(restored.predict(X), dtype=float)
+    np.testing.assert_array_equal(actual, expected)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

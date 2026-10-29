@@ -99,3 +99,30 @@ jobs:
           tests/test_parallel_orchestrator.py
           tests/test_parallel_supervisor.py
           tests/test_refactor_safety_net.py
+
+  # Differential behavior check instead of stored snapshots: the same
+  # scenarios run on the base commit (merge-base with main, or HEAD^ on main)
+  # and on this commit, with the same interpreter and libraries; any
+  # difference in results, exceptions, logs, the config schema or the
+  # loading of a base-saved model fails the job.
+  compare-with-base:
+    name: Compare behavior with the base commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,test]"
+
+      - name: Compare with the base commit
+        run: python scripts/compare_with_base.py
