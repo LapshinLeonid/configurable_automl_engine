@@ -42,9 +42,7 @@ MAX_CLASS_LINES = {
 
 #: The only functions that may keep a ``# noqa: C901`` marker:
 #: (module path, function name).
-ALLOWED_C901_NOQA = {
-    ("oversampling.py", "_fit_resample"),
-}
+ALLOWED_C901_NOQA: set[tuple[str, str]] = set()
 
 
 def _modules() -> list[Path]:

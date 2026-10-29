@@ -1273,6 +1273,19 @@
    }
   }
  },
+ "random-empty-balance": {
+  "error": {
+   "message": "max() iterable argument is empty",
+   "type": "ValueError"
+  },
+  "logs": [
+   [
+    "configurable_automl_engine.oversampling",
+    "WARNING",
+    "Oversampling is EXPERIMENTAL: the nightly evidence benchmark observed a median held-out R\u00b2 degradation exceeding 0.01. Disable oversampling unless you have verified the effect on your own data."
+   ]
+  ]
+ },
  "random-empty-input": {
   "error": {
    "message": "Found array with 0 sample(s) while a minimum of 1 is required.",
@@ -2150,6 +2163,19 @@
    }
   }
  },
+ "smote-empty-balance-all-categorical": {
+  "error": {
+   "message": "max() iterable argument is empty",
+   "type": "ValueError"
+  },
+  "logs": [
+   [
+    "configurable_automl_engine.oversampling",
+    "WARNING",
+    "Oversampling is EXPERIMENTAL: the nightly evidence benchmark observed a median held-out R\u00b2 degradation exceeding 0.01. Disable oversampling unless you have verified the effect on your own data."
+   ]
+  ]
+ },
  "smote-empty-input": {
   "error": {
    "message": "SMOTE/ADASYN require at least one non-missing target value.",
@@ -2774,6 +2800,19 @@
     "sum": "800.878111"
    }
   }
+ },
+ "sparse-empty-balance": {
+  "error": {
+   "message": "max() iterable argument is empty",
+   "type": "ValueError"
+  },
+  "logs": [
+   [
+    "configurable_automl_engine.oversampling",
+    "WARNING",
+    "Oversampling is EXPERIMENTAL: the nightly evidence benchmark observed a median held-out R\u00b2 degradation exceeding 0.01. Disable oversampling unless you have verified the effect on your own data."
+   ]
+  ]
  },
  "unexpected-error": {
   "error": {

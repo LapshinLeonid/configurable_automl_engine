@@ -293,6 +293,21 @@ _OS_CASES.update(
             _os_numeric().iloc[:0],
             np.empty(0),
         ),
+        "smote-empty-balance-all-categorical": lambda: _resample(
+            DataOversampler(multiplier=2.0, algorithm="smote", balance=True),
+            _os_categorical()[["cat"]].iloc[:0],
+            np.empty(0),
+        ),
+        "random-empty-balance": lambda: _resample(
+            DataOversampler(multiplier=2.0, balance=True),
+            _os_numeric().iloc[:0],
+            np.empty(0),
+        ),
+        "sparse-empty-balance": lambda: _resample(
+            DataOversampler(multiplier=2.0, algorithm="smote", balance=True),
+            sparse.csr_matrix((0, 3)),
+            np.empty(0),
+        ),
         "random-empty-input": lambda: _resample(
             DataOversampler(multiplier=2.0), _os_numeric().iloc[:0], np.empty(0)
         ),
