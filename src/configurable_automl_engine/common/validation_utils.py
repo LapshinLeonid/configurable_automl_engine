@@ -672,7 +672,7 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
     return cast(_InfInput, out_arr)
 
 
-def validate_features(  # noqa: C901
+def validate_features(
     X: pd.DataFrame,
     *,
     inf_policy: str = "as_missing",
@@ -754,9 +754,28 @@ def validate_features(  # noqa: C901
             "Expected 'expand', 'drop' or 'error'."
         )
 
-    logger = logging.getLogger(__name__)
-
     # 1. Duplicate column names → ValueError listing the duplicates.
+    _reject_duplicate_columns(X)
+    # 2. ±inf in numeric features.
+    out = apply_inf_policy(X.copy(), inf_policy)
+    # 3. Datetime/timedelta columns.
+    out, generated = _apply_datetime_policy(out, datetime_policy)
+    # 4. ID-like columns.
+    out = _handle_id_like_columns(
+        out, _find_id_like_columns(out), drop=drop_id_like_columns, warn=warn_id_like
+    )
+    return out, generated
+
+
+def _reject_duplicate_columns(X: pd.DataFrame) -> None:
+    """Raise ``ValueError`` listing the duplicated column names of ``X``.
+
+    Args:
+        X: The feature DataFrame.
+
+    Raises:
+        ValueError: If ``X`` has duplicate column names.
+    """
     duplicate_cols = sorted(
         {col for col, count in Counter(X.columns).items() if count > 1}
     )
@@ -769,97 +788,155 @@ def validate_features(  # noqa: C901
             "training."
         )
 
-    out = X.copy()
-    generated: list[str] = []
 
-    # 2. ±inf in numeric features.
-    out = apply_inf_policy(out, inf_policy)
+def _reject_datetime_name_collisions(X: pd.DataFrame, datetime_cols: list[str]) -> None:
+    """Reject a datetime expansion that would overwrite existing columns.
 
-    # 3. Datetime/timedelta columns.
-    datetime_cols = [
-        col
-        for col in out.columns
-        if pd.api.types.is_datetime64_any_dtype(out[col].dtype)
-        or pd.api.types.is_timedelta64_dtype(out[col].dtype)
-    ]
-    if datetime_cols:
-        if datetime_policy == "error":
-            raise ValueError(
-                "Input data contains datetime/timedelta column(s): "
-                f"{_format_column_list(datetime_cols)}. Such columns are not "
-                "handled by any transformer and would be silently dropped. "
-                "Either set general.datetime_policy: 'expand' to derive "
-                "features from them, 'drop' to remove them, or convert the "
-                "columns to numeric features before training."
-            )
-        # Name-collision guard: derived component names (<col>_year etc.) must
-        # not shadow existing columns — silently overwriting user data would
-        # be wrong, and a colliding datetime column would crash the .dt
-        # accessor. Reject with a clear message naming the collisions.
-        if datetime_policy == "expand":
-            existing = set(out.columns)
-            collisions: list[str] = []
-            for col in datetime_cols:
-                collisions.extend(
-                    f"{col}_{part_name}" for part_name in _datetime_parts(out[col])
-                )
-            collisions = sorted(c for c in collisions if c in existing)
-            if collisions:
-                raise ValueError(
-                    "Datetime expansion would overwrite existing "
-                    "column(s): "
-                    f"{_format_column_list(collisions)}. Rename the "
-                    "conflicting columns or set general.datetime_policy: "
-                    "'drop' to remove the datetime column instead of "
-                    "expanding it."
-                )
-        for col in datetime_cols:
-            if datetime_policy == "drop":
-                out = out.drop(columns=[col])
-                continue
-            parts = _datetime_parts(out[col])
-            out = out.drop(columns=[col])
-            for part_name, part_values in parts.items():
-                new_col = f"{col}_{part_name}"
-                # The component arrays are already numeric; a float conversion
-                # handles NaT correctly (→ NaN).
-                out[new_col] = np.asarray(part_values, dtype=float)
-                generated.append(new_col)
-        logger.warning(
-            "Datetime/timedelta column(s) %s: %s. Such columns are not "
-            "handled by any transformer (they would be silently dropped); "
-            "under general.datetime_policy '%s' they %s. Configure "
-            "general.datetime_policy ('expand'/'drop'/'error') to control "
-            "this behavior.",
-            "were expanded into components"
-            if datetime_policy == "expand"
-            else "have been dropped",
-            _format_column_list(datetime_cols),
-            datetime_policy,
-            "were replaced by the components " + _format_column_list(generated)
-            if datetime_policy == "expand"
-            else "were removed from the input",
+    Derived component names (``<col>_year`` etc.) must not shadow existing
+    columns — silently overwriting user data would be wrong, and a colliding
+    datetime column would crash the ``.dt`` accessor.
+
+    Args:
+        X: The feature DataFrame.
+        datetime_cols: The datetime/timedelta columns to expand.
+
+    Raises:
+        ValueError: Naming the collisions, if there are any.
+    """
+    existing = set(X.columns)
+    collisions: list[str] = []
+    for col in datetime_cols:
+        collisions.extend(f"{col}_{part_name}" for part_name in _datetime_parts(X[col]))
+    collisions = sorted(c for c in collisions if c in existing)
+    if collisions:
+        raise ValueError(
+            "Datetime expansion would overwrite existing "
+            "column(s): "
+            f"{_format_column_list(collisions)}. Rename the "
+            "conflicting columns or set general.datetime_policy: "
+            "'drop' to remove the datetime column instead of "
+            "expanding it."
         )
 
-    # 4. ID-like columns.
-    id_like: list[str] = []
-    n_rows = len(out)
-    if n_rows > 0:
-        for col in out.columns:
-            series = out[col]
-            dtype = series.dtype
-            is_obj_str = pd.api.types.is_object_dtype(
-                dtype
-            ) or pd.api.types.is_string_dtype(dtype)
-            if is_obj_str:
-                unique_count = series.nunique(dropna=False)
-                if n_rows > 0 and unique_count / n_rows >= ID_LIKE_UNIQUE_RATIO:
-                    id_like.append(col)
-            elif pd.api.types.is_integer_dtype(dtype) and series.is_unique:
-                if series.is_monotonic_increasing or series.is_monotonic_decreasing:
-                    id_like.append(col)
-    if id_like and warn_id_like:
-        logger.warning(
+
+def _apply_datetime_policy(
+    X: pd.DataFrame, datetime_policy: str
+) -> tuple[pd.DataFrame, list[str]]:
+    """Expand, drop or reject the datetime/timedelta columns of ``X``.
+
+    Args:
+        X: The feature DataFrame.
+        datetime_policy: ``"expand"``, ``"drop"`` or ``"error"``.
+
+    Returns:
+        tuple[pd.DataFrame, list[str]]: The frame and the names of the
+            columns generated by the expansion (in order).
+
+    Raises:
+        ValueError: Under ``"error"`` when a datetime/timedelta column is
+            present, or under ``"expand"`` on a name collision.
+    """
+    generated: list[str] = []
+    datetime_cols = [
+        col
+        for col in X.columns
+        if pd.api.types.is_datetime64_any_dtype(X[col].dtype)
+        or pd.api.types.is_timedelta64_dtype(X[col].dtype)
+    ]
+    if not datetime_cols:
+        return X, generated
+    if datetime_policy == "error":
+        raise ValueError(
+            "Input data contains datetime/timedelta column(s): "
+            f"{_format_column_list(datetime_cols)}. Such columns are not "
+            "handled by any transformer and would be silently dropped. "
+            "Either set general.datetime_policy: 'expand' to derive "
+            "features from them, 'drop' to remove them, or convert the "
+            "columns to numeric features before training."
+        )
+    expand = datetime_policy == "expand"
+    if expand:
+        _reject_datetime_name_collisions(X, datetime_cols)
+    out = X
+    for col in datetime_cols:
+        parts = _datetime_parts(out[col]) if expand else {}
+        out = out.drop(columns=[col])
+        for part_name, part_values in parts.items():
+            new_col = f"{col}_{part_name}"
+            # The component arrays are already numeric; a float conversion
+            # handles NaT correctly (→ NaN).
+            out[new_col] = np.asarray(part_values, dtype=float)
+            generated.append(new_col)
+    logging.getLogger(__name__).warning(
+        "Datetime/timedelta column(s) %s: %s. Such columns are not "
+        "handled by any transformer (they would be silently dropped); "
+        "under general.datetime_policy '%s' they %s. Configure "
+        "general.datetime_policy ('expand'/'drop'/'error') to control "
+        "this behavior.",
+        "were expanded into components" if expand else "have been dropped",
+        _format_column_list(datetime_cols),
+        datetime_policy,
+        "were replaced by the components " + _format_column_list(generated)
+        if expand
+        else "were removed from the input",
+    )
+    return out, generated
+
+
+def _is_id_like(series: pd.Series, n_rows: int) -> bool:
+    """Whether a column matches the row-identifier heuristic.
+
+    Args:
+        series: The column.
+        n_rows: The number of rows (> 0).
+
+    Returns:
+        bool: True for an object/string column with
+            ``nunique/n >= ID_LIKE_UNIQUE_RATIO`` or a unique monotonic
+            integer column.
+    """
+    dtype = series.dtype
+    if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype):
+        return bool(series.nunique(dropna=False) / n_rows >= ID_LIKE_UNIQUE_RATIO)
+    if pd.api.types.is_integer_dtype(dtype) and series.is_unique:
+        return bool(series.is_monotonic_increasing or series.is_monotonic_decreasing)
+    return False
+
+
+def _find_id_like_columns(X: pd.DataFrame) -> list[str]:
+    """Return the ID-like columns of ``X`` (see :func:`_is_id_like`).
+
+    Args:
+        X: The feature DataFrame.
+
+    Returns:
+        list[str]: The ID-like columns, in column order (empty for 0 rows).
+    """
+    n_rows = len(X)
+    if n_rows == 0:
+        return []
+    return [col for col in X.columns if _is_id_like(X[col], n_rows)]
+
+
+def _handle_id_like_columns(
+    X: pd.DataFrame, id_like: list[str], *, drop: bool, warn: bool
+) -> pd.DataFrame:
+    """Report and optionally drop the ID-like columns.
+
+    Args:
+        X: The feature DataFrame.
+        id_like: The ID-like columns of ``X``.
+        drop: Whether the columns are dropped.
+        warn: Whether the WARNING is emitted.
+
+    Returns:
+        pd.DataFrame: ``X`` without the ID-like columns when ``drop``,
+            otherwise ``X`` itself.
+    """
+    if not id_like:
+        return X
+    if warn:
+        logging.getLogger(__name__).warning(
             "Column(s) %s match the heuristic for row identifiers "
             "(ID-like): an object/string column with nearly all values "
             "unique (nunique/n >= %.2f) or a unique monotonic integer "
@@ -872,16 +949,15 @@ def validate_features(  # noqa: C901
             _format_column_list(id_like),
             ID_LIKE_UNIQUE_RATIO,
             "They were dropped as configured (general.drop_id_like_columns: true)."
-            if drop_id_like_columns
+            if drop
             else "They are kept in the data by default (general.drop_id_like_columns: false).",
         )
     # The drop does not depend on whether the WARNING is emitted: a repeated
     # validation with ``warn_id_like=False`` (ModelTrainer.fit, the tuner)
     # must apply the same drop_id_like_columns policy as the first call.
-    if id_like and drop_id_like_columns:
-        out = out.drop(columns=id_like)
-
-    return out, generated
+    if drop:
+        return X.drop(columns=id_like)
+    return X
 
 
 def get_effective_train_size(
