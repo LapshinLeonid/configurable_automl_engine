@@ -235,7 +235,7 @@ def test_experimental_warning_logged_once_per_run(
     sampler plus once from config validation (<= 2 total)."""
     import logging
 
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", experimental)
     df = _make_regression_df()
@@ -254,7 +254,7 @@ def test_experimental_warning_logged_once_per_run(
         assert experimental_records == []
         return
     sampler_records = [
-        r for r in experimental_records if r.name == "configurable_automl_engine.oversampling"
+        r for r in experimental_records if r.name == "configurable_automl_engine.oversampling.experimental"
     ]
     config_records = [
         r

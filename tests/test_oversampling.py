@@ -220,7 +220,7 @@ def test_critical_error_logging():
     sampler = DataOversampler(algorithm="random")
 
     # 3. Patch only the logger in the oversampling module
-    with patch("configurable_automl_engine.oversampling.logger") as mock_logger:
+    with patch("configurable_automl_engine.oversampling.sampler.logger") as mock_logger:
         # 4. Simulate an "unexpected" error through the _strategy method
         # This method is called inside _fit_resample RIGHT AFTER _check_X_y
         error_text = "Unexpected Crash during Strategy"
@@ -248,7 +248,7 @@ def test_catch_generic_exception_only():
     Verifies that the block catches exactly Exception,
     which is not in the list (ValueError, TypeError, etc.)
     """
-    with patch("configurable_automl_engine.oversampling.logger") as mock_log:
+    with patch("configurable_automl_engine.oversampling.sampler.logger") as mock_log:
         sampler = DataOversampler()
 
         # Raise an error that this block must NOT log (ValueError)
@@ -1476,7 +1476,7 @@ def test_target_bins_less_than_two_raises():
 def test_experimental_oversampling_warns_when_enabled(caplog, monkeypatch):
     """When the evidence gate marks oversampling experimental, running the
     oversampler with a real sample increase logs a WARNING."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
     df = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0], "target": [0.0, 1.0, 2.0, 3.0]})
@@ -1490,7 +1490,7 @@ def test_experimental_oversampling_warns_when_enabled(caplog, monkeypatch):
 def test_non_experimental_oversampling_does_not_warn(caplog, monkeypatch):
     """When the evidence gate passes (flag False), no experimental warning
     is emitted."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", False)
     df = pd.DataFrame({"f1": [1.0, 2.0, 3.0, 4.0], "target": [0.0, 1.0, 2.0, 3.0]})
@@ -1503,7 +1503,7 @@ def test_non_experimental_oversampling_does_not_warn(caplog, monkeypatch):
 def test_experimental_warns_on_balance_even_with_unit_multiplier(caplog, monkeypatch):
     """N3: balancing generates rows even at multiplier == 1.0, so the
     experimental WARNING must be emitted for balance=True as well."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
     rng = np.random.RandomState(0)
@@ -1681,7 +1681,7 @@ def _count_experimental(caplog) -> int:
 def test_experimental_warning_emitted_once_per_configuration(caplog, monkeypatch):
     """Repeated fit_resample calls with the same (algorithm, multiplier)
     log the experimental WARNING only once."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
     df = pd.DataFrame({"f1": np.arange(20.0), "target": np.arange(20.0)})
@@ -1696,7 +1696,7 @@ def test_experimental_warning_emitted_once_per_configuration(caplog, monkeypatch
 def test_experimental_warning_once_per_distinct_configuration(caplog, monkeypatch):
     """A different algorithm or multiplier is a new configuration and warns
     again; algorithm name normalization maps to the same key."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
     rng = np.random.RandomState(0)
@@ -1714,7 +1714,7 @@ def test_experimental_warning_once_per_distinct_configuration(caplog, monkeypatc
 def test_experimental_warning_not_emitted_without_generation(caplog, monkeypatch):
     """multiplier == 1 without balancing generates no rows: no WARNING and
     the configuration is not recorded."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     monkeypatch.setattr(os_mod, "OVERSAMPLING_EXPERIMENTAL", True)
     df = pd.DataFrame({"f1": np.arange(10.0), "target": np.arange(10.0)})
@@ -1728,7 +1728,7 @@ def test_experimental_warning_not_emitted_without_generation(caplog, monkeypatch
 
 def test_reset_experimental_warnings_allows_reemission(caplog, monkeypatch):
     """reset_experimental_warnings clears the dedup state."""
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.oversampling"):
         os_mod.warn_experimental_once(algorithm="random", multiplier=1.5)
@@ -1742,7 +1742,7 @@ def test_experimental_warning_thread_safe(caplog):
     """Concurrent emissions for the same configuration log exactly once."""
     import threading
 
-    import configurable_automl_engine.oversampling as os_mod
+    import configurable_automl_engine.oversampling.experimental as os_mod
 
     barrier = threading.Barrier(8)
 

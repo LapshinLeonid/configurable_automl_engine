@@ -43,7 +43,7 @@ from typing import Any
 
 import pandas as pd
 
-from configurable_automl_engine import oversampling as _oversampling
+from configurable_automl_engine.oversampling import experimental as _oversampling
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
