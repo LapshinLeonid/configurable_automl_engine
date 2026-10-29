@@ -48,7 +48,6 @@ ALLOWED_C901_NOQA = {
     ("training_engine/sanity_gate.py", "_permutation_impl"),
     ("training_engine/sanity_gate.py", "check"),
     ("validation.py", "iter_splits"),
-    ("models.py", "create_model"),
 }
 
 

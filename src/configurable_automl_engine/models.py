@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
@@ -460,21 +461,103 @@ def resolve_algorithm_name(algorithm: str) -> str:
     return algorithm.lower()
 
 
-def create_model(  # noqa: C901
-    algorithm: Algorithm = "elasticnet", **hyperparams: Any
-) -> RegressorMixin:
-    """
-    Returns an instance of the selected regressor.
-    The algorithm is given as a string and is case-insensitive. Short
-    aliases are not supported. If the algorithm is not found or requires a missing package,
-    raises ValueError/ImportError.
+def _gpr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+    """Apply the GaussianProcessRegressor defaults.
 
-    Hyperparameter names are checked against
-    :func:`get_allowed_hyperparameters` — the same rule as the config
-    validation (``algorithms.<name>.hyperparameters``): an unknown name raises
-    ValueError instead of being silently dropped. The only exception is
-    ``random_state``, which the engine injects into every model and which is
-    dropped for estimators that do not accept it.
+    A proper default kernel (amplitude × RBF + white noise), target
+    normalization and several optimizer restarts with a fixed seed. A bare
+    RBF(1.0) without an amplitude/noise component and without y-normalization
+    produces a "mean predictor" (score ≈ std(y)), while GPR is one of the most
+    suitable models on small samples and provides prediction intervals.
+
+    The HPO search space exposes a categorical ``kernel_type``
+    (rbf/matern/rational_quadratic) instead of a raw kernel object — Optuna
+    stores only JSON-serializable categorical values, so the abstract name is
+    translated into a concrete kernel here.
+
+    Args:
+        hyperparams: The hyperparameters (modified in place).
+
+    Returns:
+        dict[str, Any]: ``hyperparams`` with the defaults applied.
+    """
+    kernel_type = hyperparams.pop("kernel_type", "rbf")
+    if "kernel" not in hyperparams:
+        hyperparams["kernel"] = _make_gpr_kernel(kernel_type)
+    hyperparams.setdefault("normalize_y", True)
+    hyperparams.setdefault("n_restarts_optimizer", 2)
+    return hyperparams
+
+
+def _svr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+    """Apply the SVR defaults.
+
+    If ``max_iter`` is not set, a cap (10,000 iterations) is added so that
+    the LibSVM C-code exits the loop by itself if it hangs.
+
+    Args:
+        hyperparams: The hyperparameters (modified in place).
+
+    Returns:
+        dict[str, Any]: ``hyperparams`` with the defaults applied.
+    """
+    hyperparams.setdefault("max_iter", 10000)
+    return hyperparams
+
+
+def _isotonic_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+    """Apply and validate the IsotonicRegression ``out_of_bounds`` default.
+
+    IsotonicRegression defaults to ``out_of_bounds='nan'``: validation points
+    outside the training range get NaN predictions, so the default hold-out
+    (train_test_split) fails with "Validation scoring failed for all folds:
+    Input contains NaN". With ``out_of_bounds='clip'`` the same data scores a
+    finite R² (≈0.968). Unless the caller set the parameter explicitly,
+    "clip" is used so that training works out of the box. An explicit value
+    is validated here (sklearn accepts only 'nan'/'clip'/'raise') so a typo
+    fails fast at model creation, before any fold evaluation.
+
+    Args:
+        hyperparams: The hyperparameters (modified in place).
+
+    Returns:
+        dict[str, Any]: ``hyperparams`` with the default applied.
+
+    Raises:
+        ValueError: If ``out_of_bounds`` is not 'nan', 'clip' or 'raise'.
+    """
+    raw_oob = hyperparams.get("out_of_bounds", "clip")
+    if raw_oob not in ("nan", "clip", "raise"):
+        raise ValueError(
+            f"out_of_bounds must be one of ('nan', 'clip', 'raise') for "
+            f"IsotonicRegression, got {raw_oob!r}"
+        )
+    hyperparams["out_of_bounds"] = raw_oob
+    return hyperparams
+
+
+#: Algorithm-specific defaults applied by :func:`create_model`: each function
+#: takes the hyperparameter dict and returns it with the defaults filled in.
+_ALGORITHM_DEFAULTS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "gaussian_process_regression": _gpr_defaults,
+    "svr": _svr_defaults,
+    "isotonic_regression": _isotonic_defaults,
+}
+
+
+def _resolve_estimator_class(algorithm: Any) -> tuple[str, type]:
+    """Resolve the algorithm name into its key and estimator class.
+
+    Args:
+        algorithm: The algorithm name (case-insensitive).
+
+    Returns:
+        tuple[str, type]: The normalized algorithm key and the estimator class.
+
+    Raises:
+        TypeError: If ``algorithm`` is not a string.
+        ValueError: If the algorithm is unknown.
+        ImportError: If the algorithm requires a missing optional package.
     """
     if not isinstance(algorithm, str):
         raise TypeError(f"Algorithm must be a string, got: {type(algorithm).__name__}")
@@ -491,33 +574,58 @@ def create_model(  # noqa: C901
             f"Algorithm '{algo_key}' requires an additional package. "
             "Install it or exclude it from the list."
         )
+    return algo_key, estimator_cls
 
-    # Unknown hyperparameter names are rejected exactly as in the config
-    # validation (``Config._check_hyperparameter_compatibility``), so a typo
-    # in a direct call does not go unnoticed. ``random_state`` is exempt: the
-    # tuner and the trainer pass the run seed to every algorithm.
+
+def _reject_unknown_hyperparameters(algo_key: str, hyperparams: dict[str, Any]) -> None:
+    """Reject hyperparameter names the estimator does not accept.
+
+    Unknown names are rejected exactly as in the config validation
+    (``Config._check_hyperparameter_compatibility``), so a typo in a direct
+    call does not go unnoticed. ``random_state`` is exempt: the tuner and the
+    trainer pass the run seed to every algorithm.
+
+    Args:
+        algo_key: The normalized algorithm key.
+        hyperparams: The hyperparameters passed to :func:`create_model`.
+
+    Raises:
+        ValueError: If an unknown hyperparameter name is present.
+    """
     allowed = get_allowed_hyperparameters(algo_key)
-    if allowed is not None:
-        unknown = sorted(
-            key for key in hyperparams if key not in allowed and key != "random_state"
+    if allowed is None:
+        return
+    unknown = sorted(
+        key for key in hyperparams if key not in allowed and key != "random_state"
+    )
+    if unknown:
+        raise ValueError(
+            f"Algorithm '{algo_key}': unknown hyperparameters {unknown}. "
+            f"Allowed parameters: {sorted(allowed)}"
         )
-        if unknown:
-            raise ValueError(
-                f"Algorithm '{algo_key}': unknown hyperparameters {unknown}. "
-                f"Allowed parameters: {sorted(allowed)}"
-            )
 
-    # Deterministic seeding of stochastic estimators. Trees, forests, boosting
-    # and the randomized linear models draw randomness at fit time; with a
-    # fresh default RNG every fit() is different, so identical
-    # ``train_best_model`` runs would produce different scores/parameters
-    # (and the refine monotonicity promise would break). A fixed seed is
-    # injected for every estimator that accepts ``random_state`` (including
-    # XGBoost, whose constructor accepts **kwargs), unless the caller set the
-    # parameter explicitly — an explicit value always wins. An EXPLICIT
-    # ``random_state=None`` (a truly random fit, sklearn semantics) is
-    # respected: the seed is not injected, and a WARNING is logged so that the
-    # non-reproducible fit is visible.
+
+def _inject_random_state(
+    algo_key: str, estimator_cls: type, hyperparams: dict[str, Any]
+) -> None:
+    """Seed stochastic estimators deterministically (in place).
+
+    Trees, forests, boosting and the randomized linear models draw randomness
+    at fit time; with a fresh default RNG every fit() is different, so
+    identical ``train_best_model`` runs would produce different
+    scores/parameters (and the refine monotonicity promise would break). A
+    fixed seed is injected for every estimator that accepts ``random_state``
+    (including XGBoost, whose constructor accepts **kwargs), unless the caller
+    set the parameter explicitly — an explicit value always wins. An EXPLICIT
+    ``random_state=None`` (a truly random fit, sklearn semantics) is
+    respected: the seed is not injected, and a WARNING is logged so that the
+    non-reproducible fit is visible.
+
+    Args:
+        algo_key: The normalized algorithm key.
+        estimator_cls: The estimator class.
+        hyperparams: The hyperparameters (modified in place).
+    """
     if "random_state" in hyperparams:
         if hyperparams["random_state"] is None:
             logger.warning(
@@ -525,54 +633,35 @@ def create_model(  # noqa: C901
                 "NOT reproducible (a fresh RNG is drawn at fit time).",
                 algo_key,
             )
-    else:
-        accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
-        if "random_state" in accepted_params or accepts_var_kwargs:
-            hyperparams["random_state"] = MODEL_RANDOM_STATE
+        return
+    accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
+    if "random_state" in accepted_params or accepts_var_kwargs:
+        hyperparams["random_state"] = MODEL_RANDOM_STATE
 
-    # For GaussianProcessRegressor (gpr), set a proper default kernel
-    # (amplitude × RBF + white noise), enable target normalization and
-    # several optimizer restarts with a fixed seed. A bare RBF(1.0) without
-    # an amplitude/noise component and without y-normalization produces a
-    # "mean predictor" (score ≈ std(y)), while GPR is one of the most
-    # suitable models on small samples and provides prediction intervals.
-    if algo_key == "gaussian_process_regression":
-        # The HPO search space exposes a categorical ``kernel_type``
-        # (rbf/matern/rational_quadratic) instead of a raw kernel object —
-        # Optuna stores only JSON-serializable categorical values, so the
-        # abstract name is translated into a concrete kernel here.
-        kernel_type = hyperparams.pop("kernel_type", "rbf")
-        if "kernel" not in hyperparams:
-            hyperparams["kernel"] = _make_gpr_kernel(kernel_type)
-    if algo_key == "gaussian_process_regression" and "normalize_y" not in hyperparams:
-        hyperparams["normalize_y"] = True
-    if (
-        algo_key == "gaussian_process_regression"
-        and "n_restarts_optimizer" not in hyperparams
-    ):
-        hyperparams["n_restarts_optimizer"] = 2
 
-    # If max_iter is not set, add a cap (e.g. 10,000 iterations) so that the
-    # LibSVM C-code exits the loop by itself if it hangs
-    if algo_key == "svr" and "max_iter" not in hyperparams:
-        hyperparams["max_iter"] = 10000
+def create_model(
+    algorithm: Algorithm = "elasticnet", **hyperparams: Any
+) -> RegressorMixin:
+    """
+    Returns an instance of the selected regressor.
+    The algorithm is given as a string and is case-insensitive. Short
+    aliases are not supported. If the algorithm is not found or requires a missing package,
+    raises ValueError/ImportError.
 
-    # IsotonicRegression defaults to out_of_bounds='nan': validation points
-    # outside the training range get NaN predictions, so the default hold-out
-    # (train_test_split) fails with "Validation scoring failed for all folds:
-    # Input contains NaN". With out_of_bounds='clip' the same data scores a
-    # finite R² (≈0.968). Unless the caller set the parameter explicitly,
-    # "clip" is used so that training works out of the box. An explicit value
-    # is validated here (sklearn accepts only 'nan'/'clip'/'raise') so a typo
-    # fails fast at model creation, before any fold evaluation.
-    if algo_key == "isotonic_regression":
-        raw_oob = hyperparams.get("out_of_bounds", "clip")
-        if raw_oob not in ("nan", "clip", "raise"):
-            raise ValueError(
-                f"out_of_bounds must be one of ('nan', 'clip', 'raise') for "
-                f"IsotonicRegression, got {raw_oob!r}"
-            )
-        hyperparams["out_of_bounds"] = raw_oob
+    Hyperparameter names are checked against
+    :func:`get_allowed_hyperparameters` — the same rule as the config
+    validation (``algorithms.<name>.hyperparameters``): an unknown name raises
+    ValueError instead of being silently dropped. The only exception is
+    ``random_state``, which the engine injects into every model and which is
+    dropped for estimators that do not accept it.
+    """
+    algo_key, estimator_cls = _resolve_estimator_class(algorithm)
+    _reject_unknown_hyperparameters(algo_key, hyperparams)
+    _inject_random_state(algo_key, estimator_cls, hyperparams)
+
+    apply_defaults = _ALGORITHM_DEFAULTS.get(algo_key)
+    if apply_defaults is not None:
+        hyperparams = apply_defaults(hyperparams)
 
     # Clean / remap hyperparameters before instantiation
     hyperparams = clean_hyperparameters(algo_key, estimator_cls, hyperparams)
