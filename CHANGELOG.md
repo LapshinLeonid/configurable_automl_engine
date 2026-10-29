@@ -17,6 +17,32 @@ give the same winner, parameters, scores and predictions as 0.4.x, in both
   `removed_plugin_module_key`, naming the key's path and telling you to delete
   it. See "Migrating older configs" in [API_REFERENCE.md](API_REFERENCE.md).
 
+### `parallel_mode: "processes"` — the main script must be guarded
+
+- **The worker processes now start with `forkserver`** (Linux, macOS; `spawn`
+  on Windows) on every Python version. Before, Linux on Python 3.11–3.13 used
+  `fork`. With `forkserver` and `spawn` the workers import the main script
+  again, so **every top-level statement of the script runs a second time**. A
+  script that calls `train_best_model` at the top level without
+  `if __name__ == "__main__":` now fails: the workers start a nested run
+  ("Safe importing of main module" in the `multiprocessing` documentation),
+  and the HPO phase ends with "No algorithms produced valid scores"; the
+  reason names the missing guard. Other top-level side effects repeat too,
+  e.g. `logging.basicConfig(filename=..., filemode="w")` truncates the log
+  file in the middle of the run. Such scripts worked on Linux up to Python
+  3.13.
+- **What to do:** put the script's code under
+  `if __name__ == "__main__":` (see API_REFERENCE, "A script that uses
+  `parallel_mode: \"processes\"`"), or set the new
+  `general.start_method: "fork"` (POSIX only; `fork` copies the
+  multi-threaded parent and can deadlock a worker). Jupyter notebooks and
+  `threads` mode are not affected.
+- New config key `general.start_method` (`"forkserver"`, `"spawn"`,
+  `"fork"`, default `null` = the engine default). It is a config error with
+  `parallel_mode: "threads"` or when the platform does not have the method.
+- Patches made in the parent process (e.g. `unittest.mock.patch` in tests) no
+  longer reach the workers unless `start_method: "fork"` is set.
+
 ### Saved models
 
 - **Artifact format version 2.** `ModelTrainer` now keeps its state in a few
@@ -143,6 +169,74 @@ keep working.
   `hpo_phases._consume_worker_results(results)` returns a `WorkerOutcome`, and
   `hpo_phases._apply_target_domain_guard(algorithms, y)` returns a
   `TargetDomainOutcome`.
+
+### `run_parallel` and the `processes` mode
+
+`run_parallel` was split into small parts (`training_engine.parallel_*`
+modules: payload transport, deadline policy, process-pool supervisor,
+executor adapter, `TaskOutcome`). Its signature and its return value are
+unchanged except for the new optional `mp_context` argument; the results of
+healthy runs do not change.
+
+**Fixed**
+
+- **One crashed worker no longer loses the whole batch.** When a worker
+  process dies (OOM killer, a segfault in a C extension, `os._exit`), only
+  its task gets `None`: the pool is restarted and the other tasks are
+  resubmitted. Before, every task of the batch (every algorithm of the HPO
+  phase) was dropped. A task that crashes its worker twice is given up on, so
+  the run always terminates.
+- **`run_parallel(func, args_seq=[])` returns `[]`** and never calls `func`.
+  Before, it called `func` once and returned one result for zero tasks.
+  `args_seq=None` still means one call without arguments.
+- **No unbounded hang after a failed pool restart.** If the replacement pool
+  could not be created after a hard timeout, every task was rerun in threads
+  without a timeout — the hung task included — so the run could hang forever
+  (and the cleanup then failed with `AttributeError`). Now the unfinished
+  tasks fail with the reason and the finished results are kept.
+
+**Changed**
+
+- **Fallback policy.** `processes` mode falls back to threads only if the
+  process pool cannot be created or the payload transport cannot be set up,
+  before any task is submitted, and logs a `WARNING` (it was an `ERROR`) that
+  the timeouts are dropped. After tasks were submitted nothing is rerun in
+  threads: an infrastructure failure fails the unfinished tasks, and a
+  programming error (`TypeError`, `AttributeError`, ...) propagates instead
+  of being hidden behind a fallback log line.
+- **Worker logs reach the parent's log.** The log records of the worker
+  processes are forwarded to the parent process (a `QueueHandler` installed
+  by the pool initializer, a `QueueListener` in the parent) and handled by
+  the parent's handlers with every start method, so `general.log_to_file`
+  keeps the HPO records of the workers (phase results, complexity-guard
+  records) and their warnings keep the configured format.
+- **Explicit start method.** New `mp_context` argument (`"forkserver"`,
+  `"spawn"`, `"fork"` or a context). The default is now `"forkserver"`
+  where available (Linux, macOS) and `"spawn"` elsewhere, on every Python
+  version — before, it was whatever the interpreter defaulted to (`fork` on
+  Linux up to 3.13, `forkserver` on 3.14). Workers therefore import the task
+  function's module, and patches made in the parent process do not reach
+  them; pass `mp_context="fork"` (or set `general.start_method: "fork"`) to
+  get the old Linux behavior. The fork server
+  preloads numpy/pandas and the task function's module, so the workers start
+  without importing them again.
+- **Disqualification reasons for lost algorithms.** An algorithm whose HPO
+  worker timed out, crashed or failed in `processes` mode is now listed in
+  `disqualified_algorithms` with the reason (`"timed out after 600 s"`,
+  `"worker process crashed (exit code -9)"`, `"failed: ValueError: ..."`)
+  instead of silently missing from the phase. Like every disqualified
+  algorithm, it does not run in the following phases.
+- An unknown `mode` raises `ValueError` (before, it silently ran threads).
+- Workers are stopped with SIGTERM right away (SIGKILL after
+  `shutdown_grace_period`) instead of first waiting the grace period for a
+  worker that is busy with a hung task; on Python 3.14+ through the public
+  `ProcessPoolExecutor.terminate_workers()` / `kill_workers()`. A healthy run
+  shuts the pool down gracefully.
+- Internal: `_force_shutdown_processes`, `_terminate_worker_by_pid` and
+  `_pid_exists` are removed; `_StartSignal` and `_worker_proxy` live in
+  `training_engine.parallel_worker`, `DiskPersistenceManager` in
+  `training_engine.parallel_transport` (still importable from
+  `thread_pool`).
 
 ### Direct `optimize()` (#50)
 

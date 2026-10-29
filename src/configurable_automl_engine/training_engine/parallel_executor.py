@@ -1,0 +1,191 @@
+"""Adapter over ``concurrent.futures.ProcessPoolExecutor``.
+
+The supervisor needs two things the public executor API does not give on
+every supported Python version: the worker processes (to read the exit code
+of a crashed worker) and a forced shutdown that does not wait for a hung
+worker. Both live here. The only access to private executor internals is
+``_pool_internals``; on Python 3.14+ the forced shutdown uses the public
+``ProcessPoolExecutor.terminate_workers()`` / ``kill_workers()``.
+"""
+
+from __future__ import annotations
+
+import logging
+import multiprocessing
+import threading
+import time
+from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing.context import BaseContext
+from multiprocessing.process import BaseProcess
+from typing import Any
+
+__all__ = ["create_process_pool", "force_shutdown", "resolve_context"]
+
+logger = logging.getLogger(__name__)
+
+#: Python 3.14 added ProcessPoolExecutor.terminate_workers / kill_workers.
+_HAS_PUBLIC_TERMINATE = hasattr(ProcessPoolExecutor, "terminate_workers")
+
+#: How often a forced shutdown checks whether the workers have exited.
+_EXIT_POLL = 0.05
+
+
+#: Modules the fork server imports once, so that every worker forked from
+#: it starts with them (numpy / pandas and the worker side of run_parallel)
+#: instead of importing them again.
+_FORKSERVER_PRELOAD = (
+    "__main__",
+    "configurable_automl_engine.training_engine.parallel_worker",
+)
+
+
+def resolve_context(
+    mp_context: str | BaseContext | None, preload: Sequence[str] = ()
+) -> BaseContext | None:
+    """Turn a start-method name into a multiprocessing context.
+
+    For ``forkserver`` the modules of ``preload`` (e.g. the module of the
+    task function) and the worker side of ``run_parallel`` are preloaded
+    into the fork server, so the workers do not import them on every start.
+    The preload only takes effect when the fork server starts (once per
+    process).
+
+    Args:
+        mp_context (str | BaseContext | None): ``"fork"``, ``"forkserver"``,
+            ``"spawn"``, a context object, or ``None`` (the multiprocessing
+            default of the running interpreter).
+        preload (Sequence[str]): Extra modules to preload into the fork
+            server.
+
+    Returns:
+        BaseContext | None: The context to pass to the executor.
+
+    Raises:
+        ValueError: If the start method is not available on this platform.
+    """
+    if mp_context is None:
+        return None
+    ctx = (
+        mp_context
+        if isinstance(mp_context, BaseContext)
+        else multiprocessing.get_context(mp_context)
+    )
+    set_preload = getattr(ctx, "set_forkserver_preload", None)
+    if ctx.get_start_method() == "forkserver" and set_preload is not None:
+        set_preload(list(dict.fromkeys([*_FORKSERVER_PRELOAD, *preload])))
+    return ctx
+
+
+def create_process_pool(
+    max_workers: int | None,
+    mp_context: BaseContext | None,
+    initializer: Callable[..., object] | None = None,
+    initargs: tuple[Any, ...] = (),
+) -> ProcessPoolExecutor:
+    """Create a process pool (the workers start lazily, on submit).
+
+    Args:
+        max_workers (int | None): The number of worker processes.
+        mp_context (BaseContext | None): The multiprocessing context.
+        initializer (Callable | None): Run in every worker before its first
+            task (the worker log forwarding).
+        initargs (tuple[Any, ...]): The initializer arguments.
+    """
+    return ProcessPoolExecutor(
+        max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs
+    )
+
+
+def _pool_internals(
+    pool: ProcessPoolExecutor,
+) -> tuple[list[BaseProcess], threading.Thread | None]:
+    """The worker processes and the management thread of the pool.
+
+    This is the only function that reads private attributes of the
+    executor: ``ProcessPoolExecutor`` keeps its workers in ``_processes``
+    (a ``{pid: Process}`` dict) and its management thread in
+    ``_executor_manager_thread`` on every supported Python version; both are
+    ``None`` after ``shutdown``, and there is no public accessor.
+    """
+    processes = getattr(pool, "_processes", None)
+    manager = getattr(pool, "_executor_manager_thread", None)
+    return (list(processes.values()) if processes else []), manager
+
+
+def force_shutdown(
+    pool: ProcessPoolExecutor, grace_period: float
+) -> dict[int, int | None]:
+    """Stop the pool now: cancel queued tasks, terminate and reap the workers.
+
+    The workers get SIGTERM at once (a hung worker never exits on its own);
+    the ones still alive after ``grace_period`` seconds get SIGKILL.
+
+    The workers are reaped by the pool's management thread, and this
+    function only waits for that thread: polling the processes from here as
+    well would race with it — under ``forkserver`` the exit status is read
+    once from a pipe, and the second reader gets EOF, which Python reports as
+    exit code 255 instead of the real one.
+
+    Args:
+        pool (ProcessPoolExecutor): The pool to stop.
+        grace_period (float): Seconds between SIGTERM and SIGKILL.
+
+    Returns:
+        dict[int, int | None]: The exit code of every worker the pool had,
+        by PID (``None`` if a worker could not be reaped). A crashed worker
+        keeps its own exit code; the workers this function terminated report
+        ``-SIGTERM`` (or ``-SIGKILL``).
+    """
+    workers, manager = _pool_internals(pool)
+    public: Any = pool  # terminate_workers / kill_workers: Python 3.14+
+    if _HAS_PUBLIC_TERMINATE and grace_period <= 0:
+        public.kill_workers()
+    elif _HAS_PUBLIC_TERMINATE:
+        # terminate_workers() = shutdown(wait=False, cancel_futures=True)
+        # followed by SIGTERM to every live worker. The shutdown drops the
+        # executor's worker registry, so a later kill_workers() would find
+        # nothing: the SIGKILL step below uses the process handles.
+        public.terminate_workers()
+    else:
+        pool.shutdown(wait=False, cancel_futures=True)
+        for w in workers:
+            _signal(w, "terminate")
+    if manager is not None:
+        _await_manager(manager, workers, grace_period)
+    else:
+        _await_workers(workers, grace_period)
+    return {w.pid: w.exitcode for w in workers if w.pid is not None}
+
+
+def _await_manager(
+    manager: threading.Thread, workers: list[BaseProcess], grace_period: float
+) -> None:
+    """Wait for the management thread, which joins the terminated workers."""
+    manager.join(max(grace_period, 0.0))
+    if manager.is_alive():
+        # It is still joining a worker that ignored SIGTERM.
+        logger.error("A worker resisted SIGTERM; sending SIGKILL")
+        for w in workers:
+            _signal(w, "kill")
+        manager.join(1.0)
+
+
+def _await_workers(workers: list[BaseProcess], grace_period: float) -> None:
+    """Reap the workers directly (a pool without a management thread)."""
+    stop_time = time.monotonic() + grace_period
+    while time.monotonic() < stop_time and any(w.is_alive() for w in workers):
+        time.sleep(_EXIT_POLL)
+    for w in workers:
+        if w.is_alive():
+            logger.error(f"Worker {w.pid} resisted SIGTERM; sending SIGKILL")
+            _signal(w, "kill")
+    for w in workers:
+        w.join(timeout=1.0)
+
+
+def _signal(worker: BaseProcess, action: str) -> None:
+    try:
+        getattr(worker, action)()
+    except Exception:  # noqa: BLE001, S110
+        pass  # already gone, already closed, or the OS refused

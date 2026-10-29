@@ -27,13 +27,13 @@ Classification is not supported.
 * **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
 * **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`). Algorithms are referred to only by these names; short aliases (`rf`, `knn`, `xgboost`, …) are not supported.
 * **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, categorical encoding, infinite values and date/time columns, with per-algorithm preprocessing presets and optional feature selection.
-* **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers.
+* **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers. With `parallel_mode: "processes"` the workers start with `forkserver` (or `spawn`) and import the main script again: **guard the script's top-level code with `if __name__ == "__main__":`**, or set `general.start_method: "fork"` (see API_REFERENCE).
 * **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
 * **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
 * **Adaptive Complexity Guard**: Tightens the search ranges of trees and boosting on small data (lossless clipping + regularization), saving HPO budget and reducing overfitting on small samples. Disableable via `general.complexity_guard`.
 * **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
 * **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
-* **Phase/Task Timeouts (process mode only)**: A global timeout for a search step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`), enforced by a watchdog that terminates hung workers. Timeouts require `parallel_mode: "processes"`; with `parallel_mode: "threads"` (the default) setting either of them is a configuration error (`ValueError`), because a running Python thread cannot be stopped.
+* **Phase/Task Timeouts (process mode only)**: A global timeout for a search step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`), enforced by terminating hung worker processes; a crashed worker loses only its own algorithm, which is listed in `disqualified_algorithms` with the reason. Timeouts require `parallel_mode: "processes"`; with `parallel_mode: "threads"` (the default) setting either of them is a configuration error (`ValueError`), because a running Python thread cannot be stopped.
 * **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names are **rejected** — at config validation and in a direct call of `create_model(...)` / `ModelTrainer` alike — so typos do not go unnoticed (the only exception is `xgboosting`, whose estimator accepts arbitrary `**kwargs`).
 * ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Oversampling is applied only to the training part of each fold. Optional Gaussian noise injection (`oversampling.add_noise` / `noise_level`) is applied to numeric features after resampling for regularization; binary indicator columns (one-hot, missing-value indicators, 0/1 flags — also after scaling) are left untouched.
 
@@ -214,10 +214,17 @@ move that thing down.
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── finalists.py                # Winner selection, finalists pool, robust winner (Sanity Gate audit)
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
+│       │   ├── parallel_deadlines.py       # run_parallel: pure deadline policy (task timeout, queue budget)
+│       │   ├── parallel_executor.py        # run_parallel: ProcessPoolExecutor adapter (forced shutdown, exit codes)
+│       │   ├── parallel_logging.py         # run_parallel: forwards the workers' log records to the parent
+│       │   ├── parallel_outcome.py         # run_parallel: TaskOutcome, the result of one task
+│       │   ├── parallel_supervisor.py      # run_parallel: process-pool supervisor (timeout and crash restarts)
+│       │   ├── parallel_transport.py       # run_parallel: shared memory / disk cache / pickle payload transport
+│       │   ├── parallel_worker.py          # run_parallel: worker side (start signal, argument restore)
 │       │   ├── sanity_gate.py              # Sanity Gate checks for degenerate models
 │       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies (return a SelectOutcome)
 │       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, step outcomes, ...)
-│       │   └── thread_pool.py              # run_parallel: thread/process pools, disk cache, watchdog
+│       │   └── thread_pool.py              # run_parallel / run_parallel_outcomes: threads runner, fallback policy
 │       ├── feature_selection.py            # Layer 1: optional feature selection step and its config (FeatureSelectionCfg)
 │       ├── isotonic.py                     # Layer 1: IsotonicDataTransformer, the isotonic regression data adapter
 │       ├── models.py                       # Layer 1: model factory, hyperparameter cleaning
