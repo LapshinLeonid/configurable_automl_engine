@@ -8,7 +8,9 @@ code: every case records a compact digest — shapes, dtypes, hashes and
 rounded sums of the arrays, the returned frame's columns / dtypes / NaN
 count, the log records (logger, level, text) and the exception type and
 message. A refactor that keeps the behavior keeps every digest identical,
-including the order of the random draws.
+including the order of the random draws. For ``create_model`` only the
+parameters that differ from the estimator's own defaults are recorded, so the
+snapshots do not depend on the installed scikit-learn / XGBoost version.
 
 Snapshots live in ``tests/snapshots/characterization_<group>.json``.
 Regenerate them only for an intended behavior change with
@@ -41,6 +43,7 @@ from configurable_automl_engine.models import (
     AVAILABLE_ALGORITHMS,
     GPR_KERNEL_TYPES,
     create_model,
+    get_allowed_hyperparameters,
 )
 from configurable_automl_engine.oversampling import (
     DataOversampler,
@@ -766,14 +769,38 @@ def test_iter_splits_characterization(case_id: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _engine_params(model: Any) -> dict[str, str]:
+    """The parameters ``create_model`` set: those that differ from the defaults.
+
+    The full ``get_params()`` depends on the installed scikit-learn / XGBoost
+    version (new constructor parameters, changed defaults); the difference
+    with a default-constructed estimator of the same class does not.
+    """
+    params = model.get_params(deep=False)
+    defaults = type(model)().get_params(deep=False)
+    return {
+        k: repr(v)
+        for k, v in sorted(params.items())
+        if k not in defaults or repr(v) != repr(defaults[k])
+    }
+
+
 def _cm(algorithm: Any, **hyperparams: Any) -> Callable[[], Any]:
     def run() -> Any:
-        model = create_model(algorithm, **hyperparams)
-        params = model.get_params(deep=False)
-        return {
-            "class": type(model).__name__,
-            "params": {k: repr(v) for k, v in sorted(params.items())},
-        }
+        try:
+            model = create_model(algorithm, **hyperparams)
+        except ValueError as err:
+            # The "Allowed parameters" list mirrors the constructor signature
+            # of the installed library version: pin that it does, not the list.
+            message, sep, allowed = str(err).partition(" Allowed parameters: ")
+            if not sep:
+                raise
+            expected = sorted(get_allowed_hyperparameters(algorithm.lower()) or ())
+            raise ValueError(
+                f"{message} Allowed parameters: <signature of the estimator: "
+                f"{'matches' if allowed == str(expected) else 'MISMATCH'}>"
+            ) from err
+        return {"class": type(model).__name__, "params": _engine_params(model)}
 
     return run
 

@@ -4,10 +4,6 @@
   "result": {
    "class": "AdaBoostRegressor",
    "params": {
-    "estimator": "None",
-    "learning_rate": "1.0",
-    "loss": "'linear'",
-    "n_estimators": "50",
     "random_state": "42"
    }
   }
@@ -17,10 +13,6 @@
   "result": {
    "class": "AdaBoostRegressor",
    "params": {
-    "estimator": "None",
-    "learning_rate": "1.0",
-    "loss": "'linear'",
-    "n_estimators": "50",
     "random_state": "7"
    }
   }
@@ -35,18 +27,12 @@
   ],
   "result": {
    "class": "AdaBoostRegressor",
-   "params": {
-    "estimator": "None",
-    "learning_rate": "1.0",
-    "loss": "'linear'",
-    "n_estimators": "50",
-    "random_state": "None"
-   }
+   "params": {}
   }
  },
  "adaboost-unknown-param": {
   "error": {
-   "message": "Algorithm 'adaboost': unknown hyperparameters ['not_a_param']. Allowed parameters: ['estimator', 'learning_rate', 'loss', 'n_estimators', 'random_state']",
+   "message": "Algorithm 'adaboost': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -55,19 +41,7 @@
   "logs": [],
   "result": {
    "class": "ARDRegression",
-   "params": {
-    "alpha_1": "1e-06",
-    "alpha_2": "1e-06",
-    "compute_score": "False",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "lambda_1": "1e-06",
-    "lambda_2": "1e-06",
-    "max_iter": "300",
-    "threshold_lambda": "10000.0",
-    "tol": "0.001",
-    "verbose": "False"
-   }
+   "params": {}
   }
  },
  "ardregression-random-state-7": {
@@ -80,19 +54,7 @@
   ],
   "result": {
    "class": "ARDRegression",
-   "params": {
-    "alpha_1": "1e-06",
-    "alpha_2": "1e-06",
-    "compute_score": "False",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "lambda_1": "1e-06",
-    "lambda_2": "1e-06",
-    "max_iter": "300",
-    "threshold_lambda": "10000.0",
-    "tol": "0.001",
-    "verbose": "False"
-   }
+   "params": {}
   }
  },
  "ardregression-random-state-none": {
@@ -110,24 +72,12 @@
   ],
   "result": {
    "class": "ARDRegression",
-   "params": {
-    "alpha_1": "1e-06",
-    "alpha_2": "1e-06",
-    "compute_score": "False",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "lambda_1": "1e-06",
-    "lambda_2": "1e-06",
-    "max_iter": "300",
-    "threshold_lambda": "10000.0",
-    "tol": "0.001",
-    "verbose": "False"
-   }
+   "params": {}
   }
  },
  "ardregression-unknown-param": {
   "error": {
-   "message": "Algorithm 'ardregression': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha_1', 'alpha_2', 'compute_score', 'copy_X', 'fit_intercept', 'lambda_1', 'lambda_2', 'max_iter', 'n_iter', 'threshold_lambda', 'tol', 'verbose']",
+   "message": "Algorithm 'ardregression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -137,24 +87,8 @@
   "result": {
    "class": "RandomForestRegressor",
    "params": {
-    "bootstrap": "True",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
     "n_estimators": "3",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "42",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -163,18 +97,7 @@
   "result": {
    "class": "DecisionTreeRegressor",
    "params": {
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "random_state": "42",
-    "splitter": "'best'"
+    "random_state": "42"
    }
   }
  },
@@ -183,18 +106,7 @@
   "result": {
    "class": "DecisionTreeRegressor",
    "params": {
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "random_state": "7",
-    "splitter": "'best'"
+    "random_state": "7"
    }
   }
  },
@@ -208,25 +120,12 @@
   ],
   "result": {
    "class": "DecisionTreeRegressor",
-   "params": {
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "random_state": "None",
-    "splitter": "'best'"
-   }
+   "params": {}
   }
  },
  "decision_tree-unknown-param": {
   "error": {
-   "message": "Algorithm 'decision_tree': unknown hyperparameters ['not_a_param']. Allowed parameters: ['ccp_alpha', 'criterion', 'max_depth', 'max_features', 'max_leaf_nodes', 'min_impurity_decrease', 'min_samples_leaf', 'min_samples_split', 'min_weight_fraction_leaf', 'monotonic_cst', 'random_state', 'splitter']",
+   "message": "Algorithm 'decision_tree': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -236,17 +135,7 @@
   "result": {
    "class": "ElasticNet",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "l1_ratio": "0.5",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "42",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -255,17 +144,7 @@
   "result": {
    "class": "ElasticNet",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "l1_ratio": "0.5",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "7",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -279,24 +158,12 @@
   ],
   "result": {
    "class": "ElasticNet",
-   "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "l1_ratio": "0.5",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "None",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "elasticnet-unknown-param": {
   "error": {
-   "message": "Algorithm 'elasticnet': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'copy_X', 'fit_intercept', 'l1_ratio', 'max_iter', 'positive', 'precompute', 'random_state', 'selection', 'tol', 'warm_start']",
+   "message": "Algorithm 'elasticnet': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -306,24 +173,7 @@
   "result": {
    "class": "ExtraTreesRegressor",
    "params": {
-    "bootstrap": "False",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "42",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -332,24 +182,7 @@
   "result": {
    "class": "ExtraTreesRegressor",
    "params": {
-    "bootstrap": "False",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "7",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -363,31 +196,12 @@
   ],
   "result": {
    "class": "ExtraTreesRegressor",
-   "params": {
-    "bootstrap": "False",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "None",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "extra_trees-unknown-param": {
   "error": {
-   "message": "Algorithm 'extra_trees': unknown hyperparameters ['not_a_param']. Allowed parameters: ['bootstrap', 'ccp_alpha', 'criterion', 'max_depth', 'max_features', 'max_leaf_nodes', 'max_samples', 'min_impurity_decrease', 'min_samples_leaf', 'min_samples_split', 'min_weight_fraction_leaf', 'monotonic_cst', 'n_estimators', 'n_jobs', 'oob_score', 'random_state', 'verbose', 'warm_start']",
+   "message": "Algorithm 'extra_trees': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -396,15 +210,7 @@
   "logs": [],
   "result": {
    "class": "GammaRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "gammaregressor-random-state-7": {
@@ -417,15 +223,7 @@
   ],
   "result": {
    "class": "GammaRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "gammaregressor-random-state-none": {
@@ -443,20 +241,12 @@
   ],
   "result": {
    "class": "GammaRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "gammaregressor-unknown-param": {
   "error": {
-   "message": "Algorithm 'gammaregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'fit_intercept', 'max_iter', 'solver', 'tol', 'verbose', 'warm_start']",
+   "message": "Algorithm 'gammaregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -466,13 +256,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -482,13 +268,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "7"
    }
   }
@@ -504,20 +286,15 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
-    "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
-    "random_state": "None"
+    "normalize_y": "True"
    }
   }
  },
  "gaussian_process_regression-unknown-param": {
   "error": {
-   "message": "Algorithm 'gaussian_process_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'copy_X_train', 'kernel', 'kernel_type', 'n_restarts_optimizer', 'n_targets', 'normalize_y', 'optimizer', 'random_state']",
+   "message": "Algorithm 'gaussian_process_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -526,17 +303,7 @@
   "logs": [],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "glm-random-state-7": {
@@ -549,17 +316,7 @@
   ],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "glm-random-state-none": {
@@ -577,22 +334,12 @@
   ],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "glm-unknown-param": {
   "error": {
-   "message": "Algorithm 'glm': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'fit_intercept', 'link', 'max_iter', 'power', 'solver', 'tol', 'verbose', 'warm_start']",
+   "message": "Algorithm 'glm': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -602,13 +349,6 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
-    "kernel": "None",
-    "n_restarts_optimizer": "0",
-    "n_targets": "None",
-    "normalize_y": "False",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -618,13 +358,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * Matern(length_scale=1, nu=1.5) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -634,13 +370,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RationalQuadratic(alpha=1, length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -650,13 +382,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -672,13 +400,9 @@
   "result": {
    "class": "GaussianProcessRegressor",
    "params": {
-    "alpha": "1e-10",
-    "copy_X_train": "True",
     "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
     "n_restarts_optimizer": "2",
-    "n_targets": "None",
     "normalize_y": "True",
-    "optimizer": "'fmin_l_bfgs_b'",
     "random_state": "42"
    }
   }
@@ -688,27 +412,7 @@
   "result": {
    "class": "GradientBoostingRegressor",
    "params": {
-    "alpha": "0.9",
-    "ccp_alpha": "0.0",
-    "criterion": "'deprecated'",
-    "init": "None",
-    "learning_rate": "0.1",
-    "loss": "'squared_error'",
-    "max_depth": "3",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "n_estimators": "100",
-    "n_iter_no_change": "None",
-    "random_state": "42",
-    "subsample": "1.0",
-    "tol": "0.0001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -717,27 +421,7 @@
   "result": {
    "class": "GradientBoostingRegressor",
    "params": {
-    "alpha": "0.9",
-    "ccp_alpha": "0.0",
-    "criterion": "'deprecated'",
-    "init": "None",
-    "learning_rate": "0.1",
-    "loss": "'squared_error'",
-    "max_depth": "3",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "n_estimators": "100",
-    "n_iter_no_change": "None",
-    "random_state": "7",
-    "subsample": "1.0",
-    "tol": "0.0001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -751,34 +435,12 @@
   ],
   "result": {
    "class": "GradientBoostingRegressor",
-   "params": {
-    "alpha": "0.9",
-    "ccp_alpha": "0.0",
-    "criterion": "'deprecated'",
-    "init": "None",
-    "learning_rate": "0.1",
-    "loss": "'squared_error'",
-    "max_depth": "3",
-    "max_features": "None",
-    "max_leaf_nodes": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "n_estimators": "100",
-    "n_iter_no_change": "None",
-    "random_state": "None",
-    "subsample": "1.0",
-    "tol": "0.0001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "gradient_boosting-unknown-param": {
   "error": {
-   "message": "Algorithm 'gradient_boosting': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'ccp_alpha', 'criterion', 'init', 'learning_rate', 'loss', 'max_depth', 'max_features', 'max_leaf_nodes', 'min_impurity_decrease', 'min_samples_leaf', 'min_samples_split', 'min_weight_fraction_leaf', 'n_estimators', 'n_iter_no_change', 'random_state', 'subsample', 'tol', 'validation_fraction', 'verbose', 'warm_start']",
+   "message": "Algorithm 'gradient_boosting': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -801,10 +463,7 @@
   "result": {
    "class": "IsotonicRegression",
    "params": {
-    "increasing": "True",
-    "out_of_bounds": "'clip'",
-    "y_max": "None",
-    "y_min": "None"
+    "out_of_bounds": "'clip'"
    }
   }
  },
@@ -813,10 +472,7 @@
   "result": {
    "class": "IsotonicRegression",
    "params": {
-    "increasing": "True",
-    "out_of_bounds": "'raise'",
-    "y_max": "None",
-    "y_min": "None"
+    "out_of_bounds": "'raise'"
    }
   }
  },
@@ -825,10 +481,7 @@
   "result": {
    "class": "IsotonicRegression",
    "params": {
-    "increasing": "True",
-    "out_of_bounds": "'clip'",
-    "y_max": "None",
-    "y_min": "None"
+    "out_of_bounds": "'clip'"
    }
   }
  },
@@ -843,10 +496,7 @@
   "result": {
    "class": "IsotonicRegression",
    "params": {
-    "increasing": "True",
-    "out_of_bounds": "'clip'",
-    "y_max": "None",
-    "y_min": "None"
+    "out_of_bounds": "'clip'"
    }
   }
  },
@@ -866,16 +516,13 @@
   "result": {
    "class": "IsotonicRegression",
    "params": {
-    "increasing": "True",
-    "out_of_bounds": "'clip'",
-    "y_max": "None",
-    "y_min": "None"
+    "out_of_bounds": "'clip'"
    }
   }
  },
  "isotonic_regression-unknown-param": {
   "error": {
-   "message": "Algorithm 'isotonic_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: ['feature_index', 'increasing', 'out_of_bounds', 'y_max', 'y_min']",
+   "message": "Algorithm 'isotonic_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -885,16 +532,7 @@
   "result": {
    "class": "Lasso",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "42",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -903,16 +541,7 @@
   "result": {
    "class": "Lasso",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "7",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -926,23 +555,12 @@
   ],
   "result": {
    "class": "Lasso",
-   "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "1000",
-    "positive": "False",
-    "precompute": "False",
-    "random_state": "None",
-    "selection": "'cyclic'",
-    "tol": "0.0001",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "lasso-unknown-param": {
   "error": {
-   "message": "Algorithm 'lasso': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'copy_X', 'fit_intercept', 'max_iter', 'positive', 'precompute', 'random_state', 'selection', 'tol', 'warm_start']",
+   "message": "Algorithm 'lasso': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -951,16 +569,7 @@
   "logs": [],
   "result": {
    "class": "KNeighborsRegressor",
-   "params": {
-    "algorithm": "'auto'",
-    "leaf_size": "30",
-    "metric": "'minkowski'",
-    "metric_params": "None",
-    "n_jobs": "None",
-    "n_neighbors": "5",
-    "p": "2",
-    "weights": "'uniform'"
-   }
+   "params": {}
   }
  },
  "nearest_neighbors_regression-random-state-7": {
@@ -973,16 +582,7 @@
   ],
   "result": {
    "class": "KNeighborsRegressor",
-   "params": {
-    "algorithm": "'auto'",
-    "leaf_size": "30",
-    "metric": "'minkowski'",
-    "metric_params": "None",
-    "n_jobs": "None",
-    "n_neighbors": "5",
-    "p": "2",
-    "weights": "'uniform'"
-   }
+   "params": {}
   }
  },
  "nearest_neighbors_regression-random-state-none": {
@@ -1000,21 +600,12 @@
   ],
   "result": {
    "class": "KNeighborsRegressor",
-   "params": {
-    "algorithm": "'auto'",
-    "leaf_size": "30",
-    "metric": "'minkowski'",
-    "metric_params": "None",
-    "n_jobs": "None",
-    "n_neighbors": "5",
-    "p": "2",
-    "weights": "'uniform'"
-   }
+   "params": {}
   }
  },
  "nearest_neighbors_regression-unknown-param": {
   "error": {
-   "message": "Algorithm 'nearest_neighbors_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: ['algorithm', 'leaf_size', 'metric', 'metric_params', 'n_jobs', 'n_neighbors', 'p', 'weights']",
+   "message": "Algorithm 'nearest_neighbors_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1030,15 +621,7 @@
   "logs": [],
   "result": {
    "class": "PoissonRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "poissonregressor-random-state-7": {
@@ -1051,15 +634,7 @@
   ],
   "result": {
    "class": "PoissonRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "poissonregressor-random-state-none": {
@@ -1077,20 +652,12 @@
   ],
   "result": {
    "class": "PoissonRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "max_iter": "100",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "poissonregressor-unknown-param": {
   "error": {
-   "message": "Algorithm 'poissonregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'fit_intercept', 'max_iter', 'solver', 'tol', 'verbose', 'warm_start']",
+   "message": "Algorithm 'poissonregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1100,24 +667,7 @@
   "result": {
    "class": "RandomForestRegressor",
    "params": {
-    "bootstrap": "True",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "42",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -1126,24 +676,7 @@
   "result": {
    "class": "RandomForestRegressor",
    "params": {
-    "bootstrap": "True",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "7",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -1157,31 +690,12 @@
   ],
   "result": {
    "class": "RandomForestRegressor",
-   "params": {
-    "bootstrap": "True",
-    "ccp_alpha": "0.0",
-    "criterion": "'squared_error'",
-    "max_depth": "None",
-    "max_features": "1.0",
-    "max_leaf_nodes": "None",
-    "max_samples": "None",
-    "min_impurity_decrease": "0.0",
-    "min_samples_leaf": "1",
-    "min_samples_split": "2",
-    "min_weight_fraction_leaf": "0.0",
-    "monotonic_cst": "None",
-    "n_estimators": "100",
-    "n_jobs": "None",
-    "oob_score": "False",
-    "random_state": "None",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "random_forest-unknown-param": {
   "error": {
-   "message": "Algorithm 'random_forest': unknown hyperparameters ['not_a_param']. Allowed parameters: ['bootstrap', 'ccp_alpha', 'criterion', 'max_depth', 'max_features', 'max_leaf_nodes', 'max_samples', 'min_impurity_decrease', 'min_samples_leaf', 'min_samples_split', 'min_weight_fraction_leaf', 'monotonic_cst', 'n_estimators', 'n_jobs', 'oob_score', 'random_state', 'verbose', 'warm_start']",
+   "message": "Algorithm 'random_forest': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1191,14 +705,7 @@
   "result": {
    "class": "Ridge",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "None",
-    "positive": "False",
-    "random_state": "42",
-    "solver": "'auto'",
-    "tol": "0.0001"
+    "random_state": "42"
    }
   }
  },
@@ -1207,14 +714,7 @@
   "result": {
    "class": "Ridge",
    "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "None",
-    "positive": "False",
-    "random_state": "7",
-    "solver": "'auto'",
-    "tol": "0.0001"
+    "random_state": "7"
    }
   }
  },
@@ -1228,21 +728,12 @@
   ],
   "result": {
    "class": "Ridge",
-   "params": {
-    "alpha": "1.0",
-    "copy_X": "True",
-    "fit_intercept": "True",
-    "max_iter": "None",
-    "positive": "False",
-    "random_state": "None",
-    "solver": "'auto'",
-    "tol": "0.0001"
-   }
+   "params": {}
   }
  },
  "ridge-unknown-param": {
   "error": {
-   "message": "Algorithm 'ridge': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'copy_X', 'fit_intercept', 'max_iter', 'positive', 'random_state', 'solver', 'tol']",
+   "message": "Algorithm 'ridge': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1252,25 +743,7 @@
   "result": {
    "class": "SGDRegressor",
    "params": {
-    "alpha": "0.0001",
-    "average": "False",
-    "early_stopping": "False",
-    "epsilon": "0.1",
-    "eta0": "0.01",
-    "fit_intercept": "True",
-    "l1_ratio": "0.15",
-    "learning_rate": "'invscaling'",
-    "loss": "'squared_error'",
-    "max_iter": "1000",
-    "n_iter_no_change": "5",
-    "penalty": "'l2'",
-    "power_t": "0.25",
-    "random_state": "42",
-    "shuffle": "True",
-    "tol": "0.001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "42"
    }
   }
  },
@@ -1279,25 +752,7 @@
   "result": {
    "class": "SGDRegressor",
    "params": {
-    "alpha": "0.0001",
-    "average": "False",
-    "early_stopping": "False",
-    "epsilon": "0.1",
-    "eta0": "0.01",
-    "fit_intercept": "True",
-    "l1_ratio": "0.15",
-    "learning_rate": "'invscaling'",
-    "loss": "'squared_error'",
-    "max_iter": "1000",
-    "n_iter_no_change": "5",
-    "penalty": "'l2'",
-    "power_t": "0.25",
-    "random_state": "7",
-    "shuffle": "True",
-    "tol": "0.001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
+    "random_state": "7"
    }
   }
  },
@@ -1311,32 +766,12 @@
   ],
   "result": {
    "class": "SGDRegressor",
-   "params": {
-    "alpha": "0.0001",
-    "average": "False",
-    "early_stopping": "False",
-    "epsilon": "0.1",
-    "eta0": "0.01",
-    "fit_intercept": "True",
-    "l1_ratio": "0.15",
-    "learning_rate": "'invscaling'",
-    "loss": "'squared_error'",
-    "max_iter": "1000",
-    "n_iter_no_change": "5",
-    "penalty": "'l2'",
-    "power_t": "0.25",
-    "random_state": "None",
-    "shuffle": "True",
-    "tol": "0.001",
-    "validation_fraction": "0.1",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "sgdregressor-unknown-param": {
   "error": {
-   "message": "Algorithm 'sgdregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'average', 'early_stopping', 'epsilon', 'eta0', 'fit_intercept', 'l1_ratio', 'learning_rate', 'loss', 'max_iter', 'n_iter_no_change', 'penalty', 'power_t', 'random_state', 'shuffle', 'tol', 'validation_fraction', 'verbose', 'warm_start']",
+   "message": "Algorithm 'sgdregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1346,17 +781,7 @@
   "result": {
    "class": "SVR",
    "params": {
-    "C": "1.0",
-    "cache_size": "200",
-    "coef0": "0.0",
-    "degree": "3",
-    "epsilon": "0.1",
-    "gamma": "'scale'",
-    "kernel": "'rbf'",
-    "max_iter": "10000",
-    "shrinking": "True",
-    "tol": "0.001",
-    "verbose": "False"
+    "max_iter": "10000"
    }
   }
  },
@@ -1365,17 +790,7 @@
   "result": {
    "class": "SVR",
    "params": {
-    "C": "1.0",
-    "cache_size": "200",
-    "coef0": "0.0",
-    "degree": "3",
-    "epsilon": "0.1",
-    "gamma": "'scale'",
-    "kernel": "'rbf'",
-    "max_iter": "5",
-    "shrinking": "True",
-    "tol": "0.001",
-    "verbose": "False"
+    "max_iter": "5"
    }
   }
  },
@@ -1390,17 +805,7 @@
   "result": {
    "class": "SVR",
    "params": {
-    "C": "1.0",
-    "cache_size": "200",
-    "coef0": "0.0",
-    "degree": "3",
-    "epsilon": "0.1",
-    "gamma": "'scale'",
-    "kernel": "'rbf'",
-    "max_iter": "10000",
-    "shrinking": "True",
-    "tol": "0.001",
-    "verbose": "False"
+    "max_iter": "10000"
    }
   }
  },
@@ -1420,23 +825,13 @@
   "result": {
    "class": "SVR",
    "params": {
-    "C": "1.0",
-    "cache_size": "200",
-    "coef0": "0.0",
-    "degree": "3",
-    "epsilon": "0.1",
-    "gamma": "'scale'",
-    "kernel": "'rbf'",
-    "max_iter": "10000",
-    "shrinking": "True",
-    "tol": "0.001",
-    "verbose": "False"
+    "max_iter": "10000"
    }
   }
  },
  "svr-unknown-param": {
   "error": {
-   "message": "Algorithm 'svr': unknown hyperparameters ['not_a_param']. Allowed parameters: ['C', 'cache_size', 'coef0', 'degree', 'epsilon', 'gamma', 'kernel', 'max_iter', 'shrinking', 'tol', 'verbose']",
+   "message": "Algorithm 'svr': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1445,17 +840,7 @@
   "logs": [],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "tweedieregressor-random-state-7": {
@@ -1468,17 +853,7 @@
   ],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "tweedieregressor-random-state-none": {
@@ -1496,22 +871,12 @@
   ],
   "result": {
    "class": "TweedieRegressor",
-   "params": {
-    "alpha": "1.0",
-    "fit_intercept": "True",
-    "link": "'auto'",
-    "max_iter": "100",
-    "power": "0.0",
-    "solver": "'lbfgs'",
-    "tol": "0.0001",
-    "verbose": "0",
-    "warm_start": "False"
-   }
+   "params": {}
   }
  },
  "tweedieregressor-unknown-param": {
   "error": {
-   "message": "Algorithm 'tweedieregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: ['alpha', 'fit_intercept', 'link', 'max_iter', 'power', 'solver', 'tol', 'verbose', 'warm_start']",
+   "message": "Algorithm 'tweedieregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
    "type": "ValueError"
   },
   "logs": []
@@ -1528,46 +893,7 @@
   "result": {
    "class": "XGBRegressor",
    "params": {
-    "base_score": "None",
-    "booster": "None",
-    "callbacks": "None",
-    "colsample_bylevel": "None",
-    "colsample_bynode": "None",
-    "colsample_bytree": "None",
-    "device": "None",
-    "early_stopping_rounds": "None",
-    "enable_categorical": "True",
-    "eval_metric": "None",
-    "feature_types": "None",
-    "feature_weights": "None",
-    "gamma": "None",
-    "grow_policy": "None",
-    "importance_type": "None",
-    "interaction_constraints": "None",
-    "learning_rate": "None",
-    "max_bin": "None",
-    "max_cat_threshold": "None",
-    "max_cat_to_onehot": "None",
-    "max_delta_step": "None",
-    "max_depth": "None",
-    "max_leaves": "None",
-    "min_child_weight": "None",
-    "missing": "nan",
-    "monotone_constraints": "None",
-    "multi_strategy": "None",
-    "n_estimators": "None",
-    "n_jobs": "None",
-    "num_parallel_tree": "None",
-    "objective": "'reg:squarederror'",
-    "random_state": "42",
-    "reg_alpha": "None",
-    "reg_lambda": "None",
-    "sampling_method": "None",
-    "scale_pos_weight": "None",
-    "subsample": "None",
-    "tree_method": "None",
-    "validate_parameters": "None",
-    "verbosity": "None"
+    "random_state": "42"
    }
   }
  },
@@ -1576,46 +902,7 @@
   "result": {
    "class": "XGBRegressor",
    "params": {
-    "base_score": "None",
-    "booster": "None",
-    "callbacks": "None",
-    "colsample_bylevel": "None",
-    "colsample_bynode": "None",
-    "colsample_bytree": "None",
-    "device": "None",
-    "early_stopping_rounds": "None",
-    "enable_categorical": "True",
-    "eval_metric": "None",
-    "feature_types": "None",
-    "feature_weights": "None",
-    "gamma": "None",
-    "grow_policy": "None",
-    "importance_type": "None",
-    "interaction_constraints": "None",
-    "learning_rate": "None",
-    "max_bin": "None",
-    "max_cat_threshold": "None",
-    "max_cat_to_onehot": "None",
-    "max_delta_step": "None",
-    "max_depth": "None",
-    "max_leaves": "None",
-    "min_child_weight": "None",
-    "missing": "nan",
-    "monotone_constraints": "None",
-    "multi_strategy": "None",
-    "n_estimators": "None",
-    "n_jobs": "None",
-    "num_parallel_tree": "None",
-    "objective": "'reg:squarederror'",
-    "random_state": "7",
-    "reg_alpha": "None",
-    "reg_lambda": "None",
-    "sampling_method": "None",
-    "scale_pos_weight": "None",
-    "subsample": "None",
-    "tree_method": "None",
-    "validate_parameters": "None",
-    "verbosity": "None"
+    "random_state": "7"
    }
   }
  },
@@ -1629,48 +916,7 @@
   ],
   "result": {
    "class": "XGBRegressor",
-   "params": {
-    "base_score": "None",
-    "booster": "None",
-    "callbacks": "None",
-    "colsample_bylevel": "None",
-    "colsample_bynode": "None",
-    "colsample_bytree": "None",
-    "device": "None",
-    "early_stopping_rounds": "None",
-    "enable_categorical": "True",
-    "eval_metric": "None",
-    "feature_types": "None",
-    "feature_weights": "None",
-    "gamma": "None",
-    "grow_policy": "None",
-    "importance_type": "None",
-    "interaction_constraints": "None",
-    "learning_rate": "None",
-    "max_bin": "None",
-    "max_cat_threshold": "None",
-    "max_cat_to_onehot": "None",
-    "max_delta_step": "None",
-    "max_depth": "None",
-    "max_leaves": "None",
-    "min_child_weight": "None",
-    "missing": "nan",
-    "monotone_constraints": "None",
-    "multi_strategy": "None",
-    "n_estimators": "None",
-    "n_jobs": "None",
-    "num_parallel_tree": "None",
-    "objective": "'reg:squarederror'",
-    "random_state": "None",
-    "reg_alpha": "None",
-    "reg_lambda": "None",
-    "sampling_method": "None",
-    "scale_pos_weight": "None",
-    "subsample": "None",
-    "tree_method": "None",
-    "validate_parameters": "None",
-    "verbosity": "None"
-   }
+   "params": {}
   }
  },
  "xgboosting-unknown-param": {
@@ -1678,47 +924,8 @@
   "result": {
    "class": "XGBRegressor",
    "params": {
-    "base_score": "None",
-    "booster": "None",
-    "callbacks": "None",
-    "colsample_bylevel": "None",
-    "colsample_bynode": "None",
-    "colsample_bytree": "None",
-    "device": "None",
-    "early_stopping_rounds": "None",
-    "enable_categorical": "True",
-    "eval_metric": "None",
-    "feature_types": "None",
-    "feature_weights": "None",
-    "gamma": "None",
-    "grow_policy": "None",
-    "importance_type": "None",
-    "interaction_constraints": "None",
-    "learning_rate": "None",
-    "max_bin": "None",
-    "max_cat_threshold": "None",
-    "max_cat_to_onehot": "None",
-    "max_delta_step": "None",
-    "max_depth": "None",
-    "max_leaves": "None",
-    "min_child_weight": "None",
-    "missing": "nan",
-    "monotone_constraints": "None",
-    "multi_strategy": "None",
-    "n_estimators": "None",
-    "n_jobs": "None",
     "not_a_param": "1",
-    "num_parallel_tree": "None",
-    "objective": "'reg:squarederror'",
-    "random_state": "42",
-    "reg_alpha": "None",
-    "reg_lambda": "None",
-    "sampling_method": "None",
-    "scale_pos_weight": "None",
-    "subsample": "None",
-    "tree_method": "None",
-    "validate_parameters": "None",
-    "verbosity": "None"
+    "random_state": "42"
    }
   }
  }
