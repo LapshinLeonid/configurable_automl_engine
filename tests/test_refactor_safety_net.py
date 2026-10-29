@@ -395,9 +395,20 @@ def test_pickled_classes_stay_defined_in_their_modules() -> None:
     A pickle references every class by its module path, so the path is part
     of the artifact format: ``ModelTrainer`` in ``trainer``,
     ``IsotonicDataTransformer`` in ``isotonic``, the state groups in ``trainer_state`` and the setting groups
-    in ``common.settings``.
+    in ``common.settings``, the preprocessing encoders in
+    ``preprocessing.encoders``, ``ColumnNameSelector`` in
+    ``preprocessing.columns``, ``DataOversampler`` in
+    ``oversampling.sampler`` and the presets in ``preprocessing_presets``
+    (artifact format 3).
     """
-    from configurable_automl_engine import isotonic, trainer, trainer_state
+    from configurable_automl_engine import (
+        isotonic,
+        oversampling,
+        preprocessing,
+        preprocessing_presets,
+        trainer,
+        trainer_state,
+    )
     from configurable_automl_engine.common import settings
 
     assert trainer.ModelTrainer.__module__ == f"{PACKAGE}.trainer"
@@ -416,6 +427,23 @@ def test_pickled_classes_stay_defined_in_their_modules() -> None:
         settings.OversamplingSettings,
     ):
         assert cls.__module__ == f"{PACKAGE}.common.settings"
+    for obj in (
+        preprocessing.TargetEncodingTransformer,
+        preprocessing.FrequencyEncodingTransformer,
+        preprocessing.HashingEncodingTransformer,
+        preprocessing.SplitCategoricalEncoder,
+        preprocessing._to_string_array,
+    ):
+        assert obj.__module__ == f"{PACKAGE}.preprocessing.encoders"
+    assert preprocessing.ColumnNameSelector.__module__ == (
+        f"{PACKAGE}.preprocessing.columns"
+    )
+    assert oversampling.DataOversampler.__module__ == f"{PACKAGE}.oversampling.sampler"
+    for cls in (
+        preprocessing_presets.AlgorithmClass,
+        preprocessing_presets.PreprocessingPreset,
+    ):
+        assert cls.__module__ == f"{PACKAGE}.preprocessing_presets"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

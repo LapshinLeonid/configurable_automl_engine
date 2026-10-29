@@ -37,8 +37,11 @@ if TYPE_CHECKING:
 #: The version of the saved ``ModelTrainer`` state. It is recorded in the
 #: artifact metadata; ``ModelTrainer.load`` refuses any other version.
 #: 1 — the flat attributes of the engine up to 0.4.x (no recorded version);
-#: 2 — the grouped state of 0.5.0.
-ARTIFACT_FORMAT_VERSION = 2
+#: 2 — the grouped state of the 0.5.0 development builds;
+#: 3 — 0.5.0: the preprocessing encoders, ``ColumnNameSelector`` and
+#: ``DataOversampler`` moved into the ``preprocessing`` / ``oversampling``
+#: packages (a pickle records the module path of every class).
+ARTIFACT_FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
