@@ -601,7 +601,7 @@ def test_general_cfg_coverage_line_83():
         )
 
 
-@patch("configurable_automl_engine.training_engine.config_parser.is_installed")
+@patch("configurable_automl_engine.training_engine.config.general.is_installed")
 def test_joblib_not_installed_raises_error(mock_is_installed):
     """Test for the exception raised when joblib is missing."""
     # Simulate the package being absent
@@ -624,7 +624,7 @@ def test_joblib_not_installed_raises_error(mock_is_installed):
         Config.model_validate(data)
 
 
-@patch("configurable_automl_engine.training_engine.config_parser.is_installed")
+@patch("configurable_automl_engine.training_engine.config.root.is_installed")
 def test_missing_algorithm_dependency_raises_error(mock_is_installed):
     """Test for the exception raised when an algorithm's library is missing."""
     mock_is_installed.return_value = False
@@ -835,11 +835,11 @@ def test_algorithm_dependency_check():
     # Mock the mapping and the installation-check function
     with (
         patch(
-            "configurable_automl_engine.training_engine.config_parser.ALGO_PACKAGE_MAPPING",
+            "configurable_automl_engine.training_engine.config.algorithms.ALGO_PACKAGE_MAPPING",
             {"xgboosting": "xgboost_pkg"},
         ),
         patch(
-            "configurable_automl_engine.training_engine.config_parser.is_installed"
+            "configurable_automl_engine.training_engine.config.root.is_installed"
         ) as mock_installed,
     ):
         # Scenario: the package is NOT installed
