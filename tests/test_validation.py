@@ -189,6 +189,14 @@ class TestValidationEngineCoverage:
             # Check the error text (the concatenated string from the code)
             assert "Critical error: CV object is not initialized" in str(exc_info.value)
 
+    def test_iter_splits_unknown_final_method_yields_nothing(self):
+        """A strategy make_cv does not produce yields no split (no error)."""
+        X = np.array([[1, 2], [3, 4]])
+        y = np.array([0, 1])
+        with patch("configurable_automl_engine.validation.make_cv") as mocked_make_cv:
+            mocked_make_cv.return_value = ("time_series", None, None)
+            assert list(iter_splits(X, y, method="k_fold")) == []
+
     def test_iter_splits_pandas_iloc_coverage(self):
         """
         Covers:

@@ -1,0 +1,1092 @@
+{
+ "all-checks": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Infinite values (\u00b1inf) found in numeric feature(s) 'x1 (2 value(s))' and 'x2 (1 value(s))'; replacing them with NaN (general.inf_policy: 'as_missing'). The missing values will be imputed by the preprocessor."
+   ],
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Datetime/timedelta column(s) were expanded into components: ts. Such columns are not handled by any transformer (they would be silently dropped); under general.datetime_policy 'expand' they were replaced by the components ts_year, ts_month, ts_day, ts_dayofweek and ts_hour. Configure general.datetime_policy ('expand'/'drop'/'error') to control this behavior."
+   ],
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Column(s) obj_id match the heuristic for row identifiers (ID-like): an object/string column with nearly all values unique (nunique/n >= 0.95) or a unique monotonic integer column. Such columns are often uninformative for regression and can slow training down dramatically; however, the rule is a heuristic \u2014 time-dependent monotonic features (e.g. a timestamp counter) may be meaningful and should be reviewed before removal. Set general.drop_id_like_columns: true to drop them, or remove the column(s) from the input data. They were dropped as configured (general.drop_id_like_columns: true)."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "ts_year",
+     "ts_month",
+     "ts_day",
+     "ts_dayofweek",
+     "ts_hour"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64"
+    ],
+    "nan": 8,
+    "shape": [
+     20,
+     7
+    ],
+    "values": {
+     "ts_day": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "6b13e9ad0c079407",
+      "shape": [
+       20
+      ],
+      "sum": "65.0"
+     },
+     "ts_dayofweek": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "c28581b412d75355",
+      "shape": [
+       20
+      ],
+      "sum": "46.0"
+     },
+     "ts_hour": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "a2622b9672235165",
+      "shape": [
+       20
+      ],
+      "sum": "205.0"
+     },
+     "ts_month": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "98d4a1d4ef77e29e",
+      "shape": [
+       20
+      ],
+      "sum": "19.0"
+     },
+     "ts_year": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "fd82c9effead0dd1",
+      "shape": [
+       20
+      ],
+      "sum": "38456.0"
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 2,
+      "sha": "178c2d99f99cfe6a",
+      "shape": [
+       20
+      ],
+      "sum": "-3.686315"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "c26979c2fd79849b",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [
+    "ts_year",
+    "ts_month",
+    "ts_day",
+    "ts_dayofweek",
+    "ts_hour"
+   ],
+   "input_unchanged": true
+  }
+ },
+ "clean": {
+  "logs": [],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2"
+    ],
+    "dtypes": [
+     "float64",
+     "float64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     2
+    ],
+    "values": {
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "datetime-collision-drop": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Datetime/timedelta column(s) have been dropped: ts and dur. Such columns are not handled by any transformer (they would be silently dropped); under general.datetime_policy 'drop' they were removed from the input. Configure general.datetime_policy ('expand'/'drop'/'error') to control this behavior."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "ts_year"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "float64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     3
+    ],
+    "values": {
+     "ts_year": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "44a2420d6f45ff85",
+      "shape": [
+       20
+      ],
+      "sum": "20.0"
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "datetime-collision-expand": {
+  "error": {
+   "message": "Datetime expansion would overwrite existing column(s): ts_year. Rename the conflicting columns or set general.datetime_policy: 'drop' to remove the datetime column instead of expanding it.",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "datetime-drop": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Datetime/timedelta column(s) have been dropped: ts and dur. Such columns are not handled by any transformer (they would be silently dropped); under general.datetime_policy 'drop' they were removed from the input. Configure general.datetime_policy ('expand'/'drop'/'error') to control this behavior."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2"
+    ],
+    "dtypes": [
+     "float64",
+     "float64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     2
+    ],
+    "values": {
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "datetime-error": {
+  "error": {
+   "message": "Input data contains datetime/timedelta column(s): ts and dur. Such columns are not handled by any transformer and would be silently dropped. Either set general.datetime_policy: 'expand' to derive features from them, 'drop' to remove them, or convert the columns to numeric features before training.",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "datetime-expand": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Datetime/timedelta column(s) were expanded into components: ts and dur. Such columns are not handled by any transformer (they would be silently dropped); under general.datetime_policy 'expand' they were replaced by the components ts_year, ts_month, ts_day, ts_dayofweek, ts_hour, dur_days, dur_seconds and dur_microseconds. Configure general.datetime_policy ('expand'/'drop'/'error') to control this behavior."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "ts_year",
+     "ts_month",
+     "ts_day",
+     "ts_dayofweek",
+     "ts_hour",
+     "dur_days",
+     "dur_seconds",
+     "dur_microseconds"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64"
+    ],
+    "nan": 5,
+    "shape": [
+     20,
+     10
+    ],
+    "values": {
+     "dur_days": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b393978842a0fa3d",
+      "shape": [
+       20
+      ],
+      "sum": "0.0"
+     },
+     "dur_microseconds": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b393978842a0fa3d",
+      "shape": [
+       20
+      ],
+      "sum": "0.0"
+     },
+     "dur_seconds": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "32ac75855dd23ae0",
+      "shape": [
+       20
+      ],
+      "sum": "684000.0"
+     },
+     "ts_day": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "6b13e9ad0c079407",
+      "shape": [
+       20
+      ],
+      "sum": "65.0"
+     },
+     "ts_dayofweek": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "c28581b412d75355",
+      "shape": [
+       20
+      ],
+      "sum": "46.0"
+     },
+     "ts_hour": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "a2622b9672235165",
+      "shape": [
+       20
+      ],
+      "sum": "205.0"
+     },
+     "ts_month": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "98d4a1d4ef77e29e",
+      "shape": [
+       20
+      ],
+      "sum": "19.0"
+     },
+     "ts_year": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "fd82c9effead0dd1",
+      "shape": [
+       20
+      ],
+      "sum": "38456.0"
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [
+    "ts_year",
+    "ts_month",
+    "ts_day",
+    "ts_dayofweek",
+    "ts_hour",
+    "dur_days",
+    "dur_seconds",
+    "dur_microseconds"
+   ],
+   "input_unchanged": true
+  }
+ },
+ "datetime-expand-no-hour": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Datetime/timedelta column(s) were expanded into components: ts and dur. Such columns are not handled by any transformer (they would be silently dropped); under general.datetime_policy 'expand' they were replaced by the components ts_year, ts_month, ts_day, ts_dayofweek, ts_hour, dur_days, dur_seconds and dur_microseconds. Configure general.datetime_policy ('expand'/'drop'/'error') to control this behavior."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "ts_year",
+     "ts_month",
+     "ts_day",
+     "ts_dayofweek",
+     "ts_hour",
+     "dur_days",
+     "dur_seconds",
+     "dur_microseconds"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64",
+     "float64"
+    ],
+    "nan": 5,
+    "shape": [
+     20,
+     10
+    ],
+    "values": {
+     "dur_days": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b393978842a0fa3d",
+      "shape": [
+       20
+      ],
+      "sum": "0.0"
+     },
+     "dur_microseconds": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b393978842a0fa3d",
+      "shape": [
+       20
+      ],
+      "sum": "0.0"
+     },
+     "dur_seconds": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "32ac75855dd23ae0",
+      "shape": [
+       20
+      ],
+      "sum": "684000.0"
+     },
+     "ts_day": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "b06c3f1a82e398f1",
+      "shape": [
+       20
+      ],
+      "sum": "206.0"
+     },
+     "ts_dayofweek": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "6069d4f646c3a499",
+      "shape": [
+       20
+      ],
+      "sum": "54.0"
+     },
+     "ts_hour": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "9b22e9ae893f52f5",
+      "shape": [
+       20
+      ],
+      "sum": "0.0"
+     },
+     "ts_month": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "98d4a1d4ef77e29e",
+      "shape": [
+       20
+      ],
+      "sum": "19.0"
+     },
+     "ts_year": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "fd82c9effead0dd1",
+      "shape": [
+       20
+      ],
+      "sum": "38456.0"
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [
+    "ts_year",
+    "ts_month",
+    "ts_day",
+    "ts_dayofweek",
+    "ts_hour",
+    "dur_days",
+    "dur_seconds",
+    "dur_microseconds"
+   ],
+   "input_unchanged": true
+  }
+ },
+ "duplicate-columns": {
+  "error": {
+   "message": "Input data contains duplicate column names: x1. Duplicated names make column selection by name ambiguous (X[col] returns a DataFrame instead of a Series). Rename the duplicated columns before training.",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "empty-rows": {
+  "logs": [],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "obj_id",
+     "int_id",
+     "int_desc",
+     "str_id",
+     "low_card",
+     "int_not_monotonic"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "str",
+     "int64",
+     "int64",
+     "string",
+     "str",
+     "int64"
+    ],
+    "nan": 0,
+    "shape": [
+     0,
+     8
+    ],
+    "values": {
+     "int_desc": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "e3b0c44298fc1c14",
+      "shape": [
+       0
+      ],
+      "sum": "0.0"
+     },
+     "int_id": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "e3b0c44298fc1c14",
+      "shape": [
+       0
+      ],
+      "sum": "0.0"
+     },
+     "int_not_monotonic": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "e3b0c44298fc1c14",
+      "shape": [
+       0
+      ],
+      "sum": "0.0"
+     },
+     "low_card": {
+      "dtype": "object",
+      "sha": "4f53cda18c2baa0c",
+      "shape": [
+       0
+      ]
+     },
+     "obj_id": {
+      "dtype": "object",
+      "sha": "4f53cda18c2baa0c",
+      "shape": [
+       0
+      ]
+     },
+     "str_id": {
+      "dtype": "object",
+      "sha": "4f53cda18c2baa0c",
+      "shape": [
+       0
+      ]
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "e3b0c44298fc1c14",
+      "shape": [
+       0
+      ],
+      "sum": "0.0"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "e3b0c44298fc1c14",
+      "shape": [
+       0
+      ],
+      "sum": "0.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "id-like-drop": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Column(s) obj_id, int_id, int_desc and str_id match the heuristic for row identifiers (ID-like): an object/string column with nearly all values unique (nunique/n >= 0.95) or a unique monotonic integer column. Such columns are often uninformative for regression and can slow training down dramatically; however, the rule is a heuristic \u2014 time-dependent monotonic features (e.g. a timestamp counter) may be meaningful and should be reviewed before removal. Set general.drop_id_like_columns: true to drop them, or remove the column(s) from the input data. They were dropped as configured (general.drop_id_like_columns: true)."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "low_card",
+     "int_not_monotonic"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "str",
+     "int64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     4
+    ],
+    "values": {
+     "int_not_monotonic": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "2b88a36cfb1186a9",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "low_card": {
+      "dtype": "object",
+      "sha": "9c4973066bc0a59c",
+      "shape": [
+       20
+      ]
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "id-like-drop-silent": {
+  "logs": [],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "low_card",
+     "int_not_monotonic"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "str",
+     "int64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     4
+    ],
+    "values": {
+     "int_not_monotonic": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "2b88a36cfb1186a9",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "low_card": {
+      "dtype": "object",
+      "sha": "9c4973066bc0a59c",
+      "shape": [
+       20
+      ]
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "id-like-silent": {
+  "logs": [],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "obj_id",
+     "int_id",
+     "int_desc",
+     "str_id",
+     "low_card",
+     "int_not_monotonic"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "str",
+     "int64",
+     "int64",
+     "string",
+     "str",
+     "int64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     8
+    ],
+    "values": {
+     "int_desc": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "e46e41cc2ee2acd3",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "int_id": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "223cd5815c7df352",
+      "shape": [
+       20
+      ],
+      "sum": "2190.0"
+     },
+     "int_not_monotonic": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "2b88a36cfb1186a9",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "low_card": {
+      "dtype": "object",
+      "sha": "9c4973066bc0a59c",
+      "shape": [
+       20
+      ]
+     },
+     "obj_id": {
+      "dtype": "object",
+      "sha": "09acb332aa2feaa6",
+      "shape": [
+       20
+      ]
+     },
+     "str_id": {
+      "dtype": "object",
+      "sha": "c42f1ec8cbda2a03",
+      "shape": [
+       20
+      ]
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "id-like-warn": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Column(s) obj_id, int_id, int_desc and str_id match the heuristic for row identifiers (ID-like): an object/string column with nearly all values unique (nunique/n >= 0.95) or a unique monotonic integer column. Such columns are often uninformative for regression and can slow training down dramatically; however, the rule is a heuristic \u2014 time-dependent monotonic features (e.g. a timestamp counter) may be meaningful and should be reviewed before removal. Set general.drop_id_like_columns: true to drop them, or remove the column(s) from the input data. They are kept in the data by default (general.drop_id_like_columns: false)."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2",
+     "obj_id",
+     "int_id",
+     "int_desc",
+     "str_id",
+     "low_card",
+     "int_not_monotonic"
+    ],
+    "dtypes": [
+     "float64",
+     "float64",
+     "str",
+     "int64",
+     "int64",
+     "string",
+     "str",
+     "int64"
+    ],
+    "nan": 0,
+    "shape": [
+     20,
+     8
+    ],
+    "values": {
+     "int_desc": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "e46e41cc2ee2acd3",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "int_id": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "223cd5815c7df352",
+      "shape": [
+       20
+      ],
+      "sum": "2190.0"
+     },
+     "int_not_monotonic": {
+      "dtype": "int64",
+      "nan": 0,
+      "sha": "2b88a36cfb1186a9",
+      "shape": [
+       20
+      ],
+      "sum": "190.0"
+     },
+     "low_card": {
+      "dtype": "object",
+      "sha": "9c4973066bc0a59c",
+      "shape": [
+       20
+      ]
+     },
+     "obj_id": {
+      "dtype": "object",
+      "sha": "09acb332aa2feaa6",
+      "shape": [
+       20
+      ]
+     },
+     "str_id": {
+      "dtype": "object",
+      "sha": "c42f1ec8cbda2a03",
+      "shape": [
+       20
+      ]
+     },
+     "x1": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "8fdcfe924d45654e",
+      "shape": [
+       20
+      ],
+      "sum": "-3.874627"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 0,
+      "sha": "b2bf96e855b1531f",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "inf-as-missing": {
+  "logs": [
+   [
+    "configurable_automl_engine.common.validation_utils",
+    "WARNING",
+    "Infinite values (\u00b1inf) found in numeric feature(s) 'x1 (2 value(s))' and 'x2 (1 value(s))'; replacing them with NaN (general.inf_policy: 'as_missing'). The missing values will be imputed by the preprocessor."
+   ]
+  ],
+  "result": {
+   "frame": {
+    "columns": [
+     "x1",
+     "x2"
+    ],
+    "dtypes": [
+     "float64",
+     "float64"
+    ],
+    "nan": 3,
+    "shape": [
+     20,
+     2
+    ],
+    "values": {
+     "x1": {
+      "dtype": "float64",
+      "nan": 2,
+      "sha": "178c2d99f99cfe6a",
+      "shape": [
+       20
+      ],
+      "sum": "-3.686315"
+     },
+     "x2": {
+      "dtype": "float64",
+      "nan": 1,
+      "sha": "c26979c2fd79849b",
+      "shape": [
+       20
+      ],
+      "sum": "21.0"
+     }
+    }
+   },
+   "generated": [],
+   "input_unchanged": true
+  }
+ },
+ "inf-error": {
+  "error": {
+   "message": "Numeric feature(s) contain infinite values (\u00b1inf): 'x1 (2 value(s))' and 'x2 (1 value(s))'. Infinite values break distance-based and linear models. Replace them with NaN (set general.inf_policy: 'as_missing') or remove the offending rows.",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "unknown-datetime-policy": {
+  "error": {
+   "message": "Unknown datetime_policy: 'keep'. Expected 'expand', 'drop' or 'error'.",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "unknown-inf-policy": {
+  "error": {
+   "message": "Unknown inf_policy: 'drop'. Expected 'as_missing' or 'error'.",
+   "type": "ValueError"
+  },
+  "logs": []
+ }
+}

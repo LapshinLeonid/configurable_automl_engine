@@ -23,12 +23,12 @@ import logging
 import threading
 from collections import Counter
 from math import ceil
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import pandas as pd
 from imblearn.base import BaseSampler
-from imblearn.over_sampling import RandomOverSampler
+from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import OrdinalEncoder
@@ -505,6 +505,23 @@ class _SMOTERGenerator:
         return np.vstack(X_synth), np.concatenate(y_synth)
 
 
+class _BinnedTarget(NamedTuple):
+    """The target of one resampling call, binned for the regression path.
+
+    Attributes:
+        y_s (pd.Series): The original target values.
+        is_regression (bool): Whether the regression path is used.
+        y_fit (pd.Series): The values resampled as classes (bin codes for
+            the regression path, ``y_s`` itself for classification).
+        bin_mids (dict[int, float]): Per-bin representative values.
+    """
+
+    y_s: pd.Series
+    is_regression: bool
+    y_fit: pd.Series
+    bin_mids: dict[int, float]
+
+
 class DataOversampler(BaseSampler):  # type: ignore[misc]
     """Increase the data volume and balance the classes.
 
@@ -844,7 +861,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 logger.warning(f"Failed to restore type for column {col}: {e}")
         return df
 
-    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:  # noqa: C901
+    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
         """Resample the data according to the selected algorithm.
 
         The engine is regression-only: by default (``task="regression"``)
@@ -881,11 +898,43 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             TypeError: If the data has no numeric features (needed for
                        distance computation in SMOTE/ADASYN).
         """
+        multiplier, target_bins, algo_local = self._validated_params()
+
+        # Evidence gate: when the nightly benchmark has shown that
+        # oversampling degrades the held-out R² beyond the threshold, the
+        # feature is experimental — warn (once per configuration) when the
+        # oversampler actually generates rows (multiplier > 1, or balancing
+        # that brings minority groups up to the majority size even at
+        # multiplier == 1).
+        if (multiplier > 1.0 or self.balance) and OVERSAMPLING_EXPERIMENTAL:
+            warn_experimental_once(algorithm=algo_local, multiplier=multiplier)
+
+        try:
+            return self._resample(X, y, algo_local, multiplier, target_bins)
+        except (ValueError, TypeError, ImportError, RuntimeError):
+            # Re-raise known data-related or configuration errors directly
+            raise
+        except Exception as e:
+            logger.debug("Unexpected error trace in _fit_resample:", exc_info=True)
+            logger.error(f"Critical error during data oversampling: {e}")
+            raise
+
+    def _validated_params(self) -> tuple[float, int, str]:
+        """Validate the sampler parameters.
+
+        Stores ``multiplier_`` (sklearn standard: a fitted attribute with a
+        trailing underscore) and normalizes the algorithm name into a local
+        value instead of mutating ``self.algorithm``.
+
+        Returns:
+            tuple[float, int, str]: (multiplier, target_bins, algorithm).
+
+        Raises:
+            ValueError: If ``multiplier`` < 1, ``target_bins`` < 2 or the
+                algorithm is not supported.
+        """
         with self._lock:
-            # Store the result in an attribute with a leading underscore
-            # (sklearn standard)
             self.multiplier_ = float(self.multiplier)
-            # Use a local variable instead of mutating self.algorithm
             algo_local = self.algorithm.lower().replace(" ", "_")
 
         if self.multiplier_ < 1:
@@ -894,302 +943,351 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             raise ValueError(
                 f"target_bins must be >= {MIN_TARGET_BINS}, got {self.target_bins}"
             )
+        # The only algorithm check: the resampling steps below rely on it.
         if algo_local not in ("random", "smote", "adasyn"):
             raise ValueError(f"Unsupported algorithm: {algo_local}")
+        return self.multiplier_, self.target_bins, algo_local
 
-        # Evidence gate: when the nightly benchmark has shown that
-        # oversampling degrades the held-out R² beyond the threshold, the
-        # feature is experimental — warn (once per configuration) when the
-        # oversampler actually generates rows (multiplier > 1, or balancing
-        # that brings minority groups up to the majority size even at
-        # multiplier == 1).
-        if (self.multiplier_ > 1.0 or self.balance) and OVERSAMPLING_EXPERIMENTAL:
-            warn_experimental_once(algorithm=algo_local, multiplier=self.multiplier_)
+    def _resample(
+        self, X: Any, y: Any, algo: str, multiplier: float, target_bins: int
+    ) -> tuple[Any, np.ndarray]:
+        """Bin the target and dispatch to the resampling path of ``algo``.
 
-        # Check for sparse matrices (scipy.sparse)
-        is_sparse = hasattr(X, "tocsr")
+        Returns:
+            tuple: (X_resampled, y_resampled), see :meth:`_fit_resample`.
+        """
+        # Regression mode (default): the engine never treats the target
+        # as a class label. ANY numeric target (float or integer) is
+        # discretized into quantile bins; the bins are resampled as
+        # pseudo-classes and the real values are restored afterwards.
+        # The classification path is used only for explicit
+        # task="classification" calls or for non-numeric targets.
+        y_s = pd.Series(np.asarray(y))
+        if self.task.lower() != "classification":
+            target = _BinnedTarget(y_s, *_bin_regression_target(y_s, target_bins))
+        else:
+            target = _BinnedTarget(y_s, False, y_s, {})
 
         # Sparse input with add_noise: only the stored non-zero elements are
         # noised (see _add_sparse_gaussian_noise) — noising zeros would
         # densify the matrix and corrupt the "feature absent" encoding.
         noise_nonzero_only = False
-
-        try:
-            # Standard input data validation
-            y_validated = np.asarray(y)
-            y_s = pd.Series(y_validated)
-
-            # Regression mode (default): the engine never treats the target
-            # as a class label. ANY numeric target (float or integer) is
-            # discretized into quantile bins; the bins are resampled as
-            # pseudo-classes and the real values are restored afterwards.
-            # The classification path is used only for explicit
-            # task="classification" calls or for non-numeric targets.
-            is_regression = self.task.lower() != "classification"
-            if is_regression:
-                is_regression, y_fit, bin_mids = _bin_regression_target(
-                    y_s, self.target_bins
+        if hasattr(X, "tocsr"):
+            if algo == "random":
+                return self._resample_sparse(
+                    X, target, self._target_strategy(target, multiplier)
                 )
-            else:
-                y_fit = y_s
-                bin_mids = {}
+            # SMOTE/ADASYN mathematically require dense distance matrices,
+            # so a sparse input is converted to dense (as before the hashing
+            # switch to sparse), keeping the sparse noise semantics.
+            X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+            noise_nonzero_only = True
 
-            # Sparse branch (output of hashing encoding, csr_matrix):
-            # the data is already numeric, there are no categorical columns
-            # (OrdinalEncoder is not needed) and pd.DataFrame(csr) would create a
-            # silently garbage dataframe object. RandomOverSampler works with sparse
-            # directly (memory-efficient); SMOTE/ADASYN mathematically require
-            # dense distance matrices, so for them a sparse input
-            # is converted to dense (as before the hashing switch to sparse).
-            if is_sparse:
-                strategy_sparse = self._strategy(
-                    y_fit, self.multiplier_, skip_missing_code=is_regression
-                )
-                if algo_local == "random":
-                    sampler = RandomOverSampler(
-                        sampling_strategy=strategy_sparse,
-                        random_state=self.random_state,
-                    )
-                    X_res_raw, y_res = sampler.fit_resample(X, y_fit)
-                    logger.info(
-                        "%s resample: %d -> %d",
-                        algo_local.upper(),
-                        X.shape[0],
-                        X_res_raw.shape[0],
-                    )
-                    if self.add_noise:
-                        X_res_raw = self._add_sparse_gaussian_noise(X_res_raw)
-                    if is_regression:
-                        return X_res_raw, self._decode_regression_y(
-                            y_res, y_s, y_fit, bin_mids, sampler
-                        )
-                    return X_res_raw, y_res.to_numpy()
-                if algo_local in ("smote", "adasyn"):
-                    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
-                    # Keep the sparse noise semantics after densification
-                    noise_nonzero_only = True
-                else:
-                    raise ValueError(f"Unsupported algorithm: {algo_local}")
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+        # Binary indicator columns (one-hot / missing indicators) are
+        # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
+        # fractions, after which they would no longer look binary.
+        binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
+        cat_idx = self._categorical_indices(X_df, algo)
+        cat_cols = [X_df.columns[i] for i in cat_idx]
+        strategy = self._target_strategy(target, multiplier)
 
-            X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
-            # Binary indicator columns (one-hot / missing indicators) are
-            # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
-            # fractions, after which they would no longer look binary.
-            binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
-
-            # Determine the indices of non-numeric columns for SMOTENC.
-            # Columns with numeric strings ("1.0", "2.0") are not
-            # categorical — they will be converted to numbers.
-            cat_features_idx = [
-                i
-                for i, col in enumerate(X_df.columns)
-                if _is_categorical_col(X_df[col])
-            ]
-            cat_cols = [X_df.columns[i] for i in cat_features_idx]
-            # Check for the absence of numeric columns for SMOTE/ADASYN
-            if algo_local in ["smote", "adasyn"] and len(cat_features_idx) == len(
-                X_df.columns
-            ):
-                raise TypeError(
-                    f"{self.algorithm.upper()} requires at least one numeric feature."
-                )
-
-            # For all algorithms the full dataset is passed in the current logic
-            X_to_resample = X_df
-
-            # Determine the algorithm and perform resampling
-            strategy = self._strategy(
-                y_fit, self.multiplier_, skip_missing_code=is_regression
+        sampler: RandomOverSampler | None = None
+        encoder: OrdinalEncoder | None = None
+        if algo == "random":
+            X_res_raw, y_res, encoder, sampler = self._resample_random(
+                X_df, cat_cols, target, strategy
+            )
+        elif target.is_regression:
+            X_res_raw, y_res, encoder = self._resample_smoter(
+                X_df, cat_idx, cat_cols, target, strategy, algo
+            )
+        else:
+            X_res_raw, y_res = self._resample_classification(
+                X_df, cat_idx, target, strategy, algo
             )
 
-            if algo_local == "random":
-                sampler = RandomOverSampler(
-                    sampling_strategy=strategy, random_state=self.random_state
+        X_res_df = self._postprocess(
+            X_res_raw,
+            X_df,
+            cat_cols=cat_cols,
+            encoder=encoder,
+            binary_cols=binary_cols,
+            noise_nonzero_only=noise_nonzero_only,
+            algo=algo,
+        )
+        if target.is_regression:
+            return X_res_df.to_numpy(), self._decode_regression_y(
+                y_res, target.y_s, target.y_fit, target.bin_mids, sampler
+            )
+        return X_res_df.to_numpy(), np.asarray(y_res)
+
+    def _target_strategy(
+        self, target: _BinnedTarget, multiplier: float
+    ) -> dict[Any, int]:
+        """The sampling strategy of ``target`` (``-1`` skipped in regression)."""
+        return self._strategy(
+            target.y_fit, multiplier, skip_missing_code=target.is_regression
+        )
+
+    def _categorical_indices(self, X_df: pd.DataFrame, algo: str) -> list[int]:
+        """Return the positions of the categorical columns (for SMOTENC).
+
+        Columns with numeric strings ("1.0", "2.0") are not categorical —
+        they will be converted to numbers.
+
+        Args:
+            X_df (pd.DataFrame): The features.
+            algo (str): The normalized algorithm name.
+
+        Returns:
+            list[int]: The positions of the non-numeric columns.
+
+        Raises:
+            TypeError: If SMOTE/ADASYN get no numeric feature (needed for
+                the distance computation).
+        """
+        cat_idx = [
+            i for i, col in enumerate(X_df.columns) if _is_categorical_col(X_df[col])
+        ]
+        if algo in ("smote", "adasyn") and len(cat_idx) == len(X_df.columns):
+            raise TypeError(
+                f"{self.algorithm.upper()} requires at least one numeric feature."
+            )
+        return cat_idx
+
+    def _resample_sparse(
+        self, X: Any, target: _BinnedTarget, strategy: dict[Any, int]
+    ) -> tuple[Any, np.ndarray]:
+        """Random oversampling of a sparse matrix (output of hashing encoding).
+
+        The data is already numeric, there are no categorical columns
+        (OrdinalEncoder is not needed) and ``pd.DataFrame(csr)`` would create
+        a silently garbage dataframe object. RandomOverSampler works with
+        sparse directly (memory-efficient); the result stays a CSR matrix.
+
+        Returns:
+            tuple: (X_resampled, y_resampled).
+        """
+        sampler = RandomOverSampler(
+            sampling_strategy=strategy, random_state=self.random_state
+        )
+        X_res_raw, y_res = sampler.fit_resample(X, target.y_fit)
+        logger.info("%s resample: %d -> %d", "RANDOM", X.shape[0], X_res_raw.shape[0])
+        if self.add_noise:
+            X_res_raw = self._add_sparse_gaussian_noise(X_res_raw)
+        if target.is_regression:
+            return X_res_raw, self._decode_regression_y(
+                y_res, target.y_s, target.y_fit, target.bin_mids, sampler
+            )
+        return X_res_raw, y_res.to_numpy()
+
+    @staticmethod
+    def _encode_categoricals(
+        X_df: pd.DataFrame, cat_cols: list[Any]
+    ) -> tuple[pd.DataFrame, OrdinalEncoder | None]:
+        """Ordinal-encode the categorical columns (a copy; no-op without them).
+
+        Args:
+            X_df (pd.DataFrame): The features.
+            cat_cols (list[Any]): The categorical columns.
+
+        Returns:
+            tuple: (X_encoded, encoder), the encoder being ``None`` when
+                there is no categorical column.
+        """
+        if not cat_cols:
+            return X_df, None
+        encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+        X_encoded = X_df.copy()
+        X_encoded[cat_cols] = encoder.fit_transform(X_encoded[cat_cols])
+        return X_encoded, encoder
+
+    def _resample_random(
+        self,
+        X_df: pd.DataFrame,
+        cat_cols: list[Any],
+        target: _BinnedTarget,
+        strategy: dict[Any, int],
+    ) -> tuple[Any, Any, OrdinalEncoder | None, RandomOverSampler]:
+        """Random oversampling of a dense frame.
+
+        Categorical features are encoded to pass ``_check_X_y`` inside
+        RandomOverSampler, which forcibly converts the DataFrame to float.
+
+        Returns:
+            tuple: (X_resampled, y_resampled, encoder, sampler).
+        """
+        sampler = RandomOverSampler(
+            sampling_strategy=strategy, random_state=self.random_state
+        )
+        X_encoded, encoder = self._encode_categoricals(X_df, cat_cols)
+        X_res_raw, y_res = sampler.fit_resample(X_encoded, target.y_fit)
+        return X_res_raw, y_res, encoder, sampler
+
+    @staticmethod
+    def _active_counts(target: _BinnedTarget) -> Counter[Any]:
+        """Per-class counts used by SMOTE/ADASYN.
+
+        "-1" (missing target in the regression mode) is a pass-through
+        pseudo-class: it is excluded from the strategy AND from the
+        k_neighbors estimation.
+
+        Raises:
+            ValueError: If no non-missing target value is left.
+        """
+        counts = Counter(target.y_fit)
+        active_counts = Counter(
+            {
+                cls: cnt
+                for cls, cnt in counts.items()
+                if not (target.is_regression and cls == -1)
+            }
+        )
+        if not active_counts:
+            raise ValueError(
+                "SMOTE/ADASYN require at least one non-missing target value."
+            )
+        return active_counts
+
+    def _resample_smoter(
+        self,
+        X_df: pd.DataFrame,
+        cat_idx: list[int],
+        cat_cols: list[Any],
+        target: _BinnedTarget,
+        strategy: dict[Any, int],
+        algo: str,
+    ) -> tuple[np.ndarray, np.ndarray, OrdinalEncoder | None]:
+        """SMOTER-style generation for a binned regression target.
+
+        Only bins with at least two rows can produce a same-bin neighbor
+        pair; a singleton bin (or a bin that is entirely too small for the
+        k-NN) passes through unchanged. The pseudo-class ``-1`` is already
+        excluded from ``strategy`` and the active counts in the regression
+        mode, so the balanced and the proportional mode share this filter.
+
+        Returns:
+            tuple: (X_resampled, y_resampled, encoder).
+        """
+        active_counts = self._active_counts(target)
+        growth_eligible = {cls for cls, cnt in active_counts.items() if cnt >= 2}
+        # Number of synthetic rows per bin = final - original count.
+        counts_binned = Counter(target.y_fit)
+        n_to_generate: dict[int, int] = {
+            int(cls): max(0, int(tgt) - counts_binned.get(cls, 0))
+            for cls, tgt in strategy.items()
+            if cls in growth_eligible
+        }
+        # Encode categorical columns numerically before the distance
+        # computation (SMOTENC-style); the categories are decoded back in
+        # _postprocess through the encoder.
+        X_syn_source, encoder = self._encode_categoricals(X_df, cat_cols)
+        X_np = X_syn_source.to_numpy(dtype=float)
+        y_np = np.asarray(target.y_s, dtype=float)
+        generator = _SMOTERGenerator(
+            random_state=self.random_state,
+            categorical_features=cat_idx,
+            density_weighted=(algo == "adasyn"),
+        )
+        X_synth, y_synth = generator.fit_resample(
+            X_np, y_np, np.asarray(target.y_fit), n_to_generate
+        )
+        X_res_raw = np.vstack([X_np, X_synth]) if len(X_synth) else X_np
+        y_res = np.concatenate([y_np, y_synth]) if len(y_synth) else y_np
+        return X_res_raw, y_res, encoder
+
+    def _resample_classification(
+        self,
+        X_df: pd.DataFrame,
+        cat_idx: list[int],
+        target: _BinnedTarget,
+        strategy: dict[Any, int],
+        algo: str,
+    ) -> tuple[Any, Any]:
+        """SMOTE / SMOTENC / ADASYN for a classification target.
+
+        All classes stay in the strategy and k is derived from the smallest
+        class count. A singleton minority class is left to imbalanced-learn,
+        which raises an informative ValueError (the documented imblearn
+        contract). ADASYN falls back to SMOTENC when categories are present,
+        because the original ADASYN only works with numeric data.
+
+        Returns:
+            tuple: (X_resampled, y_resampled).
+        """
+        min_samples = min(self._active_counts(target).values())
+        k_neighbors = max(1, min(5, min_samples - 1))
+        sampler: Any
+        if cat_idx:
+            if algo == "adasyn":
+                # IMPORTANT: Log the substitution to avoid misleading
+                logger.warning(
+                    "ADASYN does not support categorical columns. "
+                    "Automatically falling back to SMOTENC for data integrity."
                 )
-                # Encode categorical features to pass
-                # _check_X_y inside RandomOverSampler, which forcibly
-                # converts the DataFrame to float.
-                if cat_features_idx:
-                    ordinal_encoder = OrdinalEncoder(
-                        handle_unknown="use_encoded_value", unknown_value=-1
-                    )
-                    X_to_resample = X_to_resample.copy()
-                    X_to_resample[cat_cols] = ordinal_encoder.fit_transform(
-                        X_to_resample[cat_cols]
-                    )
-                else:
-                    ordinal_encoder = None
-                X_res_raw, y_res = sampler.fit_resample(X_to_resample, y_fit)
-                random_sampler: RandomOverSampler | None = sampler
-            else:
-                ordinal_encoder = None
-                random_sampler = None
-                counts = Counter(y_fit)
-                # "-1" (missing target in the regression mode) is a
-                # pass-through pseudo-class: it is excluded from the strategy
-                # AND from the k_neighbors estimation.
-                if counts and is_regression:
-                    skip_missing = True
-                else:
-                    skip_missing = False
-                active_counts = Counter(
-                    {
-                        cls: cnt
-                        for cls, cnt in counts.items()
-                        if not (skip_missing and cls == -1)
-                    }
-                )
-                if not active_counts:
-                    raise ValueError(
-                        "SMOTE/ADASYN require at least one non-missing target value."
-                    )
+            sampler = SMOTENC(
+                categorical_features=cat_idx,
+                sampling_strategy=strategy,
+                k_neighbors=k_neighbors,
+                random_state=self.random_state,
+            )
+        elif algo == "smote":
+            sampler = SMOTE(
+                sampling_strategy=strategy,
+                k_neighbors=k_neighbors,
+                random_state=self.random_state,
+            )
+        else:
+            sampler = ADASYN(
+                sampling_strategy=strategy,
+                n_neighbors=k_neighbors,
+                random_state=self.random_state,
+            )
+        return sampler.fit_resample(X_df, target.y_fit)
 
-                if is_regression:
-                    # Regression mode: only bins with at least two rows can
-                    # produce a same-bin neighbor pair; a singleton bin (or a
-                    # bin that is entirely too small for the k-NN) passes
-                    # through unchanged.
-                    eligible = dict(active_counts)
-                    growth_eligible = {
-                        cls: cnt for cls, cnt in eligible.items() if cnt >= 2
-                    }
-                    if self.balance:
-                        strategy_final = {
-                            cls: tgt
-                            for cls, tgt in strategy.items()
-                            if cls in growth_eligible and cls != -1
-                        }
-                    else:
-                        # Proportional mode: keep only the bins that can
-                        # actually be synthesized.
-                        strategy_final = {
-                            cls: tgt
-                            for cls, tgt in strategy.items()
-                            if cls in growth_eligible
-                        }
-                    # Number of synthetic rows per bin = final - original count.
-                    counts_binned = Counter(y_fit)
-                    n_to_generate: dict[int, int] = {}
-                    for cls, tgt in strategy_final.items():
-                        orig = counts_binned.get(cls, 0)
-                        n_to_generate[int(cls)] = max(0, int(tgt) - orig)
-                    # Encode categorical columns numerically before the
-                    # distance computation (SMOTENC-style); the categories are
-                    # decoded back by the shared code below through
-                    # ``ordinal_encoder``.
-                    X_syn_source = X_df
-                    if cat_features_idx:
-                        ordinal_encoder = OrdinalEncoder(
-                            handle_unknown="use_encoded_value", unknown_value=-1
-                        )
-                        X_syn_source = X_syn_source.copy()
-                        X_syn_source[cat_cols] = ordinal_encoder.fit_transform(
-                            X_syn_source[cat_cols]
-                        )
-                    X_np = X_syn_source.to_numpy(dtype=float)
-                    y_np = np.asarray(y_s, dtype=float)
-                    y_fit_np = np.asarray(y_fit)
-                    generator = _SMOTERGenerator(
-                        random_state=self.random_state,
-                        categorical_features=cat_features_idx,
-                        density_weighted=(algo_local == "adasyn"),
-                    )
-                    X_synth, y_synth = generator.fit_resample(
-                        X_np, y_np, y_fit_np, n_to_generate
-                    )
-                    X_res_raw = np.vstack([X_np, X_synth]) if len(X_synth) else X_np
-                    y_res = np.concatenate([y_np, y_synth]) if len(y_synth) else y_np
-                else:
-                    # Classification mode: keep all classes in the strategy and
-                    # derive k from the smallest class count. A singleton
-                    # minority class is left to imbalanced-learn, which raises
-                    # an informative ValueError (the documented imblearn
-                    # contract).
-                    min_samples = min(active_counts.values())
-                    k_neighbors = max(1, min(5, min_samples - 1))
+    def _postprocess(
+        self,
+        X_res_raw: Any,
+        X_df: pd.DataFrame,
+        *,
+        cat_cols: list[Any],
+        encoder: OrdinalEncoder | None,
+        binary_cols: list[Any],
+        noise_nonzero_only: bool,
+        algo: str,
+    ) -> pd.DataFrame:
+        """Add the noise, decode the categories back and log the resample.
 
-                    if algo_local == "smote":
-                        if cat_features_idx:
-                            from imblearn.over_sampling import SMOTENC
+        ``encoder`` is the categorical encoder of the random and SMOTER paths
+        (``None`` otherwise); ``noise_nonzero_only`` noises only the non-zero
+        cells of dense data that arrived as a sparse matrix.
 
-                            sampler = SMOTENC(
-                                categorical_features=cat_features_idx,
-                                sampling_strategy=strategy,
-                                k_neighbors=k_neighbors,
-                                random_state=self.random_state,
-                            )
-                        else:
-                            from imblearn.over_sampling import SMOTE
+        Returns:
+            pd.DataFrame: The resampled features.
+        """
+        # Cast to DF since SMOTE may return numpy
+        X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
 
-                            sampler = SMOTE(
-                                sampling_strategy=strategy,
-                                k_neighbors=k_neighbors,
-                                random_state=self.random_state,
-                            )
-                    elif algo_local == "adasyn":
-                        if cat_features_idx:
-                            # IMPORTANT: Log the substitution to avoid misleading
-                            logger.warning(
-                                "ADASYN does not support categorical columns. "
-                                "Automatically falling back to SMOTENC for data integrity."
-                            )
-                            from imblearn.over_sampling import ADASYN, SMOTENC
-
-                            sampler = SMOTENC(
-                                categorical_features=cat_features_idx,
-                                sampling_strategy=strategy,
-                                k_neighbors=k_neighbors,
-                                random_state=self.random_state,
-                            )
-                        else:
-                            from imblearn.over_sampling import ADASYN
-
-                            sampler = ADASYN(
-                                sampling_strategy=strategy,
-                                n_neighbors=k_neighbors,
-                                random_state=self.random_state,
-                            )
-                    else:
-                        raise ValueError(f"Unsupported algorithm: {algo_local}")
-                    X_res_raw, y_res = sampler.fit_resample(X_to_resample, y_fit)
-
-            # Cast to DF since SMOTE may return numpy
-            X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
-
-            # A single point of noise application for all algorithms
-            # Categorical columns are excluded from the noise so as not to break
-            # the subsequent decoding via OrdinalEncoder.inverse_transform
-            if self.add_noise:
-                noise_exclude = list(cat_cols) if ordinal_encoder is not None else []
-                noise_exclude.extend(binary_cols)
-                X_res_df = self._add_gaussian_noise(
-                    X_res_df,
-                    exclude_cols=noise_exclude,
-                    nonzero_only=noise_nonzero_only,
-                )
-
-            # Decode categorical columns back (only for random)
-            if ordinal_encoder is not None:
-                X_res_df[cat_cols] = ordinal_encoder.inverse_transform(
-                    X_res_df[cat_cols]
-                )
-
-            logger.info(
-                "%s resample: %d -> %d", algo_local.upper(), len(X_df), len(X_res_df)
+        # A single point of noise application for all algorithms
+        # Categorical columns are excluded from the noise so as not to break
+        # the subsequent decoding via OrdinalEncoder.inverse_transform
+        if self.add_noise:
+            noise_exclude = list(cat_cols) if encoder is not None else []
+            noise_exclude.extend(binary_cols)
+            X_res_df = self._add_gaussian_noise(
+                X_res_df,
+                exclude_cols=noise_exclude,
+                nonzero_only=noise_nonzero_only,
             )
 
-            if is_regression:
-                return X_res_df.to_numpy(), self._decode_regression_y(
-                    y_res, y_s, y_fit, bin_mids, random_sampler
-                )
-            return X_res_df.to_numpy(), np.asarray(y_res)
-        except (ValueError, TypeError, ImportError, RuntimeError):
-            # Re-raise known data-related or configuration errors directly
-            raise
-        except Exception as e:
-            logger.debug("Unexpected error trace in _fit_resample:", exc_info=True)
-            logger.error(f"Critical error during data oversampling: {e}")
-            raise
+        # Decode the ordinal-encoded categorical columns back (random and
+        # SMOTER paths; SMOTENC keeps the original categories itself)
+        if encoder is not None:
+            X_res_df[cat_cols] = encoder.inverse_transform(X_res_df[cat_cols])
+
+        logger.info("%s resample: %d -> %d", algo.upper(), len(X_df), len(X_res_df))
+        return X_res_df
 
     def _decode_regression_y(
         self,

@@ -1,0 +1,932 @@
+{
+ "adaboost-default": {
+  "logs": [],
+  "result": {
+   "class": "AdaBoostRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "adaboost-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "AdaBoostRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "adaboost-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'adaboost': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "AdaBoostRegressor",
+   "params": {}
+  }
+ },
+ "adaboost-unknown-param": {
+  "error": {
+   "message": "Algorithm 'adaboost': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "ardregression-default": {
+  "logs": [],
+  "result": {
+   "class": "ARDRegression",
+   "params": {}
+  }
+ },
+ "ardregression-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for ardregression"
+   ]
+  ],
+  "result": {
+   "class": "ARDRegression",
+   "params": {}
+  }
+ },
+ "ardregression-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'ardregression': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for ardregression"
+   ]
+  ],
+  "result": {
+   "class": "ARDRegression",
+   "params": {}
+  }
+ },
+ "ardregression-unknown-param": {
+  "error": {
+   "message": "Algorithm 'ardregression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "case-insensitive": {
+  "logs": [],
+  "result": {
+   "class": "RandomForestRegressor",
+   "params": {
+    "n_estimators": "3",
+    "random_state": "42"
+   }
+  }
+ },
+ "decision_tree-default": {
+  "logs": [],
+  "result": {
+   "class": "DecisionTreeRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "decision_tree-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "DecisionTreeRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "decision_tree-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'decision_tree': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "DecisionTreeRegressor",
+   "params": {}
+  }
+ },
+ "decision_tree-unknown-param": {
+  "error": {
+   "message": "Algorithm 'decision_tree': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "elasticnet-default": {
+  "logs": [],
+  "result": {
+   "class": "ElasticNet",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "elasticnet-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "ElasticNet",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "elasticnet-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'elasticnet': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "ElasticNet",
+   "params": {}
+  }
+ },
+ "elasticnet-unknown-param": {
+  "error": {
+   "message": "Algorithm 'elasticnet': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "extra_trees-default": {
+  "logs": [],
+  "result": {
+   "class": "ExtraTreesRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "extra_trees-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "ExtraTreesRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "extra_trees-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'extra_trees': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "ExtraTreesRegressor",
+   "params": {}
+  }
+ },
+ "extra_trees-unknown-param": {
+  "error": {
+   "message": "Algorithm 'extra_trees': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "gammaregressor-default": {
+  "logs": [],
+  "result": {
+   "class": "GammaRegressor",
+   "params": {}
+  }
+ },
+ "gammaregressor-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for gammaregressor"
+   ]
+  ],
+  "result": {
+   "class": "GammaRegressor",
+   "params": {}
+  }
+ },
+ "gammaregressor-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'gammaregressor': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for gammaregressor"
+   ]
+  ],
+  "result": {
+   "class": "GammaRegressor",
+   "params": {}
+  }
+ },
+ "gammaregressor-unknown-param": {
+  "error": {
+   "message": "Algorithm 'gammaregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "gaussian_process_regression-default": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "42"
+   }
+  }
+ },
+ "gaussian_process_regression-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "7"
+   }
+  }
+ },
+ "gaussian_process_regression-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'gaussian_process_regression': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True"
+   }
+  }
+ },
+ "gaussian_process_regression-unknown-param": {
+  "error": {
+   "message": "Algorithm 'gaussian_process_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "glm-default": {
+  "logs": [],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "glm-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for glm"
+   ]
+  ],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "glm-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'glm': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for glm"
+   ]
+  ],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "glm-unknown-param": {
+  "error": {
+   "message": "Algorithm 'glm': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "gpr-explicit-kernel": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "gpr-kernel-matern": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * Matern(length_scale=1, nu=1.5) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "42"
+   }
+  }
+ },
+ "gpr-kernel-rational_quadratic": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RationalQuadratic(alpha=1, length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "42"
+   }
+  }
+ },
+ "gpr-kernel-rbf": {
+  "logs": [],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "42"
+   }
+  }
+ },
+ "gpr-kernel-unknown": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Unknown GPR kernel type 'cubic', falling back to 'rbf'"
+   ]
+  ],
+  "result": {
+   "class": "GaussianProcessRegressor",
+   "params": {
+    "kernel": "1**2 * RBF(length_scale=1) + WhiteKernel(noise_level=1e-05)",
+    "n_restarts_optimizer": "2",
+    "normalize_y": "True",
+    "random_state": "42"
+   }
+  }
+ },
+ "gradient_boosting-default": {
+  "logs": [],
+  "result": {
+   "class": "GradientBoostingRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "gradient_boosting-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "GradientBoostingRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "gradient_boosting-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'gradient_boosting': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "GradientBoostingRegressor",
+   "params": {}
+  }
+ },
+ "gradient_boosting-unknown-param": {
+  "error": {
+   "message": "Algorithm 'gradient_boosting': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "isotonic-bad-out-of-bounds": {
+  "error": {
+   "message": "out_of_bounds must be one of ('nan', 'clip', 'raise') for IsotonicRegression, got 'wrap'",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "isotonic-feature-index": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'feature_index' for isotonic_regression"
+   ]
+  ],
+  "result": {
+   "class": "IsotonicRegression",
+   "params": {
+    "out_of_bounds": "'clip'"
+   }
+  }
+ },
+ "isotonic-raise": {
+  "logs": [],
+  "result": {
+   "class": "IsotonicRegression",
+   "params": {
+    "out_of_bounds": "'raise'"
+   }
+  }
+ },
+ "isotonic_regression-default": {
+  "logs": [],
+  "result": {
+   "class": "IsotonicRegression",
+   "params": {
+    "out_of_bounds": "'clip'"
+   }
+  }
+ },
+ "isotonic_regression-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for isotonic_regression"
+   ]
+  ],
+  "result": {
+   "class": "IsotonicRegression",
+   "params": {
+    "out_of_bounds": "'clip'"
+   }
+  }
+ },
+ "isotonic_regression-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'isotonic_regression': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for isotonic_regression"
+   ]
+  ],
+  "result": {
+   "class": "IsotonicRegression",
+   "params": {
+    "out_of_bounds": "'clip'"
+   }
+  }
+ },
+ "isotonic_regression-unknown-param": {
+  "error": {
+   "message": "Algorithm 'isotonic_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "lasso-default": {
+  "logs": [],
+  "result": {
+   "class": "Lasso",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "lasso-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "Lasso",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "lasso-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'lasso': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "Lasso",
+   "params": {}
+  }
+ },
+ "lasso-unknown-param": {
+  "error": {
+   "message": "Algorithm 'lasso': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "nearest_neighbors_regression-default": {
+  "logs": [],
+  "result": {
+   "class": "KNeighborsRegressor",
+   "params": {}
+  }
+ },
+ "nearest_neighbors_regression-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for nearest_neighbors_regression"
+   ]
+  ],
+  "result": {
+   "class": "KNeighborsRegressor",
+   "params": {}
+  }
+ },
+ "nearest_neighbors_regression-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'nearest_neighbors_regression': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for nearest_neighbors_regression"
+   ]
+  ],
+  "result": {
+   "class": "KNeighborsRegressor",
+   "params": {}
+  }
+ },
+ "nearest_neighbors_regression-unknown-param": {
+  "error": {
+   "message": "Algorithm 'nearest_neighbors_regression': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "non-string-algorithm": {
+  "error": {
+   "message": "Algorithm must be a string, got: int",
+   "type": "TypeError"
+  },
+  "logs": []
+ },
+ "poissonregressor-default": {
+  "logs": [],
+  "result": {
+   "class": "PoissonRegressor",
+   "params": {}
+  }
+ },
+ "poissonregressor-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for poissonregressor"
+   ]
+  ],
+  "result": {
+   "class": "PoissonRegressor",
+   "params": {}
+  }
+ },
+ "poissonregressor-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'poissonregressor': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for poissonregressor"
+   ]
+  ],
+  "result": {
+   "class": "PoissonRegressor",
+   "params": {}
+  }
+ },
+ "poissonregressor-unknown-param": {
+  "error": {
+   "message": "Algorithm 'poissonregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "random_forest-default": {
+  "logs": [],
+  "result": {
+   "class": "RandomForestRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "random_forest-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "RandomForestRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "random_forest-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'random_forest': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "RandomForestRegressor",
+   "params": {}
+  }
+ },
+ "random_forest-unknown-param": {
+  "error": {
+   "message": "Algorithm 'random_forest': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "ridge-default": {
+  "logs": [],
+  "result": {
+   "class": "Ridge",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "ridge-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "Ridge",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "ridge-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'ridge': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "Ridge",
+   "params": {}
+  }
+ },
+ "ridge-unknown-param": {
+  "error": {
+   "message": "Algorithm 'ridge': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "sgdregressor-default": {
+  "logs": [],
+  "result": {
+   "class": "SGDRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "sgdregressor-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "SGDRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "sgdregressor-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'sgdregressor': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "SGDRegressor",
+   "params": {}
+  }
+ },
+ "sgdregressor-unknown-param": {
+  "error": {
+   "message": "Algorithm 'sgdregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "svr-default": {
+  "logs": [],
+  "result": {
+   "class": "SVR",
+   "params": {
+    "max_iter": "10000"
+   }
+  }
+ },
+ "svr-max-iter": {
+  "logs": [],
+  "result": {
+   "class": "SVR",
+   "params": {
+    "max_iter": "5"
+   }
+  }
+ },
+ "svr-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for svr"
+   ]
+  ],
+  "result": {
+   "class": "SVR",
+   "params": {
+    "max_iter": "10000"
+   }
+  }
+ },
+ "svr-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'svr': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for svr"
+   ]
+  ],
+  "result": {
+   "class": "SVR",
+   "params": {
+    "max_iter": "10000"
+   }
+  }
+ },
+ "svr-unknown-param": {
+  "error": {
+   "message": "Algorithm 'svr': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "tweedieregressor-default": {
+  "logs": [],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "tweedieregressor-random-state-7": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for tweedieregressor"
+   ]
+  ],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "tweedieregressor-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'tweedieregressor': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ],
+   [
+    "configurable_automl_engine.models",
+    "DEBUG",
+    "Dropped unknown param 'random_state' for tweedieregressor"
+   ]
+  ],
+  "result": {
+   "class": "TweedieRegressor",
+   "params": {}
+  }
+ },
+ "tweedieregressor-unknown-param": {
+  "error": {
+   "message": "Algorithm 'tweedieregressor': unknown hyperparameters ['not_a_param']. Allowed parameters: <signature of the estimator: matches>",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "unknown-algorithm": {
+  "error": {
+   "message": "Unknown algorithm: 'rf'",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "xgboosting-default": {
+  "logs": [],
+  "result": {
+   "class": "XGBRegressor",
+   "params": {
+    "random_state": "42"
+   }
+  }
+ },
+ "xgboosting-random-state-7": {
+  "logs": [],
+  "result": {
+   "class": "XGBRegressor",
+   "params": {
+    "random_state": "7"
+   }
+  }
+ },
+ "xgboosting-random-state-none": {
+  "logs": [
+   [
+    "configurable_automl_engine.models",
+    "WARNING",
+    "Algorithm 'xgboosting': explicit random_state=None \u2014 the fit is NOT reproducible (a fresh RNG is drawn at fit time)."
+   ]
+  ],
+  "result": {
+   "class": "XGBRegressor",
+   "params": {}
+  }
+ },
+ "xgboosting-unknown-param": {
+  "logs": [],
+  "result": {
+   "class": "XGBRegressor",
+   "params": {
+    "not_a_param": "1",
+    "random_state": "42"
+   }
+  }
+ }
+}
