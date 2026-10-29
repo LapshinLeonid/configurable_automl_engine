@@ -12,7 +12,6 @@ oversampling modules; none of them may import it.
 import logging
 import threading
 from collections import Counter
-from math import ceil
 from typing import Any, ClassVar
 
 import numpy as np
@@ -24,8 +23,11 @@ from sklearn.preprocessing import OrdinalEncoder
 
 from configurable_automl_engine.oversampling import experimental
 from configurable_automl_engine.oversampling.columns import (
+    _add_gaussian_noise,
+    _add_sparse_gaussian_noise,
     _binary_indicator_columns,
     _is_categorical_col,
+    _restore_dtypes,
 )
 from configurable_automl_engine.oversampling.experimental import (
     warn_experimental_once,
@@ -36,7 +38,8 @@ from configurable_automl_engine.oversampling.targets import (
     MIN_TARGET_BINS,
     _bin_regression_target,
     _BinnedTarget,
-    _decode_continuous_y,
+    _decode_regression_y,
+    _sampling_strategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,46 +106,13 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _strategy(
         self, y: pd.Series, multiplier: float, skip_missing_code: bool = False
     ) -> dict[Any, int]:
-        """Compute the target number of instances for each class.
-
-        For a classification target (or the pseudo-classes of a binned
-        regression target) the values are the *final* per-class row counts;
-        the overall result size is therefore approximately
-        ``N * multiplier`` (exact for ``balance=False``, where each class is
-        scaled independently). For a binned regression target, classes that
-        end up smaller than ``ceil(count * multiplier)`` (e.g. singleton
-        bins that cannot be synthesized) are dropped from the strategy by
-        the caller and pass through unchanged, so the final size may be
-        smaller than ``N * multiplier`` — this is an intentional
-        "balance-like" behavior, not a bug.
-
-        Args:
-            y (pd.Series): The target variable vector.
-            multiplier (float): The scaling factor.
-            skip_missing_code (bool): Whether to exclude the pseudo-class
-                ``-1`` (rows with a missing target in the regression mode)
-                from the strategy — it must never be rebalanced or scaled
-                (pass-through only).
-        Returns:
-            Dict[Any, int]: A dictionary where keys are class labels
-                and values are the final number of rows.
-        """
-        counts = Counter(y)
-        # The pseudo-class "-1" is reserved for rows with a missing target in
-        # the regression mode: imbalanced-learn treats it as a real class, so
-        # it must never be rebalanced or scaled (pass-through only).
-        if skip_missing_code and -1 in counts:
-            del counts[-1]
-        # If balancing is enabled, bring all classes up to the majority class,
-        # multiplied by the factor. Otherwise scale each class proportionally.
-        if self.balance:
-            # Base is the largest class
-            base_size = max(counts.values())
-            return {cls: ceil(base_size * multiplier) for cls in counts}
-
-        # Important: imbalanced-learn expects the final number of instances
-        # (Total), not the delta
-        return {cls: ceil(cnt * multiplier) for cls, cnt in counts.items()}
+        """Compute the target number of rows per class (see ``targets``)."""
+        return _sampling_strategy(
+            y,
+            multiplier,
+            balance=self.balance,
+            skip_missing_code=skip_missing_code,
+        )
 
     def _add_gaussian_noise(
         self,
@@ -151,109 +121,20 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         *,
         nonzero_only: bool = False,
     ) -> pd.DataFrame:
-        """Add Gaussian noise to numeric columns and numeric elements of object columns.
-        Applies vectorized noise computation for performance.
-        For non-numeric columns it attempts a safe type conversion.
-        Args:
-            df (pd.DataFrame): The dataset to modify.
-            exclude_cols (list[str] | None): Columns to which noise should NOT be applied
-                (e.g. ordinal-encoded categorical ones).
-            nonzero_only (bool): Noise only the non-zero cells (zeros stay
-                exact zeros). Used for data that arrived as a sparse matrix
-                and was densified for SMOTE/ADASYN, so the result matches
-                :meth:`_add_sparse_gaussian_noise`.
-        Returns:
-            pd.DataFrame: The dataset with added noise.
-        """
-        rng = np.random.default_rng(self.random_state)
-
-        # 1. First force-convert "numeric strings" to numbers
-        # This is critical for pandas 3.0 and StringDtype
-        potential_cols = df.select_dtypes(include=["object", "string"]).columns
-        for col in potential_cols:
-            # If the column contains '1.0', it becomes float.
-            # If it contains 'abc', it stays object/string.
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if not converted.isna().any():
-                df[col] = converted
-        # 2. Now select ALL numeric columns
-        # (including the ones just converted)
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-
-        # Exclude columns that must not be noised (e.g. ordinal-encoded)
-        if exclude_cols:
-            numeric_cols = numeric_cols.difference(exclude_cols)
-
-        if not numeric_cols.empty:
-            # Vectorized noise addition for all numeric columns at once
-            stds = df[numeric_cols].std().fillna(1.0).replace(0, 1.0).to_numpy()
-            scales = stds * self.noise_level
-            noise = rng.normal(0, 1.0, size=(len(df), len(numeric_cols))) * scales
-
-            # Use .to_numpy() for speed
-            values = df[numeric_cols].to_numpy()
-            if nonzero_only:
-                noise = noise * (values != 0)
-            df[numeric_cols] = values + noise
-        return df
+        """Add Gaussian noise to the numeric columns (see ``columns``)."""
+        return _add_gaussian_noise(
+            df,
+            exclude_cols,
+            noise_level=self.noise_level,
+            random_state=self.random_state,
+            nonzero_only=nonzero_only,
+        )
 
     def _add_sparse_gaussian_noise(self, X: Any) -> Any:
-        """Add Gaussian noise to the stored non-zero elements of a sparse matrix.
-
-        Noising every cell would turn each zero into a non-zero value and
-        densify the matrix (memory explosion on hashing / one-hot output);
-        besides, a zero there means "feature absent" and should stay exact.
-        So only the explicitly stored non-zero values are perturbed: the
-        sparsity pattern is preserved and the cost is O(nnz). Binary indicator
-        columns (at most two distinct values, implicit zeros included — one-hot
-        / hashing output, and also scaled 0/1 flags and missing-value
-        indicators, see :func:`_binary_indicator_columns`) are left untouched
-        as well: a noised "1.003" is not a category. The decision is made on
-        ``X`` itself, which is valid because random oversampling only
-        duplicates rows. The noise scale
-        of a column is ``noise_level`` times its standard deviation computed
-        over ALL rows (zeros included, ddof=1), the same as the dense path.
-
-        Args:
-            X: A scipy.sparse matrix.
-
-        Returns:
-            Any: A new CSR matrix (float64) with noised non-zero elements.
-        """
-        rng = np.random.default_rng(self.random_state)
-        X_csr = X.tocsr().astype(np.float64, copy=True)
-        # Explicitly stored zeros must stay zeros
-        X_csr.eliminate_zeros()
-        n_rows = X_csr.shape[0]
-        if X_csr.nnz == 0 or n_rows == 0:
-            return X_csr
-
-        mean = np.asarray(X_csr.mean(axis=0)).ravel()
-        mean_sq = np.asarray(X_csr.multiply(X_csr).mean(axis=0)).ravel()
-        var = np.maximum(mean_sq - mean**2, 0.0)
-        if n_rows > 1:
-            var = var * n_rows / (n_rows - 1)
-        stds = np.sqrt(var)
-        stds[~np.isfinite(stds) | (stds == 0)] = 1.0
-        scales = stds * self.noise_level
-
-        # Columns with more than two distinct values (an implicit zero counts
-        # as one) carry real magnitudes and are noised; two-valued columns are
-        # binary indicators, possibly shifted/scaled by the preprocessor
-        n_cols = X_csr.shape[1]
-        order = np.lexsort((X_csr.data, X_csr.indices))
-        cols_sorted = X_csr.indices[order]
-        data_sorted = X_csr.data[order]
-        is_new = np.ones(cols_sorted.size, dtype=bool)
-        is_new[1:] = (cols_sorted[1:] != cols_sorted[:-1]) | (
-            data_sorted[1:] != data_sorted[:-1]
+        """Add Gaussian noise to the non-zero elements (see ``columns``)."""
+        return _add_sparse_gaussian_noise(
+            X, noise_level=self.noise_level, random_state=self.random_state
         )
-        n_distinct = np.bincount(cols_sorted[is_new], minlength=n_cols)
-        n_distinct += np.bincount(X_csr.indices, minlength=n_cols) < n_rows
-        not_binary = n_distinct > 2
-        noise = rng.normal(0.0, 1.0, size=X_csr.nnz) * scales[X_csr.indices]
-        X_csr.data += noise * not_binary[X_csr.indices]
-        return X_csr
 
     def __getstate__(self) -> dict[str, Any]:
         # Copy the object state
@@ -311,75 +192,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _restore_dtypes(
         self, df: pd.DataFrame, original_dtypes: pd.Series
     ) -> pd.DataFrame:
-        """Restore data types with adaptation to the changes made.
-
-        Restoration logic:
-        1. Categorical: Restored strictly (including categories and order).
-        2. Integer: If add_noise=True, cast to Float (32/64) to preserve the
-           fractional part of the noise. Without noise — the original Integer is returned.
-        3. Object: Forced back to object to prevent a cast to float/int
-           by the generation libraries.
-        4. Floating: Original precision is preserved (32/64 bits).
-        Args:
-            df (pd.DataFrame): The transformed dataset.
-            original_dtypes (pd.Series): A series with the original types (`X.dtypes`).
-        Returns:
-            pd.DataFrame: The dataset with restored typing.
-        """
-        if original_dtypes is None:
-            return df
-
-        for col, dtype in original_dtypes.items():
-            if col not in df.columns:
-                continue
-            try:
-                # 1. If it is a category — restore it strictly
-                #  (important for memory and logic)
-                if isinstance(dtype, pd.CategoricalDtype):
-                    df[col] = df[col].astype(dtype)
-
-                # 2. If it is an object (strings) — return the object type
-                elif (
-                    dtype is object or isinstance(dtype, np.dtype) and dtype.kind == "O"
-                ):
-                    # If noise was added and the column became numeric,
-                    # then do NOT roll back to object
-                    if self.add_noise and is_numeric_dtype(df[col]):
-                        pass
-                    else:
-                        df[col] = df[col].astype(object)
-
-                # 3. If it is an integer:
-                elif np.issubdtype(dtype, np.integer):
-                    # If noise was added, we MUST NOT return int, or precision is lost
-                    if not self.add_noise:
-                        # Use pd.to_numeric for safety
-                        # and cast to the original int type
-                        converted = pd.to_numeric(df[col], errors="coerce")
-                        df[col] = (
-                            converted.astype(dtype)
-                            if not converted.isna().any()
-                            else converted
-                        )
-                    else:
-                        # PRECISION CHOICE: int64 -> float64, otherwise float32
-                        if dtype == np.int64:
-                            df[col] = df[col].astype(np.float64)
-                        else:
-                            df[col] = df[col].astype(np.float32)
-                # 4. If the original type is a floating point (float32 or float64):
-                elif np.issubdtype(dtype, np.floating):
-                    # Preserve the original type
-                    # (if it was float64 -> float64, if float32 -> float32)
-                    df[col] = df[col].astype(dtype)
-
-                # 5. Otherwise (float, etc.) try to return the original type
-                else:
-                    if not pd.Series(df[col]).isna().any():
-                        df[col] = df[col].astype(dtype)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to restore type for column {col}: {e}")
-        return df
+        """Restore the original data types (see ``columns``)."""
+        return _restore_dtypes(df, original_dtypes, add_noise=self.add_noise)
 
     def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
         """Resample the data according to the selected algorithm.
@@ -819,54 +633,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         bin_mids: dict[int, float],
         sampler: Any,
     ) -> np.ndarray:
-        """Restore real regression targets after resampling.
-
-        * ``random``: every row (original or duplicated) gets the real
-          target of its source row, looked up through
-          ``RandomOverSampler.sample_indices_``.
-        * ``smote``/``adasyn`` (regression path): the synthetic rows already
-          carry interpolated real values; original rows keep theirs.
-
-        Original rows are verified to stay in front (the current behavior of
-        the imbalanced-learn samplers); any deviation fails loudly.
-
-        Args:
-            y_res: The resampled target vector (real values for the engine
-                generators, bin codes for ``random``).
-            y_original (pd.Series): The original target vector.
-            y_fit (pd.Series): The bin codes of the original target.
-            bin_mids (dict[int, float]): Per-bin representative values (only
-                used by the legacy decode path).
-            sampler: The fitted ``RandomOverSampler`` (``None`` for the
-                engine generators).
-
-        Returns:
-            np.ndarray: The regression target vector for the resampled rows.
-        """
-        if sampler is not None:
-            indices = getattr(sampler, "sample_indices_", None)
-            if indices is None or len(np.asarray(indices)) != len(y_res):
-                # Fall back to the quantile-bin decode when the sampler does
-                # not expose sample_indices_ (defensive; the current
-                # imbalanced-learn RandomOverSampler always sets it).
-                return _decode_continuous_y(y_res, y_original, y_fit, bin_mids)
-            return np.asarray(y_original, dtype=float)[np.asarray(indices)]
-        y_arr = np.asarray(y_res)
-        if len(y_arr) < len(y_original):
-            raise ValueError(
-                "The resampled target vector is shorter than the original "
-                "target; cannot decode the regression target."
-            )
-        if not np.allclose(
-            y_arr[: len(y_original)],
-            np.asarray(y_original, dtype=float),
-            equal_nan=True,
-        ):
-            raise ValueError(
-                "The resampled target vector does not start with the original "
-                "rows; cannot safely decode the regression target."
-            )
-        return np.asarray(y_arr, dtype=float)
+        """Restore real regression targets after resampling (see ``targets``)."""
+        return _decode_regression_y(y_res, y_original, y_fit, bin_mids, sampler)
 
     def oversample(self, data: pd.DataFrame, target: str | None = None) -> pd.DataFrame:
         """Increase the sample as a DataFrame while preserving metadata.

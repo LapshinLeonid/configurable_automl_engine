@@ -2,11 +2,14 @@
 
 Holds the quantile binning that turns a numeric target into pseudo-classes
 for imbalanced-learn (``_bin_regression_target`` and its helpers), the
-decoding of the binned target after resampling (``_decode_continuous_y``)
-and the ``_BinnedTarget`` record. The module must not import the other
-oversampling modules.
+per-class row counts of the sampling strategy (``_sampling_strategy``), the
+decoding of the resampled target (``_decode_regression_y`` and the legacy
+quantile-bin decode ``_decode_continuous_y``) and the ``_BinnedTarget``
+record. The module must not import the other oversampling modules.
 """
 
+from collections import Counter
+from math import ceil
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -232,3 +235,107 @@ class _BinnedTarget(NamedTuple):
     is_regression: bool
     y_fit: pd.Series
     bin_mids: dict[int, float]
+
+
+def _decode_regression_y(
+    y_res: Any,
+    y_original: pd.Series,
+    y_fit: pd.Series,
+    bin_mids: dict[int, float],
+    sampler: Any,
+) -> np.ndarray:
+    """Restore real regression targets after resampling.
+
+    * ``random``: every row (original or duplicated) gets the real
+      target of its source row, looked up through
+      ``RandomOverSampler.sample_indices_``.
+    * ``smote``/``adasyn`` (regression path): the synthetic rows already
+      carry interpolated real values; original rows keep theirs.
+
+    Original rows are verified to stay in front (the current behavior of
+    the imbalanced-learn samplers); any deviation fails loudly.
+
+    Args:
+        y_res: The resampled target vector (real values for the engine
+            generators, bin codes for ``random``).
+        y_original (pd.Series): The original target vector.
+        y_fit (pd.Series): The bin codes of the original target.
+        bin_mids (dict[int, float]): Per-bin representative values (only
+            used by the legacy decode path).
+        sampler: The fitted ``RandomOverSampler`` (``None`` for the
+            engine generators).
+
+    Returns:
+        np.ndarray: The regression target vector for the resampled rows.
+    """
+    if sampler is not None:
+        indices = getattr(sampler, "sample_indices_", None)
+        if indices is None or len(np.asarray(indices)) != len(y_res):
+            # Fall back to the quantile-bin decode when the sampler does
+            # not expose sample_indices_ (defensive; the current
+            # imbalanced-learn RandomOverSampler always sets it).
+            return _decode_continuous_y(y_res, y_original, y_fit, bin_mids)
+        return np.asarray(y_original, dtype=float)[np.asarray(indices)]
+    y_arr = np.asarray(y_res)
+    if len(y_arr) < len(y_original):
+        raise ValueError(
+            "The resampled target vector is shorter than the original "
+            "target; cannot decode the regression target."
+        )
+    if not np.allclose(
+        y_arr[: len(y_original)],
+        np.asarray(y_original, dtype=float),
+        equal_nan=True,
+    ):
+        raise ValueError(
+            "The resampled target vector does not start with the original "
+            "rows; cannot safely decode the regression target."
+        )
+    return np.asarray(y_arr, dtype=float)
+
+
+def _sampling_strategy(
+    y: pd.Series, multiplier: float, *, balance: bool, skip_missing_code: bool = False
+) -> dict[Any, int]:
+    """Compute the target number of instances for each class.
+
+    For a classification target (or the pseudo-classes of a binned
+    regression target) the values are the *final* per-class row counts;
+    the overall result size is therefore approximately
+    ``N * multiplier`` (exact for ``balance=False``, where each class is
+    scaled independently). For a binned regression target, classes that
+    end up smaller than ``ceil(count * multiplier)`` (e.g. singleton
+    bins that cannot be synthesized) are dropped from the strategy by
+    the caller and pass through unchanged, so the final size may be
+    smaller than ``N * multiplier`` — this is an intentional
+    "balance-like" behavior, not a bug.
+
+    Args:
+        y (pd.Series): The target variable vector.
+        multiplier (float): The scaling factor.
+        balance (bool): Whether to bring all classes up to the majority class
+            size (``DataOversampler.balance``).
+        skip_missing_code (bool): Whether to exclude the pseudo-class
+            ``-1`` (rows with a missing target in the regression mode)
+            from the strategy — it must never be rebalanced or scaled
+            (pass-through only).
+    Returns:
+        Dict[Any, int]: A dictionary where keys are class labels
+            and values are the final number of rows.
+    """
+    counts = Counter(y)
+    # The pseudo-class "-1" is reserved for rows with a missing target in
+    # the regression mode: imbalanced-learn treats it as a real class, so
+    # it must never be rebalanced or scaled (pass-through only).
+    if skip_missing_code and -1 in counts:
+        del counts[-1]
+    # If balancing is enabled, bring all classes up to the majority class,
+    # multiplied by the factor. Otherwise scale each class proportionally.
+    if balance:
+        # Base is the largest class
+        base_size = max(counts.values())
+        return {cls: ceil(base_size * multiplier) for cls in counts}
+
+    # Important: imbalanced-learn expects the final number of instances
+    # (Total), not the delta
+    return {cls: ceil(cnt * multiplier) for cls, cnt in counts.items()}
