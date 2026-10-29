@@ -1047,6 +1047,45 @@ def test_force_shutdown_reports_exit_codes_of_exited_workers():
     assert force_shutdown(_FakePool([worker]), grace_period=1.0) == {42: -9}
 
 
+def test_force_shutdown_leaves_reaping_to_the_management_thread():
+    """With a management thread, force_shutdown never polls the workers itself.
+
+    The thread joins the terminated workers; a second reader of a forkserver
+    worker's exit status would get EOF and report exit code 255 (a race seen
+    on CI with Python 3.11).
+    """
+    import threading
+
+    worker = MagicMock()
+    worker.pid = 4242
+    worker.exitcode = 3
+    worker.is_alive.side_effect = AssertionError("polled concurrently")
+    worker.join.side_effect = AssertionError("joined concurrently")
+    pool = _FakePool([worker])
+    manager = threading.Thread(target=lambda: None)
+    manager.start()
+    pool._executor_manager_thread = manager
+    assert force_shutdown(pool, grace_period=1.0) == {4242: 3}
+    worker.kill.assert_not_called()
+
+
+def test_force_shutdown_kills_when_the_management_thread_is_stuck():
+    import threading
+
+    release = threading.Event()
+    worker = MagicMock()
+    worker.pid = 7
+    worker.exitcode = -9
+    worker.kill.side_effect = lambda: release.set()
+    pool = _FakePool([worker])
+    manager = threading.Thread(target=release.wait)
+    manager.start()
+    pool._executor_manager_thread = manager
+    assert force_shutdown(pool, grace_period=0.05) == {7: -9}
+    worker.kill.assert_called_once()
+    manager.join(1.0)
+
+
 def test_force_shutdown_of_an_already_shut_down_pool():
     pool = _FakePool([])
     pool._processes = None

@@ -4,7 +4,7 @@ The supervisor needs two things the public executor API does not give on
 every supported Python version: the worker processes (to read the exit code
 of a crashed worker) and a forced shutdown that does not wait for a hung
 worker. Both live here. The only access to private executor internals is
-``_worker_processes``; on Python 3.14+ the forced shutdown uses the public
+``_pool_internals``; on Python 3.14+ the forced shutdown uses the public
 ``ProcessPoolExecutor.terminate_workers()`` / ``kill_workers()``.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
@@ -96,16 +97,20 @@ def create_process_pool(
     )
 
 
-def _worker_processes(pool: ProcessPoolExecutor) -> list[BaseProcess]:
-    """The worker processes of the pool (empty once the pool is shut down).
+def _pool_internals(
+    pool: ProcessPoolExecutor,
+) -> tuple[list[BaseProcess], threading.Thread | None]:
+    """The worker processes and the management thread of the pool.
 
-    This is the only function that reads a private attribute of the
+    This is the only function that reads private attributes of the
     executor: ``ProcessPoolExecutor`` keeps its workers in ``_processes``
-    (a ``{pid: Process}`` dict, ``None`` after ``shutdown``) on every
-    supported Python version, and there is no public accessor.
+    (a ``{pid: Process}`` dict) and its management thread in
+    ``_executor_manager_thread`` on every supported Python version; both are
+    ``None`` after ``shutdown``, and there is no public accessor.
     """
     processes = getattr(pool, "_processes", None)
-    return list(processes.values()) if processes else []
+    manager = getattr(pool, "_executor_manager_thread", None)
+    return (list(processes.values()) if processes else []), manager
 
 
 def force_shutdown(
@@ -115,6 +120,12 @@ def force_shutdown(
 
     The workers get SIGTERM at once (a hung worker never exits on its own);
     the ones still alive after ``grace_period`` seconds get SIGKILL.
+
+    The workers are reaped by the pool's management thread, and this
+    function only waits for that thread: polling the processes from here as
+    well would race with it — under ``forkserver`` the exit status is read
+    once from a pipe, and the second reader gets EOF, which Python reports as
+    exit code 255 instead of the real one.
 
     Args:
         pool (ProcessPoolExecutor): The pool to stop.
@@ -126,7 +137,7 @@ def force_shutdown(
         keeps its own exit code; the workers this function terminated report
         ``-SIGTERM`` (or ``-SIGKILL``).
     """
-    workers = _worker_processes(pool)
+    workers, manager = _pool_internals(pool)
     public: Any = pool  # terminate_workers / kill_workers: Python 3.14+
     if _HAS_PUBLIC_TERMINATE and grace_period <= 0:
         public.kill_workers()
@@ -140,6 +151,28 @@ def force_shutdown(
         pool.shutdown(wait=False, cancel_futures=True)
         for w in workers:
             _signal(w, "terminate")
+    if manager is not None:
+        _await_manager(manager, workers, grace_period)
+    else:
+        _await_workers(workers, grace_period)
+    return {w.pid: w.exitcode for w in workers if w.pid is not None}
+
+
+def _await_manager(
+    manager: threading.Thread, workers: list[BaseProcess], grace_period: float
+) -> None:
+    """Wait for the management thread, which joins the terminated workers."""
+    manager.join(max(grace_period, 0.0))
+    if manager.is_alive():
+        # It is still joining a worker that ignored SIGTERM.
+        logger.error("A worker resisted SIGTERM; sending SIGKILL")
+        for w in workers:
+            _signal(w, "kill")
+        manager.join(1.0)
+
+
+def _await_workers(workers: list[BaseProcess], grace_period: float) -> None:
+    """Reap the workers directly (a pool without a management thread)."""
     stop_time = time.monotonic() + grace_period
     while time.monotonic() < stop_time and any(w.is_alive() for w in workers):
         time.sleep(_EXIT_POLL)
@@ -147,12 +180,8 @@ def force_shutdown(
         if w.is_alive():
             logger.error(f"Worker {w.pid} resisted SIGTERM; sending SIGKILL")
             _signal(w, "kill")
-    exit_codes: dict[int, int | None] = {}
     for w in workers:
         w.join(timeout=1.0)
-        if w.pid is not None:
-            exit_codes[w.pid] = w.exitcode
-    return exit_codes
 
 
 def _signal(worker: BaseProcess, action: str) -> None:
