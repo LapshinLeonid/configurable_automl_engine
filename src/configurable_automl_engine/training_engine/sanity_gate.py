@@ -397,6 +397,26 @@ def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> An
     return X2
 
 
+class _PermutationAbort(Exception):
+    """Ends the permutation check early with a circuit-C reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass
+class _CircuitsOutcome:
+    """Metrics and messages collected by ``ModelSanityGate._run_circuits``."""
+
+    diversity_ratio: float = float("nan")
+    unique_ratio: float = float("nan")
+    dead_features_count: int = 0
+    generalization_gap: float = float("nan")
+    reasons: list[str] = field(default_factory=list)
+    soft_warnings: list[str] = field(default_factory=list)
+
+
 class ModelSanityGate:
     """Audit a model for degeneracy through four optional circuits.
 
@@ -588,7 +608,7 @@ class ModelSanityGate:
     # ──────────────────────────────────────────────────────────────────────── #
     #  Public API
     # ──────────────────────────────────────────────────────────────────────── #
-    def check(  # noqa: C901
+    def check(
         self,
         *,
         y: Any,
@@ -621,6 +641,53 @@ class ModelSanityGate:
             ValueError: when the input contract is violated (None arguments,
                 length mismatch between y/y_pred_oof/X).
         """
+        y_arr, oof_arr = self._validate_check_inputs(y, y_pred_oof, X)
+        outcome = self._run_circuits(
+            y_arr=y_arr, oof_arr=oof_arr, y_pred_full=y_pred_full, X=X, model=model
+        )
+        reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
+
+        is_valid = not reasons
+        if self.warn_only:
+            is_valid = True
+        severity = _compute_severity(reasons, soft_warnings, self.warn_only)
+
+        # Candidate attribution: when a candidate name is supplied, every audit
+        # log line is prefixed with it so that soft warnings (e.g. about dead
+        # features) are unambiguously tied to the candidate they concern.
+        prefix = f"{candidate_name}: " if candidate_name else ""
+        self._log_audit(prefix, reasons, soft_warnings, is_valid)
+
+        return SanityCheckResult(
+            is_valid=is_valid,
+            reasons=reasons,
+            soft_warnings=soft_warnings,
+            diversity_ratio=outcome.diversity_ratio,
+            unique_ratio=outcome.unique_ratio,
+            dead_features_count=outcome.dead_features_count,
+            generalization_gap=outcome.generalization_gap,
+            severity=severity,
+        )
+
+    @staticmethod
+    def _validate_check_inputs(
+        y: Any, y_pred_oof: Any, X: Any | None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Validate the ``check()`` inputs and convert them to float vectors.
+
+        Args:
+            y: the true target.
+            y_pred_oof: OOF predictions aligned with ``y``.
+            X: the feature matrix (or None).
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: ``y`` and ``y_pred_oof`` as 1-D
+                float vectors.
+
+        Raises:
+            ValueError: when the input contract is violated (None arguments,
+                length mismatch between y/y_pred_oof/X).
+        """
         y_arr = _to_float_vector(y, "y")
         oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
         if y_arr.shape != oof_arr.shape:
@@ -641,20 +708,39 @@ class ModelSanityGate:
                     f"X and y must have the same number of rows "
                     f"(got {x_len} and {y_arr.shape[0]})"
                 )
+        return y_arr, oof_arr
 
-        reasons: list[str] = []
-        soft_warnings: list[str] = []
-        diversity_ratio = float("nan")
-        unique_ratio = float("nan")
-        dead_features_count = 0
-        generalization_gap = float("nan")
+    def _run_circuits(
+        self,
+        *,
+        y_arr: np.ndarray,
+        oof_arr: np.ndarray,
+        y_pred_full: Any | None,
+        X: Any | None,
+        model: Any,
+    ) -> _CircuitsOutcome:
+        """Run every enabled circuit and collect the metrics and messages.
+
+        Args:
+            y_arr: the target as a float vector.
+            oof_arr: OOF predictions as a float vector.
+            y_pred_full: full-fit predictions (circuit D).
+            X: the feature matrix (circuit C).
+            model: the fitted model (circuit C).
+
+        Returns:
+            _CircuitsOutcome: the four metrics, the reasons and the soft
+                warnings, in circuit order.
+        """
+        outcome = _CircuitsOutcome()
+        reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
         diversity_failed = False
 
         # Shared mask of finite pairs for the prediction-based circuits.
         valid_pairs = np.isfinite(y_arr) & np.isfinite(oof_arr)
 
         if self.check_diversity:
-            diversity_ratio, d_reasons, d_warnings = self._check_diversity(
+            outcome.diversity_ratio, d_reasons, d_warnings = self._check_diversity(
                 y_arr, oof_arr, valid_pairs
             )
             reasons.extend(d_reasons)
@@ -662,25 +748,27 @@ class ModelSanityGate:
             diversity_failed = bool(d_reasons)
 
         if self.check_unique:
-            unique_ratio, u_reasons, u_warnings = self._check_unique(
+            outcome.unique_ratio, u_reasons, u_warnings = self._check_unique(
                 y_arr, oof_arr, valid_pairs
             )
             reasons.extend(u_reasons)
             soft_warnings.extend(u_warnings)
 
         if self.check_dead_features:
-            dead_features_count, c_reasons, c_warnings = self._check_dead_features(
-                model=model,
-                X=X,
-                y=y_arr,
-                diversity_failed=diversity_failed,
+            outcome.dead_features_count, c_reasons, c_warnings = (
+                self._check_dead_features(
+                    model=model,
+                    X=X,
+                    y=y_arr,
+                    diversity_failed=diversity_failed,
+                )
             )
             reasons.extend(c_reasons)
             soft_warnings.extend(c_warnings)
 
         if self.check_generalization_gap:
-            generalization_gap, g_reasons, g_warnings = self._check_generalization_gap(
-                y_arr, oof_arr, y_pred_full
+            outcome.generalization_gap, g_reasons, g_warnings = (
+                self._check_generalization_gap(y_arr, oof_arr, y_pred_full)
             )
             reasons.extend(g_reasons)
             # Routing of circuit D violations: warn mode
@@ -693,17 +781,23 @@ class ModelSanityGate:
                 reasons.extend(g_warnings)
             else:
                 soft_warnings.extend(g_warnings)
+        return outcome
 
-        is_valid = not reasons
-        if self.warn_only:
-            is_valid = True
-        severity = _compute_severity(reasons, soft_warnings, self.warn_only)
+    def _log_audit(
+        self,
+        prefix: str,
+        reasons: list[str],
+        soft_warnings: list[str],
+        is_valid: bool,
+    ) -> None:
+        """Log the audit reasons and soft warnings.
 
-        # Candidate attribution: when a candidate name is supplied, every audit
-        # log line is prefixed with it so that soft warnings (e.g. about dead
-        # features) are unambiguously tied to the candidate they concern.
-        prefix = f"{candidate_name}: " if candidate_name else ""
-
+        Args:
+            prefix: the candidate prefix of every line (may be empty).
+            reasons: disqualification reasons.
+            soft_warnings: soft signals.
+            is_valid: the audit verdict.
+        """
         if reasons:
             logger.info(
                 "%sSanity gate%s: %d reason(s): %s",
@@ -712,44 +806,30 @@ class ModelSanityGate:
                 len(reasons),
                 reasons,
             )
-        if soft_warnings:
-            # Soft warnings (dead features in linear models, "false-dead"
-            # features on correlation, circuit D violations in the warn mode)
-            # are logged at DEBUG/INFO level — they do not disqualify on
-            # their own and must never be raised to WARNING. A deliberate
-            # exception: a suspected target leakage (RMSE_oof ≈ 0) in the
-            # warn mode is logged at the WARNING level — a silent
-            # disqualification would swap the winner and hide the leak, so a
-            # noticeable signal is needed.
-            if is_valid:
-                status = "valid"
-            else:
-                status = "disqualified"
-            logger.info(
-                "%sSanity gate: %s with %d soft warning(s) (non-disqualifying signals)",
-                prefix,
-                status,
-                len(soft_warnings),
-            )
-            for warning in soft_warnings:
-                if (
-                    self.generalization_gap_mode == "warn"
-                    and "possible target leakage" in warning
-                ):
-                    logger.warning("%sSanity gate soft warning: %s", prefix, warning)
-                else:
-                    logger.debug("%sSanity gate soft warning: %s", prefix, warning)
-
-        return SanityCheckResult(
-            is_valid=is_valid,
-            reasons=reasons,
-            soft_warnings=soft_warnings,
-            diversity_ratio=diversity_ratio,
-            unique_ratio=unique_ratio,
-            dead_features_count=dead_features_count,
-            generalization_gap=generalization_gap,
-            severity=severity,
+        if not soft_warnings:
+            return
+        # Soft warnings (dead features in linear models, "false-dead"
+        # features on correlation, circuit D violations in the warn mode)
+        # are logged at DEBUG/INFO level — they do not disqualify on
+        # their own and must never be raised to WARNING. A deliberate
+        # exception: a suspected target leakage (RMSE_oof ≈ 0) in the
+        # warn mode is logged at the WARNING level — a silent
+        # disqualification would swap the winner and hide the leak, so a
+        # noticeable signal is needed.
+        logger.info(
+            "%sSanity gate: %s with %d soft warning(s) (non-disqualifying signals)",
+            prefix,
+            "valid" if is_valid else "disqualified",
+            len(soft_warnings),
         )
+        for warning in soft_warnings:
+            if (
+                self.generalization_gap_mode == "warn"
+                and "possible target leakage" in warning
+            ):
+                logger.warning("%sSanity gate soft warning: %s", prefix, warning)
+            else:
+                logger.debug("%sSanity gate soft warning: %s", prefix, warning)
 
     # ──────────────────────────────────────────────────────────────────────── #
     #  Circuit A — Diversity Ratio (on OOF predictions)
@@ -1033,7 +1113,7 @@ class ModelSanityGate:
                 [],
             )
 
-    def _permutation_impl(  # noqa: C901
+    def _permutation_impl(
         self,
         *,
         model: Any,
@@ -1041,33 +1121,63 @@ class ModelSanityGate:
         y: np.ndarray,
         diversity_failed: bool,
     ) -> tuple[int, list[str], list[str]]:
-        """Core permutation check; errors are caught by the caller wrapper."""
-        rng = np.random.default_rng(self.permutation_seed)
-        n_rows = y.shape[0]
+        """Core permutation check; errors are caught by the caller wrapper.
 
+        All random draws come from one generator seeded with
+        ``permutation_seed``, in this order: the row subsample, the column
+        subsample, then the permutations column by column and repeat by
+        repeat. A step that cannot continue raises :class:`_PermutationAbort`
+        with its circuit-C reason.
+        """
+        rng = np.random.default_rng(self.permutation_seed)
+        try:
+            X_sub, y_sub, col_idx = self._permutation_subsample(X, y, rng)
+            base_valid, base_mse = self._base_prediction(model, X_sub, y_sub)
+            dead_count = 0
+            for col in col_idx:
+                if self._is_dead_column(
+                    model, X_sub, y_sub, int(col), rng, base_valid, base_mse
+                ):
+                    dead_count += 1
+        except _PermutationAbort as abort:
+            return 0, [abort.reason], []
+        return self._dead_features_verdict(
+            dead_count, int(col_idx.size), diversity_failed
+        )
+
+    def _permutation_subsample(
+        self, X: Any, y: np.ndarray, rng: np.random.Generator
+    ) -> tuple[Any, np.ndarray, np.ndarray]:
+        """Draw the row subsample, then the (sorted) column subsample.
+
+        Args:
+            X: the feature matrix.
+            y: the target.
+            rng: the permutation generator.
+
+        Returns:
+            tuple[Any, np.ndarray, np.ndarray]: (X_sub, y_sub, col_idx).
+
+        Raises:
+            _PermutationAbort: when the rows cannot be selected or ``X`` is
+                not a 2-D matrix with at least one column.
+        """
+        n_rows = y.shape[0]
         row_idx = np.arange(n_rows)
         if n_rows > self.permutation_max_rows:
             row_idx = rng.choice(n_rows, size=self.permutation_max_rows, replace=False)
         try:
             X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
-        except Exception as err:  # noqa: BLE001 — convert into a reason
-            return (
-                0,
-                [(f"Circuit C (dead features): row subsampling of X failed: {err}")],
-                [],
-            )
+        except Exception as err:  # converted into a reason by the caller
+            raise _PermutationAbort(
+                f"Circuit C (dead features): row subsampling of X failed: {err}"
+            ) from err
         y_sub = y[row_idx]
 
         if X_sub.ndim != 2 or X_sub.shape[1] == 0:
-            return (
-                0,
-                [
-                    (
-                        "Circuit C (dead features): X must be a 2-D matrix with at "
-                        "least one column"
-                    )
-                ],
-                [],
+            raise _PermutationAbort(
+                "Circuit C (dead features): X must be a 2-D matrix with at "
+                "least one column"
             )
         n_cols = X_sub.shape[1]
         col_idx = np.arange(n_cols)
@@ -1075,130 +1185,182 @@ class ModelSanityGate:
             col_idx = rng.choice(
                 n_cols, size=self.permutation_max_features, replace=False
             )
-        col_idx = np.sort(col_idx)
+        return X_sub, y_sub, np.sort(col_idx)
 
+    @staticmethod
+    def _base_prediction(
+        model: Any, X_sub: Any, y_sub: np.ndarray
+    ) -> tuple[np.ndarray, float]:
+        """Predict on the subsample once (cached base for every column).
+
+        Args:
+            model: the fitted model.
+            X_sub: the subsampled features.
+            y_sub: the subsampled target.
+
+        Returns:
+            tuple[np.ndarray, float]: the fixed mask of valid
+                (y, prediction) pairs and the base MSE on it.
+
+        Raises:
+            _PermutationAbort: when the prediction fails, has the wrong
+                length or has no finite pair with ``y``.
+        """
         try:
             base_pred = np.asarray(model.predict(X_sub), dtype=float).reshape(-1)
-        except Exception as err:  # noqa: BLE001 — convert into a reason
-            return (
-                0,
-                [
-                    (
-                        f"Circuit C (dead features): prediction failed on subsampled "
-                        f"X: {err}"
-                    )
-                ],
-                [],
-            )
+        except Exception as err:  # converted into a reason by the caller
+            raise _PermutationAbort(
+                f"Circuit C (dead features): prediction failed on subsampled X: {err}"
+            ) from err
 
         if base_pred.shape != y_sub.shape:
-            return (
-                0,
-                [
-                    (
-                        f"Circuit C (dead features): prediction returned "
-                        f"{base_pred.shape[0]} values for {y_sub.shape[0]} rows"
-                    )
-                ],
-                [],
+            raise _PermutationAbort(
+                f"Circuit C (dead features): prediction returned "
+                f"{base_pred.shape[0]} values for {y_sub.shape[0]} rows"
             )
         base_valid = np.isfinite(y_sub) & np.isfinite(base_pred)
         if not base_valid.any():
-            return (
-                0,
-                [
-                    (
-                        "Circuit C (dead features): no finite (y, prediction) pairs "
-                        "on the permutation subsample"
-                    )
-                ],
-                [],
+            raise _PermutationAbort(
+                "Circuit C (dead features): no finite (y, prediction) pairs "
+                "on the permutation subsample"
             )
         base_mse = float(mean_squared_error(y_sub[base_valid], base_pred[base_valid]))
+        return base_valid, base_mse
 
-        dead_count = 0
-        for col in col_idx:
-            deltas: list[float] = []
-            for _ in range(self.permutation_repeats):
-                try:
-                    X_perm = _copy_with_permuted_column(X_sub, col, rng)
-                except Exception as err:  # noqa: BLE001 — convert into a reason
-                    return (
-                        0,
-                        [
-                            (
-                                f"Circuit C (dead features): column permutation "
-                                f"failed (column {int(col)}): {err}"
-                            )
-                        ],
-                        [],
-                    )
-                try:
-                    perm_pred = np.asarray(model.predict(X_perm), dtype=float).reshape(
-                        -1
-                    )
-                except Exception as err:  # noqa: BLE001 — convert into a reason
-                    return (
-                        0,
-                        [
-                            (
-                                f"Circuit C (dead features): prediction failed on "
-                                f"permuted X (column {int(col)}): {err}"
-                            )
-                        ],
-                        [],
-                    )
-                # Fixed valid-pair mask (from the base predictions): every
-                # repeat of the same column is evaluated on the same rows, so
-                # the mean ΔMSE is not biased by varying masks. A repeat that
-                # returns non-finite values for a base-valid row is skipped
-                # rather than silently switching to a different row set.
-                if perm_pred.shape != y_sub.shape or not np.all(
-                    np.isfinite(perm_pred[base_valid])
-                ):
-                    continue
-                deltas.append(
-                    float(mean_squared_error(y_sub[base_valid], perm_pred[base_valid]))
-                    - base_mse
-                )
-            if not deltas:
-                continue
-            mean_delta = float(np.mean(deltas))
-            # Relative change of MSE; the _MSE_EPS stabilizer keeps the ratio
-            # well-defined for a perfect in-sample fit (base_mse == 0): in that
-            # case only an exactly unchanged prediction counts as "dead".
-            rel_change = abs(mean_delta) / (abs(base_mse) + _MSE_EPS)
-            if rel_change < self.permutation_tolerance:
-                dead_count += 1
+    def _is_dead_column(
+        self,
+        model: Any,
+        X_sub: Any,
+        y_sub: np.ndarray,
+        col: int,
+        rng: np.random.Generator,
+        base_valid: np.ndarray,
+        base_mse: float,
+    ) -> bool:
+        """Whether permuting column ``col`` leaves the MSE (almost) unchanged.
 
-        n_checked = int(col_idx.size)
+        Args:
+            model, X_sub, y_sub: the fitted model and the subsample.
+            col: the column index.
+            rng: the permutation generator.
+            base_valid, base_mse: the fixed mask of valid pairs and the base
+                MSE on it.
+
+        Returns:
+            bool: True when the relative ΔMSE (mean over the usable repeats)
+                is below ``permutation_tolerance``; False when no repeat is
+                usable.
+        """
+        deltas: list[float] = []
+        for _ in range(self.permutation_repeats):
+            delta = self._column_delta(
+                model, X_sub, y_sub, col, rng, base_valid, base_mse
+            )
+            if delta is not None:
+                deltas.append(delta)
+        if not deltas:
+            return False
+        mean_delta = float(np.mean(deltas))
+        # Relative change of MSE; the _MSE_EPS stabilizer keeps the ratio
+        # well-defined for a perfect in-sample fit (base_mse == 0): in that
+        # case only an exactly unchanged prediction counts as "dead".
+        rel_change = abs(mean_delta) / (abs(base_mse) + _MSE_EPS)
+        return bool(rel_change < self.permutation_tolerance)
+
+    @staticmethod
+    def _column_delta(
+        model: Any,
+        X_sub: Any,
+        y_sub: np.ndarray,
+        col: int,
+        rng: np.random.Generator,
+        base_valid: np.ndarray,
+        base_mse: float,
+    ) -> float | None:
+        """ΔMSE of one permutation repeat of column ``col``.
+
+        Args:
+            model, X_sub, y_sub, col, rng, base_valid, base_mse: as in
+                :meth:`_is_dead_column`.
+
+        Returns:
+            float | None: ``MSE_permuted - base_mse``, or None when the
+                repeat is skipped (wrong length or non-finite values on a
+                base-valid row).
+
+        Raises:
+            _PermutationAbort: when the permutation or the prediction fails.
+        """
+        try:
+            X_perm = _copy_with_permuted_column(X_sub, col, rng)
+        except Exception as err:  # converted into a reason by the caller
+            raise _PermutationAbort(
+                f"Circuit C (dead features): column permutation "
+                f"failed (column {int(col)}): {err}"
+            ) from err
+        try:
+            perm_pred = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
+        except Exception as err:  # converted into a reason by the caller
+            raise _PermutationAbort(
+                f"Circuit C (dead features): prediction failed on "
+                f"permuted X (column {int(col)}): {err}"
+            ) from err
+        # Fixed valid-pair mask (from the base predictions): every
+        # repeat of the same column is evaluated on the same rows, so
+        # the mean ΔMSE is not biased by varying masks. A repeat that
+        # returns non-finite values for a base-valid row is skipped
+        # rather than silently switching to a different row set.
+        if perm_pred.shape != y_sub.shape or not np.all(
+            np.isfinite(perm_pred[base_valid])
+        ):
+            return None
+        return (
+            float(mean_squared_error(y_sub[base_valid], perm_pred[base_valid]))
+            - base_mse
+        )
+
+    def _dead_features_verdict(
+        self, dead_count: int, n_checked: int, diversity_failed: bool
+    ) -> tuple[int, list[str], list[str]]:
+        """Turn the dead-column count into the circuit-C result.
+
+        Args:
+            dead_count: the number of dead columns.
+            n_checked: the number of checked columns.
+            diversity_failed: whether circuit A failed (combination rule).
+
+        Returns:
+            tuple[int, list[str], list[str]]: (dead_features_count, reasons,
+                soft_warnings).
+        """
         reasons: list[str] = []
         warnings: list[str] = []
         dead_ratio = dead_count / n_checked if n_checked else 0.0
-        if _fails_above(dead_ratio, self.max_dead_feature_ratio):
-            warnings.append(
-                f"Circuit C (dead features): dead-feature ratio="
-                f"{dead_ratio:.3f} > max_dead_feature_ratio="
-                f"{self.max_dead_feature_ratio:.3f} on permutation check "
-                f"({dead_count}/{n_checked} checked columns; note: correlated "
-                f"features may produce 'false-dead' results)"
-            )
-            if self.dead_features_require_low_diversity:
-                if diversity_failed:
-                    reasons.append(
-                        "Circuit C (dead features): combination — high "
-                        "dead-feature ratio AND prediction diversity below its "
-                        "threshold"
-                    )
-                elif not self.check_diversity:
-                    # The combination cannot be computed: circuit A is
-                    # disabled — explicitly report that the rule was not
-                    # applied (not silently).
-                    warnings.append(
-                        "Circuit C (dead features): combination rule inactive — "
-                        "check_diversity=False (dead-feature share is a signal "
-                        "only)"
-                    )
+        if not _fails_above(dead_ratio, self.max_dead_feature_ratio):
+            return dead_count, reasons, warnings
+        warnings.append(
+            f"Circuit C (dead features): dead-feature ratio="
+            f"{dead_ratio:.3f} > max_dead_feature_ratio="
+            f"{self.max_dead_feature_ratio:.3f} on permutation check "
+            f"({dead_count}/{n_checked} checked columns; note: correlated "
+            f"features may produce 'false-dead' results)"
+        )
+        if self.dead_features_require_low_diversity:
+            if diversity_failed:
+                reasons.append(
+                    "Circuit C (dead features): combination — high "
+                    "dead-feature ratio AND prediction diversity below its "
+                    "threshold"
+                )
+            elif not self.check_diversity:
+                # The combination cannot be computed: circuit A is
+                # disabled — explicitly report that the rule was not
+                # applied (not silently).
+                warnings.append(
+                    "Circuit C (dead features): combination rule inactive — "
+                    "check_diversity=False (dead-feature share is a signal "
+                    "only)"
+                )
         return dead_count, reasons, warnings
 
     # ──────────────────────────────────────────────────────────────────────── #

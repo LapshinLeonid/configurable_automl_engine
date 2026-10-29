@@ -44,8 +44,6 @@ MAX_CLASS_LINES = {
 #: (module path, function name).
 ALLOWED_C901_NOQA = {
     ("oversampling.py", "_fit_resample"),
-    ("training_engine/sanity_gate.py", "_permutation_impl"),
-    ("training_engine/sanity_gate.py", "check"),
 }
 
 
