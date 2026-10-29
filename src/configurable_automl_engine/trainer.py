@@ -54,30 +54,19 @@ from configurable_automl_engine.common.definitions import (
     ValidationStrategy,
 )
 from configurable_automl_engine.common.errors import TrainingError
-from configurable_automl_engine.common.log_setup import setup_logging
-from configurable_automl_engine.common.metrics import (
-    is_error_metric,
-)
 from configurable_automl_engine.common.serialization_utils import (
-    load_artifact,
-    resolve_load_formats,
     save_artifact,
 )
 from configurable_automl_engine.common.settings import (
     InputPolicies,
     OversamplingSettings,
 )
-from configurable_automl_engine.common.shared_frame import SharedDataFrame
-from configurable_automl_engine.common.validation_utils import (
-    apply_inf_policy,
-    expand_datetime_columns,
-)
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
-    FeatureSelector,
 )
-from configurable_automl_engine.isotonic import IsotonicDataTransformer
-from configurable_automl_engine.oversampling import DataOversampler
+
+# Re-exported: the documented import path of the isotonic data adapter.
+from configurable_automl_engine.isotonic import IsotonicDataTransformer  # noqa: F401
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     PreprocessingPreset,
@@ -85,26 +74,22 @@ from configurable_automl_engine.preprocessing_presets import (
 
 from .models import (
     create_model,
-    resolve_algorithm_name,
 )
 from .trainer_artifact import (
     _collect_artifact_metadata,
-    _warn_on_version_mismatch,
-    check_artifact_format,
+    load_trainer_artifact,
 )
 from .trainer_data import (
-    _align_predict_columns,
-    _align_predict_shared_dataframe,
-    _isotonic_n_numeric,
-    _isotonic_n_total_estimate,
-    _resolve_isotonic_feature_index,
+    assemble_pipeline_steps,
     build_trainer_preprocessor,
     load_training_data,
     log_preprocessed_matrix,
     prepare_features,
+    prepare_predict_input,
 )
 from .trainer_feature_selection import _resolve_feature_selection_active
 from .trainer_params import build_trainer_settings as _build_settings
+from .trainer_quick import run_train_model
 from .trainer_scoring import StepsFactory, score_on_validation_splits
 from .trainer_state import (
     FeatureSelectionResult,
@@ -548,90 +533,16 @@ class ModelTrainer:
         feature_selection_active: bool,
         X_for_estimate: Any = None,
     ) -> list[tuple[str, Any]]:
-        """Assemble the list of training pipeline steps.
-
-        Strict step order:
-        ``preprocessor → [isotonic_selector] → [feature_selector] → [oversampler] → model``.
-
-        For ``isotonic_regression`` a data adapter step
-        (:class:`IsotonicDataTransformer`) is inserted right after the
-        preprocessor: the algorithm is strictly univariate and accepts exactly
-        one feature, so even a multi-column preprocessed matrix is reduced to
-        the single numerical column selected via the ``feature_index``
-        hyperparameter. The adapter receives the number of numerical features
-        (``n_numeric``) to resolve the index against the numerical block of
-        the preprocessed matrix and the estimated total feature count to
-        validate against the actual preprocessor output (a disagreement
-        raises ``ValueError`` — non-fatal for the HPO circuit breaker).
-        The feature selector is inserted strictly between the preprocessor and
-        the oversampler so that synthetic rows are generated only for
-        informative features.
-
-        Args:
-            preprocessor: Feature preprocessing ``ColumnTransformer``.
-            base_model: Final regressor.
-            feature_selection_active: Flag enabling the feature selection step.
-            X_for_estimate: The feature matrix used to estimate the total
-                post-preprocessing feature count for the isotonic guard
-                (``None`` — the count is disabled).
-
-        Returns:
-            A list of ``(name, transformer)`` tuples for building the Pipeline.
-        """
-        settings = self.settings
-        steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
-        if resolve_algorithm_name(settings.algorithm) == "isotonic_regression":
-            steps.append(
-                (
-                    "isotonic_selector",
-                    IsotonicDataTransformer(
-                        feature_index=_resolve_isotonic_feature_index(
-                            settings.hyperparams
-                        ),
-                        n_numeric=_isotonic_n_numeric(self.numerical_features),
-                        n_total=(
-                            _isotonic_n_total_estimate(
-                                X_for_estimate,
-                                categorical_features=self.categorical_features,
-                                numerical_features=self.numerical_features,
-                                encoding=settings.encoding,
-                            )
-                            if X_for_estimate is not None
-                            else None
-                        ),
-                    ),
-                )
-            )
-        if feature_selection_active:
-            cfg = settings.feature_selection_cfg
-            selector = FeatureSelector(
-                method=cfg.method.value,
-                percentile=cfg.percentile,
-                min_features=cfg.min_features,
-                variance_threshold=cfg.variance_threshold,
-                n_estimators=cfg.n_estimators,
-                # Fixed fallback seed for selection (consistent with the tuner
-                # and the auto-check): with random_state=None in the main
-                # training, the selector must still use the fixed seed 42,
-                # otherwise selection is not reproducible between fit() calls
-                # and diverges from the HPO phase.
-                random_state=(
-                    settings.random_state if settings.random_state is not None else 42
-                ),
-            )
-            steps.append(("feature_selector", selector))
-        oversampling = settings.oversampling
-        if oversampling.enable:
-            oversampler = DataOversampler(
-                algorithm=oversampling.algorithm,
-                multiplier=oversampling.multiplier,
-                target_bins=oversampling.target_bins,
-                add_noise=oversampling.add_noise,
-                noise_level=float(oversampling.noise_level),
-            )
-            steps.append(("oversampler", oversampler))
-        steps.append(("model", base_model))
-        return steps
+        """Assemble the training pipeline steps (see ``assemble_pipeline_steps``)."""
+        return assemble_pipeline_steps(
+            self.settings,
+            preprocessor,
+            base_model,
+            categorical_features=self.categorical_features,
+            numerical_features=self.numerical_features,
+            feature_selection_active=feature_selection_active,
+            X_for_estimate=X_for_estimate,
+        )
 
     def _steps_factory(self, preprocessor: Any, base_model: Any) -> StepsFactory:
         """Build fresh pipeline steps from clones (the validation folds and
@@ -912,31 +823,12 @@ class ModelTrainer:
                     " Perform fit() first."
                 )
             try:
-                # Align columns for inputs with names; for the rest, avoid
-                # conversion if X is already an array or DataFrame
-                X_input: Any
-                if isinstance(X, pd.DataFrame):
-                    X_input = _align_predict_columns(
-                        self.feature_names,
-                        expand_datetime_columns(X, self.datetime_expansion_),
-                    )
-                elif isinstance(X, SharedDataFrame):
-                    X_input = _align_predict_shared_dataframe(self.feature_names, X)
-                elif isinstance(X, (pd.Series, np.ndarray)):
-                    X_input = X
-                else:
-                    X_input = np.asarray(X)
-
-                # The same ±inf policy as in fit(): without it a frame that
-                # trained fine (inf → NaN) would fail at prediction time with
-                # an sklearn "Input X contains infinity" error.
-                if isinstance(X_input, (pd.DataFrame, np.ndarray)):
-                    try:
-                        X_input = apply_inf_policy(
-                            X_input, self.settings.policies.inf_policy
-                        )
-                    except ValueError as err:
-                        raise TrainingError(str(err)) from err
+                X_input = prepare_predict_input(
+                    X,
+                    self.feature_names,
+                    self.datetime_expansion_,
+                    self.settings.policies.inf_policy,
+                )
 
                 preds = self.pipeline.predict(X_input)
                 return np.asarray(preds)
@@ -1010,36 +902,7 @@ class ModelTrainer:
                 ``ModelTrainer`` instance, or was saved in another artifact
                 format version.
         """
-        path_obj = Path(path)
-
-        formats = resolve_load_formats(path_obj, fmt)
-
-        obj: Any = None
-        last_error: Exception | None = None
-        for candidate in formats:
-            try:
-                obj = load_artifact(path=path_obj, fmt=candidate)
-                break
-            except FileNotFoundError:
-                raise TrainingError(f"File not found: {path}")
-            except Exception as e:  # noqa: BLE001
-                last_error = e
-        if obj is None:
-            raise TrainingError(f"Error loading artifact: {last_error}") from last_error
-
-        # Verify the type of the loaded object
-        if not isinstance(obj, cls):
-            raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
-
-        # The artifact format version is checked before anything else of
-        # the object is used: the state of another format cannot be read.
-        metadata = obj.__dict__.get("artifact_metadata_")
-        check_artifact_format(metadata)
-        # Warn about a major/minor version mismatch of the engine or
-        # scikit-learn against the current environment.
-        _warn_on_version_mismatch(metadata, obj.logger)
-
-        return obj
+        return cast(ModelTrainer, load_trainer_artifact(path, fmt, cls))
 
 
 def train_model(
@@ -1056,159 +919,43 @@ def train_model(
     feature_selection_active: bool | None = None,
 ) -> float:
     """Provide backward compatibility with the legacy model training API.
-    A facade function that accepts a configuration or a set of positional
-    arguments, instantiates a ModelTrainer, and returns the metric value
-    computed on held-out data (hold-out or the CV estimate — the fold mean
-    for additive metrics, the pooled OOF value for non-additive metrics such
-    as RMSE/MSE/R²/nRMSE) — using the
-    same validation method used to assess quality in ``ModelTrainer.fit()``
-    (not a train score).
 
-    The feature selection parameters (``feature_selection_cfg`` /
-    ``feature_selection_active``) are keyword-only: in the "config dict"
-    branch, the same-named dict keys take precedence over the explicit
-    arguments (similarly to ``data_oversampling``). A key present in the config
-    with the value ``None`` is treated as "value not set": in that case, as
-    when the key is absent, the explicit function argument is used (fallback).
-    In the simple API branch, the function arguments are used directly.
+    A facade that accepts a configuration dict or the positional
+    ``(algorithm, metric, hyperparams, X, y)`` form, fits a
+    :class:`ModelTrainer` and returns its validation score (the same
+    estimate as ``ModelTrainer.fit()``, not a train score). The full
+    description of the arguments and of the precedence of the config keys is
+    in :func:`trainer_quick.run_train_model`.
 
-    Attributes:
-        cfg_or_algo (dict | str): Configuration dict or algorithm name.
-        metric_or_testsize (str | float): Metric or test sample size.
-        params_or_metric (dict | str): Hyperparameters or metric name.
-        X (Any): Feature matrix.
-        y (Any): Target variable vector.
-        enable_logging (bool): Flag enabling logging.
-        random_state (int | None): Random seed.
-        log_path (str | Path | None): Path to the log file. Used only when
-            ``enable_logging`` is True: file logging is initialized with
-            ``setup_logging(logfile=...)`` so the "Training finished" message
-            and the library logs are written to this file. ``None`` — no file
-            is created here and messages go to the already configured handlers
-            (e.g. the console). The file handler is attached once per process:
-            if one is already registered, the first path wins and later
-            ``log_path`` values do not re-route the output. In the "config
-            dict" branch, the ``log_path`` key takes precedence over this
-            argument, except when the key is present with the value ``None`` —
-            then this argument is used (fallback).
-        feature_selection_cfg (FeatureSelectionCfg | dict | None):
-            Feature selection configuration (method, percentile, min_features,
-            etc.). In the "config dict" branch, the ``feature_selection_cfg``
-            key takes precedence over this argument, except when the key is
-            present with the value ``None`` — then this argument is used
-            (fallback). ``None`` — ``FeatureSelectionCfg()`` (mode='disabled').
-        feature_selection_active (bool | None): Explicit boolean flag of
-            feature selection activity (takes precedence over the mode from
-            ``feature_selection_cfg``). In the "config dict" branch, the
-            ``feature_selection_active`` key takes precedence over this
-            argument, except when the key is present with the value ``None`` —
-            then this argument is used (fallback). Non-boolean values are
-            rejected by the ``ModelTrainer`` constructor (strict typing).
-            ``None`` — the decision is based on the configuration.
+    Args:
+        cfg_or_algo: Configuration dict or algorithm name.
+        metric_or_testsize: Metric (simple API) or ignored (config dict).
+        params_or_metric: Hyperparameters (simple API) or ignored.
+        X: Feature matrix.
+        y: Target variable vector.
+        enable_logging: Log the "Training finished" message.
+        random_state: Random seed (simple API).
+        log_path: Log file used when ``enable_logging`` is True.
+        feature_selection_cfg: Feature selection configuration.
+        feature_selection_active: Explicit feature selection flag.
+
+    Returns:
+        float: The validation score of the fitted trainer.
+
+    Raises:
+        TrainingError: For an invalid algorithm, missing hyperparameters or
+            a trainer that returned no score.
     """
-    algo: str = ""
-    metric: str = ""
-    hyperparams: dict[str, Any] = {}
-    rs: int | None = random_state
-
-    fs_cfg: FeatureSelectionCfg | dict[str, Any] | None
-    fs_active: bool | None
-
-    # The "config dict" case
-    if isinstance(cfg_or_algo, dict):
-        cfg: dict[str, Any] = cfg_or_algo
-        algo = str(cfg.get("algorithm", ""))
-        metric = str(cfg.get("metric", ""))
-        hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
-        rs = cast(int | None, cfg.get("random_state", 42))
-        enable_logging = bool(cfg.get("enable_logging", False))
-        # ``log_path`` follows the same precedence rule as
-        # ``feature_selection_cfg``: the config key takes precedence over the
-        # explicit argument, except when the key is present with the value
-        # None ("value not set") — then the explicit argument is used
-        # (fallback).
-        if "log_path" in cfg and cfg["log_path"] is not None:
-            log_path = cast(str | Path | None, cfg["log_path"])
-        data_os = bool(cfg.get("data_oversampling", False))
-        data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
-        data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
-        # Config keys take precedence over the explicit arguments (similarly to
-        # ``data_oversampling``); a key with the value None is treated as
-        # "value not set" and falls back to the function argument (see docstring).
-        if "feature_selection_cfg" in cfg and cfg["feature_selection_cfg"] is not None:
-            fs_cfg = cast(
-                FeatureSelectionCfg | dict[str, Any] | None,
-                cfg["feature_selection_cfg"],
-            )
-        else:
-            fs_cfg = feature_selection_cfg
-        if (
-            "feature_selection_active" in cfg
-            and cfg["feature_selection_active"] is not None
-        ):
-            fs_active = cast(bool | None, cfg["feature_selection_active"])
-        else:
-            fs_active = feature_selection_active
-    else:
-        # Simple API
-        # If None is passed, we do NOT turn it into the string "None" right
-        # away to preserve the original validation logic for the tests.
-        algo = cfg_or_algo if cfg_or_algo is not None else ""
-        metric = str(metric_or_testsize)
-        hyperparams = cast(dict[str, Any], params_or_metric)
-        rs = random_state
-        data_os = False
-        data_os_mult = 1.0
-        data_os_alg = "random"
-        fs_cfg = feature_selection_cfg
-        fs_active = feature_selection_active
-
-    # Validate the algorithm
-    if not isinstance(cfg_or_algo, (str, dict)):
-        raise TrainingError("Invalid algorithm")
-    algo_key = algo.lower()
-
-    if not hyperparams and algo_key not in ["isotonic", "isotonic_regression"]:
-        raise TrainingError("Model parameters are not specified")
-
-    # Create and train the ModelTrainer
-    trainer = ModelTrainer(
-        algorithm=algo,
-        hyperparams=hyperparams,
-        metric=metric,
-        random_state=rs,
-        data_oversampling=data_os,
-        data_oversampling_multiplier=data_os_mult,
-        data_oversampling_algorithm=data_os_alg,
-        feature_selection_cfg=fs_cfg,
-        feature_selection_active=fs_active,
+    return run_train_model(
+        ModelTrainer,
+        cfg_or_algo,
+        metric_or_testsize,
+        params_or_metric,
+        X,
+        y,
+        enable_logging,
+        random_state,
+        log_path,
+        feature_selection_cfg=feature_selection_cfg,
+        feature_selection_active=feature_selection_active,
     )
-    trainer.fit(X, y)
-    val_score = trainer.val_score
-    if val_score is None:
-        raise TrainingError("Model did not return a metric value")
-
-    # Logging (if enable_logging=True)
-    if enable_logging:
-        # Initialize file logging when an explicit log path is provided.
-        # ``setup_logging`` attaches a file handler only once per process:
-        # when one is already registered, the first path wins and this
-        # argument does not re-route existing output (see the docstring).
-        if log_path is not None:
-            setup_logging(logfile=Path(log_path))
-        # Get the logger and write the message
-        logger = logging.getLogger(__name__)
-        # Metric type follows the user-facing representation: errors (RMSE/MAE,
-        # including neg_ metrics whose value is inverted back) are labeled as
-        # "Error (Natural)", while score metrics (R² and similar) are labeled
-        # as "Score".
-        metric_type = "Error (Natural)" if is_error_metric(metric) else "Score"
-
-        logger.info(
-            f"Training finished: Algorithm={algo_key}, "
-            f"Metric={metric.upper()} ({metric_type}), "
-            f"Value={val_score:.4f} "
-            f"(validation={trainer.validation_strategy})"
-        )
-
-    return float(val_score)

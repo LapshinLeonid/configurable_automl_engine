@@ -122,7 +122,7 @@
         # 3 — orchestration
         "training_engine",
         # 2 — engines
-        "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_scoring : trainer_state",
+        "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_quick : trainer_scoring : trainer_state",
         # 1 — ML building blocks
         "models : preprocessing_presets : preprocessing : oversampling : validation : feature_selection : isotonic",
         # 0 — shared utilities
@@ -142,6 +142,7 @@
         "configurable_automl_engine.trainer_data",
         "configurable_automl_engine.trainer_feature_selection",
         "configurable_automl_engine.trainer_params",
+        "configurable_automl_engine.trainer_quick",
         "configurable_automl_engine.trainer_scoring",
         "configurable_automl_engine.trainer_state",
     ]
@@ -156,6 +157,7 @@
         "configurable_automl_engine.trainer_data",
         "configurable_automl_engine.trainer_feature_selection",
         "configurable_automl_engine.trainer_params",
+        "configurable_automl_engine.trainer_quick",
         "configurable_automl_engine.trainer_scoring",
         "configurable_automl_engine.trainer_state",
     ]

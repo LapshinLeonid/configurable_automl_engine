@@ -19,6 +19,7 @@ from sklearn.metrics import make_scorer
 
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine import trainer
+from configurable_automl_engine import trainer_data
 from configurable_automl_engine.trainer import (
     ModelTrainer,
     TrainingError,
@@ -567,7 +568,7 @@ def test_load_general_exception_coverage(monkeypatch):
     # Patch the load_artifact function in the module where ModelTrainer lives
     # The assumed path is: configurable_automl_engine.trainer
     monkeypatch.setattr(
-        "configurable_automl_engine.trainer.load_artifact", mock_load_artifact_crash
+        "configurable_automl_engine.trainer_artifact.load_artifact", mock_load_artifact_crash
     )
     # 2. Action and Verification
     test_path = "some_existing_file.pkl"
@@ -2615,8 +2616,8 @@ def test_feature_selection_selector_seed_fallback_when_random_state_none():
     )
 
     with patch(
-        "configurable_automl_engine.trainer.FeatureSelector",
-        wraps=trainer.FeatureSelector,
+        "configurable_automl_engine.trainer_data.FeatureSelector",
+        wraps=trainer_data.FeatureSelector,
     ) as mock_fs:
         tr.fit(X, y)
 
@@ -2634,8 +2635,8 @@ def test_feature_selection_selector_uses_explicit_random_state_when_set():
     )
 
     with patch(
-        "configurable_automl_engine.trainer.FeatureSelector",
-        wraps=trainer.FeatureSelector,
+        "configurable_automl_engine.trainer_data.FeatureSelector",
+        wraps=trainer_data.FeatureSelector,
     ) as mock_fs:
         tr.fit(X, y)
 

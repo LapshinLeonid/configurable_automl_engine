@@ -18,9 +18,15 @@ import importlib
 import json
 import logging
 import platform
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from configurable_automl_engine.common.definitions import SerializationFormat
 from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.serialization_utils import (
+    load_artifact,
+    resolve_load_formats,
+)
 from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
 
 if TYPE_CHECKING:
@@ -217,3 +223,59 @@ def _warn_on_version_mismatch(metadata: Any, logger: logging.Logger) -> None:
                 key,
                 current,
             )
+
+
+def load_trainer_artifact(
+    path: str | Path, fmt: SerializationFormat | None, trainer_cls: type[Any]
+) -> Any:
+    """Load a saved trainer and check its artifact format (``ModelTrainer.load``).
+
+    The serialization format is auto-detected when ``fmt`` is ``None`` (see
+    ``resolve_load_formats``); the artifact format version is checked before
+    anything else of the object is used, then a WARNING is logged on an
+    engine / scikit-learn major.minor mismatch.
+
+    Args:
+        path: Path to the saved artifact.
+        fmt: Explicit serialization format, or ``None`` to auto-detect.
+        trainer_cls: The expected class of the loaded object
+            (``ModelTrainer``).
+
+    Returns:
+        Any: The loaded ``trainer_cls`` instance.
+
+    Raises:
+        TrainingError: If the file does not exist, cannot be deserialized
+            with any candidate format, does not contain a ``trainer_cls``
+            instance, or was saved in another artifact format version.
+    """
+    path_obj = Path(path)
+
+    formats = resolve_load_formats(path_obj, fmt)
+
+    obj: Any = None
+    last_error: Exception | None = None
+    for candidate in formats:
+        try:
+            obj = load_artifact(path=path_obj, fmt=candidate)
+            break
+        except FileNotFoundError:
+            raise TrainingError(f"File not found: {path}")
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+    if obj is None:
+        raise TrainingError(f"Error loading artifact: {last_error}") from last_error
+
+    # Verify the type of the loaded object
+    if not isinstance(obj, trainer_cls):
+        raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
+
+    # The artifact format version is checked before anything else of
+    # the object is used: the state of another format cannot be read.
+    metadata = obj.__dict__.get("artifact_metadata_")
+    check_artifact_format(metadata)
+    # Warn about a major/minor version mismatch of the engine or
+    # scikit-learn against the current environment.
+    _warn_on_version_mismatch(metadata, obj.logger)
+
+    return obj
