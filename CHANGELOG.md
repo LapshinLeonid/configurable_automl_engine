@@ -45,11 +45,17 @@ give the same winner, parameters, scores and predictions as 0.4.x, in both
 
 ### Saved models
 
-- **Artifact format version 2.** `ModelTrainer` now keeps its state in a few
+- **Artifact format version 3.** `ModelTrainer` now keeps its state in a few
   frozen groups instead of flat attributes, and the artifact metadata records
   `artifact_format_version`. `ModelTrainer.load` refuses an artifact saved by
   engine 0.4.x or older with a `TrainingError` that names the engine and
   format versions: retrain the model with 0.5.0.
+- **Artifact format 3: models saved by earlier 0.5.0 development builds
+  (format 2) must be retrained.** The preprocessing encoders,
+  `ColumnNameSelector` and `DataOversampler` inside a saved model moved to
+  the `preprocessing` / `oversampling` packages, and a pickle records the
+  module path of every class; `ModelTrainer.load` refuses format 2 with the
+  same "retrain the model" error.
 
 ### `ModelTrainer`
 
@@ -136,17 +142,48 @@ keep working.
 | `configurable_automl_engine.trainer.IsotonicDataTransformer` | `configurable_automl_engine.isotonic.IsotonicDataTransformer` (still importable from `trainer`) |
 | `configurable_automl_engine.training_engine.config_parser`: `FeatureSelectionCfg`, `FeatureSelectionMode`, `FeatureSelectionMethod` | `configurable_automl_engine.feature_selection` (still importable from `config_parser`) |
 | `configurable_automl_engine.preprocessing.EncodingStrategy` | `configurable_automl_engine.common.definitions.EncodingStrategy` (still importable from `preprocessing`) |
+| `configurable_automl_engine.preprocessing` (module) | the `preprocessing` package: `encoders`, `columns`, `features`, `builder` (the public names are still importable from `preprocessing`) |
+| `configurable_automl_engine.oversampling` (module) | the `oversampling` package: `sampler`, `targets`, `smoter`, `columns`, `experimental` (the public names are still importable from `oversampling`; patch `OVERSAMPLING_EXPERIMENTAL` in `oversampling.experimental`) |
+| `configurable_automl_engine.training_engine.config_parser` (the schema classes) | the `training_engine.config` package: `phases`, `sanity_gate`, `complexity_guard`, `general`, `general_rules`, `algorithms`, `root` (all names still importable from `config_parser`) |
+| `configurable_automl_engine.training_engine.sanity_gate`: the circuit helpers, `SanityCheckResult` | `training_engine.sanity_circuits`, `training_engine.sanity_result` (`ModelSanityGate` and `SanityCheckResult` still importable from `sanity_gate`) |
+| `configurable_automl_engine.training_engine.finalists.select_robust_winner` and its helpers | `configurable_automl_engine.training_engine.robust_winner` |
+| `configurable_automl_engine.hpo.complexity_guard`: `Rule`, the `_rule_*` functions, the rule tables | `configurable_automl_engine.hpo.complexity_rules` |
+| `configurable_automl_engine.common.validation_utils`: `datetime_expansion_map`, `expand_datetime_columns` and the datetime helpers | `configurable_automl_engine.common.datetime_features` |
 
 - `configurable_automl_engine.common` is a regular package now (it has an
   `__init__.py`, which imports nothing).
 - Saved models reference `IsotonicDataTransformer` and the
-  `FeatureSelection*` config types by their new module paths. The artifact
-  format version stays 2 (0.5.0 is not released yet); the old paths are
-  still importable, so artifacts saved by earlier 0.5.0 development builds
-  load as before.
+  `FeatureSelection*` config types by their new module paths (the old paths
+  are still importable).
 - The own records of `setup_logging` (e.g. the first-path-wins warning) log
   as `configurable_automl_engine.common.log_setup` instead of
   `configurable_automl_engine.training_engine.logger`.
+
+### Internal changes: no module above 1000 lines
+
+- Every module of the package is at most 1000 lines, with no exception
+  (`tests/test_module_structure.py`: `MAX_MODULE_LINES = 1000`,
+  `MODULE_SIZE_EXCEPTIONS` empty). The split modules are listed in the table
+  above; besides them, `trainer.train_model` keeps its signature and passes
+  `ModelTrainer` to `trainer_quick.run_train_model`, and the bodies of
+  `ModelTrainer.load`, the prediction input alignment and the pipeline step
+  assembly moved to `trainer_artifact` / `trainer_data` (thin methods stay).
+- `GeneralCfg` keeps only its fields: its cross-field validators are thin
+  methods that call `training_engine.config.general_rules`. The generated
+  config schema is byte-identical.
+- The Sanity Gate circuits are functions with explicit inputs
+  (`training_engine.sanity_circuits`); the random draws keep their order.
+  `DataOversampler` delegates its noise, dtype and target helpers to
+  functions in `oversampling.columns` / `oversampling.targets`.
+- Log records keep their texts and levels; the logger name follows the
+  module that now holds the code (e.g. the experimental-oversampling WARNING
+  logs as `configurable_automl_engine.oversampling.experimental`).
+- The characterization snapshots are replaced by
+  `scripts/compare_with_base.py`, run in CI on every push: the same scenarios
+  run on the base commit and on the current code in the same environment,
+  and results, exceptions, log texts, the config schema and the loading of
+  base-saved models are compared. Nothing is stored, so library versions do
+  not matter.
 
 ### Internal APIs (for code that patched or called private functions)
 

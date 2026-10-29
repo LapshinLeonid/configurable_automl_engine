@@ -4,8 +4,8 @@ The large engine modules were split into cohesive modules; these tests stop
 them from growing back:
 
 - no module of the package is longer than ``MAX_MODULE_LINES`` lines
-  (docstrings included), except the modules listed in
-  ``MODULE_SIZE_EXCEPTIONS``;
+  (docstrings included), with no exception (``MODULE_SIZE_EXCEPTIONS`` is
+  empty);
 - the classes listed in ``MAX_CLASS_LINES`` stay within their limit;
 - ruff ``C901`` is enabled with ``max-complexity = 15`` and the package
   has no ``# noqa: C901`` exception (``ALLOWED_C901_NOQA`` is empty).
@@ -25,13 +25,11 @@ import configurable_automl_engine
 PACKAGE_ROOT = Path(configurable_automl_engine.__file__).parent
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
-MAX_MODULE_LINES = 1500
+MAX_MODULE_LINES = 1000
 
-#: Modules that are out of scope of the split (tracked separately).
-MODULE_SIZE_EXCEPTIONS = {
-    "training_engine/config_parser.py",
-    "preprocessing.py",
-}
+#: Modules exempt from ``MAX_MODULE_LINES``. Empty: the limit has no
+#: exception (``test_module_size_limit_has_no_exceptions``).
+MODULE_SIZE_EXCEPTIONS: frozenset[str] = frozenset()
 
 #: Class (module path, class name) → maximum number of lines.
 MAX_CLASS_LINES = {
@@ -54,11 +52,14 @@ def _rel(path: Path) -> str:
     return path.relative_to(PACKAGE_ROOT).as_posix()
 
 
+def test_module_size_limit_has_no_exceptions() -> None:
+    """No module is exempt from the line limit."""
+    assert not MODULE_SIZE_EXCEPTIONS
+
+
 @pytest.mark.parametrize("path", _modules(), ids=_rel)
 def test_module_size_limit(path: Path) -> None:
     """Every module stays within the line limit (docstrings included)."""
-    if _rel(path) in MODULE_SIZE_EXCEPTIONS:
-        pytest.skip("out of scope of the module split (tracked separately)")
     n_lines = len(path.read_text(encoding="utf-8").splitlines())
     assert n_lines <= MAX_MODULE_LINES, (
         f"{_rel(path)} has {n_lines} lines (limit {MAX_MODULE_LINES}); "
