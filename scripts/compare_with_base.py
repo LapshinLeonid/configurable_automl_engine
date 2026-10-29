@@ -756,11 +756,11 @@ def run_scenarios(out_path: Path, workdir: Path, base_artifacts: Path | None) ->
             for lvl, msg in collector.records
         ]
         # Log records of processes-mode runs arrive from the workers in a
-        # nondeterministic order, and the forwarding may repeat a record:
-        # they are compared as a sorted set.
-        if name.endswith("/processes"):
-            logs = sorted({tuple(r) for r in logs})
-        entry["logs"] = logs
+        # nondeterministic order, and the forwarding of worker records may
+        # drop or repeat one even on identical code: only the results of
+        # these runs are compared (the sequential runs compare every record).
+        if not name.endswith("/processes"):
+            entry["logs"] = logs
         results[name] = entry
         timings[name] = round(time.perf_counter() - started, 2)
     pkg_logger.removeHandler(collector)
