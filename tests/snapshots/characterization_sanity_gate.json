@@ -1,0 +1,934 @@
+{
+ "all-circuits-off": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "nan",
+   "generalization_gap": "nan",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "nan"
+  }
+ },
+ "constant-oof": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 2 reason(s): ['Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness', 'Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000']"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: disqualified with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=3.637 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.0",
+   "generalization_gap": "3.6367706965",
+   "is_valid": false,
+   "reasons": [
+    "Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness",
+    "Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000"
+   ],
+   "severity": 3,
+   "soft_warnings": [
+    "Circuit D (generalization gap): gap=3.637 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.0083333333"
+  }
+ },
+ "constant-oof-warn-only": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate (warn_only): 2 reason(s): ['Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness', 'Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000']"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=3.637 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.0",
+   "generalization_gap": "3.6367706965",
+   "is_valid": true,
+   "reasons": [
+    "Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness",
+    "Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000"
+   ],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): gap=3.637 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.0083333333"
+  }
+ },
+ "full-length-mismatch": {
+  "error": {
+   "message": "y and y_pred_full must have the same length (got (120,) and (119,))",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "gap-finite-reject": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.000']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "1.0019068082",
+   "generalization_gap": "1.9600881351",
+   "is_valid": false,
+   "reasons": [
+    "Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.000"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "gap-reject": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "inf",
+   "is_valid": false,
+   "reasons": [
+    "Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "gap-warn": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "inf",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "leakage-reject": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit D (generalization gap): RMSE_oof\u22480 \u2014 suspiciously perfect out-of-fold fit, possible target leakage (division by zero)']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "1.0",
+   "generalization_gap": "inf",
+   "is_valid": false,
+   "reasons": [
+    "Circuit D (generalization gap): RMSE_oof\u22480 \u2014 suspiciously perfect out-of-fold fit, possible target leakage (division by zero)"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "leakage-warn": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "WARNING",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): RMSE_oof\u22480 \u2014 suspiciously perfect out-of-fold fit, possible target leakage (division by zero)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "1.0",
+   "generalization_gap": "inf",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): RMSE_oof\u22480 \u2014 suspiciously perfect out-of-fold fit, possible target leakage (division by zero)"
+   ],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "length-mismatch": {
+  "error": {
+   "message": "y and y_pred_oof must have the same length (got (120,) and (119,))",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "linear-dead": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.7070256505",
+   "generalization_gap": "1.4790247326",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)"
+   ],
+   "unique_ratio": "0.975"
+  }
+ },
+ "linear-dead-combination-off": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 2 reason(s): ['Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness', 'Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000']"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: disqualified with 2 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=4.646 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.0",
+   "generalization_gap": "4.6458596102",
+   "is_valid": false,
+   "reasons": [
+    "Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness",
+    "Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000"
+   ],
+   "severity": 3,
+   "soft_warnings": [
+    "Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)",
+    "Circuit D (generalization gap): gap=4.646 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.0083333333"
+  }
+ },
+ "linear-dead-low-diversity": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 3 reason(s): ['Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness', 'Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000', 'Circuit C (dead features): combination \u2014 zero-coefficient ratio=0.600 above max_dead_feature_ratio AND prediction diversity below its threshold']"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: disqualified with 2 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=4.646 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.0",
+   "generalization_gap": "4.6458596102",
+   "is_valid": false,
+   "reasons": [
+    "Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness",
+    "Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000",
+    "Circuit C (dead features): combination \u2014 zero-coefficient ratio=0.600 above max_dead_feature_ratio AND prediction diversity below its threshold"
+   ],
+   "severity": 4,
+   "soft_warnings": [
+    "Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)",
+    "Circuit D (generalization gap): gap=4.646 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.0083333333"
+  }
+ },
+ "linear-dead-no-diversity-check": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 2 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): combination rule inactive \u2014 check_diversity=False (dead-feature share is a signal only)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "nan",
+   "generalization_gap": "1.4790247326",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): zero-coefficient ratio=0.600 > max_dead_feature_ratio=0.400 (signal \u2014 on wide/noisy data Lasso-family models legitimately zero out features)",
+    "Circuit C (dead features): combination rule inactive \u2014 check_diversity=False (dead-feature share is a signal only)"
+   ],
+   "unique_ratio": "0.975"
+  }
+ },
+ "linear-default": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "1.0019068082",
+   "generalization_gap": "1.9600881351",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "no-full-pred": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit D (generalization gap): y_pred_full is not provided']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "1.0019068082",
+   "generalization_gap": "nan",
+   "is_valid": false,
+   "reasons": [
+    "Circuit D (generalization gap): y_pred_full is not provided"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "non-adaptive-diversity": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "1.0019068082",
+   "generalization_gap": "1.9600881351",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): gap=1.960 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.9666666667"
+  }
+ },
+ "partial-nan-oof": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=1.947 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "1.0007135561",
+   "generalization_gap": "1.947483283",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit D (generalization gap): gap=1.947 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.9646017699"
+  }
+ },
+ "tree-1d-x": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): X must be a 2-D matrix with at least one column']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): X must be a 2-D matrix with at least one column"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-bad-index": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): row subsampling of X failed: cannot index rows']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): row subsampling of X failed: cannot index rows"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-dead": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.95262933",
+   "generalization_gap": "1.3371452417",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-dead-frame-many-rows": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.95262933",
+   "generalization_gap": "1.3371452417",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-dead-low-diversity": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 3 reason(s): ['Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness', 'Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000', 'Circuit C (dead features): combination \u2014 high dead-feature ratio AND prediction diversity below its threshold']"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: disqualified with 2 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit D (generalization gap): gap=3.636 > max_generalization_gap=1.500"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.0",
+   "generalization_gap": "3.6355349408",
+   "is_valid": false,
+   "reasons": [
+    "Circuit A (diversity): ratio=0.0000 equals the constant-model baseline \u2014 no expressiveness",
+    "Circuit B (unique): nunique=1 < max(min_unique_count=5, min_unique_ratio*N=6.000 capped by nunique(y)=116 -> 6.000) = 6.000",
+    "Circuit C (dead features): combination \u2014 high dead-feature ratio AND prediction diversity below its threshold"
+   ],
+   "severity": 4,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)",
+    "Circuit D (generalization gap): gap=3.636 > max_generalization_gap=1.500"
+   ],
+   "unique_ratio": "0.0083333333"
+  }
+ },
+ "tree-dead-no-diversity-check": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 2 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): combination rule inactive \u2014 check_diversity=False (dead-feature share is a signal only)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "nan",
+   "generalization_gap": "1.3371452417",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)",
+    "Circuit C (dead features): combination rule inactive \u2014 check_diversity=False (dead-feature share is a signal only)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-default": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-frame": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-many-columns": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.500 > max_dead_feature_ratio=0.400 on permutation check (1/2 checked columns; note: correlated features may produce 'false-dead' results)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 1,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.500 > max_dead_feature_ratio=0.400 on permutation check (1/2 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-many-rows": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=0.600 > max_dead_feature_ratio=0.400 on permutation check (3/5 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-nan-base": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): no finite (y, prediction) pairs on the permutation subsample']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): no finite (y, prediction) pairs on the permutation subsample"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-nan-on-permuted": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-no-model": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "Sanity gate: 1 reason(s): ['Circuit C (dead features): model is not provided (check_dead_features=True)']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): model is not provided (check_dead_features=True)"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-no-x": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): X is not provided \u2014 permutation check impossible for a nonlinear model']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): X is not provided \u2014 permutation check impossible for a nonlinear model"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-perm-wrong-shape": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-permutation-off": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-permuted-predict-fails": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): prediction failed on permuted X (column 0): permuted predict is broken']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): prediction failed on permuted X (column 0): permuted predict is broken"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-predict-fails": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): prediction failed on subsampled X: predict is broken']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): prediction failed on subsampled X: predict is broken"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-rows-and-columns": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: valid with 1 soft warning(s) (non-disqualifying signals)"
+   ],
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "DEBUG",
+    "cand: Sanity gate soft warning: Circuit C (dead features): dead-feature ratio=1.000 > max_dead_feature_ratio=0.400 on permutation check (3/3 checked columns; note: correlated features may produce 'false-dead' results)"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 3,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 1,
+   "soft_warnings": [
+    "Circuit C (dead features): dead-feature ratio=1.000 > max_dead_feature_ratio=0.400 on permutation check (3/3 checked columns; note: correlated features may produce 'false-dead' results)"
+   ],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-sparse": {
+  "logs": [],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": true,
+   "reasons": [],
+   "severity": 0,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "tree-wrong-shape": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate: 1 reason(s): ['Circuit C (dead features): prediction returned 119 values for 120 rows']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 0,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "1.3398291451",
+   "is_valid": false,
+   "reasons": [
+    "Circuit C (dead features): prediction returned 119 values for 120 rows"
+   ],
+   "severity": 2,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "warn-only-reject": {
+  "logs": [
+   [
+    "configurable_automl_engine.training_engine.sanity_gate",
+    "INFO",
+    "cand: Sanity gate (warn_only): 1 reason(s): ['Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero']"
+   ]
+  ],
+  "result": {
+   "dead_features_count": 2,
+   "diversity_ratio": "0.9531834552",
+   "generalization_gap": "inf",
+   "is_valid": true,
+   "reasons": [
+    "Circuit D (generalization gap): RMSE_full\u22480 (perfect in-sample fit) \u2014 division by zero"
+   ],
+   "severity": 1,
+   "soft_warnings": [],
+   "unique_ratio": "0.9333333333"
+  }
+ },
+ "x-no-shape": {
+  "error": {
+   "message": "X must be array-like with a .shape attribute (ndarray, pandas.DataFrame or scipy sparse), got list",
+   "type": "ValueError"
+  },
+  "logs": []
+ },
+ "x-short": {
+  "error": {
+   "message": "X and y must have the same number of rows (got 117 and 120)",
+   "type": "ValueError"
+  },
+  "logs": []
+ }
+}
