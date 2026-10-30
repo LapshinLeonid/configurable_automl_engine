@@ -5,8 +5,9 @@ inputs: separating and validating X/y (``load_training_data``), the input
 diagnostics, the uninformative-feature cleaning and the column typing
 (``prepare_features``), the preprocessor assembly through the shared
 ``preprocessing`` module and the preset table
-(``build_trainer_preprocessor``), the isotonic adapter sizing, and the
-prediction-time column alignment. The module must not import
+(``build_trainer_preprocessor``), the isotonic adapter sizing, the assembly
+of the pipeline steps (``assemble_pipeline_steps``) and the preparation of
+the prediction input (``prepare_predict_input``). The module must not import
 ``configurable_automl_engine.trainer``.
 """
 
@@ -18,16 +19,24 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from scipy import sparse as sp
+from sklearn.compose import ColumnTransformer
 
+from configurable_automl_engine.common.datetime_features import (
+    datetime_expansion_map,
+    expand_datetime_columns,
+)
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.settings import EncodingSettings, InputPolicies
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine.common.validation_utils import (
+    apply_inf_policy,
     check_target_constant,
     check_target_numeric,
-    datetime_expansion_map,
     validate_features,
 )
+from configurable_automl_engine.feature_selection import FeatureSelector
+from configurable_automl_engine.isotonic import IsotonicDataTransformer
+from configurable_automl_engine.oversampling import DataOversampler
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
     _clean_uninformative_features,
@@ -40,8 +49,13 @@ from configurable_automl_engine.preprocessing_presets import (
     resolve_preprocessing_preset,
 )
 
-from .models import requires_dense_input
-from .trainer_state import PreparedFeatures, TrainerPreprocessor, TrainingData
+from .models import requires_dense_input, resolve_algorithm_name
+from .trainer_state import (
+    PreparedFeatures,
+    TrainerPreprocessor,
+    TrainerSettings,
+    TrainingData,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -614,3 +628,153 @@ def _align_predict_shared_dataframe(
             f"Expected columns: {feature_names}."
         )
     return X.get_view(feature_names)
+
+
+def prepare_predict_input(
+    X: Any,
+    feature_names: list[str] | None,
+    datetime_expansion: Any,
+    inf_policy: str,
+) -> Any:
+    """Bring the input of ``ModelTrainer.predict`` to the training schema.
+
+    A ``pd.DataFrame`` gets its datetime columns expanded as at training
+    time and its columns aligned to the training order; a
+    ``SharedDataFrame`` is restored and aligned the same way; arrays pass
+    as they are. The training ``inf_policy`` is applied to frames and
+    numeric arrays, so inference is symmetric with ``fit``.
+
+    Args:
+        X: The feature matrix to predict on.
+        feature_names: The training feature order (``None`` if unknown).
+        datetime_expansion: The datetime expansion recorded at fit time
+            (``ModelTrainer.datetime_expansion_``).
+        inf_policy: The ±inf policy of the trainer.
+
+    Returns:
+        Any: The input for ``pipeline.predict``.
+
+    Raises:
+        TrainingError: If ``inf_policy`` is ``"error"`` and ``X`` contains
+            ±inf (the message names the columns).
+    """
+    # Align columns for inputs with names; for the rest, avoid
+    # conversion if X is already an array or DataFrame
+    X_input: Any
+    if isinstance(X, pd.DataFrame):
+        X_input = _align_predict_columns(
+            feature_names,
+            expand_datetime_columns(X, datetime_expansion),
+        )
+    elif isinstance(X, SharedDataFrame):
+        X_input = _align_predict_shared_dataframe(feature_names, X)
+    elif isinstance(X, (pd.Series, np.ndarray)):
+        X_input = X
+    else:
+        X_input = np.asarray(X)
+
+    # The same ±inf policy as in fit(): without it a frame that
+    # trained fine (inf → NaN) would fail at prediction time with
+    # an sklearn "Input X contains infinity" error.
+    if isinstance(X_input, (pd.DataFrame, np.ndarray)):
+        try:
+            X_input = apply_inf_policy(X_input, inf_policy)
+        except ValueError as err:
+            raise TrainingError(str(err)) from err
+    return X_input
+
+
+def assemble_pipeline_steps(
+    settings: TrainerSettings,
+    preprocessor: ColumnTransformer,
+    base_model: Any,
+    *,
+    categorical_features: list[str] | None,
+    numerical_features: list[str] | None,
+    feature_selection_active: bool,
+    X_for_estimate: Any = None,
+) -> list[tuple[str, Any]]:
+    """Assemble the list of training pipeline steps.
+
+    Strict step order:
+    ``preprocessor → [isotonic_selector] → [feature_selector] → [oversampler] → model``.
+
+    For ``isotonic_regression`` a data adapter step
+    (:class:`IsotonicDataTransformer`) is inserted right after the
+    preprocessor: the algorithm is strictly univariate and accepts exactly
+    one feature, so even a multi-column preprocessed matrix is reduced to
+    the single numerical column selected via the ``feature_index``
+    hyperparameter. The adapter receives the number of numerical features
+    (``n_numeric``) to resolve the index against the numerical block of
+    the preprocessed matrix and the estimated total feature count to
+    validate against the actual preprocessor output (a disagreement
+    raises ``ValueError`` — non-fatal for the HPO circuit breaker).
+    The feature selector is inserted strictly between the preprocessor and
+    the oversampler so that synthetic rows are generated only for
+    informative features.
+
+    Args:
+        settings: The trainer settings.
+        preprocessor: Feature preprocessing ``ColumnTransformer``.
+        base_model: Final regressor.
+        categorical_features: The categorical columns of the trainer.
+        numerical_features: The numerical columns of the trainer.
+        feature_selection_active: Flag enabling the feature selection step.
+        X_for_estimate: The feature matrix used to estimate the total
+            post-preprocessing feature count for the isotonic guard
+            (``None`` — the count is disabled).
+
+    Returns:
+        A list of ``(name, transformer)`` tuples for building the Pipeline.
+    """
+    steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
+    if resolve_algorithm_name(settings.algorithm) == "isotonic_regression":
+        steps.append(
+            (
+                "isotonic_selector",
+                IsotonicDataTransformer(
+                    feature_index=_resolve_isotonic_feature_index(settings.hyperparams),
+                    n_numeric=_isotonic_n_numeric(numerical_features),
+                    n_total=(
+                        _isotonic_n_total_estimate(
+                            X_for_estimate,
+                            categorical_features=categorical_features,
+                            numerical_features=numerical_features,
+                            encoding=settings.encoding,
+                        )
+                        if X_for_estimate is not None
+                        else None
+                    ),
+                ),
+            )
+        )
+    if feature_selection_active:
+        cfg = settings.feature_selection_cfg
+        selector = FeatureSelector(
+            method=cfg.method.value,
+            percentile=cfg.percentile,
+            min_features=cfg.min_features,
+            variance_threshold=cfg.variance_threshold,
+            n_estimators=cfg.n_estimators,
+            # Fixed fallback seed for selection (consistent with the tuner
+            # and the auto-check): with random_state=None in the main
+            # training, the selector must still use the fixed seed 42,
+            # otherwise selection is not reproducible between fit() calls
+            # and diverges from the HPO phase.
+            random_state=(
+                settings.random_state if settings.random_state is not None else 42
+            ),
+        )
+        steps.append(("feature_selector", selector))
+    oversampling = settings.oversampling
+    if oversampling.enable:
+        oversampler = DataOversampler(
+            algorithm=oversampling.algorithm,
+            multiplier=oversampling.multiplier,
+            target_bins=oversampling.target_bins,
+            add_noise=oversampling.add_noise,
+            noise_level=float(oversampling.noise_level),
+        )
+        steps.append(("oversampler", oversampler))
+    steps.append(("model", base_model))
+    return steps

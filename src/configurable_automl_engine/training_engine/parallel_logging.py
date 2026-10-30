@@ -17,8 +17,10 @@ fixes that for every start method:
       was forwarded from (respecting the handler levels), so the parent's
       formatters, files and console output apply unchanged.
 
-A worker killed in the middle of a write can leave the queue unreadable; the
-listener then stops after a timeout instead of blocking the run.
+A worker that exits normally flushes its buffered records first, so no
+record is lost on a graceful pool shutdown. A worker killed in the middle of
+a write can leave the queue unreadable; the listener then stops after a
+timeout instead of blocking the run.
 """
 
 from __future__ import annotations
@@ -115,8 +117,11 @@ def _init_worker_logging(
             importlib.import_module(name)
         except Exception:  # noqa: BLE001, S112 — the task reports the error
             continue
-    # The queue's feeder thread must not keep a dying worker alive.
-    queue.cancel_join_thread()
+    # The queue's feeder thread is NOT cancelled: a worker that exits
+    # normally (graceful pool shutdown) flushes the records still buffered
+    # in the feeder, otherwise its last records are lost. The parent's
+    # listener reads until the pool is shut down, so the flush cannot block;
+    # a worker terminated by a forced shutdown skips it.
     existing = [logging.getLogger()] + [
         lg
         for lg in logging.root.manager.loggerDict.values()

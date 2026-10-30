@@ -5,100 +5,11 @@ models — constant/flat predictions, step functions, unused features and
 overfit learners. The module is standalone: it depends only on numpy, pandas
 and scikit-learn and knows nothing about the rest of the engine.
 
-Four independent check circuits are implemented; each can be disabled through
-a constructor parameter:
-
-A. Diversity Ratio (``check_diversity``)
-   ``Var(y_pred_oof) / Var(y)`` computed on **out-of-fold** predictions, not
-   on a full fit. For an honest model the ratio approximately equals R²_oof
-   (the fraction of variance explained), so a fixed absolute threshold
-   disqualifies honest models with R² ∈ (0, 0.15) — precisely the models a
-   weak signal produces. By default the circuit therefore works in the
-   **adaptive** mode (``adaptive_diversity=True``): the reference is the
-   constant model; any visibly positive prediction variance (above the
-   numerical tolerance ``_ZERO_VAR_EPS``) passes and only a model with a
-   (numerically) zero spread — a tie with the constant baseline, which means
-   R²_oof ≈ 0 — fails. Additionally, in the adaptive mode a model **worse than
-   the constant prediction** (``R²_oof < 0``) is rejected explicitly. The
-   fixed threshold ``min_prediction_diversity`` (default
-   0.15) is still available for the opt-out non-adaptive mode
-   (``adaptive_diversity=False``): the circuit then fails on a strict
-   shortfall, like before. A constant target (``Var(y) == 0``) skips the
-   check with a soft warning — the unique-ratio circuit takes over.
-
-B. Unique Ratio (``check_unique``)
-   Predictions are rounded to the scale of the target: the number of decimals
-   is derived from ``std(y)`` (not a fixed 3 digits, which depend on the
-   scale of y and break for discrete targets). Fails when
-   ``nunique < max(min_unique_count, min_unique_ratio * N)``, where the
-   ``min_unique_ratio * N`` term is capped by ``nunique(y)`` — the number of
-   distinct target values on the valid rows at the same rounding granularity
-   applied to the predictions — and the final threshold never exceeds that
-   cap: the most expressive model (one predicting y exactly) always reaches
-   it, so a perfect model is never disqualified by circuit B on a
-   low-cardinality target.
-
-C. Dead Feature Check (``check_dead_features``)
-   * Linear models (Lasso, ElasticNet, SGDRegressor, ... — anything exposing
-     ``coef_``): the share of zero coefficients is a **signal**
-     (``soft_warnings``), never a standalone disqualification — on wide noisy
-     data Lasso is *supposed* to zero out most features. Standalone
-     disqualification happens only in combination: share of zeros above
-     ``max_dead_feature_ratio`` **AND** prediction diversity below the
-     diversity threshold (rule controlled by
-     ``dead_features_require_low_diversity``, default True).
-   * Nonlinear models (SVR, trees, ...): permutation sensitivity with cost
-     controls — ``permutation_max_rows`` (row subsampling cap),
-     ``permutation_max_features`` (cap on checked columns),
-     ``permutation_repeats`` (repeat count) and a fixed ``permutation_seed``
-     for full determinism. Base predictions are cached; a feature is "dead"
-     when the relative change of MSE under permutation stays below
-     ``permutation_tolerance``. A high share of dead features produces a soft
-     warning, not a disqualification: on correlated features permutation
-     reports "false-dead" features because the model borrows the information
-     from a neighbour column. The whole permutation path can be turned off
-     with ``check_permutation_sensitivity=False`` (cost control);
-     the linear ``coef_`` path is unaffected.
-
-D. Generalization Gap (``check_generalization_gap``)
-   ``RMSE_oof / RMSE_full`` (requiring this ratio below
-   ``1 / max_generalization_gap``; the stored value grows with overfitting).
-   A finite gap strictly exceeding ``max_generalization_gap`` (default 1.5)
-   is routed by ``generalization_gap_mode``: the default
-   ``"warn"`` records it in ``soft_warnings`` (no disqualification,
-   ``is_valid`` stays True, severity ≤ 1), while ``"reject"`` reproduces the
-   legacy strict behavior — a reason and disqualification. In the ``"warn"``
-mode the circuit never disqualifies because of the gap magnitude — even
-    an infinite one: ``RMSE_full ≈ 0`` (a perfect in-sample fit
-   such as a depth-20 tree, 1-NN or ExtraTrees with ``min_samples_leaf=1``
-   is a normal property of a whole class of models and says nothing about
-   quality on new data) and ``RMSE_oof ≈ 0`` are routed to ``soft_warnings``
-   as well, and the model keeps its right to win by ``RMSE_oof``. The
-   ``RMSE_oof ≈ 0`` case additionally raises a ``WARNING`` log record — a
-   deliberately visible signal for a suspiciously perfect out-of-fold fit
-   (possible target leakage) instead of a silent substitution of the winner.
-   In the ``"reject"`` mode both division-by-zero cases become
-   disqualification reasons exactly as before.
-
-Threshold comparison sides are fixed in one place (module-level helpers
-``_fails_below`` / ``_fails_above`` / ``_diversity_fails``):
-
-* circuits A and B fail on a strict shortfall (``value < threshold``);
-* circuits C and D fail on a strict excess (``value > threshold``);
-* circuit A in the adaptive mode is the only documented exception: the
-  reference is the constant model whose prediction spread is exactly zero, so
-  a tie with it (``diversity`` at the numerical zero tolerance
-  ``_ZERO_VAR_EPS``) fails — the model is not strictly better
-  than the constant baseline — and a model strictly worse than it
-  (``R²_oof < 0``) fails as well (see ``_diversity_fails``).
-
-Equality with a threshold never fails (boundary tests rely on this).
-
-NaN handling: pairs with a non-finite true value or prediction are masked
-before computing any statistic (consistent with ``metrics.oof_rmse``). If no
-valid pair remains, the circuit fails with an explicit reason. Any internal
-error — e.g. a model that cannot predict on a modified ``X`` — is converted
-into a failure reason instead of raising.
+The gate (:class:`ModelSanityGate`) holds the settings, runs the enabled
+circuits (:mod:`.sanity_circuits` — the four circuits A–D, their thresholds,
+NaN handling and determinism are described there), routes the circuit D
+violations by ``generalization_gap_mode`` and logs the audit; the result
+record is :class:`~.sanity_result.SanityCheckResult`.
 
 ``warn_only`` mode: the gate still computes every statistic and fills
 ``reasons`` with the would-be disqualifications, but ``is_valid`` is forced to
@@ -109,23 +20,28 @@ does NOT use it — select steps with ``strategy: sanity_gate`` always apply the
 disqualifications (the ``warn_only`` selection mode was removed together with
 ``sanity_gate.mode`` / ``winner_if_active`` / the ``sanity_gate_warn_only``
 report key).
-
-Determinism: the permutation test uses ``np.random.default_rng`` seeded with
-``permutation_seed``; row/column subsampling and column shuffles are all drawn
-from this generator. Threshold-side semantics are fixed in the helpers below,
-so results are reproducible across runs for the same inputs.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
-import pandas as pd
-from sklearn.metrics import mean_squared_error
+
+from configurable_automl_engine.training_engine.sanity_circuits import (
+    DeadFeatureSettings,
+    check_dead_features,
+    check_diversity,
+    check_generalization_gap,
+    check_unique,
+)
+from configurable_automl_engine.training_engine.sanity_result import (
+    SanityCheckResult,
+    _compute_severity,
+    _validate_check_inputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,270 +55,9 @@ __all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
 #: The field name is deliberately NOT ``mode`` (a collision with the removed
 #: ``sanity_gate.mode`` field, which the ``_reject_removed_mode`` validator
 #: rejects with a migration error). The type is declared here, in the
-#: standalone gate module, and separately in ``config_parser.py`` (without an
+#: standalone gate module, and separately in ``config/sanity_gate.py`` (without an
 #: import, to keep the module independent of the rest of the engine).
 GeneralizationGapMode = Literal["warn", "reject"]
-
-
-# --------------------------------------------------------------------------- #
-#  Threshold comparisons: THE single place that fixes the comparison side (< or ≤)
-# --------------------------------------------------------------------------- #
-# Circuits A/B fail on a STRICT shortfall below the threshold; circuits C/D —
-# on a STRICT excess. Equality with the threshold is never a failure.
-# Tuning other behavior (≤ instead of <) is allowed only here.
-def _fails_below(value: float, threshold: float) -> bool:
-    """Fail on a strict shortfall: ``value < threshold`` (equality passes)."""
-    return value < threshold
-
-
-def _fails_above(value: float, threshold: float) -> bool:
-    """Fail on a strict excess: ``value > threshold`` (equality passes)."""
-    return value > threshold
-
-
-def _diversity_fails(
-    diversity: float, threshold: float, adaptive: bool, r2_oof: float
-) -> bool:
-    """Fail side of circuit A, fixed in one place (module level).
-
-    Non-adaptive mode: strict shortfall — ``diversity < threshold``, equality
-    with the threshold passes. Adaptive mode is the only documented exception
-    to the strict-``<`` convention: the reference is the constant model whose
-    prediction spread is exactly zero, so a tie with it (``diversity`` at the
-    numerical zero tolerance ``_ZERO_VAR_EPS``) fails — the model is not
-    strictly better than the constant baseline. In
-    the adaptive mode a model with a negative ``R²_oof`` (strictly worse than
-    the constant prediction) fails even when numerical round-off makes
-    ``diversity`` a tiny positive number.
-
-    Args:
-        diversity: ``Var(y_pred_oof) / Var(y)``.
-        threshold: effective threshold (``min_prediction_diversity``).
-        adaptive: whether the adaptive constant-model baseline is used.
-        r2_oof: out-of-fold R² of the predictions (used in the adaptive
-            mode only).
-
-    Returns:
-        bool: True when circuit A must fail for the given values.
-    """
-    if adaptive:
-        return diversity <= _ZERO_VAR_EPS or (np.isfinite(r2_oof) and r2_oof < 0.0)
-    return diversity < threshold
-
-
-def _r2_oof(y: np.ndarray, y_pred: np.ndarray) -> float:
-    """Out-of-fold R² of the predictions (constant-model baseline).
-
-    ``1 - Var(y - pred) / Var(y)`` — the fraction of variance explained.
-    Used by circuit A in the adaptive mode to reject models that are worse
-    than a constant prediction: a negative R² means the residual variance
-    exceeds the target variance, i.e. the model is strictly worse than
-    predicting the mean. The diversity ratio (``Var(pred) / Var(y)``) is
-    subject to round-off and may come out as a tiny positive number when the
-    predictions are numerically constant while R² is clearly negative, so
-    the explicit R² test is the authoritative negative-signal detector.
-
-    Args:
-        y: the target (on the valid pairs).
-        y_pred: the OOF predictions (on the same valid pairs).
-
-    Returns:
-        float: R²_oof, or NaN when ``Var(y) == 0`` (undefined).
-    """
-    var_y = float(np.var(y))
-    if var_y <= _ZERO_VAR_EPS:
-        return float("nan")
-    residual = y - y_pred
-    return float(1.0 - np.var(residual) / var_y)
-
-
-# Numerical tolerances and rounding constants.
-_ZERO_VAR_EPS = 1e-12  # target variance below this is treated as "constant y"
-_ZERO_RMSE_EPS = 1e-12  # RMSE below this is considered zero (division by zero)
-_MSE_EPS = 1e-12  # denominator stabilizer in the relative ΔMSE
-_FALLBACK_DECIMALS = 6  # rounding precision when std(y)==0
-_MIN_DECIMALS = -12
-_MAX_DECIMALS = 10
-
-_SEVERITY_CLEAN = 0
-_SEVERITY_WARNING = 1
-
-
-@dataclass(frozen=True)
-class SanityCheckResult:
-    """Result of a model degeneracy audit.
-
-    Attributes:
-        is_valid: True when no circuit disqualified the model. In ``warn_only``
-            mode it is always True (the gate does not disqualify).
-        reasons: disqualification reasons (each a string naming the circuit).
-        soft_warnings: signals for the report — they never disqualify alone.
-        diversity_ratio: ``Var(y_pred_oof) / Var(y)`` (circuit A); NaN when the
-            circuit is disabled or not computable.
-        unique_ratio: share of distinct (post-rounding) predictions
-            ``nunique / N`` (circuit B); NaN when the circuit is disabled.
-        dead_features_count: number of "dead" features (circuit C): zero
-            coefficients for linear models or permutation-insensitive columns
-            for nonlinear ones; 0 when the circuit is disabled.
-        generalization_gap: ``RMSE_oof / RMSE_full`` (circuit D); NaN when the
-            circuit is disabled or not computable, ``inf`` for the
-            division-by-zero cases (``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``).
-            In ``generalization_gap_mode = "warn"`` every gap violation —
-            finite or infinite — is reported in ``soft_warnings`` and never
-            disqualifies; in ``"reject"`` mode it becomes a
-            disqualification reason.
-        severity: formalized severity for the fallback:
-            0 — clean; 1 — soft warnings only;
-            2/3/4 — one/two/three or more disqualification reasons.
-            In ``warn_only`` mode it never exceeds 1.
-    """
-
-    is_valid: bool
-    reasons: list[str] = field(default_factory=list)
-    soft_warnings: list[str] = field(default_factory=list)
-    diversity_ratio: float = float("nan")
-    unique_ratio: float = float("nan")
-    dead_features_count: int = 0
-    generalization_gap: float = float("nan")
-    severity: int = _SEVERITY_CLEAN
-
-
-def _compute_severity(
-    reasons: list[str], soft_warnings: list[str], warn_only: bool
-) -> int:
-    """Map reasons/warnings to a formalized severity level.
-
-    Args:
-        reasons: disqualification reasons.
-        soft_warnings: soft signals.
-        warn_only: True — the gate does not disqualify (severity ≤ 1).
-
-    Returns:
-        int: 0 — clean; 1 — warnings only; 2/3/4 — one/two/three+ reasons.
-            Not higher than 1 in ``warn_only`` mode.
-    """
-    if reasons:
-        severity = min(2 + len(reasons) - 1, 4)
-    elif soft_warnings:
-        severity = _SEVERITY_WARNING
-    else:
-        severity = _SEVERITY_CLEAN
-    return min(severity, _SEVERITY_WARNING) if warn_only else severity
-
-
-def _to_float_vector(values: Any, name: str) -> np.ndarray:
-    """Convert an input to a 1-D float array (with shape validation).
-
-    Args:
-        values: any array-like (numpy, pandas, list).
-        name: argument name used in error messages.
-
-    Returns:
-        np.ndarray: a 1-D float array.
-
-    Raises:
-        ValueError: if ``values`` is None, is not 1-D after collapsing
-            (n, 1)/(1, n), or cannot be converted to float.
-    """
-    if values is None:
-        raise ValueError(f"{name} must not be None")
-    arr = np.asarray(values, dtype=float)
-    if arr.ndim == 2 and 1 in arr.shape:
-        arr = arr.reshape(-1)
-    if arr.ndim != 1:
-        raise ValueError(
-            f"{name} must be a 1-D vector (got shape {arr.shape}); "
-            "pass y / y_pred_oof / y_pred_full as flat arrays or Series."
-        )
-    return arr
-
-
-def _rounding_decimals(std_y: float) -> int:
-    """Rounding precision for predictions derived from the target scale (B).
-
-    The rounding granularity equals 1% of the order of magnitude of ``std(y)``:
-    ``10 ** (floor(log10(std_y)) - 2)``. Relative to ``std(y)`` itself this is
-    0.1–1% — predictions that differ by less than roughly one hundredth of the
-    noise scale of the target are treated as equal. For a constant target
-    (``std_y == 0``) a fixed fallback of ``_FALLBACK_DECIMALS`` decimals is
-    used; note that for large-scale targets this may collapse predictions
-    differing by less than the fallback granularity — pre-scale ``y`` if finer
-    granularity is needed.
-
-    Args:
-        std_y: standard deviation of the target.
-
-    Returns:
-        int: number of decimals for ``np.round`` (may be negative for
-            large-scale y).
-    """
-    if not np.isfinite(std_y) or std_y <= 0.0:
-        return _FALLBACK_DECIMALS
-    order = math.floor(math.log10(std_y))
-    return int(min(max(2 - order, _MIN_DECIMALS), _MAX_DECIMALS))
-
-
-def _core_estimator(model: Any) -> Any:
-    """Unwrap sklearn/imblearn pipelines down to the final estimator.
-
-    Args:
-        model: a model object (possibly a Pipeline).
-
-    Returns:
-        Any: the final pipeline step (or ``model`` itself when not a pipeline).
-    """
-    seen: set[int] = set()
-    while hasattr(model, "named_steps"):
-        if id(model) in seen:
-            break
-        seen.add(id(model))
-        steps = model.named_steps
-        try:
-            values = list(steps.values())
-        except AttributeError:
-            break
-        if not values:
-            break
-        model = values[-1]
-    return model
-
-
-def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> Any:
-    """Return a copy of ``X`` with the values of column ``col`` shuffled.
-
-    Preserves the input type (a DataFrame stays a DataFrame with the same
-    columns) so that ``model.predict`` receives the expected shape. Scipy
-    sparse matrices (detected by duck typing via ``toarray``) are densified
-    for the subsample — ``np.array`` on a sparse matrix yields a 0-D object
-    array, which would crash column permutation.
-
-    Args:
-        X: the feature matrix (ndarray, DataFrame or scipy sparse).
-        col: index of the column to shuffle.
-        rng: randomness generator (deterministic for a fixed seed).
-
-    Returns:
-        Any: a copy of ``X`` with column ``col`` permuted.
-    """
-    perm = rng.permutation(X.shape[0])
-    if isinstance(X, pd.DataFrame):
-        X2: Any = X.copy()
-        col_name = X2.columns[col]
-        X2[col_name] = X2[col_name].to_numpy()[perm]
-        return X2
-    if hasattr(X, "toarray"):  # scipy sparse → dense copy (subsample only)
-        X = X.toarray()
-    X2 = np.array(X, copy=True)
-    X2[:, col] = X2[perm, col]
-    return X2
-
-
-class _PermutationAbort(Exception):
-    """Ends the permutation check early with a circuit-C reason."""
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass
@@ -641,7 +296,7 @@ class ModelSanityGate:
             ValueError: when the input contract is violated (None arguments,
                 length mismatch between y/y_pred_oof/X).
         """
-        y_arr, oof_arr = self._validate_check_inputs(y, y_pred_oof, X)
+        y_arr, oof_arr = _validate_check_inputs(y, y_pred_oof, X)
         outcome = self._run_circuits(
             y_arr=y_arr, oof_arr=oof_arr, y_pred_full=y_pred_full, X=X, model=model
         )
@@ -668,47 +323,6 @@ class ModelSanityGate:
             generalization_gap=outcome.generalization_gap,
             severity=severity,
         )
-
-    @staticmethod
-    def _validate_check_inputs(
-        y: Any, y_pred_oof: Any, X: Any | None
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Validate the ``check()`` inputs and convert them to float vectors.
-
-        Args:
-            y: the true target.
-            y_pred_oof: OOF predictions aligned with ``y``.
-            X: the feature matrix (or None).
-
-        Returns:
-            tuple[np.ndarray, np.ndarray]: ``y`` and ``y_pred_oof`` as 1-D
-                float vectors.
-
-        Raises:
-            ValueError: when the input contract is violated (None arguments,
-                length mismatch between y/y_pred_oof/X).
-        """
-        y_arr = _to_float_vector(y, "y")
-        oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
-        if y_arr.shape != oof_arr.shape:
-            raise ValueError(
-                f"y and y_pred_oof must have the same length "
-                f"(got {y_arr.shape} and {oof_arr.shape})"
-            )
-        if X is not None:
-            if not hasattr(X, "shape"):
-                raise ValueError(
-                    f"X must be array-like with a .shape attribute "
-                    f"(ndarray, pandas.DataFrame or scipy sparse), got "
-                    f"{type(X).__name__}"
-                )
-            x_len = X.shape[0]
-            if x_len != y_arr.shape[0]:
-                raise ValueError(
-                    f"X and y must have the same number of rows "
-                    f"(got {x_len} and {y_arr.shape[0]})"
-                )
-        return y_arr, oof_arr
 
     def _run_circuits(
         self,
@@ -740,35 +354,47 @@ class ModelSanityGate:
         valid_pairs = np.isfinite(y_arr) & np.isfinite(oof_arr)
 
         if self.check_diversity:
-            outcome.diversity_ratio, d_reasons, d_warnings = self._check_diversity(
-                y_arr, oof_arr, valid_pairs
+            outcome.diversity_ratio, d_reasons, d_warnings = check_diversity(
+                y_arr,
+                oof_arr,
+                valid_pairs,
+                adaptive=self.adaptive_diversity,
+                min_prediction_diversity=self.min_prediction_diversity,
             )
             reasons.extend(d_reasons)
             soft_warnings.extend(d_warnings)
             diversity_failed = bool(d_reasons)
 
         if self.check_unique:
-            outcome.unique_ratio, u_reasons, u_warnings = self._check_unique(
-                y_arr, oof_arr, valid_pairs
+            outcome.unique_ratio, u_reasons, u_warnings = check_unique(
+                y_arr,
+                oof_arr,
+                valid_pairs,
+                min_unique_count=self.min_unique_count,
+                min_unique_ratio=self.min_unique_ratio,
             )
             reasons.extend(u_reasons)
             soft_warnings.extend(u_warnings)
 
         if self.check_dead_features:
-            outcome.dead_features_count, c_reasons, c_warnings = (
-                self._check_dead_features(
-                    model=model,
-                    X=X,
-                    y=y_arr,
-                    diversity_failed=diversity_failed,
-                )
+            outcome.dead_features_count, c_reasons, c_warnings = check_dead_features(
+                model=model,
+                X=X,
+                y=y_arr,
+                diversity_failed=diversity_failed,
+                settings=self._dead_feature_settings(),
             )
             reasons.extend(c_reasons)
             soft_warnings.extend(c_warnings)
 
         if self.check_generalization_gap:
             outcome.generalization_gap, g_reasons, g_warnings = (
-                self._check_generalization_gap(y_arr, oof_arr, y_pred_full)
+                check_generalization_gap(
+                    y_arr,
+                    oof_arr,
+                    y_pred_full,
+                    max_generalization_gap=self.max_generalization_gap,
+                )
             )
             reasons.extend(g_reasons)
             # Routing of circuit D violations: warn mode
@@ -782,6 +408,23 @@ class ModelSanityGate:
             else:
                 soft_warnings.extend(g_warnings)
         return outcome
+
+    def _dead_feature_settings(self) -> DeadFeatureSettings:
+        """The circuit-C settings of this gate (read at check time)."""
+        return DeadFeatureSettings(
+            check_diversity=self.check_diversity,
+            check_permutation_sensitivity=self.check_permutation_sensitivity,
+            zero_coef_tolerance=self.zero_coef_tolerance,
+            max_dead_feature_ratio=self.max_dead_feature_ratio,
+            dead_features_require_low_diversity=(
+                self.dead_features_require_low_diversity
+            ),
+            permutation_max_rows=self.permutation_max_rows,
+            permutation_max_features=self.permutation_max_features,
+            permutation_repeats=self.permutation_repeats,
+            permutation_seed=self.permutation_seed,
+            permutation_tolerance=self.permutation_tolerance,
+        )
 
     def _log_audit(
         self,
@@ -830,634 +473,3 @@ class ModelSanityGate:
                 logger.warning("%sSanity gate soft warning: %s", prefix, warning)
             else:
                 logger.debug("%sSanity gate soft warning: %s", prefix, warning)
-
-    # ──────────────────────────────────────────────────────────────────────── #
-    #  Circuit A — Diversity Ratio (on OOF predictions)
-    # ──────────────────────────────────────────────────────────────────────── #
-    def _check_diversity(
-        self, y: np.ndarray, y_pred_oof: np.ndarray, valid: np.ndarray
-    ) -> tuple[float, list[str], list[str]]:
-        """Compute ``Var(y_pred_oof) / Var(y)`` and check the threshold.
-
-        Args:
-            y: the target.
-            y_pred_oof: OOF predictions.
-            valid: mask of finite pairs.
-
-        Returns:
-            tuple[float, list[str], list[str]]: (diversity_ratio, reasons,
-                soft_warnings).
-        """
-        if not valid.any():
-            return (
-                float("nan"),
-                ["Circuit A (diversity): no finite (y, y_pred_oof) pairs"],
-                [],
-            )
-        var_y = float(np.var(y[valid]))
-        if var_y <= _ZERO_VAR_EPS:
-            # Constant target: the ratio is undefined (division by zero) —
-            # NaN is reported and circuit B takes over.
-            return (
-                float("nan"),
-                [],
-                [
-                    (
-                        "Circuit A (diversity): target variance is zero — check "
-                        "skipped (unique-ratio circuit applies)"
-                    )
-                ],
-            )
-        diversity = float(np.var(y_pred_oof[valid]) / var_y)
-        # In the adaptive mode the fraction of explained variance
-        # (R²_oof ≈ diversity for an honest model) is the decisive signal:
-        # a model worse than the constant prediction is rejected explicitly.
-        r2_oof = (
-            _r2_oof(y[valid], y_pred_oof[valid]) if self.adaptive_diversity else 0.0
-        )
-        threshold = 0.0 if self.adaptive_diversity else self.min_prediction_diversity
-        if not _diversity_fails(diversity, threshold, self.adaptive_diversity, r2_oof):
-            return diversity, [], []
-        if self.adaptive_diversity:
-            if np.isfinite(r2_oof) and r2_oof < 0.0:
-                reason = (
-                    f"Circuit A (diversity): R²_oof={r2_oof:.4f} < 0 — "
-                    "model is worse than the constant prediction"
-                )
-            else:
-                reason = (
-                    "Circuit A (diversity): ratio=0.0000 equals the "
-                    "constant-model baseline — no expressiveness"
-                )
-        else:
-            reason = (
-                f"Circuit A (diversity): ratio={diversity:.4f} < "
-                f"min_prediction_diversity={threshold:.4f}"
-            )
-        return diversity, [reason], []
-
-    # ──────────────────────────────────────────────────────────────────────── #
-    #  Circuit B — Unique Ratio (rounding from std(y))
-    # ──────────────────────────────────────────────────────────────────────── #
-    def _check_unique(
-        self, y: np.ndarray, y_pred_oof: np.ndarray, valid: np.ndarray
-    ) -> tuple[float, list[str], list[str]]:
-        """Compute the share of unique predictions and check the lower bound.
-
-        Predictions are rounded relative to the scale of the **target**
-        (``std(y)``), not of the predictions — fixed digits are inapplicable to
-        differently scaled and discrete targets.
-
-        The required number of distinct predictions is
-        ``max(min_unique_count, min_unique_ratio * N)`` with the ratio term
-        capped by ``nunique(y)`` — the number of distinct target values on the
-        valid rows at the same rounding granularity that is applied to the
-        predictions (so a model predicting y exactly always reaches the cap).
-        Without the cap a high ``min_unique_ratio`` on a low-cardinality
-        target demands more distinct predictions than the most expressive
-        model (one predicting y exactly) can produce: e.g. 18 rows with 13
-        distinct y values and ``min_unique_ratio=0.9`` require 16.2 ≥ 17
-        distinct predictions — even a perfect model would be disqualified.
-        The cap makes the ceiling equal to the expressing power
-        of a perfect model; the final threshold is additionally never allowed
-        to exceed the cap even when ``min_unique_count`` is set above it.
-
-        Args:
-            y: the target (source of the rounding scale).
-            y_pred_oof: OOF predictions.
-            valid: mask of finite pairs.
-
-        Returns:
-            tuple[float, list[str], list[str]]: (unique_ratio, reasons,
-                soft_warnings).
-        """
-        n_valid = int(valid.sum())
-        if n_valid == 0:
-            return (
-                float("nan"),
-                ["Circuit B (unique): no finite (y, y_pred_oof) pairs"],
-                [],
-            )
-        std_y = float(np.std(y[valid]))
-        decimals = _rounding_decimals(std_y)
-        rounded = np.round(y_pred_oof[valid], decimals=decimals)
-        nunique = len(np.unique(rounded))
-        unique_ratio = nunique / n_valid
-        # Distinct target values on the valid rows at the same rounding
-        # granularity that is applied to the predictions — the natural
-        # ceiling for how many distinct predictions the most expressive
-        # model (one predicting y exactly) can produce.
-        n_unique_y = len(np.unique(np.round(y[valid], decimals=decimals)))
-        ratio_bound = min(self.min_unique_ratio * n_valid, n_unique_y)
-        required = min(max(self.min_unique_count, ratio_bound), n_unique_y)
-        if _fails_below(nunique, required):
-            return (
-                unique_ratio,
-                [
-                    (
-                        f"Circuit B (unique): nunique={nunique} < "
-                        f"max(min_unique_count={self.min_unique_count}, "
-                        f"min_unique_ratio*N={self.min_unique_ratio * n_valid:.3f} "
-                        f"capped by nunique(y)={n_unique_y} -> "
-                        f"{ratio_bound:.3f}) = {required:.3f}"
-                    )
-                ],
-                [],
-            )
-        return unique_ratio, [], []
-
-    # ──────────────────────────────────────────────────────────────────────── #
-    #  Circuit C — Dead Feature Check
-    # ──────────────────────────────────────────────────────────────────────── #
-    def _check_dead_features(
-        self,
-        *,
-        model: Any,
-        X: Any | None,
-        y: np.ndarray,
-        diversity_failed: bool,
-    ) -> tuple[int, list[str], list[str]]:
-        """Check dead features: the linear or the permutation path.
-
-        Args:
-            model: the fitted model (may be a pipeline).
-            X: the feature matrix (needed by the permutation path).
-            y: the target.
-            diversity_failed: whether circuit A failed (for the combined
-                disqualification).
-
-        Returns:
-            tuple[int, list[str], list[str]]: (dead_features_count, reasons,
-                soft_warnings).
-        """
-        if model is None:
-            return (
-                0,
-                [
-                    (
-                        "Circuit C (dead features): model is not provided "
-                        "(check_dead_features=True)"
-                    )
-                ],
-                [],
-            )
-        estimator = _core_estimator(model)
-        coef = getattr(estimator, "coef_", None)
-        if coef is not None:
-            return self._check_dead_features_linear(coef, diversity_failed)
-        if not self.check_permutation_sensitivity:
-            # The permutation path is disabled by the user: for nonlinear
-            # models circuit C is idle — an intentional cost decision.
-            return 0, [], []
-        if X is None:
-            return (
-                0,
-                [
-                    (
-                        "Circuit C (dead features): X is not provided — permutation "
-                        "check impossible for a nonlinear model"
-                    )
-                ],
-                [],
-            )
-        return self._check_dead_features_permutation(
-            model=model, X=X, y=y, diversity_failed=diversity_failed
-        )
-
-    def _check_dead_features_linear(
-        self, coef: Any, diversity_failed: bool
-    ) -> tuple[int, list[str], list[str]]:
-        """Linear path: zero-coefficient share is a signal + a combination.
-
-        Args:
-            coef: the model's coefficient vector (``coef_``).
-            diversity_failed: whether circuit A failed.
-
-        Returns:
-            tuple[int, list[str], list[str]]: (dead_features_count, reasons,
-                soft_warnings).
-        """
-        coef_arr = np.asarray(coef, dtype=float).ravel()
-        if coef_arr.size == 0:
-            return 0, ["Circuit C (dead features): model exposes an empty coef_"], []
-        zero_count = int(np.sum(np.abs(coef_arr) <= self.zero_coef_tolerance))
-        zero_ratio = zero_count / coef_arr.size
-        reasons: list[str] = []
-        warnings: list[str] = []
-        if _fails_above(zero_ratio, self.max_dead_feature_ratio):
-            warnings.append(
-                f"Circuit C (dead features): zero-coefficient ratio="
-                f"{zero_ratio:.3f} > max_dead_feature_ratio="
-                f"{self.max_dead_feature_ratio:.3f} (signal — on wide/noisy "
-                f"data Lasso-family models legitimately zero out features)"
-            )
-            if self.dead_features_require_low_diversity:
-                if diversity_failed:
-                    reasons.append(
-                        f"Circuit C (dead features): combination — "
-                        f"zero-coefficient ratio={zero_ratio:.3f} above "
-                        f"max_dead_feature_ratio AND prediction diversity "
-                        f"below its threshold"
-                    )
-                elif not self.check_diversity:
-                    # The combination cannot be computed: circuit A is
-                    # disabled — explicitly report that the rule was not
-                    # applied (not silently).
-                    warnings.append(
-                        "Circuit C (dead features): combination rule inactive — "
-                        "check_diversity=False (dead-feature share is a signal "
-                        "only)"
-                    )
-        return zero_count, reasons, warnings
-
-    def _check_dead_features_permutation(
-        self,
-        *,
-        model: Any,
-        X: Any,
-        y: np.ndarray,
-        diversity_failed: bool,
-    ) -> tuple[int, list[str], list[str]]:
-        """Permutation path for nonlinear models (with cost controls).
-
-        A feature is "dead" when the relative change of MSE under permutation
-        of its column stays below ``permutation_tolerance``. Row subsampling
-        and the column cap bound the cost; base predictions are cached; the
-        seed is fixed (determinism). All ΔMSE repeats are computed on the same
-        fixed set of valid rows (derived from the base predictions), so their
-        average is well-defined even when a repeat returns non-finite values
-        for some rows (such a repeat is skipped instead of changing the mask).
-
-        Any unexpected error inside the permutation machinery (sparse or exotic
-        ``X``, failing row subsampling, etc.) is converted into a circuit-C
-        reason instead of escaping from ``check()``.
-
-        Args:
-            model: the fitted model able to ``predict`` on a modified X.
-            X: the feature matrix (ndarray, DataFrame or scipy sparse).
-            y: the target.
-            diversity_failed: whether circuit A failed.
-
-        Returns:
-            tuple[int, list[str], list[str]]: (dead_features_count, reasons,
-                soft_warnings).
-        """
-        try:
-            return self._permutation_impl(
-                model=model, X=X, y=y, diversity_failed=diversity_failed
-            )
-        except Exception as err:  # noqa: BLE001 — convert into a reason
-            return (
-                0,
-                [f"Circuit C (dead features): permutation check failed: {err}"],
-                [],
-            )
-
-    def _permutation_impl(
-        self,
-        *,
-        model: Any,
-        X: Any,
-        y: np.ndarray,
-        diversity_failed: bool,
-    ) -> tuple[int, list[str], list[str]]:
-        """Core permutation check; errors are caught by the caller wrapper.
-
-        All random draws come from one generator seeded with
-        ``permutation_seed``, in this order: the row subsample, the column
-        subsample, then the permutations column by column and repeat by
-        repeat. A step that cannot continue raises :class:`_PermutationAbort`
-        with its circuit-C reason.
-        """
-        rng = np.random.default_rng(self.permutation_seed)
-        try:
-            X_sub, y_sub, col_idx = self._permutation_subsample(X, y, rng)
-            base_valid, base_mse = self._base_prediction(model, X_sub, y_sub)
-            dead_count = 0
-            for col in col_idx:
-                if self._is_dead_column(
-                    model, X_sub, y_sub, int(col), rng, base_valid, base_mse
-                ):
-                    dead_count += 1
-        except _PermutationAbort as abort:
-            return 0, [abort.reason], []
-        return self._dead_features_verdict(
-            dead_count, int(col_idx.size), diversity_failed
-        )
-
-    def _permutation_subsample(
-        self, X: Any, y: np.ndarray, rng: np.random.Generator
-    ) -> tuple[Any, np.ndarray, np.ndarray]:
-        """Draw the row subsample, then the (sorted) column subsample.
-
-        Args:
-            X: the feature matrix.
-            y: the target.
-            rng: the permutation generator.
-
-        Returns:
-            tuple[Any, np.ndarray, np.ndarray]: (X_sub, y_sub, col_idx).
-
-        Raises:
-            _PermutationAbort: when the rows cannot be selected or ``X`` is
-                not a 2-D matrix with at least one column.
-        """
-        n_rows = y.shape[0]
-        row_idx = np.arange(n_rows)
-        if n_rows > self.permutation_max_rows:
-            row_idx = rng.choice(n_rows, size=self.permutation_max_rows, replace=False)
-        try:
-            X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
-        except Exception as err:  # converted into a reason by the caller
-            raise _PermutationAbort(
-                f"Circuit C (dead features): row subsampling of X failed: {err}"
-            ) from err
-        y_sub = y[row_idx]
-
-        if X_sub.ndim != 2 or X_sub.shape[1] == 0:
-            raise _PermutationAbort(
-                "Circuit C (dead features): X must be a 2-D matrix with at "
-                "least one column"
-            )
-        n_cols = X_sub.shape[1]
-        col_idx = np.arange(n_cols)
-        if n_cols > self.permutation_max_features:
-            col_idx = rng.choice(
-                n_cols, size=self.permutation_max_features, replace=False
-            )
-        return X_sub, y_sub, np.sort(col_idx)
-
-    @staticmethod
-    def _base_prediction(
-        model: Any, X_sub: Any, y_sub: np.ndarray
-    ) -> tuple[np.ndarray, float]:
-        """Predict on the subsample once (cached base for every column).
-
-        Args:
-            model: the fitted model.
-            X_sub: the subsampled features.
-            y_sub: the subsampled target.
-
-        Returns:
-            tuple[np.ndarray, float]: the fixed mask of valid
-                (y, prediction) pairs and the base MSE on it.
-
-        Raises:
-            _PermutationAbort: when the prediction fails, has the wrong
-                length or has no finite pair with ``y``.
-        """
-        try:
-            base_pred = np.asarray(model.predict(X_sub), dtype=float).reshape(-1)
-        except Exception as err:  # converted into a reason by the caller
-            raise _PermutationAbort(
-                f"Circuit C (dead features): prediction failed on subsampled X: {err}"
-            ) from err
-
-        if base_pred.shape != y_sub.shape:
-            raise _PermutationAbort(
-                f"Circuit C (dead features): prediction returned "
-                f"{base_pred.shape[0]} values for {y_sub.shape[0]} rows"
-            )
-        base_valid = np.isfinite(y_sub) & np.isfinite(base_pred)
-        if not base_valid.any():
-            raise _PermutationAbort(
-                "Circuit C (dead features): no finite (y, prediction) pairs "
-                "on the permutation subsample"
-            )
-        base_mse = float(mean_squared_error(y_sub[base_valid], base_pred[base_valid]))
-        return base_valid, base_mse
-
-    def _is_dead_column(
-        self,
-        model: Any,
-        X_sub: Any,
-        y_sub: np.ndarray,
-        col: int,
-        rng: np.random.Generator,
-        base_valid: np.ndarray,
-        base_mse: float,
-    ) -> bool:
-        """Whether permuting column ``col`` leaves the MSE (almost) unchanged.
-
-        Args:
-            model, X_sub, y_sub: the fitted model and the subsample.
-            col: the column index.
-            rng: the permutation generator.
-            base_valid, base_mse: the fixed mask of valid pairs and the base
-                MSE on it.
-
-        Returns:
-            bool: True when the relative ΔMSE (mean over the usable repeats)
-                is below ``permutation_tolerance``; False when no repeat is
-                usable.
-        """
-        deltas: list[float] = []
-        for _ in range(self.permutation_repeats):
-            delta = self._column_delta(
-                model, X_sub, y_sub, col, rng, base_valid, base_mse
-            )
-            if delta is not None:
-                deltas.append(delta)
-        if not deltas:
-            return False
-        mean_delta = float(np.mean(deltas))
-        # Relative change of MSE; the _MSE_EPS stabilizer keeps the ratio
-        # well-defined for a perfect in-sample fit (base_mse == 0): in that
-        # case only an exactly unchanged prediction counts as "dead".
-        rel_change = abs(mean_delta) / (abs(base_mse) + _MSE_EPS)
-        return bool(rel_change < self.permutation_tolerance)
-
-    @staticmethod
-    def _column_delta(
-        model: Any,
-        X_sub: Any,
-        y_sub: np.ndarray,
-        col: int,
-        rng: np.random.Generator,
-        base_valid: np.ndarray,
-        base_mse: float,
-    ) -> float | None:
-        """ΔMSE of one permutation repeat of column ``col``.
-
-        Args:
-            model, X_sub, y_sub, col, rng, base_valid, base_mse: as in
-                :meth:`_is_dead_column`.
-
-        Returns:
-            float | None: ``MSE_permuted - base_mse``, or None when the
-                repeat is skipped (wrong length or non-finite values on a
-                base-valid row).
-
-        Raises:
-            _PermutationAbort: when the permutation or the prediction fails.
-        """
-        try:
-            X_perm = _copy_with_permuted_column(X_sub, col, rng)
-        except Exception as err:  # converted into a reason by the caller
-            raise _PermutationAbort(
-                f"Circuit C (dead features): column permutation "
-                f"failed (column {int(col)}): {err}"
-            ) from err
-        try:
-            perm_pred = np.asarray(model.predict(X_perm), dtype=float).reshape(-1)
-        except Exception as err:  # converted into a reason by the caller
-            raise _PermutationAbort(
-                f"Circuit C (dead features): prediction failed on "
-                f"permuted X (column {int(col)}): {err}"
-            ) from err
-        # Fixed valid-pair mask (from the base predictions): every
-        # repeat of the same column is evaluated on the same rows, so
-        # the mean ΔMSE is not biased by varying masks. A repeat that
-        # returns non-finite values for a base-valid row is skipped
-        # rather than silently switching to a different row set.
-        if perm_pred.shape != y_sub.shape or not np.all(
-            np.isfinite(perm_pred[base_valid])
-        ):
-            return None
-        return (
-            float(mean_squared_error(y_sub[base_valid], perm_pred[base_valid]))
-            - base_mse
-        )
-
-    def _dead_features_verdict(
-        self, dead_count: int, n_checked: int, diversity_failed: bool
-    ) -> tuple[int, list[str], list[str]]:
-        """Turn the dead-column count into the circuit-C result.
-
-        Args:
-            dead_count: the number of dead columns.
-            n_checked: the number of checked columns.
-            diversity_failed: whether circuit A failed (combination rule).
-
-        Returns:
-            tuple[int, list[str], list[str]]: (dead_features_count, reasons,
-                soft_warnings).
-        """
-        reasons: list[str] = []
-        warnings: list[str] = []
-        dead_ratio = dead_count / n_checked if n_checked else 0.0
-        if not _fails_above(dead_ratio, self.max_dead_feature_ratio):
-            return dead_count, reasons, warnings
-        warnings.append(
-            f"Circuit C (dead features): dead-feature ratio="
-            f"{dead_ratio:.3f} > max_dead_feature_ratio="
-            f"{self.max_dead_feature_ratio:.3f} on permutation check "
-            f"({dead_count}/{n_checked} checked columns; note: correlated "
-            f"features may produce 'false-dead' results)"
-        )
-        if self.dead_features_require_low_diversity:
-            if diversity_failed:
-                reasons.append(
-                    "Circuit C (dead features): combination — high "
-                    "dead-feature ratio AND prediction diversity below its "
-                    "threshold"
-                )
-            elif not self.check_diversity:
-                # The combination cannot be computed: circuit A is
-                # disabled — explicitly report that the rule was not
-                # applied (not silently).
-                warnings.append(
-                    "Circuit C (dead features): combination rule inactive — "
-                    "check_diversity=False (dead-feature share is a signal "
-                    "only)"
-                )
-        return dead_count, reasons, warnings
-
-    # ──────────────────────────────────────────────────────────────────────── #
-    #  Circuit D — Generalization Gap
-    # ──────────────────────────────────────────────────────────────────────── #
-    def _check_generalization_gap(
-        self, y: np.ndarray, y_pred_oof: np.ndarray, y_pred_full: Any | None
-    ) -> tuple[float, list[str], list[str]]:
-        """Check ``RMSE_oof / RMSE_full`` against ``max_generalization_gap``.
-
-                Both RMSEs are computed on the **same** joint mask of finite pairs
-                (y, y_pred_oof, y_pred_full), so the ratio compares apples to apples.
-
-                Returns three lists separately so that ``check()`` can route them by
-        Returns three lists separately so that ``check()`` can route them by
-                ``generalization_gap_mode``: a gap violation — finite
-                (strictly above the threshold) or infinite (division by zero:
-                ``RMSE_full ≈ 0`` perfect in-sample fit, ``RMSE_oof ≈ 0``) — is
-                returned as a ``warnings`` entry, which ``check()`` turns into a
-                reason in ``"reject"`` mode or into ``soft_warnings`` in ``"warn"``
-                mode (in the warn mode the circuit never disqualifies because
-                of the gap magnitude). Contract violations (``y_pred_full = None``)
-                and non-computability (no finite pairs) are returned as ``reasons``
-                in **both** modes. ``RMSE_oof ≈ 0`` is the only case additionally
-                logged at ``WARNING`` level in warn mode (possible target leakage).
-
-                Args:
-                    y: the target.
-                    y_pred_oof: OOF predictions.
-                    y_pred_full: full-fit predictions (None → fail with a reason).
-
-                Returns:
-                    tuple[float, list[str], list[str]]: (generalization_gap, reasons,
-                        warnings).
-        """
-        if y_pred_full is None:
-            return (
-                float("nan"),
-                ["Circuit D (generalization gap): y_pred_full is not provided"],
-                [],
-            )
-        full_arr = _to_float_vector(y_pred_full, "y_pred_full")
-        if full_arr.shape != y.shape:
-            raise ValueError(
-                f"y and y_pred_full must have the same length "
-                f"(got {y.shape} and {full_arr.shape})"
-            )
-        mask = np.isfinite(y) & np.isfinite(y_pred_oof) & np.isfinite(full_arr)
-        if not mask.any():
-            return (
-                float("nan"),
-                ["Circuit D (generalization gap): no finite pairs to compute RMSE"],
-                [],
-            )
-        rmse_full = float(np.sqrt(mean_squared_error(y[mask], full_arr[mask])))
-        rmse_oof = float(np.sqrt(mean_squared_error(y[mask], y_pred_oof[mask])))
-        if rmse_oof <= _ZERO_RMSE_EPS:
-            # RMSE_oof ≈ 0: either a perfect model or a target leakage.
-            # In warn mode — a soft warning with an explicit leakage
-            # suspicion (additionally a WARNING in the log, see check());
-            # in reject mode — a reason (parity with the old behavior).
-            return (
-                float("inf"),
-                [],
-                [
-                    (
-                        "Circuit D (generalization gap): RMSE_oof≈0 — "
-                        "suspiciously perfect out-of-fold fit, possible "
-                        "target leakage (division by zero)"
-                    )
-                ],
-            )
-        if rmse_full <= _ZERO_RMSE_EPS:
-            # A perfect train fit (a depth-20 tree, 1-NN,
-            # ExtraTrees with min_samples_leaf=1, ...) — a normal property of
-            # a whole class of models; the gap goes to infinity, but this
-            # says nothing about the quality on new data.
-            return (
-                float("inf"),
-                [],
-                [
-                    (
-                        "Circuit D (generalization gap): RMSE_full≈0 (perfect "
-                        "in-sample fit) — division by zero"
-                    )
-                ],
-            )
-        gap = rmse_oof / rmse_full
-        if _fails_above(gap, self.max_generalization_gap):
-            return (
-                gap,
-                [],
-                [
-                    (
-                        f"Circuit D (generalization gap): gap={gap:.3f} > "
-                        f"max_generalization_gap={self.max_generalization_gap:.3f}"
-                    )
-                ],
-            )
-        return gap, [], []

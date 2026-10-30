@@ -402,6 +402,34 @@ def test_load_refuses_artifact_without_format_version(
     assert "retrain the model" in message
 
 
+def test_load_refuses_artifact_of_an_older_format_version(
+    trained_trainer: ModelTrainer, tmp_path: Path
+) -> None:
+    """An artifact of an older recorded format (a 0.5.0 development build,
+    format 2) is refused with the "retrain the model" message."""
+    path = tmp_path / "dev_model.pkl"
+    trained_trainer.save(path)
+    with open(path, "rb") as f:
+        saved = pickle.load(f)
+    saved.__dict__["artifact_metadata_"] = {
+        **saved.artifact_metadata_,
+        "artifact_format_version": ARTIFACT_FORMAT_VERSION - 1,
+        "engine_version": "0.5.0.dev1",
+    }
+    with open(path, "wb") as f:
+        pickle.dump(saved, f)
+
+    with pytest.raises(TrainingError) as excinfo:
+        ModelTrainer.load(path)
+
+    message = str(excinfo.value)
+    assert (
+        f"saved by engine 0.5.0.dev1 (artifact format {ARTIFACT_FORMAT_VERSION - 1})"
+        in message
+    )
+    assert "retrain the model" in message
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Load error handling (backward compatibility)
 # ══════════════════════════════════════════════════════════════════════════

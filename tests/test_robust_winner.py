@@ -42,12 +42,12 @@ from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.training_engine.component import train_best_model
-from configurable_automl_engine.training_engine.finalists import select_robust_winner
+from configurable_automl_engine.training_engine.robust_winner import select_robust_winner
 from configurable_automl_engine.training_engine.state import (
     FinalistCandidate,
     PhaseResult,
 )
-from configurable_automl_engine.training_engine.finalists import (
+from configurable_automl_engine.training_engine.robust_winner import (
     _circuit_rank,
     _severity_signature,
 )
@@ -336,7 +336,7 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
     ``time.monotonic`` is mocked: start at 0.0, the first candidate is
     checked at 1.0 (< budget 5.0), the rest at 10.0 (>= budget) → skipped.
     """
-    import configurable_automl_engine.training_engine.finalists as finalists_mod
+    import configurable_automl_engine.training_engine.robust_winner as robust_winner_mod
 
     y, y_oof, y_full = _honest_vectors()
     cands = {
@@ -345,7 +345,7 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
         "c": _candidate("c", cv_score=-0.10, rmse_oof=0.25, y_oof=y_oof, y_full=y_full),
     }
     mocker.patch.object(
-        finalists_mod.time,
+        robust_winner_mod.time,
         "monotonic",
         side_effect=[0.0, 1.0, 10.0, 10.0],
     )

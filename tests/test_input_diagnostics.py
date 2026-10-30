@@ -17,10 +17,12 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
-from configurable_automl_engine.common.validation_utils import (
-    check_target_constant,
+from configurable_automl_engine.common.datetime_features import (
     datetime_expansion_map,
     expand_datetime_columns,
+)
+from configurable_automl_engine.common.validation_utils import (
+    check_target_constant,
     validate_features,
 )
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError

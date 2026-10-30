@@ -1869,8 +1869,8 @@ def test_dead_features_column_permutation_failure_is_reason():
 
 
 def test_core_estimator_unwraps_nested_pipeline_objects():
-    from configurable_automl_engine.training_engine.sanity_gate import _core_estimator
-    from configurable_automl_engine.training_engine.sanity_gate import _r2_oof
+    from configurable_automl_engine.training_engine.sanity_circuits import _core_estimator
+    from configurable_automl_engine.training_engine.sanity_circuits import _r2_oof
 
     # R²_oof baseline: NaN for a constant target (undefined), a positive
     # value for a recovered signal, negative for anti-correlated predictions.
