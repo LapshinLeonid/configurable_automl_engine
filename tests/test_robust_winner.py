@@ -77,6 +77,10 @@ FINAL_SELECT_PHASE = {
 # ``logging.getLogger(__name__)``, i.e. the full package path.
 _COMPONENT_LOGGER = "configurable_automl_engine.training_engine.component"
 
+# The select-step module logger: the INFO winner-audit summary of the
+# sanity gate is emitted from select_steps.py, not from component.py.
+_SELECT_STEPS_LOGGER = "configurable_automl_engine.training_engine.select_steps"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -1204,7 +1208,10 @@ def test_train_best_model_sanity_gate_overhead_and_winner_audit_logged(
     tmp_path: Path, caplog
 ):
     """overhead_seconds in the gate section and an INFO log of the winner audit summary."""
-    with caplog.at_level(logging.INFO, logger=_COMPONENT_LOGGER):
+    # The audit-summary message is emitted by select_steps.py, so its module
+    # logger must be raised to INFO (not the component orchestrator logger):
+    # the test must not depend on log levels left over by earlier tests.
+    with caplog.at_level(logging.INFO, logger=_SELECT_STEPS_LOGGER):
         res = _run_sanity(tmp_path)
     sg = res["sanity_gate"]["GateSelect"]
     assert isinstance(sg["overhead_seconds"], float)
