@@ -49,8 +49,8 @@ def warn_experimental_once(*, algorithm: str, multiplier: float) -> None:
     """Log the experimental-status WARNING once per (algorithm, multiplier).
 
     Args:
-        algorithm (str): The normalized oversampling algorithm name.
-        multiplier (float): The sample size multiplier.
+        algorithm: The normalized oversampling algorithm name.
+        multiplier: The sample size multiplier.
 
     Returns:
         None

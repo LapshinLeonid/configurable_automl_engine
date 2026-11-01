@@ -56,13 +56,7 @@ def _register_datetime_expansion(
     trainer: ModelTrainer,
     expansion: dict[str, list[str]] | None,
 ) -> None:
-    """Register an upstream datetime expansion on a trainer before saving.
-
-    Args:
-        trainer (ModelTrainer): The trained trainer instance.
-        expansion (dict[str, list[str]] | None): Source column → generated
-            component columns; nothing is done when empty.
-    """
+    """Register an upstream datetime expansion on a trainer before saving."""
     if expansion:
         trainer.register_datetime_expansion(expansion)
 
@@ -87,10 +81,10 @@ def load_config(
     already-built object), and sets up file logging when required.
 
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): The training
+        config: The training
             configuration.
-        df (pd.DataFrame): The input data.
-        target (str | None): The target column name. Defaults to 'target'.
+        df: The input data.
+        target: The target column name. Defaults to 'target'.
 
     Returns:
         Tuple[Config, str]: A tuple (``Config`` object, target column name).
@@ -143,8 +137,9 @@ def _resolve_holdout_fraction(
     or ``None`` is returned as is.
 
     Args:
-        configured (float | Literal["auto"] | None): The configured value.
-        n_rows (int): The number of rows in the input data.
+        configured: The configured value.
+        n_rows: The number of rows in the input data.
+
 
     Returns:
         float | None: The fraction of rows to reserve, or ``None`` when no
@@ -175,9 +170,9 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     and the final training.
 
     Args:
-        cfg (Config): The configuration object.
-        df (pd.DataFrame): The input data.
-        target_col (str): The target column name.
+        cfg: The configuration object.
+        df: The input data.
+        target_col: The target column name.
 
     Returns:
         PreparedData: The prepared container of data and settings.
@@ -201,8 +196,8 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
         drop_id_like_columns=cfg.general.drop_id_like_columns,
     )
     # Recorded for inference: the saved trainer only ever sees the expanded
-    # data, so it cannot derive the mapping itself (B3 — the artifact must
-    # accept the raw schema it was trained on).
+    # data, so it cannot derive the mapping itself and the artifact must
+    # accept the raw schema it was trained on.
     datetime_expansion = datetime_expansion_map(X_raw, generated)
     check_target_constant(y)
     # Uninformative-feature cleaning at the same point where it runs in
@@ -210,8 +205,8 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # constant columns (including datetime-derived components such as
     # ts_year that are constant on the sample) are removed BEFORE type
     # detection, so the column lists in PreparedData match the feature set
-    # actually used by HPO and the final fit (S3 — no drift between the
-    # detected lists and the cleaned data).
+    # actually used by HPO and the final fit — no drift between the
+    # detected lists and the cleaned data.
     X = _clean_uninformative_features(X)
 
     # The engine seed: drives the data splits (and, through the trainer, the

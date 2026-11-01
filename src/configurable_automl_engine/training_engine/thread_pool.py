@@ -83,11 +83,7 @@ def _normalize_tasks(
     """Materialize the task arguments.
 
     ``args_seq=None`` means one call without arguments; an explicitly empty
-    ``args_seq`` means zero tasks.
-
-    Raises:
-        ValueError: If ``args_seq`` and ``kwargs_seq`` differ in length.
-    """
+    ``args_seq`` means zero tasks."""
     args_list: list[Sequence[Any]] = [()] if args_seq is None else list(args_seq)
     kwargs_list: list[Mapping[str, Any]] = (
         [{} for _ in args_list] if kwargs_seq is None else list(kwargs_seq)
@@ -119,11 +115,7 @@ def _run_threads(
     kwargs_list: Sequence[Mapping[str, Any]],
     max_workers: int | None,
 ) -> list[TaskOutcome]:
-    """Run the tasks in a thread pool, without timeouts.
-
-    Raises:
-        KeyboardInterrupt: If a task (or the user) interrupts the run.
-    """
+    """Run the tasks in a thread pool, without timeouts."""
     started: list[float | None] = [None] * len(args_list)
 
     def call(idx: int) -> Any:
@@ -305,52 +297,53 @@ def run_parallel(
     """Run a function in parallel with memory and lifecycle management.
 
     Semantics:
-        1. Tasks: ``args_seq=None`` runs ``func`` once without arguments; an
-           empty ``args_seq`` runs nothing and returns ``[]``.
-        2. Data transport (processes mode): DataFrame arguments go through
-           shared memory or the disk cache instead of pickle, and every
-           segment / temp file is freed on every exit path.
-        3. Timeouts (processes mode, hard): ``task_timeout`` counts from the
-           real start of a task in the worker; a task that never starts is
-           bounded by ``submit + task_timeout + queue_budget`` with
-           ``queue_budget = ceil(n_tasks / max_workers) * task_timeout``. A
-           timed-out task's worker is terminated and the pool is restarted
-           for the remaining tasks (a healthy task in flight at that moment
-           is resubmitted from scratch). ``timeout`` bounds the whole batch.
-           While tasks have not started, the wait is capped at
-           ``POLL_INTERVAL``. In threads mode the timeouts are ignored with a
-           warning: a running Python function cannot be interrupted.
-        4. Crash recovery (processes mode): when a worker process dies
-           (``os._exit``, a signal, the OOM killer), only its task is lost:
-           the pool is restarted and the unfinished tasks are resubmitted. A
-           task that crashes its worker ``MAX_CRASH_ATTEMPTS`` times is given
-           up on, so the run always terminates.
-        5. Fallback to threads: only when nothing has run yet — the process
-           pool cannot be created, or the payload transport cannot be set
-           up (a WARNING says the timeouts are dropped). An infrastructure
-           failure after tasks were submitted fails the unfinished tasks and
-           keeps the finished results; nothing is rerun.
+
+    1. Tasks: ``args_seq=None`` runs ``func`` once without arguments; an
+       empty ``args_seq`` runs nothing and returns ``[]``.
+    2. Data transport (processes mode): DataFrame arguments go through
+       shared memory or the disk cache instead of pickle, and every
+       segment / temp file is freed on every exit path.
+    3. Timeouts (processes mode, hard): ``task_timeout`` counts from the
+       real start of a task in the worker; a task that never starts is
+       bounded by ``submit + task_timeout + queue_budget`` with
+       ``queue_budget = ceil(n_tasks / max_workers) * task_timeout``. A
+       timed-out task's worker is terminated and the pool is restarted
+       for the remaining tasks (a healthy task in flight at that moment
+       is resubmitted from scratch). ``timeout`` bounds the whole batch.
+       While tasks have not started, the wait is capped at
+       ``POLL_INTERVAL``. In threads mode the timeouts are ignored with a
+       warning: a running Python function cannot be interrupted.
+    4. Crash recovery (processes mode): when a worker process dies
+       (``os._exit``, a signal, the OOM killer), only its task is lost:
+       the pool is restarted and the unfinished tasks are resubmitted. A
+       task that crashes its worker ``MAX_CRASH_ATTEMPTS`` times is given
+       up on, so the run always terminates.
+    5. Fallback to threads: only when nothing has run yet — the process
+       pool cannot be created, or the payload transport cannot be set
+       up (a WARNING says the timeouts are dropped). An infrastructure
+       failure after tasks were submitted fails the unfinished tasks and
+       keeps the finished results; nothing is rerun.
 
     Args:
-        func (Callable): The function to run (picklable in processes mode).
-        args_seq (Iterable): Sequence of argument tuples.
-        kwargs_seq (Iterable): Sequence of keyword-argument dicts.
-        max_workers (int): Maximum number of workers.
-        mode (str): Parallelism mode ("threads" or "processes").
-        timeout (float | None): Global time limit in seconds for the whole
+        func: The function to run (picklable in processes mode).
+        args_seq: Sequence of argument tuples.
+        kwargs_seq: Sequence of keyword-argument dicts.
+        max_workers: Maximum number of workers.
+        mode: Parallelism mode ("threads" or "processes").
+        timeout: Global time limit in seconds for the whole
             batch (processes mode only). None — no limit.
-        shared_args_indices (list[int]): DataFrame indices for Shared Memory.
+        shared_args_indices: DataFrame indices for Shared Memory.
             Data in shared memory is passed positionally and the index is
             NOT transferred: the worker always receives the frame with a
             RangeIndex(0, n) — worker code must not align X and y by index.
             An int64/uint64 column mixed with a float column is promoted to
             float64 for the worker (lossless up to 2**53 in absolute value).
-        disk_args_indices (list[int]): DataFrame indices for the disk cache.
-        shutdown_grace_period (float): Seconds a terminated worker gets
+        disk_args_indices: DataFrame indices for the disk cache.
+        shutdown_grace_period: Seconds a terminated worker gets
             between SIGTERM and SIGKILL.
-        task_timeout (float | None): Per-task timeout in seconds, from the
+        task_timeout: Per-task timeout in seconds, from the
             real start in the worker (processes mode only).
-        mp_context (str | BaseContext | None): The start method of the
+        mp_context: The start method of the
             worker processes (``"forkserver"``, ``"spawn"``, ``"fork"``) or a
             multiprocessing context; ``None`` — ``DEFAULT_START_METHOD``
             (``forkserver`` where available, else ``spawn``).

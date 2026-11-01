@@ -1,4 +1,4 @@
-"""The legacy functional training API: the body of ``train_model``.
+"""The functional training API: the body of ``train_model``.
 
 Holds :func:`run_train_model`, the logic of the ``train_model`` facade
 (``trainer.train_model`` keeps the documented signature and passes
@@ -33,39 +33,35 @@ def run_train_model(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     feature_selection_active: bool | None = None,
 ) -> float:
-    """Run the legacy ``train_model`` facade with the given trainer class.
+    """Run the ``train_model`` facade with the given trainer class.
 
     ``trainer.train_model`` calls this with ``ModelTrainer`` (passing the
     class keeps this module independent of ``trainer``, which re-exports the
-    facade). The rest of this docstring is the one of ``train_model``.
+    facade). The full argument table lives in API_REFERENCE.md
+    ("train_model(cfg_or_algo, metric_or_testsize, ...)").
 
-    Provide backward compatibility with the legacy model training API.
-    A facade function that accepts a configuration or a set of positional
-    arguments, instantiates a ModelTrainer, and returns the metric value
-    computed on held-out data (hold-out or the CV estimate — the fold mean
-    for additive metrics, the pooled OOF value for non-additive metrics such
-    as RMSE/MSE/R²/nRMSE) — using the
-    same validation method used to assess quality in ``ModelTrainer.fit()``
-    (not a train score).
+    Accepts both a config dict and the positional argument form; returns the
+    metric value computed on held-out data (the same validation method used
+    in ``ModelTrainer.fit()`` — not a train score).
 
     The feature selection parameters (``feature_selection_cfg`` /
     ``feature_selection_active``) are keyword-only: in the "config dict"
     branch, the same-named dict keys take precedence over the explicit
-    arguments (similarly to ``data_oversampling``). A key present in the config
-    with the value ``None`` is treated as "value not set": in that case, as
-    when the key is absent, the explicit function argument is used (fallback).
-    In the simple API branch, the function arguments are used directly.
+    arguments. A key present in the config with the value ``None`` is
+    treated as "value not set": in that case, as when the key is absent, the
+    explicit function argument is used (fallback). In the simple API branch,
+    the function arguments are used directly.
 
-    Attributes:
+    Args:
         trainer_cls: The trainer class to instantiate (``ModelTrainer``).
-        cfg_or_algo (dict | str): Configuration dict or algorithm name.
-        metric_or_testsize (str | float): Metric or test sample size.
-        params_or_metric (dict | str): Hyperparameters or metric name.
-        X (Any): Feature matrix.
-        y (Any): Target variable vector.
-        enable_logging (bool): Flag enabling logging.
-        random_state (int | None): Random seed.
-        log_path (str | Path | None): Path to the log file. Used only when
+        cfg_or_algo: Configuration dict or algorithm name.
+        metric_or_testsize: Metric or test sample size.
+        params_or_metric: Hyperparameters or metric name.
+        X: Feature matrix.
+        y: Target variable vector.
+        enable_logging: Flag enabling logging.
+        random_state: Random seed.
+        log_path: Path to the log file. Used only when
             ``enable_logging`` is True: file logging is initialized with
             ``setup_logging(logfile=...)`` so the "Training finished" message
             and the library logs are written to this file. ``None`` — no file
@@ -76,20 +72,16 @@ def run_train_model(
             dict" branch, the ``log_path`` key takes precedence over this
             argument, except when the key is present with the value ``None`` —
             then this argument is used (fallback).
-        feature_selection_cfg (FeatureSelectionCfg | dict | None):
-            Feature selection configuration (method, percentile, min_features,
-            etc.). In the "config dict" branch, the ``feature_selection_cfg``
-            key takes precedence over this argument, except when the key is
-            present with the value ``None`` — then this argument is used
-            (fallback). ``None`` — ``FeatureSelectionCfg()`` (mode='disabled').
-        feature_selection_active (bool | None): Explicit boolean flag of
+        feature_selection_cfg: Feature selection configuration (method,
+            percentile, min_features, etc.), with the config-key precedence
+            rule above. ``None`` — ``FeatureSelectionCfg()``
+            (mode='disabled').
+        feature_selection_active: Explicit boolean flag of
             feature selection activity (takes precedence over the mode from
-            ``feature_selection_cfg``). In the "config dict" branch, the
-            ``feature_selection_active`` key takes precedence over this
-            argument, except when the key is present with the value ``None`` —
-            then this argument is used (fallback). Non-boolean values are
-            rejected by the ``ModelTrainer`` constructor (strict typing).
-            ``None`` — the decision is based on the configuration.
+            ``feature_selection_cfg``), with the config-key precedence rule
+            above. Non-boolean values are rejected by the ``ModelTrainer``
+            constructor (strict typing). ``None`` — the decision is based on
+            the configuration.
     """
     algo: str = ""
     metric: str = ""

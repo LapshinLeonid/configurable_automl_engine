@@ -49,13 +49,7 @@ def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     Calculation logic:
     1. MSE is computed with the standard `mean_squared_error` function.
     2. The square root is taken from the result via `np.sqrt`.
-    3. The result is forcibly cast to float for consistency.
-    Args:
-        y_true (np.ndarray): True values of the target variable.
-        y_pred (np.ndarray): Model predictions.
-    Returns:
-        float: The RMSE value (the lower, the better).
-    """
+    3. The result is forcibly cast to float for consistency."""
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
@@ -70,8 +64,8 @@ def oof_rmse(y_true: Any, y_pred: Any) -> float:
     of folds of different lengths does not "drift" across indices.
 
     Args:
-        y_true (Any): True values aligned with ``y_pred`` by position.
-        y_pred (Any): OOF predictions aligned with ``y_true`` by position.
+        y_true: True values aligned with ``y_pred`` by position.
+        y_pred: OOF predictions aligned with ``y_true`` by position.
 
     Returns:
         float: RMSE over all valid pairs (lower is better).
@@ -140,7 +134,7 @@ def is_non_additive_metric(name: str) -> bool:
     mean equals the pooled value.
 
     Args:
-        name (str): Metric name (user or sklearn alias, case-insensitive;
+        name: Metric name (user or sklearn alias, case-insensitive;
             surrounding whitespace is ignored).
 
     Returns:
@@ -159,10 +153,10 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
     values.
 
     Args:
-        scorer (Any): A scikit-learn ``make_scorer`` object exposing
+        scorer: A scikit-learn ``make_scorer`` object exposing
             ``_score_func``, ``_sign`` and ``_kwargs``.
-        y_true (Any): True values aligned with ``y_pred`` by position.
-        y_pred (Any): Predictions aligned with ``y_true`` by position.
+        y_true: True values aligned with ``y_pred`` by position.
+        y_pred: Predictions aligned with ``y_true`` by position.
 
     Returns:
         float: The raw (sign-applied) metric value over all valid pairs.
@@ -210,10 +204,10 @@ def warn_pooled_fallback_once(*, algo_name: str, phase_name: str, reason: str) -
     stays silent for the subsequent occurrences of the same pair.
 
     Args:
-        algo_name (str): The algorithm being evaluated (e.g. 'ridge').
-        phase_name (str): The pipeline phase (e.g. an HPO phase name, or
+        algo_name: The algorithm being evaluated (e.g. 'ridge').
+        phase_name: The pipeline phase (e.g. an HPO phase name, or
             'final_fit' for the final ``ModelTrainer`` fit).
-        reason (str): The human-readable cause of the fallback.
+        reason: The human-readable cause of the fallback.
 
     Returns:
         None
@@ -259,13 +253,7 @@ def _nrmse(y_true: Any, y_pred: Any) -> float:
     3. Constant-target handling: if the range < 1e-6,
     `inf` (infinite error) is returned
     with a warning logged to avoid division by zero.
-    4. RMSE is divided by the computed local range.
-    Args:
-        y_true (Any): True values of the target variable within the split.
-        y_pred (Any): Model predictions.
-    Returns:
-        float: The NRMSE value normalized by the local range.
-    """
+    4. RMSE is divided by the computed local range."""
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     denom = np.max(y_true) - np.min(y_true)
 
@@ -286,14 +274,7 @@ def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -
     `inf` is returned to prevent numerical instability.
     2. The standard RMSE is computed.
     3. The error is normalized by a precomputed global range
-    (independent of the current split).
-    Args:
-        y_true (np.ndarray): True values of the target variable.
-        y_pred (np.ndarray): Model predictions.
-        target_range (float): Global range (max - min) of the entire dataset.
-    Returns:
-        float: An NRMSE value comparable across different cross-validation folds.
-    """
+    (independent of the current split)."""
     if target_range < 1e-6:
         logger.warning("Global target_range is too small. Returning +inf.")
         return float("inf")
@@ -313,7 +294,7 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
     4. The `greater_is_better=False` flag is set
     so that sklearn inverts the metric for maximization.
     Args:
-        global_y (np.ndarray): Full target variable vector
+        global_y: Full target variable vector
         for computing the global range.
     Returns:
         Any: A Scorer object for use in GridSearchCV or cross_validate.
@@ -350,7 +331,7 @@ _METRICS: dict[str, Callable[..., Any]] = {
 # For each metric the optimization direction (is_greater_better) is stored
 # explicitly next to the scorer: True — "higher is better" (r2, as well as
 # inverted neg_ metrics), False — "lower is better" (rmse, mae, etc.).
-# The direction is NO LONGER inferred heuristically from name substrings — only
+# The direction is never inferred heuristically from name substrings — only
 # from this registry or from the sklearn scorer object itself.
 _SCORER_OBJECTS: dict[str, tuple[Callable[..., Any], bool]] = {
     # For errors set greater_is_better=False;
@@ -376,7 +357,7 @@ def get_metric(name: str) -> Callable[..., Any]:
     2. The name is checked against the `_METRICS` registry.
     3. If the metric is not found, a `KeyError` is raised.
     Args:
-        name (str): Metric name (e.g. 'rmse' or 'nrmse').
+        name: Metric name (e.g. 'rmse' or 'nrmse').
     Returns:
         Callable[..., Any]: A function accepting (y_true, y_pred) and returning a float.
     """
@@ -392,18 +373,7 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
     Resolution logic:
     1. For metrics in the ``_SCORER_OBJECTS`` registry, the preconfigured
        ``make_scorer`` object is returned (the first tuple element).
-    2. Otherwise the name is delegated to ``sklearn.metrics.get_scorer``.
-
-    Args:
-        name (str): Metric name.
-
-    Returns:
-        Callable[..., Any]: A scorer object compatible with the sklearn API.
-
-    Raises:
-        ValueError: If the metric name is found neither in the registry nor in
-            sklearn (with a clear message in the style of ``get_metric``).
-    """
+    2. Otherwise the name is delegated to ``sklearn.metrics.get_scorer``."""
     lname = name.lower()
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][0]
@@ -429,17 +399,7 @@ def _sklearn_direction(name: str) -> bool:
 
     The scorer object exposes a direction flag (``_sign``): +1 — "higher is
     better", -1 — inverted error (neg_ prefix), which the optimizer still
-    maximizes.
-
-    Args:
-        name (str): Lowercased metric name.
-
-    Returns:
-        bool: True when the metric value is maximized.
-
-    Raises:
-        ValueError: If sklearn does not know the metric (see ``_resolve_scorer``).
-    """
+    maximizes."""
     scorer = _resolve_scorer(name)
     sign = getattr(scorer, "_sign", None)
     if sign is not None:
@@ -464,7 +424,7 @@ def is_greater_better(name: str) -> bool:
        This path is stable and cached (``_sklearn_direction``).
 
     Args:
-        name (str): Metric name.
+        name: Metric name.
 
     Returns:
         bool: True when the metric value is maximized (r2, neg_* metrics),
@@ -495,7 +455,7 @@ def is_error_metric(name: str) -> bool:
     returned as is → False.
 
     Args:
-        name (str): Metric name.
+        name: Metric name.
 
     Returns:
         bool: True for error metrics (RMSE, MAE, MSE, NRMSE, neg_* metrics),
@@ -523,7 +483,7 @@ def direction_label(name: str) -> str:
     better for the user).
 
     Args:
-        name (str): Metric name.
+        name: Metric name.
 
     Returns:
         str: ``"min better"`` for errors, ``"max better"`` for score metrics.
@@ -552,7 +512,7 @@ def user_direction(name: str) -> Literal["minimize", "maximize"]:
     is incorrect, see ``select_finalists``).
 
     Args:
-        name (str): Metric name.
+        name: Metric name.
 
     Returns:
         Literal["minimize", "maximize"]: Direction in user semantics:
@@ -587,8 +547,8 @@ def to_user_value(name: str, raw_value: float) -> float:
     (``component.is_valid_winner_score``), not by this function.
 
     Args:
-        name (str): Metric name.
-        raw_value (float): "Raw" value returned by the scorer object.
+        name: Metric name.
+        raw_value: "Raw" value returned by the scorer object.
 
     Returns:
         float: The metric value in the user-facing representation.
@@ -615,8 +575,8 @@ def get_scorer_object(
     3. Fallback: if the name is not in the registry, the
     standard `sklearn.metrics.get_scorer` is used.
     Args:
-        name (str): Name of the requested scorer.
-        global_y (np.ndarray | None): Optional target array for global metrics.
+        name: Name of the requested scorer.
+        global_y: Optional target array for global metrics.
     Returns:
         Union[Callable[..., Any], str]: A Scorer object or a system sklearn string.
     """
@@ -658,7 +618,7 @@ def to_sklearn_name(name: str) -> str:
     (e.g. 'rmse' -> 'neg_root_mean_squared_error').
     3. If the alias is not found, the original lowercased name is returned.
     Args:
-        name (str): User-facing metric name.
+        name: User-facing metric name.
     Returns:
         str: A metric name recognized by sklearn internals.
     """
@@ -687,10 +647,11 @@ def _columnwise_raw_values(
     valid pair yields NaN.
 
     Args:
-        scorer (Any): A ``make_scorer`` object (``_score_func``/``_sign``/
+        scorer: A ``make_scorer`` object (``_score_func``/``_sign``/
             ``_kwargs``).
-        y_true (np.ndarray): The true values, shape ``(n_rows,)``.
-        preds (np.ndarray): The predictions, shape ``(n_rows, n_columns)``.
+        y_true: The true values, shape ``(n_rows,)``.
+        preds: The predictions, shape ``(n_rows, n_columns)``.
+
 
     Returns:
         np.ndarray: The raw value of every column, shape ``(n_columns,)``.
@@ -772,12 +733,12 @@ def bbc_cv_score(
     configuration.
 
     Args:
-        scorer (Any): A ``make_scorer`` object of the comparison metric.
-        y_true (Any): The true target aligned with the OOF columns.
-        oof_matrix (Any): The OOF predictions, shape
+        scorer: A ``make_scorer`` object of the comparison metric.
+        y_true: The true target aligned with the OOF columns.
+        oof_matrix: The OOF predictions, shape
             ``(n_configurations, n_rows)``.
-        n_bootstrap (int): The number of bootstrap resamples (>= 1).
-        random_state (int | None): The bootstrap seed; ``None`` — not
+        n_bootstrap: The number of bootstrap resamples (>= 1).
+        random_state: The bootstrap seed; ``None`` — not
             reproducible.
 
     Returns:
@@ -841,18 +802,16 @@ def _bbc_mean_oob(
     """Run the BBC-CV bootstrap loop and return the mean out-of-bag score.
 
     Args:
-        scorer (Any): The scorer used for both selection and evaluation.
-        y (np.ndarray): The usable target rows, shape ``(n_rows,)``.
-        preds (np.ndarray): The OOF predictions, shape
+        scorer: The scorer used for both selection and evaluation.
+        y: The usable target rows, shape ``(n_rows,)``.
+        preds: The OOF predictions, shape
             ``(n_rows, n_configurations)``.
-        n_bootstrap (int): The number of bootstrap resamples.
-        random_state (int | None): The bootstrap seed.
+        n_bootstrap: The number of bootstrap resamples.
+        random_state: The bootstrap seed.
+
 
     Returns:
         float: The mean raw (sign-applied) out-of-bag score.
-
-    Raises:
-        ValueError: If no resample produced a finite out-of-bag score.
     """
     n_rows = y.shape[0]
     rng = np.random.default_rng(random_state)

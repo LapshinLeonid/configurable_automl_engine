@@ -51,7 +51,7 @@ def get_logger(name: str) -> logging.Logger:
     from the base node 'configurable_automl_engine'.
 
     Args:
-        name (str): Unique logger name (usually the module's __name__).
+        name: Unique logger name (usually the module's __name__).
     Returns:
         logging.Logger: A configured logger instance.
     """
@@ -81,13 +81,13 @@ def setup_logging(
     descriptors.
 
     Args:
-        logfile (Path): Path to the target log file.
-        log_to_console (bool): Whether to enable output via a StreamHandler (STDOUT).
-        level (int): Global filtering threshold and file output level.
-        console_level (int): Individual console filtering threshold.
-        log_format (str): Message string formatting template.
-        max_bytes (int): Maximum size of a single file before rotation (in bytes).
-        backup_count (int): Number of archived files kept on disk.
+        logfile: Path to the target log file.
+        log_to_console: Whether to enable output via a StreamHandler (STDOUT).
+        level: Global filtering threshold and file output level.
+        console_level: Individual console filtering threshold.
+        log_format: Message string formatting template.
+        max_bytes: Maximum size of a single file before rotation (in bytes).
+        backup_count: Number of archived files kept on disk.
     """
     base_logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
 

@@ -79,19 +79,7 @@ def _validate_target(X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
     float ``y_float`` (an ``ndarray`` of shape ``(n_samples,)``). The checks
     are shared by :meth:`TargetEncodingTransformer.fit` and
     :meth:`TargetEncodingTransformer.fit_transform`, so that both training
-    paths reject an invalid target the same way.
-
-    Args:
-        X: Matrix of categorical features.
-        y: Target variable. Required — without it, encoding is impossible.
-
-    Returns:
-        The ``(X_arr, y_float)`` tuple.
-
-    Raises:
-        ValueError: If ``y`` is not passed, is non-numeric or contains
-            non-finite values.
-    """
+    paths reject an invalid target the same way."""
     if y is None:
         raise ValueError("TargetEncodingTransformer requires y during fit().")
     X_arr = _as_2d(X)
@@ -573,18 +561,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         The shared part of :meth:`fit` and :meth:`fit_transform`: strategy
         validation, cardinality computation, the default/HC column split, and
         the creation of the internal encoders (without training — the calling
-        method trains them through ``fit``/``fit_transform``).
-
-        Args:
-            X: Matrix of categorical features.
-
-        Returns:
-            The two-dimensional numeric ``X`` array (after ``_as_2d``).
-
-        Raises:
-            ValueError: If an unknown encoding strategy is set or the
-                high-cardinality mode is misconfigured.
-        """
+        method trains them through ``fit``/``fit_transform``)."""
         if self.encoding not in _VALID_ENCODING_STRATEGIES:
             raise ValueError(
                 f"Unknown encoding strategy: {self.encoding!r}. "
@@ -662,9 +639,6 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         Args:
             parts: Encoder outputs in concatenation order.
             n_rows: Number of rows of the input matrix (for an empty result).
-
-        Returns:
-            A numeric matrix (dense or sparse).
         """
         if not parts:
             return np.empty((n_rows, 0), dtype=np.float64)

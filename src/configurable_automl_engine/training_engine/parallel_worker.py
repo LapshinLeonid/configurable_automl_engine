@@ -104,7 +104,7 @@ def _mark_worker_start(start_signal_name: str) -> None:
     Called by the worker right before executing the target function.
 
     Args:
-        start_signal_name (str): Name of the shared memory segment of the signal.
+        start_signal_name: Name of the shared memory segment of the signal.
     """
     try:
         shm = shared_memory.SharedMemory(name=start_signal_name)
@@ -136,19 +136,17 @@ def _worker_proxy(
     3. Call: passes the restored data to the target function func.
     4. Cleanup: closes the local Shared Memory handles and forcibly
         clears the argument list to speed up the Garbage Collector.
+
     Args:
-        func (Callable): Target function to run.
-        args (Sequence): List of arguments (including proxy objects).
-        kwargs (Mapping): Keyword arguments.
-        disk_indices (list[int]): Indices of arguments saved to disk.
-        shm_info (dict[int, tuple]): A dict where the key is the argument index
+        func: Target function to run.
+        args: List of arguments (including proxy objects).
+        kwargs: Keyword arguments.
+        disk_indices: Indices of arguments saved to disk.
+        shm_info: A dict where the key is the argument index
             and the value is a tuple of SHM metadata (name, shape, dtype, columns)
             used for restoration.
-        start_signal_name (str | None): Name of the shared memory segment into
-            which the worker writes the timestamp of the actual start.
-    Returns:
-        Any: Result of running the function func.
-    """
+        start_signal_name: Name of the shared memory segment into
+            which the worker writes the timestamp of the actual start."""
 
     final_args = list(args)
     # Use a context manager to automatically close SHM descriptors

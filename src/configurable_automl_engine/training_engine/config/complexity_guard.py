@@ -180,9 +180,6 @@ class ComplexityGuardCfg(BaseModel):
     def _check_thresholds(self) -> ComplexityGuardCfg:
         """Check the ordering of the size-mode thresholds.
 
-        Returns:
-            ComplexityGuardCfg: The validated settings object.
-
         Raises:
             ValueError: If ``small_n_threshold >= medium_n_threshold`` or the
                 small ratio threshold is not below the medium one.

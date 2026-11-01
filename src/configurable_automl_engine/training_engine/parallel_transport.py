@@ -87,13 +87,13 @@ class DiskPersistenceManager:
         2. Format: Parquet is written via the pyarrow engine.
         3. Registration: the file path is added to the list for later cleanup.
         Args:
-            df (pd.DataFrame): The dataset to save.
+            df: The dataset to save.
         Returns:
             str: Absolute path to the created temporary file.
         """
         # A conservative size estimate of the Parquet file: the in-memory
         # footprint of the DataFrame (deep=True accounts for object/string
-        # columns with long values, which the old 8-bytes-per-element
+        # columns with long values, which the fixed 8-bytes-per-element
         # heuristic underestimated) plus 1KB of Parquet metadata. Files
         # exceeding the free space on /dev/shm (a 64MB default in
         # Docker/Kubernetes) go to the system temp directory
@@ -197,11 +197,11 @@ class PayloadTransport:
     """Prepares the task payloads and owns the segments and files it creates.
 
     Args:
-        shared_indices (list[int] | None): The argument indices of the frames
+        shared_indices: The argument indices of the frames
             to send through shared memory.
-        disk_indices (list[int] | None): The argument indices of the frames
+        disk_indices: The argument indices of the frames
             to send through the disk cache.
-        persistence (DiskPersistenceManager | None): The disk cache; a new
+        persistence: The disk cache; a new
             one by default.
     """
 
@@ -257,9 +257,9 @@ class PayloadTransport:
         are freed and the frames are passed through pickle with a warning.
 
         Args:
-            args_seq (Sequence[Sequence[Any]]): The positional arguments of
+            args_seq: The positional arguments of
                 every task.
-            kwargs_seq (Sequence[Mapping[str, Any]]): The keyword arguments of
+            kwargs_seq: The keyword arguments of
                 every task.
 
         Returns:

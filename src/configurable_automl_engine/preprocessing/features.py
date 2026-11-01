@@ -102,10 +102,12 @@ def _clean_uninformative_features(
             (default) drops strictly constant columns; the value ``1`` keeps
             them (useful only together with the missing-ratio rule).
 
+
     Returns:
         A copy of ``X`` without the uninformative columns (the original object
         is not mutated). If there is nothing to drop, the original ``X`` is
         returned.
+
 
     Raises:
         TypeError: If ``X`` is not a ``pd.DataFrame``. For ``np.ndarray``

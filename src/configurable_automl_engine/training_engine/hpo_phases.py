@@ -91,20 +91,7 @@ def _build_hpo_request(
     ``optimize()`` call uses. The HPO phase needs only the best parameters
     and score, so the full-data fit of the best model is skipped
     (``fit_best_model=False``): the engine trains the final model itself with
-    ``ModelTrainer``.
-
-    Args:
-        algo_name (str): The algorithm name.
-        algo_cfg (AlgoCfg): The algorithm configuration.
-        spec (_HpoPhaseSpec): The phase snapshot.
-        initial_params (dict[str, Any] | None): The previous-phase parameters
-            enqueued as the first trial (refine).
-        previous_trials (list[FrozenTrial] | None): The previous-phase TPE
-            history (refine).
-
-    Returns:
-        HpoRequest: The run settings.
-    """
+    ``ModelTrainer``."""
     hyperparameters = algo_cfg.hyperparameters
     return HpoRequest(
         algo_name=algo_name,
@@ -169,25 +156,7 @@ def _run_hpo(
     y: pd.Series,
     request: HpoRequest,
 ) -> PhaseResult | None:
-    """Run the hyperparameter search of one algorithm and map the outcome.
-
-    Args:
-        X (pd.DataFrame): The feature matrix.
-        y (pd.Series): The target vector.
-        request (HpoRequest): The run settings.
-
-    Returns:
-        PhaseResult | None: The phase result — score, params and the phase's
-            own Optuna trials; or ``None`` if HPO produced no valid result
-            or failed (the algorithm is excluded from candidates; NO
-            fallback to the previous phase's parameters).
-
-    Raises:
-        InvalidAlgorithmError: If the algorithm is incompatible with the
-            data (the circuit breaker disqualifies it).
-        HPOHistoryError: If the transferred TPE history is incompatible
-            (fail fast — the pipeline fails with a clear message).
-    """
+    """Run the hyperparameter search of one algorithm and map the outcome."""
     algo_name = request.algo_name
     try:
         result = run_optimization(X, y, request)
@@ -206,20 +175,11 @@ def _run_hpo(
 def _to_phase_result(
     result: OptimizeResult | None, algo_name: str
 ) -> PhaseResult | None:
-    """Map the result of an HPO run onto a ``PhaseResult``.
-
-    Args:
-        result (OptimizeResult | None): The run result.
-        algo_name (str): The algorithm name.
-
-    Returns:
-        PhaseResult | None: The phase result, or ``None`` when the run
-            produced no valid result.
-    """
+    """Map the result of an HPO run onto a ``PhaseResult``."""
     # No valid result: either all trials failed (optuna.TrialPruned) or the
     # run failed otherwise. Return None so the main loop knows the algorithm
     # didn't pass: the dummy candidate with score -3.4e38 and params=None
-    # should no longer end up in phase_results.
+    # must not end up in phase_results.
     if result is None:
         _LOG.error(
             "Algorithm %s failed during HPO: no valid result (tuner returned None)",
@@ -260,22 +220,7 @@ def _execute_hpo_phase(
     serializable in the "processes" mode. The feature matrix ``X`` is passed
     as a separate argument: in the processes mode ``run_parallel`` transfers
     it through shared memory / disk, so it is not pickled for every
-    algorithm.
-
-    Args:
-        X (pd.DataFrame): The feature matrix.
-        y (pd.Series): The target vector.
-        request (HpoRequest): The run settings of the algorithm in the phase.
-
-    Returns:
-        PhaseResult | None: The phase result (score, params, trials), or
-            ``None`` when HPO did not return a valid result (the algorithm
-            is excluded from candidates).
-
-    Raises:
-        Exception: Exceptions from ``_run_hpo`` are logged and re-raised
-            (including ``InvalidAlgorithmError`` and ``HPOHistoryError``).
-    """
+    algorithm."""
     algo = request.algo_name
     phase_name = request.phase_name
     _LOG.info(f"=== {phase_name} phase: {algo} ({request.n_trials} tries) ===")
@@ -313,21 +258,7 @@ def _hpo_phase_worker(
     A module-level function (not a closure): serializable in the "processes"
     mode. Does not mutate the shared context: the disqualification is
     returned in the result's ``disqualify_reason`` and applied in the main
-    process (otherwise a write from another process would be lost).
-
-    Args:
-        algo_name (str): The algorithm name.
-        algo_cfg (AlgoCfg): The algorithm configuration.
-        spec (_HpoPhaseSpec): Snapshot of the HPO phase parameters.
-        X (pd.DataFrame): The feature matrix (transferred through shared
-            memory / disk by ``run_parallel`` in the "processes" mode instead
-            of being pickled inside ``spec`` for every algorithm).
-
-    Returns:
-        _HPOWorkerResult: The task result: score/params/trials on success,
-            ``disqualify_reason`` on a circuit breaker disqualification,
-            otherwise a result without a score and reason.
-    """
+    process (otherwise a write from another process would be lost)."""
     # Determine the warm-start for refine: each candidate warm-starts from
     # its OWN previous-phase record — initial_params (the enqueue_trial
     # anchor, which guarantees score monotonicity) AND previous_trials (the
@@ -413,13 +344,6 @@ def _consume_worker_results(
     and must fail the run even in the parallel mode (where ``run_parallel``
     swallows worker exceptions).
 
-    Args:
-        results (Iterable[_HPOWorkerResult | None]): Worker results.
-
-    Returns:
-        WorkerOutcome: The successful results, the circuit breaker additions
-            and the OOF matrices of the successful results (worker order).
-
     Raises:
         HPOHistoryError: If a worker reported a TPE history transfer error
             (fail fast — the pipeline must not continue with a degraded
@@ -470,19 +394,7 @@ def _apply_target_domain_guard(
     are returned for the circuit breaker with a reason and a single WARNING,
     and no trial is ever run for them. A Tweedie ``power`` range that is only
     partly invalid is clipped to its valid part instead (the algorithm stays
-    a candidate).
-
-    Args:
-        all_algorithms (dict[str, AlgoCfg]): The configured algorithms.
-        y (pd.Series): The target vector.
-        disqualified (Collection[str]): The already disqualified algorithms
-            (not checked).
-
-    Returns:
-        TargetDomainOutcome: The algorithms with clipped search spaces applied
-            (unchanged configs are returned as is; the input is not mutated)
-            and the new disqualifications "algorithm → reason".
-    """
+    a candidate)."""
     guarded: dict[str, AlgoCfg] = {}
     new_disqualified: dict[str, str] = {}
     for name, a_cfg in all_algorithms.items():
@@ -527,11 +439,6 @@ def _bbc_enabled(
     enabled algorithms. Above ``BBC_MAX_OOF_CELLS`` the estimate is skipped
     with a WARNING.
 
-    Args:
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data (hold-out already split).
-        algorithms (dict[str, AlgoCfg]): The configured algorithms.
-
     Returns:
         bool: True when the OOF predictions must be collected.
     """
@@ -570,15 +477,7 @@ def _merge_complexity_guard_records(
       whole adaptation;
     * the ``levels`` field lists all applied rule levels (e.g. ``["A", "B"]``);
     * a record produced in an earlier phase is not duplicated by a later one
-      (identical (algo, param, before, after) collapses).
-
-    Args:
-        records: Raw guard records (per rule and per phase).
-
-    Returns:
-        list[dict[str, Any]]: One record per (algo, param) with ``levels``
-            aggregating the applied rule levels.
-    """
+      (identical (algo, param, before, after) collapses)."""
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for rec in records:
         key = (rec.get("algo", "?"), rec.get("param", "?"))

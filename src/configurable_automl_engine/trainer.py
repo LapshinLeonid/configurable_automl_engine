@@ -1,39 +1,33 @@
 """Model Trainer: A universal orchestrator of the regression model lifecycle.
 
-This module encapsulates the logic for building training pipelines,
-combining data preprocessing, sample balancing, and training of Scikit-learn algorithms.
-
-A key feature is the full automation of feature preparation:
-the system classifies data types on its own,
-handles missing values and scales features,
-guaranteeing correct data delivery to the final estimator.
+Encapsulates the training pipeline: data preprocessing, sample balancing,
+and training of Scikit-learn algorithms. Feature preparation is fully
+automated — the system classifies data types on its own, handles missing
+values and scales features.
 
 Main components:
 
 ModelTrainer: The main container class for model training, validation, and deployment.
-train_model: A functional interface (Facade) that provides
-    backward compatibility with the legacy API.
+train_model: A functional interface (Facade) over
+    :class:`ModelTrainer`.
 TrainingError: A dedicated exception
     for unified handling of training failures.
 
-Implementation highlights:
+Key implementation points:
 
-Pipeline Integration: Using imblearn.pipeline allows seamless integration
-    of oversampling mechanisms (SMOTE, ADASYN) directly into the training process.
-Feature Selection: An optional feature selection step (FeatureSelector) is
-    inserted strictly between the preprocessor and the oversampler; its activity
-    is controlled by an explicit flag (HPO result) or by the configuration mode
-    (always/disabled/auto). Mode ``auto`` performs a standalone feasibility check
-    on each fit() (two additional pipeline fits, ~2-3x time), so within an HPO
-    loop an explicit ``feature_selection_active`` flag is recommended.
-Automated Feature Engineering: The built-in ColumnTransformer automatically applies
-    One-Hot encoding for categorical features and StandardScaler for numerical ones.
-Thread Safety: Recursive locks (threading.RLock) guarantee safety
-    when accessing the model state from multiple threads.
-Isotonic Support: A dedicated IsotonicDataTransformer adapter transforms
-    multidimensional data to meet the strict requirements of isotonic regression algorithms.
-Persistence: Built-in save and load methods support various serialization
-    formats (Pickle, Joblib) through the artifact system."""
+* imblearn.pipeline integrates oversampling (SMOTE, ADASYN) into the
+  training process;
+* the optional feature selection step (``FeatureSelector``) sits strictly
+  between the preprocessor and the oversampler; its activity is controlled
+  by an explicit flag (HPO result) or by the configuration mode
+  (always/disabled/auto). Mode ``auto`` performs a standalone feasibility
+  check on each fit() (two additional pipeline fits, ~2-3x time), so within
+  an HPO loop an explicit ``feature_selection_active`` flag is recommended;
+* recursive locks (``threading.RLock``) guarantee thread safety when
+  accessing the model state;
+* a dedicated ``IsotonicDataTransformer`` adapter transforms multidimensional
+  data to meet the strict requirements of isotonic regression;
+* save/load support several serialization formats (Pickle, Joblib)."""
 
 from __future__ import annotations
 
@@ -201,7 +195,7 @@ class ModelTrainer:
         dropped_features_ (list[str]): Names of columns removed by cleaning
             uninformative features (empty and strictly constant ones) in the
             last ``fit()`` call. Empty list if cleaning was not applied (input
-            without column names) or nothing was removed. Populated only for
+            without column names) or no columns qualified. Populated only for
             ``pd.DataFrame`` inputs: ``np.ndarray`` inputs have no column names,
             so cleaning is not performed.
         preprocessing_preset (PreprocessingPreset | None): The resolved
@@ -508,12 +502,7 @@ class ModelTrainer:
         adapter hint ``feature_index`` and the informational
         ``isotonic_feature`` are popped, so that
         ``ModelTrainer(hyperparams=res["params"])`` does not fail on the
-        strict ``create_model`` name check.
-
-        Raises:
-            TrainingError: If the model cannot be created (an unknown
-                algorithm, an invalid hyperparameter or a missing package).
-        """
+        strict ``create_model`` name check."""
         try:
             model_kwargs = self.hyperparams.copy()
             model_kwargs.pop("feature_index", None)
@@ -570,23 +559,11 @@ class ModelTrainer:
         feature_selection_active: bool = False,
     ) -> Pipeline:
         """Assemble the final pipeline and run
-        the training process on the prepared data.
-
-        Args:
-            X_train: Training feature matrix.
-            y_train: Target variable.
-            preprocessor: Feature preprocessing ``ColumnTransformer``.
-            base_model: Final regressor.
-            feature_selection_active: Flag enabling the feature selection step
-                (keyword-only; defaults to ``False`` — no-selection behavior).
-        """
-        # 0) Reset the actual selection status and the selected-column mask.
-        # If pipeline.fit fails, the trainer must not retain values from the
-        # previous training. After a successful fit the values are overwritten
-        # in step 4.
+        the training process on the prepared data."""
+        # Reset first: if pipeline.fit fails, the trainer must not retain
+        # values from the previous training.
         self._selection = FeatureSelectionResult()
-        # 1) Assemble the pipeline steps and initialize the pipeline (imblearn's
-        # Pipeline so that resampling steps work correctly)
+        # imblearn's Pipeline so that resampling steps work correctly
         self.pipeline = Pipeline(
             steps=self._assemble_steps(
                 preprocessor,
@@ -732,7 +709,7 @@ class ModelTrainer:
                 algorithm=settings.algorithm,
             )
 
-            # Stage 6: Final training on the full data (the artifact as before):
+            # Stage 6: Final training on the full data (the artifact):
             # the pipeline is trained on 100% of the sample, while val_score
             # remains the estimate computed on held-out data (stage 5).
             self._fit_internal(
@@ -872,14 +849,14 @@ class ModelTrainer:
     def load(
         cls, path: str | Path, fmt: SerializationFormat | None = None
     ) -> ModelTrainer:
-        """Load a previously saved ModelTrainer object from a file.
+        """Load a saved ModelTrainer object from a file.
 
         The serialization format is auto-detected when ``fmt`` is ``None``:
         the file extension decides (``.joblib`` → joblib, ``.pkl``/``.pickle``
         → pickle), and the other format is tried as a fallback so that a
         wrongly named file still loads. For an unknown extension, joblib is
         tried first, then pickle. When an explicit ``fmt`` is passed, only
-        that format is tried (as before).
+        that format is tried exclusively.
 
         The artifact format version is checked first: an artifact saved by
         another format (every engine up to 0.4.x) is refused with a clear
@@ -918,7 +895,7 @@ def train_model(
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
     feature_selection_active: bool | None = None,
 ) -> float:
-    """Provide backward compatibility with the legacy model training API.
+    """Functional facade over :class:`ModelTrainer`.
 
     A facade that accepts a configuration dict or the positional
     ``(algorithm, metric, hyperparams, X, y)`` form, fits a

@@ -25,8 +25,8 @@ from pydantic_core import PydanticCustomError
 ERR_REMOVED_REFINE_WINNER = "removed_refine_winner_action"
 
 #: Pipeline phase actions: search across all algorithms, fine-tuning of the
-#: whole input set (warm-start), and an explicit selection step. The legacy
-#: 'refine_winner' value was removed — configs containing it are rejected by
+#: whole input set (warm-start), and an explicit selection step. Configs
+#: containing the unsupported 'refine_winner' value are rejected by
 #: validation with a migration hint.
 HPOPhaseAction = Literal["all_algorithms", "refine", "select"]
 
@@ -137,9 +137,9 @@ class HPOPhaseCfg(BaseModel):
             ``DEFAULT_PHASE_N_TRIALS``. Ignored for ``select``.
         action (str): Action type: 'all_algorithms' (search across all
             algorithms), 'refine' (fine-tune the whole input set
-            with warm-start) or 'select' (selection step). The legacy value
-            'refine_winner' was removed: configs containing it are rejected
-            by validation with a migration hint.
+            with warm-start) or 'select' (selection step). The unsupported
+            value 'refine_winner' is rejected by validation with a
+            migration hint.
         strategy (Literal['cv_best', 'sanity_gate'] | None): Select step
             strategy (only for action='select'): ranking by CV score
             ('cv_best') or a Sanity Gate audit ('sanity_gate').
@@ -175,8 +175,9 @@ class HPOPhaseCfg(BaseModel):
             "Phase action: 'all_algorithms' — search across all algorithms, "
             "'refine' — fine-tune the whole input set with warm-start, "
             "'select' — explicit selection step (strategy governs the "
-            "strategy, output the output shape). The legacy 'refine_winner' "
-            "is removed: use the pair 'select' (cv_best) + 'refine'"
+            "strategy, output the output shape). The unsupported "
+            "'refine_winner' is rejected: use the pair 'select' (cv_best) + "
+            "'refine'"
         ),
     )
     strategy: SelectStrategy | None = Field(
@@ -211,23 +212,12 @@ class HPOPhaseCfg(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_legacy_refine_winner(cls, data: Any) -> Any:
-        """Reject the legacy 'refine_winner' action with a migration hint.
+        """Reject the unsupported 'refine_winner' action with a migration hint.
 
-        The value was deliberately removed without backward compatibility:
-        silently ignoring it or translating it automatically would hide a
+        Silently ignoring it or translating it automatically would hide a
         semantic change (refine_winner narrowed the set to a single candidate,
-        whereas the new select + refine pair does not). The error ships with a
-        migration hint.
-
-        Args:
-            data: Raw input data of the phase (a dict when parsed from YAML/JSON).
-
-        Returns:
-            Any: The data unchanged, if no legacy value is present.
-
-        Raises:
-            ValueError: If action equals 'refine_winner'.
-        """
+        whereas the select + refine pair does not). The error ships with a
+        migration hint."""
         if isinstance(data, dict) and data.get("action") == "refine_winner":
             # The stable error code (ERR_REMOVED_REFINE_WINNER) lets tests rely
             # on error['type'] instead of the hint text.
@@ -254,14 +244,7 @@ class HPOPhaseCfg(BaseModel):
            by the field constraint); for output='winner'/'pool' the k parameter
            is forbidden.
         3. For action='all_algorithms'/'refine' the strategy/output/k fields
-           are forbidden (candidate narrowing is the job of a select step).
-
-        Returns:
-            HPOPhaseCfg: The validated phase object.
-
-        Raises:
-            ValueError: If the set of fields is inconsistent with the phase action.
-        """
+           are forbidden (candidate narrowing is the job of a select step)."""
         if self.action == "select":
             missing = [
                 field
@@ -303,12 +286,7 @@ class HPOPhaseCfg(BaseModel):
 
 # ─────────────────── general ─────────────────── #
 def _default_phases() -> list[HPOPhaseCfg]:
-    """Build the default pipeline used when ``general.phases`` is omitted.
-
-    Returns:
-        list[HPOPhaseCfg]: An ``all_algorithms`` HPO phase followed by a
-        terminal ``select`` step picking the best cross-validation score.
-    """
+    """Build the default pipeline used when ``general.phases`` is omitted."""
     return [
         HPOPhaseCfg(name="search", action="all_algorithms"),
         HPOPhaseCfg(

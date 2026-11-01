@@ -12,6 +12,12 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
 * **Code Quality Baseline:** Zero Ruff warnings in /src/, 100% strict Mypy compliance in /src/, passing Pytest suite.
 * **State ownership:** Do not mutate `_OptimizeRunner` / `ModelTrainer` / `PhaseContext` outside their owner (`hpo/runner.py`, `trainer.py`, `training_engine/component.py`). New computational steps are pure functions: they return a frozen plan / result / outcome and the owner assigns it (`tests/test_ownership.py` enforces this). Log with `logging.getLogger(__name__)`.
 * **Import layers:** Imports go only downward: `training_engine` → `hpo`/`tuner`/trainer → building blocks → `common`. If a lower module needs something from above, move that thing down. `hpo` and the trainer modules (`trainer.py`, `trainer_*.py`) do not import each other. Package imports stay at module level (no imports inside functions; the only exception is the lazy `train_best_model` proxy in `training_engine/__init__.py`), and `TYPE_CHECKING` imports follow the same rule. The layers are listed in README ("Import layers") and enforced by the `import-linter` contracts in `pyproject.toml`: run `lint-imports` before committing.
+* **Docstrings and comments describe current behavior only.** Change history lives exclusively in `CHANGELOG.md` (and the "Migrating older configs" section of `API_REFERENCE.md`) — never in `src/`: no "like before", "as before", "the legacy behavior", "was removed", "no longer", "previously" and similar wording.
+* **No task codes or issue references in code**: no "B3"/"S3"-style markers, no "issue #NNN", no "the issue requirement". If the rationale matters, state it in plain words.
+* **Do not duplicate types in `Args:`**: annotations are the single source of truth (mypy strict). Write `name: description`, not `name (str): description`.
+* **Private functions (`_name`) get a short docstring** — one or two lines: what the function does and why. Full `Args:`/`Returns:` sections are added only for non-obvious semantics: units, array shapes, metric sign, NaN handling.
+* **A comment explains "why", not "what"**: non-obvious decisions, numeric tolerances, workarounds for library quirks, thread/process safety, paper references. A comment that restates the next line of code is removed.
+* **No inflated docstrings**: a module docstring is the module purpose and key invariants (guideline ~15 lines); user-facing behavior is documented in `API_REFERENCE.md`, not duplicated in code.
 
 ---
 
@@ -60,5 +66,6 @@ Depending on the prompt/step in the CI pipeline, you will act as a **Planner**, 
   - [ ] **Tests:** Are there positive, negative, and edge-case tests? Is anything un-tested?
   - [ ] **Types:** Are all inputs/outputs explicitly typed without using `Any` unnecessarily?
   - [ ] **Docstrings:** Are public interfaces documented in English (Google style)?
+  - [ ] **Documentation hygiene:** Do docstrings/comments describe only current behavior (no change history, task codes, or issue references)? Are `Args:` types not duplicated? Do private functions keep short docstrings? Do comments explain "why" rather than "what"?
   - [ ] **Performance & Security:** Are there memory leaks, unnecessary copy operations, or unvalidated inputs?
 * **Behavior:** Provide constructive, precise feedback pointing to specific lines of code. Do not push commits directly during a review step. 

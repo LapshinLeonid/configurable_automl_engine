@@ -66,10 +66,6 @@ def _compute_severity(
         reasons: disqualification reasons.
         soft_warnings: soft signals.
         warn_only: True — the gate does not disqualify (severity ≤ 1).
-
-    Returns:
-        int: 0 — clean; 1 — warnings only; 2/3/4 — one/two/three+ reasons.
-            Not higher than 1 in ``warn_only`` mode.
     """
     if reasons:
         severity = min(2 + len(reasons) - 1, 4)
@@ -81,19 +77,7 @@ def _compute_severity(
 
 
 def _to_float_vector(values: Any, name: str) -> np.ndarray:
-    """Convert an input to a 1-D float array (with shape validation).
-
-    Args:
-        values: any array-like (numpy, pandas, list).
-        name: argument name used in error messages.
-
-    Returns:
-        np.ndarray: a 1-D float array.
-
-    Raises:
-        ValueError: if ``values`` is None, is not 1-D after collapsing
-            (n, 1)/(1, n), or cannot be converted to float.
-    """
+    """Convert an input to a 1-D float array (with shape validation)."""
     if values is None:
         raise ValueError(f"{name} must not be None")
     arr = np.asarray(values, dtype=float)
@@ -110,21 +94,7 @@ def _to_float_vector(values: Any, name: str) -> np.ndarray:
 def _validate_check_inputs(
     y: Any, y_pred_oof: Any, X: Any | None
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Validate the ``check()`` inputs and convert them to float vectors.
-
-    Args:
-        y: the true target.
-        y_pred_oof: OOF predictions aligned with ``y``.
-        X: the feature matrix (or None).
-
-    Returns:
-        tuple[np.ndarray, np.ndarray]: ``y`` and ``y_pred_oof`` as 1-D
-            float vectors.
-
-    Raises:
-        ValueError: when the input contract is violated (None arguments,
-            length mismatch between y/y_pred_oof/X).
-    """
+    """Validate the ``check()`` inputs and convert them to float vectors."""
     y_arr = _to_float_vector(y, "y")
     oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
     if y_arr.shape != oof_arr.shape:

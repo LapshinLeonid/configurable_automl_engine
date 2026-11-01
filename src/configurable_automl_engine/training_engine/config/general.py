@@ -386,7 +386,7 @@ class GeneralCfg(BaseModel):
         default="expand",
         description=(
             "Policy for datetime/timedelta columns (not handled by any "
-            "transformer and previously silently dropped): 'expand' (default) "
+            "transformer): 'expand' (default) "
             "— replace each column with derived numeric components "
             "(year, month, day, dayofweek, and hour if it is non-zero) and log "
             "a WARNING listing the generated columns; 'drop' — remove the "

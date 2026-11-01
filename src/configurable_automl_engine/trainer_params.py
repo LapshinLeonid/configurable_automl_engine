@@ -146,18 +146,7 @@ def _normalize_additional_metrics(
 def _validate_preprocessing_override(
     override: PreprocessingOverride | dict[str, Any] | None,
 ) -> PreprocessingOverride | None:
-    """Validate and normalize a user-provided preprocessing preset override.
-
-    Args:
-        override: A dict or a :class:`PreprocessingOverride` model.
-
-    Returns:
-        The normalized override model, or ``None``.
-
-    Raises:
-        TrainingError: If an object of an unsupported type or a dict with
-            invalid values is passed.
-    """
+    """Validate and normalize a user-provided preprocessing preset override."""
     if override is None:
         return None
     if isinstance(override, PreprocessingOverride):
@@ -197,11 +186,7 @@ def _validate_validation_strategy(
     The list of allowed methods is taken from
     validation.SUPPORTED_VALIDATION_METHODS — the single extension point of
     the strategy interface: adding a new strategy (e.g., TimeSeriesSplit)
-    does not require changes here.
-
-    Returns:
-        The normalized strategy name.
-    """
+    does not require changes here."""
     normalized_strategy = norm_val_method(validation_strategy)
     if normalized_strategy not in SUPPORTED_VALIDATION_METHODS:
         raise TrainingError(
@@ -296,8 +281,8 @@ def build_trainer_settings(
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
 
-    The helpers run in the original validation order, so the first invalid
-    argument is reported as before. The arguments are not mutated.
+    The helpers run in a fixed validation order, so the first invalid
+    argument is reported. The arguments are not mutated.
 
     Returns:
         TrainerSettings: The validated and normalized settings.

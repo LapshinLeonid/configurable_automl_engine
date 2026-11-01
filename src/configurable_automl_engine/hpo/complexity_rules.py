@@ -114,12 +114,6 @@ def _is_fraction_param(param: str, *, is_float: bool, low: float, high: float) -
     afterwards. ``subsample``/``colsample_bytree`` and float
     ``max_features`` are always fractions.
 
-    Args:
-        param: The hyperparameter name.
-        is_float: Whether the space entry is a float.
-        low: Lower bound of the range.
-        high: Upper bound of the range.
-
     Returns:
         bool: ``True`` when the range lives in the unit interval.
     """
@@ -162,6 +156,7 @@ def _apply_rule(
         param: The hyperparameter name.
         is_fraction: Whether the range is a fraction.
 
+
     Returns:
         tuple[float, float]: The rule's target range in the input units.
     """
@@ -199,10 +194,6 @@ def _clamp_for_param(
         is_float: Whether the parameter is a float in the search space.
             ``max_features`` and ``min_samples_leaf`` accept both a fraction
             (float in (0, 1]) and a plain count (int, or float >= 1).
-
-    Returns:
-        tuple[float, float]: A valid ``(low, high)`` with a physical minimum
-            of 1 for integer-like parameters.
     """
     is_fraction = _is_fraction_param(param, is_float=is_float, low=low, high=high)
     if is_fraction:
@@ -455,15 +446,7 @@ def _boost_n_estimators_cap(lr_high: float | None) -> float:
     ``learning_rate`` in the space: because every sampled ``learning_rate``
     is at most ``lr_high``, the product ``n_estimators * learning_rate``
     never exceeds the budget. A missing/non-positive ``lr_high`` falls back
-    to :data:`_BOOST_DEFAULT_LR_HIGH`, which yields the default cap 200.
-
-    Args:
-        lr_high: The upper bound of ``learning_rate`` in the space, or
-            ``None`` when the parameter is absent.
-
-    Returns:
-        float: The derived cap (>= 1).
-    """
+    to :data:`_BOOST_DEFAULT_LR_HIGH`, which yields the default cap 200."""
     effective_lr_high = (
         lr_high if lr_high is not None and lr_high > 0 else _BOOST_DEFAULT_LR_HIGH
     )
@@ -476,14 +459,7 @@ def _learning_rate_high(space: dict[str, Any]) -> float | None:
     ``learning_rate`` of GradientBoosting/XGBoost is a positive float range;
     anything else (absent, categorical, int-like) returns ``None`` and the
     default :data:`_BOOST_DEFAULT_LR_HIGH` is used by
-    :func:`_boost_n_estimators_cap`.
-
-    Args:
-        space: The search space dict (parameter name -> entry).
-
-    Returns:
-        float | None: The upper bound, or ``None`` when it cannot be read.
-    """
+    :func:`_boost_n_estimators_cap`."""
     entry = space.get("learning_rate")
     if not isinstance(entry, SearchSpaceEntry):
         return None
@@ -521,9 +497,6 @@ def _rule_boost_n_estimators_b(lr_high: float | None = None) -> Rule:
         lr_high: The upper bound of ``learning_rate`` in the space. ``None``
             (or a non-positive value) — the default
             :data:`_BOOST_DEFAULT_LR_HIGH`.
-
-    Returns:
-        Rule: The level B ``n_estimators`` rule with the derived cap.
     """
     cap = _boost_n_estimators_cap(lr_high)
     effective_lr_high = (
@@ -689,15 +662,7 @@ def _small_boosting_rules(lr_high: float | None = None) -> list[tuple[str, Rule]
     The ``n_estimators`` level B cap depends on the UPPER bound of
     ``learning_rate`` in the space (``budget / lr_high``, see
     :func:`_rule_boost_n_estimators_b`), so the rule table is built per run
-    with the space's ``learning_rate``.
-
-    Args:
-        lr_high: The upper bound of ``learning_rate`` in the space (``None``
-            — the default :data:`_BOOST_DEFAULT_LR_HIGH`).
-
-    Returns:
-        list[tuple[str, Rule]]: The small boosting rule table.
-    """
+    with the space's ``learning_rate``."""
     return [
         # min_samples_leaf (GradientBoosting only) — the same rules as for trees.
         ("min_samples_leaf", _rule_min_samples_leaf_a()),

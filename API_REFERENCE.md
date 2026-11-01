@@ -319,7 +319,7 @@ The optional `general.additional_metrics` parameter is a list of extra quality m
 
 Rules and behavior:
 
-* **Optional & backward compatible.** If the parameter is absent or empty, the system behaves exactly as before: no `additional_metrics` key is added to the results.
+* **Optional.** If the parameter is absent or empty, no `additional_metrics` key is added to the results.
 * **Allowed values** — the same set as for `comparison_metric` (see above). An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
 * **Informational only.** Additional metrics do **not** participate in hyperparameter optimization, model comparison, or winner selection. The winner is determined solely by the main `comparison_metric`.
 * **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
@@ -456,9 +456,9 @@ one-hot expansion):
 * `"ordinary"`: everything else — the spaces are not changed.
 
 For example, `n = 4000` rows and 50 original columns (250 one-hot expanded)
-give `n / p = 80 >= 20` — the `"ordinary"` mode and unchanged spaces,
-while the old `p`-after-preprocessing counting produced `16 < 20` and the
-`"medium"` restrictions.
+give `n / p = 80 >= 20` — the `"ordinary"` mode and unchanged spaces
+(with the one-hot expanded column count the ratio would have been
+`16 < 20` and the `"medium"` restrictions).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -625,7 +625,7 @@ the default "search all algorithms, keep the best validation score" pipeline.
   of a candidate can only stay the same or improve). Refine does not drop
   candidates — it only updates their parameters and scores. If one algorithm
   fails, only that algorithm is dropped; if all of them fail, the step raises
-  `RuntimeError` instead of silently falling back to the old parameters.
+  `RuntimeError` instead of silently keeping the pre-refine parameters.
   `refine` may also be the first step: then it tunes all enabled algorithms
   from scratch.
 
@@ -994,7 +994,7 @@ The classification path is kept only for standalone `DataOversampler` calls with
 
 > ⚠️ **Experimental**: the nightly evidence gate (`benchmarks/run_oversampling_benchmark.py`) observed a median held-out R² degradation of `adasyn` on the count dataset of about 0.019 (> 0.01) relative to the no-oversampling baseline. The feature is therefore marked experimental: a WARNING is logged whenever the oversampler actually runs, and you should verify the effect of oversampling on your own data before relying on it. When the gate passes again, the experimental mark is removed.
 
-Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of the `oversampling` section (or of `DataOversampler` directly) (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`. Categorical columns and binary indicator columns (at most two distinct non-missing values: one-hot and hashing output, missing-value indicators, raw 0/1 flags) are excluded from the noise. The values are not required to be exactly `0`/`1`: for scale-sensitive and GLM algorithms the oversampler receives the output of `StandardScaler` / `RobustScaler`, which maps a 0/1 flag or a missing-value indicator to two other values (e.g. `-1.02`/`0.98`), and such columns are recognized as indicators too. A numeric feature that takes only two values is therefore also left un-noised. Indicators are detected before resampling, so they are recognized even when SMOTE/ADASYN later interpolate them. On sparse input (e.g., the output of the `hashing` encoder or a high-cardinality one-hot encoding) only the stored non-zero elements are noised: zeros stay exact zeros, the matrix stays sparse for `random` and memory grows only with the number of non-zero elements. The per-column noise scale is `noise_level` times the column's standard deviation over all rows (zeros included). For `smote` / `adasyn` the sparse input is densified as before, and the same rule applies — zero cells are not noised.
+Gaussian noise injection is **not a separate algorithm** — it is enabled with the `add_noise` flag of the `oversampling` section (or of `DataOversampler` directly) (intensity is controlled by `noise_level`, default `0.01`) and applies to numeric features **after** resampling, for any of the three algorithms. Integer columns are cast to float when `add_noise=True`. Categorical columns and binary indicator columns (at most two distinct non-missing values: one-hot and hashing output, missing-value indicators, raw 0/1 flags) are excluded from the noise. The values are not required to be exactly `0`/`1`: for scale-sensitive and GLM algorithms the oversampler receives the output of `StandardScaler` / `RobustScaler`, which maps a 0/1 flag or a missing-value indicator to two other values (e.g. `-1.02`/`0.98`), and such columns are recognized as indicators too. A numeric feature that takes only two values is therefore also left un-noised. Indicators are detected before resampling, so they are recognized even when SMOTE/ADASYN later interpolate them. On sparse input (e.g., the output of the `hashing` encoder or a high-cardinality one-hot encoding) only the stored non-zero elements are noised: zeros stay exact zeros, the matrix stays sparse for `random` and memory grows only with the number of non-zero elements. The per-column noise scale is `noise_level` times the column's standard deviation over all rows (zeros included). For `smote` / `adasyn` the sparse input is densified, and the same rule applies — zero cells are not noised.
 
 # Training results
 
@@ -1115,7 +1115,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `data_oversampling_add_noise` | `bool` | `False` | Add Gaussian noise to the numeric features of the oversampled data. |
 | `data_oversampling_noise_level` | `float` | `0.01` | Noise intensity relative to the column standard deviation (must be > 0). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
-| `val_method` | `ValidationStrategy` or `str` | `"auto"` | Validation method (legacy parameter), same default as `general.validation_strategy`. |
+| `val_method` | `ValidationStrategy` or `str` | `"auto"` | Validation method (accepted alias; `validation_strategy` takes precedence), same default as `general.validation_strategy`. |
 | `validation_strategy` | `ValidationStrategy`, `str` or `None` | `None` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`); takes precedence over `val_method`. `None` — `val_method` is used. |
 | `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. Ignored when using `"auto"`. |
 | `n_folds` | `int` | `5` | Number of CV folds. |
@@ -1276,7 +1276,7 @@ Categorical columns are encoded by a single shared preprocessor used both during
 
 #### Sparse output of `hashing` and sparse one-hot
 
-The hashing transformer returns a `scipy.sparse.csr_matrix` (COO→CSR, `nnz = n_samples * n_columns`, values `1.0`) instead of a dense `float64` matrix — exactly like sklearn's standard `FeatureHasher`. The default one-hot is sparse too (`OneHotEncoder(sparse_output=True)`): a unique-per-row ID column no longer expands into a dense `n × n` float matrix per fold (≈3 GB at 20k rows before the fix). Building a dense `(n_rows, n_cols * n_components)` matrix would consume gigabytes of memory on real high-cardinality tables (OOM risk). `SplitCategoricalEncoder` is sparse-aware: parts are joined with `sp.hstack` when any encoder produces a sparse matrix.
+The hashing transformer returns a `scipy.sparse.csr_matrix` (COO→CSR, `nnz = n_samples * n_columns`, values `1.0`) instead of a dense `float64` matrix — exactly like sklearn's standard `FeatureHasher`. The default one-hot is sparse too (`OneHotEncoder(sparse_output=True)`): a unique-per-row ID column does not expand into a dense `n × n` float matrix per fold (≈3 GB at 20k rows). Building a dense `(n_rows, n_cols * n_components)` matrix would consume gigabytes of memory on real high-cardinality tables (OOM risk). `SplitCategoricalEncoder` is sparse-aware: parts are joined with `sp.hstack` when any encoder produces a sparse matrix.
 
 Because `ColumnTransformer` uses the default `sparse_threshold=0.3`, its output becomes a `csr_matrix` whenever a sparse part is present and the total density is below the threshold; dense one-hot of a low-cardinality column stays dense (no behavior change). The models `gaussian_process_regression`, `isotonic_regression` and `ardregression` reject sparse input, so for them the preprocessor is automatically built with `force_dense_output=True` (`sparse_threshold=0.0`), returning a dense matrix (flag derived per algorithm by `models.requires_dense_input` in both `ModelTrainer` and `tuner.optimize`). `DataOversampler` handles sparse input as well: `random` oversampling stays sparse, while `smote`/`adasyn` convert the input to dense (they require dense distance matrices by nature).
 

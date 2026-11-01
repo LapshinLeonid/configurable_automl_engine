@@ -13,13 +13,10 @@ record is :class:`~.sanity_result.SanityCheckResult`.
 
 ``warn_only`` mode: the gate still computes every statistic and fills
 ``reasons`` with the would-be disqualifications, but ``is_valid`` is forced to
-True and ``severity`` is capped at the "warning" level — the upper layer
-decides whether to apply the verdict to winner selection. NOTE:
-this is a low-level diagnostic option of the audit object itself; the pipeline
-does NOT use it — select steps with ``strategy: sanity_gate`` always apply the
-disqualifications (the ``warn_only`` selection mode was removed together with
-``sanity_gate.mode`` / ``winner_if_active`` / the ``sanity_gate_warn_only``
-report key).
+True and ``severity`` is capped at the "warning" level. NOTE: this is a
+low-level diagnostic option of the audit object itself; the pipeline does NOT
+use it — select steps with ``strategy: sanity_gate`` always apply the
+disqualifications.
 """
 
 from __future__ import annotations
@@ -51,7 +48,7 @@ __all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
 #: Circuit D mode: ``"warn"`` — a finite gap strictly above
 #: ``max_generalization_gap`` is recorded in ``soft_warnings`` (does not
 #: disqualify); ``"reject"`` — a failure → ``reasons`` →
-#: disqualification (the old strict behavior). Default — ``"warn"``.
+#: disqualification. Default — ``"warn"``.
 #: The field name is deliberately NOT ``mode`` (a collision with the removed
 #: ``sanity_gate.mode`` field, which the ``_reject_removed_mode`` validator
 #: rejects with a migration error). The type is declared here, in the
@@ -111,9 +108,8 @@ class ModelSanityGate:
     generalization_gap_mode: Circuit D routing of a gap violation: ``"warn"``
                 (default) — ``soft_warnings``, no
                 disqualification (including an infinite gap);
-                ``"reject"`` — a reason and disqualification (legacy strict
-                default). Contract violations and non-computability stay reasons
-                in both modes.
+                ``"reject"`` — a reason and disqualification. Contract
+                violations and non-computability stay reasons in both modes.
             check_permutation_sensitivity: Enable the permutation sensitivity
                 audit of circuit C for nonlinear models (cost control).
             permutation_max_rows: Row subsampling cap for the permutation path.
@@ -162,7 +158,7 @@ class ModelSanityGate:
                         (default 0.15 — soft). Applied only in the
                         non-adaptive mode.
                     adaptive_diversity: adaptive mode A relative to the constant
-                        model (default True): fails only for a zero prediction
+                        model: fails only for a zero prediction
                         spread (the absolute threshold is not applied) and for
                         models worse than the constant prediction
                         (``R²_oof < 0``, i.e. the residual variance exceeds
@@ -187,8 +183,8 @@ class ModelSanityGate:
                         ``"warn"`` (default) — the violation lands
                         in ``soft_warnings`` (``is_valid`` stays True, severity ≤ 1),
                         including an infinite gap from division by zero (``RMSE_full
-                        ≈ 0`` / ``RMSE_oof ≈ 0``); ``"reject"`` — legacy strict
-                        behavior: a reason and disqualification. Contract violations
+                        ≈ 0`` / ``RMSE_oof ≈ 0``); ``"reject"`` — a reason and
+                        disqualification. Contract violations
                         (``y_pred_full = None``) and non-computability (no finite
                         pairs) remain reasons in both modes.
                     check_permutation_sensitivity: enable the permutation sensitivity
@@ -333,19 +329,7 @@ class ModelSanityGate:
         X: Any | None,
         model: Any,
     ) -> _CircuitsOutcome:
-        """Run every enabled circuit and collect the metrics and messages.
-
-        Args:
-            y_arr: the target as a float vector.
-            oof_arr: OOF predictions as a float vector.
-            y_pred_full: full-fit predictions (circuit D).
-            X: the feature matrix (circuit C).
-            model: the fitted model (circuit C).
-
-        Returns:
-            _CircuitsOutcome: the four metrics, the reasons and the soft
-                warnings, in circuit order.
-        """
+        """Run every enabled circuit and collect the metrics and messages."""
         outcome = _CircuitsOutcome()
         reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
         diversity_failed = False
@@ -400,7 +384,7 @@ class ModelSanityGate:
             # Routing of circuit D violations: warn mode
             # (default) — soft_warnings (does not disqualify,
             # including an infinite gap from division by zero); reject mode —
-            # reasons (the old strict behavior). Reasons in both modes
+            # reasons. Reasons in both modes
             # remain only for contract violations (y_pred_full=None) and
             # non-computability (no finite pairs).
             if self.generalization_gap_mode == "reject":

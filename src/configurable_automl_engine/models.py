@@ -144,17 +144,7 @@ def _make_gpr_kernel(kernel_type: str) -> Any:
     Every kernel is composed as ``amplitude * base_kernel + white_noise``:
     an explicit output-scale amplitude, a base kernel with an adjusted
     length scale, and an explicit noise component. The default kernel is
-    ``ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(1e-5)``.
-
-    Args:
-        kernel_type: Kernel family name — one of ``'rbf'``, ``'matern'``
-            or ``'rational_quadratic'`` (any other name falls back to
-            RBF with a warning).
-
-    Returns:
-        A compound sklearn kernel (``Sum`` of a ``Product`` and a
-        ``WhiteKernel``).
-    """
+    ``ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(1e-5)``."""
     base: Any
     if kernel_type == "matern":
         base = Matern(
@@ -477,9 +467,6 @@ def _gpr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         hyperparams: The hyperparameters (modified in place).
-
-    Returns:
-        dict[str, Any]: ``hyperparams`` with the defaults applied.
     """
     kernel_type = hyperparams.pop("kernel_type", "rbf")
     if "kernel" not in hyperparams:
@@ -497,9 +484,6 @@ def _svr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         hyperparams: The hyperparameters (modified in place).
-
-    Returns:
-        dict[str, Any]: ``hyperparams`` with the defaults applied.
     """
     hyperparams.setdefault("max_iter", 10000)
     return hyperparams
@@ -520,8 +504,6 @@ def _isotonic_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
     Args:
         hyperparams: The hyperparameters (modified in place).
 
-    Returns:
-        dict[str, Any]: ``hyperparams`` with the default applied.
 
     Raises:
         ValueError: If ``out_of_bounds`` is not 'nan', 'clip' or 'raise'.
@@ -546,19 +528,7 @@ _ALGORITHM_DEFAULTS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 
 
 def _resolve_estimator_class(algorithm: Any) -> tuple[str, type]:
-    """Resolve the algorithm name into its key and estimator class.
-
-    Args:
-        algorithm: The algorithm name (case-insensitive).
-
-    Returns:
-        tuple[str, type]: The normalized algorithm key and the estimator class.
-
-    Raises:
-        TypeError: If ``algorithm`` is not a string.
-        ValueError: If the algorithm is unknown.
-        ImportError: If the algorithm requires a missing optional package.
-    """
+    """Resolve the algorithm name into its key and estimator class."""
     if not isinstance(algorithm, str):
         raise TypeError(f"Algorithm must be a string, got: {type(algorithm).__name__}")
 
@@ -583,15 +553,7 @@ def _reject_unknown_hyperparameters(algo_key: str, hyperparams: dict[str, Any]) 
     Unknown names are rejected exactly as in the config validation
     (``Config._check_hyperparameter_compatibility``), so a typo in a direct
     call does not go unnoticed. ``random_state`` is exempt: the tuner and the
-    trainer pass the run seed to every algorithm.
-
-    Args:
-        algo_key: The normalized algorithm key.
-        hyperparams: The hyperparameters passed to :func:`create_model`.
-
-    Raises:
-        ValueError: If an unknown hyperparameter name is present.
-    """
+    trainer pass the run seed to every algorithm."""
     allowed = get_allowed_hyperparameters(algo_key)
     if allowed is None:
         return

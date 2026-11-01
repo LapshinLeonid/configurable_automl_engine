@@ -50,18 +50,7 @@ def _validate_feature_selection_cfg(
     ``None`` → default ``FeatureSelectionCfg()`` (mode='disabled');
     ``dict`` → ``FeatureSelectionCfg.model_validate(...)``, error → TrainingError;
     ``FeatureSelectionCfg`` → used as is;
-    any other type → TrainingError.
-
-    Args:
-        cfg: A dict or a :class:`FeatureSelectionCfg` model.
-
-    Returns:
-        The normalized feature selection configuration model.
-
-    Raises:
-        TrainingError: If an object of an unsupported type or a dict with
-            invalid values is passed.
-    """
+    any other type → TrainingError."""
     if cfg is None:
         return FeatureSelectionCfg()
     if isinstance(cfg, FeatureSelectionCfg):
@@ -108,9 +97,6 @@ def _resolve_feature_selection_active(
         fs_cfg: The feature selection configuration.
         metric: The primary metric (for the ``auto`` mode).
         random_state: The trainer seed (for the ``auto`` mode).
-
-    Returns:
-        ``True`` if the selection step should be present in the pipeline.
     """
     # 1. Isotonic bypass: a univariate algorithm is incompatible with feature selection.
     if resolve_algorithm_name(algorithm) == "isotonic_regression":
@@ -175,9 +161,6 @@ def _run_feature_selection_auto_check(
             and the model) for a control pipeline.
         metric: The primary metric.
         random_state: The trainer seed (``None`` — the fixed fallback 42).
-
-    Returns:
-        ``True`` if the quality with selection is strictly higher, otherwise ``False``.
     """
     n_samples = X_train.shape[0] if hasattr(X_train, "shape") else len(X_train)
     if n_samples < _MIN_AUTO_CHECK_SAMPLES:

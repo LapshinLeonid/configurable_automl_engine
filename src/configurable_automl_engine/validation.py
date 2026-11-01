@@ -280,8 +280,7 @@ def iter_splits(
             an ``np.ndarray`` of positional indices of the validation rows in the
             original ``X`` (the order corresponds to the order of ``X_val``). Used for
             assembling OOF predictions aligned with the original row order.
-            Defaults to False — the behavior is fully compatible
-            with the old 4-element contract.
+            Defaults to False — only the 4-element tuples are yielded.
     Yields:
         Tuple: A tuple of four (or five when ``include_indices=True``)
             elements:
@@ -352,6 +351,7 @@ def _take(obj: Any, idx: np.ndarray) -> Any:
         obj: A pandas object or a numpy array.
         idx: Positional row indices.
 
+
     Returns:
         Any: The selected rows, of the same type as ``obj``.
     """
@@ -383,9 +383,6 @@ def _holdout_pairs(
         method_str: The normalized requested method.
         decision: The ``choose_validation_method`` decision ('auto' only).
         random_state: The shuffling seed.
-
-    Returns:
-        list[tuple[np.ndarray, np.ndarray]]: One (train_idx, test_idx) pair.
     """
     # For 'auto' use the dynamic test size computed by
     # choose_validation_method (an integer number of rows), not a fixed one.

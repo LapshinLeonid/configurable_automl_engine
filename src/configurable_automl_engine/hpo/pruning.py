@@ -41,11 +41,8 @@ def _normalize_pruning_config(
     provided — in that case the tuner behaves identically to the current one.
 
     Args:
-        pruning (dict[str, Any] | None): A dict with enable, strategy,
-            min_steps, n_startup_trials, reduction_factor keys (or a subset).
-    Returns:
-        dict[str, Any] | None: The normalized pruner configuration, or None.
-    """
+        pruning: A dict with enable, strategy,
+            min_steps, n_startup_trials, reduction_factor keys (or a subset)."""
     if not pruning:
         return None
     enabled = bool(pruning.get("enable", False))
@@ -66,17 +63,7 @@ def _normalize_pruning_config(
 
 
 def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
-    """Create an Optuna pruner object from a normalized configuration.
-
-    Args:
-        cfg (dict[str, Any]): Normalized early stopping configuration
-            (the result of ``_normalize_pruning_config``).
-    Returns:
-        optuna.pruners.BasePruner: A configured Optuna pruner.
-    Raises:
-        HyperoptError: If an unknown pruning strategy is given or the
-            parameter values are invalid.
-    """
+    """Create an Optuna pruner object from a normalized configuration."""
     strategy = cfg["strategy"]
     min_steps = cfg["min_steps"]
     if min_steps < 1:
@@ -122,8 +109,8 @@ def plan_pruning(pruning: dict[str, Any] | None, method: str) -> PruningPlan:
     behavior).
 
     Args:
-        pruning (dict[str, Any] | None): The early stopping settings.
-        method (str): The effective validation method.
+        pruning: The early stopping settings.
+        method: The effective validation method.
 
     Returns:
         PruningPlan: The pruner and whether it is applied.

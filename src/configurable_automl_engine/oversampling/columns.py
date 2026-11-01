@@ -28,11 +28,7 @@ def _is_categorical_col(s: pd.Series) -> bool:
         - if all values are 'purely numeric' (``pd.to_numeric`` without NaN)
           -> the column is treated as numeric (the 'numeric strings' edge
           case, e.g. IDs ``'10'``, ``'20'``);
-        - otherwise (at least one non-numeric value) -> categorical.
-
-    Returns:
-        bool: ``True`` if the column is categorical.
-    """
+        - otherwise (at least one non-numeric value) -> categorical."""
     if is_numeric_dtype(s):
         return False
     try:
@@ -56,14 +52,7 @@ def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
     is preserved and "binary before scaling" is recognized after it. Gaussian
     noise on such a column produces meaningless values between its two
     levels, so the oversampler excludes them from the noise. Boolean columns
-    are not returned: the noise step never touches them anyway.
-
-    Args:
-        df (pd.DataFrame): The feature matrix (before resampling).
-
-    Returns:
-        list[Any]: Labels of the binary indicator columns.
-    """
+    are not returned: the noise step never touches them anyway."""
     numeric = df.select_dtypes(include=[np.number])
     binary: list[Any] = []
     if not numeric.empty:
@@ -90,20 +79,18 @@ def _add_gaussian_noise(
     """Add Gaussian noise to numeric columns and numeric elements of object columns.
     Applies vectorized noise computation for performance.
     For non-numeric columns it attempts a safe type conversion.
+
     Args:
-        df (pd.DataFrame): The dataset to modify.
-        exclude_cols (list[str] | None): Columns to which noise should NOT be applied
+        df: The dataset to modify.
+        exclude_cols: Columns to which noise should NOT be applied
             (e.g. ordinal-encoded categorical ones).
-        noise_level (float): Noise intensity relative to the column's standard
+        noise_level: Noise intensity relative to the column's standard
             deviation.
-        random_state (int | None): Seed of the noise generator.
-        nonzero_only (bool): Noise only the non-zero cells (zeros stay
+        random_state: Seed of the noise generator.
+        nonzero_only: Noise only the non-zero cells (zeros stay
             exact zeros). Used for data that arrived as a sparse matrix
             and was densified for SMOTE/ADASYN, so the result matches
-            :func:`_add_sparse_gaussian_noise`.
-    Returns:
-        pd.DataFrame: The dataset with added noise.
-    """
+            :func:`_add_sparse_gaussian_noise`."""
     rng = np.random.default_rng(random_state)
 
     # 1. First force-convert "numeric strings" to numbers
@@ -158,12 +145,9 @@ def _add_sparse_gaussian_noise(
 
     Args:
         X: A scipy.sparse matrix.
-        noise_level (float): Noise intensity relative to the column's standard
+        noise_level: Noise intensity relative to the column's standard
             deviation.
-        random_state (int | None): Seed of the noise generator.
-
-    Returns:
-        Any: A new CSR matrix (float64) with noised non-zero elements.
+        random_state: Seed of the noise generator.
     """
     rng = np.random.default_rng(random_state)
     X_csr = X.tocsr().astype(np.float64, copy=True)
@@ -212,15 +196,7 @@ def _restore_dtypes(
        fractional part of the noise. Without noise — the original Integer is returned.
     3. Object: Forced back to object to prevent a cast to float/int
        by the generation libraries.
-    4. Floating: Original precision is preserved (32/64 bits).
-    Args:
-        df (pd.DataFrame): The transformed dataset.
-        original_dtypes (pd.Series): A series with the original types (`X.dtypes`).
-        add_noise (bool): Whether Gaussian noise was added to the numeric
-            columns (they then keep the fractional part).
-    Returns:
-        pd.DataFrame: The dataset with restored typing.
-    """
+    4. Floating: Original precision is preserved (32/64 bits)."""
     if original_dtypes is None:
         return df
 

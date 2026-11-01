@@ -1,36 +1,26 @@
 """Feature selector for reducing the feature space.
 
-This module implements :class:`FeatureSelector` — a standalone sklearn
-transformer (``BaseEstimator`` + ``TransformerMixin``) that reduces the
-feature space using one of four algorithms:
+Implements :class:`FeatureSelector` — a standalone sklearn transformer
+(``BaseEstimator`` + ``TransformerMixin``) with four selection algorithms:
+``importance`` (``SelectFromModel`` on tree-ensemble importances, threshold =
+mean importance), ``percentile`` (``SelectPercentile`` + ``f_regression``),
+``mutual_info`` (``SelectPercentile`` + ``mutual_info_regression``) and
+``variance`` (``VarianceThreshold``).
 
-* **importance** — ``SelectFromModel`` based on the feature importances of a
-  tree ensemble (``ExtraTreesRegressor``); the threshold is the mean
-  importance (the default ``SelectFromModel`` behavior);
-* **percentile** — ``SelectPercentile`` scored with ``f_regression``
-  (linear dependencies);
-* **mutual_info** — ``SelectPercentile`` scored with
-  ``mutual_info_regression`` (captures non-linear dependencies);
-* **variance** — ``VarianceThreshold`` (drops constant and low-variance
-  columns).
+Guarantees:
 
-The transformer guarantees:
-
-1. Matrix type preservation on transform: ``np.ndarray`` stays a dense
-   array, ``scipy.sparse.csr_matrix`` stays a sparse matrix (slicing is done
-   without ``.toarray()``, which prevents OOM on large data), and
-   ``pd.DataFrame`` stays a DataFrame.
-2. Protection against an empty feature space (``min_features_guard``): if
-   the base selector picks fewer than ``min_features`` features (down to
-   zero — all features deemed irrelevant), the support mask forcibly
-   activates the ``top-min(min_features, P)`` features with the highest
-   scores.
+1. Matrix type preservation on transform: ``np.ndarray`` stays dense,
+   ``scipy.sparse.csr_matrix`` stays sparse (slicing without ``.toarray()``,
+   which prevents OOM on large data), ``pd.DataFrame`` stays a DataFrame.
+2. Empty-space guard (``min_features_guard``): if the base selector picks
+   fewer than ``min_features`` features (down to zero), the support mask
+   forcibly activates the ``top-min(min_features, P)`` features with the
+   highest scores.
 3. Passthrough mode when ``P <= min_features``: selection is skipped and
    ``support_`` keeps every input feature.
 
-The transformer is consumed by ``ModelTrainer`` (see
-``configurable_automl_engine.trainer``), where it is inserted between the
-preprocessor and the oversampler of the training pipeline.
+The transformer is consumed by ``ModelTrainer``, where it is inserted
+between the preprocessor and the oversampler of the training pipeline.
 """
 
 from __future__ import annotations
@@ -379,11 +369,6 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     ) -> tuple[np.ndarray, int]:
         """Forcibly activate the ``top-min(min_features, P)`` features.
 
-        Args:
-            scores: Feature scores (importances, scores or variances);
-                larger is "better".
-            n_features: Total number of input features ``P``.
-
         Returns:
             Tuple ``(support_, n_selected)``: a boolean mask with exactly
             ``min(min_features, P)`` active positions.
@@ -548,14 +533,7 @@ def _validate_sparse_mutual_info(X_arr: Any) -> None:
     (``discrete_features='auto'`` -> ``True`` for sparse), and
     ``mutual_info_regression`` fails on continuous values with a cryptic
     error (an empty sample in the kNN estimate). Instead, a clear
-    ``ValueError`` is raised demanding integer-valued features.
-
-    Args:
-        X_arr: Sparse matrix (already converted to a numeric dtype).
-
-    Raises:
-        ValueError: If any value is non-integer (continuous).
-    """
+    ``ValueError`` is raised demanding integer-valued features."""
     data = cast(Any, X_arr).data
     if np.issubdtype(X_arr.dtype, np.integer):
         return

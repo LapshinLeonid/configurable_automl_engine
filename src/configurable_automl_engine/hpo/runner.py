@@ -112,8 +112,8 @@ def _validate_data(
     ``optimize()`` for direct callers.
 
     Args:
-        X (Any): Feature matrix (expected np.ndarray or pd.DataFrame).
-        y (Any): Target variable vector
+        X: Feature matrix (expected np.ndarray or pd.DataFrame).
+        y: Target variable vector
             (expected np.ndarray, pd.Series or pd.DataFrame).
         inf_policy: Policy for ±inf in numeric features (default
             ``"as_missing"`` — replace with NaN and warn; ``"error"`` —
@@ -122,10 +122,7 @@ def _validate_data(
             ``"expand"`` — replace with derived components).
         drop_id_like_columns: Whether ID-like columns are dropped (default
             ``False``).
-    Returns:
-        The (possibly repaired) feature matrix ``X``: for a ``pd.DataFrame``
-        with datetime columns the expanded frame is returned; otherwise the
-        original ``X`` is returned unchanged.
+
     Raises:
         InvalidDataError: If the data types are not supported
             or the sizes of X and y do not match, or the target y is
@@ -166,16 +163,7 @@ def _validate_data(
 
 
 def _get_estimator(algo: str) -> Any:
-    """Check the availability and validity of the given algorithm.
-
-    Args:
-        algo (str): Algorithm name.
-    Returns:
-        Any: Returns True if the model is created successfully by the base factory.
-    Raises:
-        InvalidAlgorithmError: If the algorithm is not supported or a required
-            dependency (library) is missing.
-    """
+    """Check the availability and validity of the given algorithm."""
     try:
         # Try to create a model with minimal parameters to check existence
         create_model(algo)
@@ -235,9 +223,9 @@ class _OptimizeRunner:
         """Store the data and the settings of a single optimisation run.
 
         Args:
-            X (Any): The feature matrix.
-            y (Any): The target vector.
-            request (HpoRequest): The run settings (see ``optimize()`` for
+            X: The feature matrix.
+            y: The target vector.
+            request: The run settings (see ``optimize()`` for
                 the semantics of every field).
         """
         self.request = request
@@ -398,7 +386,7 @@ class _OptimizeRunner:
         )
         if canonical is None:
             # The search space cannot be reproduced by the pre-check (an
-            # exotic custom ``space_fn``, e.g. one using legacy ``suggest_*``
+            # exotic custom ``space_fn``, e.g. one using raw ``suggest_*``
             # methods the recorder does not implement). Transferring the
             # history blind would risk a silent ``study.add_trials`` desync,
             # and skipping the transfer would silently degrade refine to a
@@ -454,8 +442,8 @@ class _OptimizeRunner:
         not kept).
 
         Args:
-            trial (Trial): The current Optuna trial object.
-            current_estimator (Any): The pipeline/model of the current trial.
+            trial: The current Optuna trial object.
+            current_estimator: The pipeline/model of the current trial.
         Returns:
             float: The target metric value for the current parameter set.
         Raises:
@@ -495,16 +483,7 @@ class _OptimizeRunner:
         disqualification. The consecutive fatal failure counter is reset on
         any non-fatal outcome: success, pruner pruning (optuna.TrialPruned
         from ``_evaluate_with_intermediate_reports``), or a non-fatal
-        ValueError.
-
-        Args:
-            trial (Trial): The current Optuna trial object.
-        Returns:
-            float: The target metric value for the current parameter set.
-        Raises:
-            optuna.TrialPruned: If the trial is pruned (by an error or the pruner).
-            InvalidAlgorithmError: When the fatal failure limit is exceeded.
-        """
+        ValueError."""
         # 1. hyperparameters, model and pipeline assembly — outside try/except
         #    (contract of the original code: their errors are not fatal
         #    evaluation failures and are not counted by the circuit breaker).
@@ -555,8 +534,8 @@ class _OptimizeRunner:
         once the limit is reached (``InvalidAlgorithmError``).
 
         Args:
-            trial (Trial): The current Optuna trial (for the user_attr "fail_reason").
-            err (Exception): The caught evaluation exception.
+            trial: The current Optuna trial (for the user_attr "fail_reason").
+            err: The caught evaluation exception.
         Raises:
             optuna.TrialPruned: Always (non-fatal or fatal failure).
             InvalidAlgorithmError: If the fatal failure limit is reached.
@@ -699,14 +678,7 @@ class _OptimizeRunner:
         previous phase with the key), and the chosen NUMERICAL feature name
         is reported as ``isotonic_feature`` when it is resolvable from the
         preprocessor's ``get_feature_names_out`` (the numerical block
-        occupies the last ``n_numeric`` columns).
-
-        Args:
-            best_params: The parameters of the best trial.
-
-        Returns:
-            dict[str, Any]: The reported params.
-        """
+        occupies the last ``n_numeric`` columns)."""
         params = {k: v for k, v in best_params.items() if k != "use_feature_selection"}
         preprocessor = self.preprocessing.preprocessor
         if preprocessor is not None:
@@ -739,11 +711,7 @@ class _OptimizeRunner:
         it on the full dataset. If oversampling was enabled, the final model
         goes through it as well. Skipped entirely when ``fit_best_model`` is
         False (HPO-only callers). The trained model is stored in
-        ``self.best_model``.
-
-        Returns:
-            Any: The trained best model (``self.best_model``).
-        """
+        ``self.best_model``."""
         params = dict(self.best.model_params)
         if "random_state" not in params:
             params["random_state"] = self.request.random_state
@@ -784,6 +752,7 @@ class _OptimizeRunner:
         Returns:
             bool: True if Optuna should run; False — return
                 ``None`` (the "no valid result" signal) without running.
+
         Raises:
             ValueError: If ``n_trials`` is negative or not an integer.
         """
@@ -807,18 +776,7 @@ def _normalize_feature_selection_cfg(value: Any) -> FeatureSelectionCfg:
     """Normalize the feature selection configuration of a run.
 
     ``None`` -> default (mode='disabled'), dict -> ``FeatureSelectionCfg``
-    (validated at run time), ``FeatureSelectionCfg`` object -> as is.
-
-    Args:
-        value: The ``feature_selection_cfg`` of the request.
-
-    Returns:
-        FeatureSelectionCfg: The validated configuration.
-
-    Raises:
-        HyperoptError: If a dict with invalid values is passed.
-        TypeError: If an object of an unsupported type is passed.
-    """
+    (validated at run time), ``FeatureSelectionCfg`` object -> as is."""
     if value is None:
         return FeatureSelectionCfg()
     if isinstance(value, FeatureSelectionCfg):
@@ -843,9 +801,9 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     (e.g. expanded datetime columns) is returned in the plan.
 
     Args:
-        X (Any): The feature matrix.
-        y (Any): The target vector.
-        request (HpoRequest): The run settings.
+        X: The feature matrix.
+        y: The target vector.
+        request: The run settings.
 
     Returns:
         ValidationPlan: The repaired matrix and the resolved validation.
@@ -953,9 +911,9 @@ def run_optimization(X: Any, y: Any, request: HpoRequest) -> OptimizeResult | No
     engine's HPO phases.
 
     Args:
-        X (Any): The feature matrix.
-        y (Any): The target vector.
-        request (HpoRequest): The run settings.
+        X: The feature matrix.
+        y: The target vector.
+        request: The run settings.
 
     Returns:
         OptimizeResult | None: The phase result, or ``None`` — the "no valid

@@ -102,17 +102,17 @@ class ProcessPoolSupervisor:
     """Runs one batch of tasks in a process pool (see the module docstring).
 
     Args:
-        func (Callable[..., Any]): The target function (picklable).
-        payloads (Sequence[TaskPayload]): One payload per task.
-        max_workers (int | None): The number of worker processes (``None`` —
+        func: The target function (picklable).
+        payloads: One payload per task.
+        max_workers: The number of worker processes (``None`` —
             the CPU count).
-        mp_context (BaseContext | None): The multiprocessing context.
-        task_timeout (float | None): The per-task timeout (from the real
+        mp_context: The multiprocessing context.
+        task_timeout: The per-task timeout (from the real
             start).
-        timeout (float | None): The global timeout of the batch.
-        shutdown_grace_period (float): Seconds between SIGTERM and SIGKILL
+        timeout: The global timeout of the batch.
+        shutdown_grace_period: Seconds between SIGTERM and SIGKILL
             when the pool is stopped.
-        pool_factory (PoolFactory): Creates the executors.
+        pool_factory: Creates the executors.
     """
 
     def __init__(

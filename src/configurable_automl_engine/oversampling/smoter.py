@@ -47,11 +47,11 @@ class _SMOTERGenerator:
         """Initialize the generator.
 
         Args:
-            random_state (int | None): Random seed for reproducibility.
-            categorical_features (list[int] | None): Indices of categorical
+            random_state: Random seed for reproducibility.
+            categorical_features: Indices of categorical
                 columns; they are never interpolated (SMOTENC
                 copy-from-first-parent rules apply instead).
-            density_weighted (bool): Use ADASYN-style density weighting of
+            density_weighted: Use ADASYN-style density weighting of
                 the parent selection instead of uniform random choice.
         """
         self.random_state = random_state
@@ -68,11 +68,11 @@ class _SMOTERGenerator:
         """Generate ``n_to_generate[bin]`` synthetic rows per quantile bin.
 
         Args:
-            X (np.ndarray): Numeric (already encoded) feature matrix.
-            y (np.ndarray): The real regression target values per row.
-            y_binned (np.ndarray): Quantile-bin code per row (``-1`` —
+            X: Numeric (already encoded) feature matrix.
+            y: The real regression target values per row.
+            y_binned: Quantile-bin code per row (``-1`` —
                 missing target, never used as a synthetic parent).
-            n_to_generate (dict[int, int]): Number of synthetic rows to
+            n_to_generate: Number of synthetic rows to
                 create per bin code.
 
         Returns:

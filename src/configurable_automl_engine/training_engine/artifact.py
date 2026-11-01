@@ -64,23 +64,21 @@ def _build_trainer(
     validation settings to the trainer.
 
     Args:
-        algo_name (str): The name of the selected algorithm.
-        algo_cfg (AlgoCfg): The algorithm configuration.
-        best_params (Dict[str, Any]): The found optimal hyperparameters.
-        cfg (Config): The common configuration object.
-        metric_name_sklearn (str): The main metric name in sklearn format.
-        validation_strategy (ValidationStrategy | str): The resolved
+        algo_name: The name of the selected algorithm.
+        algo_cfg: The algorithm configuration.
+        best_params: The found optimal hyperparameters.
+        cfg: The common configuration object.
+        metric_name_sklearn: The main metric name in sklearn format.
+        validation_strategy: The resolved
             validation strategy (the engine passes the method resolved once
             in ``prepare_dataset``, so the final ``val_score`` is computed
             with the same method as the model comparison estimate in HPO).
-        n_folds (int): The number of folds (for 'k_fold').
-        test_size (float | int): The hold-out size.
-        random_state (int | None): The engine seed from
+        n_folds: The number of folds (for 'k_fold').
+        test_size: The hold-out size.
+        random_state: The engine seed from
             ``general.random_state``; drives the ModelTrainer's data splits
             and model seeds. ``None`` — non-reproducible final training.
 
-    Returns:
-        ModelTrainer: The constructed (but not yet trained) trainer.
 
     Raises:
         ValueError: If ``best_params`` is ``None`` (a signal of a complete HPO
@@ -124,26 +122,21 @@ def _build_trainer(
         serialization_format=general.serialization_format,
         encoding_strategy=general.categorical_encoding,
         additional_metrics=general.additional_metrics,
-        # Explicit preprocessing preset override from the config: applied
-        # consistently with the HPO phase.
         preprocessing_override=algo_cfg.preprocessing,
         high_cardinality_threshold=general.high_cardinality_threshold,
         high_cardinality_encoding=general.high_cardinality_encoding,
         hashing_n_components=general.hashing_n_components,
         target_encoding_smoothing=general.target_encoding_smoothing,
         target_encoding_fallback=general.target_encoding_fallback,
-        # Feature selection: the root configuration plus the HPO winner's
-        # decision.
         feature_selection_cfg=general.feature_selection,
         feature_selection_active=fs_active,
         validation_strategy=validation_strategy,
         n_folds=n_folds,
         test_size=test_size,
-        # Input-data diagnostics policies: the final fit treats ±inf /
-        # datetime / ID-like columns exactly as the pipeline entry point
-        # (prepare_dataset has already applied them; re-validation is a
-        # no-op on the already-repaired data). The ID-like WARNING is
-        # suppressed: prepare_dataset already reported it once.
+        # The final fit treats the data exactly as the pipeline entry
+        # point: prepare_dataset has already applied the policies, so
+        # re-validation is a no-op; the ID-like WARNING is suppressed
+        # because it was already reported there once.
         inf_policy=general.inf_policy,
         datetime_policy=general.datetime_policy,
         drop_id_like_columns=general.drop_id_like_columns,
@@ -168,30 +161,29 @@ def _fit_and_save(
     datetime_expansion: dict[str, list[str]] | None = None,
 ) -> ModelTrainer:
     """Train the final model and save the result to disk.
+
     Args:
-        algo_name (str): The name of the selected algorithm.
-        algo_cfg (AlgoCfg): The algorithm configuration with the trainer path.
-        X (pd.DataFrame): The full feature matrix for training.
-        y (pd.Series): The full target vector.
-        best_params (Dict[str, Any]): The found optimal hyperparameters.
-        model_path (Path): The path to save the model file to.
-        cfg (Config): The common configuration object used to obtain the
+        algo_name: The name of the selected algorithm.
+        algo_cfg: The algorithm configuration with the trainer path.
+        X: The full feature matrix for training.
+        y: The full target vector.
+        best_params: The found optimal hyperparameters.
+        model_path: The path to save the model file to.
+        cfg: The common configuration object used to obtain the
             oversampling settings.
-        metric_name_sklearn (str): The main metric name in sklearn format.
-        validation_strategy (ValidationStrategy | str): The resolved
+        metric_name_sklearn: The main metric name in sklearn format.
+        validation_strategy: The resolved
             validation strategy of the final model.
-        n_folds (int): The number of folds (for 'k_fold').
-        test_size (float | int): The hold-out size (a fraction or a number
+        n_folds: The number of folds (for 'k_fold').
+        test_size: The hold-out size (a fraction or a number
             of rows after 'auto' resolution).
-        random_state (int | None): The engine seed (``general.random_state``)
+        random_state: The engine seed (``general.random_state``)
             for the final model's splits and model seeds.
-        datetime_expansion (dict[str, list[str]] | None): The datetime
+        datetime_expansion: The datetime
             expansion applied upstream (``PreparedData.datetime_expansion``);
             registered on the trainer before saving so that the artifact
             accepts the raw input schema.
-    Returns:
-        ModelTrainer: The trainer after training and saving (used to access
-            the additional metric values).
+
     Raises:
         ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
             no valid hyperparameters (protection against the TypeError
@@ -240,13 +232,9 @@ def _oof_score_in_user_metric(
     direction.
 
     Args:
-        metric_user (str): The user-facing comparison metric name.
-        trainer (Any): The trained ``ModelTrainer`` (OOF attributes populated).
-        y (pd.Series): The full target vector (for the OOF rows alignment).
-
-    Returns:
-        float | None: The OOF estimate in the comparison metric semantics,
-            or ``None`` when the OOF vector is unavailable (no valid pairs).
+        metric_user: The user-facing comparison metric name.
+        trainer: The trained ``ModelTrainer`` (OOF attributes populated).
+        y: The full target vector (for the OOF rows alignment).
     """
     oof_pred = getattr(trainer, "oof_predictions_", None)
     if oof_pred is None:
@@ -317,13 +305,14 @@ def _compute_holdout_score(
     true out-of-sample quality of the chosen pipeline configuration.
 
     Args:
-        cfg (Config): The configuration object.
-        winner_cfg (AlgoCfg): The configuration of the winning algorithm.
-        prepared (PreparedData): The prepared data and settings (X/y are the
+        cfg: The configuration object.
+        winner_cfg: The configuration of the winning algorithm.
+        prepared: The prepared data and settings (X/y are the
             TRAIN part of the outer split; ``holdout_X``/``holdout_y`` are
             the reserved rows).
-        winner_algo (str): The winning algorithm name.
-        final_params (Dict[str, Any]): The winner's best hyperparameters.
+        winner_algo: The winning algorithm name.
+        final_params: The winner's best hyperparameters.
+
 
     Returns:
         float: The comparison metric value on the hold-out rows in user
@@ -392,38 +381,25 @@ def persist_artifact(
 
     Pipeline step 5. Trains the winning algorithm's model on the full dataset
     via ``_fit_and_save`` (or reuses the already-trained finalist of the
-    terminal ``sanity_gate`` select step — unless ``general.holdout_fraction``
-    is set, see below), saves the artifact to disk, and
-    builds the result dict: ``algorithm``, ``score`` (in user semantics),
-    ``metric``, ``params``, ``model_path``; when present it also adds
-    ``disqualified_algorithms`` (the circuit breaker, including Sanity Gate
-    select-step disqualifications), ``additional_metrics``, ``sanity_gate``
-    — a dict of the report sections of the ``sanity_gate`` select steps (key —
-    the phase name), ``oof_score`` — the comparison metric computed on the
-    final pipeline's pooled out-of-fold predictions (on the same splits that
-    selected the winner, so it is optimistic like ``score``; omitted when the
-    OOF estimate is impossible), ``n_trials_evaluated`` — the number of trials
-    actually evaluated by the winning algorithm's HPO phase (omitted when
-    unknown), ``holdout_score`` — the honest comparison metric of the
-    winner on the reserved outer hold-out (``general.holdout_fraction``;
-    present only when a hold-out is reserved), and ``bbc_score`` — the
-    bootstrap bias-corrected (BBC-CV) estimate of the selection procedure
-    from the OOF predictions of all evaluated trials (present when no
-    hold-out is reserved and the OOF pool is available).
+    terminal ``sanity_gate`` select step), saves the artifact to disk and
+    builds the result dict. The report keys and the semantics of ``score``,
+    ``oof_score``, ``holdout_score`` and ``bbc_score`` are documented in
+    API_REFERENCE.md ("Training results"); the keys are added to the result
+    only when their data is present.
 
     Args:
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and settings.
-        winner_algo (str): The name of the winning algorithm (from the terminal
+        cfg: The configuration object.
+        prepared: The prepared data and settings.
+        winner_algo: The name of the winning algorithm (from the terminal
             select step context).
-        final_score (float): The raw winner score (already passed the
+        final_score: The raw winner score (already passed the
             ``is_valid_winner_score`` invariant).
-        final_params (Dict[str, Any]): The winner's best hyperparameters.
-        model_path_override (str | Path | None): An alternative model save
+        final_params: The winner's best hyperparameters.
+        model_path_override: An alternative model save
             path.
-        disqualified_algorithms (Dict[str, str]): Disqualified algorithms
+        disqualified_algorithms: Disqualified algorithms
             (name → reason); added to the result when present.
-        pre_trained_trainer (Any | None): The winner's already-trained
+        pre_trained_trainer: The winner's already-trained
             ``ModelTrainer`` on 100% of the data (terminal ``sanity_gate``
             select step). If given, retraining is NOT performed — the artifact
             is saved from it (finalists are trained once). Exception: when
@@ -431,21 +407,18 @@ def persist_artifact(
             covered only the train part of the outer split, so it is NOT
             reused — the artifact is refit on ALL data (train + hold-out
             concatenated in ``full_X``/``full_y``) via ``_fit_and_save``.
-        sanity_gate_sections (Dict[str, Dict[str, Any]] | None): Report
+        sanity_gate_sections: Report
             sections of the ``sanity_gate`` select steps (key — the phase
-            name). The ``sanity_gate`` key is added to the result only when at
-            least one section is present.
-        complexity_guard_sections (Dict[str, Any] | None): Aggregated report
+            name).
+        complexity_guard_sections: Aggregated report
             section of the adaptive complexity guard: key ``"parameters"`` —
             the list of "before → after" records (with the reason, size mode,
-            ``n``/``p``, ``leaf_min``, level, and the applied flag). The
-            ``complexity_guard`` key is added to the result only when the
-            guard produced at least one record.
-        n_trials_evaluated (int | None): The number of trials actually
+            ``n``/``p``, ``leaf_min``, level, and the applied flag).
+        n_trials_evaluated: The number of trials actually
             evaluated by the winner's HPO phase (own COMPLETED trials;
             transferred history never counts). ``None`` or 0 (unknown) — the
             key is omitted from the result.
-        oof_pool (list[np.ndarray] | None): The OOF prediction matrices of
+        oof_pool: The OOF prediction matrices of
             all evaluated trials (``PhaseContext.oof_pool``); empty or
             ``None`` — ``bbc_score`` is not reported.
 
@@ -539,12 +512,11 @@ def persist_artifact(
     # when the count is unknown (None or 0).
     if n_trials_evaluated is not None and int(n_trials_evaluated) > 0:
         result["n_trials_evaluated"] = int(n_trials_evaluated)
-    # Circuit breaker diagnostics: which algorithms were disqualified and why.
-    # The key is added only when there are disqualifications, otherwise the
-    # results are identical to the previous behavior. The sources are mixed
-    # deliberately: both HPO failures and Sanity Gate select-step
-    # disqualifications land here; the detailed audit lives in the
-    # ``sanity_gate`` sections.
+    # Circuit breaker diagnostics: which algorithms were disqualified and
+    # why. The key is added only when there are disqualifications. The
+    # sources are mixed deliberately: both HPO failures and Sanity Gate
+    # select-step disqualifications land here; the detailed audit lives in
+    # the ``sanity_gate`` sections.
     if disqualified_algorithms:
         result["disqualified_algorithms"] = dict(disqualified_algorithms)
     # Report sections of the select steps: the ``sanity_gate`` key is a dict of
@@ -561,16 +533,14 @@ def persist_artifact(
         result["complexity_guard"] = copy.deepcopy(complexity_guard_sections)
     # Additional informational metrics of the final model. The key is added
     # only when metrics are present (after deduplication and exclusion of the
-    # main comparison metric), otherwise the results are identical to the
-    # previous behavior.
+    # main comparison metric).
     if cfg.general.additional_metrics:
         result["additional_metrics"] = dict(trainer.additional_scores)
     # Reserved outer hold-out (general.holdout_fraction): the honest estimate
     # of the WINNER on the rows that were split off before HPO and never
     # participated in model selection. The hold-out model is trained with the
     # winner's best parameters on the train part of the outer split; the final
-    # artifact is trained on ALL data (the issue requirement: "the final model
-    # is still refit on all data"), so the hold-out score is a true
+    # artifact is trained on ALL data, so the hold-out score is a true
     # out-of-sample estimate of the chosen pipeline configuration. The key is
     # added only when the hold-out is configured.
     if prepared.holdout_X is not None and prepared.holdout_y is not None:
@@ -603,15 +573,11 @@ def _bbc_score_in_user_metric(
     """Compute the BBC-CV estimate in the comparison metric semantics.
 
     Args:
-        metric_user (str): The user-facing comparison metric name.
-        oof_pool (list[np.ndarray]): The OOF prediction matrices of all
+        metric_user: The user-facing comparison metric name.
+        oof_pool: The OOF prediction matrices of all
             evaluated trials (``(n_trials, n_rows)`` each).
-        y (pd.Series): The target vector the OOF rows are aligned to.
-        random_state (int | None): The bootstrap seed (the engine seed).
-
-    Returns:
-        float | None: The estimate in user semantics, or ``None`` when it
-            cannot be computed (a WARNING is logged).
+        y: The target vector the OOF rows are aligned to.
+        random_state: The bootstrap seed (the engine seed).
     """
     y_arr = np.asarray(y, dtype=float).reshape(-1)
     matrices = [m for m in oof_pool if m.ndim == 2 and m.shape[1] == len(y_arr)]

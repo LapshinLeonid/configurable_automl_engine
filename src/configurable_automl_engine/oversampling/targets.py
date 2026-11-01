@@ -3,7 +3,7 @@
 Holds the quantile binning that turns a numeric target into pseudo-classes
 for imbalanced-learn (``_bin_regression_target`` and its helpers), the
 per-class row counts of the sampling strategy (``_sampling_strategy``), the
-decoding of the resampled target (``_decode_regression_y`` and the legacy
+decoding of the resampled target (``_decode_regression_y`` and the
 quantile-bin decode ``_decode_continuous_y``) and the ``_BinnedTarget``
 record. The module must not import the other oversampling modules.
 """
@@ -39,15 +39,7 @@ def _bin_continuous_target(
     """Discretize a continuous regression target into quantile bin codes.
 
     Backward-compatible alias of :func:`_bin_regression_target` with the
-    default bin count.
-
-    Args:
-        y (pd.Series): The target variable vector.
-
-    Returns:
-        tuple[bool, pd.Series, dict[int, float]]: A triple of
-            (is_regression, codes, bin_mids).
-    """
+    default bin count."""
     return _bin_regression_target(y, DEFAULT_TARGET_BINS)
 
 
@@ -65,10 +57,6 @@ def _bin_regression_target(
     least :data:`MIN_TARGET_BINS` groups. Non-numeric, bool and NaN-only
     targets stay on the classification path (the caller keeps the bin codes
     only when the tuple's first element is ``True``).
-
-    Args:
-        y (pd.Series): The target variable vector.
-        target_bins (int): Number of quantile bins.
 
     Returns:
         tuple[bool, pd.Series, dict[int, float]]: A triple of
@@ -110,18 +98,11 @@ def _bin_regression_target(
 def _is_continuous_target(y: pd.Series) -> bool:
     """Determine whether a target vector is continuous regression data.
 
-    Kept for backward compatibility with earlier callers of the module: a
-    target is considered continuous exactly when it is numeric and can be
-    discretized into at least :data:`MIN_TARGET_BINS` quantile bins. The
-    engine itself no longer distinguishes continuous from integer targets —
+    A target is treated as regression data exactly when it is numeric and
+    can be discretized into at least :data:`MIN_TARGET_BINS` quantile bins.
+    The engine does not distinguish continuous from integer targets —
     the regression path (see :func:`_bin_regression_target`) is used for any
     numeric target.
-
-    Args:
-        y (pd.Series): The target variable vector.
-
-    Returns:
-        bool: ``True`` if the target should be treated as regression data.
     """
     return _bin_regression_target(y, DEFAULT_TARGET_BINS)[0]
 
@@ -133,21 +114,7 @@ def _prepare_continuous_bins(y: pd.Series) -> tuple[pd.Series, dict[int, float]]
     :func:`_bin_regression_target` with the default bin count. The bin codes
     are computed on the finite target values; rows with a missing target keep
     code ``-1`` and are passed through the samplers unchanged (like an extra
-    class that is not resampled).
-
-    Args:
-        y (pd.Series): The continuous target vector.
-
-    Returns:
-        tuple[pd.Series, dict[int, float]]: A pair of the integer (``int32``)
-            code series (the quantile bin number per row, ``-1`` for a
-            missing target) and the per-bin representative values (interval
-            midpoints) used to restore continuous targets after resampling.
-
-    Raises:
-        ValueError: If ``y`` cannot be discretized into at least
-            :data:`MIN_TARGET_BINS` quantile bins.
-    """
+    class that is not resampled)."""
     is_continuous, binned, bin_mids = _bin_regression_target(y, DEFAULT_TARGET_BINS)
     if not is_continuous:
         raise ValueError(
@@ -176,19 +143,10 @@ def _decode_continuous_y(
     in the row ordering of imbalanced-learn cannot silently corrupt the
     original target values — it fails loudly instead.
 
-    Args:
-        y_binned: The resampled bin-code vector (first ``len(y_original)``
-            entries are the original codes, the tail is synthetic).
-        y_original (pd.Series): The original (continuous) target vector.
-        y_orig_codes (pd.Series): The bin codes of the original target
-            vector (the first element of the tuple returned by
-            :func:`_prepare_continuous_bins`).
-        bin_mids (dict[int, float]): Per-bin representative values produced
-            by :func:`_prepare_continuous_bins`.
-
     Returns:
         np.ndarray: The continuous target vector for the resampled rows
             (original values followed by the synthetic ones).
+
 
     Raises:
         ValueError: If the resampled vector does not start with the original
@@ -255,16 +213,6 @@ def _decode_regression_y(
     Original rows are verified to stay in front (the current behavior of
     the imbalanced-learn samplers); any deviation fails loudly.
 
-    Args:
-        y_res: The resampled target vector (real values for the engine
-            generators, bin codes for ``random``).
-        y_original (pd.Series): The original target vector.
-        y_fit (pd.Series): The bin codes of the original target.
-        bin_mids (dict[int, float]): Per-bin representative values (only
-            used by the legacy decode path).
-        sampler: The fitted ``RandomOverSampler`` (``None`` for the
-            engine generators).
-
     Returns:
         np.ndarray: The regression target vector for the resampled rows.
     """
@@ -311,14 +259,15 @@ def _sampling_strategy(
     "balance-like" behavior, not a bug.
 
     Args:
-        y (pd.Series): The target variable vector.
-        multiplier (float): The scaling factor.
-        balance (bool): Whether to bring all classes up to the majority class
+        y: The target variable vector.
+        multiplier: The scaling factor.
+        balance: Whether to bring all classes up to the majority class
             size (``DataOversampler.balance``).
-        skip_missing_code (bool): Whether to exclude the pseudo-class
+        skip_missing_code: Whether to exclude the pseudo-class
             ``-1`` (rows with a missing target in the regression mode)
             from the strategy — it must never be rebalanced or scaled
             (pass-through only).
+
     Returns:
         Dict[Any, int]: A dictionary where keys are class labels
             and values are the final number of rows.

@@ -42,16 +42,7 @@ log = _logging.getLogger(__name__)
 
 
 def _build_scorer(name: str) -> Any:
-    """Create a scorer object from a metric name.
-
-    Args:
-        name (str): String metric name
-            (e.g. 'r2' or 'neg_mean_squared_error').
-    Returns:
-        Any: A metric object compatible with the sklearn API.
-    Raises:
-        HyperoptError: If an unknown metric name is given.
-    """
+    """Create a scorer object from a metric name."""
     try:
         # Use the new API, which returns either a make_scorer object or a string
         return get_scorer_object(name)
@@ -60,14 +51,7 @@ def _build_scorer(name: str) -> Any:
 
 
 def _can_stratify(y: Any) -> bool:
-    """Determine whether stratification is possible for the y vector.
-
-    Args:
-        y (Any): Target variable vector.
-    Returns:
-        bool: True if the data is discrete (integers/bool) and the number of
-            unique classes does not exceed 15. Otherwise — False.
-    """
+    """Determine whether stratification is possible for the y vector."""
     # np.asarray guarantees a plain np.ndarray and np.dtype for mypy (no ExtensionArray/Dtype)
     arr = np.asarray(y)
 
@@ -86,13 +70,10 @@ def _split_train_test(
     """Split data into train and test sets with automatic stratification.
 
     Args:
-        X (Any): Feature matrix.
-        y (Any): Target vector.
-        test_size (float): Test set fraction. Defaults to 0.2.
-        random_state (int | None): Random number generator seed. Defaults to 42.
-    Returns:
-        tuple[Any, Any, Any, Any]: Tuple of (X_train, X_test, y_train, y_test).
-    """
+        X: Feature matrix.
+        y: Target vector.
+        test_size: Test set fraction. Defaults to 0.2.
+        random_state: Random number generator seed. Defaults to 42."""
     strat = y if _can_stratify(y) else None
     try:
         return cast(
@@ -123,15 +104,7 @@ def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
     a fold whose fit/predict/scoring raised a non-fatal exception makes the
     trial's estimate NaN — the ``cross_val_score(error_score=np.nan)``
     contract (a failed fold became NaN, i.e. the worst possible outcome), so
-    a model that crashes on most folds cannot win over an honest one.
-
-    Args:
-        fold_idx (int): 1-based fold number.
-        err (Exception): The raised exception (the message is logged with its
-            type name).
-        stage (str): One of 'fit or predict' / 'score' — the operation that
-            failed for this fold.
-    """
+    a model that crashes on most folds cannot win over an honest one."""
     log.warning(
         "Fold %d failed to %s: %s: %s — the fold is penalized: the trial "
         "estimate becomes NaN (the worst outcome)",
@@ -180,14 +153,13 @@ def _evaluate_with_intermediate_reports(
     ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
     its rows are
     marked with NaN (they cannot enter the pooled estimate) and a warning is
-    logged — the semantics of the legacy ``cross_val_score(error_score=np.nan)``
-    (a failed fold became NaN, i.e. the worst possible outcome; it must not
-    abort the trial, and a model that crashes on most folds must not win over
-    an honest one). Fatal exceptions (``MemoryError``,
+    logged — a failed fold becomes NaN, i.e. the worst possible outcome; it
+    must not abort the trial, and a model that crashes on most folds must not
+    win over an honest one. Fatal exceptions (``MemoryError``,
     ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
     to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
-    fails, a ``ValueError`` is raised — the same
-    "no valid result" contract as before. A running pooled value that is
+    fails, a ``ValueError`` is raised — the "no valid result" contract. A
+    running pooled value that is
     itself non-finite
     (e.g. R² on a single LOO pair, which is undefined) is NOT published to
     ``trial.report``: Optuna pruners cannot handle NaN and would emit
@@ -207,52 +179,43 @@ def _evaluate_with_intermediate_reports(
     is emitted there.
 
     Args:
-        trial (Trial): The current Optuna trial.
-        estimator (Any): The estimator (possibly a pipeline) to evaluate.
-        X (Any): Feature matrix.
-        y (Any): Target variable vector.
-        method (str): Split strategy ('k_fold' or 'loo').
-        n_folds (int): Number of folds for k_fold.
-        test_size (float): Test fraction (unused for k_fold/loo; passed to
+        trial: The current Optuna trial.
+        estimator: The estimator (possibly a pipeline) to evaluate.
+        X: Feature matrix.
+        y: Target variable vector.
+        method: Split strategy ('k_fold' or 'loo').
+        n_folds: Number of folds for k_fold.
+        test_size: Test fraction (unused for k_fold/loo; passed to
             keep a uniform iter_splits call).
-        random_state (int | None): Randomness seed.
-        scorer (Any): sklearn metric object.
-        pool_metric (bool): Whether the metric is non-additive and must be
+        random_state: Randomness seed.
+        scorer: sklearn metric object.
+        pool_metric: Whether the metric is non-additive and must be
             pooled over the accumulated OOF predictions. Defaults to False —
-            the legacy cumulative-fold-mean behavior.
-        algo_name (str): The algorithm being evaluated, for the fallback
+            the cumulative-fold-mean behavior.
+        algo_name: The algorithm being evaluated, for the fallback
             WARNING deduplication.
-        phase_name (str): The pipeline phase, for the fallback WARNING
+        phase_name: The pipeline phase, for the fallback WARNING
             deduplication.
-        oof_out (np.ndarray | None): An optional buffer of length
+        oof_out: An optional buffer of length
             ``len(X)``; when given, the out-of-fold predictions of the
             successful folds are written into it by position (the rows of
             failed folds stay untouched).
+
 
     Returns:
         float: The mean metric value across all folds (for additive metrics)
             or the pooled value over all rows (for non-additive metrics).
             NaN whenever at least one fold failed during evaluation — the
             caller turns it into ``HPO_WORST_SCORE`` (the worst outcome), so
-            a failing model cannot win over an honest one.
-    Raises:
-        optuna.TrialPruned: If the pruner decides to prune the trial.
-        ValueError: If every fold fails during evaluation (fit/predict) — the
-            estimate is impossible.
-        MemoryError, RuntimeError, InvalidDataError: A fatal per-fold failure —
-            propagated so the circuit breaker stays active.
-        Exception: A genuine failure outside a single fold (e.g. split
-            iteration) propagates (fatal or non-fatal depending on the
-            exception type, as before).
-    """
+            a failing model cannot win over an honest one."""
     fold_scores: list[float] = []
     # Non-additive metrics (RMSE, MSE, R², nRMSE, ...) are pooled over the
     # rows covered by the folds processed so far; the running pooled value is
     # published as the intermediate result. The OOF rows are accumulated in
     # pre-allocated full-size buffers (filled by positional indices) and
     # pooled via ``pooled_scorer_value``, whose non-finite masking drops the
-    # not-yet-covered rows — no repeated array concatenation (O(k·n) copies
-    # on the old code, O(n²) for LOO).
+    # not-yet-covered rows — no repeated array concatenation (O(n²) copies
+    # with the naive approach, O(k·n) here).
     n_rows = len(X)
     pooled_y_buf = np.full(n_rows, np.nan, dtype=float)
     pooled_pred_buf = np.full(n_rows, np.nan, dtype=float)
@@ -345,12 +308,7 @@ def _fit_predict_fold(
     trial, but a model that crashes on most folds must not win over an honest
     one). Fatal exception types (MemoryError / RuntimeError /
     InvalidDataError) are NOT swallowed here — they propagate to
-    ``handle_failure`` and keep the circuit breaker active.
-
-    Returns:
-        The fitted fold estimator and its predictions, or ``None`` when the
-        fold failed.
-    """
+    ``handle_failure`` and keep the circuit breaker active."""
     try:
         fold_estimator = clone(estimator)
         fold_estimator.fit(X_tr, y_tr)
@@ -425,9 +383,6 @@ def _final_intermediate_estimate(
     Returns:
         The fold mean (additive metrics) or the pooled value (non-additive
         metrics); NaN when a fold failed.
-
-    Raises:
-        ValueError: If every fold failed.
     """
     if n_folds_total > 0 and n_failed_folds == n_folds_total:
         raise ValueError(
@@ -436,7 +391,7 @@ def _final_intermediate_estimate(
         )
     # A failed fold is a guaranteed worst outcome: its rows could not enter
     # the pooled estimate (pooled path) or its score is NaN in the additive
-    # fold mean — the trial estimate becomes NaN, exactly like the legacy
+    # fold mean — the trial estimate becomes NaN, mirroring
     # ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned the
     # mean. A model that crashes on part of the folds must not win over an
     # honest one.
@@ -490,14 +445,14 @@ def _evaluate_pooled_cv(
     non-poolable path)
     raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
     ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
-    the trial's estimate becomes NaN — the semantics of the legacy
+    the trial's estimate becomes NaN — mirroring
     ``cross_val_score(error_score=np.nan)`` (a failed fold became NaN, i.e.
     the worst possible outcome), so a model that crashes on most folds cannot
     win over an honest one. Fatal exceptions (``MemoryError``,
     ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
     to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails at the fit/predict stage, the evaluation is impossible and a
-    ``ValueError`` is raised — the same "no valid result" contract as before
+    ``ValueError`` is raised — the "no valid result" contract
     (mirroring ``cross_val_score``, which raises ``ValueError`` when every
     fit fails, and returns an all-NaN array when the fits succeed but every
     score is impossible).
@@ -513,34 +468,29 @@ def _evaluate_pooled_cv(
     fallback is logged once per (``algo_name``, ``phase_name``) pair.
 
     Args:
-        estimator (Any): The estimator (possibly a pipeline) to evaluate.
-        X (Any): Feature matrix.
-        y (Any): Target variable vector.
-        method (str): Split strategy ('k_fold' or 'loo').
-        n_folds (int): Number of folds for k_fold.
-        test_size (float): Test fraction (unused for k_fold/loo; passed to
+        estimator: The estimator (possibly a pipeline) to evaluate.
+        X: Feature matrix.
+        y: Target variable vector.
+        method: Split strategy ('k_fold' or 'loo').
+        n_folds: Number of folds for k_fold.
+        test_size: Test fraction (unused for k_fold/loo; passed to
             keep a uniform iter_splits call).
-        random_state (int | None): Randomness seed.
-        scorer (Any): sklearn metric object.
-        algo_name (str): The algorithm being evaluated, for the fallback
+        random_state: Randomness seed.
+        scorer: sklearn metric object.
+        algo_name: The algorithm being evaluated, for the fallback
             WARNING deduplication.
-        phase_name (str): The pipeline phase, for the fallback WARNING
+        phase_name: The pipeline phase, for the fallback WARNING
             deduplication.
-        oof_out (np.ndarray | None): An optional buffer of length
+        oof_out: An optional buffer of length
             ``len(X)``; when given, the out-of-fold predictions of the
             successful folds are written into it by position.
+
 
     Returns:
         float: The pooled metric value over all out-of-fold rows. NaN
             whenever at least one fold failed during evaluation — the caller
             turns it into ``HPO_WORST_SCORE`` (the worst outcome), so a
             failing model cannot win over an honest one.
-
-    Raises:
-        ValueError: If every fold fails during evaluation (fit/predict or the
-            per-fold scoring fallback) — the pooled estimate is impossible.
-        MemoryError, RuntimeError, InvalidDataError: A fatal per-fold failure —
-            propagated so the circuit breaker stays active.
     """
     fold_scores: list[float] = []
     n_rows = len(X)
@@ -614,8 +564,8 @@ def _evaluate_pooled_cv(
             f"All {n_folds_total} fold(s) failed during evaluation — the "
             "pooled estimate is impossible"
         )
-    # A failed fold is a guaranteed worst outcome — the semantics of the
-    # legacy ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned
+    # A failed fold is a guaranteed worst outcome — the semantics of
+    # ``cross_val_score(error_score=np.nan)``, whose NaN fold poisoned
     # the estimate. A model that crashes on part of the folds must not win
     # over an honest one.
     if n_failed_folds > 0:
@@ -657,10 +607,6 @@ def _phase_oof_matrix(
     phase_trials: list[FrozenTrial], trial_oof: dict[int, np.ndarray]
 ) -> np.ndarray | None:
     """Stack the kept OOF vectors of the phase's own COMPLETED trials.
-
-    Args:
-        phase_trials: The trials of the current phase.
-        trial_oof: The kept OOF vectors by trial number.
 
     Returns:
         np.ndarray | None: A ``(n_trials, n_rows)`` matrix in trial
@@ -706,20 +652,20 @@ def score_trial(
     intermediate values are reported to ``trial`` for the Optuna pruner.
 
     Args:
-        estimator (Any): The pipeline/model of the current trial.
-        X (Any): The feature matrix.
-        y (Any): The target vector.
-        trial (Trial): The current Optuna trial object.
-        validation (ValidationPlan): The resolved validation strategy.
-        scorer (Any): The sklearn scorer of the target metric.
-        pruning_active (bool): Whether the pruner is applied (fold-wise
+        estimator: The pipeline/model of the current trial.
+        X: The feature matrix.
+        y: The target vector.
+        trial: The current Optuna trial object.
+        validation: The resolved validation strategy.
+        scorer: The sklearn scorer of the target metric.
+        pruning_active: Whether the pruner is applied (fold-wise
             evaluation with intermediate reports).
-        pool_metric (bool): Whether the metric is non-additive (pooled over
+        pool_metric: Whether the metric is non-additive (pooled over
             the out-of-fold vector).
-        random_state (int | None): The seed of the data splits.
-        algo_name (str): The algorithm name (fallback WARNING deduplication).
-        phase_name (str): The phase name (fallback WARNING deduplication).
-        collect_oof (bool): Whether the out-of-fold predictions are
+        random_state: The seed of the data splits.
+        algo_name: The algorithm name (fallback WARNING deduplication).
+        phase_name: The phase name (fallback WARNING deduplication).
+        collect_oof: Whether the out-of-fold predictions are
             returned.
     Returns:
         TrialScore: The target metric value and, with ``collect_oof``, the
@@ -849,11 +795,7 @@ def _score_fold_mean(
 
     ``validation.cv`` is guaranteed non-None here: a non-train_test_split and
     non-pruning branch means k_fold/loo, where make_cv always creates a cv
-    object.
-
-    Returns:
-        float: The mean of the per-fold scores.
-    """
+    object."""
     if oof_out is None:
         scores = model_selection.cross_val_score(
             estimator,

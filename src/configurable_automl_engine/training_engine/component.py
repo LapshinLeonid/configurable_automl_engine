@@ -1,38 +1,27 @@
 """Module managing the model training lifecycle (Training Engine).
-Provides an automated pipeline from input data validation to saving the final
-model. Supports multi-phase hyperparameter search (HPO), dynamic algorithm
+
+Provides an automated pipeline from input data validation to saving the
+final model: multi-phase hyperparameter search (HPO), dynamic algorithm
 loading, and parallel computation.
+
 The public training loop is decomposed into steps:
+
     - load_config: Load and validate the configuration and input data.
     - prepare_dataset: Prepare X/y, resolve validation strategy and column types.
     - execute_phases: Multi-phase hyperparameter search (HPO).
     - select_winner: Deterministically select the winning algorithm.
     - persist_artifact: Final training, model persistence, and report assembly.
-Two-stage winner selection is performed by an explicit pipeline select step:
-    - select with strategy: sanity_gate — a finalists pool, training each
-      finalist on 100% of the data, a ModelSanityGate audit, and ranking of the
-      audited candidates by RMSE_oof (active mode);
-    - select with strategy: cv_best — deterministic ranking by CV score without
-      audit (the equivalent of the legacy path with mode: off).
-This module only orchestrates the steps and is the only one that mutates the
-``PhaseContext``: the steps are pure functions that return outcomes, applied
-here. The steps live in dedicated modules (import them from there):
-    - state: Shared dataclasses (PhaseResult, PreparedData, PhaseContext, ...).
-    - data_prep: load_config, prepare_dataset.
-    - hpo_phases: HPO phase execution (_run_hpo).
-    - finalists: select_winner, select_finalists, select_robust_winner.
-    - select_steps: The explicit select steps (cv_best / sanity_gate).
-    - artifact: Final model training on the full dataset, persist_artifact.
-Main components:
-    - train_best_model: Public interface — orchestrates the steps above.
-    - execute_phases: The phase loop (HPO phases and select steps).
-Usage example:
-    results = train_best_model(
-        config="path/to/config.yaml",
-        df=my_dataframe,
-        target="target_col",
-        model_path_override="models/best.pkl"
-    )
+
+Winner selection is performed by an explicit pipeline select step:
+``sanity_gate`` (a finalists pool, a ModelSanityGate audit, ranking by
+RMSE_oof) or ``cv_best`` (plain ranking by CV score). The steps live in
+dedicated modules — state, data_prep, hpo_phases, finalists, select_steps,
+artifact (import them from there). This module only orchestrates the steps
+and is the only one that mutates the ``PhaseContext``: the steps are pure
+functions that return outcomes, applied here.
+
+Main components: ``train_best_model`` (public interface) and
+``execute_phases`` (the phase loop).
 """
 
 from __future__ import annotations
@@ -86,50 +75,35 @@ def execute_phases(
     Pipeline step 3. Contains the phase loop, parallel HPO execution,
     synchronous select steps, circuit breaker disqualification, and filtering
     of invalid results. The HPO worker ``_hpo_phase_worker`` and the helper
-    ``_execute_hpo_phase`` are module-level functions: the phase data is passed through ``_HpoPhaseSpec`` so that the
-    worker is serializable in the "processes" mode. The feature matrix ``X``
-    is passed as a separate argument and transferred via ``run_parallel``
-    shared memory / disk in that mode.
+    ``_execute_hpo_phase`` are module-level functions: the phase data is
+    passed through ``_HpoPhaseSpec`` so that the worker is serializable in
+    the "processes" mode. The feature matrix ``X`` is passed as a separate
+    argument and transferred via ``run_parallel`` shared memory / disk in
+    that mode.
 
-    Multi-phase semantics: the working set is not accumulated — each HPO phase
-    rebuilds it from scratch, so an algorithm that failed in the current phase
-    (complete HPO failure: ``None`` or an invalid score) is fully excluded and
-    does not keep a stale record from a previous phase. The select step output
-    replaces the pipeline working set; the final winner is determined by the
-    terminal select step.
+    Key semantics:
 
-    Refine step: ``action='refine'`` performs ``n_trials`` warm-started HPO
-    attempts for **every** candidate of the incoming working set (the results
-    of the last HPO phase, or the output of the previous select step). The
-    incoming records are used completely: ``params`` become ``initial_params``
-    for ``enqueue_trial`` (the monotonicity anchor) and ``trials`` become
-    ``previous_trials`` for ``study.add_trials`` (the TPE history warm-start);
-    incoming scores are ignored. The output keeps the same set of names with
-    updated records and replaces the working set. There is no narrowing in
-    refine — narrowing is the job of explicit select steps. As the first
-    phase, refine runs over the full set of enabled algorithms without
-    warm-start. A per-algorithm failure excludes only that algorithm (circuit
-    breaker / invalid-result filters); if refine wipes out the whole working
-    set, ``RuntimeError`` is raised — a silent fallback to pre-refine
-    parameters would hide the regression (deliberate design decision).
-
-    Per-phase sampler seeds: each HPO phase (``all_algorithms``/``refine``)
-    runs the TPE sampler with its own seed derived from the engine seed,
-    ``general.random_state + hpo_phase_ordinal`` (the first HPO phase keeps
-    the engine seed — 42 by default, the second = 43, etc.; select steps do
-    not count). Together with the ``previous_trials`` transfer this
-    guarantees that TPE startup points do not repeat between phases. The
-    data splits and the preprocessor, in contrast, keep the SAME engine seed
-    for every phase: every phase (and the final ``ModelTrainer`` fit)
-    evaluates models on the same folds, so scores stay comparable and the
-    monotonicity of ``enqueue_trial`` holds. With
-    ``general.random_state=None`` the run is non-reproducible: neither the
-    splits nor the sampler are seeded (a WARNING is logged in
-    ``prepare_dataset``).
+    * the working set is not accumulated — each HPO phase rebuilds it from
+      scratch, so an algorithm that failed in the current phase is fully
+      excluded; the select step output replaces the working set and the
+      final winner is determined by the terminal select step;
+    * ``action='refine'`` warm-starts HPO for every candidate of the incoming
+      working set (``params`` become ``initial_params``, ``trials`` become
+      ``previous_trials`` for the TPE history transfer); incoming scores are
+      ignored; there is no narrowing in refine — narrowing is the job of
+      explicit select steps. If refine wipes out the whole working set,
+      ``RuntimeError`` is raised — a silent fallback to pre-refine parameters
+      would hide the regression (deliberate design decision);
+    * each HPO phase runs the TPE sampler with its own seed
+      (``general.random_state + hpo_phase_ordinal``), while the data splits
+      keep the SAME engine seed for every phase — scores stay comparable and
+      the monotonicity of ``enqueue_trial`` holds. With
+      ``general.random_state=None`` the run is non-reproducible (a WARNING is
+      logged in ``prepare_dataset``).
 
     Args:
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and resolved settings.
+        cfg: The configuration object.
+        prepared: The prepared data and resolved settings.
 
     Returns:
         PhaseContext: The final phase context. For a valid config the last
@@ -158,16 +132,15 @@ def execute_phases(
     )
     all_algorithms = guard.algorithms
     ctx.disqualified_algorithms.update(guard.disqualified)
-    # Disqualified algorithms (circuit breaker): name -> reason.
-    # Disqualification does not abort the run: the algorithm is excluded from
-    # candidates and results, the rest continue training.
-    # living in ctx: populated by HPO failures and select steps.
+    # Disqualified algorithms (circuit breaker): name -> reason; populated
+    # by HPO failures and select steps. Disqualification does not abort the
+    # run: the algorithm is excluded from candidates and results, the rest
+    # continue training.
     # The engine seed from ``general.random_state``: drives the data splits /
     # preprocessor (passed to the HPO workers as ``random_state``) and the TPE
     # sampler base seed (``random_state + hpo_phase_ordinal``; with None the
     # sampler and the splits are non-deterministic). The default value of
-    # ``general.random_state`` is 42 (the ``validation.RANDOM_STATE`` default),
-    # so configs without an explicit seed behave exactly as before.
+    # ``general.random_state`` is 42 (the ``validation.RANDOM_STATE`` default).
     engine_random_state = cfg.general.random_state
     # BBC-CV: without an outer hold-out the OOF predictions of every trial
     # are kept, so persist_artifact can report the bias-corrected estimate.
@@ -221,17 +194,14 @@ def _execute_hpo_step(
     """Run one HPO phase (``all_algorithms`` / ``refine``) of the pipeline.
 
     Args:
-        phase (HPOPhaseCfg): The HPO phase configuration.
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and resolved settings.
-        ctx (PhaseContext): The pipeline phase context (mutated).
-        all_algorithms (dict[str, AlgoCfg]): The configured algorithms (after
+        phase: The HPO phase configuration.
+        cfg: The configuration object.
+        prepared: The prepared data and resolved settings.
+        ctx: The pipeline phase context (mutated).
+        all_algorithms: The configured algorithms (after
             the target-domain guard).
-        phase_seed (int | None): The per-phase TPE sampler seed.
-        collect_oof (bool): Whether the OOF predictions are kept for BBC-CV.
-
-    Raises:
-        RuntimeError: If the phase produced no valid score.
+        phase_seed: The per-phase TPE sampler seed.
+        collect_oof: Whether the OOF predictions are kept for BBC-CV.
     """
     _LOG.info(
         f"--- Starting Phase: {phase.name} ({phase.n_trials}"
@@ -249,7 +219,7 @@ def _execute_hpo_step(
     prev_results = ctx.working_set
 
     # The HPO phase rebuilds the working set from scratch, so the full-fit
-    # trainers and the terminal select result of previous phases no longer
+    # trainers and the terminal select result of previous phases do not
     # match the working set parameters.
     ctx.full_fit_trainers.clear()
     ctx.winner_algo = None
@@ -321,17 +291,7 @@ def _phase_candidates(
     prev_results: dict[str, PhaseResult],
     ctx: PhaseContext,
 ) -> dict[str, AlgoCfg]:
-    """Select the candidates of an HPO phase.
-
-    Args:
-        phase (HPOPhaseCfg): The HPO phase configuration.
-        all_algorithms (dict[str, AlgoCfg]): The configured algorithms.
-        prev_results (dict[str, PhaseResult]): The incoming working set.
-        ctx (PhaseContext): The pipeline phase context.
-
-    Returns:
-        dict[str, AlgoCfg]: The algorithms that run in the phase.
-    """
+    """Select the candidates of an HPO phase."""
     if phase.action == "refine":
         # Refine: warm-start HPO for the ENTIRE incoming working set. The
         # input is the last HPO phase results or the output of the previous
@@ -386,15 +346,12 @@ def _build_phase_spec(
     target vector ``y`` (a single column) stays in the spec.
 
     Args:
-        phase (HPOPhaseCfg): The HPO phase configuration.
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and resolved settings.
-        prev_results (dict[str, PhaseResult]): The incoming working set.
-        phase_seed (int | None): The per-phase TPE sampler seed.
-        collect_oof (bool): Whether the OOF predictions are kept for BBC-CV.
-
-    Returns:
-        _HpoPhaseSpec: The phase snapshot.
+        phase: The HPO phase configuration.
+        cfg: The configuration object.
+        prepared: The prepared data and resolved settings.
+        prev_results: The incoming working set.
+        phase_seed: The per-phase TPE sampler seed.
+        collect_oof: Whether the OOF predictions are kept for BBC-CV.
     """
     ovr = cfg.oversampling
     pruning_cfg: dict[str, Any] | None = None
@@ -453,16 +410,7 @@ def _run_phase_workers(
     phase_results: dict[str, PhaseResult],
     ctx: PhaseContext,
 ) -> None:
-    """Run the HPO workers of a phase (parallel or sequential).
-
-    Args:
-        cfg (Config): The configuration object.
-        current_candidates (dict[str, AlgoCfg]): The algorithms of the phase.
-        spec (_HpoPhaseSpec): The phase snapshot.
-        X (pd.DataFrame): The feature matrix.
-        phase_results (dict[str, PhaseResult]): The phase results (filled).
-        ctx (PhaseContext): The pipeline phase context (disqualifications).
-    """
+    """Run the HPO workers of a phase (parallel or sequential)."""
     # Execution (parallel or sequential)
     if cfg.general.parallel_strategy == "algorithms" and len(current_candidates) > 1:
         outcomes = run_parallel_outcomes(
@@ -513,15 +461,7 @@ def _lost_worker_reasons(
 
     A worker that timed out, crashed or failed in the pool leaves no result,
     so the algorithm would silently disappear from the phase; it is recorded
-    in the circuit breaker instead, so the result and the log say why.
-
-    Args:
-        names (list[str]): The algorithm names, in the task order.
-        outcomes (list[TaskOutcome]): The task outcomes, in the same order.
-
-    Returns:
-        dict[str, str]: "algorithm → reason" for every non-``ok`` outcome.
-    """
+    in the circuit breaker instead, so the result and the log say why."""
     lost = {n: o.reason() for n, o in zip(names, outcomes) if not o.ok}
     for name, reason in lost.items():
         _LOG.warning("Algorithm %s lost in the HPO phase: %s", name, reason)
@@ -533,14 +473,7 @@ def _apply_worker_outcome(
     phase_results: dict[str, PhaseResult],
     outcome: WorkerOutcome,
 ) -> None:
-    """Merge the HPO worker outcome into the phase results and the context.
-
-    Args:
-        ctx (PhaseContext): The pipeline phase context (disqualifications and
-            the BBC-CV pool are extended).
-        phase_results (dict[str, PhaseResult]): The phase results (extended).
-        outcome (WorkerOutcome): The sorted worker results.
-    """
+    """Merge the HPO worker outcome into the phase results and the context."""
     ctx.disqualified_algorithms.update(outcome.disqualified)
     ctx.oof_pool.extend(outcome.oof_pool)
     phase_results.update(outcome.results)
@@ -549,14 +482,7 @@ def _apply_worker_outcome(
 def _apply_select_outcome(
     ctx: PhaseContext, outcome: SelectOutcome, phase_name: str
 ) -> None:
-    """Replace the pipeline state with the outcome of a select step.
-
-    Args:
-        ctx (PhaseContext): The pipeline phase context (mutated).
-        outcome (SelectOutcome): The new state returned by the select step.
-        phase_name (str): The select phase name (the key of its gate report
-            section).
-    """
+    """Replace the pipeline state with the outcome of a select step."""
     ctx.working_set = outcome.working_set
     ctx.winner_algo = outcome.winner_algo
     ctx.pre_trained_trainer = outcome.pre_trained_trainer
@@ -576,19 +502,12 @@ def _valid_phase_results(
     minimum (WORST_SCORE_THRESHOLD): it covers both the HPO_WORST_SCORE
     constant (returned by the tuner when a trial metric is non-finite) and
     the raw float(np.finfo(np.float32).min) value (possible from numpy-cast
-    metrics), which the old math.isclose(rel_tol=1e-9)
-    check missed (relative difference ≈ 9.88e-9). Real metrics of such
+    metrics), which the coarser math.isclose(rel_tol=1e-9)
+    check misses (relative difference ≈ 9.88e-9). Real metrics of such
     magnitude are practically impossible, so the threshold cannot drop a
     legitimate winner. params must be a dict (the tuner failure signal is
     params=None); garbage score types (None, strings, etc.) are rejected
-    by is_valid_winner_score.
-
-    Args:
-        phase_results (dict[str, PhaseResult]): The raw phase results.
-
-    Returns:
-        dict[str, PhaseResult]: The valid results (insertion order kept).
-    """
+    by is_valid_winner_score."""
     valid_results: dict[str, PhaseResult] = {}
     for name, record in phase_results.items():
         params = record.params
@@ -632,32 +551,30 @@ def train_best_model(
     the hand-off of the winner/trainer from the terminal select step context
     to ``persist_artifact`` remain.
 
-    Two-stage winner selection is performed by an explicit pipeline select step
-    with ``strategy: sanity_gate``: a finalists pool (``select_finalists``),
-    one-time training of the finalists on 100% of the data, a
-    ``ModelSanityGate`` audit, and ranking by ``RMSE_oof``
-    (``select_robust_winner``, ``active`` mode). The terminal select
-    (``output: winner``) hands the winner's already-trained-on-100%-of-the-data
-    trainer to ``persist_artifact`` via ``pre_trained_trainer`` — no retraining
-    of the winner is required. Exception: when ``general.holdout_fraction`` is
-    set, the saved artifact is refit on ALL data (train + hold-out rows are
-    concatenated back), because the sanity-gate finalists were trained on the
-    train part of the outer split only — the pre-trained trainer is then NOT
-    reused. There is no global
-    ``general.sanity_gate.mode`` switch anymore: selection is performed ONLY
-    by an explicit select step, and the ``general.sanity_gate`` section is the
-    source of thresholds.
+    Winner selection is performed by an explicit pipeline select step with
+    ``strategy: sanity_gate`` (a finalists pool, a one-time training of the
+    finalists on 100% of the data, a ``ModelSanityGate`` audit, ranking by
+    ``RMSE_oof``). The terminal select (``output: winner``) hands the
+    winner's already-trained trainer to ``persist_artifact`` via
+    ``pre_trained_trainer`` — no retraining of the winner is required.
+    Exception: when ``general.holdout_fraction`` is set, the saved artifact
+    is refit on ALL data (train + hold-out rows are concatenated back),
+    because the sanity-gate finalists were trained on the train part of the
+    outer split only. There is no global ``general.sanity_gate.mode``
+    switch: selection is performed ONLY by an explicit select step, and the
+    ``general.sanity_gate`` section is the source of thresholds.
 
-    Multi-phase semantics: the working set is not accumulated — each HPO phase
-    rebuilds it from scratch, and the select step output replaces it. The last
-    phase of a valid config is a terminal select (``output: winner``), whose
-    result determines the artifact.
+    Multi-phase semantics: the working set is not accumulated — each HPO
+    phase rebuilds it from scratch, and the select step output replaces it.
+    The last phase of a valid config is a terminal select
+    (``output: winner``), whose result determines the artifact.
+
     Args:
-        config (Union[str, Path, Config, Dict[str, Any]]): The training
+        config: The training
             configuration. Can be a file path, a dict, or a Config object.
-        df (pd.DataFrame): The input data.
-        target (str | None): The target column name. Defaults to 'target'.
-        model_path_override (str | Path | None): An alternative model save path.
+        df: The input data.
+        target: The target column name. Defaults to 'target'.
+        model_path_override: An alternative model save path.
     Returns:
         Dict[str, Any]: A dict with the results: the algorithm name, ``score``
             — the metric value in user semantics (positive RMSE/MAE, plain R²;

@@ -270,15 +270,7 @@ def _apply_input_diagnostics(
     Duplicate names would surface later as an unclear pandas error, ±inf
     breaks distance/linear models, datetime columns are dropped by the
     preprocessor (remainder="drop"), and ID-like columns are usually
-    uninformative.
-
-    Returns:
-        The repaired frame, the reconciled feature names and column lists,
-        and the datetime expansion map.
-
-    Raises:
-        TrainingError: If a policy rejects the data.
-    """
+    uninformative."""
     try:
         X_checked, generated = validate_features(
             X,
@@ -327,12 +319,7 @@ def _drop_uninformative_features(
     on the training data (no leakage). The feature names are updated to the
     cleaned list: ``predict`` aligns columns by them, so removed columns are
     dropped automatically at inference, while missing ones produce an
-    explicit error. User-specified column lists are reconciled too.
-
-    Returns:
-        The cleaned frame, the reconciled feature names and column lists,
-        and the dropped columns.
-    """
+    explicit error. User-specified column lists are reconciled too."""
     cleaned = _clean_uninformative_features(X)
     dropped = [col for col in X.columns if col not in cleaned.columns]
     if not dropped:
@@ -355,14 +342,7 @@ def _detect_feature_types(
     """Automatically classify columns into numerical and categorical ones.
 
     Explicit lists given for both kinds are only validated against ``X``;
-    a missing list is detected from the dtypes (excluding ``id_column``).
-
-    Returns:
-        The categorical and the numerical columns.
-
-    Raises:
-        TrainingError: If an explicitly specified column is missing.
-    """
+    a missing list is detected from the dtypes (excluding ``id_column``)."""
     if cats is not None and nums is not None:
         missing = [col for col in cats + nums if col not in X.columns]
         if missing:
@@ -463,12 +443,10 @@ def _resolve_isotonic_feature_index(hyperparams: dict[str, Any]) -> int:
     one-hot dummies of categorical columns are not meaningful inputs for
     the strictly univariate isotonic model.
 
-    Args:
-        hyperparams: The trainer hyperparameters.
-
     Returns:
         The ordinal index of the numerical feature to feed to
         ``IsotonicRegression``.
+
 
     Raises:
         TrainingError: If ``feature_index`` is not a non-negative integer.
@@ -489,11 +467,7 @@ def _isotonic_n_numeric(numerical_features: list[str] | None) -> int:
     ``add_indicator=False`` (``requires_missing_indicator`` returns
     ``False``) and numeric columns are never expanded, so the numerical
     block of the preprocessed matrix has exactly one column per original
-    numerical feature.
-
-    Returns:
-        The number of numerical features (>= 0).
-    """
+    numerical feature."""
     return len(numerical_features) if numerical_features else 0
 
 
@@ -509,17 +483,7 @@ def _isotonic_n_total_estimate(
     The same deterministic logic the tuner uses to size the isotonic
     search space, applied to the trainer's own feature lists and data so
     that the adapter can reject a divergence between the estimate and the
-    fitted preprocessor output with a non-fatal ``ValueError``.
-
-    Args:
-        X: The prepared feature matrix.
-        categorical_features: The categorical columns.
-        numerical_features: The numerical columns.
-        encoding: The categorical encoding settings.
-
-    Returns:
-        The estimated total column count after preprocessing (>= 1).
-    """
+    fitted preprocessor output with a non-fatal ``ValueError``."""
     return estimate_n_features_after_preprocessing(
         X,
         categorical_features=list(categorical_features or []),
@@ -565,21 +529,9 @@ def _align_predict_columns(
 
     A defensive layer for ``predict``: validates the presence of all
     ``feature_names``, drops extra columns, and returns a DataFrame with
-    columns in the training order. This also fixes legacy serialized models
+    columns in the training order. This also repairs serialized models
     whose preprocessor uses positional indices: after alignment, the
-    positional slice again points to the same columns as during training.
-
-    Args:
-        feature_names: The training feature names.
-        X: Input DataFrame with the features to predict on.
-
-    Returns:
-        A DataFrame with columns in the training order.
-
-    Raises:
-        TrainingError: If some of ``feature_names`` are missing in ``X``
-            or appear in ``X`` more than once.
-    """
+    positional slice again points to the same columns as during training."""
     if not feature_names:
         return X
     missing = [col for col in feature_names if col not in X.columns]
@@ -605,20 +557,7 @@ def _align_predict_shared_dataframe(
     If the container stores column names, the data is restored into a
     DataFrame and aligned to the training order (the same guarantees as for
     a regular ``pd.DataFrame``); otherwise a positional numpy fallback in
-    the training order is used.
-
-    Args:
-        feature_names: The training feature names.
-        X: Data container in shared memory.
-
-    Returns:
-        A ``pd.DataFrame`` with columns in the training order, or a
-        ``np.ndarray`` from shared memory if column names are unavailable.
-
-    Raises:
-        TrainingError: If some of ``feature_names`` are missing from the
-            container columns.
-    """
+    the training order is used."""
     if X.columns is None or not feature_names:
         return X.shared_array
     missing = [col for col in feature_names if col not in X.columns]

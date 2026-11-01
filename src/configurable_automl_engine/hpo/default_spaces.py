@@ -56,7 +56,7 @@ class FloatSpace(NumericSpace):
         Optuna requires a strictly positive ``low`` for
         ``trial.suggest_float(..., log=True)``.
         Args:
-            low (float): Lower bound of the distribution.
+            low: Lower bound of the distribution.
         Raises:
             ValueError: If ``low <= 0``.
         """
@@ -135,15 +135,7 @@ class SearchSpaceEntry(BaseModel):
         ``explicit_type=True``: the type was written explicitly, so
         :func:`normalize_hyperparameter_entry` must not re-resolve it. When
         the flag is already present in the data (a round trip of an inferred
-        entry with ``explicit_type=False``), it is preserved as is.
-
-        Args:
-            data (Any): Original data from YAML (list or dict).
-        Returns:
-            Any: A dict ready to initialize a Pydantic model.
-        Raises:
-            ValueError: If the list contains fewer than 2 elements.
-        """
+        entry with ``explicit_type=False``), it is preserved as is."""
         if not isinstance(data, list):
             if isinstance(data, dict):
                 cfg = data.get("config")
@@ -230,7 +222,7 @@ def align_entry_bounds(entry: SearchSpaceEntry) -> SearchSpaceEntry:
     """Return a deep copy of ``entry`` whose bounds are aligned to the step grid.
 
     After the bounds of a stepped numeric range are changed (clipping,
-    the complexity guard), the upper bound may no longer lie on the step
+    the complexity guard), the upper bound may fall off the step
     grid anchored at the lower bound: e.g. ``n_estimators`` 50–1000 with a
     step of 100 clipped to 50–300 yields ``(300 - 50) % 100 != 0`` and
     Optuna silently shifts the upper bound to 250. This helper re-aligns
@@ -467,18 +459,18 @@ def compute_svr_epsilon_bounds(
        preserve ``low < high``.
 
     Args:
-        y (Any): Target vector (np.ndarray, pd.Series,
+        y: Target vector (np.ndarray, pd.Series,
             pd.DataFrame or an iterable).
-        rel_min (float): Multiplier of the lower bound. Defaults to 0.005.
-        rel_max (float): Multiplier of the upper bound. Defaults to 0.10.
-        fallback (tuple[float, float]): Bounds returned for zero or
+        rel_min: Multiplier of the lower bound. Defaults to 0.005.
+        rel_max: Multiplier of the upper bound. Defaults to 0.10.
+        fallback: Bounds returned for zero or
             undefined spread. Defaults to (1e-4, 1e-2).
-        strategy (Literal["std", "iqr"]): Spread estimation strategy.
+        strategy: Spread estimation strategy.
             ``'std'`` — standard deviation (default);
             ``'iqr'`` — robust variant via the interquartile range
             (IQR / 1.349, the σ equivalent for a normal distribution),
             resistant to outliers.
-        min_low (float): Positive minimum of the lower bound for the
+        min_low: Positive minimum of the lower bound for the
             logarithmic scale. Must be strictly greater than zero.
 
     Returns:
@@ -576,7 +568,7 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
                 )
 
             # 5. Re-align the upper bound to the step grid (a clipped high may
-            #    no longer lie on the grid; Optuna would silently narrow it).
+            #    fall off the grid; Optuna would silently narrow it).
             new_entry = align_entry_bounds(new_entry)
 
         clipped_space[param] = new_entry

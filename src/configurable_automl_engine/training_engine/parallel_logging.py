@@ -104,14 +104,7 @@ class _ForwardHandler(logging.handlers.QueueHandler):
 def _init_worker_logging(
     queue: Any, snapshot: LoggingSnapshot, modules: Sequence[str] = ()
 ) -> None:
-    """Pool initializer: route the worker's log records to the parent.
-
-    Args:
-        queue: The multiprocessing queue read by the parent's listener.
-        snapshot (LoggingSnapshot): The parent's logging configuration.
-        modules (Sequence[str]): Modules to import first, so the handlers
-            they install at import time (e.g. optuna's) are replaced as well.
-    """
+    """Pool initializer: route the worker's log records to the parent."""
     for name in modules:
         try:
             importlib.import_module(name)
@@ -176,8 +169,8 @@ class WorkerLogForwarding:
     ``initializer`` / ``initargs`` to every pool it covers.
 
     Args:
-        mp_context (BaseContext): The context of the worker processes.
-        modules (Sequence[str]): Modules the workers import before their
+        mp_context: The context of the worker processes.
+        modules: Modules the workers import before their
             logging is configured (see ``_init_worker_logging``).
     """
 

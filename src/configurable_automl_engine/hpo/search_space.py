@@ -71,8 +71,6 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
     ``space_fn``): otherwise every trial would have its own bounds and the
     TPE sampler would lose determinism.
 
-    Args:
-        y (Any): Target variable vector.
     Returns:
         SearchSpaceEntry: float_log distribution of epsilon within adaptive bounds.
     """
@@ -113,10 +111,10 @@ def build_search_space(
     SVR ``epsilon`` again means "adaptive").
 
     Args:
-        algo_name (str): The algorithm name used to look up defaults.
-        user_overrides (dict[str, Any] | None): The user ranges
+        algo_name: The algorithm name used to look up defaults.
+        user_overrides: The user ranges
             (``SearchSpaceEntry`` objects, raw range lists or constants).
-        limit (bool): Restrict the search to the user-listed parameters only
+        limit: Restrict the search to the user-listed parameters only
             (no ``DEFAULT_SPACES`` entries). Defaults to False.
 
     Returns:
@@ -158,19 +156,9 @@ def build_search_space(
 
 
 def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
-    """Convert a configuration dict into model parameters via Optuna methods.
-
-    Args:
-        trial (Trial): The current Optuna trial object.
-        space_dict (dict[str, Any]): A dict of SearchSpaceEntry objects
-            (with bounds and distribution types) or constant values.
-    Returns:
-        dict[str, Any]: The concrete hyperparameter values for this iteration.
-    """
+    """Convert a configuration dict into model parameters via Optuna methods."""
     params: dict[str, Any] = {}
     for key, value in space_dict.items():
-        # If this is a SearchSpaceEntry
-        # (use the low, high, dist_type, step properties)
         if hasattr(value, "dist_type"):
             low, high = value.low, value.high
             dist_type = value.dist_type
@@ -193,18 +181,13 @@ def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, 
                     key, float(low), float(high), log=True
                 )
             elif dist_type == "categorical":
-                # Extract the options list from the options attribute or nested config
                 options = getattr(value, "options", None)
                 if options is None and hasattr(value, "config"):
                     options = getattr(value.config, "options", None)
-
-                # If still None, fall back to low (for compatibility)
                 if options is None:
                     options = low
-
                 params[key] = trial.suggest_categorical(key, options)
         else:
-            # If it is a plain value (constant), use it as is
             params[key] = value
     return params
 
@@ -268,16 +251,7 @@ def _enqueueable_initial_params(
     from the former categorical default, now a numeric ``float_log``
     range) would make Optuna fail the enqueued trial. Such a key is
     dropped with a warning and sampled from the space instead; numeric
-    values outside the range are kept as is (Optuna handles them).
-
-    Args:
-        params: The initial params from the previous phase.
-        space_dict: The resolved dict search space of the run.
-        algo: The algorithm name (for the message).
-
-    Returns:
-        dict[str, Any]: The params that can be enqueued.
-    """
+    values outside the range are kept as is (Optuna handles them)."""
     kept: dict[str, Any] = {}
     for name, value in params.items():
         entry = space_dict.get(name)
@@ -315,22 +289,11 @@ def _canonical_distributions(
     Runs ``space_fn`` (plus the feature selection suggestion) on a
     ``_DistributionRecorder`` — the distributions the phase WOULD produce
     for its trials. If the space function cannot be reproduced (a custom
-    exotic ``space_fn``, e.g. one using legacy ``suggest_*`` methods the
+    exotic ``space_fn``, e.g. one using raw ``suggest_*`` methods the
     recorder does not implement), ``None`` is returned — the caller
     (``_transfer_previous_trials``) fails fast with ``HPOHistoryError``:
     the history transfer cannot be validated, and silently dropping it
-    would degrade refine to a cold run.
-
-    Args:
-        space_fn: The search space function of the run.
-        fs_mode: The feature selection mode.
-        is_isotonic: Whether the algorithm is ``isotonic_regression``.
-        algo: The algorithm name (for the message).
-
-    Returns:
-        dict[str, Any]: Parameter name → Optuna distribution; ``None`` —
-            the space cannot be reproduced (the caller fails fast).
-    """
+    would degrade refine to a cold run."""
     try:
         recorder = _DistributionRecorder()
         # The recorder is a Trial-compatible stand-in: it implements the
@@ -384,10 +347,6 @@ def _resolve_complexity_guard(
         n_samples_eff: The number of rows a model sees in a training fold.
         n_features_eff: The number of features after preprocessing.
         n_features_size: The number of original columns.
-
-    Returns:
-        tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly
-            adjusted) space and the guard log records.
     """
     if config.mode == "off":
         return space, []
@@ -503,11 +462,6 @@ def _normalize_space_dict(algo: str, space_dict: dict[str, Any]) -> dict[str, An
     searched on a logarithmic scale without an explicit type. Raw lists
     (not yet parsed into ``SearchSpaceEntry`` objects) are parsed first;
     explicitly typed entries and constants pass through unchanged.
-
-    Args:
-        algo: The algorithm name.
-        space_dict: The parameter name → value mapping (``SearchSpaceEntry``
-            objects, raw lists, or constants).
 
     Returns:
         dict[str, Any]: A new dict with the same structure: every numeric
@@ -684,9 +638,6 @@ def _natural_domain_bounds(
         n_features_eff: The number of features after preprocessing.
         isotonic_max_feature_index: The upper bound of the isotonic
             ``feature_index`` range.
-
-    Returns:
-        tuple[float | None, float | None]: Natural ``(low, high)`` bounds.
     """
     low: float | None = None
     high: float | None = None
@@ -763,9 +714,6 @@ def _is_guard_boundary(
         param: The hyperparameter name.
         value: The boundary value of the best trial.
         tolerance: The same absolute tolerance the boundary check uses.
-
-    Returns:
-        bool: ``True`` when the value is a guard-introduced bound.
     """
     algo = resolve_algorithm_name(algo)
     for record in guard_records:

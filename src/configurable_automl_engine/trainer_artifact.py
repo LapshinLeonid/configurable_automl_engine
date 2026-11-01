@@ -58,14 +58,7 @@ def _version_tuple(version: str) -> tuple[int | str, ...]:
     """Parse a ``major.minor.patch`` version string into a comparable tuple.
 
     Non-numeric components (e.g. ``dev``, ``rc``, ``post``) are kept as strings
-    so that ``major.minor`` comparisons stay meaningful and stable.
-
-    Args:
-        version: The version string.
-
-    Returns:
-        The parsed version components as a tuple.
-    """
+    so that ``major.minor`` comparisons stay meaningful and stable."""
     parts: list[int | str] = []
     for part in str(version).split("."):
         try:
@@ -76,15 +69,7 @@ def _version_tuple(version: str) -> tuple[int | str, ...]:
 
 
 def _major_minor(version: str) -> tuple[int, int] | None:
-    """Return the ``(major, minor)`` pair of a version string, if parseable.
-
-    Args:
-        version: The version string.
-
-    Returns:
-        The ``(major, minor)`` pair, or ``None`` when the version has fewer
-        than two numeric components.
-    """
+    """Return the ``(major, minor)`` pair of a version string, if parseable."""
     parts = _version_tuple(version)
     if len(parts) < 2 or not isinstance(parts[0], int) or not isinstance(parts[1], int):
         return None
@@ -92,15 +77,7 @@ def _major_minor(version: str) -> tuple[int, int] | None:
 
 
 def _installed_module_version(module_name: str) -> str | None:
-    """Return the ``__version__`` of an installed module, if available.
-
-    Args:
-        module_name: Name of the module to import (``'sys'`` for Python itself).
-
-    Returns:
-        The module version string, or ``None`` if the module is missing or
-        exposes no ``__version__``.
-    """
+    """Return the ``__version__`` of an installed module, if available."""
     if module_name == "sys":
         return platform.python_version()
     try:
@@ -116,14 +93,7 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
     The metadata captures the artifact format version, the environment
     (engine version, Python, and the versions of the ML stack), the creation
     timestamp in UTC, and the algorithm configuration (algorithm,
-    hyperparameters, and a content hash of the configuration).
-
-    Args:
-        settings: The settings of the trainer being saved.
-
-    Returns:
-        The metadata dictionary.
-    """
+    hyperparameters, and a content hash of the configuration)."""
     deps: dict[str, str | None] = {}
     for package_name, module_name in _ARTIFACT_VERSION_PACKAGES:
         deps[package_name] = _installed_module_version(module_name)
@@ -195,12 +165,7 @@ def _warn_on_version_mismatch(metadata: Any, logger: logging.Logger) -> None:
 
     Only the engine version and scikit-learn are checked (the packages most
     likely to break pickled models); the comparison is restricted to the
-    ``major.minor`` pair so that patch-level differences do not produce noise.
-
-    Args:
-        metadata: The artifact metadata dict read from the saved object.
-        logger: The logger to emit the warning on.
-    """
+    ``major.minor`` pair so that patch-level differences do not produce noise."""
     if not isinstance(metadata, dict):
         return
     versions = metadata.get("versions")

@@ -215,23 +215,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
         Automatically switches to SMOTENC if non-numeric columns are detected.
         For ADASYN a transparent fallback to SMOTENC is implemented when categories are present,
-        because the original ADASYN only works with numeric data.
-
-        Args:
-            X (Any): Features (array, DataFrame or sparse matrix).
-            y (Any): The target variable.
-        Returns:
-            tuple: A tuple (X_resampled, y_resampled). For a sparse input
-            (output of hashing encoding) X_resampled stays a
-            ``scipy.sparse.csr_matrix`` for the 'random' algorithm and becomes
-            dense for SMOTE/ADASYN (they require dense data).
-        Raises:
-
-            ValueError: If `multiplier` < 1, the algorithm is not supported,
-                or ``target_bins`` < 2.
-            TypeError: If the data has no numeric features (needed for
-                       distance computation in SMOTE/ADASYN).
-        """
+        because the original ADASYN only works with numeric data."""
         multiplier, target_bins, algo_local = self._validated_params()
 
         # Evidence gate: when the nightly benchmark has shown that
@@ -260,15 +244,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
         Stores ``multiplier_`` (sklearn standard: a fitted attribute with a
         trailing underscore) and normalizes the algorithm name into a local
-        value instead of mutating ``self.algorithm``.
-
-        Returns:
-            tuple[float, int, str]: (multiplier, target_bins, algorithm).
-
-        Raises:
-            ValueError: If ``multiplier`` < 1, ``target_bins`` < 2 or the
-                algorithm is not supported.
-        """
+        value instead of mutating ``self.algorithm``."""
         with self._lock:
             self.multiplier_ = float(self.multiplier)
             algo_local = self.algorithm.lower().replace(" ", "_")
@@ -287,11 +263,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _resample(
         self, X: Any, y: Any, algo: str, multiplier: float, target_bins: int
     ) -> tuple[Any, np.ndarray]:
-        """Bin the target and dispatch to the resampling path of ``algo``.
-
-        Returns:
-            tuple: (X_resampled, y_resampled), see :meth:`_fit_resample`.
-        """
+        """Bin the target and dispatch to the resampling path of ``algo``."""
         # Regression mode (default): the engine never treats the target
         # as a class label. ANY numeric target (float or integer) is
         # discretized into quantile bins; the bins are resampled as
@@ -314,15 +286,15 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                     X, target, self._target_strategy(target, multiplier)
                 )
             # SMOTE/ADASYN mathematically require dense distance matrices,
-            # so a sparse input is converted to dense (as before the hashing
-            # switch to sparse), keeping the sparse noise semantics.
+            # so a sparse input is converted to dense here, keeping the
+            # sparse noise semantics.
             X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
             noise_nonzero_only = True
 
         X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
         # Binary indicator columns (one-hot / missing indicators) are
         # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
-        # fractions, after which they would no longer look binary.
+        # fractions, after which they would stop looking binary.
         binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
         cat_idx = self._categorical_indices(X_df, algo)
         cat_cols = [X_df.columns[i] for i in cat_idx]
@@ -372,16 +344,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         Columns with numeric strings ("1.0", "2.0") are not categorical —
         they will be converted to numbers.
 
-        Args:
-            X_df (pd.DataFrame): The features.
-            algo (str): The normalized algorithm name.
-
         Returns:
             list[int]: The positions of the non-numeric columns.
-
-        Raises:
-            TypeError: If SMOTE/ADASYN get no numeric feature (needed for
-                the distance computation).
         """
         cat_idx = [
             i for i, col in enumerate(X_df.columns) if _is_categorical_col(X_df[col])
@@ -400,11 +364,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         The data is already numeric, there are no categorical columns
         (OrdinalEncoder is not needed) and ``pd.DataFrame(csr)`` would create
         a silently garbage dataframe object. RandomOverSampler works with
-        sparse directly (memory-efficient); the result stays a CSR matrix.
-
-        Returns:
-            tuple: (X_resampled, y_resampled).
-        """
+        sparse directly (memory-efficient); the result stays a CSR matrix."""
         sampler = RandomOverSampler(
             sampling_strategy=strategy, random_state=self.random_state
         )
@@ -422,16 +382,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _encode_categoricals(
         X_df: pd.DataFrame, cat_cols: list[Any]
     ) -> tuple[pd.DataFrame, OrdinalEncoder | None]:
-        """Ordinal-encode the categorical columns (a copy; no-op without them).
-
-        Args:
-            X_df (pd.DataFrame): The features.
-            cat_cols (list[Any]): The categorical columns.
-
-        Returns:
-            tuple: (X_encoded, encoder), the encoder being ``None`` when
-                there is no categorical column.
-        """
+        """Ordinal-encode the categorical columns (a copy; no-op without them)."""
         if not cat_cols:
             return X_df, None
         encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
@@ -449,11 +400,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         """Random oversampling of a dense frame.
 
         Categorical features are encoded to pass ``_check_X_y`` inside
-        RandomOverSampler, which forcibly converts the DataFrame to float.
-
-        Returns:
-            tuple: (X_resampled, y_resampled, encoder, sampler).
-        """
+        RandomOverSampler, which forcibly converts the DataFrame to float."""
         sampler = RandomOverSampler(
             sampling_strategy=strategy, random_state=self.random_state
         )
@@ -467,11 +414,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
         "-1" (missing target in the regression mode) is a pass-through
         pseudo-class: it is excluded from the strategy AND from the
-        k_neighbors estimation.
-
-        Raises:
-            ValueError: If no non-missing target value is left.
-        """
+        k_neighbors estimation."""
         counts = Counter(target.y_fit)
         active_counts = Counter(
             {
@@ -501,11 +444,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         pair; a singleton bin (or a bin that is entirely too small for the
         k-NN) passes through unchanged. The pseudo-class ``-1`` is already
         excluded from ``strategy`` and the active counts in the regression
-        mode, so the balanced and the proportional mode share this filter.
-
-        Returns:
-            tuple: (X_resampled, y_resampled, encoder).
-        """
+        mode, so the balanced and the proportional mode share this filter."""
         active_counts = self._active_counts(target)
         growth_eligible = {cls for cls, cnt in active_counts.items() if cnt >= 2}
         # Number of synthetic rows per bin = final - original count.
@@ -547,11 +486,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         class count. A singleton minority class is left to imbalanced-learn,
         which raises an informative ValueError (the documented imblearn
         contract). ADASYN falls back to SMOTENC when categories are present,
-        because the original ADASYN only works with numeric data.
-
-        Returns:
-            tuple: (X_resampled, y_resampled).
-        """
+        because the original ADASYN only works with numeric data."""
         min_samples = min(self._active_counts(target).values())
         k_neighbors = max(1, min(5, min_samples - 1))
         sampler: Any
@@ -597,11 +532,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
         ``encoder`` is the categorical encoder of the random and SMOTER paths
         (``None`` otherwise); ``noise_nonzero_only`` noises only the non-zero
-        cells of dense data that arrived as a sparse matrix.
-
-        Returns:
-            pd.DataFrame: The resampled features.
-        """
+        cells of dense data that arrived as a sparse matrix."""
         # Cast to DF since SMOTE may return numpy
         X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
 
@@ -639,8 +570,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def oversample(self, data: pd.DataFrame, target: str | None = None) -> pd.DataFrame:
         """Increase the sample as a DataFrame while preserving metadata.
         Args:
-            data (pd.DataFrame): The source DataFrame.
-            target (str, optional): The name of the target column. If None, only the
+            data: The source DataFrame.
+            target: The name of the target column. If None, only the
                 'random' algorithm is possible (duplicating the whole sample). For SMOTE/ADASYN
                 and balancing the parameter is required.
         Returns:
@@ -753,16 +684,16 @@ def oversample(
     """Increase the DataFrame volume through a functional interface.
     Creates a temporary `DataOversampler` instance and applies it to the data.
     Args:
-        data (pd.DataFrame): The input dataset.
-        multiplier (float): The row multiplier. Defaults to 1.0.
-        algorithm (str): The algorithm ('random', 'smote', 'adasyn'). Defaults to 'random'.
-        add_noise (bool): Whether to add noise. Defaults to False.
-        balance (bool, optional): Whether to balance classes. Defaults to False.
-        target (str, optional): The name of the target column. Defaults to None.
-        random_state (int, optional): The randomness seed. Defaults to 42.
-        noise_level (float): The noise level. Defaults to 0.01.
-        task (str): 'regression' (default) or 'classification'.
-        target_bins (int): Number of quantile bins for the regression path.
+        data: The input dataset.
+        multiplier: The row multiplier. Defaults to 1.0.
+        algorithm: The algorithm ('random', 'smote', 'adasyn'). Defaults to 'random'.
+        add_noise: Whether to add noise. Defaults to False.
+        balance: Whether to balance classes. Defaults to False.
+        target: The name of the target column. Defaults to None.
+        random_state: The randomness seed. Defaults to 42.
+        noise_level: The noise level. Defaults to 0.01.
+        task: 'regression' (default) or 'classification'.
+        target_bins: Number of quantile bins for the regression path.
     Returns:
         pd.DataFrame: The expanded dataset.
     """

@@ -1,7 +1,8 @@
 """Adaptive feature preprocessing presets.
 
-This module implements automatic selection of the feature preprocessing strategy
-depending on the selected regression algorithm.
+Implements automatic selection of the feature preprocessing strategy
+depending on the selected regression algorithm (the user-facing description
+lives in API_REFERENCE.md, "Adaptive Feature Preprocessing").
 
 Key concepts:
 
@@ -16,17 +17,11 @@ Key concepts:
       does not require changing the core preprocessing logic —
       it is enough to register it in the table.
 
-Selection rules:
-
-    1. The algorithm name is normalized (lowercased) and
-       checked against the registry of supported algorithms: an unknown name is
-       rejected with a :class:`ValueError` (protection against typos in the config).
-    2. The algorithm class is looked up in :data:`ALGORITHM_CLASS_MAPPING`; for a
-       supported algorithm without explicit registration the ``default`` class is
-       used (edge case — default behavior).
-    3. A user override (:class:`PreprocessingOverride`)
-       replaces preset fields fully or partially: an explicit user
-       specification takes priority over automatic selection.
+Selection rules: the algorithm name is normalized and checked against the
+registry (an unknown name is rejected with :class:`ValueError`); a supported
+algorithm without explicit registration falls back to the ``default`` class;
+a user override (:class:`PreprocessingOverride`) replaces preset fields fully
+or partially — an explicit user specification takes priority.
 
 The single function :func:`resolve_preprocessing_preset` is used at every stage
 of the lifecycle — the HPO phase, final training and prediction — which
@@ -243,11 +238,7 @@ def normalize_algorithm(algorithm: str) -> str:
 def _coerce_override(
     override: PreprocessingOverride | dict[str, Any],
 ) -> PreprocessingOverride:
-    """Coerce a user override into a :class:`PreprocessingOverride` model.
-
-    Raises:
-        TypeError: If an object of an unsupported type is passed.
-    """
+    """Coerce a user override into a :class:`PreprocessingOverride` model."""
     if isinstance(override, PreprocessingOverride):
         return override
     if isinstance(override, dict):

@@ -61,15 +61,7 @@ def _rank_cv_best(working_set: dict[str, PhaseResult]) -> list[str]:
 
     The optimizer semantics are the same as in ``select_winner``/
     ``select_finalists``: ties are resolved by insertion order (the
-    configuration order, a documented tie-break).
-
-    Args:
-        working_set (dict[str, PhaseResult]): The working set
-            "algorithm → PhaseResult".
-
-    Returns:
-        list[str]: Algorithm names, best CV score first.
-    """
+    configuration order, a documented tie-break)."""
     return sorted(working_set, key=lambda n: working_set[n].score, reverse=True)
 
 
@@ -82,15 +74,7 @@ def _rank_sanity_candidates(
     The strategy's ranking metric is ``RMSE_oof``: candidates that passed the
     audit are sorted by ascending ``RMSE_oof`` (None — last, ties — pool
     order), followed by the rejected ones per the fallback criterion. The
-    first element of the ranking always matches ``result.winner_algo``.
-
-    Args:
-        result (RobustWinnerResult): The result of ``select_robust_winner``.
-        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
-
-    Returns:
-        list[str]: Candidate names in the strategy ranking order.
-    """
+    first element of the ranking always matches ``result.winner_algo``."""
 
     def _rmse_key(name: str) -> tuple[bool, float]:
         rmse = candidate_models[name].rmse_oof
@@ -116,16 +100,7 @@ def _serialize_audit_result(
         computable". The applied circuit D mode (``generalization_gap_mode``) is
         included in the serialization of each candidate: in warn mode the reader
         sees next to a Circuit D warning that the violation did NOT disqualify
-        the model, and in reject mode — that it became a reason.
-
-        Args:
-            audit (SanityCheckResult): The audit result of a single finalist.
-            generalization_gap_mode (str): The applied circuit D mode:
-                'warn' | 'reject'.
-
-        Returns:
-            dict[str, Any]: A dict for the select step's report section.
-    """
+        the model, and in reject mode — that it became a reason."""
 
     def _num(value: float) -> float | None:
         return float(value) if np.isfinite(value) else None
@@ -151,16 +126,9 @@ def _build_sanity_gate(sg_cfg: SanityGateCfg) -> ModelSanityGate:
     enable flags are passed to the gate constructor unchanged, including the
     circuit D mode ``generalization_gap_mode``: ``"warn"`` (default) —
     a gap violation (finite or infinite) goes to ``soft_warnings``;
-    ``"reject"`` — strict disqualification (the old behavior). The gate's
+    ``"reject"`` — strict disqualification. The gate's
     ``warn_only`` mode is not used: the ``sanity_gate`` select step applies
-    disqualifications.
-
-    Args:
-        sg_cfg (SanityGateCfg): The ``general.sanity_gate`` section.
-
-    Returns:
-        ModelSanityGate: The configured gate instance.
-    """
+    disqualifications."""
     return ModelSanityGate(
         min_prediction_diversity=sg_cfg.min_prediction_diversity,
         adaptive_diversity=sg_cfg.adaptive_diversity,
@@ -193,16 +161,7 @@ def _build_finalists_pool(
 
     The thresholds (corridor δ, ``top_k_candidates``, family top-up) come from
     ``general.sanity_gate``; algorithms disqualified by the circuit breaker
-    (HPO failures and previous select steps) do not enter the pool.
-
-    Args:
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and settings.
-        ctx (PhaseContext): The pipeline phase context.
-
-    Returns:
-        list[str]: The ordered finalists pool (best first).
-    """
+    (HPO failures and previous select steps) do not enter the pool."""
     sg_cfg = cfg.general.sanity_gate
     return select_finalists(
         ctx.working_set,
@@ -230,9 +189,8 @@ def _select_cv_best(
 ) -> SelectOutcome:
     """Handle a select step with the ``cv_best`` strategy.
 
-    Ranks the incoming set by the raw CV score (the equivalent of the legacy
-    path with ``sanity_gate.mode: off``): no audit, no gate report section is
-    created. Output forms:
+    Ranks the incoming set by the raw CV score: no audit, no gate report
+    section is created. Output forms:
 
     - ``winner`` — the single winner (terminal step);
     - ``top_k`` — the first ``k`` candidates of the ranking;
@@ -240,17 +198,7 @@ def _select_cv_best(
       ``top_k_candidates``, thresholds from ``general.sanity_gate``), ranked by
       CV score, without a ``ModelSanityGate`` audit.
 
-    The output replaces the pipeline working set; the other state is kept.
-
-    Args:
-        phase (HPOPhaseCfg): The select phase configuration.
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and settings.
-        ctx (PhaseContext): The pipeline phase context (read only).
-
-    Returns:
-        SelectOutcome: The new pipeline state.
-    """
+    The output replaces the pipeline working set; the other state is kept."""
     if phase.output == "winner":
         winner_algo = select_winner(ctx.working_set)
         # Consistent user semantics: like the HPO phase log, the select step
@@ -315,18 +263,7 @@ def _drop_kept_from_circuit_breaker(
     Only the names passed via ``returned_by_fallback`` are removed: failures
     disqualified by this step and returned into its output.
     Pre-existing disqualifications (the HPO circuit breaker and others) are
-    not touched — other phases are responsible for them.
-
-    Args:
-        disqualified (Mapping[str, str]): The circuit breaker
-            "algorithm → reason".
-        returned_by_fallback (Iterable[str]): Names returned into the step
-            output and disqualified by the same step.
-
-    Returns:
-        dict[str, str]: The circuit breaker without the returned names (the
-            order of the remaining entries is kept).
-    """
+    not touched — other phases are responsible for them."""
     kept = set(returned_by_fallback)
     return {name: reason for name, reason in disqualified.items() if name not in kept}
 
@@ -340,16 +277,7 @@ def _gate_disqualifications(
     the algorithm will not return to the pools of subsequent select steps.
     The exception — candidates skipped because of an exhausted
     ``audit_time_budget_seconds``: they are NOT audited rather than rejected,
-    so they must not be disqualified forever from all subsequent phases.
-
-    Args:
-        disqualified (Mapping[str, str]): The incoming circuit breaker.
-        result (RobustWinnerResult): The result of ``select_robust_winner``.
-
-    Returns:
-        tuple[dict[str, str], set[str]]: The new circuit breaker and the
-            names disqualified by this step (without budget skips).
-    """
+    so they must not be disqualified forever from all subsequent phases."""
     merged = dict(disqualified)
     disqualified_this_step: set[str] = set()
     for name, reasons in result.disqualified.items():
@@ -377,12 +305,9 @@ def _sanity_gate_section(
     the model.
 
     Args:
-        result (RobustWinnerResult): The result of ``select_robust_winner``.
-        generalization_gap_mode (str): The applied circuit D mode.
-        overhead_seconds (float): The wall time of the training and audit.
-
-    Returns:
-        dict[str, Any]: The section (stored under the select phase name).
+        result: The result of ``select_robust_winner``.
+        generalization_gap_mode: The applied circuit D mode.
+        overhead_seconds: The wall time of the training and audit.
     """
     return {
         "strategy": "sanity_gate",
@@ -440,21 +365,7 @@ def _select_sanity_gate(
     returned by the fallback into the ``top_k``/``pool`` output are removed
     from the circuit breaker (otherwise the next phase would filter them out
     and fail). Pre-existing disqualifications (the HPO circuit breaker and
-    others) are not removed.
-
-    Args:
-        phase (HPOPhaseCfg): The select phase configuration.
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and settings.
-        ctx (PhaseContext): The pipeline phase context (read only).
-
-    Returns:
-        SelectOutcome: The new pipeline state.
-
-    Raises:
-        RuntimeError: If no finalist of the pool was trained on 100% of the
-            data.
-    """
+    others) are not removed."""
     # 1. Finalists pool.
     pool = _build_finalists_pool(cfg, prepared, ctx)
     _LOG.info(
@@ -583,10 +494,10 @@ def select_step_outcome(
     read; ``component._apply_select_outcome`` applies the outcome.
 
     Args:
-        phase (HPOPhaseCfg): The select phase configuration.
-        cfg (Config): The configuration object.
-        prepared (PreparedData): The prepared data and settings.
-        ctx (PhaseContext): The pipeline phase context (read only).
+        phase: The select phase configuration.
+        cfg: The configuration object.
+        prepared: The prepared data and settings.
+        ctx: The pipeline phase context (read only).
 
     Returns:
         SelectOutcome: The new pipeline state.

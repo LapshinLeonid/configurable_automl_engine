@@ -19,41 +19,77 @@ Classification is not supported.
 
 # Features
 
-* **Configuration-Driven Architecture**: Fully controlled via YAML schemas and Python configuration classes (Pydantic-based) for reproducible experiments. The config is validated before training starts: unknown keys, unknown hyperparameter names, missing optional packages and contradictory settings are reported as errors.
-* **Honest Quality Estimate**: Besides the (optimistic) validation score of the best trial, every run reports an estimate that is not biased by the search itself: `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved. See [Training results](API_REFERENCE.md#training-results).
-* **Multi-Step Pipelines**: A run is a list of steps (`general.phases`): search steps (`all_algorithms`, `refine`) tune hyperparameters, select steps (`select`) narrow the candidates down to the final winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
-* **Sanity Gate**: An optional select strategy that protects the final winner selection from "degenerate" models: constant/flat predictions, step functions, unused features and overfit learners.
-* **Flexible Validation Strategies**: Supports various splitting techniques including KFold, Leave-One-Out, and Train-Test Split, plus an `auto` strategy that automatically picks between them based on dataset size and dimensionality.
-* **Dynamic Hyperparameter Optimization**: Integrated wrapper for Optuna to automate search space configuration and trial management. Every algorithm has a built-in search space, so `{}` is a valid algorithm config.
-* **Extensible Model Factory**: 18 distinct scikit-learn/XGBoost regressors (17 without the optional `xgboost` package) under 19 registry names (`glm` is the same `TweedieRegressor` as `tweedieregressor`). Algorithms are referred to only by these names; short aliases (`rf`, `knn`, `xgboost`, …) are not supported.
-* **Robust Preprocessing Pipeline**: Automated handling of scaling, missing value imputation, categorical encoding, infinite values and date/time columns, with per-algorithm preprocessing presets and optional feature selection.
-* **Parallel Execution Across Algorithms**: Different algorithms are tuned at the same time in threads or processes (`parallel_strategy: "algorithms"`, the only strategy). Trials of one algorithm and the cross-validation folds inside a trial run sequentially (`n_jobs=1`), so a config with a single algorithm does not get faster with more workers. With `parallel_mode: "processes"` the workers start with `forkserver` (or `spawn`) and import the main script again: **guard the script's top-level code with `if __name__ == "__main__":`**, or set `general.start_method: "fork"` (see API_REFERENCE).
-* **Seamless Serialization**: Robust I/O tools for saving and loading models, metadata, and preprocessing artifacts in joblib or pickle formats.
-* **Dynamic Search Space Clipping**: Hyperparameter boundaries are automatically adjusted based on dataset size (e.g., `n_neighbors` capped at `n_samples - 1`).
-* **Adaptive Complexity Guard**: Tightens the search ranges of trees and boosting on small data (lossless clipping + regularization), saving HPO budget and reducing overfitting on small samples. Disableable via `general.complexity_guard`.
-* **Broken Algorithm Circuit Breaker**: Automatically disqualifies algorithms after consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`), preventing wasted compute.
-* **Early Stopping (Pruning)**: Optional Optuna-based pruning of unpromising trials (MedianPruner / HyperbandPruner) using intermediate per-fold scores, freeing HPO budget for more meaningful trials.
-* **Phase/Task Timeouts (process mode only)**: A global timeout for a search step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`), enforced by terminating hung worker processes; a crashed worker loses only its own algorithm, which is listed in `disqualified_algorithms` with the reason. Timeouts require `parallel_mode: "processes"`; with `parallel_mode: "threads"` (the default) setting either of them is a configuration error (`ValueError`), because a running Python thread cannot be stopped.
-* **Signature-Aware Hyperparameter Names**: Legacy parameter names are automatically remapped (e.g., `n_iter` → `max_iter` for ARDRegression). Unknown hyperparameter names are **rejected** — at config validation and in a direct call of `create_model(...)` / `ModelTrainer` alike — so typos do not go unnoticed (the only exception is `xgboosting`, whose estimator accepts arbitrary `**kwargs`).
-* ⚠️ **Experimental**: **Target-Aware Oversampling**: Optional data augmentation with random oversampling, SMOTE or ADASYN (via imbalanced-learn). Because the target is continuous, it is first split into quantile bins and the sampling strategy is computed on these bins, so rare ranges of the target get more synthetic rows. Oversampling is applied only to the training part of each fold. Optional Gaussian noise injection (`oversampling.add_noise` / `noise_level`) is applied to numeric features after resampling for regularization; binary indicator columns (one-hot, missing-value indicators, 0/1 flags — also after scaling) are left untouched.
+* **Configuration-Driven Architecture** — a YAML/dict config validated before
+  training starts: unknown keys, unknown hyperparameter names, missing optional
+  packages and contradictory settings are errors. See [Configuration reference](API_REFERENCE.md#configuration-reference).
+* **Honest Quality Estimate** — `holdout_score` on rows reserved before tuning,
+  or `bbc_score` (Bootstrap Bias Corrected CV) when no hold-out is reserved.
+  See [Training results](API_REFERENCE.md#training-results).
+* **Multi-Step Pipelines** — a run is a list of steps (`general.phases`): search
+  steps tune hyperparameters, select steps narrow the candidates down to the
+  winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
+* **Sanity Gate** — an optional select strategy that protects the winner
+  selection from "degenerate" models. See [Sanity Gate](API_REFERENCE.md#sanity-gate-robust-winner-selection).
+* **Flexible Validation Strategies** — KFold, Leave-One-Out, Train-Test Split,
+  plus an `auto` strategy that picks between them based on dataset size and
+  dimensionality. See [`ModelTrainer`](API_REFERENCE.md#modeltrainer).
+* **Dynamic Hyperparameter Optimization** — an Optuna wrapper with a built-in
+  search space for every algorithm (`{}` is a valid algorithm config).
+  See [`optimize`](API_REFERENCE.md#optimizealgo_name-x-y).
+* **Extensible Model Factory** — 18 scikit-learn/XGBoost regressors under 19
+  registry names. See [Algorithms section](API_REFERENCE.md#algorithms-section).
+* **Robust Preprocessing Pipeline** — scaling, missing-value imputation,
+  categorical encoding, infinite values, date/time columns, per-algorithm
+  presets and optional feature selection. See
+  [Categorical encoding](API_REFERENCE.md#categorical-encoding) and
+  [preprocessing presets](API_REFERENCE.md#adaptive-feature-preprocessing-preprocessing-presets).
+* **Parallel Execution Across Algorithms** — algorithms are tuned at the same
+  time in threads or processes (`parallel_strategy: "algorithms"`); a config
+  with a single algorithm does not get faster with more workers. With
+  `parallel_mode: "processes"` the workers start with `forkserver` (or
+  `spawn`) and import the main script again: **guard the script's top-level
+  code with `if __name__ == "__main__":`**, or set
+  `general.start_method: "fork"`. See
+  [`run_parallel`](API_REFERENCE.md#run_parallelfunc-args_seq).
+* **Seamless Serialization** — joblib or pickle formats for models, metadata
+  and preprocessing artifacts. See [`ModelTrainer`](API_REFERENCE.md#modeltrainer).
+* **Dynamic Search Space Clipping** — hyperparameter boundaries are adjusted
+  based on dataset size (e.g. `n_neighbors` capped at `n_samples - 1`). See
+  [Default search spaces](API_REFERENCE.md#algorithms-section).
+* **Adaptive Complexity Guard** — tightens the search ranges of trees and
+  boosting on small data. See
+  [Complexity Guard configuration](API_REFERENCE.md#complexity-guard-configuration-complexity_guard).
+* **Broken Algorithm Circuit Breaker** — algorithms are disqualified after
+  consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`).
+* **Early Stopping (Pruning)** — optional Optuna-based pruning of unpromising
+  trials. See [Early stopping](API_REFERENCE.md#early-stopping-pruning).
+* **Phase/Task Timeouts (process mode only)** — a global timeout for a search
+  step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`); with
+  `parallel_mode: "threads"` setting either of them is a configuration error.
+  See [`run_parallel`](API_REFERENCE.md#run_parallelfunc-args_seq).
+* **Signature-Aware Hyperparameter Names** — legacy parameter names are
+  remapped (e.g. `n_iter` → `max_iter` for ARDRegression); unknown names are
+  rejected so typos do not go unnoticed.
+* ⚠️ **Experimental**: **Target-Aware Oversampling** — optional data
+  augmentation with random oversampling, SMOTE or ADASYN. See
+  [Oversampling section](API_REFERENCE.md#oversampling-section).
 
 # Dependencies
 
 We recommend using the latest version of Python. AutoML Engine supports Python 3.11 and newer.
 
-These distributions are essential for the core functionality and will be installed automatically:
+The required dependencies (installed automatically):
 
-* **NumPy** (>=2.4.2): Base package for numerical computing and array manipulation.
-* **Scipy** (>=1.17.0): Used for advanced scientific computing and statistical functions.
-* **Pandas** (>=3.0.0): Used for data structures and high-level manipulation of tabular datasets before model ingestion. 
-* **PyArrow** (>=23.0.0): Provides a cross-language development platform for in-memory data, enabling efficient data exchange and high-performance integration with Pandas through the Arrow columnar format.
-* **Scikit-learn** (>=1.8.0): The primary library for machine learning algorithms, preprocessing tools, and validation frameworks.
-* **Imbalanced-learn** (>=0.14.1): Provides the oversampling algorithms (random, SMOTE, ADASYN) used by the experimental oversampling module; the engine applies them to quantile bins of the regression target.
-* **Optuna** (>=4.7.0): Powers the engine to perform automated hyperparameter optimization searches.
-* **Pydantic** (>=2.12.5): Data validation and settings management using Python type annotations.
-* **PyYAML** (>=6.0.3): Implements the standard configuration schema, allowing the system to parse YAML files for model parameters and training setups.
-* **Joblib** (>=1.5.3): Provides lightweight pipelining and model serialization (saving/loading).
-
+* NumPy (>=2.4.2)
+* SciPy (>=1.17.0)
+* Pandas (>=3.0.0)
+* PyArrow (>=23.0.0)
+* Scikit-learn (>=1.8.0)
+* Imbalanced-learn (>=0.14.1)
+* Optuna (>=4.7.0)
+* Pydantic (>=2.12.5)
+* PyYAML (>=6.0.3)
+* Joblib (>=1.5.3)
 
 ## Optional Dependencies
 
@@ -260,7 +296,7 @@ move that thing down.
 │       ├── trainer_data.py                 # Layer 2: ModelTrainer input data: X/y, diagnostics, preprocessor, alignment
 │       ├── trainer_feature_selection.py    # Layer 2: ModelTrainer feature selection decision and auto-check
 │       ├── trainer_params.py               # Layer 2: ModelTrainer constructor argument validation
-│       ├── trainer_quick.py                # Layer 2: the logic of the legacy train_model() facade
+│       ├── trainer_quick.py                # Layer 2: the logic of the train_model() facade
 │       ├── trainer_scoring.py              # Layer 2: ModelTrainer validation scoring and the OOF channel
 │       ├── trainer_state.py                # Layer 2: ModelTrainer state groups (TrainerSettings, ...) and the artifact format version
 │       ├── tuner.py                        # Layer 2: public HPO entry point optimize() (façade over hpo)

@@ -50,9 +50,6 @@ def _circuit_rank(reason: str) -> int:
     (rank 0) — a defensive fallback so the fallback ranking never fails on
     custom reasons.
 
-    Args:
-        reason (str): The disqualification reason text.
-
     Returns:
         int: The significance rank (0..3); 3 — circuit D, 2 — A, 1 — B,
             0 — C/unknown.
@@ -70,9 +67,6 @@ def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
     severe violation first). A lexicographically smaller signature means a less
     problematic model given the same number of violated circuits.
 
-    Args:
-        reasons (list[str]): The candidate's disqualification reasons.
-
     Returns:
         tuple[int, ...]: The severity signature sorted in descending order.
     """
@@ -89,11 +83,8 @@ def _best_by_rmse_oof(
     is ranked last.
 
     Args:
-        names (list[str]): Candidates in deterministic order.
-        candidates (Mapping[str, FinalistCandidate]): Candidates.
-
-    Returns:
-        str: The winner's name.
+        names: Candidates in deterministic order.
+        candidates: Candidates.
     """
 
     def _key(name: str) -> tuple[int, float]:
@@ -112,16 +103,7 @@ def _fallback_sort_key(
 
     Minimum number of violated circuits → minimum severity (D > A > B > C) →
     best ``RMSE_oof``. Hoisted to module level so the select step ranking
-    (``output: top_k``/``pool``) matches the winner selection.
-
-    Args:
-        name (str): The candidate name.
-        audits (Mapping[str, SanityCheckResult]): The audit of each finalist.
-        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
-
-    Returns:
-        tuple[int, tuple[int, ...], bool, float]: The sort key.
-    """
+    (``output: top_k``/``pool``) matches the winner selection."""
     reasons = audits[name].reasons
     rmse = candidate_models[name].rmse_oof
     return (
@@ -144,16 +126,7 @@ def _select_active_winner(
     valid candidates (total pool failure) — the formal fallback criterion of
     the "least problematic" model: minimum number of violated circuits →
     minimum severity (circuit significance is fixed in code: D > A > B > C,
-    see ``_circuit_rank``) → best ``RMSE_oof``. The run never fails.
-
-    Args:
-        pool_order (list[str]): The ordered finalists pool.
-        audits (Mapping[str, SanityCheckResult]): The audit of each finalist.
-        candidate_models (Mapping[str, FinalistCandidate]): Candidates.
-
-    Returns:
-        str: The winner's name.
-    """
+    see ``_circuit_rank``) → best ``RMSE_oof``. The run never fails."""
     valid = [n for n in pool_order if audits[n].is_valid]
     if valid:
         return _best_by_rmse_oof(valid, candidate_models)
@@ -171,14 +144,7 @@ def _fmt_audit_value(value: float) -> str:
 
     Note: the formatter is used in the INFO log of the audit summary of the
     ``sanity_gate`` select step; it is also used by the report mechanisms (see
-    also ``select_finalists`` / ``_train_finalists`` / ``select_robust_winner``).
-
-    Args:
-        value (float): The audit metric value (diversity/unique/gap).
-
-    Returns:
-        str: ``"%.4f"`` for finite values, ``"n/a"`` otherwise.
-    """
+    also ``select_finalists`` / ``_train_finalists`` / ``select_robust_winner``)."""
     return f"{value:.4f}" if np.isfinite(value) else "n/a"
 
 
@@ -204,10 +170,7 @@ def _audit_budget_skip_reason(budget_seconds: float) -> str:
     duplicated anywhere.
 
     Args:
-        budget_seconds (float): The phase's ``audit_time_budget_seconds`` value.
-
-    Returns:
-        str: A reason like "Sanity audit skipped: audit time budget (Ns) exceeded".
+        budget_seconds: The phase's ``audit_time_budget_seconds`` value.
     """
     return f"{_AuditSkipReason.BUDGET_EXCEEDED.value} ({budget_seconds:g}s) exceeded"
 
@@ -228,9 +191,6 @@ def _is_audit_budget_skip(reasons: list[str]) -> bool:
     Used in ``select_steps._gate_disqualifications`` so that such candidates do not
     enter the circuit breaker (``disqualified_algorithms``) — the phase
     budget must not throw the algorithm out of all subsequent phases.
-
-    Args:
-        reasons (list[str]): The candidate's audit invalidity reasons.
 
     Returns:
         bool: True if the reasons reduce to a skip caused by an exhausted
@@ -256,17 +216,14 @@ def select_robust_winner(
     runs each candidate through ``ModelSanityGate.check`` (diversity/unique are
     computed on the OOF vector; circuit D uses full-fit predictions) and ranks
     the candidates that passed the audit by ``RMSE_oof`` (CV and ``RMSE_full``
-    do NOT participate in the ranking — the composite score was removed after
-    the v2 review).
+    do NOT participate in the ranking).
 
     Modes (``mode``):
-    - ``off``: legacy ``select_winner`` behavior — winner = best ``cv_score``
-      (no audit; ``audit`` stays empty);
+    - ``off``: plain ranking — winner = best ``cv_score`` (no audit;
+      ``audit`` stays empty);
     - ``active``: disqualifications are applied; winner = best ``RMSE_oof``
       among those that passed all checks. Pipeline select steps with
-      ``strategy: sanity_gate`` run exactly this mode. The ``warn_only`` mode
-      was removed along with the ``sanity_gate_warn_only``/``winner_if_active``
-      report keys.
+      ``strategy: sanity_gate`` run exactly this mode.
 
     Audit time budget (``audit_time_budget_seconds``): the total time of the
     audit phase is limited; when the budget is exhausted the remaining
@@ -280,14 +237,14 @@ def select_robust_winner(
     The run never fails; a WARNING with the reasons is logged.
 
     Args:
-        candidate_models (Mapping[str, FinalistCandidate]): The candidate pool
+        candidate_models: The candidate pool
             (trained on 100% of the data, OOF vectors available). Insertion
             order is the deterministic pool order.
-        X (pd.DataFrame): The full feature matrix.
-        y (pd.Series): The full target vector.
-        sanity_gate (ModelSanityGate): The configured gate instance.
-        mode (SanityGateMode): The operation mode ('off'/'active').
-        audit_time_budget_seconds (float): The total audit phase time budget in
+        X: The full feature matrix.
+        y: The full target vector.
+        sanity_gate: The configured gate instance.
+        mode: The operation mode ('off'/'active').
+        audit_time_budget_seconds: The total audit phase time budget in
             seconds; 0 — no limit.
 
     Returns:
@@ -304,7 +261,7 @@ def select_robust_winner(
     pool_order = list(candidate_models)
 
     def _cv_winner() -> str:
-        """Legacy select_winner behavior: best raw score, ties — order."""
+        """Plain ranking: best raw CV score, ties — pool order."""
         return max(pool_order, key=lambda n: candidate_models[n].cv_score)
 
     if mode == "off":

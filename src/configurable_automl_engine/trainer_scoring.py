@@ -63,21 +63,18 @@ def score_on_validation_splits(
     compare models, up to sign correction.
 
     How it works:
-    1. On each fold a fresh pipeline is assembled by ``make_steps`` (clones
-       of the preprocessor and the model plus selector/oversampler per
-       config) and trained on the fold's train part.
+    1. On each fold a fresh pipeline is assembled by ``make_steps`` and
+       trained on the fold's train part.
     2. Raw values of the primary metric and all additional metrics are
        computed on the fold's validation part.
     3. ``val_score = to_user_value(metric, mean(raw))`` —
        ``additional_scores[m] = to_user_value(m, mean(raw_m))`` — for
-       additive metrics; for non-additive metrics (RMSE, MSE, R², nRMSE,
-       RMSLE, D², explained_variance, max error, median absolute error
-       and their aliases) the value is the pooled estimate over the OOF
-       vector (each row enters the calculation exactly once).
+       additive metrics; for non-additive metrics the value is the pooled
+       estimate over the OOF vector (each row enters the calculation
+       exactly once).
     4. In parallel, an OOF channel is collected: predictions from the
        validation parts of the folds are accumulated into a single
-       ``y_pred_oof`` vector aligned to the original row order, and
-       ``RMSE_oof`` is computed on the whole vector at once (see
+       ``y_pred_oof`` vector aligned to the original row order (see
        ``_finalize_oof``).
 
     A failure of a single additional metric (scorer error/None on a fold) →
@@ -296,19 +293,7 @@ def _build_validation_scorers(
 
     global_y=y: the global NRMSE is normalized by the full target (the range
     does not depend on a given fold). An additional metric whose scorer
-    cannot be built is skipped with a WARNING.
-
-    Args:
-        metric: The primary metric.
-        additional_metrics: The additional metrics.
-        y: Target variable (full data).
-
-    Returns:
-        The primary scorer and the scorers of the additional metrics.
-
-    Raises:
-        TrainingError: If the primary scorer cannot be built.
-    """
+    cannot be built is skipped with a WARNING."""
     try:
         scorer = cast(Callable[..., Any], get_scorer_object(metric, global_y=y))
     except Exception as err:  # noqa: BLE001
@@ -344,11 +329,7 @@ def _effective_validation_method(
     train_test_split for small N): OOF channel warnings must rely on the
     splits actually used rather than the requested strategy. Resolved via the
     same make_cv that iter_splits calls internally — the values are
-    guaranteed to match.
-
-    Returns:
-        The effective validation method name.
-    """
+    guaranteed to match."""
     n_features = X.shape[1] if method == "auto" else None
     try:
         effective_method, _, _ = make_cv(
@@ -446,11 +427,7 @@ def _aggregate_raw_values(
 
     A non-additive metric is computed over the pooled OOF buffer when it
     holds a finite pair; when the pooled value is impossible, the fold mean
-    is used and the fallback WARNING is emitted once per (algorithm, phase).
-
-    Returns:
-        The raw (optimizer-semantics) metric value.
-    """
+    is used and the fallback WARNING is emitted once per (algorithm, phase)."""
     if pooled and np.any(np.isfinite(oof_pred) & np.isfinite(oof_y)):
         try:
             return pooled_scorer_value(scorer, oof_y, oof_pred)
@@ -496,10 +473,6 @@ def _finalize_oof(
         method: The validation method actually applied (after a possible
             fallback ``k_fold`` → ``train_test_split``), which drives the
             coverage warnings.
-
-    Returns:
-        The OOF vector in the original row order, ``RMSE_oof`` (``None``
-        when impossible) and the coverage.
     """
     oof_vector = _align_oof_vector(oof_pred, X)
     valid = np.isfinite(oof_pred) & np.isfinite(oof_y)
@@ -586,9 +559,6 @@ def _align_oof_vector(
         oof_pred: OOF prediction buffer (NaN for uncovered rows), aligned
             by position to the original data.
         X: Original feature matrix.
-
-    Returns:
-        The ``y_pred_oof`` vector in the original row order.
     """
     if isinstance(X, (pd.DataFrame, pd.Series)) and X.index.is_unique:
         try:

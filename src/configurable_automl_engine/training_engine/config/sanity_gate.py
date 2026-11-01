@@ -23,14 +23,11 @@ ERR_REMOVED_SANITY_GATE_MODE = "removed_sanity_gate_mode"
 #: pipeline's select steps: 'off' ranks candidates by CV score only (without
 #: audit); 'active' applies disqualifications, with the winner being the best
 #: RMSE_oof. Select steps with ``strategy: sanity_gate`` run in 'active' mode.
-#: The 'warn_only' mode was removed along with the report keys
-#: ``sanity_gate_warn_only``/``winner_if_active``. This is an internal mode of
-#: the select step, NOT a configuration field: the ``general.sanity_gate.mode``
-#: field was removed, and the strategy is set explicitly in action='select'
-#: phases. The definition remains here (not exported in ``__all__``) because
-#: the robust-selection mechanism (``training_engine/state.py`` and
-#: ``training_engine/finalists.py``) imports this type directly; it is not
-#: used in the config schema.
+#: This is an internal mode of the select step, NOT a configuration field:
+#: the strategy is set explicitly in action='select' phases. The definition
+#: remains here (not exported in ``__all__``) because the robust-selection
+#: mechanism (``training_engine/state.py`` and ``training_engine/finalists.py``)
+#: imports this type directly; it is not used in the config schema.
 SanityGateMode = Literal["off", "active"]
 
 #: Shape of the finalist-pool corridor: multiplicative / additive / auto
@@ -43,7 +40,7 @@ CorridorMode = Literal["multiplicative", "additive", "auto"]
 #: max_generalization_gap`` or an infinite gap from division by zero:
 #: ``RMSE_full ≈ 0`` / ``RMSE_oof ≈ 0``) goes to
 #: ``soft_warnings`` (a soft warning, does not disqualify);
-#: ``"reject"`` — strict disqualification (the old default behavior).
+#: ``"reject"`` — strict disqualification.
 #: Reasons in both modes remain only for contract violations
 #: (``y_pred_full = None``) and non-computability (no finite pairs).
 #: The field name is NOT ``mode``: that name is reserved for the removed
@@ -62,8 +59,7 @@ class SanityGateCfg(BaseModel):
             with ``strategy: sanity_gate`` (finalist pool: corridor δ from the
             leader ∩ hard cap ``top_k_candidates``, optional soft family
             complementation; the audit thresholds of ``ModelSanityGate`` are passed
-            to the gate constructor unchanged). There is no longer a global switch:
-            the ``mode`` field was removed together with the ``warn_only`` semantics —
+            to the gate constructor unchanged). There is no global switch:
             selection happens ONLY via explicit ``select`` steps in
             ``general.phases``, and diagnostics are available in the gate section of
             each select step's report.
@@ -102,7 +98,7 @@ class SanityGateCfg(BaseModel):
                     (default 'warn'): 'warn' — a circuit D violation (a finite gap
                     above the threshold or an infinite gap from division by zero)
                     goes to soft_warnings (a soft warning); 'reject' — a failure →
-                    reasons → disqualification (the old strict behavior).
+                    reasons → disqualification.
                     Reasons in both modes — only contract violations and
                     non-computability.
                 check_permutation_sensitivity (bool): Enable the permutation audit of
@@ -127,21 +123,10 @@ class SanityGateCfg(BaseModel):
     def _reject_removed_mode(cls, data: Any) -> Any:
         """Reject the removed ``mode`` field with a migration hint.
 
-        The field was removed entirely along with the ``warn_only`` semantics
-        (a deliberate design decision): selection happens only via an
-        explicit select step. Silently ignoring it would hide the semantic
-        change, so a config with ``sanity_gate.mode`` is rejected with a
-        migration hint.
-
-        Args:
-            data: Raw input data of the section (a dict when parsed from YAML/JSON).
-
-        Returns:
-            Any: The data unchanged, if the ``mode`` key is absent.
-
-        Raises:
-            ValueError: If the data contains the ``mode`` key.
-        """
+        Selection happens only via an explicit select step (a deliberate
+        design decision). Silently ignoring ``mode`` would hide that the
+        key has no effect, so a config with ``sanity_gate.mode`` is rejected
+        with a migration hint."""
         if isinstance(data, dict) and "mode" in data:
             # The stable error code (ERR_REMOVED_SANITY_GATE_MODE) lets tests rely
             # on error['type'] instead of the hint text.
@@ -273,11 +258,12 @@ class SanityGateCfg(BaseModel):
             "a circuit D violation (a finite gap > max_generalization_gap or "
             "an infinite gap from division by zero: RMSE_full≈0 / RMSE_oof≈0) "
             "is recorded in soft_warnings (does not disqualify); "
-            "'reject' — a failure → reasons → disqualification (the old strict "
-            "behavior). Reasons in both modes remain only for "
-            "contract violations (y_pred_full=None) and non-computability (no "
-            "finite pairs). The field is deliberately NOT named mode (a "
-            "collision with the removed sanity_gate.mode field)."
+            "'reject' — a failure → reasons → disqualification. Reasons in "
+            "both modes remain only for contract violations "
+            "(y_pred_full=None) and non-computability (no finite pairs). The "
+            "field is deliberately NOT named mode (mode is reserved: it is "
+            "rejected by the _reject_removed_mode validator with a migration "
+            "error)."
         ),
     )
     check_permutation_sensitivity: bool = Field(

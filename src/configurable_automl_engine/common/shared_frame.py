@@ -57,15 +57,7 @@ def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
     numpy kinds (datetime64/timedelta64, M/m) are out of scope: mixing them
     with numeric columns, ``np.result_type`` raises or diverges from
     ``df.to_numpy()`` (which yields object) — the caller's rule 1 already
-    rejects such frames before this helper is consulted.
-
-    Args:
-        df: The candidate DataFrame.
-
-    Returns:
-        The common plain numpy dtype of ``df.to_numpy()``, or None when the
-        frame is not eligible (extension dtype present, or some dtypes).
-    """
+    rejects such frames before this helper is consulted."""
     try:
         dtypes = list(df.dtypes)
     except Exception:  # noqa: BLE001
@@ -100,15 +92,7 @@ def _ints_fit_float64(df: pd.DataFrame) -> bool:
     float (the caller checks that the result dtype is float). Only
     int64/uint64 columns are inspected; non-8-byte and non-integer columns
     (including float columns that may carry NaN) are skipped, so no NaN check
-    is needed.
-
-    Args:
-        df: The candidate DataFrame (plain numpy column types only).
-
-    Returns:
-        True when all int64/uint64 columns contain values representable in
-        float64 without loss. Empty or absent such columns return True.
-    """
+    is needed."""
     columns = df.select_dtypes(include=["int64", "uint64"])
     # Iterate positionally over the 8-byte integer columns only (the
     # optimized subset): with duplicate column names df[name] would return a
@@ -141,12 +125,7 @@ def _shm_backing_path() -> str | None:
     shm_open(3) implementation). macOS lacks the directory-level API
     entirely, and Windows uses a different mechanism. For the free-space
     check the closest observable approximation is /dev/shm
-    when it exists, otherwise None (no check possible).
-
-    Returns:
-        str | None: The backing directory (/dev/shm), or None when it
-        cannot be determined.
-    """
+    when it exists, otherwise None (no check possible)."""
     # A mock /dev/shm in tests is a regular directory: still a valid target
     # for the check.
     if os.path.exists("/dev/shm"):
@@ -179,6 +158,7 @@ def _shm_has_free_space(size: int) -> bool:
 
     Args:
         size: The requested segment size in bytes.
+
 
     Returns:
         bool: True when the segment safely fits (or the check is
@@ -240,11 +220,11 @@ class SharedDataFrame:
         3. Metadata: The column name list is kept for the subsequent
            restoration of the DataFrame structure.
         Args:
-            df (pd.DataFrame | None): Source DataFrame to place in SHM.
-            name (str | None): Name of an existing memory segment.
-            shape (tuple | None): Dimensionality of the data array.
-            dtype (np.dtype | Any): Data type of the array elements.
-            columns (list[str] | None): Column name list.
+            df: Source DataFrame to place in SHM.
+            name: Name of an existing memory segment.
+            shape: Dimensionality of the data array.
+            dtype: Data type of the array elements.
+            columns: Column name list.
         Returns:
             None
         """

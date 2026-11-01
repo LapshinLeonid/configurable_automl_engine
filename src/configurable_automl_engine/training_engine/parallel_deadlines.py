@@ -47,10 +47,10 @@ def queue_budget(n_tasks: int, workers: int, task_timeout: float | None) -> floa
     of ``task_timeout`` each.
 
     Args:
-        n_tasks (int): The number of tasks of the batch.
-        workers (int): The number of worker processes (values below 1 count
+        n_tasks: The number of tasks of the batch.
+        workers: The number of worker processes (values below 1 count
             as 1).
-        task_timeout (float | None): The per-task timeout; ``None`` — no
+        task_timeout: The per-task timeout; ``None`` — no
             timeout.
 
     Returns:
@@ -70,12 +70,12 @@ def task_deadline(
     """The absolute deadline of one task.
 
     Args:
-        submit_t (float): When the task was submitted.
-        started_t (float | None): When the task really started in the worker;
+        submit_t: When the task was submitted.
+        started_t: When the task really started in the worker;
             ``None`` — it has not started yet.
-        task_timeout (float | None): The per-task timeout; ``None`` — no
+        task_timeout: The per-task timeout; ``None`` — no
             timeout.
-        queue_budget (float): The result of :func:`queue_budget`.
+        queue_budget: The result of :func:`queue_budget`.
 
     Returns:
         float: ``min(started_t + task_timeout, submit_t + task_timeout +
@@ -99,11 +99,11 @@ def next_wait(
     """How long the wait loop may sleep before it must look again.
 
     Args:
-        now (float): The current time.
-        deadlines (Iterable[float]): The deadlines of the unfinished tasks.
-        global_deadline (float | None): The deadline of the whole run;
+        now: The current time.
+        deadlines: The deadlines of the unfinished tasks.
+        global_deadline: The deadline of the whole run;
             ``None`` — no global timeout.
-        any_unstarted (bool): Whether some task with a finite deadline has
+        any_unstarted: Whether some task with a finite deadline has
             not started yet (the wait is then capped at ``POLL_INTERVAL``).
 
     Returns:

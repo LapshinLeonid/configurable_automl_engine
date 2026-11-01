@@ -74,6 +74,7 @@ def _effective_size_train_test(n_total: int, test_size: float) -> int:
         n_total: Total number of rows.
         test_size: Desired test fraction (or absolute row count).
 
+
     Returns:
         The number of rows the model effectively trains on.
     """
@@ -88,13 +89,9 @@ def _effective_size_train_test(n_total: int, test_size: float) -> int:
 def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     """Deterministically select a validation method for regression.
 
-    The decision is based on ``n_samples`` (N, number of observations) and
-    ``n_features`` (P, number of features). The returned dict describes the
-    selected method and, when needed, the derived regime, test split size and
-    number of folds. The heuristic is fully deterministic given ``(N, P)`` so
-    every caller that resolves 'auto' arrives at the same decision.
-
-    Decision branches (applied in order):
+    The heuristic is fully deterministic given ``(N, P)`` so every caller
+    that resolves 'auto' arrives at the same decision. The decision branches
+    (applied in order):
 
     1. **LOO** for critically small samples (N <= 15) with a good N/P ratio
        (N >= 2*P): leave-one-out is the only affordable way to get per-point
@@ -107,7 +104,7 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     3. **Fixed 5-fold CV** for mid-size samples (200 <= N < 50000) with a good
        N/P ratio (N >= 10*P): a single hold-out of max(30, 2*P) rows compares
        models on too few points — on 30 rows the RMSE spread is
-       about ±13% while the confidence corridor is δ=0.15, so the winner is
+       about +/-13% while the confidence corridor is delta=0.15, so the winner is
        selected almost at random and the Sanity Gate OOF vector covers only
        ~3% of the data. 5-fold CV scores every row exactly once (100% OOF
        coverage) and stays affordable up to a few tens of thousands of rows.
@@ -357,7 +354,7 @@ def check_target_numeric(y: Any) -> None:
     error. The check fails fast on the pipeline entry point.
 
     Args:
-        y (Any): The target vector (pd.Series or any array-like of numbers).
+        y: The target vector (pd.Series or any array-like of numbers).
 
     Raises:
         ValueError: If the target is non-numeric or contains NaN/±inf.
@@ -395,7 +392,7 @@ def check_target_constant(y: Any) -> None:
     deviation rounds to zero.
 
     Args:
-        y (Any): The target vector (pd.Series or any array-like of numbers).
+        y: The target vector (pd.Series or any array-like of numbers).
 
     Raises:
         ValueError: If the target contains a single unique value.
@@ -518,42 +515,30 @@ def validate_features(
     """Validate the feature matrix and optionally repair it.
 
     Runs all input-data diagnostics required for a meaningful regression
-    run. Messages always name the offending column(s) and suggest the fix.
+    run; messages always name the offending column(s) and suggest the fix.
 
     Checks (applied in order):
 
-    1. **Duplicate column names** → ``ValueError`` listing the duplicates.
-       Duplicated names make ``X[col]`` return a DataFrame instead of a
-       Series, which surfaces later as an unclear pandas error
-       ("The truth value of a Series is ambiguous").
-
-    2. **±inf in numeric features** → governed by ``inf_policy``:
+    1. **Duplicate column names** -> ``ValueError`` listing the duplicates
+       (duplicated names make ``X[col]`` return a DataFrame instead of a
+       Series, which surfaces later as an unclear pandas error).
+    2. **±inf in numeric features** -> governed by ``inf_policy``:
        ``"as_missing"`` (default) replaces them with NaN and emits a WARNING
        listing columns and counts; ``"error"`` raises ``ValueError``.
-
-    3. **Datetime/timedelta columns** → governed by ``datetime_policy``:
+    3. **Datetime/timedelta columns** -> governed by ``datetime_policy``:
        ``"expand"`` (default) replaces each column by the components
        ``year, month, day, dayofweek`` (and ``hour`` if it is not all-zero)
        and emits a WARNING listing the generated columns; ``"drop"`` removes
        the column and emits a WARNING; ``"error"`` raises ``ValueError``.
+    4. **ID-like columns** -> a WARNING naming the column (object/string
+       with ``nunique/n >= 0.95``, or a unique monotonic integer column);
+       dropped when ``drop_id_like_columns=True``.
 
-    4. **ID-like columns** → a WARNING naming the column. A column is
-       ID-like if it is an object/string column with ``nunique/n >= 0.95``,
-       or an integer column that is unique and monotonic. With
-       ``drop_id_like_columns=True`` such columns are dropped (independently
-       of ``warn_id_like``).
-
-    Limitation: only columns with a ``datetime64``/``timedelta64`` dtype are
-    detected as datetime columns. A column holding datetime values with an
-    ``object`` dtype (e.g. after ``pd.read_csv`` without ``parse_dates``, or
-    a load from a database driver returning strings) is not expanded; it may
-    be reported as ID-like or be treated as a categorical feature. Convert
-    such columns with ``pd.to_datetime`` before training.
-
-    The performance budget of the checks is kept small (a single pass over
-    the object columns for the ID heuristic, vectorized finiteness checks
-    for the numeric columns) so that on a 50k x 50 frame the added overhead
-    stays below 5% of the training runtime.
+    Limitation: only ``datetime64``/``timedelta64`` dtypes are detected as
+    datetime columns; a column of date strings with ``object`` dtype is not
+    expanded — convert it with ``pd.to_datetime`` before training. The
+    performance budget of the checks is kept small so that on a 50k x 50
+    frame the added overhead stays below 5% of the training runtime.
 
     Args:
         X: The feature DataFrame (without the target column).
@@ -603,14 +588,7 @@ def validate_features(
 
 
 def _reject_duplicate_columns(X: pd.DataFrame) -> None:
-    """Raise ``ValueError`` listing the duplicated column names of ``X``.
-
-    Args:
-        X: The feature DataFrame.
-
-    Raises:
-        ValueError: If ``X`` has duplicate column names.
-    """
+    """Raise ``ValueError`` listing the duplicated column names of ``X``."""
     duplicate_cols = sorted(
         {col for col, count in Counter(X.columns).items() if count > 1}
     )
@@ -630,11 +608,6 @@ def _is_id_like(series: pd.Series, n_rows: int) -> bool:
     Args:
         series: The column.
         n_rows: The number of rows (> 0).
-
-    Returns:
-        bool: True for an object/string column with
-            ``nunique/n >= ID_LIKE_UNIQUE_RATIO`` or a unique monotonic
-            integer column.
     """
     dtype = series.dtype
     if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype):
@@ -646,9 +619,6 @@ def _is_id_like(series: pd.Series, n_rows: int) -> bool:
 
 def _find_id_like_columns(X: pd.DataFrame) -> list[str]:
     """Return the ID-like columns of ``X`` (see :func:`_is_id_like`).
-
-    Args:
-        X: The feature DataFrame.
 
     Returns:
         list[str]: The ID-like columns, in column order (empty for 0 rows).
@@ -662,18 +632,7 @@ def _find_id_like_columns(X: pd.DataFrame) -> list[str]:
 def _handle_id_like_columns(
     X: pd.DataFrame, id_like: list[str], *, drop: bool, warn: bool
 ) -> pd.DataFrame:
-    """Report and optionally drop the ID-like columns.
-
-    Args:
-        X: The feature DataFrame.
-        id_like: The ID-like columns of ``X``.
-        drop: Whether the columns are dropped.
-        warn: Whether the WARNING is emitted.
-
-    Returns:
-        pd.DataFrame: ``X`` without the ID-like columns when ``drop``,
-            otherwise ``X`` itself.
-    """
+    """Report and optionally drop the ID-like columns."""
     if not id_like:
         return X
     if warn:

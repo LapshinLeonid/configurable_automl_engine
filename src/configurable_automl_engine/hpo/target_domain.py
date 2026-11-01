@@ -72,8 +72,8 @@ def tweedie_power_is_valid(power: float, y_min: float) -> bool:
     """Check whether a Tweedie ``power`` accepts a target with minimum ``y_min``.
 
     Args:
-        power (float): The Tweedie power.
-        y_min (float): The minimum of the target.
+        power: The Tweedie power.
+        y_min: The minimum of the target.
 
     Returns:
         bool: ``True`` if every target value lies in the loss domain.
@@ -87,9 +87,6 @@ def tweedie_power_is_valid(power: float, y_min: float) -> bool:
 
 def _tweedie_valid_upper_bound(y_min: float) -> tuple[float, bool] | None:
     """Return the upper bound of the valid ``power`` set for ``y_min``.
-
-    Args:
-        y_min (float): The minimum of the target.
 
     Returns:
         tuple[float, bool] | None: ``(bound, inclusive)`` — valid powers are
@@ -106,18 +103,7 @@ def _tweedie_valid_upper_bound(y_min: float) -> tuple[float, bool] | None:
 def _clip_numeric(
     space: FloatSpace | IntSpace, bound: float, inclusive: bool
 ) -> FloatSpace | IntSpace | None:
-    """Clip the upper end of a numeric range to ``bound``.
-
-    Args:
-        space (FloatSpace | IntSpace): The original range.
-        bound (float): The upper bound of the valid set.
-        inclusive (bool): Whether ``bound`` itself is valid.
-
-    Returns:
-        FloatSpace | IntSpace | None: The clipped range (the original object
-            when nothing has to be clipped); ``None`` — the range has no valid
-            values.
-    """
+    """Clip the upper end of a numeric range to ``bound``."""
     is_int = isinstance(space, IntSpace)
     max_valid: float
     if is_int:
@@ -140,17 +126,7 @@ def _clip_numeric(
 
 
 def _clip_power_entry(entry: SearchSpaceEntry, y_min: float) -> SearchSpaceEntry | None:
-    """Restrict a Tweedie ``power`` search entry to the target domain.
-
-    Args:
-        entry (SearchSpaceEntry): The ``power`` search entry.
-        y_min (float): The minimum of the target.
-
-    Returns:
-        SearchSpaceEntry | None: The entry restricted to its valid part (the
-            original object when it is fully valid); ``None`` — no value of
-            the entry is valid.
-    """
+    """Restrict a Tweedie ``power`` search entry to the target domain."""
     upper = _tweedie_valid_upper_bound(y_min)
     if upper is None:
         return entry
@@ -179,14 +155,7 @@ def _clip_power_entry(entry: SearchSpaceEntry, y_min: float) -> SearchSpaceEntry
 
 
 def _describe_entry(entry: SearchSpaceEntry) -> str:
-    """Return a compact text form of a search entry for log messages.
-
-    Args:
-        entry (SearchSpaceEntry): The search entry.
-
-    Returns:
-        str: ``[low, high]`` for ranges, the options list for categoricals.
-    """
+    """Return a compact text form of a search entry for log messages."""
     config = entry.config
     if isinstance(config, CategoricalSpace):
         return str(list(config.options))
@@ -194,15 +163,7 @@ def _describe_entry(entry: SearchSpaceEntry) -> str:
 
 
 def _target_min(y: Any) -> float | None:
-    """Return the minimum of the finite target values.
-
-    Args:
-        y (Any): The target vector (array-like).
-
-    Returns:
-        float | None: The minimum, or ``None`` when the target has no finite
-            numeric values (nothing to check).
-    """
+    """Return the minimum of the finite target values."""
     try:
         arr = np.asarray(y, dtype=float).ravel()
     except (TypeError, ValueError):
@@ -230,10 +191,10 @@ def check_target_domain(
     * Every other algorithm passes unchanged.
 
     Args:
-        algo_name (str): The canonical algorithm name.
-        search_space (dict[str, Any]): The prepared search space of the
+        algo_name: The canonical algorithm name.
+        search_space: The prepared search space of the
             algorithm (``SearchSpaceEntry`` values or plain fixed values).
-        y (Any): The target vector.
+        y: The target vector.
 
     Returns:
         TargetDomainCheck: The disqualification reason or the clipped entries.

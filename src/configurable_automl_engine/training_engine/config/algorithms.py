@@ -40,15 +40,7 @@ REMOVED_ALGORITHM_KEYS = ("tuner", "trainer_module")
 
 
 def _removed_plugin_key_error(path: str) -> PydanticCustomError:
-    """The targeted error for a removed custom tuner/trainer key.
-
-    Args:
-        path: The config path of the key (e.g. ``algorithms.ridge.tuner``).
-
-    Returns:
-        PydanticCustomError: The error with the ``ERR_REMOVED_PLUGIN_KEY``
-            type and a migration hint.
-    """
+    """The targeted error for an unsupported custom tuner/trainer key."""
     return PydanticCustomError(
         ERR_REMOVED_PLUGIN_KEY,
         f"`{path}` was removed in 0.5.0: custom tuner/trainer modules are no "
@@ -160,17 +152,7 @@ class AlgoCfg(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_plugin_keys(cls, data: Any) -> Any:
-        """Reject the removed ``tuner`` / ``trainer_module`` keys with a hint.
-
-        Args:
-            data: Raw input data of the algorithm section.
-
-        Returns:
-            Any: The data unchanged, if no removed key is present.
-
-        Raises:
-            PydanticCustomError: If a removed key is present.
-        """
+        """Reject the removed ``tuner`` / ``trainer_module`` keys with a hint."""
         if isinstance(data, dict):
             for key in REMOVED_ALGORITHM_KEYS:
                 if key in data:
@@ -218,7 +200,7 @@ class AlgoCfg(BaseModel):
             to its PyPI name.
 
         Args:
-            algo_name (str): Unique identifier of the algorithm.
+            algo_name: Unique identifier of the algorithm.
         Returns:
             Optional[str]: Name of the package to install via pip, or None
                 if no dependency is defined.
@@ -236,7 +218,7 @@ class AlgoCfg(BaseModel):
         constructor accepts **kwargs), the check is skipped (soft fallback).
 
         Args:
-            algo_name (str): Unique identifier of the algorithm.
+            algo_name: Unique identifier of the algorithm.
         Returns:
             List[str]: List of invalid keys. An empty list means everything is correct.
         """
@@ -276,17 +258,7 @@ class _AlgorithmsConfigBase(BaseModel):
         """Reject ``algorithms.<name>.tuner`` / ``trainer_module`` with a hint.
 
         Checked here, before the per-algorithm validation, so that the message
-        names the full config path of the key.
-
-        Args:
-            data: Raw input data of the ``algorithms`` section.
-
-        Returns:
-            Any: The data unchanged, if no removed key is present.
-
-        Raises:
-            PydanticCustomError: If an algorithm section has a removed key.
-        """
+        names the full config path of the key."""
         if isinstance(data, dict):
             for name, section in data.items():
                 if not isinstance(section, dict):

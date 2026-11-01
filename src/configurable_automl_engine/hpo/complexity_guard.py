@@ -1,11 +1,10 @@
 """Adaptive complexity guard for tree and boosting search spaces.
 
-The module extends the existing data-dependent clipping layer
-(:mod:`configurable_automl_engine.hpo.default_spaces`): on small data
-the search ranges of tree/boosting hyperparameters are too wide, trials are
-spent on values that do not change the model, the TPE surface has flat
-regions and the search drifts toward overfit models. This guard tightens the
-ranges depending on the number of rows (``n``) and the feature count.
+On small data the search ranges of tree/boosting hyperparameters are too
+wide: trials are spent on values that do not change the model and the search
+drifts toward overfit models. This guard tightens the ranges depending on
+the row count (``n``) and the feature count. The user-facing description
+lives in API_REFERENCE.md ("Complexity Guard configuration").
 
 Two feature counts are used deliberately:
 
@@ -35,8 +34,7 @@ Two independent levels of restrictions:
   reduce the variance of the ensemble.
 
 The rules are declared declaratively (a rule table per algorithm and
-parameter) so that future rules (kNN ``k=1`` on small data, an upper bound on
-SVR ``C``) can be added without rewriting the mechanism.
+parameter) so that new rules can be added without rewriting the mechanism.
 
 Configuration is passed as a plain dataclass (:class:`ComplexityGuardConfig`)
 so that the module stays decoupled from the Pydantic config schema
@@ -184,15 +182,7 @@ def _leaf_size_param(space: dict[str, Any], is_boosting: bool) -> str:
     For boosting families the leaf size comes from ``min_child_weight``
     (approximately the minimum rows in a leaf for a squared loss) when it is
     present; otherwise from ``min_samples_leaf``. Trees use
-    ``min_samples_leaf``.
-
-    Args:
-        space: The search space dict.
-        is_boosting: Whether the algorithm is a boosting family.
-
-    Returns:
-        str: The parameter name, or ``""`` when none is present.
-    """
+    ``min_samples_leaf``."""
     if is_boosting and "min_child_weight" in space:
         return "min_child_weight"
     if "min_samples_leaf" in space:
@@ -216,9 +206,6 @@ def _effective_leaf_min(param: str, entry: SearchSpaceEntry | None, n: int) -> f
         param: The leaf-size parameter name (may be empty).
         entry: The final ``SearchSpaceEntry`` of the parameter.
         n: Number of rows.
-
-    Returns:
-        float: The effective minimum leaf size (>= 1).
     """
     if not param or entry is None:
         return 1.0
@@ -246,16 +233,7 @@ def _build_entry(
     an int step): a rule may compute ``high`` that does not lie on the grid,
     and Optuna would silently narrow such a range (``high`` is shifted down
     to the last grid point). When the aligned grid becomes empty, the range
-    collapses to a single grid value — the parameter is fixed.
-
-    Args:
-        entry: The source entry.
-        low: The new lower bound.
-        high: The new upper bound.
-
-    Returns:
-        SearchSpaceEntry: A deep copy with updated bounds.
-    """
+    collapses to a single grid value — the parameter is fixed."""
     config = entry.config
     new_entry = entry.model_copy(deep=True)
     if isinstance(config, FloatSpace):
@@ -284,9 +262,6 @@ def _domain_for_param(
         is_float: Whether the parameter is a float in the search space (for
             ``max_features`` and ``min_samples_leaf`` the domain differs: a
             fraction vs a plain count).
-
-    Returns:
-        tuple[float, float]: The full domain ``(low, high)``.
     """
     if param == "min_samples_leaf" and is_float:
         # A float min_samples_leaf may be a fraction of the sample (0, 1).
@@ -340,10 +315,6 @@ def _apply_rule_to_entry(
         leaf_min: Effective minimum leaf size (for ``max_depth`` rules).
         user_key: Whether the parameter was set explicitly by the user.
         cfg: The guard configuration.
-
-    Returns:
-        tuple[SearchSpaceEntry, dict | None]: The (possibly deep-copied)
-            entry and a log record (``None`` when nothing changed).
     """
     config = entry.config
     if not isinstance(config, (IntSpace, FloatSpace)):

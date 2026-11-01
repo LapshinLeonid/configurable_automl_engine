@@ -170,7 +170,7 @@ def read_config(path: str | Path) -> Config:
     3. Triggers cascading Pydantic validation
         to build a typed `Config` object.
     Args:
-        path (str | Path): Path to a .yaml or .yml configuration file.
+        path: Path to a .yaml or .yml configuration file.
     Returns:
         Config: The root configuration object, ready for use in the AutoML engine.
 

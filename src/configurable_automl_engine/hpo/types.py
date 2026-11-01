@@ -77,8 +77,8 @@ class OptimizeResult:
             honest denominator next to the best-trial ``score``: on a fixed
             number of folds the score is the maximum over the evaluated
             trials, so the more trials were evaluated, the more optimistic the
-            best score is expected to be. Defaults to 0 for legacy code paths
-            that construct ``OptimizeResult`` without the field.
+            best score is expected to be. Defaults to 0 when the field is
+            not computed.
         oof_predictions: The out-of-fold predictions of the phase's own
             COMPLETED trials with a valid score, one row per trial (shape
             ``(n_trials, n_rows)``, rows aligned to ``X`` by position; rows a
@@ -120,5 +120,5 @@ HPO_WORST_SCORE = -3.4028235e38
 # HPO_WORST_SCORE via math.isclose) also catches the raw
 # float(np.finfo(np.float32).min) value that numpy-cast metrics or custom
 # tuners may return: its relative difference from HPO_WORST_SCORE is
-# ≈ 9.88e-9, which the old isclose(rel_tol=1e-9) check silently missed.
+# ≈ 9.88e-9, which an isclose(rel_tol=1e-9) check silently misses.
 WORST_SCORE_THRESHOLD = float(np.finfo(np.float32).min)

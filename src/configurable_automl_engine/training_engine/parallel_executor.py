@@ -52,10 +52,10 @@ def resolve_context(
     process).
 
     Args:
-        mp_context (str | BaseContext | None): ``"fork"``, ``"forkserver"``,
+        mp_context: ``"fork"``, ``"forkserver"``,
             ``"spawn"``, a context object, or ``None`` (the multiprocessing
             default of the running interpreter).
-        preload (Sequence[str]): Extra modules to preload into the fork
+        preload: Extra modules to preload into the fork
             server.
 
     Returns:
@@ -86,11 +86,11 @@ def create_process_pool(
     """Create a process pool (the workers start lazily, on submit).
 
     Args:
-        max_workers (int | None): The number of worker processes.
-        mp_context (BaseContext | None): The multiprocessing context.
-        initializer (Callable | None): Run in every worker before its first
+        max_workers: The number of worker processes.
+        mp_context: The multiprocessing context.
+        initializer: Run in every worker before its first
             task (the worker log forwarding).
-        initargs (tuple[Any, ...]): The initializer arguments.
+        initargs: The initializer arguments.
     """
     return ProcessPoolExecutor(
         max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs
@@ -128,8 +128,8 @@ def force_shutdown(
     exit code 255 instead of the real one.
 
     Args:
-        pool (ProcessPoolExecutor): The pool to stop.
-        grace_period (float): Seconds between SIGTERM and SIGKILL.
+        pool: The pool to stop.
+        grace_period: Seconds between SIGTERM and SIGKILL.
 
     Returns:
         dict[int, int | None]: The exit code of every worker the pool had,

@@ -84,11 +84,9 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
     def _resolve_absolute_index(self, n_cols: int) -> int:
         """Map the (possibly numerical-block-relative) index to an absolute column.
 
-        Args:
-            n_cols: Number of columns of the actual input matrix.
-
         Returns:
             The absolute column index to extract.
+
 
         Raises:
             ValueError: If the estimated total feature count disagrees with

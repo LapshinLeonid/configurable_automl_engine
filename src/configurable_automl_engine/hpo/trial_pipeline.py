@@ -61,16 +61,7 @@ def _missing_indicator_enabled(algorithm: str | None) -> bool:
     with missing-indicator columns (their input contract is exactly one
     feature), so ``False`` is returned for them. An empty algorithm name or an
     invalid name (unknown algorithm) must not crash the HPO phase — in that
-    case the safe default ``True`` is returned.
-
-    Args:
-        algorithm: Regression algorithm name; it may be
-            ``None``/an empty string before name validation.
-
-    Returns:
-        ``True`` — missing indicators are enabled; ``False`` — the algorithm
-        is strictly univariate.
-    """
+    case the safe default ``True`` is returned."""
     if not algorithm:
         return True
     try:
@@ -103,8 +94,8 @@ def plan_preprocessing(X: Any, request: HpoRequest) -> PreprocessingPlan:
     the input ``X`` is not mutated.
 
     Args:
-        X (Any): The (validated) feature matrix.
-        request (HpoRequest): The run settings.
+        X: The (validated) feature matrix.
+        request: The run settings.
 
     Returns:
         PreprocessingPlan: The cleaned matrix, the column lists, the
@@ -171,9 +162,8 @@ def plan_preprocessing(X: Any, request: HpoRequest) -> PreprocessingPlan:
     # guard for the size-mode ratio ``n / p`` only. Without a preprocessor
     # (np.ndarray input without explicit column lists) the model sees
     # exactly the original columns, so the size count is aligned with the
-    # post-preprocessing count — this preserves the legacy behavior of
-    # direct optimize() calls (no one-hot expansion, the guard sees the
-    # same p it always did).
+    # post-preprocessing count — this keeps direct optimize() calls
+    # free of one-hot expansion (the guard sees the original p).
     n_features_size = max(
         1, int(X.shape[1]) if preprocessor is not None else n_features_eff
     )
@@ -208,20 +198,7 @@ def _build_trial_preprocessor(
     categorical: list[str] | None,
     numerical: list[str] | None,
 ) -> tuple[Any, list[str] | None, list[str] | None]:
-    """Build the trial preprocessor from the column lists or the detected types.
-
-    Args:
-        X (Any): The cleaned feature matrix.
-        algo (str): The lower-cased algorithm name.
-        request (HpoRequest): The run settings.
-        categorical (list[str] | None): The explicit categorical columns.
-        numerical (list[str] | None): The explicit numerical columns.
-
-    Returns:
-        tuple[Any, list[str] | None, list[str] | None]: The preprocessor (or
-            ``None``) and the column lists it was built from (the detected
-            lists when none were passed).
-    """
+    """Build the trial preprocessor from the column lists or the detected types."""
     encoding_strategy: EncodingStrategy = request.encoding.encoding or "one_hot"
     # Automatic preset selection + application of an explicit override.
     # The preset is resolved once before training (performance) and
@@ -293,17 +270,7 @@ def _numeric_feature_count(
     The isotonic ``feature_index`` is restricted to this range (numeric
     columns only; one-hot dummies are not meaningful inputs). Deterministic —
     one column per numerical feature (isotonic disables missing indicators
-    and never expands numeric columns).
-
-    Args:
-        X (Any): The cleaned feature matrix.
-        preprocessor (Any): The trial preprocessor, or ``None``.
-        categorical (list[str] | None): The categorical columns.
-        numerical (list[str] | None): The numerical columns.
-
-    Returns:
-        int | None: The count, or ``None`` when not determinable.
-    """
+    and never expands numeric columns)."""
     if preprocessor is not None and not (categorical or numerical):
         # An external preprocessor without explicit column lists: the
         # numerical block is not determinable.
@@ -336,13 +303,6 @@ def _isotonic_max_feature_index(
       width (``n_features_eff``);
     * no preprocessor (ndarray without column lists) — every column is
       treated as numeric and the index is positional over the raw matrix.
-
-    Args:
-        n_numeric_eff (int | None): The number of numerical features after
-            preprocessing.
-        has_preprocessor (bool): Whether a preprocessor is built.
-        n_features_eff (int): The number of features after preprocessing.
-        n_columns (int): The number of columns of the raw matrix.
 
     Returns:
         int: The inclusive upper bound of the index range (>= 0).
@@ -386,19 +346,7 @@ def _estimate_n_features_after_preprocessing(
     at fit time: columns whose cardinality is strictly greater than the
     threshold use the high-cardinality strategy, the rest — the main
     ``encoding`` strategy (matches
-    :class:`~configurable_automl_engine.preprocessing.SplitCategoricalEncoder`).
-
-    Args:
-        X (Any): The cleaned feature matrix.
-        preprocessor (Any): The trial preprocessor, or ``None``.
-        categorical_features (list[str] | None): The categorical columns.
-        numerical_features (list[str] | None): The numerical columns.
-        encoding (EncodingSettings): The categorical encoding settings.
-        algo (str): The lower-cased algorithm name.
-
-    Returns:
-        int: The estimated feature count (>= 1).
-    """
+    :class:`~configurable_automl_engine.preprocessing.SplitCategoricalEncoder`)."""
     if preprocessor is not None:
         n_out = getattr(preprocessor, "n_features_out_", None)
         if n_out is not None and int(n_out) >= 1:
@@ -507,15 +455,7 @@ def _resolve_apply_fs(
     use_feature_selection category is not offered even in 'auto' mode:
     selection is forcibly disabled (a univariate algorithm with its own
     IsotonicDataTransformer), so the suggestion would be meaningless and
-    the auxiliary key must not leak into best_params.
-
-    Args:
-        trial (Trial): The current Optuna trial object.
-        fs_mode (FeatureSelectionMode): The feature selection mode.
-        is_isotonic (bool): Whether the algorithm is ``isotonic_regression``.
-    Returns:
-        bool: Whether the ``feature_selector`` step should be added to the pipeline.
-    """
+    the auxiliary key must not leak into best_params."""
     if fs_mode == FeatureSelectionMode.auto and not is_isotonic:
         apply_fs = trial.suggest_categorical("use_feature_selection", [True, False])
     elif fs_mode == FeatureSelectionMode.always:
@@ -555,9 +495,6 @@ def _resolve_isotonic_feature_name(
         X: The feature matrix of the run.
         y: The target vector of the run.
         feature_index: The numeric-block-relative index of the best trial.
-
-    Returns:
-        The resolved feature name, or ``None``.
     """
     if preprocessor is None or n_numeric_eff is None:
         return None
@@ -597,9 +534,6 @@ def _fs_transformer_factory(
     Args:
         fs_cfg: The feature selection configuration.
         random_state: The run seed.
-
-    Returns:
-        FeatureSelector: A new, unfitted selector.
     """
     return FeatureSelector(
         method=fs_cfg.method.value,

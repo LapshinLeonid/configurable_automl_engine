@@ -62,12 +62,7 @@ def _warn_on_extension_mismatch(path: Path, fmt: SerializationFormat) -> None:
     and may cause the user to fail when loading, so a warning is emitted
     when the extension does not match the format. If the format is missing
     from the extension reference, no warning is emitted — format correctness
-    is validated in ``save_artifact`` and ``load_artifact``.
-
-    Args:
-        path: Path to the artifact.
-        fmt: Requested serialization format.
-    """
+    is validated in ``save_artifact`` and ``load_artifact``."""
     expected_extensions = _FORMAT_EXTENSIONS.get(fmt)
     if expected_extensions and path.suffix.lower() not in expected_extensions:
         logger.warning(

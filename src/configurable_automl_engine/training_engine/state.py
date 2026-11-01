@@ -37,8 +37,8 @@ class PhaseResult:
     """Result of an HPO phase for a single algorithm.
 
     The single record of the pipeline working set
-    (``PhaseContext.working_set: dict[str, PhaseResult]``): replaces the
-    legacy ``(score, params)`` tuple plus the parallel trials dictionary.
+    (``PhaseContext.working_set: dict[str, PhaseResult]``): the CV score,
+    the best parameters and the parallel trials in one place.
     The select steps narrow the working set by rebuilding the dict — the
     ``trials`` travel with the record automatically (no separate
     synchronization).
@@ -124,8 +124,7 @@ class RobustWinnerResult:
         winner_algo (str): The name of the winning algorithm.
         mode (SanityGateMode): The gate operation mode ('off'/'active').
             Select steps with ``strategy: sanity_gate`` run in ``active`` mode;
-            ``off`` remains the legacy mode of direct calls (CV leader without
-            audit).
+            ``off`` is the plain CV-leader ranking without audit.
         pool (list[str]): The finalists pool order (deterministic tie-break on
             equal RMSE_oof).
         audit (dict[str, SanityCheckResult]): The audit of each finalist
@@ -226,8 +225,8 @@ class PhaseContext:
             the detailed gate audit lives in ``sanity_gate_sections``.
         full_fit_trainers (dict[str, Any]): The ``ModelTrainer`` objects of the
             last ``sanity_gate`` select step, trained on 100% of the data.
-            Cleared by each HPO phase (params are no longer current) and
-            rebuilt by each sanity-select (old full-fit trainers are not
+            Cleared by each HPO phase (its params rebuild the working set)
+            and rebuilt by each sanity-select (full-fit trainers are not
             reused).
         sanity_gate_sections (dict[str, dict[str, Any]]): Report sections of
             the ``sanity_gate`` select steps (key — the phase name).

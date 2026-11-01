@@ -51,13 +51,13 @@ def is_valid_winner_score(score: Any) -> bool:
       sentinel. The threshold covers both the ``HPO_WORST_SCORE`` constant
       (returned by the tuner for non-finite metrics) and the raw
       ``float(np.finfo(np.float32).min)`` value (possible from numpy-cast
-      metrics), which the old ``math.isclose(rel_tol=1e-9)``
+      metrics), which the coarser ``math.isclose(rel_tol=1e-9)``
       filter let through (relative difference ≈ 9.88e-9 > 1e-9). Real metrics
       of such magnitude are practically impossible, so false exclusion is
       ruled out.
 
     Args:
-        score (Any): The raw score value from the HPO phase.
+        score: The raw score value from the HPO phase.
 
     Returns:
         bool: True if the score may end up in ``result["score"]``.
@@ -81,7 +81,7 @@ def select_winner(results: dict[str, PhaseResult]) -> str:
     algorithm wins (documented tie-break).
 
     Args:
-        results (dict[str, PhaseResult]): The "algorithm → PhaseResult" map of
+        results: The "algorithm → PhaseResult" map of
             the current phase. Must not be empty.
 
     Returns:
@@ -130,16 +130,7 @@ def _ge_tol(value: float, limit: float) -> bool:
 
 
 def _family_of(algo_name: str, algorithm_families: Mapping[str, str] | None) -> str:
-    """Resolve the algorithm family (unmapped algorithms are their own family).
-
-    Args:
-        algo_name (str): Algorithm name.
-        algorithm_families (Mapping[str, str] | None): Algorithm → family map,
-            or None when no family classification is provided.
-
-    Returns:
-        str: The family name (the algorithm name itself when unmapped).
-    """
+    """Resolve the algorithm family (unmapped algorithms are their own family)."""
     if algorithm_families is None:
         return algo_name
     return algorithm_families.get(algo_name, algo_name)
@@ -160,75 +151,50 @@ def select_finalists(
 ) -> list[str]:
     """Build the deterministic finalists pool.
 
-    Replaces the "blind" CV-first-place selection with a pool of candidates for
-    the second phase: candidates whose CV score falls inside the δ corridor from
-    the leader, intersected with the hard ``top_k_candidates`` cap. The corridor
-    is expressed in **user** metric semantics (see ``metrics.user_direction``
-    and ``metrics.to_user_value``): raw optimizer scores from ``results`` are
-    converted back to natural values first (the direction comes from
-    ``user_direction``, not from the optimizer's ``greater_is_better``).
+    Candidates whose CV score falls inside the δ corridor from the leader,
+    intersected with the hard ``top_k_candidates`` cap; the corridor is
+    expressed in **user** metric semantics (``metrics.user_direction`` /
+    ``metrics.to_user_value``). The corridor forms and the ``auto`` selection
+    (error → multiplicative, signed score or near-zero best error → additive;
+    the additive form also replaces a multiplicative corridor that would
+    exclude the leader itself) are documented in API_REFERENCE.md
+    ("How the Sanity Gate works").
 
-    Corridor forms (``corridor_mode``):
-    - ``multiplicative`` — min-better metrics (errors):
-      ``Score_CV(m) <= Score_CV_best * (1 + δ)``; max-better metrics (R² etc.):
-      ``Score_CV(m) >= Score_CV_best * (1 - δ)``.
-    - ``additive`` — for metrics where the multiplicative form is incorrect
-      (zero/negative values: R² < 0, MAE ≈ 0):
-      ``|Score_CV(m) - Score_CV_best| <= δ * (max_score - min_score)``, where
-      the range is computed over all valid candidates.
-    - ``auto`` (default) — chosen by the metric type: error → multiplicative,
-      score metric with a possible sign → additive. For error metrics with a
-      practically zero best score (MAE ≈ 0) the multiplicative form would
-      collapse the pool to the leader, so the additive form is used instead.
-    When the multiplicative corridor would exclude the leader itself (e.g. a
-    max-better metric with a negative best score such as R² < 0), the additive
-    form is used instead (documented edge case).
-
-    Combination of filters (explicit): pool = (candidates inside the corridor)
-    ∩ (first ``top_k_candidates`` by CV score). The corridor is the main
-    filter; if it yields fewer candidates than ``top_k_candidates`` the pool
-    contains exactly those — no topping up beyond the corridor, except the
-    optional family-diversity rule below.
-
-    Optional soft family top-up (``enforce_family_diversity``, default False):
-    when the pool represents exactly one algorithm family (linear / ensembles /
-    kernel-GPR) **and that family is permitted by ``allowed_families``**, the
-    best representative of each missing family is added from the *extended*
-    corridor (``family_diversity_multiplier * δ``), never exceeding
-    ``top_k_candidates``. The added families are also restricted to
-    ``allowed_families``; when the pool's single family is not permitted, no
-    top-up happens at all.
-
-    Algorithms disqualified by the circuit breaker never enter the
-    pool.
+    Pool = (candidates inside the corridor) ∩ (first ``top_k_candidates`` by
+    CV score). The corridor is the main filter; if it yields fewer candidates
+    than ``top_k_candidates`` the pool contains exactly those — no topping up
+    beyond the corridor, except the optional family-diversity rule: when the
+    pool is a single algorithm family permitted by ``allowed_families``, the
+    best representative of each missing permitted family is added from the
+    extended corridor (``family_diversity_multiplier * δ``), never exceeding
+    ``top_k_candidates``.
 
     Determinism: the pool is ordered by the raw score descending (optimizer
-    semantics — the same ordering as ``select_winner``); ties keep the
-    insertion order of ``results`` (the configuration order), which is the
-    documented tie-break.
+    semantics); ties keep the insertion order of ``results`` (the
+    configuration order).
 
     Args:
-        results (dict[str, PhaseResult]): HPO phase results "algorithm →
+        results: HPO phase results "algorithm →
             PhaseResult". Must not be empty after removing the disqualified
             algorithms.
-        metric_user (str): User-facing metric name (``general.comparison_metric``);
+        metric_user: User-facing metric name (``general.comparison_metric``);
             used to convert raw scores to user semantics and to pick the
             corridor direction/form.
-        top_k_candidates (int): Hard cap on the pool size (>= 1, default 3).
-        corridor_delta (float): Relative corridor width δ (>= 0, default 0.15).
-        corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'
+        top_k_candidates: Hard cap on the pool size (>= 1, default 3).
+        corridor_delta: Relative corridor width δ (>= 0, default 0.15).
+        corridor_mode: 'multiplicative' | 'additive' | 'auto'
             (default 'auto').
-        enforce_family_diversity (bool): Enable the optional soft family
+        enforce_family_diversity: Enable the optional soft family
             top-up (default False).
-        algorithm_families (Mapping[str, str] | None): Algorithm → family map
+        algorithm_families: Algorithm → family map
             (e.g. 'linear', 'ensemble', 'kernel'). Algorithms absent from the
             map are treated as their own family.
-        allowed_families (set[str] | None): Families participating in the
+        allowed_families: Families participating in the
             top-up rule: the pool's single family must be permitted AND only
             these families may be added; None — all families are permitted.
-        family_diversity_multiplier (float): Width multiplier of the extended
+        family_diversity_multiplier: Width multiplier of the extended
             corridor for the top-up (default 1.5, must be > 0).
-        disqualified (Iterable[str]): Algorithms disqualified by the circuit
+        disqualified: Algorithms disqualified by the circuit
             breaker; they are excluded from the pool.
 
     Returns:
@@ -373,12 +339,7 @@ def _validate_finalists_args(
     corridor_mode: CorridorMode,
     family_diversity_multiplier: float,
 ) -> None:
-    """Validate the arguments of ``select_finalists``.
-
-    Raises:
-        RuntimeError: If ``results`` is empty — no finalists exist.
-        ValueError: If a parameter is out of bounds.
-    """
+    """Validate the arguments of ``select_finalists``."""
     if not results:
         raise RuntimeError("Cannot build a finalists pool from empty results")
     if top_k_candidates < 1:
@@ -397,16 +358,7 @@ def _validate_finalists_args(
 def _effective_corridor_mode(
     corridor_mode: CorridorMode, metric_user: str, best_score: float
 ) -> CorridorMode:
-    """Resolve the ``auto`` corridor form by the metric type.
-
-    Args:
-        corridor_mode (CorridorMode): The configured corridor form.
-        metric_user (str): The user-facing metric name.
-        best_score (float): The leader's score in user semantics.
-
-    Returns:
-        CorridorMode: ``'multiplicative'`` or ``'additive'``.
-    """
+    """Resolve the ``auto`` corridor form by the metric type."""
     if corridor_mode == "auto":
         if is_error_metric(metric_user):
             # Error → multiplicative, except the degenerate case best≈0
@@ -436,14 +388,14 @@ def _family_diversity_topup(
     """Soft family top-up of a single-family finalists pool (in place).
 
     Args:
-        pool (list[str]): The finalists pool (extended in place).
-        candidates (list[str]): The valid candidates in insertion order.
-        ordered (list[str]): The candidates ordered by the raw score.
-        top_k_candidates (int): The hard cap on the pool size.
-        extended_delta (float): The width of the extended corridor.
-        algorithm_families (Mapping[str, str] | None): Algorithm → family map.
-        allowed_families (set[str] | None): Families permitted by the config.
-        in_corridor (Callable[[str, float], bool]): Whether a candidate is
+        pool: The finalists pool (extended in place).
+        candidates: The valid candidates in insertion order.
+        ordered: The candidates ordered by the raw score.
+        top_k_candidates: The hard cap on the pool size.
+        extended_delta: The width of the extended corridor.
+        algorithm_families: Algorithm → family map.
+        allowed_families: Families permitted by the config.
+        in_corridor: Whether a candidate is
             inside the corridor of the given width.
     """
     pool_families = {_family_of(name, algorithm_families) for name in pool}
@@ -513,28 +465,20 @@ def _fit_finalist(
     no duplicated training.
 
     Args:
-        algo_name (str): The algorithm name.
-        algo_cfg (AlgoCfg): The algorithm configuration.
-        X (pd.DataFrame): The full feature matrix.
-        y (pd.Series): The full target vector.
-        best_params (dict[str, Any]): The best hyperparameters from HPO.
-        cfg (Config): The root config.
-        metric_name_sklearn (str): The metric name in sklearn semantics.
-        validation_strategy (ValidationStrategy | str): The resolved
+        algo_name: The algorithm name.
+        algo_cfg: The algorithm configuration.
+        X: The full feature matrix.
+        y: The full target vector.
+        best_params: The best hyperparameters from HPO.
+        cfg: The root config.
+        metric_name_sklearn: The metric name in sklearn semantics.
+        validation_strategy: The resolved
             validation strategy.
-        n_folds (int): The number of folds (for 'k_fold').
-        test_size (float | int): The hold-out size.
-        random_state (int | None): The engine seed (``general.random_state``)
+        n_folds: The number of folds (for 'k_fold').
+        test_size: The hold-out size.
+        random_state: The engine seed (``general.random_state``)
             for the finalist's splits and model seeds; ``None`` — a
             non-reproducible fit.
-
-    Returns:
-        Any: The trained ``ModelTrainer`` (pipeline on 100% of the data, OOF
-            attributes).
-
-    Raises:
-        Exception: Any training error is propagated upward — the calling code
-            (``_train_finalists``) catches it and excludes the finalist.
     """
     trainer = _build_trainer(
         algo_name,
@@ -563,19 +507,7 @@ def _to_candidate(
 
     Computes the derived quantities (``y_pred_full``, ``rmse_full``) exactly
     once from the already-trained trainer; the OOF vector and ``RMSE_oof`` come
-    from the trainer's attributes.
-
-    Args:
-        algo_name (str): The algorithm name.
-        trainer (Any): The trained ``ModelTrainer``.
-        params (dict[str, Any]): The best hyperparameters.
-        cv_score (float): The raw CV score from HPO.
-        X (pd.DataFrame): The full feature matrix.
-        y (pd.Series): The full target vector.
-
-    Returns:
-        FinalistCandidate: A candidate with reusable full-fit vectors.
-    """
+    from the trainer's attributes."""
     y_pred_full = np.asarray(trainer.predict(X), dtype=float).reshape(-1)
     rmse_full: float | None = None
     try:
@@ -609,17 +541,13 @@ def _train_finalists(
     skipped (moving on to the next one).
 
     Args:
-        pool (list[str]): The ordered finalists pool (from ``select_finalists``).
-        phase_results (dict[str, PhaseResult]): HPO results
+        pool: The ordered finalists pool (from ``select_finalists``).
+        phase_results: HPO results
             "algorithm → PhaseResult".
-        cfg (Config): The root config.
-        prepared (PreparedData): The prepared data and settings.
-        random_state (int | None): The engine seed (``general.random_state``)
+        cfg: The root config.
+        prepared: The prepared data and settings.
+        random_state: The engine seed (``general.random_state``)
             forwarded to every finalist's ``ModelTrainer``.
-
-    Returns:
-        dict[str, FinalistCandidate]: Trained candidates (key — the algorithm
-            name), in pool order (the dict preserves insertion order).
     """
     algos = _algorithms_as_dict(cfg.algorithms)
     candidates: dict[str, FinalistCandidate] = {}

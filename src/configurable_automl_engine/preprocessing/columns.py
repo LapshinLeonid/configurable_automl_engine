@@ -59,16 +59,8 @@ def _resolve_column_positions_by_name(
 ) -> list[int]:
     """Map column names to positions in the actual DataFrame.
 
-    Args:
-        X: Input DataFrame against which the mapping is performed.
-        column_names: Column names to select.
-
     Returns:
         List of positions of the selected columns in ``column_names`` order.
-
-    Raises:
-        ValueError: If some of the names are missing from ``X`` or occur more
-            than once in ``X`` (ambiguous selection by name).
     """
     missing = [name for name in column_names if name not in X.columns]
     if missing:
@@ -95,15 +87,8 @@ def _resolve_column_positions_by_order(
     Used as a fallback for inputs without column names (``np.ndarray``):
     the position of a name is determined by its place in ``feature_names``.
 
-    Args:
-        feature_names: Full list of feature names in training order.
-        column_names: Column names to select.
-
     Returns:
         List of positions of the selected columns in ``column_names`` order.
-
-    Raises:
-        ValueError: If a name does not occur in ``feature_names`` exactly once.
     """
     positions: list[int] = []
     for name in column_names:

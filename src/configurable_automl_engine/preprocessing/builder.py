@@ -53,146 +53,78 @@ def build_preprocessor(
 ) -> ColumnTransformer:
     """Build a ColumnTransformer for separate processing of data types.
 
-        The following strategies are supported for categorical features:
+    Supported categorical strategies (details in API_REFERENCE.md,
+    "Categorical encoding"): ``'one_hot'`` (default, sparse one-hot),
+    ``'ordinal'``, ``'target'``, ``'frequency'``, ``'hashing'``. With
+    ``high_cardinality_threshold``/``high_cardinality_encoding`` set, columns
+    above the cardinality threshold are encoded with the high-cardinality
+    strategy and the rest with ``encoding``; the split is computed from the
+    training data inside :class:`SplitCategoricalEncoder`.
 
-        * ``'one_hot'`` (default) — ``OneHotEncoder`` with
-          ``sparse_output=True``: the sparse output avoids the dense
-          ``n × p`` blow-up on high-cardinality columns; the
-          ``ColumnTransformer`` keeps the sparse representation when the
-          total density is below ``sparse_threshold`` and returns a dense
-          matrix otherwise;
-        * ``'ordinal'`` — ``OrdinalEncoder`` (1 output column per column);
-        * ``'target'`` — target encoding with smoothing
-          (:class:`TargetEncodingTransformer`);
-        * ``'frequency'`` — frequency encoding
-          (:class:`FrequencyEncodingTransformer`);
-        * ``'hashing'`` — deterministic hashing into a fixed number of columns
-          (:class:`HashingEncodingTransformer`).
+    Leakage guards: target/frequency statistics are computed only from the
+    training part (on each CV fold the preprocessor is refitted), and target
+    encoding in ``fit_transform`` is cross-fitted — each training row is
+    encoded with means that exclude the row itself.
 
-        When ``high_cardinality_threshold`` and ``high_cardinality_encoding`` are
-        given, the automatic mode is enabled: columns whose number of unique values
-        is strictly greater than the threshold are encoded with the high-cardinality
-        strategy, and the rest — with the ``encoding`` strategy. The split is
-        computed from the training data inside :class:`SplitCategoricalEncoder`, so
-        the same logic applies both in HPO and in final training and prediction.
+    Numerical features are imputed (``imputation_strategy``) and scaled
+    (``scaling``) per the adaptive preprocessing preset; binary missing-value
+    indicators are added by default (``add_indicator=True``) so the model can
+    tell apart a measured value from an imputed one. Indicators are created
+    only for features that had missing values on train, so the output width
+    depends on the data.
 
-    Target/frequency-encoding statistics are computed only from the training
-        part, which prevents data leakage between train and validation: on each CV
-        fold the preprocessor is refitted on the training part of the fold.
-        Additionally, target encoding in :meth:`TargetEncodingTransformer.fit_transform`
-        performs cross-fitting: each training row is encoded with means computed
-        on a fold that excludes the row itself, so the row's own ``y`` does not
-        leak into its own encoded feature (removes the inflated feature-response
-        correlation on training for high-cardinality columns).
+    Columns are selected by name (:class:`ColumnNameSelector`): the column
+    order in ``fit``/``transform`` does not matter; missing/duplicated
+    columns raise an explicit error. ``np.ndarray`` inputs use a positional
+    fallback in the training order of ``feature_names``. With
+    ``encoding='ordinal'`` the integer codes are NOT scaled — for linear
+    models the incomparable scale of high-cardinality codes can dominate the
+    numerical features.
 
-        The numerical feature preprocessing strategy is set by the
-        ``imputation_strategy`` and ``scaling`` parameters and is usually taken
-        from the adaptive preprocessing preset (:mod:`preprocessing_presets`).
+    Args:
+        feature_names: Full list of feature names in column order.
+        categorical_features: Names of the columns encoded with the selected strategy.
+        numerical_features: Names of the columns subject to imputation and scaling.
+        encoding: Categorical encoding strategy (see above).
+        imputation_strategy: ``'mean'`` (default) or ``'median'`` (robust to
+            outliers). Imputation is performed with ``add_indicator=True``.
+        scaling: ``'standard'`` (default), ``'robust'`` or ``'none'``.
+        high_cardinality_threshold: Cardinality threshold (``>= 0``);
+            ``None`` — the automatic mode is disabled (the engine config
+            enables it with threshold 50 + ``'frequency'``).
+        high_cardinality_encoding: Encoding strategy for high-cardinality
+            columns; must be set together with the threshold.
+        hashing_n_components: Number of binary columns per categorical column
+            for ``encoding='hashing'`` (``>= 1``).
+        target_encoding_smoothing: Smoothing parameter of target encoding
+            (``>= 0``); with ``m=0`` the pure per-category mean is used.
+        target_encoding_fallback: Fallback value of target encoding for unknown
+            categories. ``None`` — the global mean of the target variable.
+        random_state: Seed for deterministic hashing encoding.
+        force_dense_output: Forcibly return a dense matrix instead of a sparse
+            one. Enabled for algorithms that reject ``scipy.sparse``
+            (GPR/Isotonic/ARD; see
+            :func:`~configurable_automl_engine.models.requires_dense_input`):
+            with ``sparse_threshold=0.0`` ``ColumnTransformer`` converts sparse
+            parts to dense.
+        add_indicator: Whether to add binary missing-value indicators for
+            numerical features. ``True`` by default; disabled for strictly
+            one-dimensional algorithms (``isotonic_regression``), whose input
+            contract allows exactly one feature (see
+            :func:`~configurable_automl_engine.preprocessing_presets.requires_missing_indicator`).
 
-        Numerical imputation is performed with ``add_indicator=True`` by default
-        (disabled via ``add_indicator=False`` for strictly one-dimensional
-        algorithms): for each numerical feature that had missing values in the
-        training set, a binary indicator column is added
-        (1 — the value was missing, 0 — it was present). The model gets the
-        ability to tell apart "actually measured value" and "value restored by
-        imputation" (for example, in bioprocesses where a missing pH means that
-        pH was not controlled).
+    Returns:
+        A ``ColumnTransformer`` that converts the input DataFrame into a numerical
+        matrix ready to be fed to the model. If no column matched, a
+        passthrough transformer is returned.
 
-        Args:
-            feature_names: Full list of feature names in column order.
-            categorical_features: Names of the columns encoded with the selected strategy.
-            numerical_features: Names of the columns subject to imputation and scaling.
-            encoding: Categorical encoding strategy: ``'one_hot'`` (default,
-                sparse one-hot), ``'ordinal'``, ``'target'``, ``'frequency'``
-                or ``'hashing'``.
-            imputation_strategy: Missing-value imputation strategy for numerical
-                features: ``'mean'`` (default) or ``'median'`` (robust to outliers,
-                accounts for skewed distributions). Imputation is performed with
-                ``add_indicator=True`` — binary missing-value indicators are added
-                for features with missing values in the training set.
-            scaling: Scaling of numerical features: ``'standard'`` (``StandardScaler``,
-                default), ``'robust'`` (``RobustScaler``, robust to outliers) or
-                ``'none'`` (no scaling is applied — the data is passed to the model
-                as is).
-            high_cardinality_threshold: Cardinality threshold (``>= 0``). Columns
-                with a number of unique values strictly greater than the threshold
-                are high-cardinality and encoded with the
-                ``high_cardinality_encoding`` strategy. ``None`` — automatic
-                mode disabled (the low-level default; the engine config enables
-                the mode with threshold 50 + ``'frequency'`` by default).
-            high_cardinality_encoding: Encoding strategy for high-cardinality columns.
-                Must be set together with ``high_cardinality_threshold``.
-            hashing_n_components: Number of binary columns per categorical column
-                for ``encoding='hashing'`` (``>= 1``).
-            target_encoding_smoothing: Smoothing parameter of target encoding
-                (``>= 0``); with ``m=0`` the pure per-category mean is used.
-            target_encoding_fallback: Fallback value of target encoding for unknown
-                categories. ``None`` — the global mean of the target variable.
-            random_state: Seed for deterministic hashing encoding.
-            force_dense_output: Forcibly return a dense matrix instead of a sparse
-                one. Enabled for algorithms that reject ``scipy.sparse``
-                (GPR/Isotonic/ARD; see
-                :func:`~configurable_automl_engine.models.requires_dense_input`):
-                with ``sparse_threshold=0.0`` ``ColumnTransformer`` converts sparse
-                parts to dense. ``False`` by default — the output stays sparse for
-                sparse one-hot / hashing encoding (memory savings).
-            add_indicator: Whether to add binary missing-value indicators for
-                numerical features (``SimpleImputer(add_indicator=...)``). ``True``
-                by default; disabled for strictly one-dimensional algorithms
-                (``isotonic_regression``), whose input contract allows exactly one
-                feature (see
-                :func:`~configurable_automl_engine.preprocessing_presets.requires_missing_indicator`).
-
-        Returns:
-            A ``ColumnTransformer`` that converts the input DataFrame into a numerical
-            matrix ready to be fed to the model. If no column matched, a
-            passthrough transformer is returned (behavior preserved from the
-            trainer).
-
-        Note:
-            Categorical columns are converted to a string object array before
-            imputation and encoding, so ``bool`` columns are handled correctly
-            (without ``SimpleImputer`` failing on the bool dtype).
-
-        Note:
-            Missing-value indicators for numerical features (``add_indicator=True``,
-            ``MissingIndicator(features='missing-only')``) are created only for
-            features with missing values in the training set: a fully populated
-            feature does not produce an indicator, so the number of output columns
-            depends on the data. If at inference a missing value appears in a
-            feature without missing values on train, the value is imputed but no
-            indicator is created. With ``scaling != 'none'`` the indicator columns
-            are standardized by the scaler together with the numerical ones (for
-            trees the step is absent when ``scaling='none'``) — for linear models
-            standardizing a binary flag is acceptable. The indicators are disabled
-            via ``add_indicator=False`` for strictly one-dimensional algorithms
-            (``isotonic_regression``), whose input contract allows exactly one
-            feature. The categorical pipeline does not add indicators:
-            ``SimpleImputer(strategy="most_frequent")`` works without
-            ``add_indicator``.
-
-        Note:
-            Columns are selected by name via :class:`ColumnNameSelector`: for
-            ``pd.DataFrame`` the column order in ``fit``/``transform`` does not
-            matter — the encoder is always applied to categorical columns and the
-            scaler to numerical ones; missing/duplicated columns raise an explicit
-            error. For inputs without names (``np.ndarray``), a positional fallback
-            by the training order of ``feature_names`` is used.
-
-        Note:
-            With ``encoding='ordinal'``, categories are encoded with integer codes
-            that are NOT scaled (unlike numerical columns that go through the
-            scaler). For linear models (e.g., ``elasticnet``), the incomparable
-            scale of codes for high-cardinality categories can dominate the
-            numerical features.
-
-        Raises:
-            ValueError: If a column name from ``categorical_features``/
-                ``numerical_features`` is missing in ``feature_names``, or an
-                invalid value of ``encoding``, ``imputation_strategy`` or
-                ``scaling`` is passed, the high-cardinality parameters are
-                inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
-                are invalid.
+    Raises:
+        ValueError: If a column name from ``categorical_features``/
+            ``numerical_features`` is missing in ``feature_names``, or an
+            invalid value of ``encoding``, ``imputation_strategy`` or
+            ``scaling`` is passed, the high-cardinality parameters are
+            inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
+            are invalid.
     """
     if encoding not in _VALID_ENCODING_STRATEGIES:
         raise ValueError(
@@ -237,9 +169,8 @@ def build_preprocessor(
         )
 
     # Validate that all requested column names are present in the training set
-    # (feature_names). Previously, missing names were silently skipped; now
-    # this is an explicit error — the name-based selector will not be able to
-    # resolve them.
+    # (feature_names): this is an explicit error, because the name-based
+    # selector will not be able to resolve missing names.
     specified_features = list(categorical_features) + list(numerical_features)
     missing_features = [col for col in specified_features if col not in feature_names]
     if missing_features:
