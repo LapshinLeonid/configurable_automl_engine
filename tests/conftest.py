@@ -69,3 +69,19 @@ def _reset_oversampling_experimental_warnings():
     reset_experimental_warnings()
     yield
     reset_experimental_warnings()
+
+
+@pytest.fixture(autouse=True)
+def _reset_allowed_hyperparameters_cache():
+    """Clear the ``get_allowed_hyperparameters`` lru-cache around every test.
+
+    The cache is keyed by algorithm name but consults ``models._FACTORY``,
+    which tests patch (missing dependencies, stub estimators). Clearing it
+    around each test keeps results computed against a patched factory from
+    leaking into other tests regardless of run order or assert failures.
+    """
+    from configurable_automl_engine.models import get_allowed_hyperparameters
+
+    get_allowed_hyperparameters.cache_clear()
+    yield
+    get_allowed_hyperparameters.cache_clear()

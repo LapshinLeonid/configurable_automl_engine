@@ -202,6 +202,47 @@ LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
 # ----------------------------------------------------------------------------- #
 
 
+def _collect_declared_params_from_mro(cls: type) -> tuple[frozenset[str], bool]:
+    """Collect declared constructor params of the parent classes in the MRO.
+
+    Used for a ``**kwargs`` constructor (the ``XGBRegressor`` pattern: its
+    real parameters are declared in ``XGBModel.__init__``). The parameters
+    of every parent in the method resolution order are merged: a parameter
+    is "declared" when it appears in some ``__init__`` signature without
+    being a catch-all ``*args``/``**kwargs``. ``VAR_KEYWORD`` anywhere in
+    the MRO still marks the class as accepting extra keys.
+
+    Args:
+        cls: The estimator class to introspect.
+
+    Returns:
+        ``(accepted_param_names, accepts_var_kwargs)`` — the same shape as
+        :func:`_get_constructor_param_info`.
+    """
+    accepted: set[str] = set()
+    accepts_var_kwargs = False
+    for ancestor in cls.__mro__[1:]:
+        init = ancestor.__dict__.get("__init__")
+        if init is None or not callable(init):
+            continue
+        try:
+            sig = inspect.signature(init)
+        except (TypeError, ValueError):  # pragma: no cover
+            continue
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            if param.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                if param.kind == inspect.Parameter.VAR_KEYWORD:
+                    accepts_var_kwargs = True
+                continue
+            accepted.add(name)
+    return frozenset(accepted), accepts_var_kwargs
+
+
 @lru_cache(maxsize=32)
 def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     """Return accepted constructor param names and whether cls accepts **kwargs.
@@ -209,12 +250,25 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     The result is cached per *class* (not per instance) so that repeated
     introspection during HyperOpt sweeps is O(1) after the first call.
 
+    When the constructor accepts ``**kwargs``, the declared parameters of the
+    parent ``__init__``s in the MRO are merged into the accepted set (see
+    :func:`_collect_declared_params_from_mro`): for a thin ``**kwargs``
+    wrapper like ``XGBRegressor`` the parent declarations are the real
+    accepted names, so hyperparameter validation stays meaningful.
+
+    Limitation of the merge: a parent ``__init__`` may declare a parameter
+    that the class's own ``__init__`` does not forward, so the merged set can
+    contain names a particular ``**kwargs`` subclass rejects. For such a
+    class validation can raise a false "unknown hyperparameter" instead of
+    silently passing the name to the estimator.
+
     Returns
     -------
     tuple[frozenset[str], bool]
         ``(accepted_param_names, accepts_var_kwargs)``
     """
     sig = inspect.signature(cls)
+    # Skip explicit ``self`` and treat ``**kwargs`` as accepting extra keys.
     accepted: set[str] = set()
     accepts_var_kwargs = False
     for name, param in sig.parameters.items():
@@ -224,6 +278,17 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
             accepts_var_kwargs = True
         else:
             accepted.add(name)
+
+    if accepts_var_kwargs:
+        # A ``**kwargs`` constructor is typically a thin wrapper (XGBoost:
+        # ``XGBRegressor(objective, **kwargs)`` delegates everything to
+        # ``XGBModel.__init__``). The declared parameters of the parent
+        # ``__init__``s in the MRO are the real accepted names; merging them
+        # with the class's own named parameters gives the same set that
+        # ``estimator.get_params()`` returns, so a typo can be detected
+        # despite the catch-all. See _collect_declared_params_from_mro.
+        mro_accepted, _ = _collect_declared_params_from_mro(cls)
+        accepted |= mro_accepted
     return frozenset(accepted), accepts_var_kwargs
 
 
@@ -390,9 +455,15 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
     Returns ``None`` when validation must be skipped:
     - the algorithm is unknown or its optional dependency is missing
       (estimator class is ``None``);
-    - the constructor accepts ``**kwargs``, in which case
-      :func:`clean_hyperparameters` keeps every key, so no name can be
-      considered unknown.
+    - the constructor accepts ``**kwargs`` without declaring any named
+      parameter, so no name can be considered unknown (any key would be
+      accepted by the constructor anyway).
+
+    A ``**kwargs`` constructor that still declares named parameters (the
+    ``XGBRegressor(objective, **kwargs)`` pattern, with the real parameters
+    declared in ``XGBModel.__init__``) is validated normally: the allowed
+    set contains the declared names, so a typo fails fast instead of being
+    silently swallowed by ``**kwargs``.
 
     The result is cached per algorithm key.
 
@@ -410,7 +481,10 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
         return None
 
     accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
-    if accepts_var_kwargs:
+    # Unrestricted only when there are NO declared names to validate against
+    # (a bare ``**kwargs`` constructor): with declared names (XGBoost) the
+    # check is meaningful and must run.
+    if accepts_var_kwargs and not accepted_params:
         return None
 
     allowed = set(accepted_params)

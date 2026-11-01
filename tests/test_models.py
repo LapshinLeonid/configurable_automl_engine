@@ -407,6 +407,9 @@ def test_get_allowed_hyperparameters_unknown_algo():
 
 def test_get_allowed_hyperparameters_missing_dependency(monkeypatch):
     """Missing dependency (estimator=None) → None."""
+    # The autouse fixture in conftest.py clears the lru-cache around every
+    # test, so this test cannot pick up a cached real allowed set for
+    # 'xgboosting' computed with xgboost installed.
     monkeypatch.setattr(
         "configurable_automl_engine.models._FACTORY", {"xgboosting": None}
     )
@@ -414,7 +417,7 @@ def test_get_allowed_hyperparameters_missing_dependency(monkeypatch):
 
 
 def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
-    """A constructor with **kwargs does not restrict the param set → None."""
+    """A bare **kwargs constructor without named params → None (no set)."""
 
     class _FlexibleEstimator:
         def __init__(self, **kwargs):
@@ -425,6 +428,57 @@ def test_get_allowed_hyperparameters_var_kwargs_returns_none(monkeypatch):
         {"flex": _FlexibleEstimator},
     )
     assert get_allowed_hyperparameters("flex") is None
+
+
+def test_get_allowed_hyperparameters_var_kwargs_with_named_params(monkeypatch):
+    """A **kwargs constructor that declares named params IS validated.
+
+    ``XGBRegressor`` accepts ``**kwargs``, but its real parameters are
+    declared in ``XGBModel.__init__``. The declared names restrict the
+    allowed set, so unknown names are reported as errors by validation.
+    """
+    pytest.importorskip("xgboost")
+    from xgboost import XGBRegressor
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"flex": XGBRegressor},
+    )
+    allowed = get_allowed_hyperparameters("flex")
+    assert allowed is not None
+    # The declared parameter set is exactly ``get_params(deep=False)`` of
+    # the estimator (both directions), so no extra names slip into the
+    # allowed set and no real parameter is rejected.
+    declared = set(XGBRegressor().get_params(deep=False))
+    assert declared == set(allowed)
+
+
+def test_create_model_rejects_xgboost_typo():
+    """A typo in an xgboosting hyperparameter name raises ValueError.
+
+    ``n_stimators`` (instead of ``n_estimators``) is not silently accepted
+    by the ``**kwargs`` of ``XGBRegressor``: ``create_model`` reports it as
+    an unknown hyperparameter.
+    """
+    pytest.importorskip("xgboost")
+    with pytest.raises(ValueError, match="n_stimators"):
+        create_model("xgboosting", n_stimators=10)
+
+
+def test_get_constructor_param_info_merges_mro_for_var_kwargs():
+    """``_get_constructor_param_info`` merges the declared parent params.
+
+    For a ``**kwargs`` wrapper (XGBoost) the accepted set must include the
+    parameters declared in the parent ``__init__``s (``XGBModel``), matching
+    what ``get_params()`` exposes.
+    """
+    pytest.importorskip("xgboost")
+    from configurable_automl_engine.models import _FACTORY
+
+    accepted, accepts_var_kwargs = _get_constructor_param_info(_FACTORY["xgboosting"])
+    assert accepts_var_kwargs is True
+    assert "n_estimators" in accepted
+    assert "max_depth" in accepted
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -498,7 +552,9 @@ def test_create_model_explicit_none_other_hyperparams_kept(caplog):
     import logging
 
     with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
-        model = create_model("random_forest", n_estimators=10, max_depth=5, random_state=None)
+        model = create_model(
+            "random_forest", n_estimators=10, max_depth=5, random_state=None
+        )
     assert model.random_state is None
     assert model.n_estimators == 10
     assert model.max_depth == 5
