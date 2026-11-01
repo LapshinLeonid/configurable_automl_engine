@@ -182,7 +182,6 @@ If you contribute, please ensure your code:
 # Architecture
 
 If you plan to change the code, read [architecture.md](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/architecture.md) first: it describes how the modules are layered, which imports are allowed and how this is checked in CI.
-```
 
 # ⚠️ NeuroSlop Warning
 
