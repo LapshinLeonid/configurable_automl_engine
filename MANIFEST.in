@@ -1,2 +1,9 @@
 exclude changes.diff
 exclude agents.md
+exclude .gitignore
+exclude requirements.txt
+exclude schema_generator.py
+prune .github
+prune .sourcecraft
+prune scripts
+prune tools

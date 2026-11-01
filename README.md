@@ -5,7 +5,7 @@
 [![codecov](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine/branch/main/graph/badge.svg?token=TAUHARATUM)](https://codecov.io/gh/LapshinLeonid/configurable_automl_engine)
 [![CI](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml/badge.svg)](https://github.com/LapshinLeonid/configurable_automl_engine/actions/workflows/CI.yaml)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![Socket Badge](https://badge.socket.dev/pypi/package/configurable-automl-engine/0.4.0?artifact_id=tar-gz)](https://socket.dev/pypi/package/configurable-automl-engine/overview/0.4.0/tar-gz)
+[![Socket Badge](https://badge.socket.dev/pypi/package/configurable-automl-engine/0.5.0?artifact_id=tar-gz)](https://socket.dev/pypi/package/configurable-automl-engine/overview/0.5.0/tar-gz)
 
 
 AutoML Engine is a configuration-driven automated machine learning library for
@@ -21,32 +21,32 @@ Classification is not supported.
 
 * **Configuration-Driven Architecture** — a YAML/dict config validated before
   training starts: unknown keys, unknown hyperparameter names, missing optional
-  packages and contradictory settings are errors. See [Configuration reference](API_REFERENCE.md#configuration-reference).
+  packages and contradictory settings are errors. See [Configuration reference](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#configuration-reference).
 * **Honest Quality Estimate** — the best trial's validation score is optimistic,
   because it was used to pick the winner. Every run also reports
   `holdout_score` on rows reserved before tuning, or `bbc_score` (Bootstrap
   Bias Corrected CV) when no hold-out is reserved.
-  See [Training results](API_REFERENCE.md#training-results).
+  See [Training results](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#training-results).
 * **Multi-Step Pipelines** — a run is a list of steps (`general.phases`): search
   steps tune hyperparameters, select steps narrow the candidates down to the
-  winner. See [How the engine works](API_REFERENCE.md#how-the-engine-works).
+  winner. See [How the engine works](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#how-the-engine-works).
 * **Sanity Gate** — an optional select strategy that rejects degenerate models
   (constant or step-like predictions, unused features, overfitting) before the
-  winner is chosen. See [Sanity Gate](API_REFERENCE.md#sanity-gate-robust-winner-selection).
+  winner is chosen. See [Sanity Gate](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#sanity-gate-robust-winner-selection).
 * **Flexible Validation Strategies** — KFold, Leave-One-Out, Train-Test Split,
   plus an `auto` strategy that picks between them based on dataset size and
-  dimensionality. See [`ModelTrainer`](API_REFERENCE.md#modeltrainer).
+  dimensionality. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#modeltrainer).
 * **Dynamic Hyperparameter Optimization** — an Optuna wrapper with a built-in
   search space for every algorithm (`{}` is a valid algorithm config).
-  See [`optimize`](API_REFERENCE.md#optimizealgo_name-x-y).
+  See [`optimize`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#optimizealgo_name-x-y).
 * **Extensible Model Factory** — 18 scikit-learn/XGBoost regressors (17 without
   the optional `xgboost` package); `glm` and `tweedieregressor` are two names
-  for the same `TweedieRegressor`. See [Algorithms section](API_REFERENCE.md#algorithms-section).
+  for the same `TweedieRegressor`. See [Algorithms section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#algorithms-section).
 * **Robust Preprocessing Pipeline** — scaling, missing-value imputation,
   categorical encoding, infinite values, date/time columns, per-algorithm
   presets and optional feature selection. See
-  [Categorical encoding](API_REFERENCE.md#categorical-encoding) and
-  [preprocessing presets](API_REFERENCE.md#adaptive-feature-preprocessing-preprocessing-presets).
+  [Categorical encoding](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#categorical-encoding) and
+  [preprocessing presets](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#adaptive-feature-preprocessing-preprocessing-presets).
 * **Parallel Execution Across Algorithms** — algorithms are tuned at the same
   time in threads or processes (`parallel_strategy: "algorithms"`); a config
   with a single algorithm does not get faster with more workers. With
@@ -54,30 +54,30 @@ Classification is not supported.
   `spawn`) and import the main script again: **guard the script's top-level
   code with `if __name__ == "__main__":`**, or set
   `general.start_method: "fork"`. See
-  [`run_parallel`](API_REFERENCE.md#run_parallelfunc-args_seq).
+  [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#run_parallelfunc-args_seq).
 * **Seamless Serialization** — joblib or pickle formats for models, metadata
-  and preprocessing artifacts. See [`ModelTrainer`](API_REFERENCE.md#modeltrainer).
+  and preprocessing artifacts. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#modeltrainer).
 * **Dynamic Search Space Clipping** — hyperparameter boundaries are adjusted
   based on dataset size (e.g. `n_neighbors` capped at `n_samples - 1`). See
-  [Default search spaces](API_REFERENCE.md#algorithms-section).
+  [Default search spaces](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#algorithms-section).
 * **Adaptive Complexity Guard** — tightens the search ranges of trees and
   boosting on small data; disable with `general.complexity_guard`. See
-  [Complexity Guard configuration](API_REFERENCE.md#complexity-guard-configuration-complexity_guard).
+  [Complexity Guard configuration](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#complexity-guard-configuration-complexity_guard).
 * **Broken Algorithm Circuit Breaker** — algorithms are disqualified after
   consecutive fatal failures (`MemoryError`, `RuntimeError`, `InvalidDataError`).
 * **Early Stopping (Pruning)** — optional Optuna-based pruning of unpromising
-  trials. See [Early stopping](API_REFERENCE.md#early-stopping-pruning).
+  trials. See [Early stopping](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#early-stopping-pruning).
 * **Phase/Task Timeouts (process mode only)** — a global timeout for a search
   step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`); with
   `parallel_mode: "threads"` setting either of them is a configuration error.
-  See [`run_parallel`](API_REFERENCE.md#run_parallelfunc-args_seq).
+  See [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#run_parallelfunc-args_seq).
 * **Signature-Aware Hyperparameter Names** — legacy parameter names are
   remapped (e.g. `n_iter` → `max_iter` for ARDRegression); unknown names are
   rejected so typos do not go unnoticed (except `xgboosting`, which accepts
   arbitrary `**kwargs`).
 * ⚠️ **Experimental**: **Target-Aware Oversampling** — random oversampling,
   SMOTE or ADASYN (requires `imbalanced-learn`), applied only to the training
-  part of each fold. See [Oversampling section](API_REFERENCE.md#oversampling-section)
+  part of each fold. See [Oversampling section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#oversampling-section)
 
 # Dependencies
 
@@ -126,7 +126,7 @@ Testing:
 
 # Quick Start
 
-The example can be run from [example.py](example.py). It needs only the basic
+The example can be run from [example.py](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/example.py). It needs only the basic
 installation and takes about a minute on a laptop.
 
 ```python
@@ -158,13 +158,13 @@ What happens here:
 
 * Every setting that is not written has a default: 50 tuning trials per
   algorithm, then the algorithm with the best validation score is the winner
-  (see [How the engine works](API_REFERENCE.md#how-the-engine-works)).
+  (see [How the engine works](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#how-the-engine-works)).
 * The dataset has 442 rows, so by default (`holdout_fraction: "auto"`, data
   with at least 100 rows) 20 % of the rows are reserved **before** tuning.
   `holdout_score` is the winner's R² on these untouched rows.
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
-📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](API_REFERENCE.md).
+📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md).
 
 # Contributing
 
@@ -181,7 +181,7 @@ If you contribute, please ensure your code:
 
 # Architecture
 
-If you plan to change the code, read [ARCHITECTURE.md](ARCHITECTURE.md) first: it describes how the modules are layered, which imports are allowed and how this is checked in CI.
+If you plan to change the code, read [architecture.md](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/architecture.md) first: it describes how the modules are layered, which imports are allowed and how this is checked in CI.
 ```
 
 # ⚠️ NeuroSlop Warning
