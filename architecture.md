@@ -15,8 +15,7 @@ they read their inputs and return a frozen result — a plan
 `training_engine/state.py`) — and the owner assigns it in one visible line.
 `tests/test_ownership.py` checks the rule statically, and the pure steps have
 direct unit tests (inputs unchanged, two calls give equal results). Every
-module logs under its own name (`logging.getLogger(__name__)`). Breaking
-changes are listed in [CHANGELOG.md](CHANGELOG.md).
+module logs under its own name (`logging.getLogger(__name__)`).
 
 ## Import layers
 
@@ -128,7 +127,6 @@ move that thing down.
 ├── tests                                   # Unit and integration test suites
 ├── agents.md                               # Instructions for AI agents in the CI pipeline
 ├── API_REFERENCE.md                        # User guide and API reference
-├── CHANGELOG.md                            # Release notes (breaking changes)
 ├── config.schema.json                      # JSON Schema of the config (generated)
 ├── example.py                              # Quick start example
 └── schema_generator.py                     # Generates config.schema.json from the Pydantic models
