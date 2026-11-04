@@ -25,6 +25,10 @@ from configurable_automl_engine.preprocessing import (
     build_preprocessor,
     detect_feature_types,
 )
+from configurable_automl_engine.preprocessing_presets import (
+    RobustScaling,
+    StandardScaling,
+)
 
 
 def test_detect_feature_types_mixed_dataframe():
@@ -568,7 +572,7 @@ def test_build_preprocessor_invalid_imputation_strategy_raises():
 
 
 def test_build_preprocessor_invalid_scaling_raises():
-    with pytest.raises(ValueError, match="Unknown scaling type"):
+    with pytest.raises(ValueError, match="Unknown scaling spec"):
         build_preprocessor(
             ["a"],
             categorical_features=[],
@@ -1378,3 +1382,153 @@ def test_clean_removes_zero_variance_constant_column_via_preprocessor():
     assert np.isfinite(clean_out).all()
     assert clean_out.shape == (5, 1)
     assert clean_out[:, 0].std() > 0.0
+
+
+# ──────────────────────── Object form of scaling (ScalingSpec) ────────────────────────
+
+
+def test_build_preprocessor_scaling_string_and_object_identical():
+    """The string shorthand and the object form produce identical pipelines."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0, 100.0]})
+    out_ref = None
+    for kwargs in (
+        {"scaling": "robust"},
+        {"scaling": RobustScaling()},
+        {"scaling": {"type": "robust"}},
+    ):
+        preprocessor = build_preprocessor(
+            list(df.columns),
+            categorical_features=[],
+            numerical_features=list(df.columns),
+            imputation_strategy="median",
+            **kwargs,
+        )
+        out = preprocessor.fit_transform(df)
+        if out_ref is None:
+            out_ref = out
+        np.testing.assert_allclose(out, out_ref)
+
+
+def test_build_preprocessor_scaling_robust_custom_quantile_range():
+    """RobustScaler(quantile_range=(10, 90)) inside the pipeline gives the same
+    output as sklearn called directly."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0, 4.0, 100.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling={"type": "robust", "quantile_range": [10, 90]},
+    )
+    out = preprocessor.fit_transform(df)
+    expected = RobustScaler(quantile_range=(10, 90)).fit_transform(df)
+    np.testing.assert_allclose(out, expected)
+    scaler = _num_pipeline(preprocessor).named_steps["scaler"]
+    assert isinstance(scaler, RobustScaler)
+    assert scaler.quantile_range == (10.0, 90.0)
+
+
+def test_build_preprocessor_scaling_robust_without_centering():
+    """with_centering=False is forwarded to RobustScaler."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0, 4.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling=RobustScaling(with_centering=False),
+    )
+    out = preprocessor.fit_transform(df)
+    expected = RobustScaler(with_centering=False).fit_transform(df)
+    np.testing.assert_allclose(out, expected)
+    scaler = _num_pipeline(preprocessor).named_steps["scaler"]
+    assert scaler.with_centering is False
+
+
+def test_build_preprocessor_scaling_object_none_and_standard():
+    """The object NoScaling/StandardScaling forms behave like the shorthands."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0]})
+    no_scaling = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling={"type": "none"},
+    )
+    assert "scaler" not in [s[0] for s in _num_pipeline(no_scaling).steps]
+    standard = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling=StandardScaling(),
+    )
+    assert isinstance(_num_pipeline(standard).named_steps["scaler"], StandardScaler)
+
+
+def test_build_preprocessor_scaling_cross_type_parameter_rejected():
+    """A parameter of another scaling type is rejected at build time."""
+    with pytest.raises(ValueError, match="Unknown scaling spec"):
+        build_preprocessor(
+            ["a"],
+            categorical_features=[],
+            numerical_features=["a"],
+            scaling={"type": "standard", "quantile_range": [10, 90]},
+        )
+
+
+@pytest.mark.parametrize("quantile_range", [[90, 10], [75, 75], [-1, 50], [50, 150]])
+def test_build_preprocessor_scaling_invalid_quantile_range_rejected(quantile_range):
+    """An invalid quantile_range is rejected at build time (model validation)."""
+    with pytest.raises(ValueError, match="quantile_range"):
+        build_preprocessor(
+            ["a"],
+            categorical_features=[],
+            numerical_features=["a"],
+            scaling={"type": "robust", "quantile_range": quantile_range},
+        )
+
+
+def test_build_preprocessor_default_scaling_is_object_standard():
+    """The default scaling of build_preprocessor is the StandardScaling object."""
+    preprocessor = build_preprocessor(
+        ["a"], categorical_features=[], numerical_features=["a"]
+    )
+    assert isinstance(_num_pipeline(preprocessor).named_steps["scaler"], StandardScaler)
+
+
+def test_build_preprocessor_scaling_object_form_scaler_params_exact():
+    """The object form forwards the scaler parameters byte-exact.
+
+    For non-default parameters the pipeline scaler's parameters equal those
+    of the sklearn estimator called directly (not just the quantile_range).
+    """
+    df = pd.DataFrame({"num_a": [1.0, 2.0, 3.0, 4.0, 100.0]})
+    spec = RobustScaling(quantile_range=(10.0, 90.0), with_centering=False)
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling=spec,
+    )
+    pipeline_scaler = _num_pipeline(preprocessor).named_steps["scaler"]
+    direct_scaler = RobustScaler(quantile_range=(10.0, 90.0), with_centering=False)
+
+    assert isinstance(pipeline_scaler, RobustScaler)
+    # Byte-identical constructor parameters.
+    assert pipeline_scaler.get_params() == direct_scaler.get_params()
+    assert (
+        repr(pipeline_scaler.get_params(deep=True))
+        == repr(direct_scaler.get_params(deep=True))
+    )
+    # Identical fitted state (center_/scale_ statistics).
+    pipeline_out = preprocessor.fit_transform(df)
+    fitted_pipeline_scaler = (
+        preprocessor.named_transformers_["num"].named_steps["scaler"]
+    )
+    direct_out = direct_scaler.fit_transform(df.to_numpy().reshape(-1, 1))
+    np.testing.assert_allclose(pipeline_out.ravel(), direct_out.ravel())
+    assert (fitted_pipeline_scaler.center_ is None) == (
+        direct_scaler.center_ is None
+    )
+    if fitted_pipeline_scaler.center_ is not None:
+        np.testing.assert_allclose(
+            fitted_pipeline_scaler.center_, direct_scaler.center_
+        )
+    np.testing.assert_allclose(fitted_pipeline_scaler.scale_, direct_scaler.scale_)

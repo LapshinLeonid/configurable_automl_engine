@@ -37,7 +37,7 @@ def test_preset_only_no_overrides():
     """No overrides: the automatic class preset is used unchanged."""
     preset = resolve_preprocessing_preset("ridge")
     assert preset.imputation_strategy == "mean"
-    assert preset.scaling == "standard"
+    assert preset.scaling.type == "standard"
 
 
 def test_general_only_overrides_the_preset():
@@ -47,13 +47,13 @@ def test_general_only_overrides_the_preset():
     )
     assert preset.imputation_strategy == "median"
     # The field the general block leaves unset keeps the preset value.
-    assert preset.scaling == "standard"
+    assert preset.scaling.type == "standard"
 
 
 def test_algorithm_only_overrides_the_preset():
     """A field set only in the algorithm block replaces the preset field."""
     preset = resolve_preprocessing_preset("ridge", {"scaling": "none"})
-    assert preset.scaling == "none"
+    assert preset.scaling.type == "none"
     assert preset.imputation_strategy == "mean"
 
 
@@ -65,7 +65,7 @@ def test_general_and_algorithm_together_algorithm_wins():
         default_override={"imputation_strategy": "median", "scaling": "robust"},
     )
     assert preset.imputation_strategy == "mean"
-    assert preset.scaling == "none"
+    assert preset.scaling.type == "none"
 
 
 def test_unset_algorithm_field_falls_through_to_general():
@@ -76,7 +76,7 @@ def test_unset_algorithm_field_falls_through_to_general():
         default_override={"imputation_strategy": "median"},
     )
     assert preset.imputation_strategy == "median"
-    assert preset.scaling == "none"
+    assert preset.scaling.type == "none"
 
 
 def test_unset_general_field_falls_through_to_preset():
@@ -87,7 +87,7 @@ def test_unset_general_field_falls_through_to_preset():
         default_override={"scaling": "robust"},
     )
     assert preset.imputation_strategy == "mean"
-    assert preset.scaling == "robust"
+    assert preset.scaling.type == "robust"
 
 
 def test_default_override_accepts_model_instance():
@@ -95,7 +95,7 @@ def test_default_override_accepts_model_instance():
     default = PreprocessingOverride(imputation_strategy="median")
     preset = resolve_preprocessing_preset("random_forest", default_override=default)
     assert preset.imputation_strategy == "median"
-    assert preset.scaling == "none"
+    assert preset.scaling.type == "none"
 
 
 def test_default_override_invalid_value_rejected():
@@ -136,7 +136,7 @@ def test_merge_specific_wins_per_field():
         {"scaling": "none"},
     )
     assert merged.imputation_strategy == "median"
-    assert merged.scaling == "none"
+    assert merged.scaling.type == "none"
 
 
 def test_merge_unset_field_falls_through():
@@ -145,14 +145,14 @@ def test_merge_unset_field_falls_through():
         {"imputation_strategy": "median"}, {"scaling": "none"}
     )
     assert merged.imputation_strategy == "median"
-    assert merged.scaling == "none"
+    assert merged.scaling.type == "none"
 
 
 def test_merge_none_specific_gives_specific():
     """Without a general block the result is the coerced algorithm block."""
     merged = merge_preprocessing_overrides(None, {"scaling": "none"})
     assert merged.imputation_strategy is None
-    assert merged.scaling == "none"
+    assert merged.scaling.type == "none"
 
 
 def test_merge_does_not_mutate_inputs():
@@ -162,7 +162,7 @@ def test_merge_does_not_mutate_inputs():
     merged = merge_preprocessing_overrides(default, specific)
     assert merged.imputation_strategy == "median"
     assert default.imputation_strategy == "median"
-    assert specific.scaling == "none"
+    assert specific.scaling.type == "none"
 
 
 def test_merge_rejects_unknown_keys():
@@ -290,7 +290,7 @@ def test_engine_passes_general_default_and_parity_holds(
     assert trainer.preprocessing_preset == hpo_preset
     # The general level applied; no algorithm block was configured.
     assert trainer.preprocessing_preset.imputation_strategy == "median"
-    assert trainer.preprocessing_preset.scaling == "standard"
+    assert trainer.preprocessing_preset.scaling.type == "standard"
 
 
 def test_engine_parity_with_algorithm_override(tmp_path: Path, monkeypatch):
@@ -331,7 +331,7 @@ def test_engine_parity_with_algorithm_override(tmp_path: Path, monkeypatch):
     assert trainer.preprocessing_preset == hpo_preset
     # The algorithm level won on both fields.
     assert trainer.preprocessing_preset.imputation_strategy == "mean"
-    assert trainer.preprocessing_preset.scaling == "robust"
+    assert trainer.preprocessing_preset.scaling.type == "robust"
 
 
 def test_config_without_general_block_unchanged(tmp_path: Path, monkeypatch):
@@ -363,4 +363,4 @@ def test_config_without_general_block_unchanged(tmp_path: Path, monkeypatch):
     trainer = ModelTrainer.load(res["model_path"])
     assert trainer.preprocessing_preset == resolve_preprocessing_preset("ridge")
     assert trainer.preprocessing_preset.imputation_strategy == "mean"
-    assert trainer.preprocessing_preset.scaling == "standard"
+    assert trainer.preprocessing_preset.scaling.type == "standard"

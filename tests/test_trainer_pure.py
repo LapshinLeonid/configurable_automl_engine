@@ -221,7 +221,7 @@ def test_build_trainer_preprocessor(caplog: pytest.LogCaptureFixture) -> None:
         )
 
     assert isinstance(setup.preprocessor, ColumnTransformer)
-    assert setup.preset.scaling == "standard"
+    assert setup.preset.scaling.type == "standard"
     assert "Resolved preprocessing preset for algorithm 'ridge'" in caplog.text
 
 

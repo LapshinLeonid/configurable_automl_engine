@@ -916,13 +916,13 @@ def test_algo_cfg_preprocessing_valid_override():
     cfg = AlgoCfg(preprocessing={"imputation_strategy": "median", "scaling": "none"})
     assert cfg.preprocessing is not None
     assert cfg.preprocessing.imputation_strategy == "median"
-    assert cfg.preprocessing.scaling == "none"
+    assert cfg.preprocessing.scaling.type == "none"
 
 
 def test_algo_cfg_preprocessing_partial_override():
     """Partial override: unset fields remain None."""
     cfg = AlgoCfg(preprocessing={"scaling": "robust"})
-    assert cfg.preprocessing.scaling == "robust"
+    assert cfg.preprocessing.scaling.type == "robust"
     assert cfg.preprocessing.imputation_strategy is None
 
 
@@ -962,7 +962,7 @@ def test_config_preprocessing_override_end_to_end():
     cfg = Config.model_validate(cfg_data)
     algo_cfg = getattr(cfg.algorithms, "elasticnet")
     assert algo_cfg.preprocessing.imputation_strategy == "median"
-    assert algo_cfg.preprocessing.scaling is None
+    assert algo_cfg.preprocessing.scaling is None  # unchanged
 
 
 def test_hyperparameter_compatibility_error():

@@ -1026,14 +1026,28 @@ algorithms:
     enable: true
     preprocessing:
       imputation_strategy: median   # optional: "mean" | "median"
-      scaling: standard              # optional: "standard" | "robust" | "none"
+      scaling: standard             # optional: string shorthand "standard" | "robust" | "none"
+                                    # or an object form (see "Composition of a preset")
 ```
 
-Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message.
+The `scaling` field additionally accepts an **object form** with the scaler's parameters:
+
+```yaml
+algorithms:
+  poissonregressor:
+    enable: true
+    preprocessing:
+      scaling:
+        type: robust
+        quantile_range: [10, 90]   # 0 <= low < high <= 100
+        with_centering: true       # optional, default true
+```
+
+Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message: a parameter that belongs to another scaling type (e.g. `quantile_range` with `type: standard`), an invalid `quantile_range` (`low >= high` or a value outside `[0, 100]`) and unknown types are all rejected.
 
 ## Adaptive Feature Preprocessing (preprocessing presets)
 
-The engine automatically chooses the feature preprocessing strategy based on the selected regression algorithm. A **preprocessing preset** declaratively describes the numeric-feature handling rules: the missing-value imputation strategy and whether/how scaling is applied. Each supported algorithm is assigned to an **algorithm class** with common preprocessing requirements; membership is fixed in the default mapping table (see [`preprocessing_presets.py`](src/configurable_automl_engine/preprocessing_presets.py)) — adding a new algorithm only requires registering it there.
+The engine automatically chooses the feature preprocessing strategy based on the selected regression algorithm. A **preprocessing preset** declaratively describes the numeric-feature handling rules: the missing-value imputation strategy and the scaling configuration (whether scaling is applied, its type and the scaler's parameters — see "Composition of a preset"). Each supported algorithm is assigned to an **algorithm class** with common preprocessing requirements; membership is fixed in the default mapping table (see [`preprocessing_presets.py`](src/configurable_automl_engine/preprocessing_presets.py)) — adding a new algorithm only requires registering it there.
 
 ### Algorithm classes
 
@@ -1052,7 +1066,18 @@ Unknown algorithm names (typos) are rejected with a `ValueError` listing the ava
 Each preset defines:
 
 * `imputation_strategy` — missing-value imputation strategy for numeric features: `mean` (standard) or `median` (robust to outliers / skewed distributions).
-* `scaling` — whether scaling is needed and its type: `standard` (`StandardScaler`), `robust` (`RobustScaler`, robust to outliers), or `none` (numeric features are passed to the model without scaling).
+* `scaling` — the scaling configuration of numeric features. It accepts a **string shorthand** (`standard` — `StandardScaler`, `robust` — `RobustScaler` (robust to outliers), `none` — numeric features are passed to the model without scaling) or an **object form** with the scaler's parameters. The shorthand is normalized to its object form, so both forms produce identical pipelines:
+
+```yaml
+scaling: standard                    # shorthand of {"type": "standard"}
+scaling: none                        # shorthand of {"type": "none"}
+scaling:
+  type: robust                       # RobustScaler parameters
+  quantile_range: [25.0, 75.0]       # optional; 0 <= low < high <= 100
+  with_centering: true               # optional; center the data with the median
+```
+
+The resolved preset is always stored in the object form (`StandardScaling` / `RobustScaling` / `NoScaling`); the resolved-preset log line shows the parameters, e.g. `scaling=robust(q=(10.0, 90.0))`.
 
 ### Selection and override rules
 
@@ -1225,7 +1250,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `space_overrides` | `dict[str, Callable \| dict]` or `None` | `None` | Search space overrides keyed by the algorithm name. `None` (or no entry for `algo_name`) — the algorithm's default space (`DEFAULT_SPACES`), the same one a config run without `hyperparameters` searches. A value is one of three forms: a callable `space_fn(trial) -> dict` (used as is); a dict of `SearchSpaceEntry` objects; or a dict of shorthand lists as in the config (`[low, high]`, `[low, high, "int"\|"float"\|"float_log"]`, `[options, "categorical"]`; an untyped range is re-typed against the parameter type like in the config). A dict is merged over `DEFAULT_SPACES` (a partial override searches the listed ranges plus every other default range); with `limit_hyperparameters=True` only the listed parameters are searched. Dict spaces go through the same clipping and complexity guard as a config run. An algorithm without a default space needs an override. |
 | `initial_params` | `dict[str, Any]` or `None` | `None` | Hyperparameters from the previous HPO phase, enqueued as the first trial (`enqueue_trial`) — the "monotonicity anchor" between phases. |
 | `previous_trials` | `list[optuna.trial.FrozenTrial]` or `None` | `None` | Trials of the previous HPO phase to be transferred into the new study via `study.add_trials` (the TPE history warm-start). Transferred BEFORE `enqueue_trial`/`optimize`; they feed the TPE sampler but never count as the current phase's own trials. Empty list — no-op. Trials whose distributions are incompatible with the current search space raise `HPOHistoryError` (fail fast). |
-| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`) or full overrides are supported; takes priority over automatic class-based selection. |
+| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`, `{"scaling": {"type": "robust", "quantile_range": [10, 90]}}`) or full overrides are supported; takes priority over automatic class-based selection. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 | `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the defaults of `general.complexity_guard` (mode `apply`); `{"mode": "off"}` disables the guard. When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
@@ -1349,7 +1374,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 
 **Key attributes:**
 
-* `preprocessing_preset` — the resolved `PreprocessingPreset` (algorithm class, imputation strategy, scaling type) applied during `fit()`. Useful for observability and serialization.
+* `preprocessing_preset` — the resolved `PreprocessingPreset` (algorithm class, imputation strategy, scaling configuration) applied during `fit()`. Useful for observability and serialization.
 
 **Key methods:**
 

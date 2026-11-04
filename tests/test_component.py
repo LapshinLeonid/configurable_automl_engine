@@ -2415,7 +2415,7 @@ def test_build_hpo_request_passes_preprocessing_override():
 
     received = request.preprocessing_override
     assert isinstance(received, PreprocessingOverride)
-    assert received.scaling == "none"
+    assert received.scaling.type == "none"
     assert received.imputation_strategy == "median"
 
 
@@ -2470,7 +2470,7 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
 
     loaded = ModelTrainer.load(result["model_path"])
     assert loaded.algorithm == "random_forest"
-    assert loaded.preprocessing_preset.scaling == "standard"
+    assert loaded.preprocessing_preset.scaling.type == "standard"
     assert loaded.preprocessing_preset.imputation_strategy == "mean"
 
     preprocessor = loaded.pipeline.named_steps["preprocessor"]
@@ -2480,6 +2480,69 @@ def test_train_best_model_applies_preprocessing_override(tmp_path, regression_da
     num = transformers["num"]
     assert isinstance(num.named_steps["scaler"], StandardScaler)
     assert num.named_steps["imputer"].strategy == "mean"
+
+
+def test_train_best_model_applies_object_scaling_with_parameters(
+    tmp_path, regression_dataset, caplog
+):
+    """Acceptance: an object-form scaling override with parameters is validated,
+    applied in HPO and in the final fit, and logged.
+
+    ``poissonregressor`` gets the GLM preset (median + robust); an explicit
+    ``{'type': 'robust', 'quantile_range': [10, 90]}`` override must win in
+    both phases and appear in the resolved-preset log lines.
+    """
+    import logging as _logging
+
+    from sklearn.preprocessing import RobustScaler
+
+    from configurable_automl_engine.trainer import ModelTrainer
+
+    model_path = tmp_path / "best.pkl"
+    config = {
+        "general": {
+            "comparison_metric": "r2",
+            "path_to_model": str(model_path),
+            "validation_strategy": "train_test_split",
+            "phases": [
+                {"name": "search", "n_trials": 2, "action": "all_algorithms"},
+                {
+                    "name": "final",
+                    "n_trials": 1,
+                    "action": "select",
+                    "strategy": "cv_best",
+                    "output": "winner",
+                },
+            ],
+        },
+        "algorithms": {
+            "poissonregressor": {
+                "enable": True,
+                "preprocessing": {
+                    "scaling": {"type": "robust", "quantile_range": [10, 90]},
+                },
+            },
+        },
+    }
+
+    with caplog.at_level(_logging.INFO, logger="configurable_automl_engine"):
+        result = train_best_model(
+            config=config, df=regression_dataset, target="yield_score"
+        )
+
+    # The resolved preset is logged with the parameters (HPO and final fit).
+    assert "Resolved preprocessing preset" in caplog.text
+    assert "robust(q=(10.0, 90.0))" in caplog.text
+
+    loaded = ModelTrainer.load(result["model_path"])
+    assert loaded.algorithm == "poissonregressor"
+    assert loaded.preprocessing_preset.scaling.type == "robust"
+    assert loaded.preprocessing_preset.scaling.quantile_range == (10.0, 90.0)
+
+    num = loaded.pipeline.named_steps["preprocessor"].named_transformers_["num"]
+    scaler = num.named_steps["scaler"]
+    assert isinstance(scaler, RobustScaler)
+    assert scaler.quantile_range == (10.0, 90.0)
 
 
 # --------------------------------------------------------------------------- #

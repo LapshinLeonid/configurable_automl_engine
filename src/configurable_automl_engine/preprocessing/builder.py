@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from pydantic import ValidationError
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -29,10 +30,20 @@ from configurable_automl_engine.preprocessing.encoders import (
 )
 from configurable_automl_engine.preprocessing_presets import (
     ImputationStrategy,
-    ScalingType,
+    NoScaling,
+    ObjectScalingSpec,
+    RobustScaling,
+    ScalingSpec,
+    StandardScaling,
+    coerce_scaling,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Module-level default of the ``scaling`` argument: a singleton spec
+#: instance. The spec models are frozen (``ConfigDict(frozen=True)``), so the
+#: shared default cannot be mutated by a caller.
+_DEFAULT_SCALING = StandardScaling()
 
 
 def build_preprocessor(
@@ -41,7 +52,7 @@ def build_preprocessor(
     numerical_features: list[str],
     encoding: EncodingStrategy = "one_hot",
     imputation_strategy: ImputationStrategy = "mean",
-    scaling: ScalingType = "standard",
+    scaling: ScalingSpec = _DEFAULT_SCALING,
     high_cardinality_threshold: int | None = None,
     high_cardinality_encoding: EncodingStrategy | None = None,
     hashing_n_components: int = 16,
@@ -88,7 +99,13 @@ def build_preprocessor(
         encoding: Categorical encoding strategy (see above).
         imputation_strategy: ``'mean'`` (default) or ``'median'`` (robust to
             outliers). Imputation is performed with ``add_indicator=True``.
-        scaling: ``'standard'`` (default), ``'robust'`` or ``'none'``.
+        scaling: The scaler configuration: a string shorthand (``'standard'``
+            (default), ``'robust'`` or ``'none'``) or a
+            :class:`~configurable_automl_engine.preprocessing_presets.ScalingSpec`
+            object (``StandardScaling`` / ``RobustScaling`` with
+            ``quantile_range``/``with_centering`` / ``NoScaling``). The
+            shorthand is normalized to its object form; validation happens
+            through the model.
         high_cardinality_threshold: Cardinality threshold (``>= 0``);
             ``None`` — the automatic mode is disabled (the engine config
             enables it with threshold 50 + ``'frequency'``).
@@ -122,7 +139,9 @@ def build_preprocessor(
         ValueError: If a column name from ``categorical_features``/
             ``numerical_features`` is missing in ``feature_names``, or an
             invalid value of ``encoding``, ``imputation_strategy`` or
-            ``scaling`` is passed, the high-cardinality parameters are
+            ``scaling`` is passed (an invalid scaling spec is rejected by
+            the :class:`~configurable_automl_engine.preprocessing_presets.ScalingSpec`
+            model), the high-cardinality parameters are
             inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
             are invalid.
     """
@@ -162,11 +181,13 @@ def build_preprocessor(
             f"Unknown imputation strategy: {imputation_strategy!r}. "
             "Expected one of ('mean', 'median')."
         )
-    if scaling not in ("standard", "robust", "none"):
-        raise ValueError(
-            f"Unknown scaling type: {scaling!r}. "
-            "Expected one of ('standard', 'robust', 'none')."
-        )
+    # Validation of the scaling spec happens through the model (type
+    # discriminator, quantile_range bounds, extra='forbid'); the string
+    # shorthand is normalized to its object form here.
+    try:
+        scaling_spec = coerce_scaling(scaling)
+    except ValidationError as err:
+        raise ValueError(f"Unknown scaling spec: {scaling!r}. {err}") from err
 
     # Validate that all requested column names are present in the training set
     # (feature_names): this is an explicit error, because the name-based
@@ -200,7 +221,7 @@ def build_preprocessor(
     # add_indicator=True adds a binary missing-value flag for each numerical
     # feature that had missing values in the training set: the model gets the
     # ability to tell apart "actually measured value" from "value restored by
-    # imputation". With scaling='none' the scaling step is absent — the data
+    # imputation". With a NoScaling spec the scaling step is absent — the data
     # is passed to the model without it (for trees and ensembles).
     num_steps: list[tuple[str, object]] = [
         (
@@ -208,8 +229,8 @@ def build_preprocessor(
             SimpleImputer(strategy=imputation_strategy, add_indicator=add_indicator),
         )
     ]
-    if scaling != "none":
-        scaler = RobustScaler() if scaling == "robust" else StandardScaler()
+    scaler = _build_scaler(scaling_spec)
+    if scaler is not None:
         num_steps.append(("scaler", scaler))
     num_transformer = Pipeline(steps=num_steps)
 
@@ -266,3 +287,27 @@ def build_preprocessor(
         # sparse_threshold=0.3 applies (csr for any sparse part).
         sparse_threshold=0.0 if force_dense_output else 0.3,
     )
+
+
+def _build_scaler(
+    scaling_spec: ObjectScalingSpec,
+) -> RobustScaler | StandardScaler | None:
+    """Build the scaler from a validated scaling spec.
+
+    Args:
+        scaling_spec: The object form of a scaling specification
+            (the output of :func:`coerce_scaling`).
+
+    Returns:
+        A ``RobustScaler``/``StandardScaler`` configured from the spec, or
+        ``None`` for a ``NoScaling`` spec (the scaling step is omitted).
+    """
+    if isinstance(scaling_spec, NoScaling):
+        return None
+    if isinstance(scaling_spec, RobustScaling):
+        return RobustScaler(
+            quantile_range=scaling_spec.quantile_range,
+            with_centering=scaling_spec.with_centering,
+        )
+    # StandardScaling — the only remaining member of the ScalingSpec union.
+    return StandardScaler()

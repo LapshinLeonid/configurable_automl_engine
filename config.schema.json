@@ -42,7 +42,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
+          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' — a string shorthand ('standard'|'robust'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool}). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
         }
       },
       "title": "AlgoCfg",
@@ -963,6 +963,21 @@
       "title": "IntSpace",
       "type": "object"
     },
+    "NoScaling": {
+      "additionalProperties": false,
+      "description": "No scaling: numeric features are passed to the model unscaled.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"none\"``).",
+      "properties": {
+        "type": {
+          "const": "none",
+          "default": "none",
+          "description": "The scaling type: no scaling is applied.",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "NoScaling",
+      "type": "object"
+    },
     "OversamplingAlgorithm": {
       "enum": [
         "random",
@@ -1049,19 +1064,37 @@
         "scaling": {
           "anyOf": [
             {
-              "enum": [
-                "standard",
-                "robust",
-                "none"
+              "anyOf": [
+                {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/StandardScaling"
+                    },
+                    {
+                      "$ref": "#/$defs/RobustScaling"
+                    },
+                    {
+                      "$ref": "#/$defs/NoScaling"
+                    }
+                  ]
+                },
+                {
+                  "enum": [
+                    "standard",
+                    "robust",
+                    "none"
+                  ],
+                  "type": "string"
+                }
               ],
-              "type": "string"
+              "description": "Scaling of numeric features: a string shorthand ('standard' | 'robust' | 'none') or an object ({'type': 'standard'} | {'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} | {'type': 'none'})."
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Scaling override ('standard', 'robust' or 'none'). None — automatic selection.",
+          "description": "Scaling override: a string shorthand ('standard', 'robust' or 'none'), an object ({'type': 'robust', 'quantile_range': [low, high], ...}) or None (automatic selection). The shorthand is normalized to its object form.",
           "title": "Scaling"
         }
       },
@@ -1116,6 +1149,46 @@
       ],
       "title": "PruningStrategy",
       "type": "string"
+    },
+    "RobustScaling": {
+      "additionalProperties": false,
+      "description": "Robust scaling: :class:`sklearn.preprocessing.RobustScaler`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"robust\"``).\n    quantile_range: The ``(low, high)`` quantiles used by the scaler:\n        ``0 <= low < high <= 100``.\n    with_centering: Whether to center the data with the median before\n        scaling.",
+      "properties": {
+        "type": {
+          "const": "robust",
+          "default": "robust",
+          "description": "The scaling type: RobustScaler (median centering and quantile range; robust to outliers).",
+          "title": "Type",
+          "type": "string"
+        },
+        "quantile_range": {
+          "default": [
+            25.0,
+            75.0
+          ],
+          "description": "The (low, high) quantiles of RobustScaler: 0 <= low < high <= 100.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Quantile Range",
+          "type": "array"
+        },
+        "with_centering": {
+          "default": true,
+          "description": "Center the data with the median before scaling.",
+          "title": "With Centering",
+          "type": "boolean"
+        }
+      },
+      "title": "RobustScaling",
+      "type": "object"
     },
     "SanityGateCfg": {
       "additionalProperties": false,
@@ -1375,6 +1448,21 @@
       ],
       "title": "SerializationFormat",
       "type": "string"
+    },
+    "StandardScaling": {
+      "additionalProperties": false,
+      "description": "Standard scaling: :class:`sklearn.preprocessing.StandardScaler`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"standard\"``).",
+      "properties": {
+        "type": {
+          "const": "standard",
+          "default": "standard",
+          "description": "The scaling type: StandardScaler (zero mean, unit variance).",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "StandardScaling",
+      "type": "object"
     },
     "ValidationStrategy": {
       "description": "Allowed validation strategies for hyperopt.",

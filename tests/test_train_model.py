@@ -1381,7 +1381,7 @@ def test_trainer_scale_sensitive_has_standard_scaler():
     assert isinstance(num.named_steps["scaler"], StandardScaler)
     assert num.named_steps["imputer"].strategy == "mean"
     assert trainer.preprocessing_preset is not None
-    assert trainer.preprocessing_preset.scaling == "standard"
+    assert trainer.preprocessing_preset.scaling.type == "standard"
 
 
 def test_trainer_tree_has_no_scaler():
@@ -1393,7 +1393,7 @@ def test_trainer_tree_has_no_scaler():
     step_names = [s[0] for s in num.steps]
     assert "scaler" not in step_names
     assert num.named_steps["imputer"].strategy == "median"
-    assert trainer.preprocessing_preset.scaling == "none"
+    assert trainer.preprocessing_preset.scaling.type == "none"
 
 
 def test_trainer_glm_uses_robust_scaler_and_median():
@@ -1419,7 +1419,7 @@ def test_trainer_univariate_no_scaling():
     X1 = pd.DataFrame({"a": rng.permutation(np.linspace(0, 1, 50))})
     y1 = pd.Series(X1["a"] * 2.0 + rng.randn(50) * 0.05)
     trainer = ModelTrainer(algorithm="isotonic_regression").fit(X1, y1)
-    assert trainer.preprocessing_preset.scaling == "none"
+    assert trainer.preprocessing_preset.scaling.type == "none"
     num = _num_transformer_of(trainer)
     assert "scaler" not in [s[0] for s in num.steps]
 
@@ -1532,7 +1532,59 @@ def test_trainer_preset_survives_save_load(tmp_path):
     trainer.save(pkl)
     restored = ModelTrainer.load(pkl)
     assert restored.preprocessing_preset == trainer.preprocessing_preset
-    assert restored.preprocessing_preset.scaling == "standard"
+    assert restored.preprocessing_preset.scaling.type == "standard"
+
+
+def test_trainer_pipeline_steps_and_predictions_identical_after_pickle():
+    """Regression: for configs that do not use the new scaling parameters,
+    the pickled Pipeline.steps and predictions are identical (structural)."""
+    import pickle
+
+    trainer = ModelTrainer(algorithm="ridge", hyperparams={"alpha": 0.1}).fit(X, y)
+    restored = pickle.loads(pickle.dumps(trainer))
+
+    # Step names and scaler/imputer types stay the same.
+    steps_a = [(name, type(step).__name__) for name, step in trainer.pipeline.steps]
+    steps_b = [(name, type(step).__name__) for name, step in restored.pipeline.steps]
+    assert steps_a == steps_b
+
+    pre_a = trainer.pipeline.named_steps["preprocessor"]
+    pre_b = restored.pipeline.named_steps["preprocessor"]
+    num_a = pre_a.named_transformers_["num"].named_steps
+    num_b = pre_b.named_transformers_["num"].named_steps
+    assert type(num_a["scaler"]) is type(num_b["scaler"])  # noqa: E721
+    assert num_a["scaler"].get_params() == num_b["scaler"].get_params()
+    assert num_a["imputer"].get_params().keys() == num_b["imputer"].get_params().keys()
+    for key in num_a["imputer"].get_params():
+        va, vb = num_a["imputer"].get_params()[key], num_b["imputer"].get_params()[key]
+        same = (np.isnan(va) and np.isnan(vb)) if (
+            isinstance(va, float) and isinstance(vb, float)
+        ) else va == vb
+        assert same, key
+
+    np.testing.assert_allclose(trainer.predict(X), restored.predict(X))
+
+
+def test_trainer_accepts_object_scaling_override():
+    """A trainer accepts an object-form scaling override with parameters."""
+    from configurable_automl_engine.preprocessing_presets import RobustScaling
+
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        hyperparams={"alpha": 0.1},
+        preprocessing_override={
+            "scaling": RobustScaling(quantile_range=(10.0, 90.0))
+        },
+    ).fit(X, y)
+    num = _num_transformer_of(trainer)
+    scaler = num.named_steps["scaler"]
+    assert isinstance(scaler, RobustScaler)
+    assert scaler.quantile_range == (10.0, 90.0)
+    assert trainer.preprocessing_preset.scaling == RobustScaling(
+        quantile_range=(10.0, 90.0)
+    )
+    # The log line shows the parameters.
+    assert "robust(q=(10.0, 90.0))" in trainer.preprocessing_preset.__str__()
 
 
 # ────────────────── Column order safety in predict ──────────────────
