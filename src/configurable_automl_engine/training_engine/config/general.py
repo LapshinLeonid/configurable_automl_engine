@@ -12,7 +12,7 @@ it.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import (
     ParallelStrategy,
     SerializationFormat,
@@ -49,8 +50,10 @@ from configurable_automl_engine.training_engine.config.sanity_gate import (
     SanityGateCfg,
 )
 
-# Build the type on the fly. *AVAILABLE_METRICS unpacks the list into Literal arguments
-ComparisonMetric = Literal[*AVAILABLE_METRICS]  # type: ignore
+#: A metric reference: a built-in metric name (``AVAILABLE_METRICS``) or the
+#: name of a ``general.custom_metrics`` entry. Membership is a cross-field
+#: rule (``general_rules.check_metric_references``).
+ComparisonMetric = str
 
 #: ``general.holdout_fraction: "auto"`` reserves this fraction of the rows as
 #: the outer hold-out when the input has at least ``AUTO_HOLDOUT_MIN_ROWS``
@@ -77,10 +80,14 @@ class GeneralCfg(BaseModel):
     metrics, quality evaluation strategies (Cross-Validation / Hold-out),
     and distributing computational resources.
     Attributes:
-        comparison_metric (ComparisonMetric): Main metric for ranking models.
+        comparison_metric (ComparisonMetric): Main metric for ranking models
+            (a built-in name or a ``custom_metrics`` key).
         additional_metrics (List[ComparisonMetric]): Additional informational
             metrics, computed for the final model with the same validation method
             used for model comparison (hold-out/CV, not train score).
+        custom_metrics (dict[str, CustomMetricSpec]): User metrics and scorers
+            loaded by a dotted import path, keyed by the name the metric
+            fields refer to.
         path_to_model (Path): Filesystem path for exporting the model artifact.
         serialization_format (SerializationFormat): Save format (pickle/joblib).
         log_to_file (Path | None): File for writing the engine's run logs.
@@ -110,11 +117,23 @@ class GeneralCfg(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    custom_metrics: dict[str, CustomMetricSpec] = Field(
+        default_factory=dict,
+        description=(
+            "User-defined metrics and scorers, keyed by the metric name that "
+            "comparison_metric / additional_metrics refer to. A name must "
+            "match ^[a-z][a-z0-9_]*$ and must not be a built-in or sklearn "
+            "metric name. Each entry names a callable by its dotted import "
+            "path ('package.module:attribute'); the callable is imported and "
+            "its signature is checked at config validation time."
+        ),
+    )
     comparison_metric: ComparisonMetric = Field(
         default="r2",
         description=(
-            "Metric for comparing models"
-            " and choosing the best one (for example, r2, rmse, accuracy)"
+            "Metric for comparing models and choosing the best one: one of "
+            + ", ".join(AVAILABLE_METRICS)
+            + ", or the name of a custom_metrics entry"
         ),
     )
     additional_metrics: list[ComparisonMetric] = Field(
@@ -126,7 +145,8 @@ class GeneralCfg(BaseModel):
             "are returned together with the training results (key 'additional_metrics'). "
             "The metrics are purely informational: they do not take part "
             "in hyperparameter optimization, model comparison, or winner selection. "
-            "Valid values are the same as the set of comparison_metric values. "
+            "Valid values are the same as for comparison_metric (built-in "
+            "names and custom_metrics names). "
             "Duplicates in the list are ignored (the value is counted once), and a "
             "match with the main comparison metric (including aliases, for example "
             "rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value "
@@ -406,6 +426,12 @@ class GeneralCfg(BaseModel):
         ),
     )
 
+    @field_validator("custom_metrics", mode="before")
+    @classmethod
+    def _validate_custom_metric_names(cls, v: Any) -> Any:
+        """Check the custom metric names (see ``general_rules``)."""
+        return rules.check_custom_metric_names(v)
+
     @field_validator("additional_metrics")
     @classmethod
     def _deduplicate_additional_metrics(
@@ -413,6 +439,14 @@ class GeneralCfg(BaseModel):
     ) -> list[ComparisonMetric]:
         """Remove duplicate additional metrics (see ``general_rules``)."""
         return rules.deduplicate_additional_metrics(v)
+
+    @model_validator(mode="after")
+    def _check_metric_references(self) -> GeneralCfg:
+        """Check that every metric name is built-in or declared."""
+        rules.check_metric_references(
+            self.comparison_metric, self.additional_metrics, self.custom_metrics
+        )
+        return self
 
     @model_validator(mode="after")
     def _exclude_comparison_from_additional(self) -> GeneralCfg:

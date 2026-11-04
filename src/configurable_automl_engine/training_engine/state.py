@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
+from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     FeatureSelectionCfg,
@@ -377,6 +378,9 @@ class _HpoPhaseSpec:
             results (for warm-start refine: params + TPE trials).
         y (pd.Series): The target vector.
         metric_sklearn (str): Metric name in sklearn semantics.
+        custom_metrics (dict[str, CustomMetricSpec]): The
+            ``general.custom_metrics`` declarations (registered by the worker
+            before the metric is resolved).
         resolved_validation (ValidationStrategy): The resolved validation
             strategy.
         resolved_n_folds (int): Number of folds for 'k_fold'.
@@ -451,3 +455,4 @@ class _HpoPhaseSpec:
     datetime_policy: str = "expand"
     drop_id_like_columns: bool = False
     collect_oof: bool = False
+    custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)

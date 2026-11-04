@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -43,11 +43,13 @@ from imblearn.pipeline import Pipeline
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 
+from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import (
     SerializationFormat,
     ValidationStrategy,
 )
 from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.metrics import register_custom_metrics
 from configurable_automl_engine.common.serialization_utils import (
     save_artifact,
 )
@@ -132,6 +134,9 @@ class ModelTrainer:
             lowercase. These metrics are informational only and do not affect
             training. Values are stored in ``additional_scores`` after calling
             fit().
+        custom_metrics (dict[str, CustomMetricSpec]): Custom metrics and
+            scorers loaded by a dotted import path (name → declaration);
+            ``metric`` and ``additional_metrics`` may refer to their names.
         preprocessing_override (PreprocessingOverride | dict | None): Explicit
             override of the feature preprocessing preset. It may be specified
             partially or fully and takes precedence over automatic selection.
@@ -236,6 +241,8 @@ class ModelTrainer:
         id_column: str | None = None,
         encoding_strategy: str = "one_hot",
         additional_metrics: Iterable[str] | None = None,
+        custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]]
+        | None = None,
         preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
         high_cardinality_threshold: int | None = 50,
         high_cardinality_encoding: str | None = "frequency",
@@ -307,6 +314,7 @@ class ModelTrainer:
             target_encoding_smoothing=target_encoding_smoothing,
             target_encoding_fallback=target_encoding_fallback,
             additional_metrics=additional_metrics,
+            custom_metrics=custom_metrics,
             preprocessing_override=preprocessing_override,
             feature_selection_cfg=feature_selection_cfg,
             feature_selection_active=feature_selection_active,
@@ -328,6 +336,7 @@ class ModelTrainer:
             ),
             warn_id_like=warn_id_like,
         )
+        register_custom_metrics(self.settings.custom_metrics)
         # ── State populated by fit() (grouped results of the pure steps) ──
         # The final pipeline trained on 100% of the data.
         self.pipeline: Pipeline | None = None
@@ -388,6 +397,13 @@ class ModelTrainer:
     def additional_metrics(self) -> list[str]:
         """The additional (informational) metrics."""
         return self.settings.additional_metrics
+
+    @property
+    def custom_metrics(self) -> dict[str, CustomMetricSpec]:
+        """The custom metric declarations (empty for an artifact without any)."""
+        # Settings unpickled from an artifact written without this field have
+        # no such slot.
+        return getattr(self.settings, "custom_metrics", None) or {}
 
     @property
     def feature_selection_cfg(self) -> FeatureSelectionCfg:
@@ -640,6 +656,9 @@ class ModelTrainer:
         ``score_on_validation_splits``); the trainer keeps their results.
         """
         settings = self.settings
+        # A trainer restored from an artifact (or sent to another process)
+        # starts with this process's registry: register its metrics again.
+        register_custom_metrics(self.custom_metrics)
         with self.lock:
             self._reset_fit_state()
 

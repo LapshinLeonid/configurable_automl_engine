@@ -36,6 +36,11 @@ Classification is not supported.
 * **Flexible Validation Strategies** — KFold, Leave-One-Out, Train-Test Split,
   plus an `auto` strategy that picks between them based on dataset size and
   dimensionality. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#modeltrainer).
+* **Custom Metrics and Scorers** — plug in your own metric function or
+  sklearn scorer by import path (`general.custom_metrics`, e.g.
+  `path: "my_project.metrics:mape"`) and use it as `comparison_metric` or in
+  `additional_metrics`; it is checked at config load and works in the
+  processes mode. See "Custom metrics" in `API_REFERENCE.md`.
 * **Dynamic Hyperparameter Optimization** — an Optuna wrapper with a built-in
   search space for every algorithm (`{}` is a valid algorithm config).
   See [`optimize`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#optimizealgo_name-x-y).

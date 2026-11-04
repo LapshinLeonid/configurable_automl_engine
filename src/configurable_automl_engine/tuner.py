@@ -13,12 +13,14 @@ run to ``hpo.runner.run_optimization``; the exceptions,
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from optuna.trial import FrozenTrial, Trial
 
+from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.metrics import validate_custom_metrics
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
@@ -70,6 +72,7 @@ def optimize(
     data_oversampling_add_noise: bool = False,
     data_oversampling_noise_level: float = 0.01,
     metric: str = "r2",
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
     # accepted alias; ``validation_strategy`` takes precedence
     val_method: ValidationStrategy | str = "auto",
     # alias sent by training_engine.component
@@ -132,7 +135,11 @@ def optimize(
             Defaults to False.
         data_oversampling_noise_level: Noise intensity relative to
             the column standard deviation. Defaults to 0.01.
-        metric: Metric name to maximise. Defaults to 'r2'.
+        metric: Metric name to maximise. Defaults to 'r2'. A name declared
+            in ``custom_metrics`` refers to that custom metric.
+        custom_metrics: Custom metrics and scorers loaded by a dotted import
+            path: name → ``CustomMetricSpec`` or a dict with its fields (the
+            ``general.custom_metrics`` entries). ``None`` — none.
         val_method: Validation method
             ('auto', 'k_fold', 'leave_one_out', 'train_test_split').
             Defaults to 'auto', as ``general.validation_strategy``.
@@ -311,6 +318,8 @@ def optimize(
         ValueError: If ``n_trials`` is a negative integer (or not an
             integer). The value ``n_trials=0`` is allowed and leads to an
             empty trial list → ``None``.
+        PydanticCustomError: If a ``custom_metrics`` entry is invalid (a
+            ``ValueError``; see ``CustomMetricSpec``).
         HyperoptError: If no search space is defined for the selected
             algorithm, or an invalid ``feature_selection_cfg`` is passed.
         HPOHistoryError: If ``previous_trials`` contain distributions
@@ -321,6 +330,7 @@ def optimize(
     request = HpoRequest(
         algo_name=algo_name,
         metric=metric,
+        custom_metrics=validate_custom_metrics(custom_metrics),
         n_trials=n_trials,
         # the alias takes precedence
         val_method=validation_strategy

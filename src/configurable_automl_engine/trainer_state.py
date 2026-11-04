@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
 
+    from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
     from configurable_automl_engine.common.definitions import SerializationFormat
     from configurable_automl_engine.common.settings import (
         EncodingSettings,
@@ -54,6 +55,8 @@ class TrainerSettings:
     high-cardinality / hashing / target-encoding arguments), ``oversampling``
     (the ``data_oversampling*`` arguments) and ``policies``
     (``inf_policy`` / ``datetime_policy`` / ``drop_id_like_columns``).
+    ``custom_metrics`` holds the custom metric declarations (data only: the
+    artifact never stores the metric callables).
     """
 
     algorithm: str
@@ -75,6 +78,7 @@ class TrainerSettings:
     n_folds: int
     test_size: float
     oversampling: OversamplingSettings
+    custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

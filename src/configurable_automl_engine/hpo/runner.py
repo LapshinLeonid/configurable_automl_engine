@@ -26,6 +26,7 @@ from scipy import sparse as sp
 
 from configurable_automl_engine.common.metrics import (
     is_non_additive_metric,
+    register_custom_metrics,
 )
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
@@ -919,4 +920,7 @@ def run_optimization(X: Any, y: Any, request: HpoRequest) -> OptimizeResult | No
         OptimizeResult | None: The phase result, or ``None`` — the "no valid
             result" signal (see ``optimize()``).
     """
+    # The run may execute in a worker process: its registry is rebuilt from
+    # the pickled declarations before the metric name is resolved.
+    register_custom_metrics(request.custom_metrics)
     return _OptimizeRunner(X, y, request).run()
