@@ -43,7 +43,7 @@ move that thing down.
 ```
 ├── benchmarks                              # Quality benchmarks of Sanity Gate, Complexity Guard, oversampling
 ├── scripts
-│   └── compare_with_base.py                # Differential behavior check against the base commit (run in CI)
+│   └── compare_with_base.py                # Differential behavior check against the base commit (optional CI workflow: manual run or the `compare-with-base` PR label)
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
 │       ├── common                          # Layer 0: shared utilities (imports nothing above common)
