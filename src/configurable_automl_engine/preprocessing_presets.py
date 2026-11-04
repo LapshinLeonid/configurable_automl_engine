@@ -20,12 +20,17 @@ Key concepts:
 Selection rules: the algorithm name is normalized and checked against the
 registry (an unknown name is rejected with :class:`ValueError`); a supported
 algorithm without explicit registration falls back to the ``default`` class;
-a user override (:class:`PreprocessingOverride`) replaces preset fields fully
-or partially — an explicit user specification takes priority.
+every preset field is resolved with the precedence order (later items win)
+"class preset < run-level default override < per-algorithm user override" —
+a field set at a higher level replaces the whole field from the lower level
+(nested values are never merged).
 
 The single function :func:`resolve_preprocessing_preset` is used at every stage
 of the lifecycle — the HPO phase, final training and prediction — which
-guarantees consistent application of the preset.
+guarantees consistent application of the preset. :func:`merge_preprocessing_overrides`
+is the public merge point that folds the run-level (``general.preprocessing``)
+and per-algorithm override blocks into the single ``preprocessing_override``
+argument of ``ModelTrainer`` / ``tuner.optimize``.
 """
 
 from __future__ import annotations
@@ -249,9 +254,55 @@ def _coerce_override(
     )
 
 
+def merge_preprocessing_overrides(
+    default: PreprocessingOverride | dict[str, Any] | None,
+    specific: PreprocessingOverride | dict[str, Any] | None,
+) -> PreprocessingOverride:
+    """Merge two preprocessing overrides into one ("default" + "specific").
+
+    The public merge point used by the training engine: the run-level
+    ``general.preprocessing`` block (``default``) and the per-algorithm
+    ``algorithms.<name>.preprocessing`` block (``specific``) are merged into
+    a single override before it is handed to ``ModelTrainer`` /
+    ``tuner.optimize`` (which keep their single ``preprocessing_override``
+    argument). Field-wise semantics: a field set at the more specific level
+    replaces the whole field of the default level; a field left as ``None``
+    falls through to the default level. Nested values are never merged —
+    the model only has flat scalar fields.
+
+    Args:
+        default: The run-level (general) override. ``None`` — no default.
+        specific: The algorithm-level override. ``None`` — no specific
+            override (the result is then just the coerced default).
+
+    Returns:
+        PreprocessingOverride: The merged override (a new model instance;
+            the inputs are not mutated).
+
+    Raises:
+        TypeError: If an argument has an unsupported type.
+    """
+    default_model = (
+        _coerce_override(default) if default is not None else PreprocessingOverride()
+    )
+    if specific is None:
+        return default_model
+    specific_model = _coerce_override(specific)
+    update: dict[str, Any] = {}
+    if specific_model.imputation_strategy is not None:
+        update["imputation_strategy"] = specific_model.imputation_strategy
+    if specific_model.scaling is not None:
+        update["scaling"] = specific_model.scaling
+    if not update:
+        return default_model
+    return default_model.model_copy(update=update)
+
+
 def resolve_preprocessing_preset(
     algorithm: str,
     override: PreprocessingOverride | dict[str, Any] | None = None,
+    *,
+    default_override: PreprocessingOverride | dict[str, Any] | None = None,
 ) -> PreprocessingPreset:
     """Determine the preprocessing preset for a given algorithm.
 
@@ -264,20 +315,27 @@ def resolve_preprocessing_preset(
     2. The algorithm class is looked up in :data:`ALGORITHM_CLASS_MAPPING`; for a
        supported algorithm without explicit registration the ``default`` class
        is used (edge case — default behavior).
-    3. If ``override`` is passed, its non-empty fields replace the corresponding
-       fields of the selected preset (partial or full override).
+    3. Every preset field is resolved with the precedence order (later items
+       win): class preset < ``default_override`` < ``override``. A field set
+       at a higher level replaces the whole field from the lower level;
+       a field left as ``None`` falls through to the lower level. Nested
+       values are never merged.
 
     Args:
         algorithm: A regression algorithm name.
-        override: An explicit preset override. ``None`` —
-            only automatic selection.
+        override: An explicit per-algorithm preset override. ``None`` —
+            no algorithm-level override.
+        default_override: The run-level (general) preset override applied
+            for every algorithm. Keyword-only. Fields left as ``None``
+            fall through to the automatic selection; fields set here take
+            priority over the class preset but yield to ``override``.
 
     Returns:
         The final preprocessing preset for the algorithm.
 
     Raises:
         ValueError: If ``algorithm`` is not a supported algorithm.
-        TypeError: If ``override`` has an unsupported type.
+        TypeError: If an override has an unsupported type.
     """
     algo_key = normalize_algorithm(algorithm)
     if algo_key not in AVAILABLE_ALGORITHMS:
@@ -288,15 +346,21 @@ def resolve_preprocessing_preset(
     algo_class = ALGORITHM_CLASS_MAPPING.get(algo_key, AlgorithmClass.DEFAULT)
     preset = PRESET_BY_CLASS[algo_class]
 
+    update: dict[str, Any] = {}
+    if default_override is not None:
+        default_model = _coerce_override(default_override)
+        if default_model.imputation_strategy is not None:
+            update["imputation_strategy"] = default_model.imputation_strategy
+        if default_model.scaling is not None:
+            update["scaling"] = default_model.scaling
     if override is not None:
         override_model = _coerce_override(override)
-        update: dict[str, Any] = {}
         if override_model.imputation_strategy is not None:
             update["imputation_strategy"] = override_model.imputation_strategy
         if override_model.scaling is not None:
             update["scaling"] = override_model.scaling
-        if update:
-            preset = preset.model_copy(update=update)
+    if update:
+        preset = preset.model_copy(update=update)
     return preset
 
 

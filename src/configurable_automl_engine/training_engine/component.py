@@ -388,6 +388,7 @@ def _build_phase_spec(
         target_encoding_smoothing=cfg.general.target_encoding_smoothing,
         target_encoding_fallback=cfg.general.target_encoding_fallback,
         feature_selection_cfg=cfg.general.feature_selection,
+        preprocessing_default=cfg.general.preprocessing,
         complexity_guard_cfg=cfg.general.complexity_guard,
         # Data splits and preprocessor: the engine seed (general.
         # random_state), so every phase (and the final ModelTrainer fit)

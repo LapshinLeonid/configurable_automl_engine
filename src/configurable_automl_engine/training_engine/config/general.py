@@ -35,6 +35,7 @@ from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
 from configurable_automl_engine.preprocessing import EncodingStrategy
+from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.training_engine.config import (
     general_rules as rules,
 )
@@ -113,6 +114,11 @@ class GeneralCfg(BaseModel):
             engine default ('forkserver' where available, else 'spawn').
         feature_selection (FeatureSelectionCfg): Feature space reduction
             settings. By default mode='disabled' — feature selection is not applied.
+        preprocessing (PreprocessingOverride | None): Run-level default
+            override of the adaptive feature preprocessing preset, applied
+            to every algorithm without its own per-algorithm block.
+            Precedence per field: class preset < general block <
+            per-algorithm block. None — no run-level default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -390,6 +396,23 @@ class GeneralCfg(BaseModel):
             "search spaces on small data (mode: 'off'/'warn'/'apply', "
             "lossless/regularize levels, user_range_policy, size-mode "
             "thresholds, size_basis). See API_REFERENCE.md."
+        ),
+    )
+    preprocessing: PreprocessingOverride | None = Field(
+        default=None,
+        description=(
+            "Run-level default override of the adaptive feature preprocessing "
+            "preset, applied to EVERY algorithm that has no preprocessing "
+            "block of its own (algorithms.<name>.preprocessing). Reuses the "
+            "same model as the per-algorithm block: 'imputation_strategy' "
+            "('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'); "
+            "fields left as null keep the automatic selection based on the "
+            "algorithm class. Precedence per field: class preset < "
+            "general.preprocessing < algorithms.<name>.preprocessing — a "
+            "field set at a higher level replaces the whole field from the "
+            "lower level (nested values are never merged). None — no "
+            "run-level default. Unknown keys are rejected at config "
+            "validation."
         ),
     )
     inf_policy: InfPolicy = Field(

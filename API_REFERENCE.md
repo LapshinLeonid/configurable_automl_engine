@@ -298,6 +298,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | `inf_policy` | `"as_missing"` | Infinite values in numeric features: `"as_missing"` turns them into missing values (imputed later) with a WARNING; `"error"` rejects the data. Applied at training and prediction time. |
 | `datetime_policy` | `"expand"` | Date/time columns: `"expand"` replaces each column with `year`, `month`, `day`, `dayofweek` (and `hour` when it is not always zero); `"drop"` removes them; `"error"` rejects the data. A WARNING lists the affected columns. |
 | `drop_id_like_columns` | `false` | ID-like columns (text columns where ≥ 95 % of values are unique, or unique monotonic integers) are only reported with a WARNING by default; `true` removes them. This is a heuristic: a monotonic counter such as a timestamp may be a useful feature. |
+| `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm that has no `preprocessing` block of its own. Same fields as the per-algorithm block (`imputation_strategy`, `scaling`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
 
 **Advanced blocks** (each has its own section below): `pruning`
 ([early stopping](#early-stopping-pruning)), `feature_selection`
@@ -1057,6 +1058,8 @@ Each preset defines:
 
 * The preset is resolved automatically from the algorithm name before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.
 * The same preset is applied at every lifecycle stage — hyperparameter optimization (HPO), final training, and prediction — through the single resolution point used by both `tuner.optimize` and `ModelTrainer`.
+* Every preset field is resolved with the precedence order (later items win): **class preset < `general.preprocessing` < `algorithms.<name>.preprocessing`**. A field set at a higher level replaces the whole field from the lower level; a field left unset falls through to the lower level. Nested values are never merged (the override model only has flat scalar fields).
+* The run-level `general.preprocessing` block is the default override for every algorithm without its own `preprocessing` block; the per-algorithm block wins per field. The engine merges the two blocks (helper `merge_preprocessing_overrides`) and passes the result through the existing single `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize` — no new public argument is added.
 * Explicit user override (the `preprocessing` block in the algorithm config, or the `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize`) takes priority over the automatic selection. Fields left unset keep the automatically chosen values.
 * The resolved preset is logged (INFO level) and stored on the trainer as `preprocessing_preset`, so the applied preprocessing can always be determined from logs.
 

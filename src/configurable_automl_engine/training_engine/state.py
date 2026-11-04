@@ -15,7 +15,7 @@ not import any other pipeline step module (``data_prep``, ``hpo_phases``,
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,11 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 
 from .sanity_gate import SanityCheckResult
+
+if TYPE_CHECKING:
+    from configurable_automl_engine.preprocessing_presets import (
+        PreprocessingOverride,
+    )
 
 
 @dataclass(frozen=True)
@@ -405,6 +410,10 @@ class _HpoPhaseSpec:
         target_encoding_fallback (float | None): Target encoding fallback.
         feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
             selection configuration.
+        preprocessing_default (PreprocessingOverride | None): The run-level
+            (``general.preprocessing``) preset override, merged with the
+            per-algorithm block in the worker before the HPO request is
+            built. ``None`` — no run-level default.
         random_state (int | None): The random seed of the data splits and the
             preprocessor — the ``general.random_state`` engine seed for every
             HPO phase (so folds stay comparable between phases and with the
@@ -447,6 +456,7 @@ class _HpoPhaseSpec:
     target_encoding_smoothing: float
     target_encoding_fallback: float | None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    preprocessing_default: PreprocessingOverride | None = None
     complexity_guard_cfg: Any = None
     user_hyperparameter_keys: list[str] | None = None
     random_state: int | None = None

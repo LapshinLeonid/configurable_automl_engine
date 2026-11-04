@@ -131,6 +131,10 @@ def _build_hpo_request(
             target_encoding_fallback=spec.target_encoding_fallback,
         ),
         preprocessing_override=algo_cfg.preprocessing,
+        # The run-level default (general.preprocessing): resolved per field
+        # with the precedence "class preset < default < override" in the
+        # trial pipeline.
+        preprocessing_default=spec.preprocessing_default,
         feature_selection_cfg=spec.feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=spec.oversampling_enabled,

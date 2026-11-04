@@ -203,7 +203,11 @@ def _build_trial_preprocessor(
     # Automatic preset selection + application of an explicit override.
     # The preset is resolved once before training (performance) and
     # logged for observability.
-    preset = resolve_preprocessing_preset(algo, request.preprocessing_override)
+    preset = resolve_preprocessing_preset(
+        algo,
+        request.preprocessing_override,
+        default_override=request.preprocessing_default,
+    )
     log.info(
         "Resolved preprocessing preset for algorithm '%s': %s",
         algo,

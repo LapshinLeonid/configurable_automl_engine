@@ -26,6 +26,9 @@ from configurable_automl_engine.common.metrics import (
     to_sklearn_name,
     to_user_value,
 )
+from configurable_automl_engine.preprocessing_presets import (
+    merge_preprocessing_overrides,
+)
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -123,7 +126,13 @@ def _build_trainer(
         encoding_strategy=general.categorical_encoding,
         additional_metrics=general.additional_metrics,
         custom_metrics=general.custom_metrics,
-        preprocessing_override=algo_cfg.preprocessing,
+        # The run-level default (general.preprocessing) and the
+        # per-algorithm block are merged into the single public
+        # ``preprocessing_override`` argument of ModelTrainer: the
+        # algorithm level wins per field.
+        preprocessing_override=merge_preprocessing_overrides(
+            general.preprocessing, algo_cfg.preprocessing
+        ),
         high_cardinality_threshold=general.high_cardinality_threshold,
         high_cardinality_encoding=general.high_cardinality_encoding,
         hashing_n_components=general.hashing_n_components,

@@ -77,7 +77,11 @@ class HpoRequest:
         categorical_features: The categorical column names.
         numerical_features: The numerical column names.
         encoding: The categorical encoding settings.
-        preprocessing_override: The explicit preprocessing preset override.
+        preprocessing_override: The explicit per-algorithm preprocessing
+            preset override.
+        preprocessing_default: The run-level (general) preprocessing preset
+            override applied for every algorithm; per field it yields to
+            ``preprocessing_override``.
         feature_selection_cfg: The feature selection settings.
         oversampling: The oversampling settings.
         pruning: The early stopping (pruning) settings.
@@ -109,6 +113,7 @@ class HpoRequest:
     numerical_features: list[str] | None = None
     encoding: EncodingSettings = field(default_factory=EncodingSettings)
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None
+    preprocessing_default: PreprocessingOverride | dict[str, Any] | None = None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None
     oversampling: OversamplingSettings = field(default_factory=OversamplingSettings)
     pruning: dict[str, Any] | None = None
