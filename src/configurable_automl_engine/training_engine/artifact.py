@@ -122,6 +122,7 @@ def _build_trainer(
         serialization_format=general.serialization_format,
         encoding_strategy=general.categorical_encoding,
         additional_metrics=general.additional_metrics,
+        custom_metrics=general.custom_metrics,
         preprocessing_override=algo_cfg.preprocessing,
         high_cardinality_threshold=general.high_cardinality_threshold,
         high_cardinality_encoding=general.high_cardinality_encoding,

@@ -24,18 +24,29 @@ Key features:
 from __future__ import annotations
 
 import logging
+import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from typing import Any, Literal, cast
 
 import numpy as np
+from pydantic_core import PydanticCustomError
 from sklearn.metrics import get_scorer as sklearn_get_scorer
 from sklearn.metrics import (
+    get_scorer_names,
     make_scorer,
     mean_absolute_error,
     mean_squared_error,
     r2_score,
+)
+
+from configurable_automl_engine.common.custom_metrics import (
+    CustomMetricSpec,
+    build_custom_scorer,
+    custom_metric_function,
+    lookup_custom_metric,
+    register_custom_metric,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +151,9 @@ def is_non_additive_metric(name: str) -> bool:
     Returns:
         bool: True for non-additive metrics, False for additive ones.
     """
+    custom = lookup_custom_metric(name)
+    if custom is not None:
+        return not custom.additive
     return name.lower().strip() in _NON_ADDITIVE_METRICS
 
 
@@ -361,6 +375,9 @@ def get_metric(name: str) -> Callable[..., Any]:
     Returns:
         Callable[..., Any]: A function accepting (y_true, y_pred) and returning a float.
     """
+    custom = lookup_custom_metric(name)
+    if custom is not None:
+        return custom_metric_function(custom)
     lname = name.lower()
     if lname not in _METRICS:
         raise KeyError(f"Metric '{name}' not implemented.")
@@ -373,7 +390,13 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
     Resolution logic:
     1. For metrics in the ``_SCORER_OBJECTS`` registry, the preconfigured
        ``make_scorer`` object is returned (the first tuple element).
-    2. Otherwise the name is delegated to ``sklearn.metrics.get_scorer``."""
+    2. Otherwise the name is delegated to ``sklearn.metrics.get_scorer``.
+
+    A registered custom metric (``register_custom_metrics``) takes precedence
+    over both."""
+    custom = lookup_custom_metric(name)
+    if custom is not None:
+        return cast(Callable[..., Any], build_custom_scorer(custom))
     lname = name.lower()
     if lname in _SCORER_OBJECTS:
         return _SCORER_OBJECTS[lname][0]
@@ -433,6 +456,9 @@ def is_greater_better(name: str) -> bool:
     Raises:
         ValueError: If the metric is unknown to both the registry and sklearn.
     """
+    custom = lookup_custom_metric(name)
+    if custom is not None:
+        return custom.natural_greater_is_better
     lname = name.lower()
     # 1. Explicit direction from the private registry — no cache.
     if lname in _SCORER_OBJECTS:
@@ -580,6 +606,9 @@ def get_scorer_object(
     Returns:
         Union[Callable[..., Any], str]: A Scorer object or a system sklearn string.
     """
+    custom = lookup_custom_metric(name)
+    if custom is not None:
+        return cast(Callable[..., Any], build_custom_scorer(custom))
     lname = name.lower()
 
     # Special handling for the global NRMSE
@@ -623,6 +652,111 @@ def to_sklearn_name(name: str) -> str:
         str: A metric name recognized by sklearn internals.
     """
     return _ALIAS_TO_SKLEARN.get(name.lower(), name.lower())
+
+
+# --------------------------------------------------------------------------- #
+#  Custom metrics declared by a dotted import path
+# --------------------------------------------------------------------------- #
+#: A custom metric name: lowercase letters, digits and underscores.
+_CUSTOM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+ERR_CUSTOM_NAME_INVALID = "custom_metric_invalid_name"
+ERR_CUSTOM_NAME_COLLISION = "custom_metric_name_collision"
+
+
+def reserved_metric_names() -> frozenset[str]:
+    """The names a custom metric must not take.
+
+    The built-in metrics and their aliases, ``global_nrmse`` and every
+    scorer name known to ``sklearn.metrics.get_scorer`` — a custom metric
+    must never shadow (or be shadowed by) a metric the engine resolves
+    without it.
+    """
+    return frozenset(
+        {
+            *_SCORER_OBJECTS,
+            *_METRICS,
+            *_ALIAS_TO_SKLEARN,
+            *_ALIAS_TO_SKLEARN.values(),
+            "global_nrmse",
+            *get_scorer_names(),
+        }
+    )
+
+
+def check_custom_metric_name(name: Any) -> None:
+    """Check that ``name`` can name a custom metric.
+
+    Raises:
+        PydanticCustomError: ``custom_metric_invalid_name`` — not a string
+            matching ``^[a-z][a-z0-9_]*$``; ``custom_metric_name_collision`` —
+            a name from ``reserved_metric_names``.
+    """
+    if not isinstance(name, str) or not _CUSTOM_NAME_RE.match(name):
+        raise PydanticCustomError(
+            ERR_CUSTOM_NAME_INVALID,
+            "custom metric name {name} must match ^[a-z][a-z0-9_]*$",
+            {"name": repr(name)},
+        )
+    if name in reserved_metric_names():
+        raise PydanticCustomError(
+            ERR_CUSTOM_NAME_COLLISION,
+            "custom metric name '{name}' is already a built-in or sklearn "
+            "metric name; choose another name",
+            {"name": name},
+        )
+
+
+def validate_custom_metrics(
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None,
+) -> dict[str, CustomMetricSpec]:
+    """Validate custom metric declarations keyed by their metric name.
+
+    Args:
+        custom_metrics: Metric name → ``CustomMetricSpec`` or a dict with
+            its fields (validated, which imports the callable). ``None`` —
+            no custom metrics.
+
+    Returns:
+        dict[str, CustomMetricSpec]: The validated declarations.
+
+    Raises:
+        PydanticCustomError: A ``ValueError`` with the code
+            ``custom_metric_invalid_name`` (a name not matching
+            ``^[a-z][a-z0-9_]*$``), ``custom_metric_name_collision`` (a name
+            of a built-in or sklearn metric) or a spec validation code (see
+            ``CustomMetricSpec``).
+    """
+    if not custom_metrics:
+        return {}
+    result: dict[str, CustomMetricSpec] = {}
+    for name, raw in custom_metrics.items():
+        check_custom_metric_name(name)
+        result[name] = (
+            raw
+            if isinstance(raw, CustomMetricSpec)
+            else CustomMetricSpec.model_validate(raw)
+        )
+    return result
+
+
+def register_custom_metrics(
+    custom_metrics: Mapping[str, CustomMetricSpec] | None,
+) -> None:
+    """Make validated custom metrics resolvable by name in this process.
+
+    Every helper of this module (scorer, direction, user value, additivity)
+    resolves a registered custom name before the built-in metrics. The
+    engine entry points (``train_best_model``, the HPO run, ``ModelTrainer``)
+    call this with the declarations they receive, so the registry is rebuilt
+    in every worker process from the pickled specs.
+
+    Args:
+        custom_metrics: Metric name → validated declaration (``None`` or
+            empty — nothing to register).
+    """
+    for name, spec in (custom_metrics or {}).items():
+        register_custom_metric(name, spec)
 
 
 # --------------------------------------------------------------------------- #

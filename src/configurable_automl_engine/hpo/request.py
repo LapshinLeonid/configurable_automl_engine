@@ -26,6 +26,7 @@ from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfi
 if TYPE_CHECKING:
     from optuna.trial import FrozenTrial
 
+    from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
     from configurable_automl_engine.common.definitions import ValidationStrategy
     from configurable_automl_engine.feature_selection import (
         FeatureSelectionCfg,
@@ -50,6 +51,8 @@ class HpoRequest:
     Attributes:
         algo_name: The algorithm name.
         metric: The metric name to maximize.
+        custom_metrics: The custom metric declarations by name (the run
+            registers them in its process before resolving ``metric``).
         n_trials: The number of trials of the run.
         val_method: The validation method (``'auto'`` is resolved by the
             run; the ``validation_strategy`` alias of ``optimize()`` is
@@ -86,6 +89,7 @@ class HpoRequest:
 
     algo_name: str
     metric: str = "r2"
+    custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
     n_trials: int = 50
     val_method: ValidationStrategy | str = "auto"
     n_folds: int = 5

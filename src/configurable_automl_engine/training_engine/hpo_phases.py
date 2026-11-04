@@ -23,6 +23,7 @@ from optuna.trial import FrozenTrial
 from configurable_automl_engine.common.metrics import (
     BBC_MAX_OOF_CELLS,
     direction_label,
+    register_custom_metrics,
     to_user_value,
 )
 from configurable_automl_engine.common.settings import (
@@ -96,6 +97,7 @@ def _build_hpo_request(
     return HpoRequest(
         algo_name=algo_name,
         metric=spec.metric_sklearn,
+        custom_metrics=spec.custom_metrics,
         n_trials=spec.phase.n_trials,
         val_method=spec.resolved_validation,
         n_folds=spec.resolved_n_folds,
@@ -269,6 +271,9 @@ def _hpo_phase_worker(
     # and at the end of the phase phase_results is re-bound to the filtered
     # valid_results (objects are never mutated) — therefore the snapshot is
     # stable in both parallel and sequential modes.
+    # In the processes mode the worker starts with an empty custom metric
+    # registry: rebuild it before the metric name is used for logging.
+    register_custom_metrics(spec.custom_metrics)
     init_params = None
     previous_trials: list[FrozenTrial] | None = None
     if spec.phase.action == "refine" and algo_name in spec.prev_results:

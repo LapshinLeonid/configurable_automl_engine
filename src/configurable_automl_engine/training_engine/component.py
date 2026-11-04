@@ -32,6 +32,7 @@ from typing import Any
 
 import pandas as pd
 
+from configurable_automl_engine.common.metrics import register_custom_metrics
 from configurable_automl_engine.oversampling import experimental as _oversampling
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -399,6 +400,7 @@ def _build_phase_spec(
         datetime_policy=cfg.general.datetime_policy,
         drop_id_like_columns=cfg.general.drop_id_like_columns,
         collect_oof=collect_oof,
+        custom_metrics=dict(cfg.general.custom_metrics),
     )
 
 
@@ -596,6 +598,9 @@ def train_best_model(
             training.
     """
     cfg, target_col = load_config(config, df, target)
+    # The orchestrator resolves the comparison metric (finalists, report)
+    # in this process; the workers register the same declarations themselves.
+    register_custom_metrics(cfg.general.custom_metrics)
     # Evidence gate: surface the experimental status once per run at
     # config validation time; the sampler itself warns once per process per
     # (algorithm, multiplier) instead of once per fold per trial.

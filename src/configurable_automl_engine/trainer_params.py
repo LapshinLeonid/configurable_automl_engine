@@ -14,7 +14,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
+from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.metrics import validate_custom_metrics
 from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.validation import (
@@ -252,6 +254,16 @@ def _validate_feature_lists(categorical_features: Any, numerical_features: Any) 
             )
 
 
+def _validate_custom_metrics(
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None,
+) -> dict[str, CustomMetricSpec]:
+    """Validate the custom metric declarations (a ``TrainingError`` on failure)."""
+    try:
+        return validate_custom_metrics(custom_metrics)
+    except ValueError as err:
+        raise TrainingError(f"Invalid custom_metrics: {err}") from err
+
+
 def build_trainer_settings(
     *,
     algorithm: Any,
@@ -278,6 +290,7 @@ def build_trainer_settings(
     oversampling: OversamplingSettings,
     policies: InputPolicies,
     warn_id_like: bool,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
 
@@ -306,6 +319,7 @@ def build_trainer_settings(
         target_encoding_smoothing=target_encoding_smoothing,
     )
     metrics = _normalize_additional_metrics(additional_metrics)
+    custom = _validate_custom_metrics(custom_metrics)
     override = _validate_preprocessing_override(preprocessing_override)
     fs_cfg = _validate_feature_selection_cfg(feature_selection_cfg)
     fs_active = _validate_feature_selection_active(feature_selection_active)
@@ -351,4 +365,5 @@ def build_trainer_settings(
         n_folds=n_folds,
         test_size=test_size,
         oversampling=oversampling,
+        custom_metrics=custom,
     )

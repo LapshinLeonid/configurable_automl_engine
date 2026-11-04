@@ -101,8 +101,18 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
     # ``engine_version`` key is kept for convenient access.
     deps["configurable_automl_engine"] = _engine_version
 
+    custom_metrics = {
+        name: spec.model_dump(mode="json")
+        for name, spec in (getattr(settings, "custom_metrics", None) or {}).items()
+    }
+    config_fields: dict[str, Any] = {}
+    if custom_metrics:
+        # Added only when present, so the hash of a config without custom
+        # metrics does not depend on this key.
+        config_fields["custom_metrics"] = custom_metrics
     config_blob = json.dumps(
         {
+            **config_fields,
             "algorithm": settings.algorithm,
             "hyperparams": settings.hyperparams,
             "metric": settings.metric,
@@ -126,6 +136,7 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
         "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "algorithm": settings.algorithm,
         "params": dict(settings.hyperparams),
+        "custom_metrics": custom_metrics,
         "config_hash": config_hash,
     }
 

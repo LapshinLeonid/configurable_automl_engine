@@ -375,6 +375,58 @@
       "title": "ComplexityGuardUserRangePolicy",
       "type": "string"
     },
+    "CustomMetricSpec": {
+      "additionalProperties": false,
+      "description": "The declaration of one custom metric or scorer.\n\nValidation imports the callable named by ``path`` and checks that it is\ncallable, that its signature accepts the calling convention of ``kind``\n(plus ``kwargs``) and that the direction is known.\n\nAttributes:\n    path: Dotted import path of the callable (``\"pkg.mod:attr\"`` or\n        ``\"pkg.mod.attr\"``).\n    kind: ``\"metric\"`` — ``fn(y_true, y_pred, **kwargs) -> float``\n        returning the natural metric value; ``\"scorer\"`` — an sklearn\n        scorer ``scorer(estimator, X, y) -> float``.\n    greater_is_better: The natural direction of the returned value.\n        Required for ``kind=\"metric\"``. For a ``make_scorer`` scorer the\n        direction is taken from the scorer (an explicit value must agree\n        with it); a plain callable scorer defaults to ``True``.\n    additive: ``True`` — the CV estimate is the mean of the per-fold\n        values (valid for per-sample means such as MAE); ``False`` — the\n        value over the pooled out-of-fold vector (always correct).\n    kwargs: Static keyword arguments of the metric function (for a\n        ``make_scorer`` scorer they are merged into its kwargs).",
+      "properties": {
+        "path": {
+          "description": "Dotted import path of the callable: 'package.module:attribute' (preferred) or 'package.module.attribute'.",
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "kind": {
+          "default": "metric",
+          "description": "'metric' — fn(y_true, y_pred, **kwargs) -> float; 'scorer' — sklearn scorer(estimator, X, y) -> float.",
+          "enum": [
+            "metric",
+            "scorer"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "greater_is_better": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Natural direction of the returned value. Required for kind='metric'; for a make_scorer scorer it is taken from the scorer; a plain callable scorer defaults to true.",
+          "title": "Greater Is Better"
+        },
+        "additive": {
+          "default": false,
+          "description": "true — the CV estimate is the mean of the per-fold values (only valid for per-sample means such as MAE); false (default) — the value over the pooled out-of-fold vector.",
+          "title": "Additive",
+          "type": "boolean"
+        },
+        "kwargs": {
+          "additionalProperties": true,
+          "description": "Static keyword arguments passed to the metric function.",
+          "title": "Kwargs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "CustomMetricSpec",
+      "type": "object"
+    },
     "FeatureSelectionCfg": {
       "additionalProperties": false,
       "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
@@ -485,33 +537,25 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models.\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method\n        ('train_test_split', 'k_fold', 'loo' or 'auto').\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (EncodingStrategy): Encoding strategy for\n        categorical features ('one_hot', 'ordinal', 'target', 'frequency'\n        or 'hashing'). Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (only by algorithms).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    start_method (str | None): How the worker processes start in\n        'processes' mode ('forkserver', 'spawn' or 'fork'); None — the\n        engine default ('forkserver' where available, else 'spawn').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.",
+      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models\n        (a built-in name or a ``custom_metrics`` key).\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    custom_metrics (dict[str, CustomMetricSpec]): User metrics and scorers\n        loaded by a dotted import path, keyed by the name the metric\n        fields refer to.\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method\n        ('train_test_split', 'k_fold', 'loo' or 'auto').\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (EncodingStrategy): Encoding strategy for\n        categorical features ('one_hot', 'ordinal', 'target', 'frequency'\n        or 'hashing'). Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (only by algorithms).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    start_method (str | None): How the worker processes start in\n        'processes' mode ('forkserver', 'spawn' or 'fork'); None — the\n        engine default ('forkserver' where available, else 'spawn').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.",
       "properties": {
+        "custom_metrics": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CustomMetricSpec"
+          },
+          "description": "User-defined metrics and scorers, keyed by the metric name that comparison_metric / additional_metrics refer to. A name must match ^[a-z][a-z0-9_]*$ and must not be a built-in or sklearn metric name. Each entry names a callable by its dotted import path ('package.module:attribute'); the callable is imported and its signature is checked at config validation time.",
+          "title": "Custom Metrics",
+          "type": "object"
+        },
         "comparison_metric": {
           "default": "r2",
-          "description": "Metric for comparing models and choosing the best one (for example, r2, rmse, accuracy)",
-          "enum": [
-            "nrmse",
-            "rmse",
-            "neg_root_mean_squared_error",
-            "mae",
-            "mse",
-            "r2"
-          ],
+          "description": "Metric for comparing models and choosing the best one: one of nrmse, rmse, neg_root_mean_squared_error, mae, mse, r2, or the name of a custom_metrics entry",
           "title": "Comparison Metric",
           "type": "string"
         },
         "additional_metrics": {
-          "description": "List of additional quality metrics, whose values are computed for the final trained model with the same validation method used for model comparison (hold-out scoring or the mean over CV folds), and are returned together with the training results (key 'additional_metrics'). The metrics are purely informational: they do not take part in hyperparameter optimization, model comparison, or winner selection. Valid values are the same as the set of comparison_metric values. Duplicates in the list are ignored (the value is counted once), and a match with the main comparison metric (including aliases, for example rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value is already returned as 'score'. Both rules are applied during config validation, so the resulting list in general.additional_metrics may differ from the one originally passed by the user.",
+          "description": "List of additional quality metrics, whose values are computed for the final trained model with the same validation method used for model comparison (hold-out scoring or the mean over CV folds), and are returned together with the training results (key 'additional_metrics'). The metrics are purely informational: they do not take part in hyperparameter optimization, model comparison, or winner selection. Valid values are the same as for comparison_metric (built-in names and custom_metrics names). Duplicates in the list are ignored (the value is counted once), and a match with the main comparison metric (including aliases, for example rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value is already returned as 'score'. Both rules are applied during config validation, so the resulting list in general.additional_metrics may differ from the one originally passed by the user.",
           "items": {
-            "enum": [
-              "nrmse",
-              "rmse",
-              "neg_root_mean_squared_error",
-              "mae",
-              "mse",
-              "r2"
-            ],
             "type": "string"
           },
           "title": "Additional Metrics",

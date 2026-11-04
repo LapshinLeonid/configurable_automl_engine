@@ -13,12 +13,14 @@ except ImportError:  # pragma: no cover - _version.py absent in a fresh checkout
     __version__ = "0.0.0"
 
 # Import from the subpackage where the Lazy proxy is configured
+from .common.custom_metrics import CustomMetricSpec
 from .trainer import ModelTrainer
 from .training_engine import train_best_model
 from .training_engine.config_parser import Config
 
 __all__ = [
     "Config",
+    "CustomMetricSpec",
     "ModelTrainer",
     "__version__",
     "train_best_model",

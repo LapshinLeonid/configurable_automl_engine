@@ -12,14 +12,19 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-from typing import TypeVar
+from collections.abc import Mapping
+from typing import Any, TypeVar
 
 from configurable_automl_engine.common.definitions import (
     SerializationFormat,
     ValidationStrategy,
 )
 from configurable_automl_engine.common.dependency_utils import is_installed
-from configurable_automl_engine.common.metrics import to_sklearn_name
+from configurable_automl_engine.common.metrics import (
+    AVAILABLE_METRICS,
+    check_custom_metric_name,
+    to_sklearn_name,
+)
 from configurable_automl_engine.training_engine.config.phases import (
     HPOPhaseCfg,
     PruningCfg,
@@ -28,6 +33,55 @@ from configurable_automl_engine.training_engine.config.phases import (
 logger = logging.getLogger(__name__)
 
 _MetricT = TypeVar("_MetricT", bound=str)
+
+
+def check_custom_metric_names(v: Any) -> Any:
+    """Check the keys of ``general.custom_metrics`` before the specs load.
+
+    Run before the entries are validated, so a reserved or malformed name is
+    reported even when its callable cannot be imported.
+
+    Returns:
+        The value unchanged.
+    """
+    if isinstance(v, Mapping):
+        for name in v:
+            check_custom_metric_name(name)
+    return v
+
+
+def check_metric_references(
+    comparison_metric: str,
+    additional_metrics: list[str],
+    custom_metrics: Mapping[str, object],
+) -> None:
+    """Check that every metric name is a built-in or a declared custom metric.
+
+    Names are matched exactly (custom metric names are lowercase). A custom
+    metric that no metric field refers to is reported with a WARNING.
+
+    Raises:
+        ValueError: If a name is neither built-in nor in ``custom_metrics``.
+    """
+    allowed = [*AVAILABLE_METRICS, *custom_metrics]
+    for field, name in [
+        ("comparison_metric", comparison_metric),
+        *(("additional_metrics", m) for m in additional_metrics),
+    ]:
+        if name not in allowed:
+            raise ValueError(
+                f"{field}: unknown metric {name!r}; expected one of "
+                f"{', '.join(repr(m) for m in allowed)} (declare a user metric "
+                "in general.custom_metrics)"
+            )
+    used = {comparison_metric, *additional_metrics}
+    for name in custom_metrics:
+        if name not in used:
+            logger.warning(
+                "general.custom_metrics.%s is declared but not used by "
+                "comparison_metric or additional_metrics.",
+                name,
+            )
 
 
 def deduplicate_additional_metrics(v: list[_MetricT]) -> list[_MetricT]:

@@ -14,7 +14,7 @@ setting has a sensible default.
 3. [Recipes](#recipes) — copy-paste configs for common tasks.
 4. [Configuration reference](#configuration-reference) — every option, grouped by section.
    * [`general`](#general-section) · [Pipeline steps (`phases`)](#pipeline-steps-phases) · [Sanity Gate](#sanity-gate-robust-winner-selection) · [`algorithms`](#algorithms-section) · [`oversampling`](#oversampling-section)
-   * Advanced: [early stopping](#early-stopping-pruning) · [additional metrics](#additional-metrics-additional_metrics) · [feature selection](#feature-selection-feature_selection) · [complexity guard](#complexity-guard-configuration-complexity_guard) · [preprocessing presets](#adaptive-feature-preprocessing-preprocessing-presets) · [categorical encoding](#categorical-encoding)
+   * Advanced: [early stopping](#early-stopping-pruning) · [additional metrics](#additional-metrics-additional_metrics) · [custom metrics](#custom-metrics-custom_metrics) · [feature selection](#feature-selection-feature_selection) · [complexity guard](#complexity-guard-configuration-complexity_guard) · [preprocessing presets](#adaptive-feature-preprocessing-preprocessing-presets) · [categorical encoding](#categorical-encoding)
 5. [Training results](#training-results) — what `train_best_model` returns.
 6. [Python API](#python-api) — functions and classes.
 7. [Migrating older configs](#migrating-older-configs).
@@ -258,6 +258,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `comparison_metric` | `"r2"` | Metric that defines the best model. See [allowed values](#allowed-values-for-comparison_metric). |
+| `custom_metrics` | `{}` | Your own metrics and scorers, loaded by import path; `comparison_metric` and `additional_metrics` can name them. See [Custom metrics](#custom-metrics-custom_metrics). |
 | `phases` | search + `cv_best` winner | The pipeline. See [Pipeline steps](#pipeline-steps-phases). |
 | `path_to_model` | `"model.pkl"` | Where the winning model is saved. |
 | `serialization_format` | `"pickle"` | `"pickle"` or `"joblib"`. |
@@ -312,6 +313,10 @@ A config has three top-level sections. Only `algorithms` is required:
 * `"mae"`
 * `"mse"`
 * `"r2"`
+* the name of a [`custom_metrics`](#custom-metrics-custom_metrics) entry.
+
+Names are matched exactly (`"R2"` is an error). An unknown name fails config
+validation; the message lists the built-in and the declared custom names.
 
 ### Additional metrics (`additional_metrics`)
 
@@ -320,7 +325,7 @@ The optional `general.additional_metrics` parameter is a list of extra quality m
 Rules and behavior:
 
 * **Optional.** If the parameter is absent or empty, no `additional_metrics` key is added to the results.
-* **Allowed values** — the same set as for `comparison_metric` (see above). An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
+* **Allowed values** — the same set as for `comparison_metric` (see above), custom metrics included. An unknown metric name fails config validation before training starts (`ValidationError` with the list of supported values).
 * **Informational only.** Additional metrics do **not** participate in hyperparameter optimization, model comparison, or winner selection. The winner is determined solely by the main `comparison_metric`.
 * **Duplicates.** If the same metric is listed several times, it is computed and returned exactly once (first-occurrence order is kept). Duplicates are removed at config validation time.
 * **Overlap with the main metric.** If an additional metric coincides with the main comparison metric (including aliases of the same metric, e.g. `"rmse"` and `"neg_root_mean_squared_error"`), it is excluded from the list — its value is already returned once as `score`. A warning is logged.
@@ -336,6 +341,97 @@ general:
   comparison_metric: "rmse"
   additional_metrics: ["r2", "mae", "mse"]
 ```
+
+### Custom metrics (`custom_metrics`)
+
+`general.custom_metrics` declares your own metrics and scorers. Each entry is
+keyed by the name that `comparison_metric` and `additional_metrics` use, and
+names a Python callable by its **import path**:
+
+```yaml
+general:
+  custom_metrics:
+    mape:
+      path: "my_project.metrics:mape"   # required
+      greater_is_better: false          # required for kind: metric
+      additive: true                    # default false
+      kwargs: {eps: 1.0e-6}             # optional
+    business_score:
+      path: "my_project.metrics:business_scorer"
+      kind: "scorer"
+  comparison_metric: "mape"
+  additional_metrics: ["r2", "business_score"]
+```
+
+```python
+# my_project/metrics.py
+import numpy as np
+
+def mape(y_true, y_pred, eps=1e-6):
+    return float(np.mean(np.abs(y_true - y_pred) / np.maximum(np.abs(y_true), eps)))
+
+def business_scorer(estimator, X, y):
+    return float(...)  # higher is better
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | required | Import path of the callable: `"package.module:attribute"` (preferred; the part after `:` may be nested, e.g. `"pkg.mod:Class.method"`) or `"package.module.attribute"`. |
+| `kind` | `"metric"` | `"metric"` — `fn(y_true, y_pred, **kwargs) -> float`; `"scorer"` — an sklearn scorer `scorer(estimator, X, y) -> float` (a `make_scorer` object or a plain callable). |
+| `greater_is_better` | `null` | The natural direction of the returned value: `true` for scores, `false` for errors. **Required** for `kind: "metric"`. A `make_scorer` scorer carries its own direction (an explicit value must agree with it); a plain callable scorer defaults to `true` (the sklearn convention). |
+| `additive` | `false` | How the cross-validation estimate is formed. `false` — the metric is computed once over the pooled out-of-fold predictions (always correct; required for RMSE-, R²- or median-like metrics). `true` — the mean of the per-fold values (correct only for per-sample means such as MAE or MAPE). |
+| `kwargs` | `{}` | Static keyword arguments passed to the function on every call. Only for `kind: "metric"` and for `make_scorer` scorers (merged into the scorer's own arguments). |
+
+Rules and behavior:
+
+* **Checked before training.** Config validation imports every callable and
+  checks it: the path must import, the object must be callable, its signature
+  must accept `(y_true, y_pred)` plus `kwargs` (`kind: "metric"`) or
+  `(estimator, X, y)` (`kind: "scorer"`), and the direction must be known. A
+  failure names the entry (`general.custom_metrics.<name>`) and has one of the
+  error types `custom_metric_import_error`, `custom_metric_not_callable`,
+  `custom_metric_bad_signature`, `custom_metric_direction_required`,
+  `custom_metric_direction_conflict`, `custom_metric_kwargs_unsupported`.
+* **Names.** A name must match `^[a-z][a-z0-9_]*$` and must not be a built-in
+  metric, an alias (`neg_root_mean_squared_error`), `global_nrmse` or any
+  scorer name of `sklearn.metrics.get_scorer` (`custom_metric_invalid_name`,
+  `custom_metric_name_collision`). A declared metric that no metric field
+  uses is reported with a WARNING.
+* **Values.** A `kind: "metric"` function returns the natural value (a
+  positive MAPE with `greater_is_better: false`); the report shows it as is.
+  For a scorer the value is shown in its natural form as well: a
+  `make_scorer(..., greater_is_better=False)` scorer is inverted back to the
+  positive error, like the built-in error metrics.
+* **Same treatment as the built-in metrics** everywhere: the HPO objective,
+  early stopping, the final `val_score` / `oof_score`, `holdout_score`,
+  `bbc_score`, the Sanity Gate corridor (`"auto"` follows the declared
+  direction), `additional_metrics` and the log lines ("min better" /
+  "max better").
+* **Plain callable scorers** expose no raw metric function, so the value over
+  the pooled out-of-fold vector — and `bbc_score` — cannot be computed for
+  them: the per-fold mean is used (a WARNING at config load unless
+  `additive: true`), and the report has no `bbc_score` when such a scorer is
+  the comparison metric. Use `kind: "metric"` or a `make_scorer` scorer to
+  keep the pooled estimate.
+* **Errors at run time.** An exception raised by the callable (or a value
+  that is not a number) is handled like a failing built-in scorer: the HPO
+  fold or trial gets the failure penalty, and an additional metric is skipped
+  with a WARNING.
+* **`parallel_mode: "processes"`.** Only the declaration crosses the process
+  boundary; every worker imports the callable again from `path`. The module
+  must therefore be importable in the workers — an installed package or a
+  module on `PYTHONPATH`, not a function defined in the main script or in a
+  notebook cell.
+* **Saved models.** The artifact stores the declarations (see
+  `artifact_metadata_["custom_metrics"]`), never the callables: loading a
+  model and calling `predict` work where the metric module is not installed.
+* **Security.** `path` imports and runs arbitrary code. Do not load configs
+  from untrusted sources.
+
+The direct APIs take the same declarations: `optimize(..., metric="mape",
+custom_metrics={...})` and `ModelTrainer(metric="mape", custom_metrics={...})`
+accept a mapping from name to a dict with the fields above or to a
+`CustomMetricSpec` (`configurable_automl_engine.CustomMetricSpec`).
 
 ### Early stopping (`pruning`)
 
@@ -1115,6 +1211,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `data_oversampling_add_noise` | `bool` | `False` | Add Gaussian noise to the numeric features of the oversampled data. |
 | `data_oversampling_noise_level` | `float` | `0.01` | Noise intensity relative to the column standard deviation (must be > 0). |
 | `metric` | `str` | `"r2"` | Metric to maximize. |
+| `custom_metrics` | `Mapping[str, CustomMetricSpec \| dict]` or `None` | `None` | Custom metrics that `metric` may name; same fields and rules as [`general.custom_metrics`](#custom-metrics-custom_metrics). An invalid entry raises `ValueError` (a pydantic `PydanticCustomError`). |
 | `val_method` | `ValidationStrategy` or `str` | `"auto"` | Validation method (accepted alias; `validation_strategy` takes precedence), same default as `general.validation_strategy`. |
 | `validation_strategy` | `ValidationStrategy`, `str` or `None` | `None` | Validation method (`"train_test_split"`, `"k_fold"`, `"loo"`, `"auto"`); takes precedence over `val_method`. `None` — `val_method` is used. |
 | `train_test_split_test_size` | `float` | `0.2` | Test set size when using `train_test_split` validation. Ignored when using `"auto"`. |
@@ -1217,6 +1314,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 | `algorithm` | `str` | `"elasticnet"` | Algorithm name. |
 | `hyperparams` | `dict` or `None` | `None` | Model hyperparameters. |
 | `metric` | `str` | `"r2"` | Evaluation metric. |
+| `custom_metrics` | `Mapping[str, CustomMetricSpec \| dict]` or `None` | `None` | Custom metrics that `metric` and `additional_metrics` may name; same fields and rules as [`general.custom_metrics`](#custom-metrics-custom_metrics). An invalid entry raises `TrainingError`. Stored with the model as declarations only. |
 | `random_state` | `int` or `None` | `42` | Random seed. |
 | `data_oversampling` | `bool` | `False` | Enable oversampling. |
 | `data_oversampling_multiplier` | `float` | `1.0` | Oversampling multiplier. |

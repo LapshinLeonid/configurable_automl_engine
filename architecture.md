@@ -43,16 +43,17 @@ move that thing down.
 ```
 ├── benchmarks                              # Quality benchmarks of Sanity Gate, Complexity Guard, oversampling
 ├── scripts
-│   └── compare_with_base.py                # Differential behavior check against the base commit (run in CI)
+│   └── compare_with_base.py                # Differential behavior check against the base commit (optional CI workflow: manual run or the `compare-with-base` PR label)
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
 │       ├── common                          # Layer 0: shared utilities (imports nothing above common)
+│       │   ├── custom_metrics.py           # CustomMetricSpec: user metrics/scorers by dotted path, scorer cache, process-local registry
 │       │   ├── datetime_features.py        # Datetime/timedelta input columns: the datetime policy, expansion at fit and predict time
 │       │   ├── definitions.py              # Constants, enums and literals (validation, encoding, serialization)
 │       │   ├── dependency_utils.py         # Optional library and dependency checks
 │       │   ├── errors.py                   # TrainingError
 │       │   ├── log_setup.py                # Centralized logging setup (setup_logging)
-│       │   ├── metrics.py                  # Evaluation metrics, BBC-CV estimate
+│       │   ├── metrics.py                  # Evaluation metrics (built-in and registered custom), BBC-CV estimate
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
 │       │   ├── settings.py                 # Setting groups shared by HPO and the trainer (encoding, oversampling, input policies)
 │       │   ├── shared_frame.py             # SharedDataFrame: a DataFrame passed between processes through shared memory
