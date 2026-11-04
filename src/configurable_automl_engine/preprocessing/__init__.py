@@ -12,7 +12,9 @@ building blocks:
   numerical columns;
 * :func:`build_preprocessor` — assembly of the ``sklearn.ColumnTransformer``
   (categorical encoding + numerical imputation/scaling; missing-value
-  indicators are added by default).
+  indicators are added by default);
+* :class:`Winsorizer` — the standalone winsorization transformer
+  (:mod:`.outliers`; not used by :func:`build_preprocessor` yet).
 
 Key invariants:
 
@@ -28,7 +30,8 @@ Key invariants:
 
 Package layout: :mod:`.encoders` (the encoders), :mod:`.columns`
 (:class:`ColumnNameSelector`), :mod:`.features` (type detection,
-uninformative-column removal, feature-count estimate), :mod:`.builder`
+uninformative-column removal, feature-count estimate), :mod:`.outliers`
+(:class:`Winsorizer`, standalone), :mod:`.builder`
 (:func:`build_preprocessor`). This ``__init__`` only re-exports the public
 names (the import path stays the same).
 """
@@ -50,6 +53,7 @@ from configurable_automl_engine.preprocessing.features import (
     detect_feature_types,
     estimate_n_features_after_preprocessing,
 )
+from configurable_automl_engine.preprocessing.outliers import Winsorizer
 
 __all__ = [
     "ColumnNameSelector",
@@ -58,6 +62,7 @@ __all__ = [
     "HashingEncodingTransformer",
     "SplitCategoricalEncoder",
     "TargetEncodingTransformer",
+    "Winsorizer",
     "_clean_uninformative_features",
     "_to_string_array",
     "build_preprocessor",

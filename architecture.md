@@ -38,6 +38,13 @@ functions are not allowed (except the lazy `train_best_model` proxy in
 `training_engine/__init__.py`). If a lower module needs something from above,
 move that thing down.
 
+Inside the `preprocessing` package the import direction is:
+`builder -> features -> columns`, `encoders -> columns` and
+`builder -> encoders -> columns`; `outliers` must not import any other
+preprocessing module (it is a pure, self-contained transformer; its classes
+are pickled inside saved models, so its module path is part of the artifact
+format and the module must stay where it is).
+
 # Project Structure
 
 ```
@@ -113,7 +120,8 @@ move that thing down.
 │       │   ├── builder.py                  # build_preprocessor: the single preprocessor entry point
 │       │   ├── columns.py                  # ColumnNameSelector: column selection by name
 │       │   ├── encoders.py                 # Target / frequency / hashing / split categorical encoders
-│       │   └── features.py                 # Feature type detection, uninformative columns, feature count estimate
+│       │   ├── features.py                 # Feature type detection, uninformative columns, feature count estimate
+│       │   └── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
 │       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
 │       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks
