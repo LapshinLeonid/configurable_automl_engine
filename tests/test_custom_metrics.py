@@ -10,6 +10,7 @@ the metric module).
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import subprocess
 import sys
@@ -775,14 +776,24 @@ def test_artifact_loads_without_the_metric_module(regression_xy, tmp_path):
         pred = m.predict(pd.read_csv({str(tmp_path / "x.csv")!r}))
         assert len(pred) == 3
         assert not any(k == "tests" or k.startswith("tests.") for k in sys.modules)
+        try:
+            import tests.custom_metric_fixtures  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            raise AssertionError("the metric module must not be importable here")
         print(sorted(m.custom_metrics))
         """
     )
-    # -I: isolated mode, the repository root (and so ``tests``) is not on
-    # sys.path; cwd is a temp dir.
+    # The repository root (and so ``tests``) must not be importable: -P keeps
+    # the cwd off sys.path, PYTHONPATH is dropped, and cwd is a temp dir. The
+    # user site-packages stay available (the libraries may be installed
+    # there).
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-P", "-c", script],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
         timeout=300,

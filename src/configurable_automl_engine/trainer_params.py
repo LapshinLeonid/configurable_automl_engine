@@ -281,7 +281,6 @@ def build_trainer_settings(
     target_encoding_smoothing: float,
     target_encoding_fallback: float | None,
     additional_metrics: Iterable[str] | None,
-    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None,
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
     feature_selection_active: Any,
@@ -291,6 +290,7 @@ def build_trainer_settings(
     oversampling: OversamplingSettings,
     policies: InputPolicies,
     warn_id_like: bool,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
 
