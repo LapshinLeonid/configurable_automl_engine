@@ -185,12 +185,20 @@ class AlgoCfg(BaseModel):
         description=(
             "Explicit override of the feature preprocessing preset for this "
             "algorithm. Set partially or fully: 'imputation_strategy' "
-            "('mean'|'median') and/or 'scaling' — a string shorthand "
+            "('mean'|'median'), 'scaling' — a string shorthand "
             "('standard'|'robust'|'quantile'|'none') or an object "
             "({'type': 'robust', 'quantile_range': [low, high], "
-            "'with_centering': bool}). "
-            "Takes precedence over the automatic choice based on the algorithm "
-            "class. None — automatic selection."
+            "'with_centering': bool} / {'type': 'quantile', "
+            "'output_distribution': 'uniform'|'normal', 'n_quantiles': int, "
+            "'subsample': int}), and 'outliers' — winsorization of numeric "
+            "features: a string shorthand ('none'|'quantile'|'iqr') or an "
+            "object ({'method': 'quantile', 'lower_quantile': float, "
+            "'upper_quantile': float} / {'method': 'iqr', 'iqr_multiplier': "
+            "float}). Merged per field with general.preprocessing: a field "
+            "set here wins, a field left null is taken from "
+            "general.preprocessing, then from the automatic choice based on "
+            "the algorithm class. None — only general.preprocessing and the "
+            "automatic selection apply."
         ),
     )
 

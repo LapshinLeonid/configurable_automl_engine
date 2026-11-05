@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging as _logging
 import time
+from dataclasses import replace
 from typing import Any, NoReturn, cast
 
 import numpy as np
@@ -25,6 +26,9 @@ import pandas as pd
 from optuna.trial import FrozenTrial, Trial
 from scipy import sparse as sp
 
+from configurable_automl_engine.common.datetime_features import (
+    generated_datetime_columns,
+)
 from configurable_automl_engine.common.metrics import (
     is_non_additive_metric,
     register_custom_metrics,
@@ -275,6 +279,14 @@ class _OptimizeRunner:
 
         request = self.request
         self.validation = plan_validation(self.X, self.y, request)
+        if request.winsorizer_exclude is None:
+            # As in ModelTrainer: datetime components are never winsorized.
+            request = self.request = replace(
+                request,
+                winsorizer_exclude=generated_datetime_columns(
+                    self.X, self.validation.X
+                ),
+            )
         self.X = self.validation.X
         # The preprocessor must be planned BEFORE the search space: the
         # adaptive complexity guard needs ``p`` — the number of features

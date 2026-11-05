@@ -84,7 +84,9 @@ class HpoRequest:
             ``preprocessing_override``.
         winsorizer_exclude: The numerical columns excluded from winsorization
             (the datetime-derived component columns; see
-            ``datetime_expansion_map``). ``None`` — nothing is excluded.
+            ``datetime_expansion_map``). ``None`` — derived automatically from
+            the datetime expansion of ``X`` (as in ``ModelTrainer``); ``[]``
+            — nothing is excluded.
         feature_selection_cfg: The feature selection settings.
         oversampling: The oversampling settings.
         pruning: The early stopping (pruning) settings.

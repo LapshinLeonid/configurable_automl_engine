@@ -21,6 +21,7 @@ import logging
 from typing import Any, Literal
 
 import numpy as np
+from scipy.stats import norm
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import QuantileTransformer
 
@@ -44,6 +45,12 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
     ``UserWarning`` about ``n_quantiles`` exceeding the number of samples;
     the effective value is exposed as ``n_quantiles_``. Every clipping is
     logged once at DEBUG level.
+
+    ``output_distribution='normal'`` is computed from the uniform output as
+    ``norm.ppf(0.5/n + u * (1 - 1/n))`` (``n = n_quantiles_``) instead of
+    sklearn's own normal output, which maps the training extremes to its
+    ±5.2 clipping bound and thus creates outliers on small folds; the
+    transformed values are bounded by ``±ppf(1 - 0.5/n)``.
 
     The transformer follows the standard sklearn API: ``get_params``/
     ``set_params`` (via :class:`~sklearn.base.BaseEstimator`), ``fit``/
@@ -112,9 +119,15 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
                 effective_n_quantiles,
             )
         self.n_quantiles_ = effective_n_quantiles
+        # sklearn's 'normal' output maps the training minimum/maximum to its
+        # clipping bound (about ±5.2) while the neighbouring points get
+        # ordinary values: on a 14-row fold the extreme row sits 3.8 away
+        # from its neighbour, i.e. the scaler itself manufactures two
+        # high-leverage outliers per column. The 'normal' output is built on
+        # top of the 'uniform' one instead (see ``transform``).
         self._transformer_ = QuantileTransformer(
             n_quantiles=effective_n_quantiles,
-            output_distribution=self.output_distribution,
+            output_distribution="uniform",
             subsample=self.subsample,
             random_state=self.random_state,
         ).fit(X)
@@ -133,7 +146,43 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
             NotFittedError: If called before ``fit``.
         """
         check_is_fitted(self, "_transformer_")
-        return self._transformer_.transform(X)
+        uniform = self._transformer_.transform(X)
+        # A model pickled before the 'normal' remap holds an inner
+        # transformer that already outputs the normal distribution: it is
+        # returned as is, so old artifacts keep predicting identically.
+        if (
+            self.output_distribution != "normal"
+            or self._transformer_.output_distribution == "normal"
+        ):
+            return uniform
+        return self._uniform_to_normal(uniform, self.n_quantiles_)
+
+    @staticmethod
+    def _uniform_to_normal(uniform: Any, n_quantiles: int) -> Any:
+        """Map the uniform output to a normal one without extreme tails.
+
+        ``u`` is squeezed into ``[0.5/n, 1 - 0.5/n]`` (the mid-points of
+        the outermost quantile bins, ``n`` — the effective number of
+        quantiles) before ``norm.ppf``, so the training extremes land at
+        ``±ppf(1 - 0.5/n)`` (±1.80 on 14 rows) instead of sklearn's ±5.2
+        clipping bound. NaN passes through unchanged.
+
+        Args:
+            uniform: The uniform-distributed output (dense ndarray).
+            n_quantiles: The effective number of quantiles.
+
+        Returns:
+            The normal-distributed output of the same shape.
+        """
+        half = 0.5 / n_quantiles
+
+        def _map(values: np.ndarray) -> np.ndarray:
+            return np.asarray(
+                norm.ppf(half + np.clip(values, 0.0, 1.0) * (1.0 - 2.0 * half)),
+                dtype=values.dtype if values.dtype.kind == "f" else float,
+            )
+
+        return _map(np.asarray(uniform))
 
     def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
         """One-to-one mapping: one output column per input column.

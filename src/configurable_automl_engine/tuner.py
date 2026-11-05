@@ -210,7 +210,10 @@ def optimize(
             applied consistently with the final training.
         winsorizer_exclude: Numerical columns excluded from winsorization
             (the datetime-derived component columns; see
-            ``datetime_expansion_map``). ``None`` — nothing is excluded.
+            ``datetime_expansion_map``). ``None`` (default) — derived
+            automatically from the datetime expansion of ``X``, exactly as
+            in ``ModelTrainer``, so tuning and the final fit see the same
+            preprocessing; ``[]`` — nothing is excluded.
             Names outside the numerical feature set are ignored (with a
             DEBUG line); names missing from ``X`` raise ``ValueError``.
         pruning: Early stopping (pruning) settings.

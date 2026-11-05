@@ -116,7 +116,9 @@ class GeneralCfg(BaseModel):
             settings. By default mode='disabled' — feature selection is not applied.
         preprocessing (PreprocessingOverride | None): Run-level default
             override of the adaptive feature preprocessing preset, applied
-            to every algorithm without its own per-algorithm block.
+            to every algorithm and merged per field with its per-algorithm
+            block (fields the per-algorithm block leaves unset come from
+            here).
             Precedence per field: class preset < general block <
             per-algorithm block. None — no run-level default.
     """
@@ -402,11 +404,13 @@ class GeneralCfg(BaseModel):
         default=None,
         description=(
             "Run-level default override of the adaptive feature preprocessing "
-            "preset, applied to EVERY algorithm that has no preprocessing "
-            "block of its own (algorithms.<name>.preprocessing). Reuses the "
-            "same model as the per-algorithm block: 'imputation_strategy' "
-            "('mean'|'median') and/or 'scaling' "
-            "('standard'|'robust'|'quantile'|'none'); "
+            "preset, applied to EVERY algorithm and merged per field with "
+            "the algorithm's own block (algorithms.<name>.preprocessing): a "
+            "field the algorithm block leaves null is taken from here. "
+            "Reuses the same model as the per-algorithm block: "
+            "'imputation_strategy' ('mean'|'median'), 'scaling' "
+            "('standard'|'robust'|'quantile'|'none' or an object form) and "
+            "'outliers' ('none'|'quantile'|'iqr' or an object form); "
             "fields left as null keep the automatic selection based on the "
             "algorithm class. Precedence per field: class preset < "
             "general.preprocessing < algorithms.<name>.preprocessing — a "

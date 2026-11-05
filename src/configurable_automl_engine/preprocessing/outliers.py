@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import warnings
 from collections.abc import Sequence
 from numbers import Real
@@ -26,6 +27,20 @@ from sklearn.utils.validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Small-sample WARNING deduplication: the winsorizer is fitted once per fold
+# per trial, so the WARNING is emitted once per process per
+# (algorithm, lower_quantile, upper_quantile) configuration. The set is
+# guarded by a lock: folds may be fitted concurrently.
+_small_sample_lock = threading.Lock()
+_small_sample_warned: set[tuple[str, float, float]] = set()
+
+
+def reset_small_sample_warnings() -> None:
+    """Clear the warn-once state of the small-sample WARNING (test helper)."""
+    with _small_sample_lock:
+        _small_sample_warned.clear()
+
 
 __all__ = ["Winsorizer"]
 
@@ -298,6 +313,8 @@ class Winsorizer(TransformerMixin, BaseEstimator):
         arr = self._to_2d_float(X)
         self.n_features_in_ = arr.shape[1]
         exclude_mask = self._exclude_mask()
+        if self.method == "quantile":
+            self._warn_small_sample(arr.shape[0])
 
         lower = np.empty(self.n_features_in_, dtype=float)
         upper = np.empty(self.n_features_in_, dtype=float)
@@ -367,6 +384,51 @@ class Winsorizer(TransformerMixin, BaseEstimator):
                 ", ".join(excluded_names),
             )
         return self
+
+    def _warn_small_sample(self, n_rows: int) -> None:
+        """Warn once when the quantile bounds cannot isolate any outlier.
+
+        With ``lower_quantile * n_rows < 1`` (or the same for
+        ``1 - upper_quantile``) the bound falls between the minimum and the
+        second smallest value (the maximum and the second largest), so every
+        fit clips the extreme rows of every column whether they are outliers
+        or not. ``method="iqr"`` adapts to small samples instead.
+
+        Args:
+            n_rows: The number of training rows of the fitted fold.
+        """
+        lo_tail = self.lower_quantile
+        hi_tail = 1.0 - self.upper_quantile
+        too_small = (0.0 < lo_tail and lo_tail * n_rows < 1.0) or (
+            0.0 < hi_tail and hi_tail * n_rows < 1.0
+        )
+        if not too_small:
+            return
+        key = (
+            self.algorithm_name or "",
+            float(self.lower_quantile),
+            float(self.upper_quantile),
+        )
+        with _small_sample_lock:
+            if key in _small_sample_warned:
+                return
+            _small_sample_warned.add(key)
+        prefix = (
+            f"Winsorizer (algorithm {self.algorithm_name!r}): "
+            if self.algorithm_name
+            else "Winsorizer: "
+        )
+        logger.warning(
+            "%squantile bounds [%s, %s] on %d training rows fall between the "
+            "extreme value and its neighbour: the minimum and maximum of every "
+            "column are clipped on every fit, whether they are outliers or "
+            "not. Consider outliers.method='iqr' for small data. (Logged once "
+            "per configuration.)",
+            prefix,
+            self.lower_quantile,
+            self.upper_quantile,
+            n_rows,
+        )
 
     def _exclude_mask(self) -> np.ndarray:
         """Resolve the ``exclude`` entries into a per-column boolean mask.
