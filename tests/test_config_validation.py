@@ -935,7 +935,7 @@ def test_algo_cfg_preprocessing_invalid_scaling_rejected():
     """An invalid scaling value is rejected during validation
     with a clear error message (negative scenario)."""
     with pytest.raises(ValidationError, match="scaling"):
-        AlgoCfg(preprocessing={"scaling": "quantile"})
+        AlgoCfg(preprocessing={"scaling": "power"})
 
 
 def test_algo_cfg_preprocessing_invalid_imputation_rejected():

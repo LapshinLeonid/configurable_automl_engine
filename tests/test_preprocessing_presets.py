@@ -332,9 +332,9 @@ def test_cross_type_parameter_rejected():
 def test_unknown_scaling_type_rejected_in_override():
     """An unknown scaling type (string or object) is rejected with a clear error."""
     with pytest.raises(ValidationError):
-        PreprocessingOverride.model_validate({"scaling": "quantile"})
+        PreprocessingOverride.model_validate({"scaling": "power"})
     with pytest.raises(ValidationError):
-        PreprocessingOverride.model_validate({"scaling": {"type": "quantile"}})
+        PreprocessingOverride.model_validate({"scaling": {"type": "power"}})
 
 
 def test_object_override_with_robust_parameters_applied():
@@ -427,3 +427,107 @@ def test_coerce_scaling_error_is_validation_error():
         coerce_scaling("bogus")
     with pytest.raises(ValueError):
         coerce_scaling("bogus")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  QuantileScaling spec (ScalingSpec union member)
+# ──────────────────────────────────────────────────────────────────────────
+def test_quantile_scaling_defaults():
+    """QuantileScaling defaults: n_quantiles/output_distribution match sklearn;
+    subsample=100_000 is a deliberate engine-specific value (sklearn>=1.8
+    defaults to 10_000). The spec value is always forwarded to sklearn, so
+    the behavior is stable against upstream default changes.
+    """
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    spec = QuantileScaling()
+    assert spec.type == "quantile"
+    assert spec.output_distribution == "uniform"
+    assert spec.n_quantiles == 1000
+    assert spec.subsample == 100_000
+
+
+def test_quantile_scaling_string_shorthand_normalized():
+    """The 'quantile' string shorthand is normalized to the object form."""
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    assert coerce_scaling("quantile") == QuantileScaling()
+    assert scaling_type("quantile") == "quantile"
+    assert scaling_type(QuantileScaling(output_distribution="normal")) == "quantile"
+
+
+def test_quantile_scaling_object_override_applied():
+    """An object-form override with quantile parameters reaches the preset."""
+    preset = resolve_preprocessing_preset(
+        "ridge",
+        {
+            "scaling": {
+                "type": "quantile",
+                "output_distribution": "normal",
+                "n_quantiles": 100,
+            }
+        },
+    )
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    assert preset.scaling == QuantileScaling(
+        output_distribution="normal", n_quantiles=100
+    )
+    # The frozen spec is stored in the object form (no raw dict).
+    assert isinstance(preset.scaling, QuantileScaling)
+
+
+@pytest.mark.parametrize("n_quantiles", [9, 1, 0, -5])
+def test_quantile_scaling_invalid_n_quantiles_rejected(n_quantiles):
+    """n_quantiles < 10 is rejected by validation."""
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    with pytest.raises(ValidationError):
+        QuantileScaling(n_quantiles=n_quantiles)
+
+
+def test_quantile_scaling_subsample_below_n_quantiles_rejected():
+    """subsample < n_quantiles is rejected by the model validator."""
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    with pytest.raises(ValidationError, match="subsample"):
+        QuantileScaling(n_quantiles=100, subsample=50)
+    with pytest.raises(ValidationError):
+        PreprocessingOverride.model_validate(
+            {"scaling": {"type": "quantile", "n_quantiles": 1000, "subsample": 100}}
+        )
+
+
+def test_quantile_scaling_invalid_output_distribution_rejected():
+    """An output_distribution outside {'uniform', 'normal'} is rejected."""
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    with pytest.raises(ValidationError):
+        QuantileScaling(output_distribution="logistic")
+
+
+def test_quantile_scaling_frozen():
+    """The spec is a frozen value object: mutation is rejected."""
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    with pytest.raises(ValidationError):
+        QuantileScaling().n_quantiles = 42
+
+
+def test_quantile_scaling_preset_str_shows_parameters():
+    """__str__ shows the quantile parameters (e.g. quantile(dist=normal, n=100))."""
+    preset = resolve_preprocessing_preset(
+        "ridge",
+        {"scaling": {"type": "quantile", "output_distribution": "normal"}},
+    )
+    assert "quantile(dist=normal" in str(preset)
+    # The default subsample is not shown.
+    assert "subsample" not in str(preset)
+
+
+def test_quantile_scaling_cross_type_parameter_rejected():
+    """A robust parameter inside the quantile branch is rejected."""
+    with pytest.raises(ValidationError):
+        PreprocessingOverride.model_validate(
+            {"scaling": {"type": "quantile", "quantile_range": [10, 90]}}
+        )

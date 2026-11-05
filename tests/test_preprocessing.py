@@ -223,9 +223,9 @@ def test_build_preprocessor_default_is_onehot():
         # Internal encoders are created in fit() (sklearn convention).
         preprocessor.fit(df)
         assert isinstance(
-            preprocessor.named_transformers_["cat"].named_steps[
-                "encoder"
-            ].default_encoder_,
+            preprocessor.named_transformers_["cat"]
+            .named_steps["encoder"]
+            .default_encoder_,
             OneHotEncoder,
         )
 
@@ -577,7 +577,7 @@ def test_build_preprocessor_invalid_scaling_raises():
             ["a"],
             categorical_features=[],
             numerical_features=["a"],
-            scaling="quantile",
+            scaling="quantum",
         )
 
 
@@ -658,9 +658,7 @@ def test_build_preprocessor_indicator_columns_on_fit_transform():
 
 def test_build_preprocessor_indicator_only_for_missing_features():
     """A fully populated feature does not get an indicator (missing-only)."""
-    df = pd.DataFrame(
-        {"num_a": [1.0, 2.0, np.nan], "num_b": [10.0, 20.0, 30.0]}
-    )
+    df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan], "num_b": [10.0, 20.0, 30.0]})
     preprocessor = build_preprocessor(
         list(df.columns),
         categorical_features=[],
@@ -796,8 +794,7 @@ def test_build_preprocessor_categorical_imputer_without_indicator():
         numerical_features=["num"],
     )
     cat_transformers = dict(
-        (name, transformer)
-        for name, transformer, _ in preprocessor.transformers
+        (name, transformer) for name, transformer, _ in preprocessor.transformers
     )
     cat_imputer = cat_transformers["cat"].named_steps["imputer"]
     assert isinstance(cat_imputer, SimpleImputer)
@@ -966,8 +963,7 @@ def test_preprocessor_hc_and_target_reorder_identical():
         }
     )
     y = pd.Series(
-        df["low"].map({"a": 1.0, "b": 2.0, "c": 3.0}).to_numpy()
-        + rng.normal(0, 0.1, n)
+        df["low"].map({"a": 1.0, "b": 2.0, "c": 3.0}).to_numpy() + rng.normal(0, 0.1, n)
     )
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -994,9 +990,7 @@ def test_preprocessor_reorder_all_encoding_strategies(enc):
     fit_transform returns cross-fitted values and is not required to match
     transform on the same rows.
     """
-    df = pd.DataFrame(
-        {"cat": ["a", "b", "a", "c"], "num": [1.0, 2.0, 3.0, 4.0]}
-    )
+    df = pd.DataFrame({"cat": ["a", "b", "a", "c"], "num": [1.0, 2.0, 3.0, 4.0]})
     y = pd.Series([1.0, 2.0, 1.0, 3.0])
     preprocessor = build_preprocessor(
         list(df.columns),
@@ -1021,9 +1015,7 @@ def test_preprocessor_reorder_all_encoding_strategies(enc):
 def test_build_preprocessor_hashing_sparse_by_default():
     """hashing encoding returns a csr_matrix through ColumnTransformer
     (the default sparse_threshold=0.3 yields csr with any sparse part)."""
-    df = pd.DataFrame(
-        {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
-    )
+    df = pd.DataFrame({"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)})
     preprocessor = build_preprocessor(
         list(df.columns),
         categorical_features=["cat"],
@@ -1041,9 +1033,7 @@ def test_build_preprocessor_hashing_sparse_by_default():
 def test_build_preprocessor_force_dense_output():
     """force_dense_output=True converts the sparse parts (hashing) to dense:
     required for GPR/Isotonic/ARD, which reject scipy.sparse."""
-    df = pd.DataFrame(
-        {"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)}
-    )
+    df = pd.DataFrame({"cat": ["a", "b", "c"] * 4, "num": np.arange(12.0)})
     preprocessor = build_preprocessor(
         list(df.columns),
         categorical_features=["cat"],
@@ -1173,7 +1163,6 @@ def test_build_preprocessor_one_hot_sparse_transform_consistency():
     assert out.shape == (600, 601)
 
 
-
 # ───────────────────── Cleaning of uninformative features ─────────────────────
 
 
@@ -1294,9 +1283,7 @@ def test_clean_is_idempotent():
 
 def test_clean_clean_data_unchanged():
     """Columns without missing values and with variance are kept (regression)."""
-    df = pd.DataFrame(
-        {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
-    )
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]})
     out = _clean_uninformative_features(df)
 
     assert list(out.columns) == ["a", "b"]
@@ -1349,9 +1336,7 @@ def test_clean_removes_zero_variance_constant_column_via_preprocessor():
     """Motivation: a constant column yields zero variance through
     the preprocessor (q75 == q25 for RobustScaler; in older sklearn versions —
     NaN/±inf due to division by zero IQR), and cleaning removes the garbage before build."""
-    df = pd.DataFrame(
-        {"informative": [1.0, 2.0, 3.0, 4.0, 5.0], "const": [7.0] * 5}
-    )
+    df = pd.DataFrame({"informative": [1.0, 2.0, 3.0, 4.0, 5.0], "const": [7.0] * 5})
 
     # Without cleaning, a constant column passes through the scaler with zero
     # variance — a "garbage" dimension in the distance matrix of metric
@@ -1513,22 +1498,334 @@ def test_build_preprocessor_scaling_object_form_scaler_params_exact():
     assert isinstance(pipeline_scaler, RobustScaler)
     # Byte-identical constructor parameters.
     assert pipeline_scaler.get_params() == direct_scaler.get_params()
-    assert (
-        repr(pipeline_scaler.get_params(deep=True))
-        == repr(direct_scaler.get_params(deep=True))
+    assert repr(pipeline_scaler.get_params(deep=True)) == repr(
+        direct_scaler.get_params(deep=True)
     )
     # Identical fitted state (center_/scale_ statistics).
     pipeline_out = preprocessor.fit_transform(df)
-    fitted_pipeline_scaler = (
-        preprocessor.named_transformers_["num"].named_steps["scaler"]
-    )
+    fitted_pipeline_scaler = preprocessor.named_transformers_["num"].named_steps[
+        "scaler"
+    ]
     direct_out = direct_scaler.fit_transform(df.to_numpy().reshape(-1, 1))
     np.testing.assert_allclose(pipeline_out.ravel(), direct_out.ravel())
-    assert (fitted_pipeline_scaler.center_ is None) == (
-        direct_scaler.center_ is None
-    )
+    assert (fitted_pipeline_scaler.center_ is None) == (direct_scaler.center_ is None)
     if fitted_pipeline_scaler.center_ is not None:
         np.testing.assert_allclose(
             fitted_pipeline_scaler.center_, direct_scaler.center_
         )
     np.testing.assert_allclose(fitted_pipeline_scaler.scale_, direct_scaler.scale_)
+
+
+# ─────────────────────────────── Quantile scaling ───────────────────────────────
+
+
+def test_build_preprocessor_scaling_quantile_uses_fold_safe_wrapper():
+    """scaling='quantile' → _FoldSafeQuantileTransformer in the numeric pipeline."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    preprocessor = build_preprocessor(
+        ["a"], categorical_features=[], numerical_features=["a"], scaling="quantile"
+    )
+    scaler = _num_pipeline(preprocessor).named_steps["scaler"]
+    assert isinstance(scaler, _FoldSafeQuantileTransformer)
+    assert scaler.output_distribution == "uniform"
+    assert scaler.n_quantiles == 1000
+    assert scaler.subsample == 100_000
+
+
+def test_build_preprocessor_scaling_quantile_object_params_forwarded():
+    """The quantile object form forwards the scaler parameters byte-exact."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+    from configurable_automl_engine.preprocessing_presets import QuantileScaling
+
+    spec = QuantileScaling(output_distribution="normal", n_quantiles=50, subsample=500)
+    preprocessor = build_preprocessor(
+        ["a"],
+        categorical_features=[],
+        numerical_features=["a"],
+        scaling=spec,
+        random_state=7,
+    )
+    scaler = _num_pipeline(preprocessor).named_steps["scaler"]
+    assert isinstance(scaler, _FoldSafeQuantileTransformer)
+    assert scaler.output_distribution == "normal"
+    assert scaler.n_quantiles == 50
+    assert scaler.subsample == 500
+    # random_state of build_preprocessor is forwarded to the wrapper.
+    assert scaler.random_state == 7
+
+
+def test_build_preprocessor_scaling_quantile_matches_sklearn():
+    """The pipeline quantile scaler gives the same output as sklearn directly."""
+    import warnings
+
+    from sklearn.preprocessing import QuantileTransformer
+
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"num_a": rng.normal(size=200) * 10 + 5})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="quantile",
+        random_state=42,
+    )
+    pipeline_out = preprocessor.fit_transform(df)
+    # The direct sklearn call with the same clipping the wrapper performs
+    # (UserWarning about n_quantiles > n_samples is expected there and
+    # suppressed — the wrapper exists precisely to avoid it).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        direct_out = QuantileTransformer(
+            n_quantiles=1000, random_state=42
+        ).fit_transform(df.to_numpy().reshape(-1, 1))
+    np.testing.assert_allclose(pipeline_out.ravel(), direct_out.ravel())
+
+
+def test_build_preprocessor_scaling_quantile_no_user_warning_on_small_fold():
+    """On a 30-row fold with default n_quantiles=1000 no UserWarning is raised."""
+    import warnings
+
+    df = pd.DataFrame({"num_a": np.arange(30, dtype=float)})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="quantile",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        preprocessor.fit(df)
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert not user_warnings, [str(w.message) for w in user_warnings]
+    scaler = preprocessor.named_transformers_["num"].named_steps["scaler"]
+    assert scaler.n_quantiles_ == 30
+
+
+def test_build_preprocessor_scaling_quantile_indicators_are_scaled_too():
+    """Missing-value indicator columns pass through the quantile scaler."""
+    df = pd.DataFrame({"num_a": [1.0, 2.0, np.nan, 4.0, 3.0, 5.0]})
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="quantile",
+    )
+    out = preprocessor.fit_transform(df)
+    names = list(preprocessor.get_feature_names_out())
+    assert any("missingindicator" in name for name in names)
+    assert np.isfinite(out).all()
+    # The indicator column is transformed to the same [0, 1] range as the
+    # scaled feature (both pass through the same QuantileTransformer).
+    indicator = out[:, names.index("num__missingindicator_num_a")]
+    assert indicator.min() >= 0.0 and indicator.max() <= 1.0
+
+
+def test_fold_safe_quantile_transformer_normal_output_is_standardized():
+    """output_distribution='normal' on large data: approx. mean 0, std 1."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    rng = np.random.default_rng(3)
+    X = rng.normal(loc=50.0, scale=20.0, size=(100_000, 2))
+    out = _FoldSafeQuantileTransformer(
+        output_distribution="normal", random_state=42
+    ).fit_transform(X)
+    assert abs(out.mean()) < 0.05
+    assert abs(out.std() - 1.0) < 0.05
+
+
+def test_fold_safe_quantile_transformer_deterministic_for_fixed_random_state():
+    """A fixed random_state gives identical output across runs."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    rng = np.random.default_rng(5)
+    # n_rows > subsample forces random subsampling: without a fixed seed the
+    # fitted quantiles (and the output) would differ between runs.
+    X = rng.normal(size=(300_000, 2))
+    y = rng.normal(size=300_000)
+    first = _FoldSafeQuantileTransformer(
+        n_quantiles=1000, subsample=10_000, random_state=123
+    ).fit_transform(X, y)
+    second = _FoldSafeQuantileTransformer(
+        n_quantiles=1000, subsample=10_000, random_state=123
+    ).fit_transform(X, y)
+    np.testing.assert_array_equal(first, second)
+
+
+def test_fold_safe_quantile_transformer_pickle_roundtrip_identical_output():
+    """A pickle round-trip produces identical output."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    rng = np.random.default_rng(6)
+    X = rng.normal(loc=10, scale=3, size=(500, 2))
+    transformer = _FoldSafeQuantileTransformer(
+        output_distribution="normal", random_state=42
+    ).fit(X)
+    expected = transformer.transform(X)
+    restored = pickle.loads(pickle.dumps(transformer))
+    assert isinstance(restored, _FoldSafeQuantileTransformer)
+    assert restored.get_params() == transformer.get_params()
+    np.testing.assert_array_equal(restored.transform(X), expected)
+
+
+def test_fold_safe_quantile_transformer_debug_logged_once_on_clip(caplog):
+    """The clipping is logged once per fit at DEBUG level."""
+    import logging as logging_module
+
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    X = np.arange(30, dtype=float).reshape(-1, 1)
+    with caplog.at_level(
+        logging_module.DEBUG, logger="configurable_automl_engine.preprocessing.quantile"
+    ):
+        _FoldSafeQuantileTransformer(n_quantiles=1000).fit(X)
+    clip_records = [r for r in caplog.records if "clipped" in r.getMessage()]
+    assert len(clip_records) == 1
+    assert clip_records[0].levelno == logging_module.DEBUG
+
+    caplog.clear()
+    # No clipping on a large-enough fold: no DEBUG line.
+    with caplog.at_level(
+        logging_module.DEBUG, logger="configurable_automl_engine.preprocessing.quantile"
+    ):
+        _FoldSafeQuantileTransformer(n_quantiles=10).fit(
+            np.arange(50, dtype=float).reshape(-1, 1)
+        )
+    assert not [r for r in caplog.records if "clipped" in r.getMessage()]
+
+
+def test_fold_safe_quantile_transformer_feature_names_out_one_to_one():
+    """get_feature_names_out is one-to-one (same count, same names)."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    X = pd.DataFrame(
+        {"alpha": np.arange(20, dtype=float), "beta": np.arange(20, dtype=float) * 2}
+    )
+    transformer = _FoldSafeQuantileTransformer().fit(X)
+    names = list(transformer.get_feature_names_out())
+    assert names == ["alpha", "beta"]
+
+
+def test_fold_safe_quantile_transformer_not_fitted_rejected():
+    """transform before fit raises NotFittedError."""
+    from sklearn.exceptions import NotFittedError
+
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    with pytest.raises(NotFittedError):
+        _FoldSafeQuantileTransformer().transform(np.zeros((5, 1)))
+
+
+def test_fold_safe_quantile_transformer_empty_input_rejected():
+    """fit on an empty fold raises ValueError."""
+    from configurable_automl_engine.preprocessing.quantile import (
+        _FoldSafeQuantileTransformer,
+    )
+
+    with pytest.raises(ValueError):
+        _FoldSafeQuantileTransformer().fit(np.empty((0, 1)))
+
+
+@pytest.mark.parametrize("strategy", ["loo", "k_fold"])
+def test_quantile_scaling_loo_validation_completes(strategy):
+    """LOO/k-fold validation together with scaling='quantile' completes.
+
+    Every fold is refitted (the fold preprocessor is rebuilt with the same
+    quantile spec): with the fold-size-aware clipping no fold can fail on
+    n_quantiles > n_rows.
+    """
+    import warnings
+
+    from configurable_automl_engine.validation import iter_splits
+
+    rng = np.random.default_rng(7)
+    df = pd.DataFrame({"num_a": rng.normal(size=12), "num_b": rng.normal(size=12)})
+    y = rng.normal(size=12)
+    for X_tr, X_te, y_tr, y_te in iter_splits(
+        df,
+        y,
+        method=strategy,
+        n_folds=3,
+        random_state=0,
+        test_size=0.25,
+    ):
+        preprocessor = build_preprocessor(
+            list(df.columns),
+            categorical_features=[],
+            numerical_features=list(df.columns),
+            scaling="quantile",
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            preprocessor.fit(X_tr)
+        assert not [w for w in caught if issubclass(w.category, UserWarning)], [
+            str(w.message) for w in caught
+        ]
+        transformed = preprocessor.transform(X_te)
+        assert np.isfinite(transformed).all()
+
+
+def test_quantile_scaling_with_quantile_outliers_small_fold():
+    """Combined regression guard: outliers=quantile + scaling=quantile.
+
+    The merged numeric pipeline is [Winsorizer] -> SimpleImputer(add_indicator)
+    -> [fold-safe quantile scaler]: the winsorization must not clip the 0/1
+    missing-value indicator columns, and the fold-size-aware clipping of
+    n_quantiles must still hold on a small fold (no sklearn UserWarning).
+    """
+    import warnings
+
+    rng = np.random.default_rng(11)
+    n = 30
+    x = rng.normal(loc=0.0, scale=10.0, size=n)
+    x[:5] = 1000.0  # extreme outliers that winsorization must clip
+    df = pd.DataFrame({"num_a": x})
+    df.loc[rng.random(n) < 0.2, "num_a"] = np.nan
+
+    preprocessor = build_preprocessor(
+        list(df.columns),
+        categorical_features=[],
+        numerical_features=list(df.columns),
+        scaling="quantile",
+        outliers={"method": "quantile", "lower_quantile": 0.05, "upper_quantile": 0.95},
+    )
+    num = _num_pipeline(preprocessor)
+    step_names = [name for name, _ in num.steps]
+    assert step_names == ["winsorizer", "imputer", "scaler"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = preprocessor.fit_transform(df)
+    assert not [w for w in caught if issubclass(w.category, UserWarning)], [
+        str(w.message) for w in caught
+    ]
+
+    names = list(preprocessor.get_feature_names_out())
+    assert any("missingindicator" in name for name in names)
+    assert np.isfinite(out).all()
+    # The indicator columns stay two-valued: the winsorizer runs before the
+    # imputer, so the 0/1 flags are never clipped by the quantile bounds.
+    fitted_num = preprocessor.named_transformers_["num"]
+    fitted_winsorizer = fitted_num.named_steps["winsorizer"]
+    assert fitted_winsorizer.lower_bounds_ is not None
+    scaler = fitted_num.named_steps["scaler"]
+    assert scaler.n_quantiles_ == n
+    # The scaled feature is bounded to [0, 1] by the quantile transform.
+    feature_col = out[:, names.index("num__num_a")]
+    assert feature_col.min() >= 0.0 and feature_col.max() <= 1.0

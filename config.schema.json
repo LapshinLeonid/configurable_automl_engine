@@ -42,7 +42,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' — a string shorthand ('standard'|'robust'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool}). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
+          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' — a string shorthand ('standard'|'robust'|'quantile'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool}). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
         }
       },
       "title": "AlgoCfg",
@@ -812,7 +812,7 @@
             }
           ],
           "default": null,
-          "description": "Run-level default override of the adaptive feature preprocessing preset, applied to EVERY algorithm that has no preprocessing block of its own (algorithms.<name>.preprocessing). Reuses the same model as the per-algorithm block: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'none'); fields left as null keep the automatic selection based on the algorithm class. Precedence per field: class preset < general.preprocessing < algorithms.<name>.preprocessing — a field set at a higher level replaces the whole field from the lower level (nested values are never merged). None — no run-level default. Unknown keys are rejected at config validation."
+          "description": "Run-level default override of the adaptive feature preprocessing preset, applied to EVERY algorithm that has no preprocessing block of its own (algorithms.<name>.preprocessing). Reuses the same model as the per-algorithm block: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'quantile'|'none'); fields left as null keep the automatic selection based on the algorithm class. Precedence per field: class preset < general.preprocessing < algorithms.<name>.preprocessing — a field set at a higher level replaces the whole field from the lower level (nested values are never merged). None — no run-level default. Unknown keys are rejected at config validation."
         },
         "inf_policy": {
           "default": "as_missing",
@@ -1111,6 +1111,9 @@
                       "$ref": "#/$defs/RobustScaling"
                     },
                     {
+                      "$ref": "#/$defs/QuantileScaling"
+                    },
+                    {
                       "$ref": "#/$defs/NoScaling"
                     }
                   ]
@@ -1119,19 +1122,20 @@
                   "enum": [
                     "standard",
                     "robust",
+                    "quantile",
                     "none"
                   ],
                   "type": "string"
                 }
               ],
-              "description": "Scaling of numeric features: a string shorthand ('standard' | 'robust' | 'none') or an object ({'type': 'standard'} | {'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} | {'type': 'none'})."
+              "description": "Scaling of numeric features: a string shorthand ('standard' | 'robust' | 'quantile' | 'none') or an object ({'type': 'standard'} | {'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} | {'type': 'quantile', 'output_distribution': 'uniform'|'normal', 'n_quantiles': int, 'subsample': int} | {'type': 'none'})."
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Scaling override: a string shorthand ('standard', 'robust' or 'none'), an object ({'type': 'robust', 'quantile_range': [low, high], ...}) or None (automatic selection). The shorthand is normalized to its object form.",
+          "description": "Scaling override: a string shorthand ('standard', 'robust', 'quantile' or 'none'), an object ({'type': 'robust', 'quantile_range': [low, high], ...}) or None (automatic selection). The shorthand is normalized to its object form.",
           "title": "Scaling"
         },
         "outliers": {
@@ -1248,6 +1252,45 @@
         }
       },
       "title": "QuantileOutliers",
+      "type": "object"
+    },
+    "QuantileScaling": {
+      "additionalProperties": false,
+      "description": "Quantile scaling: :class:`sklearn.preprocessing.QuantileTransformer`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"quantile\"``).\n    output_distribution: The marginal distribution of the transformed\n        data: ``\"uniform\"`` or ``\"normal\"``.\n    n_quantiles: The number of quantiles to compute (``>= 10``).\n    subsample: The maximum number of samples used to estimate the\n        quantiles (``>= n_quantiles``).",
+      "properties": {
+        "type": {
+          "const": "quantile",
+          "default": "quantile",
+          "description": "The scaling type: QuantileTransformer (non-parametric transform to a uniform or normal distribution).",
+          "title": "Type",
+          "type": "string"
+        },
+        "output_distribution": {
+          "default": "uniform",
+          "description": "Marginal distribution of the transformed data: 'uniform' or 'normal'.",
+          "enum": [
+            "uniform",
+            "normal"
+          ],
+          "title": "Output Distribution",
+          "type": "string"
+        },
+        "n_quantiles": {
+          "default": 1000,
+          "description": "Number of quantiles to compute (>= 10).",
+          "minimum": 10,
+          "title": "N Quantiles",
+          "type": "integer"
+        },
+        "subsample": {
+          "default": 100000,
+          "description": "Maximum number of samples used to estimate the quantiles for computational efficiency (>= n_quantiles). The value is always forwarded to sklearn (the sklearn default is 10_000), so the behavior is stable against upstream default changes.",
+          "minimum": 1,
+          "title": "Subsample",
+          "type": "integer"
+        }
+      },
+      "title": "QuantileScaling",
       "type": "object"
     },
     "RobustScaling": {

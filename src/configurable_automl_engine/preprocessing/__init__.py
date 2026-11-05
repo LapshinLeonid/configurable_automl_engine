@@ -14,7 +14,11 @@ building blocks:
   (categorical encoding + numerical imputation/scaling; missing-value
   indicators are added by default);
 * :class:`Winsorizer` — the standalone winsorization transformer
-  (:mod:`.outliers`; not used by :func:`build_preprocessor` yet).
+  (:mod:`.outliers`; used by :func:`build_preprocessor` for the
+  ``outliers`` setting — the first step of the numeric pipeline);
+* :class:`_FoldSafeQuantileTransformer` — the fold-safe quantile scaler
+  (:mod:`.quantile`; used by :func:`build_preprocessor` for
+  ``scaling: quantile``).
 
 Key invariants:
 
@@ -31,7 +35,8 @@ Key invariants:
 Package layout: :mod:`.encoders` (the encoders), :mod:`.columns`
 (:class:`ColumnNameSelector`), :mod:`.features` (type detection,
 uninformative-column removal, feature-count estimate), :mod:`.outliers`
-(:class:`Winsorizer`, standalone), :mod:`.builder`
+(:class:`Winsorizer`, standalone), :mod:`.quantile`
+(:class:`_FoldSafeQuantileTransformer`), :mod:`.builder`
 (:func:`build_preprocessor`). This ``__init__`` only re-exports the public
 names (the import path stays the same).
 """
@@ -54,6 +59,9 @@ from configurable_automl_engine.preprocessing.features import (
     estimate_n_features_after_preprocessing,
 )
 from configurable_automl_engine.preprocessing.outliers import Winsorizer
+from configurable_automl_engine.preprocessing.quantile import (
+    _FoldSafeQuantileTransformer,
+)
 
 __all__ = [
     "ColumnNameSelector",
@@ -63,6 +71,7 @@ __all__ = [
     "SplitCategoricalEncoder",
     "TargetEncodingTransformer",
     "Winsorizer",
+    "_FoldSafeQuantileTransformer",
     "_clean_uninformative_features",
     "_to_string_array",
     "build_preprocessor",

@@ -186,8 +186,9 @@ class AlgoCfg(BaseModel):
             "Explicit override of the feature preprocessing preset for this "
             "algorithm. Set partially or fully: 'imputation_strategy' "
             "('mean'|'median') and/or 'scaling' — a string shorthand "
-            "('standard'|'robust'|'none') or an object ({'type': 'robust', "
-            "'quantile_range': [low, high], 'with_centering': bool}). "
+            "('standard'|'robust'|'quantile'|'none') or an object "
+            "({'type': 'robust', 'quantile_range': [low, high], "
+            "'with_centering': bool}). "
             "Takes precedence over the automatic choice based on the algorithm "
             "class. None — automatic selection."
         ),

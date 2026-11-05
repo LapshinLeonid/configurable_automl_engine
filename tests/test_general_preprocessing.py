@@ -198,7 +198,7 @@ def test_general_preprocessing_unknown_key_rejected():
 def test_general_preprocessing_invalid_value_rejected():
     """Invalid field values in general.preprocessing are rejected."""
     with pytest.raises(ValidationError):
-        GeneralCfg(preprocessing={"scaling": "quantile"})
+        GeneralCfg(preprocessing={"scaling": "power"})
 
 
 # ──────────────────────────────────────────────────────────────────────────

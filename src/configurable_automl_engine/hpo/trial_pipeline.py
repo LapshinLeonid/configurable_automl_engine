@@ -41,6 +41,7 @@ from configurable_automl_engine.preprocessing import (
     estimate_n_features_after_preprocessing,
 )
 from configurable_automl_engine.preprocessing_presets import (
+    log_tree_class_scaling_ineffective,
     requires_missing_indicator,
     resolve_preprocessing_preset,
 )
@@ -213,6 +214,7 @@ def _build_trial_preprocessor(
         algo,
         preset,
     )
+    log_tree_class_scaling_ineffective(preset, log)
     if categorical is not None or numerical is not None:
         # Explicitly passed column lists (the main path from
         # training_engine)

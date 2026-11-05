@@ -122,6 +122,7 @@ format and the module must stay where it is).
 │       │   ├── encoders.py                 # Target / frequency / hashing / split categorical encoders
 │       │   ├── features.py                 # Feature type detection, uninformative columns, feature count estimate
 │       │   └── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
+│       ├── outliers_presets.py              # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
 │       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
 │       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks

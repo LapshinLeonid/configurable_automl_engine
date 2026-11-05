@@ -56,6 +56,10 @@ from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
+from configurable_automl_engine.preprocessing_presets import (
+    AlgorithmClass,
+    PreprocessingOverride,
+)
 from tests.purity import assert_pure
 
 ENCODING = EncodingSettings(encoding="one_hot")
@@ -492,3 +496,78 @@ def test_fitted_trainer_state_is_small_and_documented_attributes_readable() -> N
     assert "when" in trainer.datetime_expansion_
     assert isinstance(trainer.preprocessing_preset, PreprocessingPreset)
     assert trainer.artifact_metadata_ is None  # populated by save()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Tree-class scaling INFO line (issue: scaling has no effect on splits)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_build_trainer_preprocessor_trees_scaling_info_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A forced scaler on a tree algorithm logs one INFO line about split-based models."""
+    X, _ = _frame()
+    features = _features(X)
+    override = PreprocessingOverride.model_validate({"scaling": "robust"})
+
+    with caplog.at_level(logging.INFO):
+        setup = build_trainer_preprocessor(
+            "random_forest",
+            features.categorical_features,
+            features.numerical_features,
+            feature_names=features.feature_names,
+            encoding=ENCODING,
+            override=override,
+            random_state=0,
+        )
+
+    assert setup.preset.algorithm_class == AlgorithmClass.TREES
+    assert setup.preset.scaling.type == "robust"
+    info_lines = [
+        r for r in caplog.records if "no effect on split-based models" in r.getMessage()
+    ]
+    assert len(info_lines) == 1
+    assert info_lines[0].levelno == logging.INFO
+
+
+def test_build_trainer_preprocessor_trees_no_scaling_no_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default tree preset (scaling='none') does not log the INFO line."""
+    X, _ = _frame()
+    features = _features(X)
+
+    with caplog.at_level(logging.INFO):
+        build_trainer_preprocessor(
+            "random_forest",
+            features.categorical_features,
+            features.numerical_features,
+            feature_names=features.feature_names,
+            encoding=ENCODING,
+            override=None,
+            random_state=0,
+        )
+
+    assert "no effect on split-based models" not in caplog.text
+
+
+def test_build_trainer_preprocessor_scale_sensitive_no_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scale-sensitive algorithm with scaling does not log the tree INFO line."""
+    X, _ = _frame()
+    features = _features(X)
+
+    with caplog.at_level(logging.INFO):
+        build_trainer_preprocessor(
+            "ridge",
+            features.categorical_features,
+            features.numerical_features,
+            feature_names=features.feature_names,
+            encoding=ENCODING,
+            override=None,
+            random_state=0,
+        )
+
+    assert "no effect on split-based models" not in caplog.text

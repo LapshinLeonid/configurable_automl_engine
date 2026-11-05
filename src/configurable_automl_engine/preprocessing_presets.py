@@ -26,10 +26,10 @@ a field set at a higher level replaces the whole field from the lower level
 (nested values are never merged).
 
 Scaling configuration (:class:`ScalingSpec`) is an object with a ``type``
-discriminator (``StandardScaling`` / ``RobustScaling`` / ``NoScaling``);
-the string shorthand (``"robust"``) is accepted everywhere and normalized to
-its object form by a ``BeforeValidator``, so existing configs and API calls
-keep working.
+discriminator (``StandardScaling`` / ``RobustScaling`` / ``QuantileScaling`` /
+``NoScaling``); the string shorthand (``"robust"``) is accepted everywhere and
+normalized to its object form by a ``BeforeValidator``, so existing configs and
+API calls keep working.
 
 The single function :func:`resolve_preprocessing_preset` is used at every stage
 of the lifecycle — the HPO phase, final training and prediction — which
@@ -41,6 +41,7 @@ argument of ``ModelTrainer`` / ``tuner.optimize``.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Annotated, Any, Literal
 
@@ -66,7 +67,7 @@ ImputationStrategy = Literal["mean", "median"]
 #: Deprecated alias of the string shorthand of :class:`ScalingSpec` (kept for
 #: backward compatibility of imports; the canonical string form is
 #: :data:`StringScaling`).
-ScalingType = Literal["standard", "robust", "none"]
+ScalingType = Literal["standard", "robust", "quantile", "none"]
 
 
 def _coerce_scaling_spec(value: Any) -> Any:
@@ -179,6 +180,72 @@ class RobustScaling(BaseModel):
         return self
 
 
+class QuantileScaling(BaseModel):
+    """Quantile scaling: :class:`sklearn.preprocessing.QuantileTransformer`.
+
+    The spec is a frozen value object: parameters cannot be mutated after
+    creation, so module-level defaults stay safe to share.
+
+    Attributes:
+        type: The scaling type discriminator (always ``"quantile"``).
+        output_distribution: The marginal distribution of the transformed
+            data: ``"uniform"`` or ``"normal"``.
+        n_quantiles: The number of quantiles to compute (``>= 10``).
+        subsample: The maximum number of samples used to estimate the
+            quantiles (``>= n_quantiles``).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["quantile"] = Field(
+        default="quantile",
+        description=(
+            "The scaling type: QuantileTransformer (non-parametric transform "
+            "to a uniform or normal distribution)."
+        ),
+    )
+    output_distribution: Literal["uniform", "normal"] = Field(
+        default="uniform",
+        description=(
+            "Marginal distribution of the transformed data: 'uniform' or 'normal'."
+        ),
+    )
+    n_quantiles: int = Field(
+        default=1000,
+        ge=10,
+        description="Number of quantiles to compute (>= 10).",
+    )
+    subsample: int = Field(
+        default=100_000,
+        ge=1,
+        description=(
+            "Maximum number of samples used to estimate the quantiles "
+            "for computational efficiency (>= n_quantiles). The value is "
+            "always forwarded to sklearn (the sklearn default is 10_000), "
+            "so the behavior is stable against upstream default changes."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_subsample(self) -> QuantileScaling:
+        """Validate that ``subsample`` is not smaller than ``n_quantiles``.
+
+        Returns:
+            The validated model instance.
+
+        Raises:
+            ValueError: If ``subsample < n_quantiles`` (sklearn would reject
+                such a combination in ``fit`` with a ValueError; the
+                mismatch is reported at the config-validation stage).
+        """
+        if self.subsample < self.n_quantiles:
+            raise ValueError(
+                f"subsample ({self.subsample}) must be >= n_quantiles "
+                f"({self.n_quantiles})."
+            )
+        return self
+
+
 class NoScaling(BaseModel):
     """No scaling: numeric features are passed to the model unscaled.
 
@@ -205,6 +272,7 @@ class NoScaling(BaseModel):
 ObjectScalingSpec = Annotated[
     Annotated[StandardScaling, Tag(_scaling_tag(StandardScaling))]
     | Annotated[RobustScaling, Tag(_scaling_tag(RobustScaling))]
+    | Annotated[QuantileScaling, Tag(_scaling_tag(QuantileScaling))]
     | Annotated[NoScaling, Tag(_scaling_tag(NoScaling))],
     Discriminator(_discriminate_scaling_type),
 ]
@@ -214,7 +282,7 @@ ObjectScalingSpec = Annotated[
 #: (``enum``) alternative in the JSON schema. During validation the shorthand
 #: is normalized to its object form by :func:`_coerce_scaling_spec`, so this
 #: member effectively only documents/renders the schema alternative.
-StringScaling = Literal["standard", "robust", "none"]
+StringScaling = Literal["standard", "robust", "quantile", "none"]
 
 ScalingSpec = Annotated[
     ObjectScalingSpec | StringScaling,
@@ -222,9 +290,11 @@ ScalingSpec = Annotated[
     Field(
         description=(
             "Scaling of numeric features: a string shorthand "
-            "('standard' | 'robust' | 'none') or an object "
+            "('standard' | 'robust' | 'quantile' | 'none') or an object "
             "({'type': 'standard'} | {'type': 'robust', 'quantile_range': "
-            "[low, high], 'with_centering': bool} | {'type': 'none'})."
+            "[low, high], 'with_centering': bool} | {'type': 'quantile', "
+            "'output_distribution': 'uniform'|'normal', 'n_quantiles': int, "
+            "'subsample': int} | {'type': 'none'})."
         ),
     ),
 ]
@@ -239,8 +309,8 @@ def coerce_scaling(spec: ScalingSpec) -> ObjectScalingSpec:
 
     Args:
         spec: A :class:`ScalingSpec` member, a string shorthand
-            (``"standard"`` / ``"robust"`` / ``"none"``) or an object-form
-            dict.
+            (``"standard"`` / ``"robust"`` / ``"quantile"`` / ``"none"``) or
+            an object-form dict.
 
     Returns:
         The object form of the scaling spec.
@@ -251,7 +321,9 @@ def coerce_scaling(spec: ScalingSpec) -> ObjectScalingSpec:
             subclass).
     """
     coerced: Any = _coerce_scaling_spec(spec)
-    if isinstance(coerced, (StandardScaling, RobustScaling, NoScaling)):
+    if isinstance(
+        coerced, (StandardScaling, RobustScaling, QuantileScaling, NoScaling)
+    ):
         return coerced
     obj: ObjectScalingSpec = _SCALING_SPEC_ADAPTER.validate_python(coerced)
     return obj
@@ -259,7 +331,7 @@ def coerce_scaling(spec: ScalingSpec) -> ObjectScalingSpec:
 
 def scaling_type(spec: ScalingSpec) -> ScalingType:
     """The string type of a scaling spec (``'standard'`` / ``'robust'`` /
-    ``'none'``).
+    ``'quantile'`` / ``'none'``).
 
     Args:
         spec: A scaling specification in any accepted form.
@@ -272,240 +344,68 @@ def scaling_type(spec: ScalingSpec) -> ScalingType:
     return result
 
 
-def _coerce_outlier_spec(value: Any) -> Any:
-    """Normalize a string shorthand into the object form of an outlier spec.
+def log_tree_class_scaling_ineffective(
+    preset: PreprocessingPreset,
+    logger: logging.Logger,
+) -> None:
+    """Log one INFO line when a tree-class preset applies a non-``none`` scaler.
+
+    The shared wording point used by both call sites that resolve a preset and
+    build a preprocessor (the trainer and the HPO trial pipeline), so the
+    message cannot drift between the trainer and HPO logs. A split-based model
+    is invariant to monotone per-feature transforms, so a user-forced scaler
+    does not change the splits — the line is purely informational. The line is
+    emitted under the caller's logger (every module logs under its own name);
+    no line is emitted for a ``none`` scaling or a non-``trees`` class.
 
     Args:
-        value: ``"none"`` / ``"quantile"`` / ``"iqr"`` (the string shorthand)
-            or an already-object form (a dict or an :class:`OutlierSpec`
-            member).
-
-    Returns:
-        The object form: ``{"method": <shorthand>}`` for a string, the input
-        value otherwise.
+        preset: The resolved preprocessing preset (with its algorithm class
+            and scaling spec).
+        logger: The logger of the calling module.
     """
-    if isinstance(value, str):
-        return {"method": value}
-    return value
+    if (
+        preset.algorithm_class == AlgorithmClass.TREES
+        and scaling_type(preset.scaling) != "none"
+    ):
+        logger.info(
+            "Scaling (type=%s) has no effect on split-based models "
+            "(algorithm class 'trees'): the splits are invariant to monotone "
+            "per-feature transforms.",
+            scaling_type(preset.scaling),
+        )
 
 
-def _discriminate_outlier_method(value: Any) -> Any:
-    """Extract the ``method`` discriminator tag of an outlier spec value.
+# Outlier-handling specs: the definitions live in
+# :mod:`configurable_automl_engine.outliers_presets` (the module keeps
+# ``preprocessing_presets`` within the structural line limit), and the names
+# are re-exported here, so the public import path stays the same. The import
+# sits mid-file on purpose: moving it to the top would create an import
+# cycle (outliers_presets -> preprocessing package -> builder ->
+# preprocessing_presets). If the E402 rule is ever enabled in ruff, this
+# import needs a per-line noqa.
+from configurable_automl_engine.outliers_presets import (
+    NO_OUTLIERS,
+    IqrOutliers,
+    NoOutliers,
+    ObjectOutlierSpec,
+    OutlierSpec,
+    QuantileOutliers,
+    StringOutlierSpec,
+    coerce_outliers,
+    format_outliers,
+)
 
-    Args:
-        value: An outlier spec in any pre-coercion form (a dict, the object
-            form or ``None``/garbage — anything non-dict/object yields
-            ``None`` and is rejected by the union).
-
-    Returns:
-        The ``method`` tag (``'none'`` / ``'quantile'`` / ``'iqr'``) or
-        ``None`` when it cannot be determined.
-    """
-    if isinstance(value, dict):
-        return value.get("method")
-    return getattr(value, "method", None)
-
-
-def _outlier_tag(t: type[BaseModel]) -> str:
-    """Return the discriminator tag of an outlier spec model class."""
-    return t.model_fields["method"].default  # type: ignore[return-value]
-
-
-class NoOutliers(BaseModel):
-    """No outlier handling: numeric features are passed through as-is.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        method: The outlier handling discriminator (always ``"none"``).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    method: Literal["none"] = Field(
-        default="none",
-        description="No outlier handling is applied.",
-    )
-
-
-class QuantileOutliers(BaseModel):
-    """Quantile (winsorized) clipping of numeric features.
-
-    The bounds are learned from the training data (per CV fold, no leakage)
-    by :class:`~configurable_automl_engine.preprocessing.Winsorizer` with
-    ``method="quantile"``: every value outside
-    ``[lower_quantile, upper_quantile]`` of the training column is clipped
-    to the corresponding bound.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        method: The outlier handling discriminator (always ``"quantile"``).
-        lower_quantile: The lower clipping quantile: ``0 <= lower < upper <= 1``.
-        upper_quantile: The upper clipping quantile: ``0 <= lower < upper <= 1``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    method: Literal["quantile"] = Field(
-        default="quantile",
-        description=(
-            "Quantile clipping: values outside the training quantiles are "
-            "clipped to the bounds (Winsorizer)."
-        ),
-    )
-    lower_quantile: float = Field(
-        default=0.01,
-        description="The lower clipping quantile: 0 <= lower < upper <= 1.",
-    )
-    upper_quantile: float = Field(
-        default=0.99,
-        description="The upper clipping quantile: 0 <= lower < upper <= 1.",
-    )
-
-    @model_validator(mode="after")
-    def _validate_quantiles(self) -> QuantileOutliers:
-        """Validate the quantile bounds (``0 <= lower < upper <= 1``).
-
-        Returns:
-            The validated model instance.
-
-        Raises:
-            ValueError: If a quantile is outside ``[0, 1]`` or the bounds
-                are not strictly increasing.
-        """
-        if not (0.0 <= self.lower_quantile <= 1.0):
-            raise ValueError(
-                f"lower_quantile must be in [0, 1], got {self.lower_quantile}."
-            )
-        if not (0.0 <= self.upper_quantile <= 1.0):
-            raise ValueError(
-                f"upper_quantile must be in [0, 1], got {self.upper_quantile}."
-            )
-        if self.lower_quantile >= self.upper_quantile:
-            raise ValueError(
-                f"lower_quantile ({self.lower_quantile}) must be strictly "
-                f"less than upper_quantile ({self.upper_quantile})."
-            )
-        return self
-
-
-class IqrOutliers(BaseModel):
-    """IQR-based clipping of numeric features.
-
-    The bounds are learned from the training data (per CV fold, no leakage)
-    by :class:`~configurable_automl_engine.preprocessing.Winsorizer` with
-    ``method="iqr"``: every value outside
-    ``[Q1 - iqr_multiplier * IQR, Q3 + iqr_multiplier * IQR]`` of the
-    training column is clipped to the corresponding bound.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        method: The outlier handling discriminator (always ``"iqr"``).
-        iqr_multiplier: The IQR multiplier: ``> 0``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    method: Literal["iqr"] = Field(
-        default="iqr",
-        description=(
-            "IQR clipping: values outside Q1 - k * IQR .. Q3 + k * IQR are "
-            "clipped to the bounds (Winsorizer)."
-        ),
-    )
-    iqr_multiplier: float = Field(
-        default=1.5,
-        gt=0.0,
-        description="The IQR multiplier of the clipping bounds (must be > 0).",
-    )
-
-
-#: The object form of an outlier-handling configuration: a union of the
-#: per-method models discriminated explicitly by the ``method`` field
-#: (``Tag`` + :class:`~pydantic.Discriminator`), so validation errors are
-#: precise (no cross-method union noise) and the method parameters are
-#: checked in the branch of their own method only.
-ObjectOutlierSpec = Annotated[
-    Annotated[NoOutliers, Tag(_outlier_tag(NoOutliers))]
-    | Annotated[QuantileOutliers, Tag(_outlier_tag(QuantileOutliers))]
-    | Annotated[IqrOutliers, Tag(_outlier_tag(IqrOutliers))],
-    Discriminator(_discriminate_outlier_method),
+__all__ = [
+    "NO_OUTLIERS",
+    "IqrOutliers",
+    "NoOutliers",
+    "ObjectOutlierSpec",
+    "OutlierSpec",
+    "QuantileOutliers",
+    "StringOutlierSpec",
+    "coerce_outliers",
+    "format_outliers",
 ]
-
-#: String shorthand of an outlier-handling method (e.g. ``"quantile"``):
-#: accepted wherever an :class:`OutlierSpec` is expected, and rendered as a
-#: plain string (``enum``) alternative in the JSON schema. During validation
-#: the shorthand is normalized to its object form by
-#: :func:`_coerce_outlier_spec`, so this member effectively only
-#: documents/renders the schema alternative.
-StringOutlierSpec = Literal["none", "quantile", "iqr"]
-
-OutlierSpec = Annotated[
-    ObjectOutlierSpec | StringOutlierSpec,
-    BeforeValidator(_coerce_outlier_spec),
-    Field(
-        description=(
-            "Outlier handling for numeric features: a string shorthand "
-            "('none' | 'quantile' | 'iqr') or an object "
-            "({'method': 'none'} | {'method': 'quantile', "
-            "'lower_quantile': float, 'upper_quantile': float} | "
-            "{'method': 'iqr', 'iqr_multiplier': float})."
-        ),
-    ),
-]
-
-#: Validated accessor for a single :class:`OutlierSpec` value (used by
-#: :func:`coerce_outliers` and the builder).
-_OUTLIER_SPEC_ADAPTER: TypeAdapter[ObjectOutlierSpec] = TypeAdapter(ObjectOutlierSpec)
-
-#: Module-level default of the ``outliers`` field: no outlier handling.
-#: A frozen singleton, so the shared default cannot be mutated by a caller.
-NO_OUTLIERS = NoOutliers()
-
-
-def coerce_outliers(spec: OutlierSpec) -> ObjectOutlierSpec:
-    """Coerce an outlier specification into its object form.
-
-    Args:
-        spec: An :class:`OutlierSpec` member, a string shorthand
-            (``"none"`` / ``"quantile"`` / ``"iqr"``) or an object-form dict.
-
-    Returns:
-        The object form of the outlier spec.
-
-    Raises:
-        ValueError: If the value is not a valid outlier spec (delegated to
-            Pydantic validation, a :class:`~pydantic.ValidationError`
-            subclass).
-    """
-    coerced: Any = _coerce_outlier_spec(spec)
-    if isinstance(coerced, (NoOutliers, QuantileOutliers, IqrOutliers)):
-        return coerced
-    obj: ObjectOutlierSpec = _OUTLIER_SPEC_ADAPTER.validate_python(coerced)
-    return obj
-
-
-def format_outliers(spec: OutlierSpec) -> str:
-    """Format an outlier spec for the preset's log string.
-
-    Args:
-        spec: An outlier specification in any accepted form.
-
-    Returns:
-        ``'none'`` as-is; for the clipping methods the parameters are shown,
-        e.g. ``quantile(0.01, 0.99)`` or ``iqr(k=1.5)``.
-    """
-    obj = coerce_outliers(spec)
-    if isinstance(obj, QuantileOutliers):
-        return f"quantile({obj.lower_quantile}, {obj.upper_quantile})"
-    if isinstance(obj, IqrOutliers):
-        return f"iqr(k={obj.iqr_multiplier})"
-    return repr(obj.method)
 
 
 class AlgorithmClass(str, Enum):
@@ -542,8 +442,9 @@ class PreprocessingPreset(BaseModel):
             (robust to outliers, accounts for skewness).
         scaling: The scaling configuration of numeric features (a
             :class:`ScalingSpec`: ``StandardScaling``, ``RobustScaling`` with
-            its ``quantile_range``/``with_centering`` parameters, or
-            ``NoScaling``).
+            its ``quantile_range``/``with_centering`` parameters,
+            ``QuantileScaling`` with its ``output_distribution``/
+            ``n_quantiles``/``subsample`` parameters, or ``NoScaling``).
         description: A human-readable description of the preset.
     """
 
@@ -564,7 +465,7 @@ class PreprocessingPreset(BaseModel):
         default_factory=StandardScaling,
         description=(
             "Scaling of numeric features: a string shorthand "
-            "('standard', 'robust' or 'none') or an object "
+            "('standard', 'robust', 'quantile' or 'none') or an object "
             "({'type': 'robust', 'quantile_range': [low, high], ...}). "
             "The shorthand is normalized to its object form."
         ),
@@ -606,13 +507,20 @@ def _format_scaling(spec: ScalingSpec) -> str:
     Returns:
         ``'standard'`` / ``'none'`` as-is; for a robust spec the parameters
         are shown, e.g. ``robust(q=(10.0, 90.0))`` (a non-default
-        ``with_centering=False`` is appended as ``, centering=False``).
+        ``with_centering=False`` is appended as ``, centering=False``); for
+        a quantile spec the parameters are shown, e.g.
+        ``quantile(dist=normal, n=1000)``.
     """
     obj = coerce_scaling(spec)
     if obj.type == "robust":
         text = f"robust(q={obj.quantile_range})"
         if not obj.with_centering:
             text += ", centering=False"
+        return text
+    if obj.type == "quantile":
+        text = f"quantile(dist={obj.output_distribution}, n={obj.n_quantiles})"
+        if obj.subsample != QuantileScaling.model_fields["subsample"].default:
+            text += f", subsample={obj.subsample}"
         return text
     return repr(obj.type)
 
@@ -637,10 +545,10 @@ class PreprocessingOverride(BaseModel):
     scaling: ScalingSpec | None = Field(
         default=None,
         description=(
-            "Scaling override: a string shorthand ('standard', 'robust' or "
-            "'none'), an object ({'type': 'robust', 'quantile_range': "
-            "[low, high], ...}) or None (automatic selection). The shorthand "
-            "is normalized to its object form."
+            "Scaling override: a string shorthand ('standard', 'robust', "
+            "'quantile' or 'none'), an object ({'type': 'robust', "
+            "'quantile_range': [low, high], ...}) or None (automatic "
+            "selection). The shorthand is normalized to its object form."
         ),
     )
     outliers: OutlierSpec | None = Field(

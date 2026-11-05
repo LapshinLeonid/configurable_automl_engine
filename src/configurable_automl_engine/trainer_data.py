@@ -45,6 +45,7 @@ from configurable_automl_engine.preprocessing import (
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
+    log_tree_class_scaling_ineffective,
     requires_missing_indicator,
     resolve_preprocessing_preset,
 )
@@ -408,6 +409,7 @@ def build_trainer_preprocessor(
         algorithm,
         preset,
     )
+    log_tree_class_scaling_ineffective(preset, _LOG)
     # GPR/Isotonic/ARD algorithms reject sparse matrices: with hashing
     # encoding (sparse output) the preprocessor must return a dense matrix
     # via force_dense_output. Strictly univariate algorithms (isotonic) are

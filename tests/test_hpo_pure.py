@@ -743,3 +743,51 @@ def test_runner_state_is_small() -> None:
 
     assert result is not None and result.model is not None
     assert len(vars(runner)) <= 40, sorted(vars(runner))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Tree-class scaling INFO line in the HPO phase
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_plan_preprocessing_trees_scaling_info_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A forced scaler on a tree algorithm logs one INFO line in the HPO phase too."""
+    X, _ = _numeric_frame()
+    request = HpoRequest(
+        algo_name="random_forest",
+        preprocessing_override={"scaling": "standard"},
+    )
+
+    with caplog.at_level(logging.INFO):
+        plan = assert_pure(plan_preprocessing, X, request)
+
+    assert plan.preprocessor is not None
+    info_lines = {
+        r.getMessage()
+        for r in caplog.records
+        if "no effect on split-based models" in r.getMessage()
+        and r.name == "configurable_automl_engine.hpo.trial_pipeline"
+    }
+    assert len(info_lines) == 1
+    assert any(
+        r.levelno == logging.INFO
+        for r in caplog.records
+        if r.name == "configurable_automl_engine.hpo.trial_pipeline"
+        and "no effect on split-based models" in r.getMessage()
+    )
+
+
+def test_plan_preprocessing_trees_no_scaling_no_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default tree preset (scaling='none') does not log the INFO line."""
+    X, _ = _numeric_frame()
+    request = HpoRequest(algo_name="random_forest")
+
+    with caplog.at_level(logging.INFO):
+        plan = assert_pure(plan_preprocessing, X, request)
+
+    assert plan.preprocessor is not None
+    assert "no effect on split-based models" not in caplog.text

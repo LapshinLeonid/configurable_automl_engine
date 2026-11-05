@@ -1026,7 +1026,7 @@ algorithms:
     enable: true
     preprocessing:
       imputation_strategy: median   # optional: "mean" | "median"
-      scaling: standard             # optional: string shorthand "standard" | "robust" | "none"
+      scaling: standard             # optional: string shorthand "standard" | "robust" | "quantile" | "none"
                                     # or an object form (see "Composition of a preset")
       outliers:                      # optional: outlier handling (Winsorizer)
         method: quantile             # "none" | "quantile" | "iqr"
@@ -1071,7 +1071,7 @@ Unknown algorithm names (typos) are rejected with a `ValueError` listing the ava
 Each preset defines:
 
 * `imputation_strategy` — missing-value imputation strategy for numeric features: `mean` (standard) or `median` (robust to outliers / skewed distributions).
-* `scaling` — the scaling configuration of numeric features. It accepts a **string shorthand** (`standard` — `StandardScaler`, `robust` — `RobustScaler` (robust to outliers), `none` — numeric features are passed to the model without scaling) or an **object form** with the scaler's parameters. The shorthand is normalized to its object form, so both forms produce identical pipelines:
+* `scaling` — the scaling configuration of numeric features. It accepts a **string shorthand** (`standard` — `StandardScaler`, `robust` — `RobustScaler` (robust to outliers), `quantile` — `QuantileTransformer` (non-parametric transform to a uniform or normal distribution), `none` — numeric features are passed to the model without scaling) or an **object form** with the scaler's parameters. The shorthand is normalized to its object form, so both forms produce identical pipelines:
 
 ```yaml
 scaling: standard                    # shorthand of {"type": "standard"}
@@ -1080,9 +1080,19 @@ scaling:
   type: robust                       # RobustScaler parameters
   quantile_range: [25.0, 75.0]       # optional; 0 <= low < high <= 100
   with_centering: true               # optional; center the data with the median
+scaling:
+  type: quantile                     # QuantileTransformer parameters
+  output_distribution: uniform       # optional: "uniform" | "normal"
+  n_quantiles: 1000                  # optional; >= 10; clipped to the fold size
+  subsample: 100000                  # optional; >= n_quantiles; always forwarded
+                                     # to sklearn (the sklearn default is 10000)
 ```
 
-The resolved preset is always stored in the object form (`StandardScaling` / `RobustScaling` / `NoScaling`); the resolved-preset log line shows the parameters, e.g. `scaling=robust(q=(10.0, 90.0))`.
+For `type: quantile` the transformer is fold-size-aware: on a cross-validation fold with fewer rows than `n_quantiles` the value is clipped to the fold size (logged at DEBUG level), so no sklearn warning is emitted and every validation strategy (including leave-one-out) works out of the box. Missing-value indicator columns are scaled together with the numeric features (they are part of the same imputation → scaling pipeline), which matches the behaviour of the other scaling types.
+
+The resolved preset is always stored in the object form (`StandardScaling` / `RobustScaling` / `QuantileScaling` / `NoScaling`); the resolved-preset log line shows the parameters, e.g. `scaling=robust(q=(10.0, 90.0))` or `scaling=quantile(dist=normal, n=1000)`.
+
+For tree-class algorithms (the `trees` class) any non-`none` scaling has no effect on split-based models and is reported with an INFO log line.
 * `outliers` — optional winsorization (clipping) of numeric features, applied identically in HPO and in the final model. The clipping bounds are learned from the training data (per CV fold, so there is no leakage). Forms:
   * `none` (default) — no outlier handling; the step is absent from the pipeline (not added as a no-op).
   * `quantile` — clips every value outside the training quantiles `[lower_quantile, upper_quantile]` (both in `[0, 1]`, `lower < upper`; defaults `0.01`/`0.99`). Example: `{method: quantile, lower_quantile: 0.02, upper_quantile: 0.98}`.

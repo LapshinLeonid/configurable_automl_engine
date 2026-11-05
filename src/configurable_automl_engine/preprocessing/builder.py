@@ -3,8 +3,9 @@
 Holds :func:`build_preprocessor`: the ``ColumnTransformer`` with imputation
 and the selected encoding for categorical columns and imputation plus scaling
 for numerical columns. It is used both in HPO (``tuner.optimize``) and in
-final training (``trainer.ModelTrainer``). It builds on the encoders and the
-column selector; no other preprocessing module may import it.
+final training (``trainer.ModelTrainer``). It builds on the encoders, the
+column selector and the quantile scaler; no other preprocessing module may
+import it.
 """
 
 from __future__ import annotations
@@ -30,11 +31,15 @@ from configurable_automl_engine.preprocessing.encoders import (
     _to_string_array,
 )
 from configurable_automl_engine.preprocessing.outliers import Winsorizer
+from configurable_automl_engine.preprocessing.quantile import (
+    _FoldSafeQuantileTransformer,
+)
 from configurable_automl_engine.preprocessing_presets import (
     ImputationStrategy,
     NoScaling,
     ObjectScalingSpec,
     OutlierSpec,
+    QuantileScaling,
     RobustScaling,
     ScalingSpec,
     StandardScaling,
@@ -110,10 +115,12 @@ def build_preprocessor(
         imputation_strategy: ``'mean'`` (default) or ``'median'`` (robust to
             outliers). Imputation is performed with ``add_indicator=True``.
         scaling: The scaler configuration: a string shorthand (``'standard'``
-            (default), ``'robust'`` or ``'none'``) or a
+            (default), ``'robust'``, ``'quantile'`` or ``'none'``) or a
             :class:`~configurable_automl_engine.preprocessing_presets.ScalingSpec`
             object (``StandardScaling`` / ``RobustScaling`` with
-            ``quantile_range``/``with_centering`` / ``NoScaling``). The
+            ``quantile_range``/``with_centering`` / ``QuantileScaling`` with
+            ``output_distribution``/``n_quantiles``/``subsample`` /
+            ``NoScaling``). The
             shorthand is normalized to its object form; validation happens
             through the model.
         high_cardinality_threshold: Cardinality threshold (``>= 0``);
@@ -264,7 +271,7 @@ def build_preprocessor(
             SimpleImputer(strategy=imputation_strategy, add_indicator=add_indicator),
         )
     )
-    scaler = _build_scaler(scaling_spec)
+    scaler = _build_scaler(scaling_spec, random_state=random_state)
     if scaler is not None:
         num_steps.append(("scaler", scaler))
     num_transformer = Pipeline(steps=num_steps)
@@ -326,16 +333,20 @@ def build_preprocessor(
 
 def _build_scaler(
     scaling_spec: ObjectScalingSpec,
-) -> RobustScaler | StandardScaler | None:
+    random_state: int | None = None,
+) -> RobustScaler | StandardScaler | _FoldSafeQuantileTransformer | None:
     """Build the scaler from a validated scaling spec.
 
     Args:
         scaling_spec: The object form of a scaling specification
             (the output of :func:`coerce_scaling`).
+        random_state: Seed forwarded to the quantile transformer
+            (deterministic subsampling); ignored by the other scalers.
 
     Returns:
-        A ``RobustScaler``/``StandardScaler`` configured from the spec, or
-        ``None`` for a ``NoScaling`` spec (the scaling step is omitted).
+        A ``RobustScaler``/``StandardScaler``/``_FoldSafeQuantileTransformer``
+        configured from the spec, or ``None`` for a ``NoScaling`` spec (the
+        scaling step is omitted).
     """
     if isinstance(scaling_spec, NoScaling):
         return None
@@ -343,6 +354,13 @@ def _build_scaler(
         return RobustScaler(
             quantile_range=scaling_spec.quantile_range,
             with_centering=scaling_spec.with_centering,
+        )
+    if isinstance(scaling_spec, QuantileScaling):
+        return _FoldSafeQuantileTransformer(
+            output_distribution=scaling_spec.output_distribution,
+            n_quantiles=scaling_spec.n_quantiles,
+            subsample=scaling_spec.subsample,
+            random_state=random_state,
         )
     # StandardScaling — the only remaining member of the ScalingSpec union.
     return StandardScaler()
