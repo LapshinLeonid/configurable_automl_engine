@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import warnings
+from collections.abc import Sequence
 from numbers import Real
 from typing import Any, Literal
 
@@ -45,6 +46,14 @@ class Winsorizer(TransformerMixin, BaseEstimator):
       rewritten by the clip, and one WARNING per ``fit`` names all such
       columns.
 
+    Excluded columns (``exclude``): the named columns are never clipped —
+    they get the degenerate ``(-inf, +inf)`` bounds regardless of their
+    values and are named in the same WARNING as the degenerate columns.
+    The engine passes the datetime-derived component columns there: the
+    year/month/day features are bounded by construction and winsorizing
+    them would only lose information (e.g. by clipping the first and the
+    last month of the data range).
+
     Other invariants:
 
     * the fitted transformer is pickled inside saved models, so this class's
@@ -65,6 +74,10 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             WARNING about collapsed columns (not an sklearn estimator
             parameter in spirit: it never affects the fitted result, and
             ``clone`` copies it like any other constructor argument).
+        exclude: Column names that are never clipped (they get the
+            ``(-inf, +inf)`` bounds); by position when the input has no
+            names. Datetime-derived features are passed there by the
+            engine: they are bounded by construction.
         lower_bounds_: Per-column lower bounds learned in ``fit``.
         upper_bounds_: Per-column upper bounds learned in ``fit``.
         n_features_in_: Number of features seen in ``fit``.
@@ -78,6 +91,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):
         upper_quantile: float = 0.99,
         iqr_multiplier: float = 1.5,
         algorithm_name: str | None = None,
+        exclude: Sequence[str | int] | None = None,
     ) -> None:
         """Initialize the transformer; no validation happens here (sklearn convention).
 
@@ -89,12 +103,17 @@ class Winsorizer(TransformerMixin, BaseEstimator):
                 ``"iqr"`` method.
             algorithm_name: Optional algorithm name prefixed to the WARNING
                 about collapsed columns.
+            exclude: Column names (or positions for nameless input) that are
+                never clipped — they get the ``(-inf, +inf)`` bounds.
         """
         self.method = method
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile
         self.iqr_multiplier = iqr_multiplier
         self.algorithm_name = algorithm_name
+        # Stored as passed (sklearn clone contract: the constructor must not
+        # copy or modify its parameters); resolved lazily in _exclude_mask.
+        self.exclude = exclude
 
     def __sklearn_tags__(self) -> Any:
         """Declare estimator tags; NaN input is supported by design."""
@@ -267,33 +286,41 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             The fitted transformer.
 
         Raises:
-            ValueError: If the parameters are invalid.
+            ValueError: If the parameters are invalid or an ``exclude``
+                entry does not match any input column.
         """
         self._validate_params()
         _check_feature_names(self, X, reset=True)
         arr = self._to_2d_float(X)
         self.n_features_in_ = arr.shape[1]
+        exclude_mask = self._exclude_mask()
 
         lower = np.empty(self.n_features_in_, dtype=float)
         upper = np.empty(self.n_features_in_, dtype=float)
         for col in range(self.n_features_in_):
-            with warnings.catch_warnings():
-                # An all-NaN column makes nanquantile return NaN; the
-                # degenerate bounds below handle it without the noise.
-                warnings.filterwarnings(
-                    "ignore",
-                    message="All-NaN slice encountered",
-                    category=RuntimeWarning,
-                )
-                if self.method == "quantile":
-                    q_lo = np.nanquantile(arr[:, col], self.lower_quantile)
-                    q_hi = np.nanquantile(arr[:, col], self.upper_quantile)
-                else:
-                    q1 = np.nanquantile(arr[:, col], 0.25)
-                    q3 = np.nanquantile(arr[:, col], 0.75)
-                    iqr = q3 - q1
-                    q_lo = q1 - self.iqr_multiplier * iqr
-                    q_hi = q3 + self.iqr_multiplier * iqr
+            if exclude_mask[col]:
+                # An excluded column (datetime-derived components etc.) is
+                # bounded by construction: clipping would only lose
+                # information, so the degenerate interval keeps every value.
+                q_lo, q_hi = -np.inf, np.inf
+            else:
+                with warnings.catch_warnings():
+                    # An all-NaN column makes nanquantile return NaN; the
+                    # degenerate bounds below handle it without the noise.
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="All-NaN slice encountered",
+                        category=RuntimeWarning,
+                    )
+                    if self.method == "quantile":
+                        q_lo = np.nanquantile(arr[:, col], self.lower_quantile)
+                        q_hi = np.nanquantile(arr[:, col], self.upper_quantile)
+                    else:
+                        q1 = np.nanquantile(arr[:, col], 0.25)
+                        q3 = np.nanquantile(arr[:, col], 0.75)
+                        iqr = q3 - q1
+                        q_lo = q1 - self.iqr_multiplier * iqr
+                        q_hi = q3 + self.iqr_multiplier * iqr
             if np.isnan(q_lo) or np.isnan(q_hi):
                 # All-NaN column: clipping to (-inf, +inf) changes nothing.
                 q_lo, q_hi = -np.inf, np.inf
@@ -316,14 +343,68 @@ class Winsorizer(TransformerMixin, BaseEstimator):
                 else "Winsorizer: "
             )
             logger.warning(
-                "%s%d column(s) have a degenerate clipping interval "
-                "(constant or all-NaN in the training data) and are not "
-                "clipped: %s",
+                "%s%d column(s) are excluded from clipping "
+                "(explicitly excluded, constant or all-NaN in the training "
+                "data): %s",
                 prefix,
                 len(collapsed_names),
                 ", ".join(collapsed_names),
             )
         return self
+
+    def _exclude_mask(self) -> np.ndarray:
+        """Resolve the ``exclude`` entries into a per-column boolean mask.
+
+        A string entry matches a column name (DataFrame input or the names
+        seen in ``fit``); an integer entry is the column position for a
+        nameless (ndarray) input. A name that matches no column raises —
+        a stale name would otherwise be silently ignored.
+
+        Returns:
+            A boolean ndarray of length ``n_features_in_`` (``True`` — the
+            column is excluded from clipping).
+
+        Raises:
+            ValueError: If a string ``exclude`` entry is not a column name.
+        """
+        mask = np.zeros(self.n_features_in_, dtype=bool)
+        if not self.exclude:
+            return mask
+        names = self._input_names()
+        name_index: dict[str, int] = {}
+        if names is not None:
+            name_index = {str(name): col for col, name in enumerate(names)}
+        for entry in self.exclude:
+            if isinstance(entry, bool):
+                # bool is a subclass of int: excluded explicitly. ValueError
+                # is deliberate (the module contract: ValueError for every
+                # invalid parameter), matching _validate_real_param.
+                raise ValueError(  # noqa: TRY004
+                    f"Winsorizer: exclude entries must be column names or "
+                    f"positions, got {entry!r} of type bool."
+                )
+            if isinstance(entry, str):
+                col = name_index.get(entry)
+                if col is None:
+                    raise ValueError(
+                        f"Winsorizer: exclude entry {entry!r} does not match "
+                        "any input column."
+                    )
+                mask[col] = True
+            elif isinstance(entry, int) and not isinstance(entry, bool):
+                if not 0 <= entry < self.n_features_in_:
+                    raise ValueError(
+                        f"Winsorizer: exclude position {entry} is out of "
+                        f"range for {self.n_features_in_} column(s)."
+                    )
+                mask[entry] = True
+            else:
+                raise ValueError(  # noqa: TRY004
+                    f"Winsorizer: exclude entries must be column names or "
+                    f"positions, got {entry!r} of type "
+                    f"{type(entry).__name__}."
+                )
+        return mask
 
     def _collapsed_column_names(self) -> list[str]:
         """Return the names (or positional labels) of the degenerate columns."""

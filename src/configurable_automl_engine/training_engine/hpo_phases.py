@@ -73,6 +73,19 @@ def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
     }
 
 
+def _datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
+    """Flat list of the datetime-derived columns of an expansion map.
+
+    Args:
+        expansion: Mapping ``source datetime column → generated component
+            columns`` (``PreparedData.datetime_expansion``).
+
+    Returns:
+        The generated component column names (order of the mapping).
+    """
+    return [name for names in expansion.values() for name in names]
+
+
 # --------------------------------------------------------------------------- #
 #  HPO call                                                                   #
 # --------------------------------------------------------------------------- #
@@ -136,6 +149,11 @@ def _build_hpo_request(
         # with the precedence "class preset < default < override" in the
         # trial pipeline.
         preprocessing_default=spec.preprocessing_default,
+        # The datetime-derived component columns are excluded from
+        # winsorization in the HPO trials, consistently with the final
+        # ModelTrainer (year/month/day features are bounded by
+        # construction).
+        winsorizer_exclude=list(spec.winsorizer_exclude),
         feature_selection_cfg=spec.feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=spec.oversampling_enabled,

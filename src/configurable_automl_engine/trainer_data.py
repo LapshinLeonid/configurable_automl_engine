@@ -61,6 +61,20 @@ from .trainer_state import (
 _LOG = logging.getLogger(__name__)
 
 
+def _datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
+    """Flat list of the datetime-derived columns of an expansion map.
+
+    Args:
+        expansion: Mapping ``source datetime column → generated component
+            columns`` (``ModelTrainer.datetime_expansion_`` /
+            ``PreparedFeatures.datetime_expansion``).
+
+    Returns:
+        The generated component column names (order of the mapping).
+    """
+    return [name for names in expansion.values() for name in names]
+
+
 def extract_feature_names(X: Any) -> list[str] | None:
     """Extract column names from various data structures without copying.
 
@@ -375,6 +389,7 @@ def build_trainer_preprocessor(
     encoding: EncodingSettings,
     override: PreprocessingOverride | None,
     random_state: int | None,
+    winsorizer_exclude: list[str] | None = None,
 ) -> TrainerPreprocessor:
     """Build the ColumnTransformer of the trainer and resolve its preset.
 
@@ -392,6 +407,9 @@ def build_trainer_preprocessor(
         encoding: The categorical encoding settings.
         override: The explicit preprocessing preset override.
         random_state: The seed of the randomized encoders.
+        winsorizer_exclude: Numerical columns excluded from winsorization
+            (the datetime-derived component columns; see
+            ``datetime_expansion_map``). ``None`` — nothing is excluded.
 
     Returns:
         TrainerPreprocessor: The unfitted preprocessor and the preset.
@@ -432,6 +450,7 @@ def build_trainer_preprocessor(
         add_indicator=requires_missing_indicator(algorithm) if algorithm else True,
         outliers=preset.outliers,
         outlier_algorithm=algorithm or None,
+        winsorizer_exclude=winsorizer_exclude,
     )
     return TrainerPreprocessor(preprocessor=preprocessor, preset=preset)
 

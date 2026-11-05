@@ -263,6 +263,7 @@ def _build_trial_preprocessor(
         add_indicator=_missing_indicator_enabled(algo),
         outliers=preset.outliers,
         outlier_algorithm=algo,
+        winsorizer_exclude=request.winsorizer_exclude,
     )
     return preprocessor, categorical, numerical
 

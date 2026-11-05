@@ -82,6 +82,9 @@ class HpoRequest:
         preprocessing_default: The run-level (general) preprocessing preset
             override applied for every algorithm; per field it yields to
             ``preprocessing_override``.
+        winsorizer_exclude: The numerical columns excluded from winsorization
+            (the datetime-derived component columns; see
+            ``datetime_expansion_map``). ``None`` — nothing is excluded.
         feature_selection_cfg: The feature selection settings.
         oversampling: The oversampling settings.
         pruning: The early stopping (pruning) settings.
@@ -114,6 +117,7 @@ class HpoRequest:
     encoding: EncodingSettings = field(default_factory=EncodingSettings)
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None
     preprocessing_default: PreprocessingOverride | dict[str, Any] | None = None
+    winsorizer_exclude: list[str] | None = None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None
     oversampling: OversamplingSettings = field(default_factory=OversamplingSettings)
     pruning: dict[str, Any] | None = None

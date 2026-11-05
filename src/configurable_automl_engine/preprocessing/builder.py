@@ -16,6 +16,7 @@ may import it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import ValidationError
@@ -77,6 +78,7 @@ def build_preprocessor(
     add_indicator: bool = True,
     outliers: OutlierSpec | None = None,
     outlier_algorithm: str | None = None,
+    winsorizer_exclude: Sequence[str] | None = None,
 ) -> ColumnTransformer:
     """Build a ColumnTransformer for separate processing of data types.
 
@@ -164,6 +166,15 @@ def build_preprocessor(
         outlier_algorithm: The algorithm name used only to prefix the
             WARNING about collapsed (constant/all-NaN) columns with the
             algorithm context. ``None`` — the message is not prefixed.
+        winsorizer_exclude: Names of numerical columns that are never
+            clipped even when the winsorizer is enabled (they get the
+            ``(-inf, +inf)`` bounds). The engine passes the datetime-derived
+            component columns there (see ``datetime_expansion_map``): they
+            are bounded by construction and winsorizing them would only
+            lose information. A name that is not a numerical column is
+            ignored (with a DEBUG line) — the step only ever sees the
+            numerical block. Names of columns outside ``feature_names``
+            raise. ``None``/empty — nothing is excluded.
 
     Returns:
         A ``ColumnTransformer`` that converts the input DataFrame into a numerical
@@ -227,7 +238,10 @@ def build_preprocessor(
     # Validation of the outlier spec happens through the model (method
     # discriminator, quantile bounds, extra='forbid'); the string shorthand
     # is normalized to its object form here. None/'none' — no step at all.
-    winsorizer = _build_winsorizer(outliers, outlier_algorithm)
+    exclude_names = _validate_winsorizer_exclude(
+        winsorizer_exclude, feature_names, numerical_features
+    )
+    winsorizer = _build_winsorizer(outliers, outlier_algorithm, exclude_names)
 
     # Validate that all requested column names are present in the training set
     # (feature_names): this is an explicit error, because the name-based
@@ -372,7 +386,9 @@ def _build_scaler(
 
 
 def _build_winsorizer(
-    outliers: OutlierSpec | None, outlier_algorithm: str | None
+    outliers: OutlierSpec | None,
+    outlier_algorithm: str | None,
+    exclude: list[str] | None = None,
 ) -> Winsorizer | None:
     """Build the winsorizer from an outlier spec, or ``None`` when disabled.
 
@@ -384,6 +400,8 @@ def _build_winsorizer(
             to its object form.
         outlier_algorithm: The algorithm name for the collapsed-columns
             WARNING prefix.
+        exclude: Names of the numerical columns that are never clipped
+            (``exclude`` parameter of :class:`Winsorizer`).
 
     Returns:
         A configured ``Winsorizer`` or ``None`` when outlier handling is off.
@@ -406,4 +424,64 @@ def _build_winsorizer(
         upper_quantile=getattr(outliers_spec, "upper_quantile", 0.99),
         iqr_multiplier=getattr(outliers_spec, "iqr_multiplier", 1.5),
         algorithm_name=outlier_algorithm,
+        exclude=exclude,
     )
+
+
+def _validate_winsorizer_exclude(
+    winsorizer_exclude: Sequence[str] | None,
+    feature_names: list[str],
+    numerical_features: list[str],
+) -> list[str] | None:
+    """Validate the excluded-column names and log the exclusion.
+
+    The winsorizer step only ever sees the numerical block, so the check
+    runs against ``numerical_features``:
+
+    * a name outside ``numerical_features`` is dropped with a DEBUG line —
+      it also covers datetime-derived component columns that were already
+      removed from the feature set as uninformative (e.g. a constant
+      ``<ts>_year`` on the sample), so a stale expansion entry is harmless;
+    * a numerical name missing from ``feature_names`` raises — the name
+      would never be seen by the preprocessor (a caller-side error).
+
+    Args:
+        winsorizer_exclude: The requested excluded column names.
+        feature_names: The full feature names in training order.
+        numerical_features: The numerical columns.
+
+    Returns:
+        The validated list of excluded numerical names (``None`` when
+        nothing is excluded), in the order of the input.
+
+    Raises:
+        ValueError: If a numerical requested name is missing from
+            ``feature_names``.
+    """
+    if not winsorizer_exclude:
+        return None
+    exclude: list[str] = []
+    for name in winsorizer_exclude:
+        if name not in numerical_features:
+            logger.debug(
+                "winsorizer_exclude: column %r is not a numerical feature "
+                "(already dropped or categorical) and cannot be excluded "
+                "from winsorization; the entry is ignored.",
+                name,
+            )
+            continue
+        if name not in feature_names:
+            raise ValueError(
+                f"Unknown winsorizer_exclude column: {name!r}. "
+                f"Expected columns: {feature_names}."
+            )
+        exclude.append(name)
+    if not exclude:
+        return None
+    logger.info(
+        "Winsorizer excludes %d datetime-derived (or explicitly excluded) "
+        "numerical column(s) from clipping: %s",
+        len(exclude),
+        ", ".join(exclude),
+    )
+    return exclude

@@ -1159,6 +1159,8 @@ For tree-class algorithms (the `trees` class) any non-`none` scaling has no effe
 
   **Pipeline order:** the numeric pipeline is `[Winsorizer] -> SimpleImputer(add_indicator=...) -> [scaler]` — the winsorization step comes strictly **before** the imputer. Otherwise the mean/median imputation would see the extreme values (biasing the imputed value), and the 0/1 missing-value indicator columns would get clipped. With `method: none` the step is absent from the pipeline. The step is one-to-one, so it may be used by all algorithm classes including `univariate`/`isotonic_regression` (the `feature_index` semantics are preserved).
 
+  **Datetime exclusion:** datetime-derived component columns (produced by `general.datetime_policy: 'expand'`, e.g. `<ts>_year`, `<ts>_month`) are excluded from winsorization — they are bounded by construction, so clipping them could only lose information (e.g. by clipping the first and the last month of the data range); the excluded columns are named in an INFO log line.
+
 ### Selection and override rules
 
 * The preset is resolved automatically from the algorithm name before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.

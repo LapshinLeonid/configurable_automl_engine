@@ -76,6 +76,7 @@ from .trainer_artifact import (
     load_trainer_artifact,
 )
 from .trainer_data import (
+    _datetime_expansion_columns,
     assemble_pipeline_steps,
     build_trainer_preprocessor,
     load_training_data,
@@ -356,6 +357,15 @@ class ModelTrainer:
         # (the engine expands the data in prepare_dataset, before the trainer
         # sees it).
         self.datetime_expansion_: dict[str, list[str]] = {}
+        # The expansion registered BEFORE fit (``register_datetime_expansion``
+        # called before the training data is seen). Consumed by the next
+        # ``fit``: it drives the winsorizer exclusion of the datetime-derived
+        # component columns (the engine registers the map on the trainer
+        # before fit — the data is already expanded in ``prepare_dataset``),
+        # is merged into ``datetime_expansion_`` afterwards and is cleared,
+        # so a later refit on its own data starts clean (a refit resets the
+        # recorded expansion).
+        self._pre_fit_expansion: dict[str, list[str]] = {}
         # Artifact metadata, populated by :meth:`save` (and read back by
         # :meth:`load`). Contains the artifact format version, the engine
         # version, dependency versions, the creation timestamp, the
@@ -659,6 +669,12 @@ class ModelTrainer:
         # A trainer restored from an artifact (or sent to another process)
         # starts with this process's registry: register its metrics again.
         register_custom_metrics(self.custom_metrics)
+        # The expansion registered BEFORE fit (the engine registers the map
+        # on the trainer before calling fit — the data is already expanded in
+        # prepare_dataset). Consumed once: the next fit starts clean, so a
+        # refit on its own data resets the recorded expansion.
+        pre_registered = self._pre_fit_expansion
+        self._pre_fit_expansion = {}
         with self.lock:
             self._reset_fit_state()
 
@@ -674,8 +690,13 @@ class ModelTrainer:
                 policies=settings.policies,
                 warn_id_like=settings.warn_id_like,
             )
+            # Merge the pre-registered expansion with the fit-time map
+            # (entries recorded by fit itself take precedence).
             self._features = features
-            self.datetime_expansion_ = dict(features.datetime_expansion)
+            self.datetime_expansion_ = {
+                **pre_registered,
+                **dict(features.datetime_expansion),
+            }
 
             # Stage 2: Create the model via the factory. Done BEFORE
             # preprocessor assembly so that an unknown algorithm (a typo in
@@ -684,6 +705,11 @@ class ModelTrainer:
             base_model = self._create_base_model()
 
             # Stage 3: Build the preprocessor and resolve its preset.
+            # The datetime-derived component columns (``datetime_policy=
+            # "expand"``) are excluded from winsorization: year/month/day
+            # features are bounded by construction and clipping them would
+            # only lose information (e.g. the first and the last month of
+            # the data range).
             setup = build_trainer_preprocessor(
                 settings.algorithm,
                 features.categorical_features,
@@ -692,6 +718,9 @@ class ModelTrainer:
                 encoding=settings.encoding,
                 override=settings.preprocessing_override,
                 random_state=settings.random_state,
+                winsorizer_exclude=_datetime_expansion_columns(
+                    self.datetime_expansion_
+                ),
             )
             self.preprocessing_preset = setup.preset
             make_steps = self._steps_factory(setup.preprocessor, base_model)
@@ -754,6 +783,13 @@ class ModelTrainer:
         applies the same expansion to raw input data. Entries recorded by
         ``fit`` itself take precedence for the same source column.
 
+        A registration BEFORE the first ``fit`` is additionally kept as the
+        pre-fit expansion: the next ``fit`` uses it to exclude the generated
+        component columns from winsorization (they are bounded by
+        construction), merges it into ``datetime_expansion_`` for
+        ``predict`` and consumes it — a later refit on its own data starts
+        with a clean expansion state.
+
         Args:
             expansion: Mapping ``source column → generated component
                 columns`` (see ``datetime_expansion_map``).
@@ -773,6 +809,13 @@ class ModelTrainer:
                 "(source column → generated component columns)"
             )
         with self.lock:
+            if self.pipeline is None:
+                # Pre-fit registration: remembered for the next fit (the
+                # winsorizer exclusion) and merged into the recorded map.
+                self._pre_fit_expansion = {
+                    **self._pre_fit_expansion,
+                    **{src: list(names) for src, names in expansion.items()},
+                }
             self.datetime_expansion_ = {
                 **{src: list(names) for src, names in expansion.items()},
                 **self.datetime_expansion_,

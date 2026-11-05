@@ -210,8 +210,11 @@ def _fit_and_save(
         test_size=test_size,
         random_state=random_state,
     )
-    trainer.fit(X, y)
+    # The expansion is registered BEFORE fit: the datetime-derived component
+    # columns are excluded from winsorization when the preprocessor is
+    # assembled (year/month/day features are bounded by construction).
     _register_datetime_expansion(trainer, datetime_expansion)
+    trainer.fit(X, y)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     trainer.save(model_path)
     return trainer
@@ -345,6 +348,9 @@ def _compute_holdout_score(
             test_size=prepared.resolved_test_size,
             random_state=prepared.random_state,
         )
+        # The expansion is registered BEFORE fit: the datetime-derived
+        # component columns are excluded from winsorization.
+        _register_datetime_expansion(holdout_trainer, prepared.datetime_expansion)
         # Train on the train part of the outer split only: the hold-out rows
         # never participate in the fit, so the estimate on them is honest.
         holdout_trainer.fit(prepared.X, prepared.y)

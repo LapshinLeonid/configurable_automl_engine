@@ -93,6 +93,7 @@ def optimize(
     numerical_features: list[str] | None = None,
     encoding: EncodingStrategy | None = None,
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
+    winsorizer_exclude: list[str] | None = None,
     pruning: dict[str, Any] | None = None,
     high_cardinality_threshold: int | None = 50,
     high_cardinality_encoding: EncodingStrategy | None = "frequency",
@@ -207,6 +208,11 @@ def optimize(
             override of the feature preprocessing preset. Set partially or
             fully; takes precedence over the automatic selection and is
             applied consistently with the final training.
+        winsorizer_exclude: Numerical columns excluded from winsorization
+            (the datetime-derived component columns; see
+            ``datetime_expansion_map``). ``None`` — nothing is excluded.
+            Names outside the numerical feature set are ignored (with a
+            DEBUG line); names missing from ``X`` raise ``ValueError``.
         pruning: Early stopping (pruning) settings.
             A dict with fields: ``enable`` (bool, False by default),
             ``strategy`` ('median' | 'hyperband', 'median' by default),
@@ -366,6 +372,9 @@ def optimize(
             target_encoding_fallback=target_encoding_fallback,
         ),
         preprocessing_override=preprocessing_override,
+        winsorizer_exclude=(
+            None if winsorizer_exclude is None else list(winsorizer_exclude)
+        ),
         feature_selection_cfg=feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=data_oversampling,

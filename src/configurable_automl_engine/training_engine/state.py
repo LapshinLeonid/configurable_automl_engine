@@ -471,6 +471,10 @@ class _HpoPhaseSpec:
         target_encoding_fallback (float | None): Target encoding fallback.
         feature_selection_cfg (FeatureSelectionCfg | dict | None): Feature
             selection configuration.
+        winsorizer_exclude (list[str]): The numerical columns excluded from
+            winsorization in the HPO trials (the datetime-derived component
+            columns of ``PreparedData.datetime_expansion``; empty — nothing
+            is excluded).
         preprocessing_default (PreprocessingOverride | None): The run-level
             (``general.preprocessing``) preset override, merged with the
             per-algorithm block in the worker before the HPO request is
@@ -517,6 +521,7 @@ class _HpoPhaseSpec:
     target_encoding_smoothing: float
     target_encoding_fallback: float | None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    winsorizer_exclude: list[str] = field(default_factory=list)
     preprocessing_default: PreprocessingOverride | None = None
     complexity_guard_cfg: Any = None
     user_hyperparameter_keys: list[str] | None = None

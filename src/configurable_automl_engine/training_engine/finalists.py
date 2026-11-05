@@ -456,6 +456,7 @@ def _fit_finalist(
     n_folds: int,
     test_size: float,
     random_state: int | None,
+    datetime_expansion: dict[str, list[str]] | None = None,
 ) -> Any:
     """Train a finalist on 100% of the data and return its ``ModelTrainer``.
 
@@ -479,6 +480,10 @@ def _fit_finalist(
         random_state: The engine seed (``general.random_state``)
             for the finalist's splits and model seeds; ``None`` — a
             non-reproducible fit.
+        datetime_expansion: The datetime
+            expansion applied upstream (``PreparedData.datetime_expansion``);
+            registered on the trainer BEFORE fit so that the datetime-derived
+            component columns are excluded from winsorization.
     """
     trainer = _build_trainer(
         algo_name,
@@ -491,6 +496,8 @@ def _fit_finalist(
         test_size=test_size,
         random_state=random_state,
     )
+    if datetime_expansion:
+        trainer.register_datetime_expansion(datetime_expansion)
     trainer.fit(X, y)
     return trainer
 
@@ -570,6 +577,7 @@ def _train_finalists(
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
                 random_state=random_state,
+                datetime_expansion=prepared.datetime_expansion,
             )
         except Exception as err:  # noqa: BLE001 — the finalist is excluded
             _LOG.warning(
