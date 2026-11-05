@@ -27,7 +27,7 @@ alike — and there are no import cycles:
 |---|---|
 | 3 — orchestration | `training_engine/` (config schema, phases, selection, artifact saving, `run_parallel`) |
 | 2 — engines | `hpo/`, `tuner.py`; `trainer.py`, `trainer_*.py`. HPO and the trainer modules do not import each other; `tuner.py` is the façade over `hpo` |
-| 1 — ML building blocks | `models`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic` |
+| 1 — ML building blocks | `models`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic`, `experiment` |
 | 0 — shared utilities | `common/` (and the generated `_version`) |
 
 The package `__init__` is the public façade on top; it loads
@@ -90,6 +90,14 @@ trainer.
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
+│       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters
+│       │   ├── leaderboard.py              # Leaderboard: the algorithm ranking table built from an ExperimentResult
+│       │   ├── reporting                   # Reporters: pure consumers of ExperimentResult (no engine, no mlflow imports)
+│       │   │   ├── base.py                 # Reporter (generic ABC), CompositeReporter (several reporters in one call)
+│       │   │   ├── json_reporter.py        # JSONReporter: atomic full-snapshot JSON (model_dump, utf-8, overwrite)
+│       │   │   └── markdown_reporter.py    # MarkdownReporter: metadata, outcome, honest scores, leaderboard, run details
+│       │   ├── result.py                   # ExperimentResult / AlgorithmRun: the central serializable result model
+│       │   └── store.py                    # ExperimentStore: thread-safe run history, JSONL persist, damaged-line skip
 │       ├── training_engine                 # Layer 3: orchestration
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
 │       │   ├── component.py                # Main orchestrator: train_best_model, the phase loop; applies the step outcomes

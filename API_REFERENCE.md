@@ -1569,6 +1569,22 @@ Legacy facade function for training a single model. Accepts either a config dict
 
 ---
 
+## `Reporter`, `JSONReporter`, `MarkdownReporter`, `CompositeReporter`
+
+`from configurable_automl_engine.experiment import Reporter, JSONReporter, MarkdownReporter, CompositeReporter`.
+
+The reporter framework: pure consumers of the `ExperimentResult` model (see [Training results](#training-results)) — they never reach into the training engine and never import MLflow. A reporter's `report(result)` produces one artifact and returns it: a file path (`Path`) for a file reporter, a rendered text (`str`) for a text reporter.
+
+**`JSONReporter(path, *, indent=None)`** — writes the full experiment snapshot (config, per-run records, winner, honest scores) to a JSON file. The payload is produced by the model itself (`model_dump(mode="json")`), so numpy scalars, `Path`, enums and datetimes arrive already normalized to JSON types. Policies: the write is atomic (a temp file in the destination directory is renamed into place — a failure never leaves a partial file and never corrupts an existing report); missing parent directories are created; an existing file is overwritten (the last report wins); the file is UTF-8 with `ensure_ascii=False` (unicode labels stay readable) and gets the ordinary file-creation permissions (umask-based, not the private mode of the temp file). A value smuggled past the model validation raises `TypeError` naming the offending fields, with the destination untouched. The JSON parses back into a dict equivalent to `result.model_dump(mode="json")`, and `ExperimentResult.from_json()` restores an equal model.
+
+**`MarkdownReporter(*, include_config=True)`** — renders a human-readable Markdown document: the run metadata (run id, status, metric with its direction, validation, hold-out size), the outcome (winner, its user-semantic score, the best params), the honest score estimates (`holdout_score` / `bbc_score` / `oof_score` labeled with their semantics, next to the optimistic selection score), the leaderboard (the `build_leaderboard` ranking table), the per-run details (status, score, best params, trials, the failure/disqualification reason) and the failure message. The configuration snapshot is embedded as a collapsed `<details>` JSON block (`include_config=False` omits it). Table cells escape `|` and line breaks, so arbitrary names and parameters cannot break the table.
+
+**`CompositeReporter(reporters)`** — runs several reporters in one call (the single registration point of a run): the reporters run in registration order, the call returns the tuple of their artifacts (empty for no reporters). The first reporter failure propagates (fail fast); the artifacts of the already-run reporters stay produced.
+
+**Returns (JSONReporter):** `Path` — the written report file. **Returns (MarkdownReporter):** `str` — the Markdown document. **Returns (CompositeReporter):** `tuple` — the artifacts of the individual reporters.
+
+---
+
 ## `DataOversampler`
 
 `from configurable_automl_engine.oversampling import DataOversampler`. All parameters are keyword-only.

@@ -1,12 +1,14 @@
-"""Experiment result models, run history and leaderboard (see
-:mod:`.result`, :mod:`.store` and :mod:`.leaderboard`).
+"""Experiment result models, run history, leaderboard and reporters (see
+:mod:`.result`, :mod:`.store`, :mod:`.leaderboard` and :mod:`.reporting`).
 
 The public import paths are :mod:`configurable_automl_engine.experiment.result`
 and this package: ``ExperimentResult``, ``AlgorithmRun``, the statuses, the
-run history (``ExperimentStore``, the T4 component) and the algorithm
-ranking table (``Leaderboard``). The models are pure data: the module
-imports nothing from the engine layers, so reporters can consume results
-without importing the training engine.
+run history (``ExperimentStore``, the T4 component), the algorithm
+ranking table (``Leaderboard``) and the reporter framework
+(``Reporter``, ``JSONReporter``, ``MarkdownReporter``,
+``CompositeReporter``). The models are pure data: the module imports
+nothing from the engine layers, so reporters can consume results without
+importing the training engine.
 """
 
 from configurable_automl_engine.common.definitions import (
@@ -21,6 +23,13 @@ from configurable_automl_engine.experiment.leaderboard import (
     Leaderboard,
     LeaderboardEntry,
     build_leaderboard,
+)
+from configurable_automl_engine.experiment.reporting import (
+    CompositeReporter,
+    JSONReporter,
+    MarkdownReporter,
+    Reporter,
+    ReporterArtifact,
 )
 from configurable_automl_engine.experiment.result import (
     AlgorithmRun,
@@ -37,13 +46,18 @@ __all__ = [
     "EMPTY_LEADERBOARD_MESSAGE",
     "FAILED_SUMMARY_MESSAGE",
     "AlgorithmRun",
+    "CompositeReporter",
     "DuplicateRunError",
     "ExperimentResult",
     "ExperimentStore",
     "ExperimentStoreError",
+    "JSONReporter",
     "Leaderboard",
     "LeaderboardEntry",
+    "MarkdownReporter",
     "MetricDirection",
+    "Reporter",
+    "ReporterArtifact",
     "RunPhaseAction",
     "RunStatus",
     "RunStepStatus",
