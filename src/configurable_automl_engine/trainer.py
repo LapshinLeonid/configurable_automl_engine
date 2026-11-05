@@ -44,6 +44,9 @@ from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
+from configurable_automl_engine.common.datetime_features import (
+    datetime_expansion_columns,
+)
 from configurable_automl_engine.common.definitions import (
     SerializationFormat,
     ValidationStrategy,
@@ -76,7 +79,6 @@ from .trainer_artifact import (
     load_trainer_artifact,
 )
 from .trainer_data import (
-    _datetime_expansion_columns,
     assemble_pipeline_steps,
     build_trainer_preprocessor,
     load_training_data,
@@ -718,9 +720,7 @@ class ModelTrainer:
                 encoding=settings.encoding,
                 override=settings.preprocessing_override,
                 random_state=settings.random_state,
-                winsorizer_exclude=_datetime_expansion_columns(
-                    self.datetime_expansion_
-                ),
+                winsorizer_exclude=datetime_expansion_columns(self.datetime_expansion_),
             )
             self.preprocessing_preset = setup.preset
             make_steps = self._steps_factory(setup.preprocessor, base_model)

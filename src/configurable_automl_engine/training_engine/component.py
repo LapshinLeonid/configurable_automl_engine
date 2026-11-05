@@ -34,6 +34,9 @@ from typing import Any
 
 import pandas as pd
 
+from configurable_automl_engine.common.datetime_features import (
+    datetime_expansion_columns,
+)
 from configurable_automl_engine.common.metrics import register_custom_metrics
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.oversampling import experimental as _oversampling
@@ -51,7 +54,6 @@ from .hpo_phases import (
     _apply_target_domain_guard,
     _bbc_enabled,
     _consume_worker_results,
-    _datetime_expansion_columns,
     _hpo_phase_worker,
     _merge_complexity_guard_records,
 )
@@ -449,7 +451,7 @@ def _build_phase_spec(
         target_encoding_smoothing=cfg.general.target_encoding_smoothing,
         target_encoding_fallback=cfg.general.target_encoding_fallback,
         feature_selection_cfg=cfg.general.feature_selection,
-        winsorizer_exclude=_datetime_expansion_columns(prepared.datetime_expansion),
+        winsorizer_exclude=datetime_expansion_columns(prepared.datetime_expansion),
         preprocessing_default=cfg.general.preprocessing,
         complexity_guard_cfg=cfg.general.complexity_guard,
         # Data splits and preprocessor: the engine seed (general.

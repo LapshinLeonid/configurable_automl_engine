@@ -47,8 +47,12 @@ class Winsorizer(TransformerMixin, BaseEstimator):
       columns.
 
     Excluded columns (``exclude``): the named columns are never clipped —
-    they get the degenerate ``(-inf, +inf)`` bounds regardless of their
-    values and are named in the same WARNING as the degenerate columns.
+    they get the ``(-inf, +inf)`` bounds regardless of their values. An
+    exclusion is expected configuration, not a data problem, so it is logged
+    at DEBUG level only and never triggers the WARNING above (the engine
+    already names the excluded columns once in an INFO line when it builds
+    the preprocessor; a WARNING per ``fit`` would repeat on every CV fold
+    and HPO trial).
     The engine passes the datetime-derived component columns there: the
     year/month/day features are bounded by construction and winsorizing
     them would only lose information (e.g. by clipping the first and the
@@ -297,6 +301,9 @@ class Winsorizer(TransformerMixin, BaseEstimator):
 
         lower = np.empty(self.n_features_in_, dtype=float)
         upper = np.empty(self.n_features_in_, dtype=float)
+        # Degenerate (all-NaN or collapsed) columns: tracked separately from
+        # the excluded ones, because only they deserve a WARNING.
+        degenerate = np.zeros(self.n_features_in_, dtype=bool)
         for col in range(self.n_features_in_):
             if exclude_mask[col]:
                 # An excluded column (datetime-derived components etc.) is
@@ -324,31 +331,40 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             if np.isnan(q_lo) or np.isnan(q_hi):
                 # All-NaN column: clipping to (-inf, +inf) changes nothing.
                 q_lo, q_hi = -np.inf, np.inf
+                degenerate[col] = True
             elif q_lo == q_hi:
                 # Collapsed column: the degenerate interval would rewrite its
                 # constant value (and everything else) on clip; widen it
                 # instead so the column passes through unchanged.
                 q_lo, q_hi = -np.inf, np.inf
+                degenerate[col] = True
             lower[col] = q_lo
             upper[col] = q_hi
 
         self.lower_bounds_ = lower
         self.upper_bounds_ = upper
 
-        collapsed_names = self._collapsed_column_names()
+        prefix = (
+            f"Winsorizer (algorithm {self.algorithm_name!r}): "
+            if self.algorithm_name
+            else "Winsorizer: "
+        )
+        collapsed_names = self._column_labels(degenerate)
         if collapsed_names:
-            prefix = (
-                f"Winsorizer (algorithm {self.algorithm_name!r}): "
-                if self.algorithm_name
-                else "Winsorizer: "
-            )
             logger.warning(
-                "%s%d column(s) are excluded from clipping "
-                "(explicitly excluded, constant or all-NaN in the training "
-                "data): %s",
+                "%s%d column(s) are not clipped (constant or all-NaN in the "
+                "training data): %s",
                 prefix,
                 len(collapsed_names),
                 ", ".join(collapsed_names),
+            )
+        excluded_names = self._column_labels(exclude_mask)
+        if excluded_names:
+            logger.debug(
+                "%s%d column(s) are excluded from clipping by configuration: %s",
+                prefix,
+                len(excluded_names),
+                ", ".join(excluded_names),
             )
         return self
 
@@ -406,15 +422,20 @@ class Winsorizer(TransformerMixin, BaseEstimator):
                 )
         return mask
 
-    def _collapsed_column_names(self) -> list[str]:
-        """Return the names (or positional labels) of the degenerate columns."""
+    def _column_labels(self, mask: np.ndarray) -> list[str]:
+        """Return the names (or positional labels) of the masked columns.
+
+        Args:
+            mask: A boolean ndarray of length ``n_features_in_``.
+
+        Returns:
+            The column names (DataFrame input) or ``column_<j>`` labels
+            (nameless input) of the columns where ``mask`` is ``True``.
+        """
         names = self._input_names()
-        collapsed = np.flatnonzero(
-            np.isinf(self.lower_bounds_) & np.isinf(self.upper_bounds_)
-        )
         return [
             str(names[col]) if names is not None else f"column_{col}"
-            for col in collapsed
+            for col in np.flatnonzero(mask)
         ]
 
     def transform(self, X: Any) -> np.ndarray:
