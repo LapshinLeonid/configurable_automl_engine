@@ -110,8 +110,7 @@ def visual_width(text: str) -> int:
     """
     composed = _normalize(text)
     return sum(
-        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-        for ch in composed
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in composed
     )
 
 
@@ -174,47 +173,45 @@ def _format_params(params: dict[str, Any], max_width: int) -> str:
     return _truncate("{" + rendered + "}", max_width)
 
 
+def _register_algorithm_names(container: Any, order: dict[str, int]) -> None:
+    """Register the algorithm names of one config container into ``order``.
+
+    The ``algorithms`` section of a phase (or of the top-level config) may
+    be a mapping (name → params) or a list of names / ``{name: …}`` dicts
+    (defensive: the schema allows the mapping form only, but a hand-built
+    snapshot must not crash the ranking).
+    """
+    if isinstance(container, dict):
+        for name in container:
+            order.setdefault(str(name), len(order))
+    elif isinstance(container, list):
+        for entry in container:
+            if isinstance(entry, dict) and "name" in entry:
+                order.setdefault(str(entry["name"]), len(order))
+            elif isinstance(entry, str):
+                order.setdefault(entry, len(order))
+
+
 def _configuration_order(result: ExperimentResult) -> dict[str, int]:
     """Recover the configuration order of the algorithms from the result.
 
     The ``config`` snapshot holds the ``general.phases`` section; the
-    ``algorithms`` mapping inside the first phase (or of the top-level
-    algorithm config) lists the algorithms in their configuration order.
-    Any algorithm missing from the recovered order is appended after the
-    known ones (sorted alphabetically for determinism), so a hand-built
-    result never crashes the ranking.
+    ``algorithms`` mapping inside each phase lists the algorithms in their
+    configuration order. When the phases section does not carry an
+    ``algorithms`` mapping (a hand-built snapshot), the top-level
+    ``config['algorithms']`` is used instead. Any algorithm missing from
+    the recovered order is appended after the known ones by the ranking
+    fallback, so a hand-built result never crashes the ranking.
     """
     order: dict[str, int] = {}
     config = result.config
     phases = config.get("general", {}).get("phases")
-    if isinstance(phases, list) and phases:
+    if isinstance(phases, list):
         for phase in phases:
-            if not isinstance(phase, dict):
-                continue
-            algorithms = phase.get("algorithms")
-            if isinstance(algorithms, dict):
-                for idx, name in enumerate(algorithms):
-                    order.setdefault(str(name), len(order))
-            elif isinstance(algorithms, list):
-                for entry in algorithms:
-                    if isinstance(entry, dict) and "name" in entry:
-                        order.setdefault(str(entry["name"]), len(order))
-                    elif isinstance(entry, str):
-                        order.setdefault(entry, len(order))
+            if isinstance(phase, dict) and "algorithms" in phase:
+                _register_algorithm_names(phase["algorithms"], order)
     if not order:
-        # The engine configuration keeps the algorithms at
-        # ``config['algorithms']`` when the phases section is not a list
-        # of dicts (defensive: a hand-built snapshot).
-        algorithms = config.get("algorithms")
-        if isinstance(algorithms, dict):
-            for idx, name in enumerate(algorithms):
-                order.setdefault(str(name), len(order))
-        elif isinstance(algorithms, list):
-            for entry in algorithms:
-                if isinstance(entry, str):
-                    order.setdefault(entry, len(order))
-                elif isinstance(entry, dict) and "name" in entry:
-                    order.setdefault(str(entry["name"]), len(order))
+        _register_algorithm_names(config.get("algorithms"), order)
     return order
 
 
@@ -333,7 +330,6 @@ class Leaderboard:
         """
         if not self.entries:
             return EMPTY_LEADERBOARD_MESSAGE
-        header = " | ".join(_COLUMNS)
         rows: list[list[str]] = []
         for entry in self.entries:
             rows.append(
