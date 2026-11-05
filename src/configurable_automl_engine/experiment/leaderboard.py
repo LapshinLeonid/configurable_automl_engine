@@ -20,10 +20,11 @@ Documented contract:
   finalists-pool ordering): on equal scores the earlier-configured
   algorithm takes the better rank. The configuration order is read from
   the ``config`` snapshot (``config['general']['phases']`` → the
-  ``algorithms`` section order). When the order cannot be recovered from
-  the snapshot (a hand-built result), the record order of the result is
-  used — which is itself deterministic (phase name, then configuration
-  order);
+  ``algorithms`` section order, defensively: a malformed hand-built
+  snapshot never crashes the ranking). When the order cannot be recovered
+  from the snapshot, the fallback key sorts the tied algorithms by name
+  (the names are unique keys of the algorithms configuration, so the
+  fallback order is itself deterministic);
 * the ``Phase`` column names the phase in which the algorithm showed its
   best result: the best record of the algorithm is selected with the same
   ranking direction and the same tie-break as the table itself;
@@ -48,6 +49,7 @@ Documented contract:
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -155,24 +157,6 @@ def _format_score(score: float) -> str:
     return f"{score:.3f}"
 
 
-def _format_duration(seconds: float | None) -> str:
-    """Render the training-time cell of the run details."""
-    if seconds is None:
-        return "n/a"
-    if seconds >= 60.0:
-        minutes, rest = divmod(seconds, 60.0)
-        return f"{int(minutes)}m {rest:.1f}s"
-    return f"{seconds:.2f}s"
-
-
-def _format_params(params: dict[str, Any], max_width: int) -> str:
-    """Render the best-parameters cell of the run details."""
-    if not params:
-        return "{}"
-    rendered = ", ".join(f"{key}={value!r}" for key, value in params.items())
-    return _truncate("{" + rendered + "}", max_width)
-
-
 def _register_algorithm_names(container: Any, order: dict[str, int]) -> None:
     """Register the algorithm names of one config container into ``order``.
 
@@ -205,7 +189,11 @@ def _configuration_order(result: ExperimentResult) -> dict[str, int]:
     """
     order: dict[str, int] = {}
     config = result.config
-    phases = config.get("general", {}).get("phases")
+    # Defensive: a hand-built snapshot may hold a non-mapping 'general'
+    # section (the engine's model_dump always produces a mapping); the
+    # declared contract is that such a snapshot never crashes the ranking.
+    general = config.get("general")
+    phases = general.get("phases") if isinstance(general, dict) else None
     if isinstance(phases, list):
         for phase in phases:
             if isinstance(phase, dict) and "algorithms" in phase:
@@ -226,15 +214,14 @@ def _sort_key(
 
     The score is negated for ``maximize`` metrics so that an ascending
     sort puts the best score first in both directions; the configuration
-    index (or a large sentinel + the name for unlisted algorithms) breaks
-    the score ties deterministically.
+    index breaks the score ties deterministically (algorithms missing
+    from the recovered configuration order share the fallback index, and
+    the name sorts them alphabetically).
     """
     directional_score = (
         -entry_score if direction is MetricDirection.maximize else entry_score
     )
-    order_index = config_order.get(
-        algorithm, len(config_order) + visual_width(algorithm)
-    )
+    order_index = config_order.get(algorithm, len(config_order))
     return (directional_score, order_index, algorithm)
 
 
@@ -308,7 +295,7 @@ class Leaderboard:
     def __len__(self) -> int:
         return len(self.entries)
 
-    def __iter__(self):  # type: ignore[no-untyped-def]
+    def __iter__(self) -> Iterator[LeaderboardEntry]:
         return iter(self.entries)
 
     @property

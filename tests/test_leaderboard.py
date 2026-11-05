@@ -394,8 +394,8 @@ def test_b1_tie_broken_by_configuration_order() -> None:
     assert [e.algorithm for e in lb.entries] == ["gamma", "beta", "alpha"]
 
 
-def test_b1_tie_without_config_snapshot_uses_record_order() -> None:
-    """B1: without a config snapshot the record order breaks the ties."""
+def test_b1_tie_without_config_snapshot_uses_name_order() -> None:
+    """B1: without a config snapshot the ties fall back to name order."""
     result = _make_result(
         [
             _run_kwargs(algorithm="second", score=0.5, score_raw=-0.5),
@@ -404,8 +404,28 @@ def test_b1_tie_without_config_snapshot_uses_record_order() -> None:
     )
     lb = build_leaderboard(result)
     # No configuration order is recoverable from an empty config: the
-    # deterministic fallback is the algorithm-name order.
+    # deterministic fallback is the alphabetical algorithm-name order.
     assert [e.algorithm for e in lb.entries] == ["first", "second"]
+
+
+def test_b1_malformed_config_snapshot_does_not_crash() -> None:
+    """B1: a malformed hand-built config snapshot never crashes.
+
+    The defensive contract of ``_configuration_order``: a non-mapping
+    ``config['general']`` section (and, symmetrically, any other
+    malformed part of the snapshot) is skipped, the ranking falls back to
+    the name order instead of raising.
+    """
+    result = _make_result(
+        [
+            _run_kwargs(algorithm="second", score=0.5, score_raw=-0.5),
+            _run_kwargs(algorithm="first", score=0.5, score_raw=-0.5),
+        ],
+        config={"general": "garbage"},
+    )
+    lb = build_leaderboard(result)
+    assert [e.algorithm for e in lb.entries] == ["first", "second"]
+    assert len(lb) == 2
 
 
 def test_b1_tie_independent_of_sort_input_order() -> None:
@@ -552,7 +572,10 @@ def test_b5_zero_own_trials() -> None:
     assert entry.trials == 0
     assert entry.n_trials_failed == 0
     assert entry.training_time_seconds == 0.0
-    assert " 0 " in lb.to_table().replace(" | ", " ")
+    # The rendered Trials cell of the rank-1 row is exactly "0".
+    trials_row = [line for line in lb.to_table().splitlines() if line.startswith("1 ")]
+    assert len(trials_row) == 1
+    assert trials_row[0].split(" | ")[3].strip() == "0"
 
 
 def test_b5_unknown_training_time() -> None:
