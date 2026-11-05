@@ -298,7 +298,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | `inf_policy` | `"as_missing"` | Infinite values in numeric features: `"as_missing"` turns them into missing values (imputed later) with a WARNING; `"error"` rejects the data. Applied at training and prediction time. |
 | `datetime_policy` | `"expand"` | Date/time columns: `"expand"` replaces each column with `year`, `month`, `day`, `dayofweek` (and `hour` when it is not always zero); `"drop"` removes them; `"error"` rejects the data. A WARNING lists the affected columns. |
 | `drop_id_like_columns` | `false` | ID-like columns (text columns where ≥ 95 % of values are unique, or unique monotonic integers) are only reported with a WARNING by default; `true` removes them. This is a heuristic: a monotonic counter such as a timestamp may be a useful feature. |
-| `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm that has no `preprocessing` block of its own. Same fields as the per-algorithm block (`imputation_strategy`, `scaling`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
+| `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm that has no `preprocessing` block of its own. Same fields as the per-algorithm block (`imputation_strategy`, `scaling`, `outliers`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
 
 **Advanced blocks** (each has its own section below): `pruning`
 ([early stopping](#early-stopping-pruning)), `feature_selection`
@@ -1028,9 +1028,14 @@ algorithms:
       imputation_strategy: median   # optional: "mean" | "median"
       scaling: standard             # optional: string shorthand "standard" | "robust" | "none"
                                     # or an object form (see "Composition of a preset")
+      outliers:                      # optional: outlier handling (Winsorizer)
+        method: quantile             # "none" | "quantile" | "iqr"
+        lower_quantile: 0.02         # only for "quantile": 0 <= lower < upper <= 1
+        upper_quantile: 0.98
+        # iqr_multiplier: 1.5        # only for "iqr": > 0
 ```
 
-The `scaling` field additionally accepts an **object form** with the scaler's parameters:
+The `outliers` field enables the winsorization (clipping) of numeric features — see [Composition of a preset](#composition-of-a-preset). The `scaling` field additionally accepts an **object form** with the scaler's parameters:
 
 ```yaml
 algorithms:
@@ -1043,7 +1048,7 @@ algorithms:
         with_centering: true       # optional, default true
 ```
 
-Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message: a parameter that belongs to another scaling type (e.g. `quantile_range` with `type: standard`), an invalid `quantile_range` (`low >= high` or a value outside `[0, 100]`) and unknown types are all rejected.
+The string shorthand (`outliers: quantile`) is also accepted. Invalid values in the `preprocessing` block are rejected at configuration validation with a clear message: a parameter that belongs to another scaling type (e.g. `quantile_range` with `type: standard`), an invalid `quantile_range` (`low >= high` or a value outside `[0, 100]`), cross-method outlier parameters (e.g. `iqr_multiplier` together with `method: quantile`), out-of-range outlier values and unknown types are all rejected.
 
 ## Adaptive Feature Preprocessing (preprocessing presets)
 
@@ -1078,6 +1083,13 @@ scaling:
 ```
 
 The resolved preset is always stored in the object form (`StandardScaling` / `RobustScaling` / `NoScaling`); the resolved-preset log line shows the parameters, e.g. `scaling=robust(q=(10.0, 90.0))`.
+* `outliers` — optional winsorization (clipping) of numeric features, applied identically in HPO and in the final model. The clipping bounds are learned from the training data (per CV fold, so there is no leakage). Forms:
+  * `none` (default) — no outlier handling; the step is absent from the pipeline (not added as a no-op).
+  * `quantile` — clips every value outside the training quantiles `[lower_quantile, upper_quantile]` (both in `[0, 1]`, `lower < upper`; defaults `0.01`/`0.99`). Example: `{method: quantile, lower_quantile: 0.02, upper_quantile: 0.98}`.
+  * `iqr` — clips values outside `Q1 − k·IQR … Q3 + k·IQR` (`iqr_multiplier: k > 0`, default `1.5`).
+  * A degenerate column (constant or all-NaN on train) is never clipped; a WARNING naming the columns (prefixed with the algorithm name) is logged once per fit.
+
+  **Pipeline order:** the numeric pipeline is `[Winsorizer] -> SimpleImputer(add_indicator=...) -> [scaler]` — the winsorization step comes strictly **before** the imputer. Otherwise the mean/median imputation would see the extreme values (biasing the imputed value), and the 0/1 missing-value indicator columns would get clipped. With `method: none` the step is absent from the pipeline. The step is one-to-one, so it may be used by all algorithm classes including `univariate`/`isotonic_regression` (the `feature_index` semantics are preserved).
 
 ### Selection and override rules
 
@@ -1250,7 +1262,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `space_overrides` | `dict[str, Callable \| dict]` or `None` | `None` | Search space overrides keyed by the algorithm name. `None` (or no entry for `algo_name`) — the algorithm's default space (`DEFAULT_SPACES`), the same one a config run without `hyperparameters` searches. A value is one of three forms: a callable `space_fn(trial) -> dict` (used as is); a dict of `SearchSpaceEntry` objects; or a dict of shorthand lists as in the config (`[low, high]`, `[low, high, "int"\|"float"\|"float_log"]`, `[options, "categorical"]`; an untyped range is re-typed against the parameter type like in the config). A dict is merged over `DEFAULT_SPACES` (a partial override searches the listed ranges plus every other default range); with `limit_hyperparameters=True` only the listed parameters are searched. Dict spaces go through the same clipping and complexity guard as a config run. An algorithm without a default space needs an override. |
 | `initial_params` | `dict[str, Any]` or `None` | `None` | Hyperparameters from the previous HPO phase, enqueued as the first trial (`enqueue_trial`) — the "monotonicity anchor" between phases. |
 | `previous_trials` | `list[optuna.trial.FrozenTrial]` or `None` | `None` | Trials of the previous HPO phase to be transferred into the new study via `study.add_trials` (the TPE history warm-start). Transferred BEFORE `enqueue_trial`/`optimize`; they feed the TPE sampler but never count as the current phase's own trials. Empty list — no-op. Trials whose distributions are incompatible with the current search space raise `HPOHistoryError` (fail fast). |
-| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`, `{"scaling": {"type": "robust", "quantile_range": [10, 90]}}`) or full overrides are supported; takes priority over automatic class-based selection. |
+| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`, `{"scaling": {"type": "robust", "quantile_range": [10, 90]}}`, `{"outliers": "quantile"}`) or full overrides are supported; takes priority over automatic class-based selection. Supported fields: `imputation_strategy`, `scaling`, `outliers` (a string shorthand `"none"\|"quantile"\|"iqr"` or an object `{method: quantile, lower_quantile: ..., upper_quantile: ...}` / `{method: iqr, iqr_multiplier: ...}`). |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 | `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the defaults of `general.complexity_guard` (mode `apply`); `{"mode": "off"}` disables the guard. When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
@@ -1359,7 +1371,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 | `validation_strategy` | `str` or `ValidationStrategy` | `"auto"` | Validation strategy for the final model quality estimate, same default as `general.validation_strategy`: `"auto"`, `"train_test_split"` (one hold-out split), `"k_fold"` (CV fold mean) or `"loo"`. The engine path always passes the already-resolved strategy. |
 | `n_folds` | `int` | `5` | Number of folds for `"k_fold"` (`>= 2`). |
 | `test_size` | `float` or `int` | `0.2` | Hold-out size: a fraction in `(0, 1)` or an integer number of rows (like sklearn `train_test_split`). |
-| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial or full overrides are supported; takes priority over the automatic class-based selection. |
+| `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial or full overrides are supported; takes priority over the automatic class-based selection. Supported fields: `imputation_strategy`, `scaling`, `outliers` (a string shorthand or an object, same forms as in the config `preprocessing` block). |
 | `high_cardinality_threshold` | `int` or `None` | `50` | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding` (default `"frequency"`); the rest use `encoding_strategy`. The mode is on by default, as in the engine config; set both parameters to `None` to disable it. |
 | `high_cardinality_encoding` | `str` or `None` | `"frequency"` | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
 | `hashing_n_components` | `int` | `16` | Number of binary columns per categorical column when `"hashing"` encoding is used (`>= 1`). Controls output dimensionality regardless of column cardinality. |
@@ -1374,7 +1386,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 
 **Key attributes:**
 
-* `preprocessing_preset` — the resolved `PreprocessingPreset` (algorithm class, imputation strategy, scaling configuration) applied during `fit()`. Useful for observability and serialization.
+* `preprocessing_preset` — the resolved `PreprocessingPreset` (algorithm class, imputation strategy, scaling configuration, outlier handling) applied during `fit()`. Useful for observability and serialization.
 
 **Key methods:**
 

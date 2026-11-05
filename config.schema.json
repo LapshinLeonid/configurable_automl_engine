@@ -963,6 +963,43 @@
       "title": "IntSpace",
       "type": "object"
     },
+    "IqrOutliers": {
+      "additionalProperties": false,
+      "description": "IQR-based clipping of numeric features.\n\nThe bounds are learned from the training data (per CV fold, no leakage)\nby :class:`~configurable_automl_engine.preprocessing.Winsorizer` with\n``method=\"iqr\"``: every value outside\n``[Q1 - iqr_multiplier * IQR, Q3 + iqr_multiplier * IQR]`` of the\ntraining column is clipped to the corresponding bound.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"iqr\"``).\n    iqr_multiplier: The IQR multiplier: ``> 0``.",
+      "properties": {
+        "method": {
+          "const": "iqr",
+          "default": "iqr",
+          "description": "IQR clipping: values outside Q1 - k * IQR .. Q3 + k * IQR are clipped to the bounds (Winsorizer).",
+          "title": "Method",
+          "type": "string"
+        },
+        "iqr_multiplier": {
+          "default": 1.5,
+          "description": "The IQR multiplier of the clipping bounds (must be > 0).",
+          "exclusiveMinimum": 0.0,
+          "title": "Iqr Multiplier",
+          "type": "number"
+        }
+      },
+      "title": "IqrOutliers",
+      "type": "object"
+    },
+    "NoOutliers": {
+      "additionalProperties": false,
+      "description": "No outlier handling: numeric features are passed through as-is.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"none\"``).",
+      "properties": {
+        "method": {
+          "const": "none",
+          "default": "none",
+          "description": "No outlier handling is applied.",
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "title": "NoOutliers",
+      "type": "object"
+    },
     "NoScaling": {
       "additionalProperties": false,
       "description": "No scaling: numeric features are passed to the model unscaled.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"none\"``).",
@@ -1096,6 +1133,42 @@
           "default": null,
           "description": "Scaling override: a string shorthand ('standard', 'robust' or 'none'), an object ({'type': 'robust', 'quantile_range': [low, high], ...}) or None (automatic selection). The shorthand is normalized to its object form.",
           "title": "Scaling"
+        },
+        "outliers": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/NoOutliers"
+                    },
+                    {
+                      "$ref": "#/$defs/QuantileOutliers"
+                    },
+                    {
+                      "$ref": "#/$defs/IqrOutliers"
+                    }
+                  ]
+                },
+                {
+                  "enum": [
+                    "none",
+                    "quantile",
+                    "iqr"
+                  ],
+                  "type": "string"
+                }
+              ],
+              "description": "Outlier handling for numeric features: a string shorthand ('none' | 'quantile' | 'iqr') or an object ({'method': 'none'} | {'method': 'quantile', 'lower_quantile': float, 'upper_quantile': float} | {'method': 'iqr', 'iqr_multiplier': float})."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Outlier handling override: a string shorthand ('none', 'quantile' or 'iqr'), an object ({'method': 'quantile', ...} | {'method': 'iqr', ...}) or None (automatic selection). The shorthand is normalized to its object form.",
+          "title": "Outliers"
         }
       },
       "title": "PreprocessingOverride",
@@ -1149,6 +1222,33 @@
       ],
       "title": "PruningStrategy",
       "type": "string"
+    },
+    "QuantileOutliers": {
+      "additionalProperties": false,
+      "description": "Quantile (winsorized) clipping of numeric features.\n\nThe bounds are learned from the training data (per CV fold, no leakage)\nby :class:`~configurable_automl_engine.preprocessing.Winsorizer` with\n``method=\"quantile\"``: every value outside\n``[lower_quantile, upper_quantile]`` of the training column is clipped\nto the corresponding bound.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"quantile\"``).\n    lower_quantile: The lower clipping quantile: ``0 <= lower < upper <= 1``.\n    upper_quantile: The upper clipping quantile: ``0 <= lower < upper <= 1``.",
+      "properties": {
+        "method": {
+          "const": "quantile",
+          "default": "quantile",
+          "description": "Quantile clipping: values outside the training quantiles are clipped to the bounds (Winsorizer).",
+          "title": "Method",
+          "type": "string"
+        },
+        "lower_quantile": {
+          "default": 0.01,
+          "description": "The lower clipping quantile: 0 <= lower < upper <= 1.",
+          "title": "Lower Quantile",
+          "type": "number"
+        },
+        "upper_quantile": {
+          "default": 0.99,
+          "description": "The upper clipping quantile: 0 <= lower < upper <= 1.",
+          "title": "Upper Quantile",
+          "type": "number"
+        }
+      },
+      "title": "QuantileOutliers",
+      "type": "object"
     },
     "RobustScaling": {
       "additionalProperties": false,

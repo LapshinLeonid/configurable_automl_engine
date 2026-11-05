@@ -10,6 +10,7 @@ column selector; no other preprocessing module may import it.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from pydantic import ValidationError
 from sklearn.compose import ColumnTransformer
@@ -28,13 +29,16 @@ from configurable_automl_engine.preprocessing.encoders import (
     SplitCategoricalEncoder,
     _to_string_array,
 )
+from configurable_automl_engine.preprocessing.outliers import Winsorizer
 from configurable_automl_engine.preprocessing_presets import (
     ImputationStrategy,
     NoScaling,
     ObjectScalingSpec,
+    OutlierSpec,
     RobustScaling,
     ScalingSpec,
     StandardScaling,
+    coerce_outliers,
     coerce_scaling,
 )
 
@@ -61,6 +65,8 @@ def build_preprocessor(
     random_state: int | None = 42,
     force_dense_output: bool = False,
     add_indicator: bool = True,
+    outliers: OutlierSpec | None = None,
+    outlier_algorithm: str | None = None,
 ) -> ColumnTransformer:
     """Build a ColumnTransformer for separate processing of data types.
 
@@ -77,12 +83,16 @@ def build_preprocessor(
     encoding in ``fit_transform`` is cross-fitted — each training row is
     encoded with means that exclude the row itself.
 
-    Numerical features are imputed (``imputation_strategy``) and scaled
-    (``scaling``) per the adaptive preprocessing preset; binary missing-value
-    indicators are added by default (``add_indicator=True``) so the model can
-    tell apart a measured value from an imputed one. Indicators are created
-    only for features that had missing values on train, so the output width
-    depends on the data.
+    Numerical features are winsorized (``outliers``), imputed
+    (``imputation_strategy``) and scaled (``scaling``) per the adaptive
+    preprocessing preset; binary missing-value indicators are added by
+    default (``add_indicator=True``) so the model can tell apart a measured
+    value from an imputed one. The winsorization step comes strictly BEFORE
+    the imputer: otherwise the mean/median imputation would see the extreme
+    values and the 0/1 missing-value indicator columns would get clipped.
+    With the default ``outliers=None`` (``method='none'``) the step is
+    absent from the pipeline. Indicators are created only for features that
+    had missing values on train, so the output width depends on the data.
 
     Columns are selected by name (:class:`ColumnNameSelector`): the column
     order in ``fit``/``transform`` does not matter; missing/duplicated
@@ -129,6 +139,19 @@ def build_preprocessor(
             one-dimensional algorithms (``isotonic_regression``), whose input
             contract allows exactly one feature (see
             :func:`~configurable_automl_engine.preprocessing_presets.requires_missing_indicator`).
+        outliers: The outlier-handling configuration: ``None`` (the default,
+            no outlier handling — the winsorization step is absent from the
+            pipeline), a string shorthand (``'none'`` / ``'quantile'`` /
+            ``'iqr'``) or an
+            :class:`~configurable_automl_engine.preprocessing_presets.OutlierSpec`
+            object (``QuantileOutliers`` with ``lower_quantile``/
+            ``upper_quantile``, or ``IqrOutliers`` with ``iqr_multiplier``).
+            The step is inserted before the imputer: the clipping bounds are
+            learned from the raw training column, and the imputed values and
+            the 0/1 indicator columns stay outside the clip.
+        outlier_algorithm: The algorithm name used only to prefix the
+            WARNING about collapsed (constant/all-NaN) columns with the
+            algorithm context. ``None`` — the message is not prefixed.
 
     Returns:
         A ``ColumnTransformer`` that converts the input DataFrame into a numerical
@@ -138,10 +161,11 @@ def build_preprocessor(
     Raises:
         ValueError: If a column name from ``categorical_features``/
             ``numerical_features`` is missing in ``feature_names``, or an
-            invalid value of ``encoding``, ``imputation_strategy`` or
-            ``scaling`` is passed (an invalid scaling spec is rejected by
-            the :class:`~configurable_automl_engine.preprocessing_presets.ScalingSpec`
-            model), the high-cardinality parameters are
+            invalid value of ``encoding``, ``imputation_strategy``,
+            ``scaling`` or ``outliers`` is passed (an invalid scaling/outlier
+            spec is rejected by the corresponding
+            :class:`~configurable_automl_engine.preprocessing_presets.ScalingSpec`
+            / ``OutlierSpec`` model), the high-cardinality parameters are
             inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
             are invalid.
     """
@@ -188,6 +212,10 @@ def build_preprocessor(
         scaling_spec = coerce_scaling(scaling)
     except ValidationError as err:
         raise ValueError(f"Unknown scaling spec: {scaling!r}. {err}") from err
+    # Validation of the outlier spec happens through the model (method
+    # discriminator, quantile bounds, extra='forbid'); the string shorthand
+    # is normalized to its object form here. None/'none' — no step at all.
+    winsorizer = _build_winsorizer(outliers, outlier_algorithm)
 
     # Validate that all requested column names are present in the training set
     # (feature_names): this is an explicit error, because the name-based
@@ -217,18 +245,25 @@ def build_preprocessor(
             sparse_threshold=0.0 if force_dense_output else 0.3,
         )
 
-    # Numerical feature transformation pipeline: imputation + (optionally) a scaler.
-    # add_indicator=True adds a binary missing-value flag for each numerical
-    # feature that had missing values in the training set: the model gets the
-    # ability to tell apart "actually measured value" from "value restored by
-    # imputation". With a NoScaling spec the scaling step is absent — the data
-    # is passed to the model without it (for trees and ensembles).
-    num_steps: list[tuple[str, object]] = [
+    # Numerical feature transformation pipeline: [winsorizer] -> imputation
+    # -> (optionally) a scaler. add_indicator=True adds a binary
+    # missing-value flag for each numerical feature that had missing values
+    # in the training set: the model gets the ability to tell apart "actually
+    # measured value" from "value restored by imputation". With a NoScaling
+    # spec the scaling step is absent — the data is passed to the model
+    # without it (for trees and ensembles). The winsorizer (when enabled via
+    # ``outliers``) comes strictly BEFORE the imputer: the clipping bounds
+    # must be learned from the raw training column, otherwise the mean
+    # imputation sees the outliers and the 0/1 indicator columns get clipped.
+    num_steps: list[tuple[str, Any]] = []
+    if winsorizer is not None:
+        num_steps.append(("winsorizer", winsorizer))
+    num_steps.append(
         (
             "imputer",
             SimpleImputer(strategy=imputation_strategy, add_indicator=add_indicator),
         )
-    ]
+    )
     scaler = _build_scaler(scaling_spec)
     if scaler is not None:
         num_steps.append(("scaler", scaler))
@@ -311,3 +346,41 @@ def _build_scaler(
         )
     # StandardScaling — the only remaining member of the ScalingSpec union.
     return StandardScaler()
+
+
+def _build_winsorizer(
+    outliers: OutlierSpec | None, outlier_algorithm: str | None
+) -> Winsorizer | None:
+    """Build the winsorizer from an outlier spec, or ``None`` when disabled.
+
+    Args:
+        outliers: The outlier-handling configuration: ``None``/``'none'`` —
+            no step; otherwise the clipping configuration. The spec is
+            validated through the model (method discriminator, quantile
+            bounds, ``extra='forbid'``); the string shorthand is normalized
+            to its object form.
+        outlier_algorithm: The algorithm name for the collapsed-columns
+            WARNING prefix.
+
+    Returns:
+        A configured ``Winsorizer`` or ``None`` when outlier handling is off.
+
+    Raises:
+        ValueError: If the outlier spec is invalid (delegated to Pydantic
+            validation, a ``ValidationError`` subclass).
+    """
+    if outliers is None:
+        return None
+    try:
+        outliers_spec = coerce_outliers(outliers)
+    except ValidationError as err:
+        raise ValueError(f"Unknown outliers spec: {outliers!r}. {err}") from err
+    if outliers_spec.method == "none":
+        return None
+    return Winsorizer(
+        method=outliers_spec.method,
+        lower_quantile=getattr(outliers_spec, "lower_quantile", 0.01),
+        upper_quantile=getattr(outliers_spec, "upper_quantile", 0.99),
+        iqr_multiplier=getattr(outliers_spec, "iqr_multiplier", 1.5),
+        algorithm_name=outlier_algorithm,
+    )

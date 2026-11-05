@@ -61,6 +61,10 @@ class Winsorizer(TransformerMixin, BaseEstimator):
         lower_quantile: Lower quantile of the ``"quantile"`` method.
         upper_quantile: Upper quantile of the ``"quantile"`` method.
         iqr_multiplier: Multiplier of the IQR for the ``"iqr"`` method.
+        algorithm_name: Optional algorithm context used only to prefix the
+            WARNING about collapsed columns (not an sklearn estimator
+            parameter in spirit: it never affects the fitted result, and
+            ``clone`` copies it like any other constructor argument).
         lower_bounds_: Per-column lower bounds learned in ``fit``.
         upper_bounds_: Per-column upper bounds learned in ``fit``.
         n_features_in_: Number of features seen in ``fit``.
@@ -73,6 +77,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):
         lower_quantile: float = 0.01,
         upper_quantile: float = 0.99,
         iqr_multiplier: float = 1.5,
+        algorithm_name: str | None = None,
     ) -> None:
         """Initialize the transformer; no validation happens here (sklearn convention).
 
@@ -82,11 +87,14 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             upper_quantile: Upper quantile of the ``"quantile"`` method.
             iqr_multiplier: Multiplier of the interquartile range for the
                 ``"iqr"`` method.
+            algorithm_name: Optional algorithm name prefixed to the WARNING
+                about collapsed columns.
         """
         self.method = method
         self.lower_quantile = lower_quantile
         self.upper_quantile = upper_quantile
         self.iqr_multiplier = iqr_multiplier
+        self.algorithm_name = algorithm_name
 
     def __sklearn_tags__(self) -> Any:
         """Declare estimator tags; NaN input is supported by design."""
@@ -302,10 +310,16 @@ class Winsorizer(TransformerMixin, BaseEstimator):
 
         collapsed_names = self._collapsed_column_names()
         if collapsed_names:
+            prefix = (
+                f"Winsorizer (algorithm {self.algorithm_name!r}): "
+                if self.algorithm_name
+                else "Winsorizer: "
+            )
             logger.warning(
-                "Winsorizer: %d column(s) have a degenerate clipping interval "
+                "%s%d column(s) have a degenerate clipping interval "
                 "(constant or all-NaN in the training data) and are not "
                 "clipped: %s",
+                prefix,
                 len(collapsed_names),
                 ", ".join(collapsed_names),
             )

@@ -428,6 +428,8 @@ def build_trainer_preprocessor(
         random_state=random_state,
         force_dense_output=requires_dense_input(algorithm),
         add_indicator=requires_missing_indicator(algorithm) if algorithm else True,
+        outliers=preset.outliers,
+        outlier_algorithm=algorithm or None,
     )
     return TrainerPreprocessor(preprocessor=preprocessor, preset=preset)
 

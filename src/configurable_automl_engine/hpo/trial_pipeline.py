@@ -259,6 +259,8 @@ def _build_trial_preprocessor(
         random_state=request.random_state,
         force_dense_output=requires_dense_input(algo),
         add_indicator=_missing_indicator_enabled(algo),
+        outliers=preset.outliers,
+        outlier_algorithm=algo,
     )
     return preprocessor, categorical, numerical
 
