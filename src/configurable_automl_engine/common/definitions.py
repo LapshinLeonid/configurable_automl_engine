@@ -1,6 +1,8 @@
 from enum import Enum
 from typing import Literal
 
+import numpy as np
+
 
 # ──────────────── validation enum ──────────────── #
 class ValidationStrategy(str, Enum):
@@ -37,3 +39,57 @@ ALGO_PACKAGE_MAPPING: dict[str, str] = {
 
 class ParallelStrategy(str, Enum):
     ALGORITHMS = "algorithms"
+
+
+# ──────────────── experiment result ──────────────── #
+class RunStatus(str, Enum):
+    """Outcome status of a whole experiment run (``ExperimentResult.status``)."""
+
+    completed = "completed"
+    failed = "failed"
+
+
+class RunStepStatus(str, Enum):
+    """Outcome status of one algorithm record inside a phase."""
+
+    completed = "completed"
+    failed = "failed"
+    disqualified = "disqualified"
+
+
+class RunPhaseAction(str, Enum):
+    """Pipeline phase action of an ``AlgorithmRun`` record.
+
+    Mirrors ``HPOPhaseAction`` from the config schema
+    (``training_engine/config/phases.py``); the legacy 'refine_winner' is
+    rejected by the config schema and therefore absent here.
+    """
+
+    all_algorithms = "all_algorithms"
+    refine = "refine"
+    select = "select"
+
+
+class MetricDirection(str, Enum):
+    """Direction of the comparison metric in user semantics.
+
+    ``minimize`` — error metrics (RMSE, MAE, NRMSE and all neg_ scorers
+    inverted by ``to_user_value``): a smaller value is better.
+    ``maximize`` — score metrics (R² and similar): a larger value is better.
+    """
+
+    minimize = "minimize"
+    maximize = "maximize"
+
+
+# ──────────────── worst-score sentinel ──────────────── #
+# The lower bound of the "worst-score sentinel" class: the exact float32
+# minimum (``np.finfo(np.float32).min``). Any score <= this bound is treated
+# as a sentinel — real metrics of such magnitude are practically impossible.
+# Comparing against this bound (instead of an exact match against
+# HPO_WORST_SCORE via math.isclose) also catches the raw
+# float(np.finfo(np.float32).min) value that numpy-cast metrics or custom
+# tuners may return. The constant lives here, in the bottom import layer, so
+# both the HPO package (``hpo/types.py`` re-exports it) and the experiment
+# result model validate scores against one source of truth.
+WORST_SCORE_THRESHOLD = float(np.finfo(np.float32).min)

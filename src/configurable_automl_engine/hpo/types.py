@@ -17,6 +17,10 @@ from typing import Any
 import numpy as np
 from optuna.trial import FrozenTrial
 
+from configurable_automl_engine.common.definitions import (
+    WORST_SCORE_THRESHOLD as _WORST_SCORE_THRESHOLD,
+)
+
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
 class HyperoptError(Exception):
@@ -113,12 +117,8 @@ class OptimizeResult:
 HPO_WORST_SCORE = -3.4028235e38
 
 
-# The lower bound of the "worst-score sentinel" class: the exact float32
-# minimum. Any score <= this bound is treated as a sentinel — real metrics of
-# such magnitude are practically impossible (documented threshold decision).
-# Comparing against this bound (instead of the exact
-# HPO_WORST_SCORE via math.isclose) also catches the raw
-# float(np.finfo(np.float32).min) value that numpy-cast metrics or custom
-# tuners may return: its relative difference from HPO_WORST_SCORE is
-# ≈ 9.88e-9, which an isclose(rel_tol=1e-9) check silently misses.
-WORST_SCORE_THRESHOLD = float(np.finfo(np.float32).min)
+# The lower bound of the "worst-score sentinel" class (see the docstring of
+# ``common.definitions.WORST_SCORE_THRESHOLD`` — the canonical definition);
+# re-exported here so the HPO-side checks and the documented import path
+# (``configurable_automl_engine.tuner.WORST_SCORE_THRESHOLD``) keep working.
+WORST_SCORE_THRESHOLD = _WORST_SCORE_THRESHOLD
