@@ -48,7 +48,8 @@ Classification is not supported.
   the optional `xgboost` package); `glm` and `tweedieregressor` are two names
   for the same `TweedieRegressor`. See [Algorithms section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#algorithms-section).
 * **Robust Preprocessing Pipeline** — scaling, missing-value imputation,
-  categorical encoding, infinite values, date/time columns, per-algorithm
+  outlier handling (quantile/IQR winsorization), categorical encoding,
+  infinite values, date/time columns, per-algorithm
   presets and optional feature selection. See
   [Categorical encoding](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#categorical-encoding) and
   [preprocessing presets](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#adaptive-feature-preprocessing-preprocessing-presets).

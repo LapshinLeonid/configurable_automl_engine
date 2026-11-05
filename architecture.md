@@ -45,6 +45,18 @@ preprocessing module (it is a pure, self-contained transformer; its classes
 are pickled inside saved models, so its module path is part of the artifact
 format and the module must stay where it is).
 
+The numerical pipeline assembled by `build_preprocessor` is
+`[Winsorizer] -> SimpleImputer -> [scaler]`: the winsorization
+(`outliers`, an `OutlierSpec` from `outliers_presets`) comes strictly before
+the imputer, so the imputed value is not biased by the extreme values and the
+missing-value indicator columns are not clipped. The preset that decides
+whether the winsorization step exists, which imputation strategy and which
+scaler are used, is resolved once per algorithm by
+`resolve_preprocessing_preset` (`preprocessing_presets`) with the precedence
+"class preset < run-level `general.preprocessing` < per-algorithm override",
+and the same resolution is shared by the HPO trial pipeline and the final
+trainer.
+
 # Project Structure
 
 ```
@@ -116,14 +128,15 @@ format and the module must stay where it is).
 │       │   ├── sampler.py                  # DataOversampler and oversample()
 │       │   ├── smoter.py                   # SMOTER-style generator for a regression target
 │       │   └── targets.py                  # Binning of a regression target, sampling strategy, decoding
-│       ├── preprocessing                   # Layer 1: feature preprocessing: imputation, scaling, encoding
-│       │   ├── builder.py                  # build_preprocessor: the single preprocessor entry point
+│       ├── preprocessing                   # Layer 1: feature preprocessing: winsorization (outliers), imputation, scaling, encoding
+│       │   ├── builder.py                  # build_preprocessor: the single preprocessor entry point ([Winsorizer] -> SimpleImputer -> [scaler] for numeric columns)
 │       │   ├── columns.py                  # ColumnNameSelector: column selection by name
 │       │   ├── encoders.py                 # Target / frequency / hashing / split categorical encoders
 │       │   ├── features.py                 # Feature type detection, uninformative columns, feature count estimate
-│       │   └── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
+│       │   ├── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
+│       │   └── quantile.py                 # _FoldSafeQuantileTransformer: QuantileTransformer with fold-size-aware n_quantiles clipping
 │       ├── outliers_presets.py              # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
-│       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets
+│       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets (imputation, scaling, outliers; precedence: class preset < general < algorithm)
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
 │       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks
 │       ├── trainer_data.py                 # Layer 2: ModelTrainer input data: X/y, diagnostics, preprocessor, alignment

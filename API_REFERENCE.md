@@ -243,6 +243,64 @@ general:
   additional_metrics: ["r2", "mae"]
 ```
 
+**Heavy-tailed numeric features.** Heavy-tailed data (Student-t, log-normal,
+financial returns) and data with measurement errors produce extreme values
+that distort mean imputation and variance-based scaling. Three complementary
+remedies exist; they can be combined:
+
+* **Winsorization** (`outliers`) — clip every value outside the training
+  quantiles (`method: quantile`, e.g. the 2nd/98th percentile) or outside
+  `Q1 − k·IQR … Q3 + k·IQR` (`method: iqr`). The cheapest and most targeted
+  option: choose it when the bulk of the distribution is fine and only a few
+  values are suspect (sensor spikes, data-entry errors). The bounds are
+  learned from the training data per CV fold, so there is no leakage, and the
+  step applies to every algorithm class including trees and isotonic
+  regression. See [Composition of a preset](#composition-of-a-preset).
+* **`robust` scaling** (`RobustScaler`) — center with the median and scale
+  with the IQR instead of the mean and the standard deviation. Choose it for
+  scale-sensitive models and GLMs when you want the features centered but do
+  not want the extremes to stretch the scale; the outliers themselves are
+  still passed through (combine with `outliers` to also bound them).
+* **`quantile` scaling** (`QuantileTransformer`) — a non-parametric transform
+  that maps the features to a uniform or normal distribution and, in effect,
+  flattens the tails completely. The strongest option: choose it when the
+  distribution is so heavy-tailed (or so skewed) that neither winsorization
+  nor `robust` scaling makes it model-friendly, e.g. for linear or
+  distance-based models. On small folds `n_quantiles` is clipped to the fold
+  size, so cross-validation stays warning-free. The downside is that the
+  transform is non-linear and loses the straightforward interpretation of
+  the scaled values.
+
+**Trees are insensitive to scaling but not to outliers.** A split-based model
+(DecisionTree, RandomForest, ExtraTrees, GradientBoosting, XGBoosting) is
+invariant to any monotone feature transform, so `standard`, `robust` and
+`quantile` scaling change nothing for it (the engine keeps `none` for the
+`trees` class). Extreme values, however, still move the split thresholds, so
+winsorization may improve a tree too — set `outliers` in the run-level
+`general.preprocessing` block and every algorithm, trees included, receives it.
+
+```yaml
+general:
+  preprocessing:                 # run-level default for every algorithm
+    imputation_strategy: median  # the mean is dragged by the tails
+    outliers:
+      method: quantile           # clip outside the 2nd/98th percentile
+      lower_quantile: 0.02
+      upper_quantile: 0.98
+
+algorithms:
+  ridge:                         # scale-sensitive: transform away the tails
+    enable: true
+    preprocessing:
+      scaling:
+        type: quantile
+        output_distribution: normal
+  random_forest:                 # inherits the general block (median +
+    enable: true                 # quantile outliers, `none` scaling)
+  isotonic_regression:           # univariate preset, untouched
+    enable: true
+```
+
 # Configuration reference
 
 A config has three top-level sections. Only `algorithms` is required:

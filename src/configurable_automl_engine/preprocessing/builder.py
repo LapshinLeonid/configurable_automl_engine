@@ -1,11 +1,16 @@
 """The single entry point that builds the feature preprocessor.
 
-Holds :func:`build_preprocessor`: the ``ColumnTransformer`` with imputation
-and the selected encoding for categorical columns and imputation plus scaling
-for numerical columns. It is used both in HPO (``tuner.optimize``) and in
-final training (``trainer.ModelTrainer``). It builds on the encoders, the
-column selector and the quantile scaler; no other preprocessing module may
-import it.
+Holds :func:`build_preprocessor`: the ``ColumnTransformer`` with optional
+winsorization, imputation and the selected encoding for categorical columns
+and winsorization (optional) plus imputation and scaling for numerical
+columns. The numerical pipeline order is fixed:
+``[Winsorizer] -> SimpleImputer -> [scaler]`` — the winsorization comes
+strictly before the imputer so that the imputed value is not biased by the
+extreme values and the missing-value indicator columns are not clipped. It is
+used both in HPO (``tuner.optimize``) and in final training
+(``trainer.ModelTrainer``). It builds on the outliers transformer, the
+encoders, the column selector and the scalers; no other preprocessing module
+may import it.
 """
 
 from __future__ import annotations

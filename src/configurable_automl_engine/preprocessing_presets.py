@@ -8,8 +8,12 @@ Key concepts:
 
     * **Preprocessing preset** (:class:`PreprocessingPreset`) — a declaratively
       described set of rules for processing numeric features: the missing value
-      imputation strategy (:data:`ImputationStrategy`) and the scaling
-      configuration (:class:`ScalingSpec`).
+      imputation strategy (:data:`ImputationStrategy`), the scaling
+      configuration (:class:`ScalingSpec`) and the outlier handling
+      (:class:`OutlierSpec` — winsorization of the extreme values before the
+      imputer; the definitions live in
+      :mod:`configurable_automl_engine.outliers_presets` and are re-exported
+      here).
     * **Algorithm class** (:class:`AlgorithmClass`) — a group of regression
       algorithms with common preprocessing requirements.
     * **Mapping table** :data:`ALGORITHM_CLASS_MAPPING` — fixes
@@ -29,7 +33,9 @@ Scaling configuration (:class:`ScalingSpec`) is an object with a ``type``
 discriminator (``StandardScaling`` / ``RobustScaling`` / ``QuantileScaling`` /
 ``NoScaling``); the string shorthand (``"robust"``) is accepted everywhere and
 normalized to its object form by a ``BeforeValidator``, so existing configs and
-API calls keep working.
+API calls keep working. The outlier configuration (:class:`OutlierSpec`)
+follows the same pattern (``NoOutliers`` / ``QuantileOutliers`` / ``IqrOutliers``
+with the ``"quantile"`` / ``"iqr"`` shorthands).
 
 The single function :func:`resolve_preprocessing_preset` is used at every stage
 of the lifecycle — the HPO phase, final training and prediction — which
@@ -643,7 +649,7 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
         outliers="none",
         description=(
             "Default behavior for algorithms without explicit registration "
-            "in the mapping table: mean + StandardScaler."
+            "in the mapping table: mean imputation and StandardScaler."
         ),
     ),
 }
