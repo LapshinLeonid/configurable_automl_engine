@@ -149,11 +149,41 @@ def test_exclude_invalid_entry_type_raises():
         wins.fit(X)
 
 
-def test_excluded_columns_named_in_the_degenerate_warning(caplog):
-    """Excluded columns appear in the WARNING about unclipped columns."""
+def test_excluded_columns_do_not_trigger_the_degenerate_warning(caplog):
+    """An exclusion is configuration, not a data problem: no WARNING.
+
+    The excluded column is reported at DEBUG level only; otherwise every CV
+    fold and HPO trial of a run with a datetime column would repeat the same
+    WARNING."""
     df = pd.DataFrame(
         {
             "a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "ts_month": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    wins = Winsorizer(method="quantile", lower_quantile=0.25, upper_quantile=0.75)
+    wins.exclude = ["ts_month"]
+    with caplog.at_level(
+        logging.DEBUG, logger="configurable_automl_engine.preprocessing.outliers"
+    ):
+        wins.fit(df)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    debug = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and "excluded from clipping" in r.getMessage()
+    ]
+    assert len(debug) == 1
+    assert "ts_month" in debug[0]
+
+
+def test_degenerate_warning_names_only_degenerate_columns(caplog):
+    """With an excluded and a constant column, the WARNING names only the
+    constant one."""
+    df = pd.DataFrame(
+        {
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "const": [7.0] * 6,
             "ts_month": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         }
     )
@@ -165,7 +195,10 @@ def test_excluded_columns_named_in_the_degenerate_warning(caplog):
         wins.fit(df)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "ts_month" in warnings[0].getMessage()
+    message = warnings[0].getMessage()
+    assert "const" in message
+    assert "ts_month" not in message
+    assert np.isinf(wins.lower_bounds_[2]) and np.isinf(wins.upper_bounds_[2])
 
 
 # ──────────────────────────────────────────────────────────────────────────

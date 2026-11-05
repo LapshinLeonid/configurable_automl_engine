@@ -61,20 +61,6 @@ from .trainer_state import (
 _LOG = logging.getLogger(__name__)
 
 
-def _datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
-    """Flat list of the datetime-derived columns of an expansion map.
-
-    Args:
-        expansion: Mapping ``source datetime column → generated component
-            columns`` (``ModelTrainer.datetime_expansion_`` /
-            ``PreparedFeatures.datetime_expansion``).
-
-    Returns:
-        The generated component column names (order of the mapping).
-    """
-    return [name for names in expansion.values() for name in names]
-
-
 def extract_feature_names(X: Any) -> list[str] | None:
     """Extract column names from various data structures without copying.
 

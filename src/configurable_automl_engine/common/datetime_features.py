@@ -116,6 +116,25 @@ def datetime_expansion_map(
     return expansion
 
 
+def datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
+    """Flat list of the datetime-derived columns of an expansion map.
+
+    The single helper used by every place that excludes the generated
+    component columns from winsorization (the final ``ModelTrainer`` fit and
+    the HPO trials), so the two paths cannot drift apart.
+
+    Args:
+        expansion: Mapping ``source datetime column → generated component
+            columns`` (the output of :func:`datetime_expansion_map`, e.g.
+            ``ModelTrainer.datetime_expansion_`` or
+            ``PreparedData.datetime_expansion``).
+
+    Returns:
+        The generated component column names (order of the mapping).
+    """
+    return [name for names in expansion.values() for name in names]
+
+
 def expand_datetime_columns(
     X: pd.DataFrame, expansion: dict[str, list[str]]
 ) -> pd.DataFrame:
