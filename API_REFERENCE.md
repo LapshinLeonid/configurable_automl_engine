@@ -1295,6 +1295,8 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 **Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for an invalid config; `ValueError` for unusable data (for example a missing or non-numeric target column); `RuntimeError` if no algorithm succeeds.
 
+**Experiment result.** Alongside the dict, the full run history is assembled into the `ExperimentResult` model (per-algorithm / per-phase records with raw and user-semantic scores, trial statistics, phase and run timings, the resolved validation settings, the circuit-breaker map, and the report sections) and stored in `configurable_automl_engine.training_engine.component.last_experiment_result` after every call — including a failed run (`status: "failed"` with the error message and the records of the completed phases). The model is a pure serializable Pydantic model (`ExperimentResult.to_json()` / `ExperimentResult.from_json()`); the winner, its user-semantic score and the params are taken from the same sources as the dict keys `algorithm` / `score` / `params`, so the two cannot diverge.
+
 ---
 
 ## `optimize(algo_name, X, y, ...)`

@@ -370,9 +370,7 @@ def test_prepare_dataset_rejects_multi_column_target():
     df = _df(n_rows=10)
     # A duplicated column name: indexing "target" returns a 2-column DataFrame.
     data = np.column_stack([df.to_numpy(), df["target"].to_numpy()])
-    df_dup = pd.DataFrame(
-        data, columns=["f0", "f1", "target", "target"]
-    )
+    df_dup = pd.DataFrame(data, columns=["f0", "f1", "target", "target"])
     with pytest.raises(ValueError, match="single column"):
         prepare_dataset(cfg, df_dup, "target")
 
@@ -424,7 +422,10 @@ def test_execute_phases_single_phase_all_algorithms_with_terminal_select():
     assert mock_hpo.call_count == 2
     # The HPO phase name travels to _run_hpo → tuner.optimize(phase_name=...)
     # for the pooled-fallback WARNING deduplication.
-    assert all(call.kwargs["request"].phase_name == "coarse" for call in mock_hpo.call_args_list)
+    assert all(
+        call.kwargs["request"].phase_name == "coarse"
+        for call in mock_hpo.call_args_list
+    )
 
 
 def test_execute_phases_select_cv_best_top_k_replaces_working_set():
@@ -570,7 +571,9 @@ def test_execute_phases_refine_empty_working_set_raises():
     cfg.algorithms.random_forest.enable = False
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(hpo_phases_mod, "_run_hpo", return_value=PhaseResult(score=0.9, params={})):
+    with patch.object(
+        hpo_phases_mod, "_run_hpo", return_value=PhaseResult(score=0.9, params={})
+    ):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -603,7 +606,9 @@ def test_execute_phases_filters_worst_score_sentinel():
 
     def fake_run_hpo(**kw: Any) -> PhaseResult:
         if kw["request"].algo_name == "random_forest":
-            return PhaseResult(score=HPO_WORST_SCORE, params={"p": 1})  # sentinel -> excluded
+            return PhaseResult(
+                score=HPO_WORST_SCORE, params={"p": 1}
+            )  # sentinel -> excluded
         return PhaseResult(score=0.7, params={"p": 2})
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
@@ -640,7 +645,9 @@ def test_execute_phases_all_invalid_algorithms_raise():
     )
     prepared = prepare_dataset(cfg, _df(n_rows=20), "target")
 
-    with patch.object(hpo_phases_mod, "_run_hpo", side_effect=InvalidAlgorithmError("bad")):
+    with patch.object(
+        hpo_phases_mod, "_run_hpo", side_effect=InvalidAlgorithmError("bad")
+    ):
         with pytest.raises(RuntimeError, match="No algorithms produced valid scores"):
             execute_phases(cfg, prepared)
 
@@ -943,6 +950,9 @@ def test_train_best_model_orchestrates_steps_in_order():
             "persist_artifact",
             side_effect=lambda **kw: record("persist_artifact", expected_result),
         ) as persist_mock,
+        # The ExperimentResult assembly is stubbed: this test checks the
+        # orchestration order of the legacy dict pipeline only.
+        patch.object(component, "build_experiment_result", return_value=MagicMock()),
     ):
         out = train_best_model(config="x", df=MagicMock(), target="target")
 
@@ -977,7 +987,9 @@ def test_train_best_model_no_winner_skips_persist():
 def test_train_best_model_invalid_winner_score_raises():
     """Winner-score invariant: the sentinel never reaches the report."""
     sentinel = float(np.finfo(np.float32).min)
-    ctx = PhaseContext(working_set={"rf": PhaseResult(score=sentinel, params={})}, winner_algo="rf")
+    ctx = PhaseContext(
+        working_set={"rf": PhaseResult(score=sentinel, params={})}, winner_algo="rf"
+    )
     with (
         patch.object(component, "load_config", return_value=(MagicMock(), "target")),
         patch.object(component, "prepare_dataset", return_value=MagicMock()),
@@ -1008,6 +1020,9 @@ def test_train_best_model_passes_context_to_persist():
         patch.object(
             component, "persist_artifact", return_value=expected
         ) as mock_persist,
+        # The ExperimentResult assembly is stubbed: this test checks the
+        # context forwarding to persist_artifact only.
+        patch.object(component, "build_experiment_result", return_value=MagicMock()),
     ):
         out = train_best_model(config={}, df=MagicMock(), target="target")
 
@@ -1065,7 +1080,9 @@ def test_execute_phases_refine_passes_previous_trials():
     def fake_run_hpo(**kw: Any) -> PhaseResult:
         algo = kw["request"].algo_name
         prev = kw["request"].previous_trials
-        calls.append((algo, kw["request"].initial_params, None if prev is None else list(prev)))
+        calls.append(
+            (algo, kw["request"].initial_params, None if prev is None else list(prev))
+        )
         return PhaseResult(score=0.9, params={"p": 1}, trials=[history])
 
     with patch.object(hpo_phases_mod, "_run_hpo", side_effect=fake_run_hpo):
@@ -1121,8 +1138,14 @@ def test_hpo_phases_use_different_sampler_seeds_but_fixed_folds():
         [
             {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
             {"name": "fine1", "n_trials": 1, "action": "refine"},
-            {"name": "gate", "n_trials": 1, "action": "select",
-             "strategy": "cv_best", "output": "top_k", "k": 1},
+            {
+                "name": "gate",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "top_k",
+                "k": 1,
+            },
             {"name": "fine2", "n_trials": 1, "action": "refine"},
         ],
         algorithms=["random_forest", "extra_trees"],
@@ -1162,8 +1185,14 @@ def test_hpo_phases_use_general_random_state_for_splits_and_sampler_base():
         [
             {"name": "coarse", "n_trials": 1, "action": "all_algorithms"},
             {"name": "fine", "n_trials": 1, "action": "refine"},
-            {"name": "gate", "n_trials": 1, "action": "select",
-             "strategy": "cv_best", "output": "top_k", "k": 1},
+            {
+                "name": "gate",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "top_k",
+                "k": 1,
+            },
             {"name": "fine2", "n_trials": 1, "action": "refine"},
         ],
         algorithms=["random_forest", "extra_trees"],
@@ -1229,8 +1258,13 @@ def test_general_random_state_none_report_and_prepared(caplog):
     cfg_dict = _cfg_dict(
         phases=[
             {"name": "search", "n_trials": 1, "action": "all_algorithms"},
-            {"name": "final", "n_trials": 1, "action": "select",
-             "strategy": "cv_best", "output": "winner"},
+            {
+                "name": "final",
+                "n_trials": 1,
+                "action": "select",
+                "strategy": "cv_best",
+                "output": "winner",
+            },
         ],
         random_state=None,
     )

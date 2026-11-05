@@ -26,13 +26,16 @@ Main components: ``train_best_model`` (public interface) and
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from configurable_automl_engine.common.metrics import register_custom_metrics
+from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.oversampling import experimental as _oversampling
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -51,10 +54,15 @@ from .hpo_phases import (
     _hpo_phase_worker,
     _merge_complexity_guard_records,
 )
+from .run_result import (
+    build_experiment_result,
+    build_failed_experiment_result,
+)
 from .select_steps import select_step_outcome
 from .state import (
     PhaseContext,
     PhaseResult,
+    PhaseTiming,
     PreparedData,
     SelectOutcome,
     WorkerOutcome,
@@ -65,6 +73,14 @@ from .thread_pool import TaskOutcome, run_parallel_outcomes
 __all__ = ["execute_phases", "train_best_model"]
 
 _LOG = logging.getLogger(__name__)
+
+# The instrumented run result of the LAST ``train_best_model`` call in this
+# process (the T3 experiment-result plumbing): the public API still returns
+# the legacy dict (backward compatibility), and the ``ExperimentResult``
+# model assembled from the same sources is stored here for the consumers
+# (the facade and the experiment store, T5/T4) until the result-plumbing
+# contract of the facade is finalized.
+last_experiment_result: ExperimentResult | None = None
 
 
 def execute_phases(
@@ -133,6 +149,12 @@ def execute_phases(
     )
     all_algorithms = guard.algorithms
     ctx.disqualified_algorithms.update(guard.disqualified)
+    # The attribute point of the guard disqualifications in the run-result
+    # records: the first pipeline phase (the guard runs before any phase).
+    for name in guard.disqualified:
+        ctx.disqualification_phases.setdefault(
+            name, cfg.general.phases[0].name if cfg.general.phases else ""
+        )
     # Disqualified algorithms (circuit breaker): name -> reason; populated
     # by HPO failures and select steps. Disqualification does not abort the
     # run: the algorithm is excluded from candidates and results, the rest
@@ -156,11 +178,19 @@ def execute_phases(
     # _HpoPhaseSpec construction in _build_phase_spec).
     hpo_phase_ordinal = 0
     for phase in cfg.general.phases:
+        # Wall-clock timings of the phase: collected for every pipeline
+        # phase (HPO or select) and consumed by the run-result assembly
+        # (the ExperimentResult phase timing records).
+        phase_started_at = dt.datetime.now(dt.UTC)
+        phase_started_monotonic = time.monotonic()
         if phase.action == "select":
             # The select step runs synchronously (outside run_parallel): it
             # operates on already-finished HPO results.
-            _apply_select_outcome(
-                ctx, select_step_outcome(phase, cfg, prepared, ctx), phase.name
+            outcome = select_step_outcome(phase, cfg, prepared, ctx)
+            _apply_select_outcome(ctx, outcome, phase.name)
+            _attribute_disqualifications(ctx, phase.name)
+            ctx.phase_timings.append(
+                _phase_timing(phase, phase_started_at, phase_started_monotonic)
             )
             continue
 
@@ -179,7 +209,37 @@ def execute_phases(
             phase_seed=phase_seed,
             collect_oof=collect_oof,
         )
+        _attribute_disqualifications(ctx, phase.name)
+        ctx.phase_timings.append(
+            _phase_timing(phase, phase_started_at, phase_started_monotonic)
+        )
     return ctx
+
+
+def _attribute_disqualifications(ctx: PhaseContext, phase_name: str) -> None:
+    """Record the phase where each new circuit-breaker disqualification happened.
+
+    The ``disqualified`` records of the run result (``ExperimentResult``)
+    are attributed to the phase where the algorithm was disqualified — one
+    record per disqualification, not one per phase.
+    """
+    for name in ctx.disqualified_algorithms:
+        ctx.disqualification_phases.setdefault(name, phase_name)
+
+
+def _phase_timing(
+    phase: HPOPhaseCfg,
+    started_at: dt.datetime,
+    started_monotonic: float,
+) -> PhaseTiming:
+    """Build the timing record of a completed pipeline phase."""
+    return PhaseTiming(
+        phase_name=phase.name,
+        action=phase.action,
+        started_at=started_at,
+        finished_at=dt.datetime.now(dt.UTC),
+        duration_seconds=time.monotonic() - started_monotonic,
+    )
 
 
 def _execute_hpo_step(
@@ -572,6 +632,16 @@ def train_best_model(
     The last phase of a valid config is a terminal select
     (``output: winner``), whose result determines the artifact.
 
+    The run is instrumented: alongside the legacy dict the full run history
+    (per-algorithm / per-phase records, trial statistics, phase and run
+    timings, the resolved validation settings) is assembled into the
+    ``ExperimentResult`` model (``training_engine.run_result``), which is
+    stored in ``component.last_experiment_result`` for the consumers (the
+    facade and the experiment store). The model is built from the same
+    sources as the dict, so the dict contract is unchanged. On an
+    orchestration failure (``RuntimeError``) a failed ``ExperimentResult``
+    is recorded before the error is re-raised.
+
     Args:
         config: The training
             configuration. Can be a file path, a dict, or a Config object.
@@ -596,7 +666,9 @@ def train_best_model(
             trained on the full dataset. The disqualification of a single
             algorithm (``InvalidAlgorithmError``) does NOT abort the run: the
             algorithm is excluded from the candidates and the rest continue
-            training.
+            training. On a ``RuntimeError`` a failed ``ExperimentResult``
+            is assembled and stored in ``last_experiment_result`` before the
+            error is re-raised.
     """
     cfg, target_col = load_config(config, df, target)
     # The orchestrator resolves the comparison metric (finalists, report)
@@ -608,11 +680,54 @@ def train_best_model(
     if cfg.oversampling.enable and _oversampling.OVERSAMPLING_EXPERIMENTAL:
         _LOG.warning(_oversampling.EXPERIMENTAL_WARNING_MESSAGE)
     prepared = prepare_dataset(cfg, df, target_col)
-    ctx = execute_phases(cfg, prepared)
+    # Run-level timing: the timestamps and the monotonic duration of the
+    # whole run — the input of the ExperimentResult timing fields.
+    run_started_at = dt.datetime.now(dt.UTC)
+    run_started_monotonic = time.monotonic()
+    run_finished = _RunFinish(run_started_at, run_started_monotonic)
+    ctx: PhaseContext | None = None
+    try:
+        ctx = execute_phases(cfg, prepared)
+        result = _run_after_phases(
+            cfg=cfg,
+            prepared=prepared,
+            ctx=ctx,
+            model_path_override=model_path_override,
+            run_finished=run_finished,
+        )
+    except RuntimeError as err:
+        # Orchestration failure (a phase produced no valid scores, a select
+        # received an empty working set, an invalid winner score): the
+        # error propagates unchanged to the caller, and a failed
+        # ExperimentResult is assembled for the run history (T4) — the
+        # partial evidence of the completed phases is preserved.
+        _LOG.error("Run failed: %s", err)
+        _record_failed_run(
+            cfg=cfg,
+            prepared=prepared,
+            ctx=ctx,
+            error_message=str(err),
+            run_finished=run_finished,
+        )
+        raise
+    return result
 
-    # The winner is taken from the terminal select step context: the last phase
-    # of a valid config must be a select with output: winner (cross-validated
-    # by the schema), so ctx.winner_algo is already set.
+
+def _run_after_phases(
+    *,
+    cfg: Config,
+    prepared: PreparedData,
+    ctx: PhaseContext,
+    model_path_override: str | Path | None,
+    run_finished: _RunFinish,
+) -> dict[str, Any]:
+    """Finish the run after ``execute_phases``: winner checks, the final
+    artifact, and the ``ExperimentResult`` assembly.
+
+    The winner is taken from the terminal select step context: the last phase
+    of a valid config must be a select with output: winner (cross-validated
+    by the schema), so ctx.winner_algo is already set.
+    """
     if ctx.winner_algo is None or not ctx.working_set:
         # Protection against an empty phase list (the config allows phases: []):
         # the loop in execute_phases did not run — raise a clear RuntimeError.
@@ -637,7 +752,7 @@ def train_best_model(
             f"{final_score!r} (non-finite or worst-score sentinel); "
             f"refusing to report it."
         )
-    return persist_artifact(
+    result = persist_artifact(
         cfg=cfg,
         prepared=prepared,
         winner_algo=winner_algo,
@@ -655,3 +770,64 @@ def train_best_model(
         n_trials_evaluated=n_trials_evaluated,
         oof_pool=ctx.oof_pool,
     )
+    # The instrumented run result (T3): assembled from the same sources as
+    # the dict (not from the dict itself), so the optional dict keys stay
+    # untouched. The model is not returned by the public API (the dict
+    # contract is unchanged) — it is stored on the function for the facade
+    # (T5) until the result-plumbing contract is finalized.
+    experiment_result = build_experiment_result(
+        cfg=cfg,
+        prepared=prepared,
+        ctx=ctx,
+        result=result,
+        run_started_at=run_finished.started_at,
+        run_finished_at=run_finished.finished_at(),
+        run_duration_seconds=run_finished.duration_seconds(),
+    )
+    globals()["last_experiment_result"] = experiment_result
+    return result
+
+
+class _RunFinish:
+    """The run-level timing captured at start and read at finish."""
+
+    def __init__(self, started_at: dt.datetime, started_monotonic: float) -> None:
+        self.started_at = started_at
+        self._started_monotonic = started_monotonic
+
+    def finished_at(self) -> dt.datetime:
+        """The run finish time (UTC)."""
+        return dt.datetime.now(dt.UTC)
+
+    def duration_seconds(self) -> float:
+        """The total wall-clock duration (monotonic clock)."""
+        return time.monotonic() - self._started_monotonic
+
+
+def _record_failed_run(
+    *,
+    cfg: Config,
+    prepared: PreparedData | None,
+    ctx: PhaseContext | None,
+    error_message: str,
+    run_finished: _RunFinish,
+) -> None:
+    """Assemble and store the failed ``ExperimentResult`` of a failed run.
+
+    The exception propagates to the caller unchanged; the failed result is
+    kept for the run history (the T4 store consumes it via the facade).
+    """
+    try:
+        failed_result = build_failed_experiment_result(
+            cfg=cfg,
+            prepared=prepared,
+            ctx=ctx,
+            error_message=error_message,
+            run_started_at=run_finished.started_at,
+            run_finished_at=run_finished.finished_at(),
+            run_duration_seconds=run_finished.duration_seconds(),
+        )
+    except Exception:  # noqa: BLE001 — a failed-result assembly error must not shadow the run error
+        _LOG.exception("Failed to assemble the failed-run ExperimentResult")
+        return
+    globals()["last_experiment_result"] = failed_result

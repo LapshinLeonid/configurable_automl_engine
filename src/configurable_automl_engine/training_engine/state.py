@@ -14,6 +14,7 @@ not import any other pipeline step module (``data_prep``, ``hpo_phases``,
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,20 @@ if TYPE_CHECKING:
     from configurable_automl_engine.preprocessing_presets import (
         PreprocessingOverride,
     )
+
+__all__ = [
+    "FinalistCandidate",
+    "PhaseContext",
+    "PhaseResult",
+    "PhaseTiming",
+    "PreparedData",
+    "RobustWinnerResult",
+    "SelectOutcome",
+    "TargetDomainOutcome",
+    "WorkerOutcome",
+    "_HPOWorkerResult",
+    "_HpoPhaseSpec",
+]
 
 
 @dataclass(frozen=True)
@@ -216,6 +231,31 @@ class PreparedData:
     datetime_expansion: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PhaseTiming:
+    """Wall-clock timings of one pipeline phase.
+
+    Collected by ``execute_phases`` around every phase (HPO or select) and
+    consumed by the run-result assembly in ``component`` (the
+    ``ExperimentResult`` of the T3 instrumentation).
+
+    Attributes:
+        phase_name (str): The phase name (``HPOPhaseCfg.name``).
+        action (str): The phase action ('all_algorithms', 'refine' or
+            'select' — the string values of ``HPOPhaseAction``).
+        started_at (datetime): The phase start (timezone-aware UTC).
+        finished_at (datetime): The phase finish (timezone-aware UTC).
+        duration_seconds (float): The wall-clock duration (monotonic clock,
+            independent of the wall-clock stamps).
+    """
+
+    phase_name: str
+    action: str
+    started_at: dt.datetime
+    finished_at: dt.datetime
+    duration_seconds: float
+
+
 @dataclass
 class PhaseContext:
     """Explicit context shared between pipeline phases.
@@ -254,6 +294,15 @@ class PhaseContext:
             algorithm in every HPO phase (``(n_trials, n_rows)`` each) — all
             configurations the selection chose from; the BBC-CV input. Empty
             when OOF collection is off.
+        phase_timings (list[PhaseTiming]): The wall-clock timings of the
+            completed phases, in pipeline order — the input of the run-level
+            phase timing section of ``ExperimentResult``.
+        disqualification_phases (dict[str, str]): "algorithm → the phase
+            name where it was disqualified by the circuit breaker" — the
+            attribute point of the ``disqualified`` records in the
+            ``ExperimentResult`` runs (one record per disqualification, not
+            one per phase). The target-domain guard disqualifications are
+            attributed to the first pipeline phase.
     """
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
@@ -264,6 +313,8 @@ class PhaseContext:
     pre_trained_trainer: Any | None = None
     complexity_guard_records: list[dict[str, Any]] = field(default_factory=list)
     oof_pool: list[np.ndarray] = field(default_factory=list)
+    phase_timings: list[PhaseTiming] = field(default_factory=list)
+    disqualification_phases: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
