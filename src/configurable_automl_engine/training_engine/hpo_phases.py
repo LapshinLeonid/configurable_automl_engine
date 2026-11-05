@@ -42,6 +42,7 @@ from configurable_automl_engine.hpo.types import (
     HPOHistoryError,
     InvalidAlgorithmError,
     OptimizeResult,
+    TrialStats,
 )
 from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.training_engine.config_parser import (
@@ -211,6 +212,10 @@ def _to_phase_result(
         # COMPLETED trials of the phase).
         n_trials_evaluated=int(result.n_trials_evaluated or 0),
         oof_predictions=result.oof_predictions,
+        # The aggregated state counters of the phase's own trials (the
+        # leaderboard's Trials / failed columns). A result built by a custom
+        # runner without the statistics keeps the zero-value default.
+        trial_stats=result.trial_stats or TrialStats(),
     )
 
 
@@ -306,6 +311,7 @@ def _hpo_phase_worker(
             complexity_guard=list(result.complexity_guard or []),
             n_trials_evaluated=int(result.n_trials_evaluated or 0),
             oof_predictions=result.oof_predictions,
+            trial_stats=result.trial_stats or TrialStats(),
         )
     except InvalidAlgorithmError as err:
         # Circuit breaker: the algorithm is disqualified after
@@ -383,6 +389,7 @@ def _consume_worker_results(
             complexity_guard=list(res.complexity_guard or []),
             n_trials_evaluated=int(res.n_trials_evaluated or 0),
             oof_predictions=res.oof_predictions,
+            trial_stats=res.trial_stats or TrialStats(),
         )
     return WorkerOutcome(
         results=phase_results, disqualified=disqualified, oof_pool=oof_pool

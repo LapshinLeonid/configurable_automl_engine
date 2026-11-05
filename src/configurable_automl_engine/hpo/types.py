@@ -1,7 +1,8 @@
 """Public types of the hyperparameter optimisation (HPO) package.
 
 The exceptions (``HyperoptError`` and its subclasses), the self-documenting
-phase result ``OptimizeResult`` and the worst-score sentinel constants
+phase result ``OptimizeResult``, its aggregated trial statistics
+``TrialStats`` and the worst-score sentinel constants
 (``HPO_WORST_SCORE`` / ``WORST_SCORE_THRESHOLD``). They are re-exported by
 ``configurable_automl_engine.tuner``, their documented import path (the
 classes are defined here, so ``__module__`` names this module). The
@@ -11,7 +12,7 @@ module holds definitions only and must not import any other module of the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -47,6 +48,57 @@ class HPOHistoryError(HyperoptError):
       validated, and silently dropping the history would degrade refine to a
       cold run (the exact bug this feature fixes).
     """
+
+
+# ═════════════════════════════ trial statistics ══════════════════════════════
+@dataclass
+class TrialStats:
+    """Aggregated statistics of the current phase's own trials.
+
+    The ready-made counters of one HPO phase so the callers (the training
+    engine's leaderboard columns, logs, reports) do not have to recount the
+    trial states by iterating over ``FrozenTrial.state``. The counters are
+    computed over the CURRENT phase's own trials only — transferred
+    ``previous_trials`` never count (symmetric with ``OptimizeResult.
+    n_trials_evaluated``).
+
+    All counters are plain Python ``int``: Optuna/numpy scalar types
+    (``np.int64`` and friends) are normalized at construction so the values
+    survive serialization boundaries (parallel workers, reports) without
+    changing their type.
+
+    Attributes:
+        n_trials: The number of the phase's own trials (requested and
+            actually run by Optuna; an enqueued ``initial_params`` trial
+            counts too).
+        n_completed: The trials that finished with a valid score
+            (``TrialState.COMPLETE``). A trial whose metric was non-finite
+            still completes (with the worst-score sentinel), so it is
+            counted here.
+        n_pruned: The trials pruned by the early stopping pruner or by a
+            non-fatal evaluation error (``optuna.TrialPruned``).
+        n_failed: The trials that failed with an uncaught exception
+            (``TrialState.FAIL``).
+        duration_seconds: The wall-clock duration of the phase's
+            optimization loop, in seconds. ``None`` when the duration was
+            not measured (e.g. a custom runner or ``n_trials=0``).
+    """
+
+    n_trials: int = 0
+    n_completed: int = 0
+    n_pruned: int = 0
+    n_failed: int = 0
+    duration_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize the counters to plain Python scalars."""
+        self.n_trials = int(self.n_trials)
+        self.n_completed = int(self.n_completed)
+        self.n_pruned = int(self.n_pruned)
+        self.n_failed = int(self.n_failed)
+        self.duration_seconds = (
+            None if self.duration_seconds is None else float(self.duration_seconds)
+        )
 
 
 @dataclass
@@ -90,6 +142,9 @@ class OptimizeResult:
             ``train_test_split`` — are NaN). Collected only when
             ``collect_oof=True`` (the input of the BBC-CV estimate);
             ``None`` otherwise or when no trial qualifies.
+        trial_stats: The aggregated statistics of the current phase's own
+            trials (state counters and the phase duration); see
+            ``TrialStats``. Always present on a non-``None`` result.
     """
 
     model: Any | None
@@ -99,6 +154,7 @@ class OptimizeResult:
     complexity_guard: list[dict[str, Any]] | None = None
     n_trials_evaluated: int = 0
     oof_predictions: np.ndarray | None = None
+    trial_stats: TrialStats = field(default_factory=TrialStats)
 
 
 # ═══════════════════════════════════ constants ═══════════════════════════════

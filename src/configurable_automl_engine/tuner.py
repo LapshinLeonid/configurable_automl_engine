@@ -7,8 +7,9 @@ oversampling (see the ``optimize()`` docstring for the full contract).
 This module is the public facade: ``optimize()`` keeps its signature,
 collects its arguments into an ``hpo.request.HpoRequest`` and delegates the
 run to ``hpo.runner.run_optimization``; the exceptions,
-``OptimizeResult`` and the sentinel constants are re-exported from
-``hpo.types``. The implementation lives in the ``hpo`` package.
+``OptimizeResult``, its aggregated trial statistics ``TrialStats`` and the
+sentinel constants are re-exported from ``hpo.types``. The implementation
+lives in the ``hpo`` package.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from .hpo.types import (
     InvalidAlgorithmError,
     InvalidDataError,
     OptimizeResult,
+    TrialStats,
 )
 
 __all__ = [
@@ -55,6 +57,7 @@ __all__ = [
     "InvalidAlgorithmError",
     "InvalidDataError",
     "OptimizeResult",
+    "TrialStats",
     "optimize",
 ]
 
@@ -302,10 +305,13 @@ def optimize(
             decision), ``score`` (the best raw "optimizer" metric value on
             validation, higher is better), ``trials`` — the frozen
             trials of the current phase ONLY (transferred
-            ``previous_trials`` are excluded), and
+            ``previous_trials`` are excluded),
             ``n_trials_evaluated`` — the number of trials actually
             evaluated by the phase (own COMPLETED trials; transferred
-            history never counts).
+            history never counts), and ``trial_stats`` — the aggregated
+            statistics of the phase's own trials (the state counters
+            requested / completed / pruned / failed and the phase
+            duration; see ``TrialStats``).
         None: The "no valid result" signal — ``n_trials=0`` (an empty trial
             list) or no trial of the current phase completed (e.g., every
             trial was turned into ``optuna.TrialPruned`` by a non-fatal

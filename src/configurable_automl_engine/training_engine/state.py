@@ -22,6 +22,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
+from configurable_automl_engine.hpo.types import TrialStats
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     FeatureSelectionCfg,
@@ -70,6 +71,10 @@ class PhaseResult:
         oof_predictions (np.ndarray | None): The out-of-fold predictions of
             the phase's completed trials, shape ``(n_trials, n_rows)`` (the
             BBC-CV input); ``None`` when OOF collection is off.
+        trial_stats (TrialStats): The aggregated statistics of the phase's
+            own trials (state counters: requested / completed / pruned /
+            failed, and the phase duration) — the input of the Trials and
+            "number of failed trials" columns of the leaderboard.
     """
 
     score: float
@@ -78,6 +83,7 @@ class PhaseResult:
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
     n_trials_evaluated: int = 0
     oof_predictions: np.ndarray | None = None
+    trial_stats: TrialStats = field(default_factory=TrialStats)
 
 
 @dataclass(frozen=True)
@@ -352,6 +358,9 @@ class _HPOWorkerResult:
         oof_predictions (np.ndarray | None): The OOF predictions of the
             phase's completed trials (``(n_trials, n_rows)``); ``None`` when
             OOF collection is off.
+        trial_stats (TrialStats): The aggregated statistics of the phase's
+            own trials (state counters and the phase duration); defaults
+            are used when the worker failed before any trial ran.
     """
 
     name: str
@@ -363,6 +372,7 @@ class _HPOWorkerResult:
     complexity_guard: list[dict[str, Any]] = field(default_factory=list)
     n_trials_evaluated: int = 0
     oof_predictions: np.ndarray | None = None
+    trial_stats: TrialStats = field(default_factory=TrialStats)
 
 
 @dataclass

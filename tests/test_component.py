@@ -44,6 +44,7 @@ from configurable_automl_engine.training_engine.component import (
 )
 from configurable_automl_engine.training_engine.data_prep import prepare_dataset
 from configurable_automl_engine.training_engine.state import PhaseResult
+from configurable_automl_engine.training_engine.state import _HPOWorkerResult
 from configurable_automl_engine.training_engine.artifact import _fit_and_save
 from configurable_automl_engine.training_engine.hpo_phases import _run_hpo
 from configurable_automl_engine.training_engine.state import _HpoPhaseSpec
@@ -3268,3 +3269,106 @@ def test_train_best_model_reproducible_with_stochastic_models(tmp_path: Path):
     assert res1["algorithm"] == res2["algorithm"]
     assert res1["score"] == res2["score"]
     assert res1["params"] == res2["params"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Aggregated trial statistics: проброс в training_engine
+# ──────────────────────────────────────────────────────────────────────────────
+class TestTrialStatsPropagation:
+    """OptimizeResult.trial_stats travels into PhaseResult / _HPOWorkerResult."""
+
+    def test_to_phase_result_propagates_trial_stats(self):
+        """_to_phase_result: trial_stats пробрасывается в PhaseResult как is."""
+        from configurable_automl_engine.hpo.types import TrialStats
+
+        stats = TrialStats(n_trials=4, n_completed=2, n_pruned=2, n_failed=0)
+        result = _optimize_result(
+            {"param": 1}, 0.95, n_trials_evaluated=2, trial_stats=stats
+        )
+        phase = hpo_phases_mod._to_phase_result(result, "ridge")
+        assert phase is not None
+        assert phase.trial_stats is stats
+
+    def test_to_phase_result_defaults_zero_stats_when_missing(self):
+        """Совместимость: сторонний OptimizeResult без статистики → нули.
+
+        Кастомные раннеры, вызывающие run_optimization/optimize и не
+        заполняющие trial_stats, дают дефолтную нулевую структуру вместо
+        падения."""
+        result = _optimize_result({"param": 1}, 0.95)
+        phase = hpo_phases_mod._to_phase_result(result, "ridge")
+        assert phase is not None
+        assert phase.trial_stats.n_trials == 0
+        assert phase.trial_stats.n_completed == 0
+        assert phase.trial_stats.n_pruned == 0
+        assert phase.trial_stats.n_failed == 0
+        assert phase.trial_stats.duration_seconds is None
+
+    def test_hpo_phase_worker_propagates_trial_stats(self):
+        """_hpo_phase_worker: trial_stats попадает в _HPOWorkerResult."""
+        from configurable_automl_engine.hpo.types import TrialStats
+
+        stats = TrialStats(n_trials=3, n_completed=3, n_pruned=0, n_failed=0)
+        spec = make_phase_spec(phase=HPOPhaseCfg(name="p1", n_trials=3, action="all_algorithms"))
+        algo_cfg = AlgoCfg(enable=True)
+        with patch.object(
+            hpo_phases_mod,
+            "_execute_hpo_phase",
+            return_value=PhaseResult(
+                score=0.9,
+                params={"p": 1},
+                trials=[],
+                n_trials_evaluated=3,
+                trial_stats=stats,
+            ),
+        ):
+            worker_result = hpo_phases_mod._hpo_phase_worker(
+                "ridge", algo_cfg, spec, pd.DataFrame({"a": [1.0, 2.0]})
+            )
+        assert worker_result.trial_stats is stats
+        assert worker_result.score == 0.9
+
+    def test_consume_worker_results_propagates_trial_stats(self):
+        """_consume_worker_results: trial_stats доезжает до PhaseResult."""
+        from configurable_automl_engine.hpo.types import TrialStats
+
+        stats = TrialStats(
+            n_trials=5, n_completed=3, n_pruned=2, n_failed=0, duration_seconds=1.5
+        )
+        outcome = hpo_phases_mod._consume_worker_results(
+            [
+                _HPOWorkerResult(
+                    name="ridge",
+                    score=0.9,
+                    params={"p": 1},
+                    trials=[],
+                    n_trials_evaluated=3,
+                    trial_stats=stats,
+                )
+            ]
+        )
+        assert "ridge" in outcome.results
+        assert outcome.results["ridge"].trial_stats is stats
+        assert outcome.results["ridge"].trial_stats.n_pruned == 2
+        assert outcome.results["ridge"].trial_stats.duration_seconds == 1.5
+
+    def test_phase_result_trial_stats_end_to_end_through_worker(self):
+        """Полная цепочка: OptimizeResult.trial_stats → worker → PhaseResult."""
+        from configurable_automl_engine.hpo.types import TrialStats
+
+        stats = TrialStats(n_trials=2, n_completed=1, n_pruned=1, n_failed=0)
+        spec = make_phase_spec(phase=HPOPhaseCfg(name="p1", n_trials=2, action="all_algorithms"))
+        algo_cfg = AlgoCfg(enable=True)
+        optimize_result = _optimize_result(
+            {"p": 1}, 0.9, n_trials_evaluated=1, trial_stats=stats
+        )
+        with patch.object(
+            hpo_phases_mod, "run_optimization", return_value=optimize_result
+        ):
+            worker_result = hpo_phases_mod._hpo_phase_worker(
+                "ridge", algo_cfg, spec, pd.DataFrame({"a": [1.0, 2.0]})
+            )
+        assert worker_result.trial_stats is stats
+        outcome = hpo_phases_mod._consume_worker_results([worker_result])
+        assert outcome.results["ridge"].trial_stats.n_completed == 1
+        assert outcome.results["ridge"].trial_stats.n_pruned == 1

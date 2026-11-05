@@ -16,6 +16,7 @@ this module).
 from __future__ import annotations
 
 import logging as _logging
+import time
 from typing import Any, NoReturn, cast
 
 import numpy as np
@@ -77,6 +78,7 @@ from .types import (
     InvalidAlgorithmError,
     InvalidDataError,
     OptimizeResult,
+    TrialStats,
 )
 
 log = _logging.getLogger(__name__)
@@ -190,7 +192,7 @@ class _OptimizeRunner:
          ├─ plan_pruning()           → PruningPlan
          ├─ _transfer_previous_trials()  (TPE history warm-start)
          ├─ _objective() → score_trial() / handle_failure()  (Optuna loop)
-         ├─ select_best_trial()      → BestTrial
+         ├─ select_best_trial()      → BestTrial (+ the trial statistics)
          └─ _fit_best_model()  (skipped when ``fit_best_model=False``)
 
     The setup steps are pure functions; the runner stores their plans and
@@ -219,6 +221,7 @@ class _OptimizeRunner:
     study: optuna.Study
     best: BestTrial
     best_model: Any
+    trial_stats: TrialStats
 
     def __init__(self, X: Any, y: Any, request: HpoRequest) -> None:
         """Store the data and the settings of a single optimisation run.
@@ -250,14 +253,19 @@ class _OptimizeRunner:
         # The out-of-fold predictions of every completed trial with a valid
         # score (the BBC-CV input): trial number -> OOF vector of len(X).
         self.trial_oof: dict[int, np.ndarray] = {}
+        # The aggregated statistics of the current phase's own trials: the
+        # counters are filled in run() after the Optuna loop (and also on the
+        # "no valid result" path) and returned with the OptimizeResult.
+        self.trial_stats = TrialStats()
 
     def run(self) -> OptimizeResult | None:
         """Run the full optimisation cycle, split into steps.
 
         Returns:
             OptimizeResult: The result of the phase — the final model, the
-                best params, the best score, and the trials of the current
-                phase ONLY (transferred ``previous_trials`` are excluded).
+                best params, the best score, the trials of the current
+                phase ONLY (transferred ``previous_trials`` are excluded)
+                and the aggregated trial statistics (``trial_stats``).
             None: The "no valid result" signal — ``n_trials=0`` or no
                 COMPLETED trial of the current phase. Transferred history
                 does NOT count toward the current phase validity.
@@ -321,6 +329,7 @@ class _OptimizeRunner:
             )
             self.study.enqueue_trial(initial_params)
             log.info("Enqueued initial params from previous phase: %s", initial_params)
+        optimize_started_at = time.monotonic()
         try:
             self.study.optimize(self._objective, n_trials=request.n_trials)
         except InvalidAlgorithmError:
@@ -330,6 +339,7 @@ class _OptimizeRunner:
                 self.MAX_FATAL_FAILURES,
             )
             raise
+        optimize_duration = time.monotonic() - optimize_started_at
 
         # The current phase's own trials (transferred ones have smaller
         # numbers and are excluded). Returned with the result so the caller
@@ -339,6 +349,10 @@ class _OptimizeRunner:
             for t in self.study.get_trials(deepcopy=False)
             if t.number >= self.phase_start_number
         ]
+        # The aggregated statistics of the phase's own trials: computed
+        # BEFORE the best-trial selection so the "no valid result" path
+        # (None) still carries the counters (n_completed=0 + pruned/failed).
+        self.trial_stats = _count_trial_states(self.phase_trials, optimize_duration)
         if not self.select_best_trial():
             return None
         self._log_best_result()
@@ -357,6 +371,7 @@ class _OptimizeRunner:
             complexity_guard=self.search.guard_records or None,
             n_trials_evaluated=self.best.n_trials_evaluated,
             oof_predictions=oof_predictions,
+            trial_stats=self.trial_stats,
         )
 
     # ─────────────────── run steps ─────────────────────────────────────────
@@ -560,11 +575,14 @@ class _OptimizeRunner:
         current phase (``number >= phase_start_number``) rather than by the
         internal behavior of ``study.best_params``. Transferred trials
         (``previous_trials``) feed the TPE sampler but are NEVER counted or
-        ranked here: they must not mask a total failure of the current phase
-        (otherwise a refine phase that wiped out all its own trials would
-        silently fall back to the previous phase's parameters — the forbidden
-        no-fallback contract). Counters are logged for observability ("no
-        valid result" must be explainable from the logs).
+        ranked here: they must not mask a total failure of the current
+        phase (otherwise a refine phase that wiped out all its own trials
+        would silently fall back to the previous phase's parameters — the
+        forbidden no-fallback contract). Counters are logged for
+        observability ("no valid result" must be explainable from the
+        logs); the same counters travel with the result as
+        ``OptimizeResult.trial_stats`` (and with the ``None`` failure
+        signal via ``runner.trial_stats``).
 
         The best trial is selected EXPLICITLY by its value among the current
         phase's COMPLETED trials; ``study.best_params`` is deliberately not
@@ -581,28 +599,35 @@ class _OptimizeRunner:
             for t in self.study.get_trials(deepcopy=False)
             if t.number >= self.phase_start_number
         ]
-        n_completed = sum(
-            1 for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE
-        )
-        n_pruned = sum(
-            1 for t in own_trials if t.state == optuna.trial.TrialState.PRUNED
-        )
-        n_failed = sum(1 for t in own_trials if t.state == optuna.trial.TrialState.FAIL)
+        # Sync the field with the recomputed list: after a direct
+        # ``select_best_trial`` call (no ``run()``) both the counters above
+        # and the best-trial selection below must work over ONE list —
+        # otherwise an empty ``phase_trials`` with non-empty own trials in
+        # the study passes the ``n_completed > 0`` check but crashes ``max()``
+        # with ``ValueError`` (the fallback was documented as safe).
+        self.phase_trials = own_trials
+        # Recomputed here from own_trials: idempotent with the run() call and
+        # safe for direct ``select_best_trial`` callers that did not go
+        # through run() (the old fallback for a not-yet-filled phase_trials).
+        # The duration measured in run() is preserved (select_best_trial does
+        # not re-time the loop).
+        stats = _count_trial_states(own_trials, self.trial_stats.duration_seconds)
+        self.trial_stats = stats
         if self.pruning.active:
             log.info(
                 "Early stopping: pruned %d of %d trials (algo=%s)",
-                n_pruned,
-                len(own_trials),
+                stats.n_pruned,
+                stats.n_trials,
                 self.algo,
             )
         log.info(
             "Trial states for algorithm '%s': completed=%d, pruned=%d, failed=%d",
             self.algo,
-            n_completed,
-            n_pruned,
-            n_failed,
+            stats.n_completed,
+            stats.n_pruned,
+            stats.n_failed,
         )
-        if n_completed == 0:
+        if stats.n_completed == 0:
             # The "no valid result" contract: all OWN trials are pruned
             # (PRUNED), failed (FAILED), or the trial list is empty. Transferred
             # history is irrelevant here. Return False so the caller (_run_hpo)
@@ -612,14 +637,18 @@ class _OptimizeRunner:
                 "Algorithm '%s' produced no completed trials "
                 "(completed=%d, pruned=%d, failed=%d); returning no result",
                 self.algo,
-                n_completed,
-                n_pruned,
-                n_failed,
+                stats.n_completed,
+                stats.n_pruned,
+                stats.n_failed,
             )
             return False
 
         best_trial = max(
-            (t for t in own_trials if t.state == optuna.trial.TrialState.COMPLETE),
+            (
+                t
+                for t in self.phase_trials
+                if t.state == optuna.trial.TrialState.COMPLETE
+            ),
             key=lambda t: cast(float, t.value),
         )
         best_params = dict(best_trial.params)
@@ -667,7 +696,7 @@ class _OptimizeRunner:
             # (the more trials were evaluated on the same folds, the more
             # optimistic the score is expected to be). Transferred history
             # never counts.
-            n_trials_evaluated=n_completed,
+            n_trials_evaluated=stats.n_completed,
         )
         return True
 
@@ -902,6 +931,39 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
         n_folds=n_folds,
         test_size=request.train_test_split_test_size,
         split_test_size=split_test_size,
+    )
+
+
+def _count_trial_states(
+    trials: list[FrozenTrial], duration_seconds: float | None = None
+) -> TrialStats:
+    """Aggregate the state counters of the CURRENT phase's own trials.
+
+    Args:
+        trials: The trials of the current phase ONLY (transferred
+            ``previous_trials`` must not be passed — they would inflate the
+            counters).
+        duration_seconds: The wall-clock duration of the optimization loop,
+            in seconds (``None`` — not measured).
+
+    Returns:
+        TrialStats: The counters normalized to plain Python ``int`` /
+        ``float`` (Optuna stores trial numbers and values as numpy scalars;
+        the aggregate must survive serialization boundaries without
+        changing its type).
+    """
+    states = [t.state for t in trials]
+    n_completed = sum(1 for s in states if s == optuna.trial.TrialState.COMPLETE)
+    n_pruned = sum(1 for s in states if s == optuna.trial.TrialState.PRUNED)
+    n_failed = sum(1 for s in states if s == optuna.trial.TrialState.FAIL)
+    # RUNNING/WAITING trials (a crashed worker left one behind) are counted in
+    # n_trials but in none of the state counters — the counters never overlap.
+    return TrialStats(
+        n_trials=len(trials),
+        n_completed=n_completed,
+        n_pruned=n_pruned,
+        n_failed=n_failed,
+        duration_seconds=duration_seconds,
     )
 
 

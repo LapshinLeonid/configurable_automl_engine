@@ -26,16 +26,13 @@ import numpy as np
 import optuna
 import pandas as pd
 import pytest
-
 from optuna.pruners import HyperbandPruner, MedianPruner, NopPruner
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.model_selection import KFold
 
-from configurable_automl_engine.hpo import search_space as hpo_search_space
+from configurable_automl_engine.common.metrics import get_scorer_object
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.hpo import runner as hpo_runner
-from configurable_automl_engine.common.metrics import get_scorer_object
-from configurable_automl_engine.tuner import HPO_WORST_SCORE, HyperoptError, optimize
 from configurable_automl_engine.hpo.evaluation import (
     _evaluate_pooled_cv,
     _evaluate_with_intermediate_reports,
@@ -44,6 +41,7 @@ from configurable_automl_engine.hpo.pruning import (
     _build_pruner,
     _normalize_pruning_config,
 )
+from configurable_automl_engine.tuner import HPO_WORST_SCORE, HyperoptError, optimize
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,7 +113,9 @@ def test_normalize_pruning_config_defaults():
 
 
 def test_build_pruner_median():
-    pruner = _build_pruner({"strategy": "median", "min_steps": 2, "n_startup_trials": 3})
+    pruner = _build_pruner(
+        {"strategy": "median", "min_steps": 2, "n_startup_trials": 3}
+    )
     assert isinstance(pruner, MedianPruner)
     assert pruner._n_warmup_steps == 2
     assert pruner._n_startup_trials == 3
@@ -267,7 +267,10 @@ def test_evaluate_pooled_cv_returns_pooled_value():
     )
     # The per-fold scorer is never invoked on the common path (lazy fallback).
     assert counting.calls == 0
-    expected = float(scorer._sign * scorer._score_func(y.to_numpy(), np.full(len(y), float(np.mean(y)) + 0.5)))
+    expected = float(
+        scorer._sign
+        * scorer._score_func(y.to_numpy(), np.full(len(y), float(np.mean(y)) + 0.5))
+    )
     assert pooled == pytest.approx(expected, rel=1e-6)
 
 
@@ -312,7 +315,12 @@ def test_evaluate_pooled_cv_masks_non_finite_predictions():
     first_fold_rows = set()
     for i, (X_tr, X_te, y_tr, y_te, test_idx) in enumerate(
         hpo_evaluation.iter_splits(
-            X, y, method="k_fold", n_folds=4, test_size=0.2, random_state=42,
+            X,
+            y,
+            method="k_fold",
+            n_folds=4,
+            test_size=0.2,
+            random_state=42,
             include_indices=True,
         )
     ):
@@ -754,7 +762,9 @@ def test_optimize_pooled_fallback_warns_once_with_phase_name(toy_data, caplog):
     metrics_mod.reset_pooled_fallback_warnings()
     with (
         caplog.at_level(logging.WARNING),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", bare_scorer_factory),
     ):
         opt_res = optimize(
@@ -1011,7 +1021,9 @@ def test_evaluate_pooled_cv_scoring_all_folds_failed_returns_nan(caplog):
     class AlwaysFailingRawMetric:
         """Poolable scorer whose raw metric raises on ANY input vector."""
 
-        _score_func = staticmethod(lambda yt, yp: (_ for _ in ()).throw(ValueError("raw metric boom")))
+        _score_func = staticmethod(
+            lambda yt, yp: (_ for _ in ()).throw(ValueError("raw metric boom"))
+        )
         _sign = -1
         _kwargs = {}
 
@@ -1193,7 +1205,9 @@ def test_evaluate_with_intermediate_reports_additive_skips_failed_fold(caplog):
     # still published as intermediate steps.
     steps = [call.kwargs["step"] for call in trial.report.call_args_list]
     assert steps == [2, 3, 4]
-    assert all(call.args[0] == pytest.approx(0.7) for call in trial.report.call_args_list)
+    assert all(
+        call.args[0] == pytest.approx(0.7) for call in trial.report.call_args_list
+    )
 
 
 def test_evaluate_with_intermediate_reports_all_folds_failed_raises_valueerror(caplog):
@@ -1397,15 +1411,15 @@ def test_evaluate_with_intermediate_reports_additive_fatal_scorer_exception_prop
 def quality_patches():
     """Patches are active for the duration of the test: a deterministic model and scorer."""
     with (
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
     ):
         yield
 
 
-def test_optimize_pruning_median_prunes_bad_trials(
-    toy_data, quality_patches, caplog
-):
+def test_optimize_pruning_median_prunes_bad_trials(toy_data, quality_patches, caplog):
     """MedianPruner prunes the deliberately bad trials before all folds complete.
 
     Even trials are good (quality=0.9), odd trials are deliberately bad (0.05).
@@ -1434,7 +1448,6 @@ def test_optimize_pruning_median_prunes_bad_trials(
         )
         assert opt_res is not None
         model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     # The best trial completed fully and has maximum quality.
     assert score == pytest.approx(0.9)
@@ -1471,7 +1484,6 @@ def test_optimize_pruning_hyperband_prunes_bad_trials(
         )
         assert opt_res is not None
         model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1648,9 +1660,7 @@ def test_optimize_pruned_and_failed_mix_returns_no_results(
     assert opt_res is None
 
 
-def test_optimize_pruning_nonfinite_score_uses_worst_score(
-    toy_data, quality_patches
-):
+def test_optimize_pruning_nonfinite_score_uses_worst_score(toy_data, quality_patches):
     """A non-finite avg_score in the pruning branch → the trial gets HPO_WORST_SCORE.
 
     Covers the ``if not np.isfinite(avg_score)`` branch inside the
@@ -1677,10 +1687,25 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
         phase_name="",
         oof_out=None,
     ):
-        del trial, estimator, X, y, method, n_folds, test_size, random_state, scorer, pool_metric, algo_name, phase_name
+        del (
+            trial,
+            estimator,
+            X,
+            y,
+            method,
+            n_folds,
+            test_size,
+            random_state,
+            scorer,
+            pool_metric,
+            algo_name,
+            phase_name,
+        )
         return np.nan
 
-    with patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate):
+    with patch.object(
+        hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+    ):
         opt_res = optimize(
             "ridge",
             X,
@@ -1699,7 +1724,6 @@ def test_optimize_pruning_nonfinite_score_uses_worst_score(
         )
         assert opt_res is not None
         model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == HPO_WORST_SCORE
     assert params is not None
@@ -1731,7 +1755,6 @@ def test_optimize_pruning_not_applied_for_train_test_split(
         assert opt_res is not None
         _model, params, score = opt_res.model, opt_res.params, opt_res.score
 
-
     # All trials completed — the best one was found by the usual maximization rule.
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1760,15 +1783,12 @@ def test_optimize_pruning_loo_works(toy_data, quality_patches):
     assert opt_res is not None
     model, params, score = opt_res.model, opt_res.params, opt_res.score
 
-
     assert score == pytest.approx(0.9)
     assert params is not None
     assert model is not None
 
 
-def test_optimize_pruning_with_initial_params_refine(
-    toy_data, quality_patches
-):
+def test_optimize_pruning_with_initial_params_refine(toy_data, quality_patches):
     """refine (initial_params + enqueue_trial) is compatible with pruning."""
     X, y = toy_data
 
@@ -1791,7 +1811,6 @@ def test_optimize_pruning_with_initial_params_refine(
     )
     assert opt_res is not None
     _model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1819,7 +1838,6 @@ def test_optimize_pruning_two_folds_edge_case(toy_data, quality_patches):
     )
     assert opt_res is not None
     model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -1953,7 +1971,6 @@ def test_optimize_pruned_trials_not_fatal(toy_data, quality_patches, caplog):
     assert opt_res is not None
     _model, _params, score = opt_res.model, opt_res.params, opt_res.score
 
-
     # The optimization completed without InvalidAlgorithmError.
     assert score == pytest.approx(0.9)
     assert "disqualified" not in caplog.text
@@ -1998,9 +2015,7 @@ def test_train_best_model_with_pruning_e2e(tmp_path: Path) -> None:
         "algorithms": {"ridge": {"enable": True}},
     }
 
-    X, y = make_regression(
-        n_samples=120, n_features=5, noise=0.1, random_state=42
-    )
+    X, y = make_regression(n_samples=120, n_features=5, noise=0.1, random_state=42)
     df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
     df["target"] = y
 
@@ -2064,8 +2079,12 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 360),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(
+            hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+        ),
     ):
         optimize(
             "ridge",
@@ -2114,7 +2133,9 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
         report_steps.append(step)
 
     with (
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner.optuna.trial.Trial, "report", fake_report),
     ):
@@ -2137,7 +2158,6 @@ def test_optimize_auto_kfold_pruning_integration_seven_reports():
         assert opt_res is not None
         _model, params, score = opt_res.model, opt_res.params, opt_res.score
 
-
     assert score == pytest.approx(0.9)
     assert params is not None
     # Exactly k=7 intermediate reports (steps 1..7) — one per fold.
@@ -2159,7 +2179,9 @@ def test_optimize_auto_pruning_parity_with_cross_val():
         yield from real_iter_splits(*args, **kwargs)
 
     with (
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_evaluation, "iter_splits", spy_iter_splits),
     ):
@@ -2234,8 +2256,12 @@ def test_optimize_auto_no_features_fallback_clamps_n_folds():
 
     with (
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(
+            hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+        ),
     ):
         optimize(
             "ridge",
@@ -2300,8 +2326,12 @@ def test_optimize_auto_kfold_low_confidence_k2():
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 16),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(
+            hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+        ),
     ):
         optimize(
             "ridge",
@@ -2354,8 +2384,12 @@ def test_optimize_explicit_kfold_pruning_keeps_original_n_folds():
 
     with (
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
-        patch.object(hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
+        patch.object(
+            hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+        ),
     ):
         optimize(
             "ridge",
@@ -2390,7 +2424,9 @@ def test_optimize_auto_loo_with_pruning_works():
         report_steps.append(step)
 
     with (
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
         patch.object(hpo_runner.optuna.trial.Trial, "report", fake_report),
     ):
@@ -2412,7 +2448,6 @@ def test_optimize_auto_loo_with_pruning_works():
         )
         assert opt_res is not None
         _model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -2451,7 +2486,9 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
         caplog.at_level(logging.WARNING),
         patch.object(hpo_runner, "make_cv", fake_make_cv),
         patch.object(hpo_runner, "get_effective_train_size", lambda *a, **k: 49500),
-        patch.object(hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)),
+        patch.object(
+            hpo_runner, "create_model", lambda algo, **kw: FakeQualityModel(**kw)
+        ),
         patch.object(hpo_runner, "_build_scorer", _quality_scorer_factory),
     ):
         opt_res = optimize(
@@ -2472,7 +2509,6 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
         )
         assert opt_res is not None
         _model, params, score = opt_res.model, opt_res.params, opt_res.score
-
 
     assert score == pytest.approx(0.9)
     assert params is not None
@@ -2516,9 +2552,7 @@ def test_train_best_model_auto_pruning_e2e(tmp_path: Path) -> None:
         "algorithms": {"ridge": {"enable": True}},
     }
 
-    X, y = make_regression(
-        n_samples=150, n_features=5, noise=0.1, random_state=42
-    )
+    X, y = make_regression(n_samples=150, n_features=5, noise=0.1, random_state=42)
     df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
     df["target"] = y
 
@@ -2755,7 +2789,9 @@ def test_evaluate_pooled_cv_failed_fold_non_poolable_path_fallback_nan(caplog):
     assert np.isnan(pooled)
 
 
-def test_evaluate_pooled_cv_failed_fold_poolable_scorer_raising_on_pooled_vector(caplog):
+def test_evaluate_pooled_cv_failed_fold_poolable_scorer_raising_on_pooled_vector(
+    caplog,
+):
     """Poolable scorer raising on the pooled vector: NaN, not a fold reward.
 
     The retained per-fold pairs must include the failed fold's (NaN, NaN)
@@ -2967,3 +3003,524 @@ def test_optimize_model_failing_one_fold_gets_worst_score(toy_data, caplog):
     assert opt_res.score == HPO_WORST_SCORE
     assert "failed to fit or predict" in caplog.text
     assert "TypeError" in caplog.text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Aggregated trial statistics (OptimizeResult.trial_stats)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_optimize_trial_stats_counts_mixed_states(toy_data, quality_patches):
+    """P1: смесь completed+pruned+failed → счётчики и скор/params корректны.
+
+    Чётные триалы хорошие (0.9), нечётные заведомо плохие (0.05) и режутся
+    MedianPruner'ом: n_trials=4, n_completed=2, n_pruned=2, n_failed=0;
+    счётчики — plain int, а лучший скор/params берутся из COMPLETED-триалов.
+    """
+    X, y = toy_data
+    res = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=4,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        fit_best_model=False,
+        space_overrides={"ridge": _make_quality_space()},
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+    assert res is not None
+    stats = res.trial_stats
+    assert stats.n_trials == 4
+    assert stats.n_completed == 2
+    assert stats.n_pruned == 2
+    assert stats.n_failed == 0
+    # Счётчики нормализованы в plain int (не optuna/np.int64).
+    assert type(stats.n_trials) is int
+    assert type(stats.n_completed) is int
+    assert type(stats.n_pruned) is int
+    assert type(stats.n_failed) is int
+    # Лучший результат — из COMPLETED-триалов.
+    assert res.score == pytest.approx(0.9)
+    assert res.params is not None
+    # Согласованность с n_trials_evaluated (тот же знаменатель).
+    assert res.n_trials_evaluated == stats.n_completed
+    # Длительность фазы измерена (неотрицательный float).
+    assert isinstance(stats.duration_seconds, float)
+    assert stats.duration_seconds >= 0.0
+
+
+def test_optimize_trial_stats_pruning_disabled_all_completed(toy_data, quality_patches):
+    """Без pruning все триалы COMPLETED: n_completed == n_trials."""
+    X, y = toy_data
+    res = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=3,
+        validation_strategy="train_test_split",
+        random_state=42,
+        fit_best_model=False,
+        space_overrides={"ridge": _make_quality_space()},
+    )
+    assert res is not None
+    stats = res.trial_stats
+    assert stats.n_trials == 3
+    assert stats.n_completed == 3
+    assert stats.n_pruned == 0
+    assert stats.n_failed == 0
+    assert res.n_trials_evaluated == 3
+
+
+def test_optimize_trial_stats_single_trial_pruned_logs_zero_completed(
+    toy_data, quality_patches, caplog
+):
+    """B1: n_trials=1, единственный триал pruned → None + счётчики в логе.
+
+    ``None`` — сигнал «нет валидного результата» и статистики с собой не
+    несёт; наблюдаемость обеспечивают счётчики в логе состояния триалов
+    (completed=0, pruned=1, failed=0).
+    """
+    X, y = toy_data
+    mocker_target = hpo_runner.optuna.trial.Trial
+    with (
+        patch.object(mocker_target, "should_prune", return_value=True),
+        caplog.at_level(logging.INFO),
+    ):
+        res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=1,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+    assert res is None
+    assert "completed=0, pruned=1, failed=0" in caplog.text
+
+
+def test_optimize_trial_stats_all_pruned_logs_zero_completed(
+    toy_data, quality_patches, mocker, caplog
+):
+    """N1: все PRUNED → None + n_completed=0 + лог со счётчиками."""
+    X, y = toy_data
+    mocker.patch.object(
+        hpo_runner.optuna.trial.Trial, "should_prune", return_value=True
+    )
+    with caplog.at_level(logging.INFO):
+        res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=4,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+    assert res is None
+    assert "Trial states for algorithm 'ridge'" in caplog.text
+    assert "completed=0, pruned=4, failed=0" in caplog.text
+
+
+def _patch_optimize_to_add_trials(study: optuna.Study, states: list):
+    """Replace ``study.optimize`` with a stub that adds trials IN the phase.
+
+    Trials pre-created BEFORE ``study.optimize`` runs would sit behind the
+    phase boundary (``phase_start_number``) and not count as the phase's own
+    trials; the stub adds them inside the (mocked) loop, so the runner sees
+    them as its own trials — the same way real FAIL/PRUNED trials appear.
+    """
+    from optuna.trial import create_trial
+
+    def fake_optimize(_objective, n_trials, **kwargs):
+        del kwargs
+        for state in states[:n_trials]:
+            study.add_trial(create_trial(state=state, params={}, distributions={}))
+
+    study.optimize = fake_optimize  # type: ignore[method-assign]
+
+
+def test_optimize_trial_stats_all_failed_logs_zero_completed(
+    toy_data, quality_patches, mocker, caplog
+):
+    """N2: все FAILED → None + n_completed=0 + лог со счётчиками."""
+    X, y = toy_data
+    study = optuna.create_study(direction="maximize")
+    mocker.patch.object(hpo_runner.optuna, "create_study", return_value=study)
+    _patch_optimize_to_add_trials(study, [optuna.trial.TrialState.FAIL] * 3)
+    with caplog.at_level(logging.INFO):
+        res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=3,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+        )
+    assert res is None
+    assert "completed=0, pruned=0, failed=3" in caplog.text
+
+
+def test_optimize_trial_stats_pruned_failed_mix_logs_zero_completed(
+    toy_data, quality_patches, mocker, caplog
+):
+    """N3: mix PRUNED+FAILED без COMPLETED → None + n_completed=0 + лог."""
+    X, y = toy_data
+    study = optuna.create_study(direction="maximize")
+    mocker.patch.object(hpo_runner.optuna, "create_study", return_value=study)
+    _patch_optimize_to_add_trials(
+        study,
+        [
+            optuna.trial.TrialState.PRUNED,
+            optuna.trial.TrialState.FAIL,
+            optuna.trial.TrialState.PRUNED,
+        ],
+    )
+    with caplog.at_level(logging.INFO):
+        res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=3,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            space_overrides={"ridge": _make_quality_space()},
+        )
+    assert res is None
+    assert "completed=0, pruned=2, failed=1" in caplog.text
+
+
+def test_optimize_trial_stats_refine_with_initial_params_counts_enqueued_trial(
+    toy_data, quality_patches
+):
+    """P3: refine-фаза с initial_params (enqueue-триал) → статистика включает
+    enqueued-триал: n_trials фазы == запрошенному числу, enqueued-триал
+    выполняется первым и входит в счётчики."""
+    X, y = toy_data
+    res = optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=3,
+        validation_strategy="k_fold",
+        n_folds=3,
+        random_state=42,
+        fit_best_model=False,
+        initial_params={"quality": 0.9},
+        space_overrides={"ridge": _make_quality_space()},
+    )
+    assert res is not None
+    stats = res.trial_stats
+    assert stats.n_trials == 3
+    assert stats.n_completed == 3
+    assert stats.n_pruned == 0
+    assert stats.n_failed == 0
+
+
+def test_optimize_trial_stats_previous_trials_not_counted(toy_data):
+    """P4: previous_trials перенесены из предыдущей фазы → счётчики агрегируют
+    только собственные триалы фазы (симметрично n_trials_evaluated)."""
+    X, y = toy_data
+    first = optimize(
+        "nearest_neighbors_regression",
+        X,
+        y,
+        n_trials=3,
+        random_state=42,
+        fit_best_model=False,
+    )
+    assert first is not None
+    assert first.trial_stats.n_trials == 3
+    assert first.trial_stats.n_completed == 3
+
+    second = optimize(
+        "nearest_neighbors_regression",
+        X,
+        y,
+        n_trials=2,
+        random_state=43,
+        fit_best_model=False,
+        previous_trials=first.trials,
+    )
+    assert second is not None
+    # Только собственные триалы фазы: перенесённые (3) не учитываются.
+    assert second.trial_stats.n_trials == 2
+    assert second.trial_stats.n_completed == 2
+    assert second.trial_stats.n_pruned == 0
+    assert second.trial_stats.n_failed == 0
+    assert second.n_trials_evaluated == second.trial_stats.n_completed
+
+
+def test_optimize_trial_stats_nonfinite_scores_count_as_completed(
+    toy_data, quality_patches
+):
+    """N4 (регрессия test_optimize_pruning_nonfinite_score_uses_worst_score):
+    нефинитная метрика → COMPLETED со сентинелом → триал учитывается в
+    n_completed (результат дальше исключается фильтром valid_results)."""
+    X, y = toy_data
+
+    def fake_evaluate(
+        trial,
+        estimator,
+        X,
+        y,
+        *,
+        method,
+        n_folds,
+        test_size,
+        random_state,
+        scorer,
+        pool_metric=False,
+        algo_name="",
+        phase_name="",
+        oof_out=None,
+    ):
+        del (
+            trial,
+            estimator,
+            X,
+            y,
+            method,
+            n_folds,
+            test_size,
+            random_state,
+            scorer,
+            pool_metric,
+            algo_name,
+            phase_name,
+            oof_out,
+        )
+        return np.nan
+
+    with patch.object(
+        hpo_evaluation, "_evaluate_with_intermediate_reports", fake_evaluate
+    ):
+        res = optimize(
+            "ridge",
+            X,
+            y,
+            n_trials=2,
+            validation_strategy="k_fold",
+            n_folds=3,
+            random_state=42,
+            fit_best_model=False,
+            space_overrides={"ridge": _make_quality_space()},
+            pruning={
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
+        )
+    assert res is not None
+    assert res.score == HPO_WORST_SCORE
+    # Триалы завершились (пусть и с сентинелом) — они в n_completed.
+    assert res.trial_stats.n_trials == 2
+    assert res.trial_stats.n_completed == 2
+    assert res.trial_stats.n_pruned == 0
+    assert res.trial_stats.n_failed == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Unit tests of _count_trial_states (RUNNING/WAITING не входят в счётчики)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_count_trial_states_running_and_waiting_counted_only_in_n_trials():
+    """RUNNING/WAITING-триалы → в n_trials, но ни в один счётчик состояний.
+
+    Задокументированное поведение _count_trial_states: счётчики состояний
+    не пересекаются, «зависшие» триалы (например, после краха воркера)
+    видны в n_trials, но не завышают completed/pruned/failed.
+    """
+    from optuna.trial import create_trial
+
+    from configurable_automl_engine.hpo.runner import _count_trial_states
+
+    trials = [
+        create_trial(state=optuna.trial.TrialState.COMPLETE, value=0.9),
+        create_trial(state=optuna.trial.TrialState.PRUNED),
+        create_trial(state=optuna.trial.TrialState.FAIL),
+        create_trial(state=optuna.trial.TrialState.RUNNING),
+        create_trial(state=optuna.trial.TrialState.WAITING),
+    ]
+    stats = _count_trial_states(trials, duration_seconds=1.5)
+    assert stats.n_trials == 5
+    assert stats.n_completed == 1
+    assert stats.n_pruned == 1
+    assert stats.n_failed == 1
+    # Счётчики не пересекаются: сумма состояний < n_trials из-за RUNNING/WAITING.
+    assert stats.n_completed + stats.n_pruned + stats.n_failed < stats.n_trials
+    assert stats.duration_seconds == 1.5
+
+
+def test_count_trial_states_default_duration_is_none():
+    """duration_seconds=None (не измерена) → пробрасывается без изменений."""
+    from optuna.trial import create_trial
+
+    from configurable_automl_engine.hpo.runner import _count_trial_states
+
+    stats = _count_trial_states(
+        [create_trial(state=optuna.trial.TrialState.COMPLETE, value=0.5)]
+    )
+    assert stats.n_trials == 1
+    assert stats.n_completed == 1
+    assert stats.duration_seconds is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Fallback-ветка select_best_trial: прямой вызов без run()
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _bare_runner(
+    X: pd.DataFrame, y: pd.Series, pruning: dict | None = None
+) -> hpo_runner._OptimizeRunner:
+    """A runner with the run() plans built, but the Optuna loop not executed.
+
+    Emulates the state of a direct ``select_best_trial()`` caller that did
+    not go through ``run()``: the plans exist, the study exists, but
+    ``phase_trials`` is not yet filled (the fallback branch must handle it).
+
+    Args:
+        X: The feature matrix.
+        y: The target vector.
+        pruning: Optional early-stopping settings for the request (the
+            runner re-plans pruning from the request inside ``run()``).
+    """
+    from configurable_automl_engine.hpo.request import HpoRequest
+    from configurable_automl_engine.hpo.runner import (
+        _build_scorer,
+        _OptimizeRunner,
+        plan_preprocessing,
+        plan_pruning,
+        plan_search_space,
+        plan_validation,
+    )
+
+    runner = _OptimizeRunner(
+        X, y, HpoRequest(algo_name="ridge", n_trials=2, pruning=pruning)
+    )
+    request = runner.request
+    runner.validation = plan_validation(runner.X, runner.y, request)
+    runner.X = runner.validation.X
+    runner.preprocessing = plan_preprocessing(runner.X, request)
+    runner.X = runner.preprocessing.X
+    runner.search = plan_search_space(
+        runner.algo,
+        runner.y,
+        space_override=None,
+        limit_hyperparameters=None,
+        user_hyperparameter_keys=None,
+        complexity_guard=request.complexity_guard,
+        n_samples_eff=runner.validation.n_samples_eff,
+        preprocessing=runner.preprocessing,
+    )
+    runner.scorer = _build_scorer(request.metric)
+    runner.pruning = plan_pruning(request.pruning, runner.validation.method)
+    runner.study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=1),
+        pruner=optuna.pruners.NopPruner(),
+    )
+    runner.phase_start_number = 0
+    return runner
+
+
+def test_select_best_trial_direct_call_without_run_fills_phase_trials(
+    toy_data, quality_patches
+):
+    """Регрессия: прямой вызов select_best_trial() без run() не бросает
+    ValueError по пустому self.phase_trials.
+
+    Fallback-ветка пересчитывает own_trials из study; после фикса поле
+    phase_trials синхронизируется с own_trials, поэтому и проверка
+    «n_completed > 0», и выбор best_trial работают по одному списку.
+    """
+    X, y = toy_data
+    runner = _bare_runner(X, y)
+    runner.study.add_trial(
+        optuna.trial.create_trial(
+            state=optuna.trial.TrialState.COMPLETE,
+            value=0.9,
+            params={},
+            distributions={},
+        )
+    )
+
+    # Fallback-сценарий: phase_trials НЕ заполнен (run() не вызывался).
+    runner.phase_trials = []
+    assert runner.select_best_trial() is True
+    # Поле синхронизировано: best_trial выбирается по одному с счётчиками списку.
+    assert len(runner.phase_trials) == 1
+    assert runner.best.score == pytest.approx(0.9)
+    assert runner.trial_stats.n_trials == 1
+    assert runner.trial_stats.n_completed == 1
+
+
+def test_select_best_trial_direct_call_no_completed_returns_false(
+    toy_data, quality_patches
+):
+    """Прямой вызов select_best_trial() без run() и без COMPLETED-триалов:
+    False («no valid result»), без исключений; счётчики отражают fail."""
+    from optuna.trial import create_trial
+
+    X, y = toy_data
+    runner = _bare_runner(X, y)
+    runner.study.add_trial(create_trial(state=optuna.trial.TrialState.FAIL))
+
+    runner.phase_trials = []
+    assert runner.select_best_trial() is False
+    assert runner.trial_stats.n_trials == 1
+    assert runner.trial_stats.n_completed == 0
+    assert runner.trial_stats.n_failed == 1
+
+
+def test_optimize_trial_stats_runner_stats_available_on_none_path(
+    toy_data, quality_patches
+):
+    """B2-дополнение: на None-пути runner.trial_stats несёт счётчики
+    (n_completed=0), наблюдаемость «no valid result» не только в логах."""
+    X, y = toy_data
+    mocker_target = hpo_runner.optuna.trial.Trial
+    runner = _bare_runner(
+        X,
+        y,
+        pruning={
+            "enable": True,
+            "strategy": "median",
+            "min_steps": 1,
+            "n_startup_trials": 1,
+        },
+    )
+    runner.scorer = _quality_scorer_factory(runner.request.metric)
+    with patch.object(mocker_target, "should_prune", return_value=True):
+        result = runner.run()
+    assert result is None
+    stats = runner.trial_stats
+    assert stats.n_trials == 2
+    assert stats.n_completed == 0
+    assert stats.n_pruned == 2
+    assert stats.n_failed == 0
