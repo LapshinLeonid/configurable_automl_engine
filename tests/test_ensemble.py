@@ -352,6 +352,31 @@ def test_n4_missing_predictor_is_error() -> None:
             ],
             predictors={"a": _FakePredictor(1.0)},
         )
+    # Review: a NEGATIVE member weight is rejected per member, even when
+    # the weights sum to 1.0 ([2.0, -1.0]) — the sum check alone cannot
+    # see the sign structure, and a negative weight must never reach the
+    # members, the report section or the serialized artifact.
+    with pytest.raises(ValueError, match="positive and finite"):
+        EnsembleModel(
+            metric_user="rmse",
+            metric_direction="minimize",
+            members=[
+                EnsembleMember("a", 1.0, 2.0, 1),
+                EnsembleMember("b", 2.0, -1.0, 2),
+            ],
+            predictors={"a": _FakePredictor(1.0), "b": _FakePredictor(2.0)},
+        )
+    # A non-finite weight is rejected per member as well.
+    with pytest.raises(ValueError, match="positive and finite"):
+        EnsembleModel(
+            metric_user="rmse",
+            metric_direction="minimize",
+            members=[
+                EnsembleMember("a", 1.0, float("nan"), 1),
+                EnsembleMember("b", 2.0, 1.0, 2),
+            ],
+            predictors={"a": _FakePredictor(1.0), "b": _FakePredictor(2.0)},
+        )
 
 
 def test_n4_engine_member_without_record_skips_ensemble(

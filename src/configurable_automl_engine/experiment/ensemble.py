@@ -365,6 +365,20 @@ class EnsembleModel:
         names = [member.name for member in members]
         if len(set(names)) != len(names):
             raise ValueError(f"Ensemble member names must be unique, got {names}")
+        # Per-member weight validation BEFORE the sum check: the sum is
+        # insensitive to the sign structure (weights like [2.0, -1.0] sum
+        # to 1.0), so a negative or non-finite member weight could slip
+        # into the members, the report section and the serialized
+        # artifact unnoticed.
+        bad = [
+            (member.name, member.weight)
+            for member in members
+            if not math.isfinite(member.weight) or member.weight <= 0.0
+        ]
+        if bad:
+            raise ValueError(
+                f"Ensemble member weights must be positive and finite, got {bad}"
+            )
         total = sum(member.weight for member in members)
         if not math.isfinite(total) or total <= 0.0:
             raise ValueError(
