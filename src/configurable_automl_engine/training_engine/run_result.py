@@ -178,6 +178,11 @@ def build_experiment_result(
             if ctx.complexity_guard_records
             else None
         ),
+        ensemble=(
+            dict(result["ensemble"])
+            if isinstance(result.get("ensemble"), dict)
+            else None
+        ),
         oof_score=_opt_float(result.get("oof_score")),
         holdout_score=_opt_float(result.get("holdout_score")),
         bbc_score=_opt_float(result.get("bbc_score")),

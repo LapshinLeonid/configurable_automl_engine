@@ -303,6 +303,13 @@ class PhaseContext:
             ``ExperimentResult`` runs (one record per disqualification, not
             one per phase). The target-domain guard disqualifications are
             attributed to the first pipeline phase.
+        leaderboard_snapshot (dict[str, PhaseResult]): The full leaderboard
+            of the last HPO phase (every algorithm with a valid score),
+            snapshotted before select steps narrow the working set — the
+            source of the experimental top-K ensemble
+            (``general.ensemble``): the terminal select keeps only the
+            winner in the working set, so the ensemble ranks the snapshot
+            instead.
     """
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
@@ -315,6 +322,7 @@ class PhaseContext:
     oof_pool: list[np.ndarray] = field(default_factory=list)
     phase_timings: list[PhaseTiming] = field(default_factory=list)
     disqualification_phases: dict[str, str] = field(default_factory=dict)
+    leaderboard_snapshot: dict[str, PhaseResult] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

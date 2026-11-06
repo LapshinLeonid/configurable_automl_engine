@@ -24,8 +24,9 @@ Documented contract:
   experiment (an in-memory store by default; pass ``store`` or ``store_path``
   to persist the history as JSONL) and kept as the ``result`` attribute;
 * the methods that need a finished run (``leaderboard``, ``best_model``,
-  ``report``, ``export``, ``explain``) raise ``RuntimeError`` with a clear
-  state message when called before ``run()``;
+  ``report``, ``export``, ``explain``, ``ensemble_model``) raise
+  ``RuntimeError`` with a clear state message when called before
+  ``run()``;
 * a repeated ``run()`` is allowed: it trains again, produces a new
   ``run_id`` and replaces ``result`` (a ``RuntimeWarning`` is emitted so
   the repeated training is visible in the log);
@@ -368,6 +369,38 @@ class AutoMLExperiment:
         from configurable_automl_engine.trainer import ModelTrainer
 
         return ModelTrainer.load(model_path)
+
+    def ensemble_model(self) -> Any:
+        """Return the experimental top-K ensemble of the last run.
+
+        The ensemble is built by the engine when ``general.ensemble.enable``
+        is true; the section (members, scores, weights, artifact path) is
+        recorded in ``ExperimentResult.ensemble`` and the serialized model
+        is loaded from the artifact path recorded there — the single
+        source of truth, like ``best_model()``.
+
+        Returns:
+            The loaded ``EnsembleModel`` (a weighted-average predictor
+            with a sklearn-style ``predict(X)``).
+
+        Raises:
+            ExperimentNotRunError: The experiment has not been run yet.
+            RuntimeError: The run produced no ensemble (the feature is
+                disabled, the run failed, or the ensemble step was
+                skipped), or the recorded ensemble artifact cannot be
+                loaded.
+        """
+        result = self._require_result()
+        section = result.ensemble
+        if not section or not section.get("artifact_path"):
+            raise RuntimeError(
+                "No ensemble available: the run did not produce an ensemble "
+                "(enable general.ensemble in the configuration; the winner "
+                "model is available via best_model())."
+            )
+        from configurable_automl_engine.experiment.ensemble import EnsembleModel
+
+        return EnsembleModel.load(section["artifact_path"])
 
     def report(
         self,

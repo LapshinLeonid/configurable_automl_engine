@@ -333,6 +333,12 @@ def _execute_hpo_step(
     # Since the phase results started empty, the working set is guaranteed
     # to contain only this phase's results.
     ctx.working_set = valid_results
+    # The experimental top-K ensemble (general.ensemble) ranks the FULL
+    # leaderboard of the run, not the narrowed terminal working set: the
+    # snapshot is refreshed after every HPO phase (the working set is
+    # rebuilt from scratch), so the snapshot always mirrors the last HPO
+    # phase — the same records the leaderboard of the result is built from.
+    ctx.leaderboard_snapshot = dict(valid_results)
 
     # Accumulate the adaptive complexity guard records of the phase into
     # the report section (one "before → after" record per restricted
@@ -795,6 +801,14 @@ def _run_after_phases(
         n_trials_evaluated=n_trials_evaluated,
         oof_pool=ctx.oof_pool,
     )
+    # Experimental top-K ensemble (general.ensemble.enable): an additional
+    # output NEXT TO the winner — the winner, the winner artifact and the
+    # terminal selection are not affected. The ensemble model is saved next
+    # to the winner artifact, and the report section (members, scores,
+    # weights, artifact path) is added to the result dict; a failure of the
+    # ensemble step never aborts the run (logged, no section).
+    if cfg.general.ensemble.enable:
+        _build_and_attach_ensemble(cfg=cfg, prepared=prepared, ctx=ctx, result=result)
     # The instrumented run result (T3): assembled from the same sources as
     # the dict (not from the dict itself), so the optional dict keys stay
     # untouched. The model is not returned by the public API (the dict
@@ -829,6 +843,60 @@ class _RunFinish:
     def duration_seconds(self) -> float:
         """The total wall-clock duration (monotonic clock)."""
         return time.monotonic() - self._started_monotonic
+
+
+def _build_and_attach_ensemble(
+    *,
+    cfg: Config,
+    prepared: PreparedData,
+    ctx: PhaseContext,
+    result: dict[str, Any],
+) -> None:
+    """Build the experimental ensemble and attach its report to the result.
+
+    Best-effort by contract: every failure is logged and the result simply
+    carries no ``ensemble`` key. The ensemble model is saved next to the
+    winner artifact (``<model stem>_ensemble.<ext>``) so the facade and the
+    consumers can reload it; the artifact path is recorded in the section.
+    """
+    from configurable_automl_engine.training_engine.ensemble_step import (
+        build_ensemble_from_context,
+    )
+
+    built = build_ensemble_from_context(cfg=cfg, prepared=prepared, ctx=ctx)
+    if built is None:
+        return
+    ensemble, section = built
+    # Save next to the winner artifact (the ensemble is an additional
+    # output: the winner artifact path is never touched). ``model_path``
+    # is always present in the result (persist_artifact records it) — a
+    # missing key means an unexpected engine/result divergence, and an
+    # ensemble placed next to a wrong path would be worse than no
+    # ensemble: the step degrades to "no section" with an explicit
+    # warning naming the consequence for the facade.
+    model_path = result.get("model_path")
+    if not model_path:
+        _LOG.warning(
+            "The ensemble could not be attached: the result carries no "
+            "'model_path' (unexpected result-assembly divergence); the "
+            "result carries no ensemble section and ensemble_model() "
+            "will raise."
+        )
+        return
+    ensemble_path = Path(str(model_path)).with_name(
+        f"{Path(str(model_path)).stem}_ensemble{Path(str(model_path)).suffix}"
+    )
+    try:
+        ensemble.save(ensemble_path, cfg.general.serialization_format)
+    except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
+        _LOG.warning(
+            "The ensemble artifact could not be saved: %s; the result "
+            "carries no ensemble section and ensemble_model() will raise.",
+            err,
+        )
+        return
+    section["artifact_path"] = str(ensemble_path)
+    result["ensemble"] = section
 
 
 def _record_failed_run(

@@ -42,6 +42,9 @@ from configurable_automl_engine.training_engine.config import (
 from configurable_automl_engine.training_engine.config.complexity_guard import (
     ComplexityGuardCfg,
 )
+from configurable_automl_engine.training_engine.config.ensemble import (
+    EnsembleCfg,
+)
 from configurable_automl_engine.training_engine.config.phases import (
     HPOPhaseCfg,
     PruningCfg,
@@ -396,6 +399,19 @@ class GeneralCfg(BaseModel):
             "search spaces on small data (mode: 'off'/'warn'/'apply', "
             "lossless/regularize levels, user_range_policy, size-mode "
             "thresholds, size_basis). See API_REFERENCE.md."
+        ),
+    )
+    ensemble: EnsembleCfg = Field(
+        default_factory=EnsembleCfg,
+        description=(
+            "Experimental weighted-average ensemble of the top-K "
+            "leaderboard models (disabled by default). When "
+            "general.ensemble.enable is true, after the terminal "
+            "selection the engine retrains the top-K completed "
+            "algorithms on 100% of the data, averages their predictions "
+            "with weights derived from the validation scores and reports "
+            "the dedicated 'ensemble' section in the result. The winner "
+            "and the winner artifact are NOT affected"
         ),
     )
     preprocessing: PreprocessingOverride | None = Field(
