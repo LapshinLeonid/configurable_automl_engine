@@ -49,9 +49,11 @@
 
     logging = ["concurrent-log-handler>=0.9.25"]
 
+    mlflow = ["mlflow>=2.0.0"]
+
     test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15"]
 
-    all = ["configurable-automl-engine[xgboost,logging]"]
+    all = ["configurable-automl-engine[xgboost,logging,mlflow]"]
 
     dev = ["configurable-automl-engine[all,test]"]
 

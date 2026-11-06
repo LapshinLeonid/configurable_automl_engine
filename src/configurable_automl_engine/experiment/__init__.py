@@ -6,9 +6,11 @@ and this package: ``ExperimentResult``, ``AlgorithmRun``, the statuses, the
 run history (``ExperimentStore``, the T4 component), the algorithm
 ranking table (``Leaderboard``) and the reporter framework
 (``Reporter``, ``JSONReporter``, ``MarkdownReporter``,
-``CompositeReporter``). The models are pure data: the module imports
-nothing from the engine layers, so reporters can consume results without
-importing the training engine.
+``CompositeReporter``), plus the optional MLflow adapter
+(``MLflowReporter`` — imports ``mlflow`` lazily, only at report time).
+The models are pure data: the module imports nothing from the engine
+layers, so reporters can consume results without importing the training
+engine.
 """
 
 from configurable_automl_engine.common.definitions import (
@@ -28,6 +30,8 @@ from configurable_automl_engine.experiment.reporting import (
     CompositeReporter,
     JSONReporter,
     MarkdownReporter,
+    MLflowReporter,
+    MLflowReporterError,
     Reporter,
     ReporterArtifact,
 )
@@ -54,6 +58,8 @@ __all__ = [
     "JSONReporter",
     "Leaderboard",
     "LeaderboardEntry",
+    "MLflowReporter",
+    "MLflowReporterError",
     "MarkdownReporter",
     "MetricDirection",
     "Reporter",

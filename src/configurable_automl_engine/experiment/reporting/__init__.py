@@ -9,8 +9,10 @@ run in one call through :class:`CompositeReporter` — the single
 registration point of a run.
 
 The reporters are pure consumers of the result model: they never import
-the training engine and never import MLflow (an MLflow reporter is a
-separate adapter, outside this package).
+the training engine and never import MLflow. The one exception is the
+MLflow *adapter* (:class:`MLflowReporter`), which imports ``mlflow``
+lazily, inside its own ``report`` call — importing this package stays
+MLflow-free.
 """
 
 from configurable_automl_engine.experiment.reporting.base import (
@@ -24,10 +26,16 @@ from configurable_automl_engine.experiment.reporting.json_reporter import (
 from configurable_automl_engine.experiment.reporting.markdown_reporter import (
     MarkdownReporter,
 )
+from configurable_automl_engine.experiment.reporting.mlflow_reporter import (
+    MLflowReporter,
+    MLflowReporterError,
+)
 
 __all__ = [
     "CompositeReporter",
     "JSONReporter",
+    "MLflowReporter",
+    "MLflowReporterError",
     "MarkdownReporter",
     "Reporter",
     "ReporterArtifact",

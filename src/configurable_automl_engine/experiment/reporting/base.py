@@ -5,8 +5,9 @@ A reporter consumes one finished
 :class:`~configurable_automl_engine.experiment.result.ExperimentResult`
 and produces an artifact: a file path or a rendered string. Reporters are
 pure consumers of the result model — they never reach into the training
-engine and never import MLflow (the MLflow reporter is a separate adapter,
-a later task in the epic).
+engine and never import MLflow (the optional MLflow adapter lives in
+:mod:`.mlflow_reporter` and imports ``mlflow`` lazily, inside its own
+``report`` call).
 
 Contract:
 
@@ -58,7 +59,8 @@ class Reporter(ABC, Generic[_ArtifactT_co]):
     Subclasses implement :meth:`report`, consuming a finished
     ``ExperimentResult`` and returning the produced artifact. Reporters
     are stateless consumers of the result model: they never import the
-    training engine and never import MLflow.
+    training engine and never import MLflow (the optional MLflow adapter
+    imports ``mlflow`` lazily, inside its own ``report`` call).
 
     A plain reporter returns one artifact; a composite returns a tuple
     (see :class:`CompositeReporter`), and the generic parameter makes

@@ -1583,6 +1583,51 @@ The reporter framework: pure consumers of the `ExperimentResult` model (see [Tra
 
 **Returns (JSONReporter):** `Path` — the written report file. **Returns (MarkdownReporter):** `str` — the Markdown document. **Returns (CompositeReporter):** `tuple` — the artifacts of the individual reporters.
 
+## `MLflowReporter` (optional extra `[mlflow]`)
+
+`from configurable_automl_engine.experiment import MLflowReporter`. Requires the optional extra: `pip install 'configurable-automl-engine[mlflow]'`.
+
+The MLflow tracking adapter: logs the metrics, the parameters, the tags and the artifacts of one finished `ExperimentResult` into an MLflow run. It is the only component of the package that knows about MLflow — the `mlflow` import happens lazily, inside the adapter's `report` call (guarded by `is_installed`), so installing and importing the package without MLflow is unaffected and the engine core (`training_engine/`, `hpo/`, `tuner.py`) never touches MLflow.
+
+**`MLflowReporter(*, nested=False, log_artifacts=True, artifact_prefix="experiment")`**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `nested` | `bool` | `False` | Run policy. `False` — log into the caller's active run (`mlflow.start_run()`); without an active run a `MLflowReporterError` is raised (the run placement is the caller's decision). `True` — start a nested run per `report` call, named after the experiment `run_id`; without an active parent the run is promoted to top level (MLflow's own semantics). |
+| `log_artifacts` | `bool` | `True` | Also log the three text artifacts: the leaderboard table (`leaderboard.txt`), the JSON snapshot (`report.json`) and the Markdown report (`report.md`). |
+| `artifact_prefix` | `str` | `"experiment"` | The directory prefix of the artifacts inside the run. |
+
+**What is logged:**
+
+* tags — the experiment `run_id`, the status, the metric name/direction (sklearn and user semantics), the label and the engine version, the failure message for a failed run;
+* metrics — `automl.winner_score_<metric>`, the honest estimates (`automl.holdout_score_<metric>`, `automl.bbc_score_<metric>`, `automl.oof_score_<metric>`), `automl.duration_seconds`, the per-algorithm scores (`automl.score.<algorithm>.<phase>`) and `additional_metrics` (`automl.additional.<name>`);
+* params — the run settings (metric, validation, folds, random state) and the best hyperparameters (the winner's as `automl.param.<key>`, the per-phase ones as `automl.param.<algorithm>__<phase>.<key>`, nested mappings flattened with a dot).
+
+**Policies:**
+
+* **failure policy** — a tracking-server failure (connection error, timeout, any MLflow API exception) never fails the experiment: the error is logged as a WARNING and `report` returns `None` (the "reported-failed" artifact). Usage errors still raise `MLflowReporterError`: a missing `mlflow` installation (the message names the `[mlflow]` extra) and a missing active run with `nested=False`. A failure mid-report leaves a *partial* run — the logging order is tags → metrics → params → artifacts, so a `log_params` failure keeps the tags and metrics but loses the params and artifacts; the WARNING names the failure, and the re-reporting policy (below) is the remedy;
+* **metric sanitization** — NaN/±inf values (MLflow rejects them; `additional_metrics` may carry a NaN from sklearn) are skipped with a WARNING; the experiment's own score fields cannot be non-finite (the model validation rejects them);
+* **parameter keys** — per-phase parameters are prefixed with `<algorithm>__<phase>`, so identical hyperparameter names across phases (an HPO refine of the same space) never collide (a re-logged different value would fail the MLflow run). The separator is `__` (not `:`): MLflow's parameter-name validation regex for Windows (`^[/\w.\- ]*$`) rejects a colon, which would make `log_params` raise `INVALID_PARAMETER_VALUE` on Windows and — per the failure policy — degrade the whole report to a warning. Both the phase segment and the flattened parameter sub-keys are additionally clamped to a head/tail budget (`...` in the middle): MLflow rejects an entity key over 250 characters (`MAX_ENTITY_KEY_LENGTH`), and an unconstrained user-configured phase name would otherwise fail `log_params` the same way. The truncation marker is ASCII `...` — the unicode ellipsis `…` fails MLflow's name-validation regex itself. As a final guard the *composed* key (prefix + algorithm + phase + sub-key) is clamped to the limit too — the segment budgets alone do not bound the sum of the parts;
+* **autolog** — the reporter logs only experiment-level metrics/params under `automl.*` keys: an `mlflow.sklearn.autolog()` active in the caller's run does not conflict (its step-level training metrics are separate keys); the reporter never calls autolog itself;
+* **re-reporting** — with `nested=True` every `report` call opens a fresh nested run, so the same result can be reported repeatedly (each call is its own MLflow run). With `nested=False` the data goes into the one active run: re-reporting the *same* result is safe (identical tag/param values are idempotent in MLflow and metric re-logs are appended as extra steps), but re-reporting a *different* result into the same run overwrites the `automl.*` param keys — prefer one active run per `ExperimentResult` (or `nested=True`).
+
+**Returns:** `str` — the MLflow run id the data was logged into, or `None` when the tracking failed (see the failure policy).
+
+```python
+import mlflow
+
+import configurable_automl_engine as caml
+from configurable_automl_engine.experiment import MLflowReporter
+from configurable_automl_engine.training_engine import component as caml_component
+
+results = caml.train_best_model(config=config, df=df, target="target")  # the engine run
+result = caml_component.last_experiment_result  # the ExperimentResult of the last run
+
+with mlflow.start_run(run_name="my-experiment"):
+    MLflowReporter().report(result)          # into the active run
+    # or: MLflowReporter(nested=True).report(result)  # a nested run per result
+```
+
 ---
 
 ## `DataOversampler`
