@@ -285,6 +285,11 @@ class ExperimentResult(_ResultModel):
             (a JSON-serializable mapping).
         complexity_guard: The aggregated report section of the adaptive
             complexity guard (a JSON-serializable mapping).
+        ensemble: The report section of the experimental top-K ensemble
+            (``general.ensemble``): the members (rank, algorithm, score,
+            weight), the effective size, the weight method and the
+            ensemble artifact path (a JSON-serializable mapping; ``None``
+            when the ensemble was not built).
         oof_score: The comparison metric on the final pipeline's pooled OOF
             predictions (optimistic, not an independent estimate).
         holdout_score: The honest out-of-sample estimate on the reserved
@@ -325,6 +330,7 @@ class ExperimentResult(_ResultModel):
     disqualified_algorithms: dict[str, str] = Field(default_factory=dict)
     sanity_gate: dict[str, Any] | None = None
     complexity_guard: dict[str, Any] | None = None
+    ensemble: dict[str, Any] | None = None
     oof_score: ScoreValueOrNone = None
     holdout_score: ScoreValueOrNone = None
     bbc_score: ScoreValueOrNone = None
@@ -373,7 +379,7 @@ class ExperimentResult(_ResultModel):
         _check_json_safe(value, "winner_params")
         return value
 
-    @field_validator("sanity_gate", "complexity_guard")
+    @field_validator("sanity_gate", "complexity_guard", "ensemble")
     @classmethod
     def _report_sections_json_safe(
         cls, value: dict[str, Any] | None

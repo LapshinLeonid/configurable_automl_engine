@@ -53,6 +53,9 @@ from configurable_automl_engine.training_engine.config.complexity_guard import (
     ComplexityGuardSizeBasis,
     ComplexityGuardUserRangePolicy,
 )
+from configurable_automl_engine.training_engine.config.ensemble import (
+    EnsembleCfg,
+)
 from configurable_automl_engine.training_engine.config.general import (
     AUTO_HOLDOUT_FRACTION,  # noqa: F401
     AUTO_HOLDOUT_MIN_ROWS,  # noqa: F401
@@ -91,6 +94,7 @@ __all__ = [
     "ComplexityGuardUserRangePolicy",
     "Config",
     "CorridorMode",
+    "EnsembleCfg",
     "FeatureSelectionCfg",
     "FeatureSelectionMethod",
     "FeatureSelectionMode",

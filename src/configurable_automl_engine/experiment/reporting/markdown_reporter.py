@@ -146,6 +146,7 @@ class MarkdownReporter(Reporter):
         self._render_outcome(lines, result)
         self._render_honest_scores(lines, result)
         self._render_leaderboard(lines, result)
+        self._render_ensemble(lines, result)
         self._render_run_details(lines, result)
         self._render_failure(lines, result)
         if self._include_config:
@@ -269,6 +270,67 @@ class MarkdownReporter(Reporter):
                 f"| {_format_score(entry.score)} "
                 f"| {entry.trials} "
                 f"| {_escape_cell(entry.phase)} |"
+            )
+        lines.append("")
+
+    def _render_ensemble(self, lines: list[str], result: ExperimentResult) -> None:
+        """Render the experimental ensemble section (when present).
+
+        The section shows the members table (rank, algorithm, validation
+        score, weight), the effective ensemble size next to the requested
+        one (``min(k, n)`` with a warning note when they differ) and the
+        ensemble artifact path; the section is skipped when the result
+        carries no ensemble (the feature is off or the step failed).
+        """
+        section = result.ensemble
+        if not section:
+            return
+        lines.append("## Ensemble (experimental)")
+        lines.append("")
+        members = section.get("members", [])
+        if not members:
+            return
+        weight_method = section.get("weight_method")
+        lines.append(
+            f"Weighted average of the top-{section.get('k_used', len(members))} "
+            f"leaderboard models "
+            f"(strategy: {_escape_inline(str(section.get('strategy', 'weighted_average')))}"
+            + (
+                f", weights: {_escape_inline(str(weight_method))}"
+                if weight_method
+                else ""
+            )
+            + ")."
+        )
+        k_requested = section.get("k_requested")
+        k_used = section.get("k_used")
+        if (
+            isinstance(k_requested, int)
+            and isinstance(k_used, int)
+            and k_requested != k_used
+        ):
+            lines.append(
+                f"- Requested size k={k_requested} exceeds the available "
+                f"candidates: min(k, n) = {k_used} member(s) used."
+            )
+        lines.append("")
+        lines.append("| Rank | Algorithm | Score | Weight |")
+        lines.append("|-----:|:----------|------:|-------:|")
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            rank = member.get("rank")
+            lines.append(
+                f"| {_escape_cell(rank)} "
+                f"| {_escape_cell(member.get('algorithm'))} "
+                f"| {_format_score(member.get('score'))} "
+                f"| {_format_score(member.get('weight'))} |"
+            )
+        artifact_path = section.get("artifact_path")
+        if artifact_path:
+            lines.append("")
+            lines.append(
+                f"Ensemble artifact: {_escape_code_span(_escape_cell(artifact_path))}"
             )
         lines.append("")
 

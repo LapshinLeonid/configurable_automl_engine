@@ -20,6 +20,13 @@ from configurable_automl_engine.common.definitions import (
     RunStatus,
     RunStepStatus,
 )
+from configurable_automl_engine.experiment.ensemble import (
+    EnsembleMember,
+    EnsembleModel,
+    EnsembleModelError,
+    compute_weights,
+    select_top_k,
+)
 from configurable_automl_engine.experiment.experiment import (
     AutoMLExperiment,
     ExperimentNotRunError,
@@ -58,6 +65,9 @@ __all__ = [
     "AutoMLExperiment",
     "CompositeReporter",
     "DuplicateRunError",
+    "EnsembleMember",
+    "EnsembleModel",
+    "EnsembleModelError",
     "ExperimentNotRunError",
     "ExperimentResult",
     "ExperimentStore",
@@ -76,4 +86,6 @@ __all__ = [
     "RunStepStatus",
     "RunSummary",
     "build_leaderboard",
+    "compute_weights",
+    "select_top_k",
 ]
