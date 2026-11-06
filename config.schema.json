@@ -427,6 +427,37 @@
       "title": "CustomMetricSpec",
       "type": "object"
     },
+    "EnsembleCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the experimental top-K ensemble.\n\nThe ensemble is built AFTER the terminal select step from the\ncompleted records of the run's leaderboard: the top-K algorithms are\nretrained on 100% of the data (exactly once each) and their\npredictions are averaged with the weights derived from the\nvalidation scores. The result of the ensemble is reported in the\ndedicated ``ensemble`` section of the ``ExperimentResult`` (the\nwinner and the winner artifact are NOT affected: the ensemble is an\nadditional experimental output, not a replacement of the terminal\nselection).\n\nAttributes:\n    enable: Build the ensemble (off by default — the ensemble is an\n        experimental feature outside the MVP pipeline).\n    k: The requested ensemble size (the number of top leaderboard\n        members, ≥ 1). When ``k`` exceeds the number of available\n        completed algorithms, ``min(k, n)`` is used with a warning.\n    weight_method: How the member weights are derived from the\n        validation scores: ``\"score_weighted\"`` (default) —\n        direction-aware conversion (inverse for error metrics,\n        proportional for score metrics); ``\"equal\"`` — the uniform\n        baseline.",
+      "properties": {
+        "enable": {
+          "default": false,
+          "description": "Build the experimental weighted-average ensemble of the top-K leaderboard models after the terminal selection (off by default). When enabled, the result carries the dedicated 'ensemble' report section (members, scores, weights, the artifact path of the serialized ensemble) and the artifact file is written next to the winner model; the winner and the winner artifact themselves are not affected",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "k": {
+          "default": 3,
+          "description": "The requested ensemble size: the number of top leaderboard members to combine (>= 1). When k exceeds the number of completed algorithms, min(k, n) members are used with a warning; k=1 is the valid single-model boundary case",
+          "minimum": 1,
+          "title": "K",
+          "type": "integer"
+        },
+        "weight_method": {
+          "default": "score_weighted",
+          "description": "How the member weights are derived from the validation scores: 'score_weighted' (default) — direction-aware conversion (inverse for error metrics like RMSE/MAE, proportional for score metrics like R2); 'equal' — the uniform weights baseline",
+          "enum": [
+            "score_weighted",
+            "equal"
+          ],
+          "title": "Weight Method",
+          "type": "string"
+        }
+      },
+      "title": "EnsembleCfg",
+      "type": "object"
+    },
     "FeatureSelectionCfg": {
       "additionalProperties": false,
       "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
@@ -801,6 +832,10 @@
         "complexity_guard": {
           "$ref": "#/$defs/ComplexityGuardCfg",
           "description": "Settings of the adaptive complexity guard for tree/boosting search spaces on small data (mode: 'off'/'warn'/'apply', lossless/regularize levels, user_range_policy, size-mode thresholds, size_basis). See API_REFERENCE.md."
+        },
+        "ensemble": {
+          "$ref": "#/$defs/EnsembleCfg",
+          "description": "Experimental weighted-average ensemble of the top-K leaderboard models (disabled by default). When general.ensemble.enable is true, after the terminal selection the engine retrains the top-K completed algorithms on 100% of the data, averages their predictions with weights derived from the validation scores and reports the dedicated 'ensemble' section in the result. The winner and the winner artifact are NOT affected"
         },
         "preprocessing": {
           "anyOf": [

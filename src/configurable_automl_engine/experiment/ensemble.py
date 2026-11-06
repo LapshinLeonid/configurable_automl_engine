@@ -45,9 +45,10 @@ from __future__ import annotations
 import logging
 import math
 import warnings
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -67,8 +68,8 @@ __all__ = [
     "ENSEMBLE_ARTIFACT_KEY",
     "ENSEMBLE_ARTIFACT_VERSION",
     "EnsembleMember",
-    "EnsembleModelError",
     "EnsembleModel",
+    "EnsembleModelError",
     "compute_weights",
     "select_top_k",
     "validate_ensemble_score",
@@ -117,7 +118,11 @@ def validate_ensemble_score(score: Any) -> float:
     if isinstance(score, bool) or not isinstance(
         score, (int, float, np.integer, np.floating)
     ):
-        raise ValueError(
+        # ValueError (not TypeError): the value flows through the weight /
+        # top-K validators, where a ValueError surfaces as a clear
+        # "invalid member score" message instead of an unrelated
+        # "error converting" text.
+        raise ValueError(  # noqa: TRY004
             f"Ensemble member score must be a real number, got "
             f"{type(score).__name__}: {score!r}"
         )
@@ -216,9 +221,7 @@ def compute_weights(
             f"Unknown ensemble weight method {method!r}: "
             "expected 'score_weighted' or 'equal'"
         )
-    validated = {
-        name: validate_ensemble_score(score) for name, score in scores.items()
-    }
+    validated = {name: validate_ensemble_score(score) for name, score in scores.items()}
     if method == "equal":
         uniform = 1.0 / len(validated)
         return {name: uniform for name in validated}
@@ -229,7 +232,10 @@ def compute_weights(
         # error value (never expected in user semantics), the epsilon floor
         # keeps a perfect 0.0 score finite.
         return _normalize(
-            {name: 1.0 / max(abs(value), _MIN_SCORE_EPS) for name, value in validated.items()}
+            {
+                name: 1.0 / max(abs(value), _MIN_SCORE_EPS)
+                for name, value in validated.items()
+            }
         )
     proportional = {name: max(value, 0.0) for name, value in validated.items()}
     if all(weight <= 0.0 for weight in proportional.values()):
@@ -281,9 +287,7 @@ def select_top_k(
         raise ValueError("Top-K selection requires at least one candidate score")
     if isinstance(k, bool) or not isinstance(k, int) or k < 1:
         raise ValueError(f"Ensemble size k must be a positive integer, got {k!r}")
-    validated = {
-        name: validate_ensemble_score(score) for name, score in scores.items()
-    }
+    validated = {name: validate_ensemble_score(score) for name, score in scores.items()}
     n = len(validated)
     if k > n:
         warnings.warn(
@@ -364,8 +368,7 @@ class EnsembleModel:
         total = sum(member.weight for member in members)
         if not math.isfinite(total) or total <= 0.0:
             raise ValueError(
-                f"Ensemble member weights must be positive and finite "
-                f"(sum={total!r})"
+                f"Ensemble member weights must be positive and finite (sum={total!r})"
             )
         missing = [member.name for member in members if member.name not in predictors]
         if missing:

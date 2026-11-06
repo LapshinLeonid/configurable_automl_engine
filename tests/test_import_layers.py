@@ -54,6 +54,21 @@ ALLOWED_FUNCTION_IMPORTS = {
         f"{PACKAGE}.training_engine.run_result",
     ),
     ("experiment/experiment.py", f"{PACKAGE}.trainer"),
+    # The experimental ensemble loader (``ensemble_model()``): the pure
+    # ensemble core is imported lazily so the facade module keeps its
+    # import-light contract.
+    (
+        "experiment/experiment.py",
+        f"{PACKAGE}.experiment.ensemble",
+    ),
+    # The experimental ensemble step (``_build_and_attach_ensemble``): the
+    # step imports the finalists trainer (a heavy chain) lazily — the
+    # ensemble is an optional output, the import must not slow the
+    # ensemble-less runs.
+    (
+        "training_engine/component.py",
+        f"{PACKAGE}.training_engine.ensemble_step",
+    ),
 }
 
 

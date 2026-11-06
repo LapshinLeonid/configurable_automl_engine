@@ -870,7 +870,9 @@ def _build_and_attach_ensemble(
     # Save next to the winner artifact (the ensemble is an additional
     # output: the winner artifact path is never touched).
     model_path = Path(str(result.get("model_path", cfg.general.path_to_model)))
-    ensemble_path = model_path.with_name(f"{model_path.stem}_ensemble{model_path.suffix}")
+    ensemble_path = model_path.with_name(
+        f"{model_path.stem}_ensemble{model_path.suffix}"
+    )
     try:
         ensemble.save(ensemble_path, cfg.general.serialization_format)
     except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
