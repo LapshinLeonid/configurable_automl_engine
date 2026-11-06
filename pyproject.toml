@@ -107,6 +107,16 @@
     containers = ["configurable_automl_engine"]
     # Every module of the package must be assigned to a layer.
     exhaustive = true
+    ignore_imports = [
+        # The object facade (AutoMLExperiment) sits in the experiment
+        # package but orchestrates the training engine: the facade module
+        # imports the engine lazily inside run() and _adopt_result() (a
+        # permitted exception).
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.trainer",
+    ]
     layers = [
         # 3 — orchestration
         "training_engine",
@@ -160,6 +170,16 @@
     name = "No import cycles between sibling modules"
     type = "acyclic_siblings"
     ancestors = ["configurable_automl_engine"]
+    # The object facade (experiment.experiment) orchestrates the training
+    # engine via lazy imports inside run(); the engine imports only the
+    # data models of the experiment package (result/store/leaderboard/
+    # reporting), never the facade — the acyclic-siblings view of the two
+    # package siblings ignores the one-directional facade plumbing.
+    ignore_imports = [
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
+        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+    ]
 
     [tool.pytest.ini_options]
     filterwarnings = [

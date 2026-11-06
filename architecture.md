@@ -90,7 +90,8 @@ trainer.
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
-│       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters
+│       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters, object facade
+│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / report)
 │       │   ├── leaderboard.py              # Leaderboard: the algorithm ranking table built from an ExperimentResult
 │       │   ├── reporting                   # Reporters: pure consumers of ExperimentResult (no engine, no mlflow imports)
 │       │   │   ├── base.py                 # Reporter (generic ABC), CompositeReporter (several reporters in one call)

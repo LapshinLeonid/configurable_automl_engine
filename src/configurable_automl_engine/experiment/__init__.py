@@ -1,16 +1,17 @@
-"""Experiment result models, run history, leaderboard and reporters (see
-:mod:`.result`, :mod:`.store`, :mod:`.leaderboard` and :mod:`.reporting`).
+"""Experiment result models, run history, leaderboard, reporters and the
+object facade.
 
 The public import paths are :mod:`configurable_automl_engine.experiment.result`
 and this package: ``ExperimentResult``, ``AlgorithmRun``, the statuses, the
 run history (``ExperimentStore``, the T4 component), the algorithm
-ranking table (``Leaderboard``) and the reporter framework
+ranking table (``Leaderboard``), the reporter framework
 (``Reporter``, ``JSONReporter``, ``MarkdownReporter``,
-``CompositeReporter``), plus the optional MLflow adapter
-(``MLflowReporter`` — imports ``mlflow`` lazily, only at report time).
+``CompositeReporter``), the optional MLflow adapter
+(``MLflowReporter`` — imports ``mlflow`` lazily, only at report time)
+and the object facade of an experiment run (``AutoMLExperiment``).
 The models are pure data: the module imports nothing from the engine
 layers, so reporters can consume results without importing the training
-engine.
+engine (the facade imports the engine lazily, inside its ``run()``).
 """
 
 from configurable_automl_engine.common.definitions import (
@@ -18,6 +19,10 @@ from configurable_automl_engine.common.definitions import (
     RunPhaseAction,
     RunStatus,
     RunStepStatus,
+)
+from configurable_automl_engine.experiment.experiment import (
+    AutoMLExperiment,
+    ExperimentNotRunError,
 )
 from configurable_automl_engine.experiment.leaderboard import (
     EMPTY_LEADERBOARD_MESSAGE,
@@ -50,8 +55,10 @@ __all__ = [
     "EMPTY_LEADERBOARD_MESSAGE",
     "FAILED_SUMMARY_MESSAGE",
     "AlgorithmRun",
+    "AutoMLExperiment",
     "CompositeReporter",
     "DuplicateRunError",
+    "ExperimentNotRunError",
     "ExperimentResult",
     "ExperimentStore",
     "ExperimentStoreError",

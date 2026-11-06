@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ from .hpo_phases import (
 from .run_result import (
     build_experiment_result,
     build_failed_experiment_result,
+    mark_result_owner,
 )
 from .select_steps import select_step_outcome
 from .state import (
@@ -81,8 +83,13 @@ _LOG = logging.getLogger(__name__)
 # process (the T3 experiment-result plumbing): the public API still returns
 # the legacy dict (backward compatibility), and the ``ExperimentResult``
 # model assembled from the same sources is stored here for the consumers
-# (the facade and the experiment store, T5/T4) until the result-plumbing
-# contract of the facade is finalized.
+# (the facade and the experiment store, T5/T4). The global is NOT reset
+# between calls: a consumer that cannot pass its own ``run_token`` (the
+# owner stamp, see ``run_result.mark_result_owner``) must snapshot this
+# value before the call and verify it changed afterwards. The facade
+# passes a private token into ``train_best_model`` and matches it after
+# the call, so concurrent or sequential experiments never pick up a
+# stranger's result.
 last_experiment_result: ExperimentResult | None = None
 
 
@@ -609,6 +616,8 @@ def train_best_model(
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
+    *,
+    run_token: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Main interface for training the best model.
 
@@ -644,7 +653,11 @@ def train_best_model(
     facade and the experiment store). The model is built from the same
     sources as the dict, so the dict contract is unchanged. On an
     orchestration failure (``RuntimeError``) a failed ``ExperimentResult``
-    is recorded before the error is re-raised.
+    is recorded before the error is re-raised. When ``run_token`` is
+    given, the assembled result (completed or failed) is stamped with the
+    token (``run_result.mark_result_owner``), so an orchestrator reading
+    the global afterwards can tell its own result from a stranger's (the
+    global is not reset between calls).
 
     Args:
         config: The training
@@ -652,6 +665,11 @@ def train_best_model(
         df: The input data.
         target: The target column name. Defaults to 'target'.
         model_path_override: An alternative model save path.
+        run_token: The caller's private run token (an opaque UUID);
+            when given, the assembled ``ExperimentResult`` is stamped
+            with it for owner recognition (see
+            ``run_result.mark_result_owner``). The legacy dict return
+            value is not affected.
     Returns:
         Dict[str, Any]: A dict with the results: the algorithm name, ``score``
             — the metric value in user semantics (positive RMSE/MAE, plain R²;
@@ -698,6 +716,7 @@ def train_best_model(
             ctx=ctx,
             model_path_override=model_path_override,
             run_finished=run_finished,
+            run_token=run_token,
         )
     except RuntimeError as err:
         # Orchestration failure (a phase produced no valid scores, a select
@@ -712,6 +731,7 @@ def train_best_model(
             ctx=ctx,
             error_message=str(err),
             run_finished=run_finished,
+            run_token=run_token,
         )
         raise
     return result
@@ -724,6 +744,7 @@ def _run_after_phases(
     ctx: PhaseContext,
     model_path_override: str | Path | None,
     run_finished: _RunFinish,
+    run_token: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Finish the run after ``execute_phases``: winner checks, the final
     artifact, and the ``ExperimentResult`` assembly.
@@ -788,6 +809,8 @@ def _run_after_phases(
         run_finished_at=run_finished.finished_at(),
         run_duration_seconds=run_finished.duration_seconds(),
     )
+    if run_token is not None:
+        mark_result_owner(experiment_result, run_token)
     globals()["last_experiment_result"] = experiment_result
     return result
 
@@ -815,11 +838,14 @@ def _record_failed_run(
     ctx: PhaseContext | None,
     error_message: str,
     run_finished: _RunFinish,
+    run_token: uuid.UUID | None = None,
 ) -> None:
     """Assemble and store the failed ``ExperimentResult`` of a failed run.
 
     The exception propagates to the caller unchanged; the failed result is
     kept for the run history (the T4 store consumes it via the facade).
+    When ``run_token`` is given, the failed result is stamped with it (see
+    ``run_result.mark_result_owner``).
     """
     try:
         failed_result = build_failed_experiment_result(
@@ -834,4 +860,6 @@ def _record_failed_run(
     except Exception:  # noqa: BLE001 — a failed-result assembly error must not shadow the run error
         _LOG.exception("Failed to assemble the failed-run ExperimentResult")
         return
+    if run_token is not None:
+        mark_result_owner(failed_result, run_token)
     globals()["last_experiment_result"] = failed_result
