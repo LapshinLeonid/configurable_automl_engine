@@ -1456,6 +1456,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict` or `None` | `None` | Feature selection settings, same fields as [`general.feature_selection`](#feature-selection-feature_selection). `None` — disabled. |
 | `feature_selection_active` | `bool` or `None` | `None` | Explicit on/off switch for feature selection (takes precedence over the mode in `feature_selection_cfg`); the engine passes the winner's `use_feature_selection` decision here. `None` — decided by the config. |
 | `warn_id_like` | `bool` | `True` | Whether the ID-like WARNING is emitted during `fit()`. The engine path (via `prepare_dataset`) passes `False` so the diagnostics are not duplicated; standalone calls warn by default. |
+| `target_transform` | `TargetTransform` or `str` | `"none"` | Transformation of the target `y` applied inside the `model` step (see [Target transformation](#target-transformation)): `"none"`, `"log1p"`, `"boxcox"` or `"yeo-johnson"`. |
 
 **Key attributes:**
 
@@ -1503,6 +1504,27 @@ The engine config, `ModelTrainer` and `tuner.optimize` enable the automatic high
 * NaNs in categorical columns are converted to strings and treated as ordinary categories.
 * Configurations without the new parameters keep the documented defaults (the automatic high-cardinality mode is on: threshold 50 + `"frequency"`); models saved before the introduction of these strategies keep their previous behavior (backward compatibility).
 * `target`/`frequency`/`hashing` encode columns before oversampling (the preprocessor step precedes the sampler step in the pipeline), so SMOTE/ADASYN always receive already-encoded numeric features.
+
+### Target transformation
+
+`ModelTrainer(..., target_transform=...)` (Python API only; the config schema and HPO are not affected) trains the model on a transformed target and returns predictions in the original scale. The transformation wraps the base regressor into a `TransformedTargetRegressor` — it is the **last** step of the pipeline: the `model` step itself becomes the wrapper, so the preprocessor, the feature selector and the oversampler all see the **original** `y` (SMOTER-style oversampling interpolates between existing target values, and the synthetic targets stay inside the transformation domain). The wrapper is rebuilt in every validation fold and in the feature-selection auto-check, so `val_score` measures the full wrapped pipeline.
+
+Available values (enum `TargetTransform` in `common/definitions.py`):
+
+| Value | Meaning | Requirements for `y` |
+|-------|---------|----------------------|
+| `"none"` (default) | No transformation; the `model` step stays the original estimator. | Any numeric `y`. |
+| `"log1p"` | `log(1 + y)` forward, `expm1` inverse. | `min(y) > -1`. |
+| `"boxcox"` | Box-Cox power transform (`PowerTransformer`, `standardize=True`). | `min(y) > 0` (strictly positive). |
+| `"yeo-johnson"` | Yeo-Johnson power transform (`PowerTransformer`, `standardize=True`). | Any real `y`. |
+
+Domain violations are rejected with a `ValueError` from `fit()` **before** any training or scoring; the message names the method, the found minimum and suggests `yeo-johnson` as the unrestricted alternative.
+
+**Clipping (inverse transform).** After `fit` the transformer remembers the transformed train range (`t_min_`/`t_max_`); `inverse_transform` clips its input into `[t_min_ - m, t_max_ + m]`, `m = clip_margin * (t_max_ - t_min_)` (`clip_margin=0.5` by default; the margin equals `clip_margin` itself for a zero-range target) before inverting, and the output is additionally clipped into the original train range expanded by the same relative margin. Both bounds matter for extrapolation: a linear model extrapolating in log space would otherwise produce `expm1(inf)` at prediction time, and a power transform (a negative Yeo-Johnson lambda in particular) can return NaN beyond the domain of its inverse formula even for a clipped input. `predict` always returns finite values. The number of clipped values is logged at DEBUG level. Because of the clipping the inverse transformation is intentionally inexact outside the train range, so the wrapper is created with `check_inverse=False`.
+
+**Edge cases.** A constant target is rejected by the standard target validation before training; for a defensive direct use of `TargetTransformer` a constant `y` fits `yeo-johnson` with `standardize=False` and raises a clear `ValueError` for `boxcox`. `isotonic_regression` works with the wrapper too — the transformation sits after the `isotonic_selector` step.
+
+**Bias warning.** After back-transformation from log scale a prediction corresponds to the conditional **median** of the target rather than its conditional mean (`exp(E[log y])` underestimates `E[y]`). MAE/MAPE typically improve with the transformation; RMSE can get worse.
 
 ---
 

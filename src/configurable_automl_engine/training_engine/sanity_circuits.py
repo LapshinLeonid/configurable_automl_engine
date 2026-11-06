@@ -177,20 +177,32 @@ def _rounding_decimals(std_y: float) -> int:
 
 
 def _core_estimator(model: Any) -> Any:
-    """Unwrap sklearn/imblearn pipelines down to the final estimator."""
+    """Unwrap sklearn/imblearn pipelines down to the final estimator.
+
+    Objects exposing a ``regressor_`` attribute (fitted
+    ``TransformedTargetRegressor`` wrappers — e.g. the trainer pipeline's
+    ``model`` step with ``target_transform``) are unwrapped too: the linear
+    path of circuit C (``coef_``) must see the inner regressor's
+    coefficients, not stop silently on the wrapper. Unfitted wrappers
+    (without ``regressor_``) are returned as is. Loop protection: every
+    object is visited at most once (the ``seen`` id set), so a ``regressor_``
+    pointing back cannot loop forever."""
     seen: set[int] = set()
-    while hasattr(model, "named_steps"):
+    while hasattr(model, "named_steps") or hasattr(model, "regressor_"):
         if id(model) in seen:
             break
         seen.add(id(model))
-        steps = model.named_steps
-        try:
-            values = list(steps.values())
-        except AttributeError:
-            break
-        if not values:
-            break
-        model = values[-1]
+        if hasattr(model, "named_steps"):
+            steps = model.named_steps
+            try:
+                values = list(steps.values())
+            except AttributeError:
+                break
+            if not values:
+                break
+            model = values[-1]
+        else:
+            model = model.regressor_
     return model
 
 

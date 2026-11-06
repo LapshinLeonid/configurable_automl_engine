@@ -32,6 +32,34 @@ class SerializationFormat(str, Enum):
     joblib = "joblib"
 
 
+# ──────────────── target transform enum ──────────────── #
+class TargetTransform(str, Enum):
+    """Target transformations applied inside the model step of the pipeline.
+
+    The transformation wraps the regressor in a
+    ``TransformedTargetRegressor``: the model is trained on the transformed
+    ``y`` and ``predict`` returns values in the original scale
+    (``TargetTransformer.inverse_transform``, with clipping to the
+    transformed train range).
+
+    Requirements for ``y``:
+
+    * ``none`` — no transformation; any numeric ``y``;
+    * ``log1p`` — ``log(1 + y)``; requires ``min(y) > -1``
+      (validated before training, see
+      ``preprocessing.target_transform.validate_target_for_transform``);
+    * ``boxcox`` — the Box-Cox power transformation; requires strictly
+      positive ``y``: ``min(y) > 0`` (validated before training);
+    * ``yeo-johnson`` — the Yeo-Johnson power transformation; any real
+      ``y`` (no domain restrictions).
+    """
+
+    none = "none"
+    log1p = "log1p"
+    boxcox = "boxcox"
+    yeo_johnson = "yeo-johnson"
+
+
 ALGO_PACKAGE_MAPPING: dict[str, str] = {
     "xgboosting": "xgboost",
 }

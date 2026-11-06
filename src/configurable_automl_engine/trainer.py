@@ -8,10 +8,8 @@ values and scales features.
 Main components:
 
 ModelTrainer: The main container class for model training, validation, and deployment.
-train_model: A functional interface (Facade) over
-    :class:`ModelTrainer`.
-TrainingError: A dedicated exception
-    for unified handling of training failures.
+train_model: A functional interface (Facade) over :class:`ModelTrainer`.
+TrainingError: A dedicated exception for unified handling of training failures.
 
 Key implementation points:
 
@@ -49,6 +47,7 @@ from configurable_automl_engine.common.datetime_features import (
 )
 from configurable_automl_engine.common.definitions import (
     SerializationFormat,
+    TargetTransform,
     ValidationStrategy,
 )
 from configurable_automl_engine.common.errors import TrainingError
@@ -66,6 +65,7 @@ from configurable_automl_engine.feature_selection import (
 
 # Re-exported: the documented import path of the isotonic data adapter.
 from configurable_automl_engine.isotonic import IsotonicDataTransformer  # noqa: F401
+from configurable_automl_engine.preprocessing import validate_target_for_transform
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
     PreprocessingPreset,
@@ -103,19 +103,18 @@ class ModelTrainer:
     """Orchestrator of the training and validation process for regression models.
 
     Automates the construction of a pipeline that includes feature preprocessing
-    (imputation, scaling, encoding), synthetic sample enlargement
-    (oversampling), and training of the selected algorithm with mandatory validation.
-
-    The state is grouped: the validated constructor settings
+    (imputation, scaling, encoding), synthetic sample enlargement (oversampling)
+    and training of the selected algorithm with mandatory validation. The state
+    is grouped: the validated constructor settings
     (``settings``), the fit results of the pure steps (the prepared features,
     the validation estimate, the feature selection outcome) and the final
     ``pipeline``. The attributes below are read-only views of these groups,
     except ``pipeline``, ``preprocessing_preset``, ``datetime_expansion_``
-    and ``artifact_metadata_``. The saved artifact records its format
-    version (``trainer_state.ARTIFACT_FORMAT_VERSION``).
+    and ``artifact_metadata_``. The artifact records its format version
+    (``trainer_state.ARTIFACT_FORMAT_VERSION``).
+
     Attributes:
-        algorithm (str): Algorithm name
-            (e.g., 'elasticnet', 'xgboosting').
+        algorithm (str): Algorithm name (e.g., 'elasticnet', 'xgboosting').
         hyperparams (dict): Hyperparameter configuration for model initialization..
         metric (str): Metric key (r2, mse, mae) used to assess quality on validation.
         random_state (int | None): Random seed for reproducible splits and training.
@@ -124,25 +123,22 @@ class ModelTrainer:
         numerical_features (list[str] | None): List of columns to scale.
         id_column (str | None): Identifier excluded from the training process.
         encoding_strategy (str): Categorical encoding strategy
-            ('one_hot', 'ordinal', 'target', 'frequency' or 'hashing').
-            Defaults to 'one_hot'.
+            ('one_hot', 'ordinal', 'target', 'frequency' or 'hashing'; default 'one_hot').
         additional_metrics (Iterable[str] | None): Additional quality metrics
-            computed for the trained model using the same validation method as
-            the primary metric (``train_test_split`` — hold-out scoring,
-            ``k_fold``/``loo`` — mean across folds for additive metrics, the
-            pooled OOF value for non-additive ones (RMSE/MSE/R²/nRMSE/RMSLE/
-            D²/explained_variance/max error/median absolute error and their
-            aliases)). Any iterable sequence of strings is accepted
-            (list, tuple, set, generator); the metric name is normalized to
-            lowercase. These metrics are informational only and do not affect
-            training. Values are stored in ``additional_scores`` after calling
-            fit().
+            computed with the same validation method as the primary metric
+            (``train_test_split`` — hold-out scoring, ``k_fold``/``loo`` —
+            mean across folds for additive metrics, the pooled OOF value for
+            non-additive ones (RMSE/MSE/R²/nRMSE/RMSLE/D²/explained_variance/
+            max error/median absolute error and their aliases)). Any iterable
+            sequence of strings is accepted (list, tuple, set, generator);
+            the metric name is normalized to lowercase. Informational only;
+            stored in ``additional_scores`` after fit().
         custom_metrics (dict[str, CustomMetricSpec]): Custom metrics and
             scorers loaded by a dotted import path (name → declaration);
             ``metric`` and ``additional_metrics`` may refer to their names.
-        preprocessing_override (PreprocessingOverride | dict | None): Explicit
-            override of the feature preprocessing preset. It may be specified
-            partially or fully and takes precedence over automatic selection.
+        preprocessing_override (PreprocessingOverride | dict | None):
+            Explicit override of the preprocessing preset (partial or full;
+            takes precedence over automatic selection).
         settings (TrainerSettings): All validated constructor settings in
             one frozen object (the oversampling, encoding and input-policy
             groups included); the settings above are read-only views of it.
@@ -153,30 +149,28 @@ class ModelTrainer:
             metrics and as the pooled value over the OOF vector for
             non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
             explained_variance, max error, median absolute error and their
-            aliases) —
-            using the same validation method that HPO uses to compare models
-            (``validation.iter_splits``). It is not a train score: the
-            estimate is always computed on data not used to train the pipeline
-            of that fold. For error metrics the value is positive
+            aliases) — using the same validation method that HPO uses to
+            compare models (``validation.iter_splits``). It is not a train
+            score: the estimate is always computed on data not used to train
+            the pipeline of that fold; error metrics are positive
             (sign-corrected).
         oof_score_ (float | None): ``RMSE_oof`` — an out-of-fold estimate on
             all rows: predictions from validation folds are concatenated into
             a single vector and the metric is computed on the whole vector at
             once (rather than averaged over small folds). Every row is
             predicted by a fold-model that has not been trained on it, but the
-            splits are the same as in HPO (``validation.iter_splits`` with the
-            same seed): when the hyperparameters were selected on these
+            splits are the same as in HPO (``validation.iter_splits`` with
+            the same seed): when the hyperparameters were selected on these
             splits, the estimate inherits the selection bias and is NOT an
             independent estimate of generalization (for RMSE it equals the
             best-trial ``val_score``). ``None`` if an OOF estimate is
-            impossible (no valid pairs at all). Separate channel: the
-            ``val_score`` of HPO phases is not affected.
+            impossible; the ``val_score`` of HPO phases is not affected.
         oof_predictions_ (pd.Series | np.ndarray | None): The ``y_pred_oof``
             vector, aligned to the original row order (``pd.Series`` with the
             preserved pandas index for data with a unique index, including
             MultiIndex; ``np.ndarray`` by position for numpy inputs and data
             with duplicated indexes). Uncovered rows (e.g., the train part of
-            ``train_test_split``) and non-finite predictions are NaN.
+            ``train_test_split``) and non-finite predictions are NaN;
             ``None`` until the first ``fit()``.
         oof_coverage_ (float | None): Fraction of the original data rows covered
             by OOF predictions (1.0 for ``k_fold``/``loo``; < 1.0 for
@@ -187,25 +181,26 @@ class ModelTrainer:
             non-additive ones; empty dict if no metrics are configured).
         validation_strategy (str): Validation strategy for the final model:
             ``'auto'`` (default, as ``general.validation_strategy``),
-            ``'train_test_split'``, ``'k_fold'`` or ``'loo'``. ``'auto'`` is resolved inside fit() via
-            ``validation.make_cv``; the engine path passes an already resolved
-            method. The list of allowed methods is in
-            ``validation.SUPPORTED_VALIDATION_METHODS`` (a single extension
-            point: new strategies, e.g. order-aware ``TimeSeriesSplit``, are
-            registered there and in ``make_cv``, after which the OOF channel
-            works with them without rewriting).
-        n_folds (int): Number of folds for the ``'k_fold'`` strategy (default 5).
-        test_size (float | int): Size of the hold-out part: a fraction in (0, 1)
-            or an integer number of rows (as in sklearn ``train_test_split``).
-            Defaults to 0.2.
+            ``'train_test_split'``, ``'k_fold'`` or ``'loo'``. ``'auto'`` is
+            resolved inside fit() via ``validation.make_cv``; the engine path
+            passes an already resolved method. The allowed methods are listed
+            in ``validation.SUPPORTED_VALIDATION_METHODS`` (a single
+            extension point: new strategies, e.g. order-aware
+            ``TimeSeriesSplit``, are registered there and in ``make_cv``,
+            after which the OOF channel works with them without rewriting).
+        n_folds (int): Number of folds for the ``'k_fold'`` strategy
+            (default 5).
+        test_size (float | int): Size of the hold-out part: a fraction in
+            (0, 1) or an integer number of rows (as in sklearn
+            ``train_test_split``). Defaults to 0.2.
         feature_names (list[str] | None): List of feature names identified
             during training.
         dropped_features_ (list[str]): Names of columns removed by cleaning
             uninformative features (empty and strictly constant ones) in the
             last ``fit()`` call. Empty list if cleaning was not applied (input
             without column names) or no columns qualified. Populated only for
-            ``pd.DataFrame`` inputs: ``np.ndarray`` inputs have no column names,
-            so cleaning is not performed.
+            ``pd.DataFrame`` inputs: ``np.ndarray`` inputs have no column
+            names, so cleaning is not performed.
         preprocessing_preset (PreprocessingPreset | None): The resolved
             preprocessing preset (populated during fit()).
         feature_selection_cfg (FeatureSelectionCfg): Validated feature
@@ -216,13 +211,13 @@ class ModelTrainer:
             Takes precedence over the mode from ``feature_selection_cfg``;
             ``None`` — the decision is made based on the configuration.
         feature_selection_active_ (bool): Actual feature selection status in
-            the final training (populated in fit(); False before the first fit).
+            the final training (False before the first fit).
         selected_features_mask_ (np.ndarray | None): Boolean mask of the
             selected columns after fit() (None if selection was not applied).
-            Note: the mask has the dimensionality of the post-preprocessor
-            matrix (after one-hot expansion/scaling), not of the original
-            columns; no mapping back to original names is performed — the
-            filtering is transparent through the pipeline.
+            The mask has the dimensionality of the post-preprocessor matrix
+            (after one-hot expansion/scaling), not of the original columns;
+            no mapping back to original names is performed — the filtering is
+            transparent through the pipeline.
         lock (threading.RLock): Recursive lock for thread-safe training.
     """
 
@@ -261,6 +256,7 @@ class ModelTrainer:
         datetime_policy: str = "expand",
         drop_id_like_columns: bool = False,
         warn_id_like: bool = True,
+        target_transform: TargetTransform | str = TargetTransform.none,
     ):
         """Initialize the trainer with model parameters and preprocessing settings.
 
@@ -294,6 +290,14 @@ class ModelTrainer:
                 ``True``). Set to ``False`` when the diagnostics have already
                 been reported by the pipeline entry point (``prepare_dataset``)
                 to avoid duplicate warnings on the engine path.
+            target_transform: Transformation of the target ``y`` inside the
+                ``model`` step (``TransformedTargetRegressor``): the model
+                is trained on the transformed ``y`` and ``predict`` returns
+                values in the original scale. ``"none"`` (default) — off;
+                ``"log1p"`` requires ``min(y) > -1``, ``"boxcox"`` requires
+                ``min(y) > 0`` (a ``ValueError`` from ``fit()`` on a domain
+                violation), ``"yeo-johnson"`` — any real ``y``. See the
+                section "Target transformation" in API_REFERENCE.md.
         """
 
         self.logger = logging.getLogger(__name__)
@@ -338,6 +342,7 @@ class ModelTrainer:
                 drop_id_like_columns=drop_id_like_columns,
             ),
             warn_id_like=warn_id_like,
+            target_transform=target_transform,
         )
         register_custom_metrics(self.settings.custom_metrics)
         # ── State populated by fit() (grouped results of the pure steps) ──
@@ -438,6 +443,11 @@ class ModelTrainer:
         return self.settings.test_size
 
     @property
+    def target_transform(self) -> TargetTransform:
+        """The target transformation applied inside the ``model`` step."""
+        return self.settings.target_transform
+
+    @property
     def categorical_features(self) -> list[str] | None:
         """The categorical columns (the detected ones after fit())."""
         if self._features is not None:
@@ -498,16 +508,14 @@ class ModelTrainer:
 
     # ── persistence of the object state ────────────────────────────────────
     def __getstate__(self) -> dict[str, Any]:
-        """Control the object state for correct serialization
-        (excluding lock and logger)."""
+        """Control the object state for serialization (no lock/logger)."""
         state = self.__dict__.copy()
         state.pop("lock", None)
         state.pop("logger", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore the object state after deserialization,
-        initializing a thread-safe lock and a logger.
+        """Restore the object state, reinitializing the lock and the logger.
 
         The state is restored as is: ``load`` checks the artifact format
         version before using the object (``check_artifact_format``).
@@ -520,15 +528,13 @@ class ModelTrainer:
     def _create_base_model(self) -> Any:
         """Create the regressor via the model factory.
 
-        The model seed follows the trainer's ``random_state`` (the engine
-        seed from ``general.random_state``), unless the user set
-        ``random_state`` explicitly in the hyperparameters — an explicit
-        value always wins. ``random_state=None`` (trainer or explicit
-        hyperparameter) produces a truly random fit. Auxiliary keys of the
-        HPO result ``params`` are not model hyperparameters:
-        ``use_feature_selection`` (the 'auto' mode decision), the data
-        adapter hint ``feature_index`` and the informational
-        ``isotonic_feature`` are popped, so that
+        The model seed follows the trainer's ``random_state``, unless the
+        user set ``random_state`` explicitly in the hyperparameters (an
+        explicit value wins); ``None`` produces a truly random fit.
+        Auxiliary keys of the HPO result ``params`` are not model
+        hyperparameters: ``use_feature_selection`` (the 'auto' mode
+        decision), the data adapter hint ``feature_index`` and the
+        informational ``isotonic_feature`` are popped, so that
         ``ModelTrainer(hyperparams=res["params"])`` does not fail on the
         strict ``create_model`` name check."""
         try:
@@ -588,8 +594,8 @@ class ModelTrainer:
     ) -> Pipeline:
         """Assemble the final pipeline and run
         the training process on the prepared data."""
-        # Reset first: if pipeline.fit fails, the trainer must not retain
-        # values from the previous training.
+        # Reset first: if pipeline.fit fails, the trainer must not
+        # retain values from the previous training.
         self._selection = FeatureSelectionResult()
         # imblearn's Pipeline so that resampling steps work correctly
         self.pipeline = Pipeline(
@@ -630,12 +636,8 @@ class ModelTrainer:
         return self.pipeline
 
     def _reset_fit_state(self) -> None:
-        """Reset the training state at the start of ``fit()``.
-
-        If training fails at any stage (data preparation, activity
-        resolution, validation scoring, pipeline.fit), the trainer must not
-        retain values from the previous training.
-        """
+        """Reset the training state at the start of ``fit()``: a failed
+        fit must not retain values from the previous training."""
         self.pipeline = None
         self._features = None
         self._scores = None
@@ -643,7 +645,7 @@ class ModelTrainer:
         self.datetime_expansion_ = {}
 
     def fit(self, X: Any, y: Any) -> ModelTrainer:
-        """Run the full cycle of data preparation, model training, and metric evaluation.
+        """Run the full cycle of data preparation, training, and evaluation.
 
         Quality evaluation (``val_score`` / ``additional_scores``) is performed
         on held-out data using the same validation method that HPO uses to
@@ -659,8 +661,8 @@ class ModelTrainer:
         leakage, separate from ``val_score``. Both use the HPO splits, so for
         hyperparameters selected on those splits neither is independent of
         the selection. After validation scoring, the final
-        pipeline is trained on the full data: the artifact stores a training on
-        100% of the sample, while ``val_score`` remains an honest quality
+        pipeline is trained on the full data (the artifact stores a training
+        on 100% of the sample) while ``val_score`` remains an honest quality
         estimate (not a train score).
 
         The steps are pure functions (``load_training_data``,
@@ -699,6 +701,10 @@ class ModelTrainer:
                 **pre_registered,
                 **dict(features.datetime_expansion),
             }
+
+            # Domain validation of the target (log1p / boxcox): a
+            # ValueError BEFORE any training — an invalid y fails fast.
+            validate_target_for_transform(data.y, settings.target_transform)
 
             # Stage 2: Create the model via the factory. Done BEFORE
             # preprocessor assembly so that an unknown algorithm (a typo in
@@ -739,10 +745,10 @@ class ModelTrainer:
                 random_state=settings.random_state,
             )
 
-            # Stage 5: Validation scoring. Quality evaluation is performed with
-            # the same split method used for model comparison in HPO
-            # (validation.iter_splits), so that val_score/additional_scores are
-            # honest hold-out/CV estimates rather than train scores.
+            # Stage 5: Validation scoring with the same split method used
+            # for model comparison in HPO (validation.iter_splits), so
+            # val_score/additional_scores are honest estimates rather than
+            # train scores.
             self._scores = score_on_validation_splits(
                 features.X,
                 data.y,
@@ -757,9 +763,9 @@ class ModelTrainer:
                 algorithm=settings.algorithm,
             )
 
-            # Stage 6: Final training on the full data (the artifact):
-            # the pipeline is trained on 100% of the sample, while val_score
-            # remains the estimate computed on held-out data (stage 5).
+            # Stage 6: Final training on the full data (the artifact): the
+            # pipeline is trained on 100% of the sample, while val_score
+            # remains the held-out estimate (stage 5).
             self._fit_internal(
                 features.X,
                 data.y,
@@ -768,9 +774,8 @@ class ModelTrainer:
                 feature_selection_active=feature_selection_active,
             )
 
-            # Observability: the dimensionality and the representation of the
-            # preprocessed matrix that the model actually received (one-hot
-            # expansion, missing-value indicators, sparse/dense storage).
+            # Observability: the dimensionality and the representation of
+            # the preprocessed matrix the model actually received.
             log_preprocessed_matrix(setup.preprocessor, features.X)
 
             return self
@@ -833,14 +838,12 @@ class ModelTrainer:
         model accepts the raw schema it was trained on. ``SharedDataFrame`` is
         restored into a DataFrame and aligned the same way when column names
         are available. For ``np.ndarray`` and other inputs without names, the
-        positional column order fixed at training time is used.
-
-        The ±inf policy used at training time (``inf_policy``) is applied to
-        the input as well, so inference is symmetric with :meth:`fit`:
+        positional column order fixed at training time is used. The ±inf
+        policy used at training time (``inf_policy``) is applied to the
+        input as well, so inference is symmetric with :meth:`fit`:
         ``"as_missing"`` replaces ±inf in numeric features with NaN (the
-        preprocessor imputes them) and logs a WARNING listing the columns and
-        counts; ``"error"`` rejects the input. Both ``pd.DataFrame`` and
-        numeric ``np.ndarray`` inputs are handled.
+        preprocessor imputes them) and logs a WARNING listing the columns
+        and counts; ``"error"`` rejects the input.
 
         Args:
             X: Feature matrix to predict on.
@@ -882,10 +885,10 @@ class ModelTrainer:
 
         The artifact is written in ``self.serialization_format`` (pickle or
         joblib). Before writing, the instance is enriched with
-        ``artifact_metadata_`` — a dict with the engine version, the versions
-        of Python and the ML stack, the creation timestamp (UTC), the
-        algorithm, hyperparameters and a hash of the configuration — so that
-        :meth:`load` can warn about potentially incompatible artifacts.
+        ``artifact_metadata_`` (engine and ML-stack versions, the creation
+        timestamp, the algorithm, hyperparameters, the target transformation
+        and a configuration hash) so that :meth:`load` can warn about
+        potentially incompatible artifacts.
 
         Args:
             path: Destination path of the artifact. The directory is created
@@ -899,9 +902,8 @@ class ModelTrainer:
             # Create the directories if they do not exist
             path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-            # Enrich the artifact with environment and configuration metadata
-            # so that load() can detect version mismatches and the engine can
-            # audit the provenance of the artifact.
+            # Enrich the artifact with environment and configuration
+            # metadata (version-mismatch detection, provenance audit).
             self.artifact_metadata_ = _collect_artifact_metadata(self.settings)
 
             # Call the new utility instead of pickle.dump
@@ -915,16 +917,13 @@ class ModelTrainer:
 
         The serialization format is auto-detected when ``fmt`` is ``None``:
         the file extension decides (``.joblib`` → joblib, ``.pkl``/``.pickle``
-        → pickle), and the other format is tried as a fallback so that a
-        wrongly named file still loads. For an unknown extension, joblib is
-        tried first, then pickle. When an explicit ``fmt`` is passed, only
-        that format is tried exclusively.
-
-        The artifact format version is checked first: an artifact saved by
-        another format (every engine up to 0.4.x) is refused with a clear
-        error that says to retrain the model. After a successful load, a
-        WARNING is logged when the artifact's engine or scikit-learn
-        major/minor version differs from the one in the current environment.
+        → pickle), the other format is tried as a fallback, and for an
+        unknown extension joblib is tried first. An explicit ``fmt`` is used
+        exclusively. The artifact format version is checked first (an
+        artifact saved by another format is refused with an error that says
+        to retrain the model); after a successful load a WARNING is logged
+        when the artifact's engine or scikit-learn ``major.minor`` version
+        differs from the current environment.
 
         Args:
             path: Path to the saved artifact.
