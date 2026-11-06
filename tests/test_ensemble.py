@@ -228,6 +228,51 @@ def test_p4_top_k_reuses_select_semantics() -> None:
     assert select_top_k({"first": 2.0, "second": 2.0}, 1, "minimize") == ["first"]
 
 
+def test_p4_winner_inserted_at_score_position() -> None:
+    """P4 (winner insertion): the terminal winner absent from the top-K
+    is inserted at its SCORE position, so the member order (and the
+    reported ranks) stays best-first — not appended with the last rank.
+    The snapshot holds raw optimizer scores (negated for rmse)."""
+    from configurable_automl_engine.training_engine.ensemble_step import (
+        top_k_from_leaderboard,
+    )
+    from configurable_automl_engine.training_engine.state import (
+        PhaseContext,
+        PhaseResult,
+    )
+
+    def _ctx(snapshot: dict[str, float], winner: str | None) -> PhaseContext:
+        ctx = PhaseContext()
+        ctx.leaderboard_snapshot = {
+            name: PhaseResult(score=score, params={})
+            for name, score in snapshot.items()
+        }
+        ctx.winner_algo = winner
+        return ctx
+
+    # minimize (rmse, raw scores negated): a defensive divergence where
+    # the winner is not in the top-K — it is inserted at its score
+    # position (after both better members), not blindly appended.
+    ctx = _ctx({"a": -1.0, "b": -2.0, "w": -2.5}, "w")
+    selected, scores = top_k_from_leaderboard(ctx, "rmse", 2)
+    assert selected == ["a", "b", "w"]
+    assert scores["w"] == 2.5
+
+    # The same for a maximize metric (a defensive divergence where the
+    # winner is not in the top-2: 'w' (0.5) loses to 'a' (0.9) and
+    # 'b' (0.6)) → inserted after both, by score position.
+    ctx = _ctx({"a": 0.9, "b": 0.6, "w": 0.5, "c": 0.3}, "w")
+    selected, _ = top_k_from_leaderboard(ctx, "r2", 2)
+    assert selected == ["a", "b", "w"]
+
+    # Ties: the winner tied with the top member stays behind it (the same
+    # tie-break as the top-K ranking; k=2 here — at k=1 the winner
+    # replaces the selection by the terminal-select contract).
+    ctx = _ctx({"a": -1.0, "b": -2.0, "w": -1.0}, "w")
+    selected, _ = top_k_from_leaderboard(ctx, "rmse", 2)
+    assert selected == ["a", "w"]
+
+
 def test_p5_section_reaches_result_report_and_json(tmp_path: Any) -> None:
     """P5: the ensemble section survives the JSON round-trip and is
     rendered by the Markdown reporter."""

@@ -285,11 +285,15 @@ class MarkdownReporter(Reporter):
         section = result.ensemble
         if not section:
             return
-        lines.append("## Ensemble (experimental)")
-        lines.append("")
         members = section.get("members", [])
         if not members:
+            # A section without members (unreachable via the engine: the
+            # builder always assembles a non-empty list, and the result
+            # validator checks JSON safety) renders nothing — no dangling
+            # heading.
             return
+        lines.append("## Ensemble (experimental)")
+        lines.append("")
         weight_method = section.get("weight_method")
         lines.append(
             f"Weighted average of the top-{section.get('k_used', len(members))} "

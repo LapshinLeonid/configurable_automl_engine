@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from configurable_automl_engine.common.definitions import MetricDirection
 from configurable_automl_engine.common.metrics import to_user_value, user_direction
 from configurable_automl_engine.experiment.ensemble import (
     EnsembleMember,
@@ -39,6 +40,25 @@ from .state import PhaseContext, PreparedData
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["build_ensemble_from_context", "top_k_from_leaderboard"]
+
+
+def _resolve_direction(
+    direction: MetricDirection | str,
+) -> MetricDirection:
+    """Resolve the comparison-metric direction (a local mirror).
+
+    ``experiment.ensemble`` keeps the single implementation; this mirror
+    avoids importing the private helper across the package boundary (the
+    ``ensemble`` module exports only its public API).
+    """
+    if isinstance(direction, MetricDirection):
+        return direction
+    text = str(direction).strip().lower()
+    if text == MetricDirection.minimize.value:
+        return MetricDirection.minimize
+    if text == MetricDirection.maximize.value:
+        return MetricDirection.maximize
+    return MetricDirection(user_direction(text))
 
 
 def top_k_from_leaderboard(
@@ -83,12 +103,43 @@ def top_k_from_leaderboard(
     }
     selected = select_top_k(user_scores, k, direction=metric_user)
     if ctx.winner_algo and ctx.winner_algo not in selected:
-        # K=1 keeps the single best member; otherwise the terminal winner
-        # is appended as the last member (its rank follows the selection).
+        # Defensive branch: by construction the terminal winner is the
+        # best user-semantic score (raw scores are monotone in user
+        # semantics for both directions), so it is always rank 1 of the
+        # top-K. It can be absent only through an unexpected
+        # snapshot/winner divergence — in that case the winner is
+        # inserted at its score position (not appended blindly), so the
+        # member order — and therefore the reported ranks — stays the
+        # best-first order of the user-semantic scores. K=1 keeps the
+        # single best member.
+        if ctx.winner_algo not in user_scores:
+            # No record at all: the winner cannot become a member (no
+            # score, no retrain source) — the top-K selection stays as is.
+            return selected, user_scores
         if len(selected) == 1:
             selected = [ctx.winner_algo]
         else:
-            selected.append(ctx.winner_algo)
+            winner_score = user_scores[ctx.winner_algo]
+            resolved = _resolve_direction(metric_user)
+            if resolved is MetricDirection.maximize:
+                # Descending order: the first member with a strictly
+                # smaller score is the winner's insertion point.
+                position = len(selected)
+                for idx, name in enumerate(selected):
+                    if user_scores[name] < winner_score:
+                        position = idx
+                        break
+            else:
+                # Ascending order (minimize): the first member with a
+                # strictly greater score is the winner's insertion point;
+                # ties keep the earlier member ahead (the same tie-break
+                # as the top-K ranking).
+                position = len(selected)
+                for idx, name in enumerate(selected):
+                    if user_scores[name] > winner_score:
+                        position = idx
+                        break
+            selected.insert(position, ctx.winner_algo)
     return selected, user_scores
 
 

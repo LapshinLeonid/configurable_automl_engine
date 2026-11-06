@@ -868,15 +868,32 @@ def _build_and_attach_ensemble(
         return
     ensemble, section = built
     # Save next to the winner artifact (the ensemble is an additional
-    # output: the winner artifact path is never touched).
-    model_path = Path(str(result.get("model_path", cfg.general.path_to_model)))
-    ensemble_path = model_path.with_name(
-        f"{model_path.stem}_ensemble{model_path.suffix}"
+    # output: the winner artifact path is never touched). ``model_path``
+    # is always present in the result (persist_artifact records it) — a
+    # missing key means an unexpected engine/result divergence, and an
+    # ensemble placed next to a wrong path would be worse than no
+    # ensemble: the step degrades to "no section" with an explicit
+    # warning naming the consequence for the facade.
+    model_path = result.get("model_path")
+    if not model_path:
+        _LOG.warning(
+            "The ensemble could not be attached: the result carries no "
+            "'model_path' (unexpected result-assembly divergence); the "
+            "result carries no ensemble section and ensemble_model() "
+            "will raise."
+        )
+        return
+    ensemble_path = Path(str(model_path)).with_name(
+        f"{Path(str(model_path)).stem}_ensemble{Path(str(model_path)).suffix}"
     )
     try:
         ensemble.save(ensemble_path, cfg.general.serialization_format)
     except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
-        _LOG.warning("The ensemble artifact could not be saved: %s", err)
+        _LOG.warning(
+            "The ensemble artifact could not be saved: %s; the result "
+            "carries no ensemble section and ensemble_model() will raise.",
+            err,
+        )
         return
     section["artifact_path"] = str(ensemble_path)
     result["ensemble"] = section
