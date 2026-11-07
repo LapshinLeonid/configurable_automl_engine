@@ -353,12 +353,14 @@ workflows:
     tasks:
       - name: run-quality-checks
         cubes:
-          - name: lint-and-test
+          # Split into two cubes: the platform limits a single cube to 1200
+          # seconds, so lint and tests get independent time budgets
+          - name: lint-and-typecheck
             image: python:3.11-slim
             script:
               - pip install --upgrade pip
               - SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
-              - pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML
+              - pip install ruff mypy types-PyYAML
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
@@ -374,6 +376,13 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 mypy src --install-types --non-interactive
                 echo "✅ Mypy: no issues found"
+
+          - name: run-tests
+            image: python:3.11-slim
+            script:
+              - pip install --upgrade pip
+              - SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
+              - pip install pytest pytest-cov pytest-mock
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
