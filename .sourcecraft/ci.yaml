@@ -353,39 +353,52 @@ workflows:
     tasks:
       - name: run-quality-checks
         cubes:
-          # Split into two cubes: the platform limits a single cube to 1200
-          # seconds, so lint and tests get independent time budgets
+          # Native cubes share the worker environment within a task, so the
+          # test cube reuses the dependencies installed by the first cube.
+          # They also run as separate cubes: the platform limits a single
+          # cube to 1200 seconds, so lint and tests get independent budgets.
           - name: lint-and-typecheck
-            image: python:3.11-slim
             script:
-              - pip install --upgrade pip
-              - SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
-              - pip install ruff mypy types-PyYAML
+              # The native worker ships Python 3.10, while the project
+              # requires >=3.11 — install 3.11 from the deadsnakes PPA
+              # (same approach as the ai-development-pipeline setup cube)
+              - |
+                set -e
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-venv
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                # Pre-install distutils-managed system packages with
+                # --ignore-installed, otherwise pip fails with
+                # "Cannot uninstall blinker 1.4" during dependency setup
+                python3.11 -m pip install --ignore-installed blinker
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e ".[all,test]"
+                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  1. CODE STYLE CHECK (Ruff)"
                 echo "═══════════════════════════════════════════════════════════════"
-                ruff check src/
-                ruff format --check src/
+                python3.11 -m ruff check src/
+                python3.11 -m ruff format --check src/
                 echo "✅ Ruff: no issues found"
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  2. TYPE CHECK (Mypy)"
                 echo "═══════════════════════════════════════════════════════════════"
-                mypy src --install-types --non-interactive
+                python3.11 -m mypy src --install-types --non-interactive
                 echo "✅ Mypy: no issues found"
 
           - name: run-tests
-            image: python:3.11-slim
             script:
-              - pip install --upgrade pip
-              - SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
-              - pip install pytest pytest-cov pytest-mock
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  3. RUN TESTS AND COVERAGE (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
-                pytest --cov=src
+                python3.11 -m pytest --cov=src
