@@ -69,6 +69,14 @@ ALLOWED_FUNCTION_IMPORTS = {
         "training_engine/component.py",
         f"{PACKAGE}.training_engine.ensemble_step",
     ),
+    # The export component (the T11 component) is a sibling of the
+    # facade inside the experiment package: it is imported lazily
+    # inside export() to keep the facade module import-light (the same
+    # pattern as the lazy engine calls above).
+    (
+        "experiment/experiment.py",
+        f"{PACKAGE}.experiment.export",
+    ),
 }
 
 

@@ -31,6 +31,10 @@ from configurable_automl_engine.experiment.experiment import (
     AutoMLExperiment,
     ExperimentNotRunError,
 )
+from configurable_automl_engine.experiment.export import (
+    ExportError,
+    export_experiment,
+)
 from configurable_automl_engine.experiment.leaderboard import (
     EMPTY_LEADERBOARD_MESSAGE,
     FAILED_SUMMARY_MESSAGE,
@@ -72,6 +76,7 @@ __all__ = [
     "ExperimentResult",
     "ExperimentStore",
     "ExperimentStoreError",
+    "ExportError",
     "JSONReporter",
     "Leaderboard",
     "LeaderboardEntry",
@@ -87,5 +92,6 @@ __all__ = [
     "RunSummary",
     "build_leaderboard",
     "compute_weights",
+    "export_experiment",
     "select_top_k",
 ]

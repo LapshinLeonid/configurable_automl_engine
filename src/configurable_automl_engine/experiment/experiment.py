@@ -12,7 +12,7 @@ in an :class:`~configurable_automl_engine.experiment.store.ExperimentStore`
     experiment.leaderboard()
     experiment.best_model()
     experiment.report()
-    experiment.export(directory)   # implemented in a later epic task
+    experiment.export(directory)
     experiment.explain()           # implemented in a later epic task
 
 Documented contract:
@@ -36,6 +36,9 @@ Documented contract:
   not a deep copy of every block — mutating the column *values in place*
   (``df.loc[...] = ...``) still writes through to the training data, as
   with any pandas copy; assign a new frame instead;
+* ``export(directory)`` bundles the consumed artifacts of the run
+  into the destination directory (see
+  :mod:`configurable_automl_engine.experiment.export`);
 * ``best_model()`` returns the winner's ``ModelTrainer``: it is loaded
   from the artifact path recorded in the result (auto-detected format);
 * the facade holds no global state: two experiments in different threads
@@ -46,8 +49,8 @@ Documented contract:
   a concurrent or sequential stranger's run never leaks into the
   experiment's own state.
 
-Until the corresponding epic tasks land, ``explain()`` and ``export()``
-raise ``NotImplementedError``.
+Until the corresponding epic task lands, ``explain()`` raises
+``NotImplementedError``.
 """
 
 from __future__ import annotations
@@ -431,26 +434,37 @@ class AutoMLExperiment:
         print(markdown_text)
         return markdown_text
 
-    def export(self, directory: str | Path) -> Any:
-        """Export the experiment bundle (a later epic task).
+    def export(self, directory: str | Path) -> Path:
+        """Export the artifact bundle of the last run into ``directory``.
+
+        The export is delegated to
+        :func:`configurable_automl_engine.experiment.export.export_experiment`
+        (the T11 component): the model artifact (a byte-exact copy; the
+        original file is never touched), the leaderboard (JSON and
+        Markdown), the full Markdown report, the JSON result snapshot
+        and the run metadata (identity, status, timings, engine
+        version, the exported-file map) — every file prefixed with the
+        ``run_id``. Missing destination directories are created
+        recursively; an existing bundle of the same run is overwritten;
+        the bundle is assembled atomically (a failure never leaves a
+        partial export).
 
         Args:
-            directory: Destination directory of the export bundle
-                (unused until the export component of the epic lands).
-                Kept in the signature so the public contract does not
-                change when the real implementation arrives.
+            directory: Destination directory of the export bundle.
+
+        Returns:
+            Path: The destination directory containing the bundle.
 
         Raises:
-            NotImplementedError: The export component is not implemented
-                yet (see the epic roadmap).
+            ExportError: The destination exists but is not a directory,
+                or the recorded model artifact is missing on disk.
+            OSError: The destination is not writable.
             ExperimentNotRunError: The experiment has not been run yet.
         """
-        _ = directory  # unused until the epic's export component lands
-        self._require_result()
-        raise NotImplementedError(
-            "export() is not implemented yet: it will delegate to the "
-            "experiment export component of the epic."
-        )
+        result = self._require_result()
+        from configurable_automl_engine.experiment.export import export_experiment
+
+        return export_experiment(result, directory)
 
     def explain(self, *args: Any, **kwargs: Any) -> Any:
         """Explain the model of the experiment (a later epic task).
