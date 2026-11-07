@@ -33,7 +33,6 @@ Covered scenarios (positive / negative / boundary):
 - R3: ``run()`` returns a result carrying this experiment's owner stamp
   (the engine-side token contract).
 """
-
 from __future__ import annotations
 
 import json
@@ -160,6 +159,16 @@ def test_p1_full_lifecycle_run_leaderboard_best_model_report(
     printed = experiment.leaderboard(print_table=True)
     assert printed.to_table() in capsys.readouterr().out
 
+    summarized = experiment.leaderboard(summary=True)
+    summary_out = capsys.readouterr().out
+    # The UX summary block of the epic #37 example: the status header,
+    # the ranking and the Winner line reach the stdout through the
+    # facade (one call, no manual to_summary() wiring).
+    assert "Experiment completed" in summary_out
+    assert result.winner in summary_out
+    assert f"Winner: {result.winner}" in summary_out
+    assert summarized.to_summary(status=True) in summary_out
+
     model = experiment.best_model()
     assert model.algorithm == result.winner
 
@@ -270,6 +279,16 @@ def test_n1_methods_before_run_raise_state_error(tmp_path: Path, method: str) ->
             getattr(experiment, method)()
     # The state is observable through the public result property.
     assert experiment.result is None
+
+
+def test_n1_leaderboard_summary_before_run_raises_state_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N1: ``leaderboard(summary=True)`` before run() → the state error."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    with pytest.raises(ExperimentNotRunError, match="has not been run"):
+        experiment.leaderboard(summary=True)
+    assert capsys.readouterr().out == ""
 
 
 def test_n1_not_run_error_is_runtime_error(tmp_path: Path) -> None:

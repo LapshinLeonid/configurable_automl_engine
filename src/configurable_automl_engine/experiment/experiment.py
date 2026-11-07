@@ -345,11 +345,21 @@ class AutoMLExperiment:
             )
         return self._result
 
-    def leaderboard(self, *, print_table: bool = False) -> Leaderboard:
+    def leaderboard(
+        self,
+        *,
+        print_table: bool = False,
+        summary: bool = False,
+    ) -> Leaderboard:
         """Return the algorithm ranking table of the last run.
 
         Args:
             print_table: Also print the rendered table to stdout.
+            summary: Also print the UX summary block (the status line
+                ``Experiment completed`` / ``Experiment failed``, the
+                ranked list and the Winner line — the report layout of
+                the epic #37 UX goal) to stdout. ``print_table`` and
+                ``summary`` are independent: both may be printed.
 
         Returns:
             Leaderboard: The ranked leaderboard built from the run result
@@ -362,6 +372,8 @@ class AutoMLExperiment:
         board = build_leaderboard(result)
         if print_table:
             print(board.to_table())
+        if summary:
+            print(board.to_summary(status=True))
         return board
 
     def best_model(self) -> ModelTrainer:

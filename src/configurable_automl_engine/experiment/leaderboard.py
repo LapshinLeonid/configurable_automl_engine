@@ -44,6 +44,11 @@ Documented contract:
   error: :func:`build_leaderboard` returns an empty leaderboard,
   :meth:`Leaderboard.to_table` renders a placeholder message and
   :meth:`Leaderboard.to_summary` reports the failure explicitly.
+
+``to_summary`` contract: the statusless rendering (the default) is the
+list plus the ``Winner: …`` line; with ``status=True`` the first line of
+the block is the experiment status (``Experiment completed`` /
+``Experiment failed``), matching the UX-цель example of the epic #37.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ from typing import Any
 from configurable_automl_engine.common.definitions import (
     MetricDirection,
     RunPhaseAction,
+    RunStatus,
     RunStepStatus,
 )
 from configurable_automl_engine.experiment.result import (
@@ -64,8 +70,10 @@ from configurable_automl_engine.experiment.result import (
 )
 
 __all__ = [
+    "COMPLETED_SUMMARY_MESSAGE",
     "EMPTY_LEADERBOARD_MESSAGE",
     "FAILED_SUMMARY_MESSAGE",
+    "SUMMARY_HEADER_INDENT",
     "Leaderboard",
     "LeaderboardEntry",
     "build_leaderboard",
@@ -76,8 +84,16 @@ __all__ = [
 #: filtering (a failed experiment, no completed records with valid scores).
 EMPTY_LEADERBOARD_MESSAGE = "<no ranked algorithms>"
 
+#: The status header of a completed experiment (the first line of the
+#: UX summary, following the epic #37 example).
+COMPLETED_SUMMARY_MESSAGE = "Experiment completed"
+
 #: The summary line of a failed experiment (no winner to congratulate).
 FAILED_SUMMARY_MESSAGE = "Experiment failed"
+
+#: The indent of the ``Winner: …`` line: it hangs under the list so the
+#: winner stands out without taking a rank number (the epic #37 layout).
+SUMMARY_HEADER_INDENT = "   "
 
 #: The columns of the ranking table, in the render order.
 _COLUMNS: tuple[str, ...] = ("Rank", "Algorithm", "Score", "Trials", "Phase")
@@ -291,6 +307,10 @@ class Leaderboard:
     metric_user: str
     metric_direction: MetricDirection
     entries: tuple[LeaderboardEntry, ...] = field(default_factory=tuple)
+    #: The status of the experiment the leaderboard was built from
+    #: (``None`` for a hand-built ``Leaderboard`` — the ``status=True``
+    #: rendering then treats the run as not completed).
+    result_status: RunStatus | None = None
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -348,13 +368,42 @@ class Leaderboard:
         )
         return "\n".join(lines)
 
-    def to_summary(self) -> str:
+    def to_summary(self, *, status: bool = False) -> str:
         """Render the UX summary of the experiment outcome.
 
         The block lists every ranked entry as ``N. Name  Score`` (the
         names padded to a common width so the scores align) and closes
         with the ``Winner: …`` line; a failed experiment with no ranked
         entries reports the failure instead of a winner.
+
+        Args:
+            status: Prepend the experiment status line to the block —
+                ``Experiment completed`` for a completed run or
+                ``Experiment failed`` for a failed one (the failed
+                status keeps the ranking below it: some algorithms may
+                have valid records even when the run as a whole failed).
+                The statusless rendering (the default) keeps the
+                historical list + Winner layout unchanged; the status
+                line matches the UX-цель block of the epic #37 example.
+                A statusless summary of an empty leaderboard is the
+                failure placeholder (unchanged); a failed status never
+                prefixes an empty summary (the placeholder already says
+                ``Experiment failed``).
+
+        Returns:
+            str: The rendered summary block; the exact shape depends on
+                ``status`` and on whether entries exist:
+
+                * ``status=False``, entries exist: the ``N. Name Score``
+                  list plus the final ``   Winner: …`` line (no status
+                  header — the documented deviation from the epic #37
+                  example);
+                * ``status=True``, entries exist: the status line
+                  (``Experiment completed`` / ``Experiment failed``),
+                  then the list, then the Winner line;
+                * no entries: the ``Experiment failed`` placeholder —
+                  with or without ``status=True`` (the placeholder is
+                  never doubled).
         """
         if not self.entries:
             return FAILED_SUMMARY_MESSAGE
@@ -364,8 +413,15 @@ class Leaderboard:
             f"{_format_score(entry.score)}"
             for idx, entry in enumerate(self.entries, start=1)
         ]
-        lines.append(f"   Winner: {self.entries[0].algorithm}")
-        return "\n".join(lines)
+        lines.append(f"{SUMMARY_HEADER_INDENT}Winner: {self.entries[0].algorithm}")
+        if not status:
+            return "\n".join(lines)
+        header = (
+            COMPLETED_SUMMARY_MESSAGE
+            if self.result_status is RunStatus.completed
+            else FAILED_SUMMARY_MESSAGE
+        )
+        return "\n".join([header, *lines])
 
 
 def build_leaderboard(result: ExperimentResult) -> Leaderboard:
@@ -428,6 +484,7 @@ def build_leaderboard(result: ExperimentResult) -> Leaderboard:
         metric_user=result.metric_user,
         metric_direction=result.metric_direction,
         entries=entries,
+        result_status=result.status,
     )
 
 

@@ -4,7 +4,8 @@ Covered scenarios (positive / negative / boundary):
 
 - P1: the table format matches the epic example (columns, order, ranks);
 - P2: the UX summary "Experiment completed … Winner: …" is rendered
-  correctly;
+  correctly (both the statusless default and the ``status=True`` block
+  of the epic #37 UX-цель example);
 - P3: the per-run details (params, validation strategy, training time,
   failed trials) are available on the entries;
 - P4: a minimized metric (RMSE) ranks the smallest score first;
@@ -35,8 +36,10 @@ from configurable_automl_engine.common.definitions import (
 )
 from configurable_automl_engine.experiment import AlgorithmRun, ExperimentResult
 from configurable_automl_engine.experiment.leaderboard import (
+    COMPLETED_SUMMARY_MESSAGE,
     EMPTY_LEADERBOARD_MESSAGE,
     FAILED_SUMMARY_MESSAGE,
+    SUMMARY_HEADER_INDENT,
     Leaderboard,
     LeaderboardEntry,
     build_leaderboard,
@@ -168,6 +171,69 @@ def test_p2_summary_winner_line() -> None:
     assert [visual_width(line.split("0.")[0]) for line in lines[:4]] == [
         visual_width(lines[0].split("0.")[0])
     ] * 4
+
+
+def test_p2_summary_status_header_epic_block() -> None:
+    """P2: ``status=True`` renders the epic #37 UX-цель block verbatim."""
+    result = _make_result(
+        [
+            _run_kwargs(algorithm="Random Forest", score=0.842, score_raw=-0.842),
+            _run_kwargs(algorithm="XGBoost", score=0.831, score_raw=-0.831),
+            _run_kwargs(algorithm="Gradient Boosting", score=0.809, score_raw=-0.809),
+            _run_kwargs(algorithm="Ridge", score=0.774, score_raw=-0.774),
+        ]
+    )
+    lb = build_leaderboard(result)
+    summary = lb.to_summary(status=True)
+    lines = summary.splitlines()
+    assert lines[0] == COMPLETED_SUMMARY_MESSAGE
+    # The ranking follows: 1..N lines then the indented Winner line.
+    assert lines[1].startswith("1. Ridge")
+    assert lines[4].startswith("4. Random Forest")
+    assert lines[5] == "   Winner: Ridge"
+    assert len(lines) == 6
+    # The Winner indent is a shared constant (kept aligned with the list).
+    assert SUMMARY_HEADER_INDENT == "   "
+
+
+def test_p2_summary_status_header_for_failed_result() -> None:
+    """P2: a failed run with valid records reports the failed status.
+
+    Symmetric to the completed case: some algorithms may have scored
+    even when the run as a whole failed — the ranking stays under the
+    ``Experiment failed`` header.
+    """
+    result = _make_result(
+        [
+            _run_kwargs(algorithm="healthy", score=0.5, score_raw=-0.5),
+        ],
+        status=RunStatus.failed,
+        error="a late phase crashed",
+    )
+    lb = build_leaderboard(result)
+    assert len(lb) == 1
+    summary = lb.to_summary(status=True)
+    lines = summary.splitlines()
+    assert lines[0] == FAILED_SUMMARY_MESSAGE
+    assert lines[1].startswith("1. healthy")
+    assert lines[-1] == "   Winner: healthy"
+
+
+def test_p2_summary_status_never_doubled_on_empty_leaderboard() -> None:
+    """P2: the empty-leaderboard failure placeholder is not doubled."""
+    result = ExperimentResult(
+        **_result_kwargs(
+            status=RunStatus.failed,
+            error="No valid results after HPO phases",
+            winner=None,
+            winner_score=None,
+            winner_params={},
+            runs=[],
+        )
+    )
+    lb = build_leaderboard(result)
+    assert lb.to_summary() == FAILED_SUMMARY_MESSAGE
+    assert lb.to_summary(status=True) == FAILED_SUMMARY_MESSAGE
 
 
 def test_p3_run_details_available() -> None:
@@ -471,7 +537,14 @@ def test_b2_single_record() -> None:
     assert entry is not None
     assert entry.rank == 1
     assert entry.algorithm == "only"
-    assert lb.to_summary().splitlines()[-1] == "   Winner: only"
+    summary = lb.to_summary()
+    assert summary.splitlines()[-1] == "   Winner: only"
+    # The statusless rendering starts with the ranking (no status header).
+    assert summary.splitlines()[0].startswith("1. only")
+    # With the status flag the header precedes the single ranking line.
+    status_lines = lb.to_summary(status=True).splitlines()
+    assert status_lines[0] == COMPLETED_SUMMARY_MESSAGE
+    assert status_lines[-1] == "   Winner: only"
 
 
 def test_b3_long_names_truncated_and_aligned() -> None:

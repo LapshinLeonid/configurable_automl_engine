@@ -47,6 +47,7 @@ from configurable_automl_engine.experiment.export import (
     export_experiment,
 )
 from configurable_automl_engine.experiment.leaderboard import (
+    COMPLETED_SUMMARY_MESSAGE,
     EMPTY_LEADERBOARD_MESSAGE,
     FAILED_SUMMARY_MESSAGE,
     Leaderboard,
@@ -74,6 +75,7 @@ from configurable_automl_engine.experiment.store import (
 )
 
 __all__ = [
+    "COMPLETED_SUMMARY_MESSAGE",
     "EMPTY_LEADERBOARD_MESSAGE",
     "FAILED_SUMMARY_MESSAGE",
     "AlgorithmRun",
