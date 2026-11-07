@@ -51,9 +51,11 @@
 
     mlflow = ["mlflow>=2.0.0"]
 
+    shap = ["shap>=0.48.0"]
+
     test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15"]
 
-    all = ["configurable-automl-engine[xgboost,logging,mlflow]"]
+    all = ["configurable-automl-engine[xgboost,logging,mlflow,shap]"]
 
     dev = ["configurable-automl-engine[all,test]"]
 
@@ -116,6 +118,10 @@
         "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
         "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
         "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.trainer",
+        # The explainability component explains the winner's ModelTrainer
+        # pipeline: it consumes the trainer from the experiment package
+        # (both are building blocks; the trainer imports nothing back).
+        "configurable_automl_engine.experiment.explain -> configurable_automl_engine.trainer",
     ]
     layers = [
         # 3 — orchestration

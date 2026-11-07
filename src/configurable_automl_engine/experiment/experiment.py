@@ -13,7 +13,7 @@ in an :class:`~configurable_automl_engine.experiment.store.ExperimentStore`
     experiment.best_model()
     experiment.report()
     experiment.export(directory)
-    experiment.explain()           # implemented in a later epic task
+    experiment.explain()           # feature importance of the winner
 
 Documented contract:
 
@@ -49,8 +49,10 @@ Documented contract:
   a concurrent or sequential stranger's run never leaks into the
   experiment's own state.
 
-Until the corresponding epic task lands, ``explain()`` raises
-``NotImplementedError``.
+``explain()`` explains the winner: the permutation importance of the
+original feature columns (always available) or the SHAP contributions
+(the optional ``[shap]`` extra; see
+:mod:`configurable_automl_engine.experiment.explain`).
 """
 
 from __future__ import annotations
@@ -64,6 +66,19 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from configurable_automl_engine.common.datetime_features import (
+    expand_datetime_columns,
+)
+from configurable_automl_engine.experiment.explain import (
+    DEFAULT_N_REPEATS,
+    DEFAULT_SAMPLE_ROWS,
+    ExplainNotAvailableError,
+    PermutationImportanceResult,
+    ShapFeatureImportance,
+    explain_permutation_importance,
+    explain_shap,
+    render_importance_markdown,
+)
 from configurable_automl_engine.experiment.leaderboard import (
     Leaderboard,
     build_leaderboard,
@@ -80,7 +95,14 @@ from configurable_automl_engine.experiment.store import ExperimentStore
 if TYPE_CHECKING:
     from configurable_automl_engine.trainer import ModelTrainer
 
-__all__ = ["AutoMLExperiment", "ExperimentNotRunError"]
+__all__ = [
+    "AutoMLExperiment",
+    "ExperimentNotRunError",
+    "ExplainNotAvailableError",
+]
+
+#: The explain methods of ``AutoMLExperiment.explain``.
+_EXPLAIN_METHODS = frozenset({"permutation", "shap"})
 
 _LOG = logging.getLogger(__name__)
 
@@ -466,19 +488,167 @@ class AutoMLExperiment:
 
         return export_experiment(result, directory)
 
-    def explain(self, *args: Any, **kwargs: Any) -> Any:
-        """Explain the model of the experiment (a later epic task).
+    def explain(
+        self,
+        method: str = "permutation",
+        X: pd.DataFrame | None = None,
+        y: Any | None = None,
+        *,
+        n_repeats: int = DEFAULT_N_REPEATS,
+        max_rows: int = DEFAULT_SAMPLE_ROWS,
+        post_preprocessing: bool = False,
+        markdown: bool = True,
+    ) -> Any:
+        """Explain the winner model of the last run.
+
+        Two computations are available (one per call):
+
+        * ``method="permutation"`` (default) — the permutation importance
+          of every original input column: the mean change of the run's
+          comparison metric when one column is shuffled. Works through
+          the trainer's own ``predict`` (the raw pre-pipeline schema),
+          so one importance per original column comes out regardless of
+          the internal encoding/selection. The target ``y`` is required
+          (the metric needs the true values); ``X``/``y`` default to the
+          run's training frame and target.
+        * ``method="shap"`` — mean absolute SHAP contributions (the
+          optional ``[shap]`` extra; a missing installation raises
+          ``ExplainNotAvailableError`` naming the extra). By default the
+          per-component values are aggregated to the original columns;
+          ``post_preprocessing=True`` reports them under their pipeline
+          names instead. The target is not used.
+
+        The importance rows are the run's training rows (in-sample for
+        the saved artifact — the final model is fit on all data); pass
+        ``X``/``y`` explicitly to score a different block (e.g. a
+        held-out frame).
+
+        Args:
+            method: ``"permutation"`` or ``"shap"`` (case-insensitive).
+            X: The feature frame to explain on (default — the training
+                frame of the run, without the target column).
+            y: The target vector aligned with ``X`` (default — the
+                training target of the run; required for permutation).
+            n_repeats: Shuffles per feature (permutation only).
+            max_rows: The row budget of the computation (both methods;
+                larger data is subsampled deterministically).
+            post_preprocessing: SHAP only: report the per-component
+                values under their pipeline names instead of aggregating
+                to the original columns.
+            markdown: Also render the importance table as a Markdown
+                section (returned as the second element of the tuple).
+
+        Returns:
+            The structured importance of the requested method (a
+            ``PermutationImportanceResult`` or a ``ShapFeatureImportance``);
+            with ``markdown=True`` a ``(importance, str)`` tuple — the
+            second element is the rendered Markdown section.
 
         Raises:
-            NotImplementedError: The explainability component is not
-                implemented yet (see the epic roadmap).
             ExperimentNotRunError: The experiment has not been run yet.
+            RuntimeError: The run failed and no model artifact exists,
+                or the recorded artifact cannot be loaded as a
+                ``ModelTrainer`` (propagated from ``best_model``).
+            ExplainNotAvailableError: The computation cannot be served:
+                the model has no fitted pipeline, ``y`` is missing for
+                the permutation importance, the data is empty or has no
+                feature columns, an unknown ``method`` was passed, or
+                SHAP was requested without the ``[shap]`` extra.
         """
-        self._require_result()
-        raise NotImplementedError(
-            "explain() is not implemented yet: it will delegate to the "
-            "model explainability component of the epic."
+        result = self._require_result()
+        method_key = method.lower().strip()
+        if method_key not in _EXPLAIN_METHODS:
+            raise ExplainNotAvailableError(
+                f"Unknown explain method: {method!r}. "
+                f"Expected one of {sorted(_EXPLAIN_METHODS)}."
+            )
+        trainer = self.best_model()
+        X_explain, y_explain = self._explain_data(X, y)
+        importance: PermutationImportanceResult | ShapFeatureImportance
+        if method_key == "shap":
+            importance = explain_shap(
+                trainer,
+                X_explain,
+                result,
+                max_rows=max_rows,
+                post_preprocessing=post_preprocessing,
+            )
+        else:
+            if y_explain is None:
+                raise ExplainNotAvailableError(
+                    "Permutation importance requires the target values: "
+                    "pass y explicitly (or leave the defaults, so the "
+                    "training target of the run is used)."
+                )
+            importance = explain_permutation_importance(
+                trainer,
+                X_explain,
+                y_explain,
+                result,
+                n_repeats=n_repeats,
+                max_rows=max_rows,
+            )
+        if not markdown:
+            return importance
+        baseline: float | None
+        metric_user: str | None
+        if isinstance(importance, PermutationImportanceResult):
+            baseline = importance.baseline_score
+            metric_user = importance.metric_user
+        else:
+            baseline = None
+            metric_user = None
+        section = render_importance_markdown(
+            f"Feature importance ({method_key})",
+            importance.importances,
+            baseline=baseline,
+            metric_user=metric_user,
         )
+        return importance, section
+
+    def _explain_data(
+        self,
+        X: pd.DataFrame | None,
+        y: Any | None,
+    ) -> tuple[pd.DataFrame, Any | None]:
+        """The frame/target the explanation is computed on.
+
+        The defaults are the run's training data: the feature columns of
+        the snapshotted input frame (the target column removed) and the
+        target vector. The datetime expansion recorded on the trainer
+        (``datetime_policy: 'expand'``) is applied to the default frame:
+        the saved pipeline was fit on the generated component columns
+        (``ts_month`` …), which do not exist in the raw input — without
+        the expansion the alignment to ``trainer.feature_names`` would
+        fail. An explicit ``X`` is used as-is (the caller owns the
+        schema; the module-level explain functions apply the expansion to
+        it as well); with an explicit ``X`` but no ``y``, ``y`` stays
+        ``None`` (the permutation importance then raises a defined
+        error).
+
+        When the trainer cannot be loaded (a failed run without an
+        artifact), the raw default frame is returned unchanged: the
+        explain functions raise their own defined errors, and masking a
+        genuine artifact-loading failure here would only move the
+        confusing message further from its cause.
+        """
+        if X is not None:
+            return X, y
+        if not isinstance(self._data, pd.DataFrame):
+            return self._data, y
+        data = copy.copy(self._data)
+        target = self._target or "target"
+        if target in data.columns:
+            features = data.drop(columns=[target])
+            target_values: Any = data[target]
+        else:
+            features = data
+            target_values = None
+        trainer = self.best_model()
+        expansion = trainer.datetime_expansion_
+        if expansion:
+            features = expand_datetime_columns(features, expansion)
+        return features, target_values
 
 
 # --------------------------------------------------------------------------- #

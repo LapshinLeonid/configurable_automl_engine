@@ -1699,6 +1699,38 @@ with mlflow.start_run(run_name="my-experiment"):
 
 ---
 
+## `explain()` — интерпретируемость лучшей модели
+
+`from configurable_automl_engine.experiment.explain import explain_permutation_importance, explain_shap, aggregate_to_original_features, render_importance_markdown`. Метод фасада: `AutoMLExperiment.explain(...)` после `run()`.
+
+Интерпретация winner-пайплайна. Два вычисления, по одному на вызов:
+
+* **`method="permutation"`** (по умолчанию) — permutation importance (sklearn `permutation_importance`, без новых зависимостей): среднее изменение метрики эксперимента при перемешивании одного признака. Считается через `trainer.predict` на **сырых** (до-пайплайн) колонках — одна оценка на исходный столбец данных независимо от внутренней кодировки/отбора. Нужен `y` (метрике нужны истинные значения); по умолчанию берутся обучающие данные прогона.
+* **`method="shap"`** — средние абсолютные SHAP-вклады (опциональный extra `[shap]`, `pip install 'configurable-automl-engine[shap]'`; import-guard через `is_installed`, при отсутствии — `ExplainNotAvailableError` с именем extra, не голый `ModuleNotFoundError`). По умолчанию по-компонентные значения агрегируются к исходным колонкам (one-hot/хеш-компонент → источник по имени из `get_feature_names_out`); `post_preprocessing=True` возвращает их по именам колонок пайплайна. Цель не используется.
+
+**Семантика имён фич.** Permutation importance: исходные колонки данных (включая колонки, расширенные из datetime как самостоятельные фичи; колонки, отброшенные пайплайном — неинформативные/ID-like — получают нулевую важность). SHAP (post_preprocessing=True): имена `get_feature_names_out` — `cat__<col>`/`num__<col>`/`remainder__<col>`, one-hot добавляет категорию (`cat__col_value`), hashing вкладывает второй разделитель (`cat__col__h0`); агрегированный вид — исходные колонки. Несопоставимые компоненты (fallback-имена `xN`) не атрибутируются (WARNING с их суммарной массой).
+
+**Схема кадра и datetime.** Записанное на тренере datetime-расширение (`datetime_policy: 'expand'`) применяется к кадру объяснения **автоматически** — как на дефолтном пути фасада, так и на явном `X` (в обоих методах): сырой кадр с исходной datetime-колонкой — легитимный вход, компоненты (`ts_month` …) появляются сами. Кадр без источника и без компонент отклоняется с `ExplainNotAvailableError`, перечисляющим отсутствующие колонки. SHAP объясняет модель поверх **полной** пост-препроцессинговой матрицы: сэмплер (`DataOversampler`) и column-редьюсеры (`feature_selector`, `isotonic_selector`) исключены из трансформ-цепочки — редьюсеры применяются на стороне модели адаптером, поэтому компоненты именуются и атрибутируются исходным колонкам независимо от активного отбора. Выравнивание цели проверяется явно: Series — по индексу (отсутствующие метки → определённая ошибка), позиционная цель — по длине (несовпадение → определённая ошибка, без молчаливой обрезки); `n_features`/`n_rows` считаются по фактически оценённым фичам и строкам.
+
+**Семантика данных.** Важность считается на строках обучающих данных прогона: финальный артефакт обучен на всех данных (в т.ч. строках зарезервированного hold-out — см. `general.holdout_fraction`), поэтому эти строки in-sample для него. Передайте `X`/`y` явно, чтобы объяснять на другой выборке (например, на удержанных строках). Базовая метрика (`baseline_score`) приводится к user-семантике (положительный RMSE/MAE, «чистый» R²); кастомные метрики должны быть зарегистрированы в процессе (тренер делает это в `fit()`).
+
+**Ресурсы.** `max_rows` (по умолчанию 5000) — бюджет строк: большие данные детерминированно семплируются (`random_state=0`), стоимость permutation — `n_repeats × n_features` предсказаний, SHAP растёт и по строкам, и по фичам. Нефинитные значения важности (NaN/±inf) заменяются на `0.0` с WARNING, сортировка и потребители не ломаются. Константные фичи корректно дают нулевую важность. Пустой кадр / нет фич / модель без пайплайна / несоответствие схемы / неизвестный `method` — `ExplainNotAvailableError`; до `run()` — `ExperimentNotRunError`.
+
+**Разреженные данные.** Матрица после препроцессинга может быть sparse (one-hot/hashing) — permutation importance на сыром DataFrame работает через пайплайн и поддерживает оба представления; часть моделей (GPR/Isotonic/ARD) требует dense — их пайплайн строится с `force_dense_output` (см. `models.SPARSE_UNSUPPORTED_ALGORITHMS`).
+
+**Возврат.** Структурированный результат: `PermutationImportanceResult` (отсортированные по убыванию `importances` — `FeatureImportance(feature, importance_mean, importance_std)`, `baseline_score`, `metric_user`, `n_rows`, `n_features`, `data_semantics`) или `ShapFeatureImportance` (`importances`, `post_preprocessing`, `baseline_prediction` — среднее предсказание). С `markdown=True` (по умолчанию) — кортеж `(importance, str)` со второй координатой — готовая Markdown-секция (`## Feature importance (...)` с таблицей и строкой baseline) для встраивания в отчёт.
+
+```python
+experiment = AutoMLExperiment(config, df, target="target")
+experiment.run()
+importance, section = experiment.explain()                     # permutation + Markdown
+importance, section = experiment.explain(n_repeats=10)         # точнее, дороже
+per_component  = experiment.explain(method="shap",             # требует extra [shap]
+                                    post_preprocessing=True)
+```
+
+---
+
 ## `DataOversampler`
 
 `from configurable_automl_engine.oversampling import DataOversampler`. All parameters are keyword-only.
