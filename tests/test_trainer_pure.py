@@ -19,15 +19,23 @@ from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import Ridge
 
-from configurable_automl_engine.trainer_artifact import (
-    _collect_artifact_metadata,
-    check_artifact_format,
-)
 from configurable_automl_engine.common.definitions import SerializationFormat
+from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.settings import (
     EncodingSettings,
     InputPolicies,
     OversamplingSettings,
+)
+from configurable_automl_engine.feature_selection import (
+    FeatureSelectionCfg,
+)
+from configurable_automl_engine.preprocessing_presets import (
+    AlgorithmClass,
+    PreprocessingOverride,
+)
+from configurable_automl_engine.trainer_artifact import (
+    _collect_artifact_metadata,
+    check_artifact_format,
 )
 from configurable_automl_engine.trainer_data import (
     _align_predict_columns,
@@ -41,7 +49,6 @@ from configurable_automl_engine.trainer_data import (
     log_preprocessed_matrix,
     prepare_features,
 )
-from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.trainer_feature_selection import (
     _resolve_feature_selection_active,
     _run_feature_selection_auto_check,
@@ -53,13 +60,6 @@ from configurable_automl_engine.trainer_scoring import (
     score_on_validation_splits,
 )
 from configurable_automl_engine.trainer_state import ARTIFACT_FORMAT_VERSION
-from configurable_automl_engine.feature_selection import (
-    FeatureSelectionCfg,
-)
-from configurable_automl_engine.preprocessing_presets import (
-    AlgorithmClass,
-    PreprocessingOverride,
-)
 from tests.purity import assert_pure
 
 ENCODING = EncodingSettings(encoding="one_hot")
@@ -270,7 +270,12 @@ def test_log_preprocessed_matrix(caplog: pytest.LogCaptureFixture) -> None:
 
 @pytest.mark.parametrize(
     ("strategy", "metric"),
-    [("k_fold", "rmse"), ("k_fold", "mae"), ("train_test_split", "r2"), ("loo", "rmse")],
+    [
+        ("k_fold", "rmse"),
+        ("k_fold", "mae"),
+        ("train_test_split", "r2"),
+        ("loo", "rmse"),
+    ],
 )
 def test_score_on_validation_splits_is_pure(strategy: str, metric: str) -> None:
     X, y = _frame()
@@ -464,6 +469,51 @@ def test_collect_artifact_metadata_and_format_check() -> None:
         check_artifact_format({"engine_version": "0.4.1"})
     with pytest.raises(TrainingError, match="<= 0.4.x"):
         check_artifact_format(None)
+
+
+def test_trainer_settings_unpickle_legacy_state_without_target_transform() -> None:
+    """A legacy format-3 pickle (state list without ``target_transform``)
+    restores with the default ``TargetTransform.none`` (regression: the
+    short-``zip`` unpickle left the trailing slot unset and any later
+    ``fit``/``save`` on the loaded object crashed with ``AttributeError``)."""
+    import pickle
+    from dataclasses import fields
+
+    from configurable_automl_engine.common.definitions import TargetTransform
+    from configurable_automl_engine.trainer_state import TrainerSettings
+
+    settings = _settings()
+    current = [getattr(settings, f.name) for f in fields(TrainerSettings)]
+    assert current[-1] == TargetTransform.none
+    legacy = current[:-1]  # the state list of the 20-slot pre-PR class
+
+    class _Legacy:
+        def __reduce__(self):
+            return (TrainerSettings.__new__, (TrainerSettings,), legacy)
+
+    restored = pickle.loads(pickle.dumps(_Legacy()))
+    assert restored.algorithm == "ridge"
+    assert restored.target_transform == TargetTransform.none
+
+    # A state with an extra trailing value is tolerated too (zip truncates).
+    class _Overlong:
+        def __reduce__(self):
+            return (TrainerSettings.__new__, (TrainerSettings,), current + ["x"])
+
+    overlong = pickle.loads(pickle.dumps(_Overlong()))
+    assert overlong == settings
+
+    # A corrupt (non-list) state is rejected instead of silently producing a
+    # half-initialized object.
+    class _Corrupt:
+        def __reduce__(self):
+            return (TrainerSettings.__new__, (TrainerSettings,), {"not": "a list"})
+
+    with pytest.raises(TypeError, match="pickle state"):
+        pickle.loads(pickle.dumps(_Corrupt()))
+
+    # The current round trip is unaffected.
+    assert pickle.loads(pickle.dumps(settings)) == settings
 
 
 # ──────────────────────────────────────────────────────────────────────────────

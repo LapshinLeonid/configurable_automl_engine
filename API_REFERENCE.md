@@ -380,6 +380,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | `inf_policy` | `"as_missing"` | Infinite values in numeric features: `"as_missing"` turns them into missing values (imputed later) with a WARNING; `"error"` rejects the data. Applied at training and prediction time. |
 | `datetime_policy` | `"expand"` | Date/time columns: `"expand"` replaces each column with `year`, `month`, `day`, `dayofweek` (and `hour` when it is not always zero); `"drop"` removes them; `"error"` rejects the data. A WARNING lists the affected columns. |
 | `drop_id_like_columns` | `false` | ID-like columns (text columns where ≥ 95 % of values are unique, or unique monotonic integers) are only reported with a WARNING by default; `true` removes them. This is a heuristic: a monotonic counter such as a timestamp may be a useful feature. |
+| `target_transform` | `"none"` | Transformation of the target `y` inside the `model` step of the pipeline: `"none"` — no transformation; `"log1p"` — `log(1 + y)` (requires `min(y) > -1`); `"boxcox"` — the Box-Cox power transformation (requires `min(y) > 0`); `"yeo-johnson"` — the Yeo-Johnson power transformation (any real `y`). Applied identically in the HPO trials, the final trainer and the hold-out trainer, so the hyperparameters are optimized for the model that is actually returned. A domain violation (`min(y)` outside the method's domain) fails ONCE before the first HPO trial, not in every fold. GLM algorithms with a restricted loss domain (`gammaregressor`, `poissonregressor`, `tweedieregressor`/`glm`) are validated against the TRANSFORMED target by the target-domain guard before HPO: e.g. `gammaregressor` with `"boxcox"` / `"yeo-johnson"` (which can produce non-positive transformed values) may be disqualified with a reason naming the transformation. `predict` returns values in the original scale (the inverse transformation clips to the train range). |
 | `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm and merged per field with its own `preprocessing` block (a field the algorithm block leaves unset is taken from here). Same fields as the per-algorithm block (`imputation_strategy`, `scaling`, `outliers`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
 
 **Advanced blocks** (each has its own section below): `pruning`
@@ -1373,6 +1374,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `inf_policy` | `str` | `"as_missing"` | Same as `general.inf_policy`: `"as_missing"` turns infinite values in numeric features into missing values, `"error"` rejects the data. |
 | `datetime_policy` | `str` | `"expand"` | Same as `general.datetime_policy`. |
 | `drop_id_like_columns` | `bool` | `False` | Same as `general.drop_id_like_columns`. |
+| `target_transform` | `TargetTransform` or `str` | `"none"` | Transformation of the target `y` inside the `model` step of every trial pipeline and of the final best model: `"none"`, `"log1p"`, `"boxcox"`, `"yeo-johnson"` (same values and domain requirements as `general.target_transform`). The transformation is applied identically in the HPO trials and in the full-data fit, so the selected hyperparameters match the returned model; a domain violation raises `ValueError` ONCE before the first trial. |
 | `collect_oof` | `bool` | `False` | Keep the out-of-fold predictions of every completed trial in `OptimizeResult.oof_predictions` (the input of `bbc_score`); costs `n_trials × len(X)` floats. |
 | `phase_name` | `str` or `None` | `None` | Step name used in log messages. |
 | `fit_best_model` | `bool` | `True` | Whether to train the final model on all provided data after the search. Set to `False` when only the best parameters and score are needed (e.g., the training engine's HPO phases — the final model is trained by its own trainer): the redundant full-data fit is skipped and the `model` field of the result is `None`. |
@@ -1476,7 +1478,8 @@ Constructor parameters that have a counterpart in the `general` config section h
 | `target_encoding_fallback` | `float` or `None` | `None` | Fallback value for categories unseen in training under target encoding. `None` means the global target mean. |
 | `inf_policy` | `str` | `"as_missing"` | Policy for infinite values (`±inf`) in numeric features during `fit()`: `"as_missing"` (default) — replace with NaN and log a WARNING listing the columns/counts; `"error"` — reject with `TrainingError` naming the columns. |
 | `datetime_policy` | `str` | `"expand"` | Policy for datetime/timedelta columns during `fit()`: `"expand"` (default) — replace each column with derived numeric components (`year`, `month`, `day`, `dayofweek`, `hour` if non-zero) and log a WARNING listing the generated columns; `"drop"` — remove and warn; `"error"` — reject. |
-| `drop_id_like_columns` | `bool` | `False` | Whether ID-like columns (object/string with `nunique/n >= 0.95`, or a unique monotonic integer column) are dropped during `fit()`. `False` (default) — only a WARNING naming the columns; `True` — they are removed. |
+| `drop_id_like_columns` | `bool` | `False` | Same as `general.drop_id_like_columns`. |
+| `target_transform` | `TargetTransform` or `str` | `TargetTransform.none` | Same as `general.target_transform`: `"none"` / `"log1p"` / `"boxcox"` / `"yeo-johnson"`, the transformation of `y` inside the `model` step of `ModelTrainer.fit()`. GLM domain compatibility: with a non-`none` transformation the engine's target-domain guard validates GLM algorithms against the TRANSFORMED target before HPO. |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict` or `None` | `None` | Feature selection settings, same fields as [`general.feature_selection`](#feature-selection-feature_selection). `None` — disabled. |
 | `feature_selection_active` | `bool` or `None` | `None` | Explicit on/off switch for feature selection (takes precedence over the mode in `feature_selection_cfg`); the engine passes the winner's `use_feature_selection` decision here. `None` — decided by the config. |
 | `warn_id_like` | `bool` | `True` | Whether the ID-like WARNING is emitted during `fit()`. The engine path (via `prepare_dataset`) passes `False` so the diagnostics are not duplicated; standalone calls warn by default. |
@@ -1527,6 +1530,35 @@ The engine config, `ModelTrainer` and `tuner.optimize` enable the automatic high
 * NaNs in categorical columns are converted to strings and treated as ordinary categories.
 * Configurations without the new parameters keep the documented defaults (the automatic high-cardinality mode is on: threshold 50 + `"frequency"`); models saved before the introduction of these strategies keep their previous behavior (backward compatibility).
 * `target`/`frequency`/`hashing` encode columns before oversampling (the preprocessor step precedes the sampler step in the pipeline), so SMOTE/ADASYN always receive already-encoded numeric features.
+
+### Target transformation
+
+`ModelTrainer(..., target_transform=...)` and `general.target_transform` train the model on a transformed target and return predictions in the original scale. The transformation wraps the base regressor into a `TransformedTargetRegressor` — it is the **last** step of the pipeline: the `model` step itself becomes the wrapper, so the preprocessor, the feature selector and the oversampler all see the **original** `y` (SMOTER-style oversampling interpolates between existing target values, and the synthetic targets stay inside the transformation domain). The wrapper is rebuilt in every validation fold and in the feature-selection auto-check, so `val_score` measures the full wrapped pipeline.
+
+With `general.target_transform` the engine applies the SAME transformation in every place that touches the target:
+
+* every HPO trial pipeline (`tuner.optimize` / the engine's HPO phases) — the `model` step is wrapped, so the trials optimize the model trained on the transformed `y` (otherwise the selected hyperparameters would not match the final model);
+* the final trainer (`persist_artifact`) and the outer hold-out trainer (`holdout_score`) — both receive `general.target_transform` via `ModelTrainer`;
+* the pre-HPO target-domain guard of the GLM algorithms — validated against the TRANSFORMED target (see below).
+
+Available values (enum `TargetTransform` in `common/definitions.py`):
+
+| Value | Meaning | Requirements for `y` |
+|-------|---------|----------------------|
+| `"none"` (default) | No transformation; the `model` step stays the original estimator. | Any numeric `y`. |
+| `"log1p"` | `log(1 + y)` forward, `expm1` inverse. | `min(y) > -1`. |
+| `"boxcox"` | Box-Cox power transform (`PowerTransformer`, `standardize=True`). | `min(y) > 0` (strictly positive). |
+| `"yeo-johnson"` | Yeo-Johnson power transform (`PowerTransformer`, `standardize=True`). | Any real `y`. |
+
+Domain violations are rejected with a `ValueError` **before** any training: in the engine and in `tuner.optimize` the check (`validate_target_for_transform`) runs once before the first HPO trial, in a standalone `ModelTrainer.fit()` — at the start of the fit. The message names the method, the found minimum and suggests `yeo-johnson` as the unrestricted alternative.
+
+**Interaction with GLM algorithms.** GLM losses have a restricted target support (`gammaregressor`: `y > 0`, `poissonregressor`: `y >= 0`, `tweedieregressor`/`glm`: depends on `power`). With a non-`none` `target_transform` the loss is applied to the TRANSFORMED `y`, so the pre-HPO target-domain guard checks the transformed target (`y_eff = TargetTransformer(target_transform).fit_transform(y)`). Because `"boxcox"` and `"yeo-johnson"` (`standardize=True`) both standardize the transformed values, `y_eff` typically spans negative values even for a strictly positive original target — `gammaregressor` (and `poissonregressor` when `min(y_eff) < 0`) is then disqualified before HPO, and the reason states that the domain was checked after the transformation. A transformation domain violation itself (e.g. `"boxcox"` on a target with zeros) is raised once, before the first trial.
+
+**Clipping (inverse transform).** After `fit` the transformer remembers the transformed train range (`t_min_`/`t_max_`); `inverse_transform` clips its input into `[t_min_ - m, t_max_ + m]`, `m = clip_margin * (t_max_ - t_min_)` (`clip_margin=0.5` by default; the margin equals `clip_margin` itself for a zero-range target) before inverting, and the output is additionally clipped into the original train range expanded by the same relative margin. Both bounds matter for extrapolation: a linear model extrapolating in log space would otherwise produce `expm1(inf)` at prediction time, and a power transform (a negative Yeo-Johnson lambda in particular) can return NaN beyond the domain of its inverse formula even for a clipped input. `predict` always returns finite values. The number of clipped values is logged at DEBUG level. Because of the clipping the inverse transformation is intentionally inexact outside the train range, so the wrapper is created with `check_inverse=False`.
+
+**Edge cases.** A constant target is rejected by the standard target validation before training; for a defensive direct use of `TargetTransformer` a constant `y` fits `yeo-johnson` with `standardize=False` and raises a clear `ValueError` for `boxcox`. `isotonic_regression` works with the wrapper too — the transformation sits after the `isotonic_selector` step.
+
+**Bias warning.** After back-transformation from log scale a prediction corresponds to the conditional **median** of the target rather than its conditional mean (`exp(E[log y])` underestimates `E[y]`). MAE/MAPE typically improve with the transformation; RMSE can get worse.
 
 ---
 
@@ -1590,6 +1622,67 @@ Legacy facade function for training a single model. Accepts either a config dict
 | `feature_selection_active` (keyword-only) | `bool` or `None` | Explicit feature selection activity flag (takes precedence over the config mode). In the config-dict branch the `feature_selection_active` key takes precedence; a key present with a `None` value is treated as unset and falls back to this argument; non-bool values are rejected by `ModelTrainer`; `None` defers the decision to the config. |
 
 **Returns:** `float` — validation metric value computed on hold-out data (or the CV estimate: the fold mean for additive metrics, the pooled OOF value for non-additive ones) with the `ModelTrainer` validation strategy — an honest out-of-sample estimate, not a train score.
+
+---
+
+## `Reporter`, `JSONReporter`, `MarkdownReporter`, `CompositeReporter`
+
+`from configurable_automl_engine.experiment import Reporter, JSONReporter, MarkdownReporter, CompositeReporter`.
+
+The reporter framework: pure consumers of the `ExperimentResult` model (see [Training results](#training-results)) — they never reach into the training engine and never import MLflow. A reporter's `report(result)` produces one artifact and returns it: a file path (`Path`) for a file reporter, a rendered text (`str`) for a text reporter.
+
+**`JSONReporter(path, *, indent=None)`** — writes the full experiment snapshot (config, per-run records, winner, honest scores) to a JSON file. The payload is produced by the model itself (`model_dump(mode="json")`), so numpy scalars, `Path`, enums and datetimes arrive already normalized to JSON types. Policies: the write is atomic (a temp file in the destination directory is renamed into place — a failure never leaves a partial file and never corrupts an existing report); missing parent directories are created; an existing file is overwritten (the last report wins); the file is UTF-8 with `ensure_ascii=False` (unicode labels stay readable) and gets the ordinary file-creation permissions (umask-based, not the private mode of the temp file). A value smuggled past the model validation raises `TypeError` naming the offending fields, with the destination untouched. The JSON parses back into a dict equivalent to `result.model_dump(mode="json")`, and `ExperimentResult.from_json()` restores an equal model.
+
+**`MarkdownReporter(*, include_config=True)`** — renders a human-readable Markdown document: the run metadata (run id, status, metric with its direction, validation, hold-out size), the outcome (winner, its user-semantic score, the best params), the honest score estimates (`holdout_score` / `bbc_score` / `oof_score` labeled with their semantics, next to the optimistic selection score), the leaderboard (the `build_leaderboard` ranking table), the per-run details (status, score, best params, trials, the failure/disqualification reason) and the failure message. The configuration snapshot is embedded as a collapsed `<details>` JSON block (`include_config=False` omits it). Table cells escape `|` and line breaks, so arbitrary names and parameters cannot break the table.
+
+**`CompositeReporter(reporters)`** — runs several reporters in one call (the single registration point of a run): the reporters run in registration order, the call returns the tuple of their artifacts (empty for no reporters). The first reporter failure propagates (fail fast); the artifacts of the already-run reporters stay produced.
+
+**Returns (JSONReporter):** `Path` — the written report file. **Returns (MarkdownReporter):** `str` — the Markdown document. **Returns (CompositeReporter):** `tuple` — the artifacts of the individual reporters.
+
+## `MLflowReporter` (optional extra `[mlflow]`)
+
+`from configurable_automl_engine.experiment import MLflowReporter`. Requires the optional extra: `pip install 'configurable-automl-engine[mlflow]'`.
+
+The MLflow tracking adapter: logs the metrics, the parameters, the tags and the artifacts of one finished `ExperimentResult` into an MLflow run. It is the only component of the package that knows about MLflow — the `mlflow` import happens lazily, inside the adapter's `report` call (guarded by `is_installed`), so installing and importing the package without MLflow is unaffected and the engine core (`training_engine/`, `hpo/`, `tuner.py`) never touches MLflow.
+
+**`MLflowReporter(*, nested=False, log_artifacts=True, artifact_prefix="experiment")`**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `nested` | `bool` | `False` | Run policy. `False` — log into the caller's active run (`mlflow.start_run()`); without an active run a `MLflowReporterError` is raised (the run placement is the caller's decision). `True` — start a nested run per `report` call, named after the experiment `run_id`; without an active parent the run is promoted to top level (MLflow's own semantics). |
+| `log_artifacts` | `bool` | `True` | Also log the three text artifacts: the leaderboard table (`leaderboard.txt`), the JSON snapshot (`report.json`) and the Markdown report (`report.md`). |
+| `artifact_prefix` | `str` | `"experiment"` | The directory prefix of the artifacts inside the run. |
+
+**What is logged:**
+
+* tags — the experiment `run_id`, the status, the metric name/direction (sklearn and user semantics), the label and the engine version, the failure message for a failed run;
+* metrics — `automl.winner_score_<metric>`, the honest estimates (`automl.holdout_score_<metric>`, `automl.bbc_score_<metric>`, `automl.oof_score_<metric>`), `automl.duration_seconds`, the per-algorithm scores (`automl.score.<algorithm>.<phase>`) and `additional_metrics` (`automl.additional.<name>`);
+* params — the run settings (metric, validation, folds, random state) and the best hyperparameters (the winner's as `automl.param.<key>`, the per-phase ones as `automl.param.<algorithm>__<phase>.<key>`, nested mappings flattened with a dot).
+
+**Policies:**
+
+* **failure policy** — a tracking-server failure (connection error, timeout, any MLflow API exception) never fails the experiment: the error is logged as a WARNING and `report` returns `None` (the "reported-failed" artifact). Usage errors still raise `MLflowReporterError`: a missing `mlflow` installation (the message names the `[mlflow]` extra) and a missing active run with `nested=False`. A failure mid-report leaves a *partial* run — the logging order is tags → metrics → params → artifacts, so a `log_params` failure keeps the tags and metrics but loses the params and artifacts; the WARNING names the failure, and the re-reporting policy (below) is the remedy;
+* **metric sanitization** — NaN/±inf values (MLflow rejects them; `additional_metrics` may carry a NaN from sklearn) are skipped with a WARNING; the experiment's own score fields cannot be non-finite (the model validation rejects them);
+* **parameter keys** — per-phase parameters are prefixed with `<algorithm>__<phase>`, so identical hyperparameter names across phases (an HPO refine of the same space) never collide (a re-logged different value would fail the MLflow run). The separator is `__` (not `:`): MLflow's parameter-name validation regex for Windows (`^[/\w.\- ]*$`) rejects a colon, which would make `log_params` raise `INVALID_PARAMETER_VALUE` on Windows and — per the failure policy — degrade the whole report to a warning. Both the phase segment and the flattened parameter sub-keys are additionally clamped to a head/tail budget (`...` in the middle): MLflow rejects an entity key over 250 characters (`MAX_ENTITY_KEY_LENGTH`), and an unconstrained user-configured phase name would otherwise fail `log_params` the same way. The truncation marker is ASCII `...` — the unicode ellipsis `…` fails MLflow's name-validation regex itself. As a final guard the *composed* key (prefix + algorithm + phase + sub-key) is clamped to the limit too — the segment budgets alone do not bound the sum of the parts;
+* **autolog** — the reporter logs only experiment-level metrics/params under `automl.*` keys: an `mlflow.sklearn.autolog()` active in the caller's run does not conflict (its step-level training metrics are separate keys); the reporter never calls autolog itself;
+* **re-reporting** — with `nested=True` every `report` call opens a fresh nested run, so the same result can be reported repeatedly (each call is its own MLflow run). With `nested=False` the data goes into the one active run: re-reporting the *same* result is safe (identical tag/param values are idempotent in MLflow and metric re-logs are appended as extra steps), but re-reporting a *different* result into the same run overwrites the `automl.*` param keys — prefer one active run per `ExperimentResult` (or `nested=True`).
+
+**Returns:** `str` — the MLflow run id the data was logged into, or `None` when the tracking failed (see the failure policy).
+
+```python
+import mlflow
+
+import configurable_automl_engine as caml
+from configurable_automl_engine.experiment import MLflowReporter
+from configurable_automl_engine.training_engine import component as caml_component
+
+results = caml.train_best_model(config=config, df=df, target="target")  # the engine run
+result = caml_component.last_experiment_result  # the ExperimentResult of the last run
+
+with mlflow.start_run(run_name="my-experiment"):
+    MLflowReporter().report(result)          # into the active run
+    # or: MLflowReporter(nested=True).report(result)  # a nested run per result
+```
 
 ---
 

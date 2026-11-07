@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.metrics import (
     is_error_metric,
     oof_rmse,
@@ -456,6 +457,7 @@ def _fit_finalist(
     n_folds: int,
     test_size: float,
     random_state: int | None,
+    target_transform: TargetTransform = TargetTransform.none,
     datetime_expansion: dict[str, list[str]] | None = None,
 ) -> Any:
     """Train a finalist on 100% of the data and return its ``ModelTrainer``.
@@ -480,6 +482,11 @@ def _fit_finalist(
         random_state: The engine seed (``general.random_state``)
             for the finalist's splits and model seeds; ``None`` — a
             non-reproducible fit.
+        target_transform: The target transformation of the ``model`` step
+            (``general.target_transform``): the same transformation the HPO
+            trials trained on, so the finalist — a potential final artifact
+            via ``persist_artifact(pre_trained_trainer=...)`` — matches the
+            search scale. Default ``TargetTransform.none``.
         datetime_expansion: The datetime
             expansion applied upstream (``PreparedData.datetime_expansion``);
             registered on the trainer BEFORE fit so that the datetime-derived
@@ -495,6 +502,7 @@ def _fit_finalist(
         n_folds=n_folds,
         test_size=test_size,
         random_state=random_state,
+        target_transform=target_transform,
     )
     if datetime_expansion:
         trainer.register_datetime_expansion(datetime_expansion)
@@ -577,6 +585,7 @@ def _train_finalists(
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
                 random_state=random_state,
+                target_transform=cfg.general.target_transform,
                 datetime_expansion=prepared.datetime_expansion,
             )
         except Exception as err:  # noqa: BLE001 — the finalist is excluded

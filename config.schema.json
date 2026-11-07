@@ -42,7 +42,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median'), 'scaling' — a string shorthand ('standard'|'robust'|'quantile'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} / {'type': 'quantile', 'output_distribution': 'uniform'|'normal', 'n_quantiles': int, 'subsample': int}), and 'outliers' — winsorization of numeric features: a string shorthand ('none'|'quantile'|'iqr') or an object ({'method': 'quantile', 'lower_quantile': float, 'upper_quantile': float} / {'method': 'iqr', 'iqr_multiplier': float}). Merged per field with general.preprocessing: a field set here wins, a field left null is taken from general.preprocessing, then from the automatic choice based on the algorithm class. None — only general.preprocessing and the automatic selection apply."
+          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median') and/or 'scaling' — a string shorthand ('standard'|'robust'|'quantile'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool}). Takes precedence over the automatic choice based on the algorithm class. None — automatic selection."
         }
       },
       "title": "AlgoCfg",
@@ -427,6 +427,37 @@
       "title": "CustomMetricSpec",
       "type": "object"
     },
+    "EnsembleCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the experimental top-K ensemble.\n\nThe ensemble is built AFTER the terminal select step from the\ncompleted records of the run's leaderboard: the top-K algorithms are\nretrained on 100% of the data (exactly once each) and their\npredictions are averaged with the weights derived from the\nvalidation scores. The result of the ensemble is reported in the\ndedicated ``ensemble`` section of the ``ExperimentResult`` (the\nwinner and the winner artifact are NOT affected: the ensemble is an\nadditional experimental output, not a replacement of the terminal\nselection).\n\nAttributes:\n    enable: Build the ensemble (off by default — the ensemble is an\n        experimental feature outside the MVP pipeline).\n    k: The requested ensemble size (the number of top leaderboard\n        members, ≥ 1). When ``k`` exceeds the number of available\n        completed algorithms, ``min(k, n)`` is used with a warning.\n    weight_method: How the member weights are derived from the\n        validation scores: ``\"score_weighted\"`` (default) —\n        direction-aware conversion (inverse for error metrics,\n        proportional for score metrics); ``\"equal\"`` — the uniform\n        baseline.",
+      "properties": {
+        "enable": {
+          "default": false,
+          "description": "Build the experimental weighted-average ensemble of the top-K leaderboard models after the terminal selection (off by default). When enabled, the result carries the dedicated 'ensemble' report section (members, scores, weights, the artifact path of the serialized ensemble) and the artifact file is written next to the winner model; the winner and the winner artifact themselves are not affected",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "k": {
+          "default": 3,
+          "description": "The requested ensemble size: the number of top leaderboard members to combine (>= 1). When k exceeds the number of completed algorithms, min(k, n) members are used with a warning; k=1 is the valid single-model boundary case",
+          "minimum": 1,
+          "title": "K",
+          "type": "integer"
+        },
+        "weight_method": {
+          "default": "score_weighted",
+          "description": "How the member weights are derived from the validation scores: 'score_weighted' (default) — direction-aware conversion (inverse for error metrics like RMSE/MAE, proportional for score metrics like R2); 'equal' — the uniform weights baseline",
+          "enum": [
+            "score_weighted",
+            "equal"
+          ],
+          "title": "Weight Method",
+          "type": "string"
+        }
+      },
+      "title": "EnsembleCfg",
+      "type": "object"
+    },
     "FeatureSelectionCfg": {
       "additionalProperties": false,
       "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
@@ -537,7 +568,7 @@
     },
     "GeneralCfg": {
       "additionalProperties": false,
-      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models\n        (a built-in name or a ``custom_metrics`` key).\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    custom_metrics (dict[str, CustomMetricSpec]): User metrics and scorers\n        loaded by a dotted import path, keyed by the name the metric\n        fields refer to.\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method\n        ('train_test_split', 'k_fold', 'loo' or 'auto').\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (EncodingStrategy): Encoding strategy for\n        categorical features ('one_hot', 'ordinal', 'target', 'frequency'\n        or 'hashing'). Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (only by algorithms).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    start_method (str | None): How the worker processes start in\n        'processes' mode ('forkserver', 'spawn' or 'fork'); None — the\n        engine default ('forkserver' where available, else 'spawn').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.\n    preprocessing (PreprocessingOverride | None): Run-level default\n        override of the adaptive feature preprocessing preset, applied\n        to every algorithm and merged per field with its per-algorithm\n        block (fields the per-algorithm block leaves unset come from\n        here).\n        Precedence per field: class preset < general block <\n        per-algorithm block. None — no run-level default.",
+      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models\n        (a built-in name or a ``custom_metrics`` key).\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    custom_metrics (dict[str, CustomMetricSpec]): User metrics and scorers\n        loaded by a dotted import path, keyed by the name the metric\n        fields refer to.\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method\n        ('train_test_split', 'k_fold', 'loo' or 'auto').\n    n_folds (int): Number of splits for cross-validation.\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (EncodingStrategy): Encoding strategy for\n        categorical features ('one_hot', 'ordinal', 'target', 'frequency'\n        or 'hashing'). Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (only by algorithms).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    start_method (str | None): How the worker processes start in\n        'processes' mode ('forkserver', 'spawn' or 'fork'); None — the\n        engine default ('forkserver' where available, else 'spawn').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.\n    preprocessing (PreprocessingOverride | None): Run-level default\n        override of the adaptive feature preprocessing preset, applied\n        to every algorithm and merged per field with its per-algorithm\n        block (fields the per-algorithm block leaves unset come from\n        here).\n        Precedence per field: class preset < general block <\n        per-algorithm block. None — no run-level default.\n    target_transform (TargetTransform): Transformation of the target\n        ``y`` inside the ``model`` step of every trial pipeline, the\n        final trainer and the hold-out trainer ('none' / 'log1p' /\n        'boxcox' / 'yeo-johnson'); applied identically everywhere so\n        the selected hyperparameters match the final model. GLM\n        algorithms with a restricted loss domain are validated against\n        the transformed target before HPO.",
       "properties": {
         "custom_metrics": {
           "additionalProperties": {
@@ -802,6 +833,10 @@
           "$ref": "#/$defs/ComplexityGuardCfg",
           "description": "Settings of the adaptive complexity guard for tree/boosting search spaces on small data (mode: 'off'/'warn'/'apply', lossless/regularize levels, user_range_policy, size-mode thresholds, size_basis). See API_REFERENCE.md."
         },
+        "ensemble": {
+          "$ref": "#/$defs/EnsembleCfg",
+          "description": "Experimental weighted-average ensemble of the top-K leaderboard models (disabled by default). When general.ensemble.enable is true, after the terminal selection the engine retrains the top-K completed algorithms on 100% of the data, averages their predictions with weights derived from the validation scores and reports the dedicated 'ensemble' section in the result. The winner and the winner artifact are NOT affected"
+        },
         "preprocessing": {
           "anyOf": [
             {
@@ -812,7 +847,7 @@
             }
           ],
           "default": null,
-          "description": "Run-level default override of the adaptive feature preprocessing preset, applied to EVERY algorithm and merged per field with the algorithm's own block (algorithms.<name>.preprocessing): a field the algorithm block leaves null is taken from here. Reuses the same model as the per-algorithm block: 'imputation_strategy' ('mean'|'median'), 'scaling' ('standard'|'robust'|'quantile'|'none' or an object form) and 'outliers' ('none'|'quantile'|'iqr' or an object form); fields left as null keep the automatic selection based on the algorithm class. Precedence per field: class preset < general.preprocessing < algorithms.<name>.preprocessing — a field set at a higher level replaces the whole field from the lower level (nested values are never merged). None — no run-level default. Unknown keys are rejected at config validation."
+          "description": "Run-level default override of the adaptive feature preprocessing preset, applied to EVERY algorithm that has no preprocessing block of its own (algorithms.<name>.preprocessing). Reuses the same model as the per-algorithm block: 'imputation_strategy' ('mean'|'median') and/or 'scaling' ('standard'|'robust'|'quantile'|'none'); fields left as null keep the automatic selection based on the algorithm class. Precedence per field: class preset < general.preprocessing < algorithms.<name>.preprocessing — a field set at a higher level replaces the whole field from the lower level (nested values are never merged). None — no run-level default. Unknown keys are rejected at config validation."
         },
         "inf_policy": {
           "default": "as_missing",
@@ -840,6 +875,11 @@
           "description": "Whether ID-like columns (object/string with nunique/n >= 0.95, or a unique monotonic integer column) are dropped from the feature matrix. False (default) — such columns are only reported with a WARNING naming them; true — they are removed. ID-like columns are typically uninformative for regression and can slow training down dramatically.",
           "title": "Drop Id Like Columns",
           "type": "boolean"
+        },
+        "target_transform": {
+          "$ref": "#/$defs/TargetTransform",
+          "default": "none",
+          "description": "Transformation of the target y inside the 'model' step of the pipeline, applied identically in the HPO trials, in the final trainer and in the hold-out trainer: 'none' (default) — no transformation; 'log1p' — log(1 + y) (requires min(y) > -1); 'boxcox' — the Box-Cox power transformation (requires min(y) > 0); 'yeo-johnson' — the Yeo-Johnson power transformation (any real y). The hyperparameters are optimized for the model trained on the TRANSFORMED target, so the search matches the final model. A domain violation (min(y) outside the method's domain) fails once before the first trial, not in every fold. GLM algorithms with a restricted loss domain (gammaregressor, poissonregressor, tweedieregressor/glm) are validated against the TRANSFORMED target by the target-domain guard before HPO: gammaregressor with 'boxcox' / 'yeo-johnson' may be disqualified when the transformed target becomes non-positive. 'predict' returns values in the original scale (the inverse transformation clips to the train range)."
         }
       },
       "title": "GeneralCfg",
@@ -1606,6 +1646,17 @@
       },
       "title": "StandardScaling",
       "type": "object"
+    },
+    "TargetTransform": {
+      "description": "Target transformations applied inside the model step of the pipeline.\n\nThe transformation wraps the regressor in a\n``TransformedTargetRegressor``: the model is trained on the transformed\n``y`` and ``predict`` returns values in the original scale\n(``TargetTransformer.inverse_transform``, with clipping to the\ntransformed train range).\n\nRequirements for ``y``:\n\n* ``none`` — no transformation; any numeric ``y``;\n* ``log1p`` — ``log(1 + y)``; requires ``min(y) > -1``\n  (validated before training, see\n  ``preprocessing.target_transform.validate_target_for_transform``);\n* ``boxcox`` — the Box-Cox power transformation; requires strictly\n  positive ``y``: ``min(y) > 0`` (validated before training);\n* ``yeo-johnson`` — the Yeo-Johnson power transformation; any real\n  ``y`` (no domain restrictions).",
+      "enum": [
+        "none",
+        "log1p",
+        "boxcox",
+        "yeo-johnson"
+      ],
+      "title": "TargetTransform",
+      "type": "string"
     },
     "ValidationStrategy": {
       "description": "Allowed validation strategies for hyperopt.",

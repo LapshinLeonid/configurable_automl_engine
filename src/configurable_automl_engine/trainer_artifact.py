@@ -21,7 +21,10 @@ import platform
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from configurable_automl_engine.common.definitions import SerializationFormat
+from configurable_automl_engine.common.definitions import (
+    SerializationFormat,
+    TargetTransform,
+)
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.serialization_utils import (
     load_artifact,
@@ -118,6 +121,9 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
             "metric": settings.metric,
             "random_state": settings.random_state,
             "serialization_format": settings.serialization_format.value,
+            "target_transform": (
+                getattr(settings, "target_transform", TargetTransform.none).value
+            ),
             "validation_strategy": settings.validation_strategy,
             "n_folds": settings.n_folds,
             "test_size": settings.test_size,
@@ -137,6 +143,9 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
         "algorithm": settings.algorithm,
         "params": dict(settings.hyperparams),
         "custom_metrics": custom_metrics,
+        "target_transform": (
+            getattr(settings, "target_transform", TargetTransform.none).value
+        ),
         "config_hash": config_hash,
     }
 

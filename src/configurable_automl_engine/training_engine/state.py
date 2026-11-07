@@ -23,6 +23,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.hpo.types import TrialStats
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -303,6 +304,13 @@ class PhaseContext:
             ``ExperimentResult`` runs (one record per disqualification, not
             one per phase). The target-domain guard disqualifications are
             attributed to the first pipeline phase.
+        leaderboard_snapshot (dict[str, PhaseResult]): The full leaderboard
+            of the last HPO phase (every algorithm with a valid score),
+            snapshotted before select steps narrow the working set — the
+            source of the experimental top-K ensemble
+            (``general.ensemble``): the terminal select keeps only the
+            winner in the working set, so the ensemble ranks the snapshot
+            instead.
     """
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
@@ -315,6 +323,7 @@ class PhaseContext:
     oof_pool: list[np.ndarray] = field(default_factory=list)
     phase_timings: list[PhaseTiming] = field(default_factory=list)
     disqualification_phases: dict[str, str] = field(default_factory=dict)
+    leaderboard_snapshot: dict[str, PhaseResult] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +503,10 @@ class _HpoPhaseSpec:
             validation.
         drop_id_like_columns (bool): ``general.drop_id_like_columns`` for the
             HPO data validation.
+        target_transform (TargetTransform): ``general.target_transform`` —
+            the transformation of the target ``y`` inside the ``model`` step
+            of every trial pipeline (``TargetTransform.none`` — no
+            transformation).
         collect_oof (bool): Whether the HPO run keeps the OOF predictions of
             every trial for the BBC-CV estimate.
     """
@@ -530,5 +543,6 @@ class _HpoPhaseSpec:
     inf_policy: str = "as_missing"
     datetime_policy: str = "expand"
     drop_id_like_columns: bool = False
+    target_transform: TargetTransform = TargetTransform.none
     collect_oof: bool = False
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)

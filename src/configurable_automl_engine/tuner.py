@@ -20,7 +20,10 @@ from typing import Any
 from optuna.trial import FrozenTrial, Trial
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
-from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.definitions import (
+    TargetTransform,
+    ValidationStrategy,
+)
 from configurable_automl_engine.common.metrics import validate_custom_metrics
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
@@ -30,6 +33,7 @@ from configurable_automl_engine.hpo.complexity_guard import (
 )
 from configurable_automl_engine.preprocessing import (
     EncodingStrategy,
+    normalize_target_transform,
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
@@ -94,6 +98,7 @@ def optimize(
     encoding: EncodingStrategy | None = None,
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     winsorizer_exclude: list[str] | None = None,
+    target_transform: TargetTransform | str = TargetTransform.none,
     pruning: dict[str, Any] | None = None,
     high_cardinality_threshold: int | None = 50,
     high_cardinality_encoding: EncodingStrategy | None = "frequency",
@@ -216,6 +221,20 @@ def optimize(
             preprocessing; ``[]`` — nothing is excluded.
             Names outside the numerical feature set are ignored (with a
             DEBUG line); names missing from ``X`` raise ``ValueError``.
+        target_transform: Transformation of the target ``y`` inside the
+            ``model`` step of every trial pipeline and of the final best
+            model: ``'none'`` (default) — no transformation; ``'log1p'`` —
+            ``log(1 + y)`` (requires ``min(y) > -1``); ``'boxcox'`` — the
+            Box-Cox power transformation (requires ``min(y) > 0``);
+            ``'yeo-johnson'`` — the Yeo-Johnson power transformation (any
+            real ``y``). The transformation is applied identically in the
+            HPO trials and in the final full-data fit (the hyperparameters
+            are selected for the model that is actually returned); a
+            domain violation raises ``ValueError`` ONCE before the first
+            trial. GLM algorithms with a restricted loss domain are
+            validated against the TRANSFORMED target by the engine's
+            target-domain guard (see ``general.target_transform``).
+            Consistent with ``ModelTrainer(target_transform=...)``.
         pruning: Early stopping (pruning) settings.
             A dict with fields: ``enable`` (bool, False by default),
             ``strategy`` ('median' | 'hyperband', 'median' by default),
@@ -378,6 +397,7 @@ def optimize(
         winsorizer_exclude=(
             None if winsorizer_exclude is None else list(winsorizer_exclude)
         ),
+        target_transform=normalize_target_transform(target_transform),
         feature_selection_cfg=feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=data_oversampling,

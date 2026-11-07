@@ -170,6 +170,37 @@ What happens here:
   `holdout_score` is the winner's R² on these untouched rows.
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
+## Example: target transformation
+
+For skewed positive targets (counts, prices, durations) a transformation of
+`y` often helps linear models. Set `general.target_transform` and the engine
+applies the SAME transformation in the HPO trials, in the final model and in
+the hold-out trainer:
+
+```python
+config = {
+    "general": {
+        "comparison_metric": "r2",
+        "target_transform": "log1p",  # "none" (default) / "log1p" / "boxcox" / "yeo-johnson"
+        "path_to_model": "skewed_model.pkl",
+    },
+    "algorithms": {"ridge": {}, "random_forest": {}},
+}
+
+results = caml.train_best_model(config=config, df=df, target="target")
+```
+
+The hyperparameters are optimized for the model trained on the transformed
+`y` (the `model` step of every trial pipeline is a
+`TransformedTargetRegressor`), and `predict` returns values in the original
+scale. A domain violation (e.g. `"log1p"` on `min(y) <= -1`, `"boxcox"` on
+non-positive `y`) fails once before the first trial; `"yeo-johnson"` accepts
+any real `y`. GLM algorithms with a restricted loss domain
+(`gammaregressor`, `poissonregressor`, `tweedieregressor`) are validated
+against the transformed target before HPO and may be disqualified with a
+reason naming the transformation. See
+[Target transformation](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#target-transformation).
+
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md).
 
 # Contributing

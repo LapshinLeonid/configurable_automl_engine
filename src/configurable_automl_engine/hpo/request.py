@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.settings import (
     EncodingSettings,
     InputPolicies,
@@ -87,6 +88,12 @@ class HpoRequest:
             ``datetime_expansion_map``). ``None`` — derived automatically from
             the datetime expansion of ``X`` (as in ``ModelTrainer``); ``[]``
             — nothing is excluded.
+        target_transform: The target transformation of the ``model`` step
+            (``TargetTransform.none`` — no transformation; ``log1p`` /
+            ``boxcox`` / ``yeo-johnson`` wrap the regressor into a
+            ``TransformedTargetRegressor`` so the trials and the final best
+            model are trained on the transformed ``y`` — consistently with
+            the final ``ModelTrainer``).
         feature_selection_cfg: The feature selection settings.
         oversampling: The oversampling settings.
         pruning: The early stopping (pruning) settings.
@@ -120,6 +127,7 @@ class HpoRequest:
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None
     preprocessing_default: PreprocessingOverride | dict[str, Any] | None = None
     winsorizer_exclude: list[str] | None = None
+    target_transform: TargetTransform = TargetTransform.none
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None
     oversampling: OversamplingSettings = field(default_factory=OversamplingSettings)
     pruning: dict[str, Any] | None = None

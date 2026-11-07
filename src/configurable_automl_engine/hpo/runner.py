@@ -1,16 +1,11 @@
 """The HPO run of a single algorithm (``_OptimizeRunner``).
-
-Holds the state of one ``optimize()`` call and the run loop: the Optuna
-study with the TPE history transfer, the objective with the circuit breaker
-for fatal failures, the best-trial selection and the final fit of the best
-model. The setup is a chain of pure steps that return plans
-(``hpo.plans``): ``plan_validation`` (here: input validation and the
-validation strategy) → ``plan_preprocessing`` (``hpo.trial_pipeline``) →
-``plan_search_space`` (``hpo.search_space``) → ``plan_pruning``
-(``hpo.pruning``); the trial evaluation is ``score_trial``
-(``hpo.evaluation``). Only the runner's own methods mutate the runner. It
-must not import ``configurable_automl_engine.tuner`` (the façade imports
-this module).
+Holds one ``optimize()`` run: Optuna study setup with TPE history transfer,
+objective execution with the fatal-error circuit breaker, best-trial
+selection, and the optional final full-data fit. Planning stays in pure steps
+(``plan_validation`` → ``plan_preprocessing`` → ``plan_search_space`` →
+``plan_pruning``), while ``score_trial`` evaluates one trial. Only runner
+methods mutate runner state; this module must not import
+``configurable_automl_engine.tuner``.
 """
 
 from __future__ import annotations
@@ -46,6 +41,7 @@ from configurable_automl_engine.models import (
     create_model,
     resolve_algorithm_name,
 )
+from configurable_automl_engine.preprocessing import validate_target_for_transform
 from configurable_automl_engine.validation import make_cv, norm_val_method
 
 from .evaluation import (
@@ -150,10 +146,7 @@ def _validate_data(
         check_target_numeric(y)
     except ValueError as err:
         raise InvalidDataError(str(err)) from err
-    # Feature diagnostics: duplicate columns are always rejected (a duplicated
-    # name makes X[col] return a DataFrame — an unclear pandas error
-    # downstream); ±inf / datetime / ID-like columns follow the configured
-    # policies.
+    # Feature diagnostics mirror the configured policies.
     if isinstance(X, pd.DataFrame):
         try:
             repaired, _ = validate_features(
@@ -172,12 +165,11 @@ def _validate_data(
 def _get_estimator(algo: str) -> Any:
     """Check the availability and validity of the given algorithm."""
     try:
-        # Try to create a model with minimal parameters to check existence
+        # Try to create a model with minimal parameters to check existence.
         create_model(algo)
         return True
     except (ValueError, ImportError) as err:
-        # If the algorithm is not found in models.py or the package is not
-        #  installed (e.g. XGBoost)
+        # Missing model or backend package (for example, XGBoost).
         raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
 
 
@@ -458,6 +450,7 @@ class _OptimizeRunner:
             random_state=self.request.random_state,
             apply_fs=apply_fs,
             feature_index=feature_index,
+            target_transform=self.request.target_transform,
         )
 
     def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
@@ -857,6 +850,13 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     """
     algo = request.algo_name.lower()
     policies = request.policies
+    # Target transformation domain check: raised ONCE, before the first
+    # trial (a per-trial check would spend the whole HPO budget on a
+    # domain violation — e.g. ``boxcox`` on a target with zeros — and
+    # surface it only as every fold of every trial failing). The final
+    # ``ModelTrainer.fit`` validates the same way, so the error contract is
+    # shared.
+    validate_target_for_transform(y, request.target_transform)
     # _validate_data may return a repaired feature matrix (e.g. datetime
     # columns expanded); the None return is kept for backward compatibility
     # with callers/mocks that treat the helper as a pure validator.

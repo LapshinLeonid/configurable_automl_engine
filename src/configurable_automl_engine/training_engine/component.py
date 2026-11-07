@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,7 @@ from .hpo_phases import (
 from .run_result import (
     build_experiment_result,
     build_failed_experiment_result,
+    mark_result_owner,
 )
 from .select_steps import select_step_outcome
 from .state import (
@@ -81,8 +83,13 @@ _LOG = logging.getLogger(__name__)
 # process (the T3 experiment-result plumbing): the public API still returns
 # the legacy dict (backward compatibility), and the ``ExperimentResult``
 # model assembled from the same sources is stored here for the consumers
-# (the facade and the experiment store, T5/T4) until the result-plumbing
-# contract of the facade is finalized.
+# (the facade and the experiment store, T5/T4). The global is NOT reset
+# between calls: a consumer that cannot pass its own ``run_token`` (the
+# owner stamp, see ``run_result.mark_result_owner``) must snapshot this
+# value before the call and verify it changed afterwards. The facade
+# passes a private token into ``train_best_model`` and matches it after
+# the call, so concurrent or sequential experiments never pick up a
+# stranger's result.
 last_experiment_result: ExperimentResult | None = None
 
 
@@ -146,9 +153,14 @@ def execute_phases(
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
     # Target-domain guard (before any trial): GLMs whose loss domain does not
     # fit y are disqualified up front, a partly invalid Tweedie power range
-    # is clipped to its valid part.
+    # is clipped to its valid part. With a non-``none`` general.
+    # target_transform the domain is checked against the TRANSFORMED target
+    # (the HPO trials train on it).
     guard = _apply_target_domain_guard(
-        all_algorithms, prepared.y, ctx.disqualified_algorithms
+        all_algorithms,
+        prepared.y,
+        ctx.disqualified_algorithms,
+        target_transform=cfg.general.target_transform,
     )
     all_algorithms = guard.algorithms
     ctx.disqualified_algorithms.update(guard.disqualified)
@@ -326,6 +338,12 @@ def _execute_hpo_step(
     # Since the phase results started empty, the working set is guaranteed
     # to contain only this phase's results.
     ctx.working_set = valid_results
+    # The experimental top-K ensemble (general.ensemble) ranks the FULL
+    # leaderboard of the run, not the narrowed terminal working set: the
+    # snapshot is refreshed after every HPO phase (the working set is
+    # rebuilt from scratch), so the snapshot always mirrors the last HPO
+    # phase — the same records the leaderboard of the result is built from.
+    ctx.leaderboard_snapshot = dict(valid_results)
 
     # Accumulate the adaptive complexity guard records of the phase into
     # the report section (one "before → after" record per restricted
@@ -464,6 +482,7 @@ def _build_phase_spec(
         inf_policy=cfg.general.inf_policy,
         datetime_policy=cfg.general.datetime_policy,
         drop_id_like_columns=cfg.general.drop_id_like_columns,
+        target_transform=cfg.general.target_transform,
         collect_oof=collect_oof,
         custom_metrics=dict(cfg.general.custom_metrics),
     )
@@ -609,6 +628,8 @@ def train_best_model(
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
+    *,
+    run_token: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Main interface for training the best model.
 
@@ -644,7 +665,11 @@ def train_best_model(
     facade and the experiment store). The model is built from the same
     sources as the dict, so the dict contract is unchanged. On an
     orchestration failure (``RuntimeError``) a failed ``ExperimentResult``
-    is recorded before the error is re-raised.
+    is recorded before the error is re-raised. When ``run_token`` is
+    given, the assembled result (completed or failed) is stamped with the
+    token (``run_result.mark_result_owner``), so an orchestrator reading
+    the global afterwards can tell its own result from a stranger's (the
+    global is not reset between calls).
 
     Args:
         config: The training
@@ -652,6 +677,11 @@ def train_best_model(
         df: The input data.
         target: The target column name. Defaults to 'target'.
         model_path_override: An alternative model save path.
+        run_token: The caller's private run token (an opaque UUID);
+            when given, the assembled ``ExperimentResult`` is stamped
+            with it for owner recognition (see
+            ``run_result.mark_result_owner``). The legacy dict return
+            value is not affected.
     Returns:
         Dict[str, Any]: A dict with the results: the algorithm name, ``score``
             — the metric value in user semantics (positive RMSE/MAE, plain R²;
@@ -698,6 +728,7 @@ def train_best_model(
             ctx=ctx,
             model_path_override=model_path_override,
             run_finished=run_finished,
+            run_token=run_token,
         )
     except RuntimeError as err:
         # Orchestration failure (a phase produced no valid scores, a select
@@ -712,6 +743,7 @@ def train_best_model(
             ctx=ctx,
             error_message=str(err),
             run_finished=run_finished,
+            run_token=run_token,
         )
         raise
     return result
@@ -724,6 +756,7 @@ def _run_after_phases(
     ctx: PhaseContext,
     model_path_override: str | Path | None,
     run_finished: _RunFinish,
+    run_token: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Finish the run after ``execute_phases``: winner checks, the final
     artifact, and the ``ExperimentResult`` assembly.
@@ -774,6 +807,14 @@ def _run_after_phases(
         n_trials_evaluated=n_trials_evaluated,
         oof_pool=ctx.oof_pool,
     )
+    # Experimental top-K ensemble (general.ensemble.enable): an additional
+    # output NEXT TO the winner — the winner, the winner artifact and the
+    # terminal selection are not affected. The ensemble model is saved next
+    # to the winner artifact, and the report section (members, scores,
+    # weights, artifact path) is added to the result dict; a failure of the
+    # ensemble step never aborts the run (logged, no section).
+    if cfg.general.ensemble.enable:
+        _build_and_attach_ensemble(cfg=cfg, prepared=prepared, ctx=ctx, result=result)
     # The instrumented run result (T3): assembled from the same sources as
     # the dict (not from the dict itself), so the optional dict keys stay
     # untouched. The model is not returned by the public API (the dict
@@ -788,6 +829,8 @@ def _run_after_phases(
         run_finished_at=run_finished.finished_at(),
         run_duration_seconds=run_finished.duration_seconds(),
     )
+    if run_token is not None:
+        mark_result_owner(experiment_result, run_token)
     globals()["last_experiment_result"] = experiment_result
     return result
 
@@ -808,6 +851,60 @@ class _RunFinish:
         return time.monotonic() - self._started_monotonic
 
 
+def _build_and_attach_ensemble(
+    *,
+    cfg: Config,
+    prepared: PreparedData,
+    ctx: PhaseContext,
+    result: dict[str, Any],
+) -> None:
+    """Build the experimental ensemble and attach its report to the result.
+
+    Best-effort by contract: every failure is logged and the result simply
+    carries no ``ensemble`` key. The ensemble model is saved next to the
+    winner artifact (``<model stem>_ensemble.<ext>``) so the facade and the
+    consumers can reload it; the artifact path is recorded in the section.
+    """
+    from configurable_automl_engine.training_engine.ensemble_step import (
+        build_ensemble_from_context,
+    )
+
+    built = build_ensemble_from_context(cfg=cfg, prepared=prepared, ctx=ctx)
+    if built is None:
+        return
+    ensemble, section = built
+    # Save next to the winner artifact (the ensemble is an additional
+    # output: the winner artifact path is never touched). ``model_path``
+    # is always present in the result (persist_artifact records it) — a
+    # missing key means an unexpected engine/result divergence, and an
+    # ensemble placed next to a wrong path would be worse than no
+    # ensemble: the step degrades to "no section" with an explicit
+    # warning naming the consequence for the facade.
+    model_path = result.get("model_path")
+    if not model_path:
+        _LOG.warning(
+            "The ensemble could not be attached: the result carries no "
+            "'model_path' (unexpected result-assembly divergence); the "
+            "result carries no ensemble section and ensemble_model() "
+            "will raise."
+        )
+        return
+    ensemble_path = Path(str(model_path)).with_name(
+        f"{Path(str(model_path)).stem}_ensemble{Path(str(model_path)).suffix}"
+    )
+    try:
+        ensemble.save(ensemble_path, cfg.general.serialization_format)
+    except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
+        _LOG.warning(
+            "The ensemble artifact could not be saved: %s; the result "
+            "carries no ensemble section and ensemble_model() will raise.",
+            err,
+        )
+        return
+    section["artifact_path"] = str(ensemble_path)
+    result["ensemble"] = section
+
+
 def _record_failed_run(
     *,
     cfg: Config,
@@ -815,11 +912,14 @@ def _record_failed_run(
     ctx: PhaseContext | None,
     error_message: str,
     run_finished: _RunFinish,
+    run_token: uuid.UUID | None = None,
 ) -> None:
     """Assemble and store the failed ``ExperimentResult`` of a failed run.
 
     The exception propagates to the caller unchanged; the failed result is
     kept for the run history (the T4 store consumes it via the facade).
+    When ``run_token`` is given, the failed result is stamped with it (see
+    ``run_result.mark_result_owner``).
     """
     try:
         failed_result = build_failed_experiment_result(
@@ -834,4 +934,6 @@ def _record_failed_run(
     except Exception:  # noqa: BLE001 — a failed-result assembly error must not shadow the run error
         _LOG.exception("Failed to assemble the failed-run ExperimentResult")
         return
+    if run_token is not None:
+        mark_result_owner(failed_result, run_token)
     globals()["last_experiment_result"] = failed_result

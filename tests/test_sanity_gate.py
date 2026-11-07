@@ -82,7 +82,9 @@ def _honest_oof_full(
     return oof, full_model.predict(X), full_model
 
 
-def _with_rmse(base: np.ndarray, target_rmse: float, rng: np.random.RandomState) -> np.ndarray:
+def _with_rmse(
+    base: np.ndarray, target_rmse: float, rng: np.random.RandomState
+) -> np.ndarray:
     """A vector with the given RMSE relative to ``base`` (see Circuit D)."""
     noise = rng.randn(len(base))
     noise = noise / np.sqrt(np.mean(noise**2)) * target_rmse
@@ -337,9 +339,9 @@ def test_diversity_adaptive_deep_tree_negative_oof_r2_rejected():
         oof[te] = tree.predict(X[te])
     tree = DecisionTreeRegressor(max_depth=20, random_state=0).fit(X, y)
     assert 1.0 - np.var(y - oof) / np.var(y) < 0.0  # precondition: R²_oof < 0
-    result = ModelSanityGate(check_dead_features=False, check_generalization_gap=False).check(
-        y=y, y_pred_oof=oof, y_pred_full=tree.predict(X), X=X, model=tree
-    )
+    result = ModelSanityGate(
+        check_dead_features=False, check_generalization_gap=False
+    ).check(y=y, y_pred_oof=oof, y_pred_full=tree.predict(X), X=X, model=tree)
     assert not result.is_valid
     assert any("R²_oof" in r and "worse than the constant" in r for r in result.reasons)
 
@@ -436,8 +438,7 @@ def test_unique_threshold_capped_by_nunique_y():
     distinct target values: a model predicting y exactly always reaches the
     cap and passes.
     """
-    y = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                 dtype=float)
+    y = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12], dtype=float)
     assert len(y) == 18
     assert len(np.unique(y)) == 13
 
@@ -623,6 +624,52 @@ def test_dead_features_zero_ratio_boundary_equality_no_warning():
     assert result.soft_warnings == []  # equality with the threshold is not an excess
 
 
+def test_dead_features_wrapped_linear_model_zero_coefs():
+    """Circuit C linear path fires through a TransformedTargetRegressor.
+
+    The trainer wraps the regressor into a ``TransformedTargetRegressor``
+    when ``target_transform`` is set. ``_core_estimator`` must unwrap the
+    fitted wrapper (the ``regressor_`` attribute), so a wrapped linear
+    model with zero coefficients still triggers the circuit-C signal —
+    the linear path must not silently degrade to the permutation path.
+    """
+    from sklearn.compose import TransformedTargetRegressor
+
+    from configurable_automl_engine.training_engine.sanity_circuits import (
+        _core_estimator,
+    )
+
+    rng = np.random.RandomState(9)
+    X = np.abs(rng.randn(120, 6))
+    y = np.abs(rng.randn(120)) + 0.1
+    inner = Lasso(alpha=5.0, random_state=0).fit(X, y)
+    assert np.allclose(inner.coef_, 0.0)  # zeroed out completely by L1
+    wrapped = TransformedTargetRegressor(
+        regressor=inner,
+        transformer=None,
+        func=np.log1p,
+        inverse_func=np.expm1,
+        check_inverse=False,
+    )
+    wrapped.fit(X, y)
+    # The wrapper itself has no coef_: without the unwrap the linear path
+    # would be skipped silently.
+    assert getattr(wrapped, "coef_", None) is None
+    assert _core_estimator(wrapped) is wrapped.regressor_
+
+    gate = ModelSanityGate()
+    tol = gate.zero_coef_tolerance
+    result = gate.check(
+        y=y,
+        y_pred_oof=wrapped.predict(X),
+        y_pred_full=wrapped.predict(X),
+        X=X,
+        model=wrapped,
+    )
+    assert result.dead_features_count == int((np.abs(inner.coef_) <= tol).sum())
+    assert any("zero-coefficient ratio" in w for w in result.soft_warnings)
+
+
 def test_dead_features_nonlinear_permutation_positive_rf():
     rng = np.random.RandomState(3)
     n, p = 150, 6
@@ -634,9 +681,9 @@ def test_dead_features_nonlinear_permutation_positive_rf():
         X,
         y,
     )
-    result = ModelSanityGate(check_diversity=False, check_generalization_gap=False).check(
-        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
-    )
+    result = ModelSanityGate(
+        check_diversity=False, check_generalization_gap=False
+    ).check(y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model)
     assert result.is_valid
     assert result.dead_features_count == 0
     assert result.soft_warnings == []
@@ -747,7 +794,9 @@ def test_dead_features_permutation_cost_controls_rows_and_features():
         check_unique=False,
         check_generalization_gap=False,
     )
-    result = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
+    result = gate.check(
+        y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf
+    )
     # At most 5 columns were checked.
     assert 0 <= result.dead_features_count <= 5
 
@@ -767,8 +816,12 @@ def test_dead_features_permutation_deterministic_with_seed():
         check_unique=False,
         check_generalization_gap=False,
     )
-    r1 = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
-    r2 = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
+    r1 = gate.check(
+        y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf
+    )
+    r2 = gate.check(
+        y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf
+    )
     # NaN fields do not participate in comparison (nan != nan); compare the essentials.
     assert r1.is_valid == r2.is_valid
     assert r1.reasons == r2.reasons
@@ -786,7 +839,9 @@ def test_dead_features_permutation_works_with_dataframe_x():
     gate = ModelSanityGate(
         check_diversity=False, check_unique=False, check_generalization_gap=False
     )
-    result = gate.check(y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf)
+    result = gate.check(
+        y=y, y_pred_oof=rf.predict(X), y_pred_full=rf.predict(X), X=X, model=rf
+    )
     assert result.is_valid
 
 
@@ -1023,9 +1078,7 @@ def test_gap_warn_mode_deep_tree_division_by_zero_is_soft_warning():
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
 
-    warn = _gap_only_gate(1.5, mode="warn").check(
-        y=y, y_pred_oof=oof, y_pred_full=full
-    )
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
     assert warn.is_valid is True
     assert warn.reasons == []
     assert any("Circuit D" in w and "RMSE_full" in w for w in warn.soft_warnings)
@@ -1036,9 +1089,7 @@ def test_gap_warn_mode_deep_tree_division_by_zero_is_soft_warning():
         y=y, y_pred_oof=oof, y_pred_full=full
     )
     assert not strict.is_valid
-    assert any(
-        "Circuit D" in r and "division by zero" in r for r in strict.reasons
-    )
+    assert any("Circuit D" in r and "division by zero" in r for r in strict.reasons)
     assert np.isinf(strict.generalization_gap)
 
 
@@ -1052,9 +1103,7 @@ def test_gap_warn_mode_one_nn_division_by_zero_is_soft_warning():
     assert np.sqrt(np.mean((y - full) ** 2)) < 1e-6
     oof = full + rng.randn(120) * 0.5
 
-    warn = _gap_only_gate(1.5, mode="warn").check(
-        y=y, y_pred_oof=oof, y_pred_full=full
-    )
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
     assert warn.is_valid is True
     assert warn.reasons == []
     assert any("Circuit D" in w and "RMSE_full" in w for w in warn.soft_warnings)
@@ -1093,9 +1142,7 @@ def test_gap_warn_mode_rmse_oof_zero_is_soft_warning():
     assert np.isinf(warn.generalization_gap)
     assert warn.severity == 1
 
-    strict = _gap_only_gate(1.5, mode="reject").check(
-        y=y, y_pred_oof=y, y_pred_full=y
-    )
+    strict = _gap_only_gate(1.5, mode="reject").check(y=y, y_pred_oof=y, y_pred_full=y)
     assert not strict.is_valid
     assert any("RMSE_oof" in r and "division by zero" in r for r in strict.reasons)
     assert np.isinf(strict.generalization_gap)
@@ -1147,23 +1194,17 @@ def test_gap_inf_boundary_rmse_full_zero_soft_warning_in_warn_mode():
     y = np.arange(100, dtype=float) * 1.0
     full = y.copy()  # RMSE_full == 0 exactly
     oof = y + rng.randn(100) * 1e-3  # RMSE_oof ≈ 1e-3 > _ZERO_RMSE_EPS
-    warn = _gap_only_gate(1.5, mode="warn").check(
-        y=y, y_pred_oof=oof, y_pred_full=full
-    )
+    warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=oof, y_pred_full=full)
     assert warn.is_valid is True
     assert warn.reasons == []
-    assert any(
-        "RMSE_full" in w and "division by zero" in w for w in warn.soft_warnings
-    )
+    assert any("RMSE_full" in w and "division by zero" in w for w in warn.soft_warnings)
     assert np.isinf(warn.generalization_gap)
 
     strict = _gap_only_gate(1.5, mode="reject").check(
         y=y, y_pred_oof=oof, y_pred_full=full
     )
     assert not strict.is_valid
-    assert any(
-        "RMSE_full" in r and "division by zero" in r for r in strict.reasons
-    )
+    assert any("RMSE_full" in r and "division by zero" in r for r in strict.reasons)
     assert np.isinf(strict.generalization_gap)
 
 
@@ -1274,9 +1315,7 @@ def test_gap_warn_mode_rmse_oof_zero_logs_warning(caplog):
     """
     y = np.arange(100, dtype=float)
     with caplog.at_level("WARNING", logger="configurable_automl_engine"):
-        warn = _gap_only_gate(1.5, mode="warn").check(
-            y=y, y_pred_oof=y, y_pred_full=y
-        )
+        warn = _gap_only_gate(1.5, mode="warn").check(y=y, y_pred_oof=y, y_pred_full=y)
     assert warn.is_valid is True
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("target leakage" in r.message for r in warning_records)
@@ -1329,9 +1368,7 @@ def test_gap_rmse_full_and_oof_both_zero_single_leakage_warning():
     assert "target leakage" in warn.soft_warnings[0]
     assert not any("RMSE_full" in w for w in warn.soft_warnings)
 
-    strict = _gap_only_gate(1.5, mode="reject").check(
-        y=y, y_pred_oof=y, y_pred_full=y
-    )
+    strict = _gap_only_gate(1.5, mode="reject").check(y=y, y_pred_oof=y, y_pred_full=y)
     assert not strict.is_valid
     assert len(strict.reasons) == 1
     assert "RMSE_oof" in strict.reasons[0]
@@ -1364,7 +1401,9 @@ def test_positive_honest_nonlinear_passes_all_circuits_clean_data():
         X,
         y,
     )
-    result = ModelSanityGate().check(y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model)
+    result = ModelSanityGate().check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
     assert result.is_valid
     assert result.reasons == []
     assert result.diversity_ratio > 0.15
@@ -1384,7 +1423,9 @@ def test_positive_honest_model_passes_on_noisy_r2_about_0_3():
     noise_var = 6.0 * (1.0 / 0.3 - 1.0)
     y = signal + rng.randn(n) * np.sqrt(noise_var)
     oof, full, model = _honest_oof_full(lambda: SVR(kernel="rbf", C=2.0), X, y)
-    result = ModelSanityGate().check(y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model)
+    result = ModelSanityGate().check(
+        y=y, y_pred_oof=oof, y_pred_full=full, X=X, model=model
+    )
     assert result.is_valid
     assert result.reasons == []
     assert 0.1 < result.diversity_ratio < 0.5  # ≈ R², well above the strict 0.15
@@ -1492,9 +1533,7 @@ def test_nan_predictions_are_masked_like_oof_rmse():
     pred = np.linspace(-5.0, 5.0, n)  # step ≈ 0.1 > rounding granularity
     pred_masked = pred.copy()
     pred_masked[::5] = np.nan  # 20% uncovered rows
-    gate = ModelSanityGate(
-        check_dead_features=False, check_generalization_gap=False
-    )
+    gate = ModelSanityGate(check_dead_features=False, check_generalization_gap=False)
     full_result = gate.check(y=y, y_pred_oof=pred, y_pred_full=y)
     masked_result = gate.check(y=y, y_pred_oof=pred_masked, y_pred_full=y)
     # Masking does not change the semantics: both pass/fail identically,
@@ -1861,15 +1900,15 @@ def test_dead_features_column_permutation_failure_is_reason():
     gate = ModelSanityGate(
         check_diversity=False, check_unique=False, check_generalization_gap=False
     )
-    result = gate.check(
-        y=y, y_pred_oof=y, model=_DummyModel(), X=_BrokenSparseLike()
-    )
+    result = gate.check(y=y, y_pred_oof=y, model=_DummyModel(), X=_BrokenSparseLike())
     assert not result.is_valid
     assert any("column permutation failed" in r for r in result.reasons)
 
 
 def test_core_estimator_unwraps_nested_pipeline_objects():
-    from configurable_automl_engine.training_engine.sanity_circuits import _core_estimator
+    from configurable_automl_engine.training_engine.sanity_circuits import (
+        _core_estimator,
+    )
     from configurable_automl_engine.training_engine.sanity_circuits import _r2_oof
 
     # R²_oof baseline: NaN for a constant target (undefined), a positive
@@ -1922,6 +1961,7 @@ def test_gap_y_pred_full_length_mismatch_rejected():
 def test_constructor_zero_coef_tolerance_validation():
     with pytest.raises(ValueError):
         ModelSanityGate(zero_coef_tolerance=-1e-6)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Soft-warning log levels
@@ -2046,11 +2086,7 @@ def test_audit_log_lines_prefixed_with_candidate_name(caplog):
         )
     # The reasons line, the status line, and the soft-warning details are all
     # attributed to the candidate.
-    audit_records = [
-        r
-        for r in caplog.records
-        if "lasso_alpha_0.1:" in r.message
-    ]
+    audit_records = [r for r in caplog.records if "lasso_alpha_0.1:" in r.message]
     assert audit_records
     assert any("reason(s)" in r.message for r in audit_records)
     assert any("soft warning" in r.message for r in audit_records)

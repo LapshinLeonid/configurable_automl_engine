@@ -13,8 +13,10 @@ module holds definitions only (it is part of the saved artifact format, see
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from typing import TYPE_CHECKING, Any
+
+from configurable_automl_engine.common.definitions import TargetTransform
 
 if TYPE_CHECKING:
     import numpy as np
@@ -43,6 +45,37 @@ if TYPE_CHECKING:
 #: ``DataOversampler`` moved into the ``preprocessing`` / ``oversampling``
 #: packages (a pickle records the module path of every class).
 ARTIFACT_FORMAT_VERSION = 3
+
+
+def _trainer_settings_setstate(self, state: Any) -> None:
+    """Restore a slots-dataclass state, tolerating shorter legacy states.
+
+    A pickle of a slots dataclass stores the field values as a list zipped
+    against the current fields. Artifacts of the current format (3) saved
+    before ``target_transform`` was added carry a 20-value list: the default
+    ``zip`` restores them without an error but leaves the trailing slot
+    unset, and a later ``fit``/``save`` on the loaded object would fail with
+    ``AttributeError``. Fill the missing tail fields with their dataclass
+    defaults (the field is additive, so the default ``TargetTransform.none``
+    preserves the legacy behavior).
+
+    Raises:
+        TypeError: If the state is not a list/tuple (corrupt pickle).
+    """
+    if not isinstance(state, (list, tuple)):
+        raise TypeError(
+            f"Unexpected {type(self).__name__} pickle state: {type(state).__name__}"
+        )
+    # Fields with defaults (the tail of the field list) keep their default
+    # when the legacy state is shorter; fill from the state first, then
+    # patch the unset tail with the defaults.
+    fields_ = fields(self)
+    for i, field_ in enumerate(fields_):
+        if i < len(state):
+            object.__setattr__(self, field_.name, state[i])
+    for field_ in fields_[len(state) :]:
+        if field_.default is not MISSING:
+            object.__setattr__(self, field_.name, field_.default)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +112,15 @@ class TrainerSettings:
     test_size: float
     oversampling: OversamplingSettings
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
+    target_transform: TargetTransform = TargetTransform.none
+
+
+# ``@dataclass(slots=True)`` rebuilds the class and (for frozen dataclasses)
+# unconditionally overwrites ``__setstate__`` with its own ``zip``-based
+# helper, which silently leaves the trailing ``target_transform`` slot unset
+# for a legacy (shorter) state list. Re-assert the custom implementation
+# AFTER the decorator so it survives on every supported Python version.
+TrainerSettings.__setstate__ = _trainer_settings_setstate  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True, slots=True)

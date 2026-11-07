@@ -63,7 +63,42 @@ _LOG = logging.getLogger(__name__)
 __all__ = [
     "build_experiment_result",
     "build_failed_experiment_result",
+    "mark_result_owner",
+    "result_owned_by",
 ]
+
+
+def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
+    """Mark ``result`` as produced for the caller identified by ``token``.
+
+    The ``ExperimentResult`` model has a closed field set (extra =
+    ``"forbid"``), so the ownership token is attached as an attribute —
+    it never reaches ``model_dump`` / ``to_json`` / the JSONL history and
+    needs no model change.
+
+    The token lets an orchestrator (the ``AutoMLExperiment`` facade, T5)
+    recognize *its own* run result when reading the module-level
+    ``component.last_experiment_result`` global: the global is the
+    result of the last ``train_best_model`` call in the process and is
+    not reset between calls, so a consumer that cannot snapshot it
+    before the run (or runs concurrently in another thread) would
+    otherwise pick up a stranger's result. The engine stamps the token
+    right after assembling the result; the facade passes its private
+    token into ``train_best_model`` and matches it afterwards.
+
+    Args:
+        result: The assembled result model to stamp (mutated in place).
+        token: The caller's private run token (an opaque UUID).
+    """
+    object.__setattr__(result, "_owner_token", token)
+
+
+def result_owned_by(result: ExperimentResult, token: uuid.UUID) -> bool:
+    """Whether ``result`` was stamped with ``token`` (see
+    :func:`mark_result_owner`). A result without a token (built by an
+    older engine version or by hand) belongs to nobody.
+    """
+    return getattr(result, "_owner_token", None) == token
 
 
 def build_experiment_result(
@@ -141,6 +176,11 @@ def build_experiment_result(
         complexity_guard=(
             {"parameters": list(ctx.complexity_guard_records)}
             if ctx.complexity_guard_records
+            else None
+        ),
+        ensemble=(
+            dict(result["ensemble"])
+            if isinstance(result.get("ensemble"), dict)
             else None
         ),
         oof_score=_opt_float(result.get("oof_score")),

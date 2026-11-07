@@ -42,6 +42,7 @@ from configurable_automl_engine.preprocessing import (
     _clean_uninformative_features,
     build_preprocessor,
     estimate_n_features_after_preprocessing,
+    wrap_with_target_transform,
 )
 from configurable_automl_engine.preprocessing_presets import (
     PreprocessingOverride,
@@ -724,5 +725,16 @@ def assemble_pipeline_steps(
             noise_level=float(oversampling.noise_level),
         )
         steps.append(("oversampler", oversampler))
-    steps.append(("model", base_model))
+    # The target transformation wraps the base model: the preprocessor,
+    # the feature selector and the oversampler all work with the original
+    # y (the wrapper sits strictly inside the "model" step and transforms
+    # y only for the inner regressor; the same wrapper is therefore also
+    # active inside every CV fold and the feature-selection auto-check,
+    # which rebuild the steps through this function).
+    steps.append(
+        (
+            "model",
+            wrap_with_target_transform(base_model, settings.target_transform),
+        )
+    )
     return steps

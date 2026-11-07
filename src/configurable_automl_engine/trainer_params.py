@@ -24,7 +24,7 @@ from configurable_automl_engine.validation import (
     norm_val_method,
 )
 
-from .common.definitions import SerializationFormat, ValidationStrategy
+from .common.definitions import SerializationFormat, TargetTransform, ValidationStrategy
 from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
 from .feature_selection import FeatureSelectionCfg
 from .trainer_feature_selection import _validate_feature_selection_cfg
@@ -264,6 +264,26 @@ def _validate_custom_metrics(
         raise TrainingError(f"Invalid custom_metrics: {err}") from err
 
 
+def _validate_target_transform(value: Any) -> TargetTransform:
+    """Validate the target transformation and normalize it to the enum.
+
+    Both ``TargetTransform`` members and their value strings (including the
+    aliases ``"none"``/``"log1p"``/``"boxcox"``/``"yeo-johnson"`` in any
+    case) are accepted; anything else is rejected at initialization time.
+    """
+    if isinstance(value, TargetTransform):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        for member in TargetTransform:
+            if normalized == member.value:
+                return member
+    raise TrainingError(
+        f"Unknown target_transform: {value!r}. Expected one of "
+        f"{[m.value for m in TargetTransform]}."
+    )
+
+
 def build_trainer_settings(
     *,
     algorithm: Any,
@@ -290,6 +310,7 @@ def build_trainer_settings(
     oversampling: OversamplingSettings,
     policies: InputPolicies,
     warn_id_like: bool,
+    target_transform: TargetTransform | str = TargetTransform.none,
     custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
@@ -332,6 +353,7 @@ def build_trainer_settings(
         noise_level=oversampling.noise_level,
     )
     _validate_feature_lists(categorical_features, numerical_features)
+    target_transform_enum = _validate_target_transform(target_transform)
     return TrainerSettings(
         algorithm=algorithm,
         hyperparams=hyperparams,
@@ -366,4 +388,5 @@ def build_trainer_settings(
         test_size=test_size,
         oversampling=oversampling,
         custom_metrics=custom,
+        target_transform=target_transform_enum,
     )
