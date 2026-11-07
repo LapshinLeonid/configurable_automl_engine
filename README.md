@@ -84,6 +84,24 @@ Classification is not supported.
 * ⚠️ **Experimental**: **Target-Aware Oversampling** — random oversampling,
   SMOTE or ADASYN (requires `imbalanced-learn`), applied only to the training
   part of each fold. See [Oversampling section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#oversampling-section)
+* **Object Experiment API** — `AutoMLExperiment` wraps one training run in an
+  object: `run()`, then `leaderboard()`, `best_model()`, `report()`,
+  `export()` and `explain()` serve the facets of the finished run; a repeated
+  `run()` is allowed (with a warning) and concurrent experiments share
+  nothing. See
+  [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#automlexperiment-объектный-api).
+* **Experiment Tracking** — every run is registered as a serializable
+  `ExperimentResult` in a thread-safe `ExperimentStore` (optional JSONL
+  persist with a damaged-line-skip restore policy), ranked into a
+  `Leaderboard`, rendered by `JSONReporter` / `MarkdownReporter` /
+  `CompositeReporter` and the optional `MLflowReporter` extra, bundled to a
+  directory by `export_experiment` and interpreted by `explain()` (permutation
+  importance or SHAP). The experimental `general.ensemble` section adds a
+  weighted-average top-K ensemble next to the winner.
+  See [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimentstore-история-прогонов),
+  [`Leaderboard`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#leaderboard--build_leaderboard),
+  [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#export_experiment)
+  and [`general.ensemble`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimental-ensemble-generalensemble).
 
 # Dependencies
 
@@ -110,7 +128,9 @@ These distributions will not be installed automatically. You can install them us
 |-------|----------|------|
 | `xgboost` | `xgboost>=3.1.3` | The `xgboosting` algorithm. Without it a config that enables `xgboosting` is rejected at validation. |
 | `logging` | `concurrent-log-handler>=0.9.25` | Process-safe rotating log files (`general.log_to_file`) when several processes write to the same log. Without it the standard `RotatingFileHandler` is used. |
-| `all` | `xgboost` + `logging` | Both of the above. |
+| `mlflow` | `mlflow>=2.0.0` | The `MLflowReporter` tracking adapter: logs the metrics, params, tags and artifacts of a finished run into an MLflow run (see [MLflowReporter](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#mlflowreporter-optional-extra-mlflow)). |
+| `shap` | `shap>=0.48.0` | SHAP feature importance of the winner model: `explain(method="shap")` of `AutoMLExperiment` (see [explain()](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели)). |
+| `all` | `xgboost` + `logging` + `mlflow` + `shap` | All of the above. |
 
 # Installation
 
@@ -122,7 +142,7 @@ With the optional XGBoost algorithm:
 
     pip install "configurable-automl-engine[xgboost]"
 
-With all optional extras (`xgboost` and `logging`):
+With all optional extras (`xgboost`, `logging`, `mlflow` and `shap`):
 
     pip install "configurable-automl-engine[all]"
 

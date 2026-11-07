@@ -106,27 +106,33 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters, object facade
-│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / report)
+│       │   ├── ensemble.py                 # Experimental top-K ensemble core: select_top_k, compute_weights, EnsembleModel (save/load, report section)
+│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / ensemble_model / report / export / explain)
+│       │   ├── explain.py                  # Winner explainability: permutation importance, optional SHAP, Markdown rendering
+│       │   ├── export.py                   # export_experiment: the artifact bundle of a run into a directory (atomic two-phase swap, <run_id>_* names)
 │       │   ├── leaderboard.py              # Leaderboard: the algorithm ranking table built from an ExperimentResult
 │       │   ├── reporting                   # Reporters: pure consumers of ExperimentResult (no engine, no mlflow imports)
-│       │   │   ├── base.py                 # Reporter (generic ABC), CompositeReporter (several reporters in one call)
-│       │   │   ├── json_reporter.py        # JSONReporter: atomic full-snapshot JSON (model_dump, utf-8, overwrite)
-│       │   │   └── markdown_reporter.py    # MarkdownReporter: metadata, outcome, honest scores, leaderboard, run details
+│       │   │   ├── base.py                # Reporter (generic ABC), CompositeReporter (several reporters in one call)
+│       │   │   ├── json_reporter.py       # JSONReporter: atomic full-snapshot JSON (model_dump, utf-8, overwrite)
+│       │   │   ├── markdown_reporter.py   # MarkdownReporter: metadata, outcome, honest scores, leaderboard, run details
+│       │   │   └── mlflow_reporter.py     # MLflowReporter (optional extra [mlflow]): the only component that knows about MLflow (lazy guarded import)
 │       │   ├── result.py                   # ExperimentResult / AlgorithmRun: the central serializable result model
 │       │   └── store.py                    # ExperimentStore: thread-safe run history, JSONL persist, damaged-line skip
 │       ├── training_engine                 # Layer 3: orchestration
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
 │       │   ├── component.py                # Main orchestrator: train_best_model, the phase loop; applies the step outcomes
 │       │   ├── config                      # Config schema (Pydantic), one module per section
-│       │   │   ├── algorithms.py           # algorithms / oversampling sections (AlgoCfg, OversamplingCfg)
-│       │   │   ├── complexity_guard.py     # general.complexity_guard (ComplexityGuardCfg)
-│       │   │   ├── general.py              # general section (GeneralCfg, fields only)
-│       │   │   ├── general_rules.py        # Cross-field validation rules of the general section
-│       │   │   ├── phases.py               # Pipeline steps (HPOPhaseCfg) and pruning (PruningCfg)
-│       │   │   ├── root.py                 # Root Config and read_config
-│       │   │   └── sanity_gate.py          # general.sanity_gate (SanityGateCfg)
+│       │   │   ├── algorithms.py          # algorithms / oversampling sections (AlgoCfg, OversamplingCfg)
+│       │   │   ├── complexity_guard.py    # general.complexity_guard (ComplexityGuardCfg)
+│       │   │   ├── ensemble.py            # general.ensemble (EnsembleCfg): the experimental top-K ensemble section
+│       │   │   ├── general.py             # general section (GeneralCfg, fields only)
+│       │   │   ├── general_rules.py       # Cross-field validation rules of the general section
+│       │   │   ├── phases.py              # Pipeline steps (HPOPhaseCfg) and pruning (PruningCfg)
+│       │   │   ├── root.py                # Root Config and read_config
+│       │   │   └── sanity_gate.py         # general.sanity_gate (SanityGateCfg)
 │       │   ├── config_parser.py            # Façade: re-exports the config schema (the public import path)
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
+│       │   ├── ensemble_step.py            # The experimental top-K ensemble step: runs after the terminal select, never aborts the run
 │       │   ├── finalists.py                # Winner selection, finalists pool, training of the finalists
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
 │       │   ├── parallel_deadlines.py       # run_parallel: pure deadline policy (task timeout, queue budget)
@@ -137,6 +143,7 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── parallel_transport.py       # run_parallel: shared memory / disk cache / pickle payload transport
 │       │   ├── parallel_worker.py          # run_parallel: worker side (start signal, argument restore)
 │       │   ├── robust_winner.py            # Robust winner: Sanity Gate audit of the finalists, fallback ranking
+│       │   ├── run_result.py               # build_experiment_result: assembly of the ExperimentResult model; owner stamp (mark_result_owner)
 │       │   ├── sanity_circuits.py          # Sanity Gate circuits A–D (diversity, unique, dead features, gap)
 │       │   ├── sanity_gate.py              # ModelSanityGate: settings, check(), audit logging
 │       │   ├── sanity_result.py            # SanityCheckResult, severity, input checks
@@ -158,8 +165,9 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── encoders.py                 # Target / frequency / hashing / split categorical encoders
 │       │   ├── features.py                 # Feature type detection, uninformative columns, feature count estimate
 │       │   ├── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
-│       │   └── quantile.py                 # _FoldSafeQuantileTransformer: QuantileTransformer with fold-size-aware n_quantiles clipping
-│       ├── outliers_presets.py              # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
+│       │   ├── quantile.py                 # _FoldSafeQuantileTransformer: QuantileTransformer with fold-size-aware n_quantiles clipping
+│       │   └── target_transform.py         # TargetTransformer (log1p / boxcox / yeo-johnson), wrap_with_target_transform, the 'auto' resolution from the target skewness
+│       ├── outliers_presets.py             # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
 │       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets (imputation, scaling, outliers; precedence: class preset < general < algorithm)
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
 │       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks
