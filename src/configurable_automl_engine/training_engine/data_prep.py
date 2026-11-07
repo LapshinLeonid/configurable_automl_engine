@@ -1,12 +1,13 @@
 """Data preparation step of the training pipeline (Training Engine).
 
 Loads and validates the run configuration (``load_config``), splits the input
-into X/y, applies the input-data diagnostics, reserves the outer hold-out and
-resolves the validation strategy and the column types exactly once
-(``prepare_dataset``); it also registers the datetime expansion on a saved
-trainer. It may import ``state`` only and must not import the other pipeline
-step modules (``hpo_phases``, ``finalists``, ``select_steps``, ``artifact``,
-``component``).
+into X/y, applies the input-data diagnostics, reserves the outer hold-out,
+resolves the ``auto`` target transformation (on the TRAIN part of the split,
+never on the hold-out), the validation strategy and the column types exactly
+once (``prepare_dataset``); it also registers the datetime expansion on a
+saved trainer. It may import ``state`` only and must not import the other
+pipeline step modules (``hpo_phases``, ``finalists``, ``select_steps``,
+``artifact``, ``component``).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sklearn.model_selection import train_test_split
 from configurable_automl_engine.common.datetime_features import (
     datetime_expansion_map,
 )
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.log_setup import setup_logging
 from configurable_automl_engine.common.metrics import to_sklearn_name
 from configurable_automl_engine.common.validation_utils import (
@@ -165,8 +167,10 @@ def _resolve_holdout_fraction(
 def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
     """Resolve ``general.target_transform: 'auto'`` into a concrete method.
 
-    Runs once, at the start of ``prepare_dataset`` — before the HPO phases
-    and before the pre-HPO GLM target-domain guard. The decision
+    Runs once in ``prepare_dataset`` — after the outer hold-out is split off
+    (the decision sample is the TRAIN part of the split, so the hold-out
+    target values never influence the decision) and before the HPO phases
+    and the pre-HPO GLM target-domain guard. The decision
     (``resolve_target_transform``) reads the target skewness: ``|skew(y)| >``
     ``general.target_transform_skew_threshold`` selects ``log1p`` when
     ``min(y) > -1``, otherwise ``yeo-johnson``; a more symmetric target
@@ -180,7 +184,9 @@ def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
         cfg: The configuration object (``cfg.general.target_transform`` is
             always replaced with the resolved value; for a non-``auto``
             configured method the resolved value is the method itself).
-        y: The raw target vector (the decision sample).
+        y: The raw target vector (the decision sample; the TRAIN part of the
+            outer split when a hold-out is reserved, the full target
+            otherwise).
     """
     cfg.general.target_transform = resolve_target_transform(
         y,
@@ -189,14 +195,96 @@ def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
     )
 
 
+def _fallback_transform_for_full_y(
+    resolved: TargetTransform, full_y: pd.Series
+) -> TargetTransform:
+    """Guard the resolved transform against the FULL data domain.
+
+    The decision sample for ``target_transform: 'auto'`` is the train part of
+    the outer split, but the final artifact is refit on ALL data (train +
+    hold-out). A method with a restricted target domain (``log1p`` requires
+    ``min(y) > -1``, ``boxcox`` requires ``min(y) > 0``) can violate that
+    domain on the hold-out rows: the train part may resolve (or be
+    configured) to ``log1p`` while the hold-out contains a value ≤ -1.
+    Training would then fail in ``validate_target_for_transform`` AFTER the
+    HPO budget was spent.
+
+    When the method's domain is violated by the full target, the method is
+    downgraded to ``yeo-johnson`` (any real ``y``) with a WARNING. The
+    downgrade applies to the auto-resolved decision AND to an explicitly
+    configured restricted method — the alternative is a guaranteed crash of
+    the final fit, and the WARNING reports the override explicitly. ``none``
+    and ``yeo-johnson`` accept any real ``y`` and are returned unchanged.
+
+    The ``log1p``/``boxcox`` domain bounds themselves are undefined for
+    non-finite or non-numeric ``full_y``: ``np.min`` of a vector with NaN
+    returns NaN, so the comparison would silently report a violation and
+    downgrade the method. To keep the helper predictable for any direct
+    caller, such input raises ``ValueError`` with a message reusing the
+    target-validation wording. In ``prepare_dataset`` this branch is
+    unreachable — the target is validated before this point
+    (``prepare_X_y`` → ``check_target_numeric``) — so the pipeline behavior
+    is unchanged.
+
+    Args:
+        resolved: The resolved (or explicitly configured) method.
+        full_y: The FULL target vector (train + hold-out) — the data the
+            final artifact is refit on; must be numeric and finite.
+
+    Returns:
+        TargetTransform: The method to run the pipeline with — the input
+            method, or ``yeo-johnson`` as the domain-safe fallback.
+
+    Raises:
+        ValueError: If ``full_y`` is non-numeric (a string vector etc.) or
+            contains NaN/±inf — the domain decision is undefined for such
+            data (``prepare_dataset`` rejects them earlier anyway).
+    """
+    if resolved not in (TargetTransform.log1p, TargetTransform.boxcox):
+        return resolved
+    try:
+        arr = np.asarray(full_y, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            "target_transform domain guard requires a numeric full target "
+            "vector (train + hold-out); cannot convert it to float."
+        ) from err
+    # The WHOLE vector must be finite, not just its minimum: min() of a
+    # vector with +inf stays finite, so the domain decision would be made
+    # on corrupted data. NaN (and ±inf) make min(y) undefined for the
+    # domain check — fail fast instead of a silent downgrade.
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(
+            "target_transform domain guard requires a finite full target "
+            "vector (train + hold-out); found NaN or infinite value(s), so "
+            "the min(y) domain decision is undefined."
+        )
+    minimum = float(np.min(arr))
+    lower_bound = -1.0 if resolved is TargetTransform.log1p else 0.0
+    if minimum > lower_bound:
+        return resolved
+    _LOG.warning(
+        "target_transform='%s' is violated by the FULL target "
+        "(min(y)=%s <= %s, an extreme value in the reserved outer hold-out): "
+        "the final artifact is refit on all data, so the method is "
+        "downgraded to 'yeo-johnson' (valid for any real y). The decision "
+        "was made on the train part of the split only.",
+        resolved.value,
+        minimum,
+        lower_bound,
+    )
+    return TargetTransform.yeo_johnson
+
+
 def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedData:
     """Prepare the data and resolve the settings for the HPO phases.
 
-    Pipeline step 2. Splits the DataFrame into X/y, resolves the validation
-    strategy ('auto' → a concrete method/folds/test_size), resolves the
-    'auto' target transformation from the target skewness and detects column
-    types exactly once — a guarantee of consistent preprocessing between HPO
-    and the final training.
+    Pipeline step 2. Splits the DataFrame into X/y, reserves the outer
+    hold-out, resolves the validation strategy ('auto' → a concrete
+    method/folds/test_size), resolves the 'auto' target transformation from
+    the TRAIN-part target skewness (never from the hold-out rows) and
+    detects column types exactly once — a guarantee of consistent
+    preprocessing between HPO and the final training.
 
     Args:
         cfg: The configuration object.
@@ -211,17 +299,6 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
 
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
-
-    # Target-transform resolution ('auto'): before the HPO budget is spent
-    # (and before the pre-HPO GLM target-domain guard, which must check the
-    # domains against the target the trials will actually train on). The
-    # resolved concrete method is written back into cfg.general, so every
-    # later consumer (the HPO spec, the finalists, the artifact trainer,
-    # the run-result assembly) reads the resolved value — 'auto' itself
-    # never reaches them. The raw target (the full vector, including the
-    # rows later reserved for the outer hold-out) is the decision sample:
-    # the skewness of the data the user configured on.
-    _resolve_auto_target_transform(cfg, y)
 
     # Centralized input-data diagnostics: duplicate columns, ±inf in numeric
     # features, datetime/timedelta columns and ID-like columns are detected
@@ -314,6 +391,33 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
                 "general.holdout_fraction or set it to null.",
                 len(holdout_X),
             )
+
+    # Target-transform resolution ('auto'): AFTER the outer hold-out is split
+    # OFF and BEFORE the HPO budget is spent (and before the pre-HPO GLM
+    # target-domain guard, which must check the domains against the target
+    # the trials will actually train on). The decision sample is the TRAIN
+    # part of the outer split (or the full target when no hold-out is
+    # reserved): the hold-out must model the unseen data, so its target
+    # values must not influence how the pipeline itself is built — including
+    # the choice of the target transformation (an extreme value that lands
+    # in the hold-out must not flip the skewness decision, e.g. to log1p,
+    # for the pipeline that is later evaluated on that hold-out). The
+    # resolved concrete method is written back into cfg.general, so every
+    # later consumer (the HPO spec, the finalists, the artifact trainer,
+    # the run-result assembly) reads the resolved value — 'auto' itself
+    # never reaches them, and the same single decision is reused for both
+    # the HPO trials and the final trainer.
+    _resolve_auto_target_transform(cfg, y)
+    # Domain guard of the resolved method against the FULL target (train +
+    # hold-out): the final artifact is refit on all data, so a restricted
+    # method (log1p / boxcox) — whether auto-resolved or explicitly
+    # configured — can be violated by an extreme hold-out value — that
+    # would crash the fit AFTER the HPO budget was spent. Downgraded to
+    # yeo-johnson with a WARNING.
+    full_y = pd.concat([y, holdout_y], axis=0) if holdout_y is not None else y
+    cfg.general.target_transform = _fallback_transform_for_full_y(
+        cfg.general.target_transform, full_y
+    )
 
     # Single resolution of the validation strategy: 'auto' is resolved exactly
     # once on the raw X/y — before the HPO phases. The resolved values (method
