@@ -42,6 +42,7 @@ from configurable_automl_engine.models import (
     create_model,
     resolve_algorithm_name,
 )
+from configurable_automl_engine.preprocessing import validate_target_for_transform
 from configurable_automl_engine.validation import make_cv, norm_val_method
 
 from .evaluation import (
@@ -446,6 +447,7 @@ class _OptimizeRunner:
             random_state=self.request.random_state,
             apply_fs=apply_fs,
             feature_index=feature_index,
+            target_transform=self.request.target_transform,
         )
 
     def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
@@ -845,6 +847,13 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     """
     algo = request.algo_name.lower()
     policies = request.policies
+    # Target transformation domain check: raised ONCE, before the first
+    # trial (a per-trial check would spend the whole HPO budget on a
+    # domain violation — e.g. ``boxcox`` on a target with zeros — and
+    # surface it only as every fold of every trial failing). The final
+    # ``ModelTrainer.fit`` validates the same way, so the error contract is
+    # shared.
+    validate_target_for_transform(y, request.target_transform)
     # _validate_data may return a repaired feature matrix (e.g. datetime
     # columns expanded); the None return is kept for backward compatibility
     # with callers/mocks that treat the helper as a pure validator.

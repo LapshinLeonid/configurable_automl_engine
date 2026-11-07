@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.metrics import (
     bbc_cv_score,
     get_scorer_object,
@@ -57,6 +58,7 @@ def _build_trainer(
     n_folds: int = 5,
     test_size: float = 0.2,
     random_state: int | None = None,
+    target_transform: TargetTransform = TargetTransform.none,
 ) -> ModelTrainer:
     """Construct a ``ModelTrainer`` for an algorithm from its configuration.
 
@@ -81,6 +83,10 @@ def _build_trainer(
         random_state: The engine seed from
             ``general.random_state``; drives the ModelTrainer's data splits
             and model seeds. ``None`` — non-reproducible final training.
+        target_transform: The target transformation of the ``model`` step
+            (``general.target_transform``): the same transformation the HPO
+            trials trained on, so the final (and hold-out) model matches the
+            search. Default ``TargetTransform.none``.
 
 
     Raises:
@@ -151,6 +157,7 @@ def _build_trainer(
         datetime_policy=general.datetime_policy,
         drop_id_like_columns=general.drop_id_like_columns,
         warn_id_like=False,
+        target_transform=target_transform,
     )
 
 
@@ -169,6 +176,7 @@ def _fit_and_save(
     test_size: float = 0.2,
     random_state: int | None = None,
     datetime_expansion: dict[str, list[str]] | None = None,
+    target_transform: TargetTransform = TargetTransform.none,
 ) -> ModelTrainer:
     """Train the final model and save the result to disk.
 
@@ -193,6 +201,9 @@ def _fit_and_save(
             expansion applied upstream (``PreparedData.datetime_expansion``);
             registered on the trainer before saving so that the artifact
             accepts the raw input schema.
+        target_transform: The target transformation of the ``model`` step
+            (``general.target_transform``); forwarded to the trainer so the
+            final model trains on the transformed target like the HPO trials.
 
     Raises:
         ValueError: If ``best_params`` is ``None`` — a sign that HPO returned
@@ -209,6 +220,7 @@ def _fit_and_save(
         n_folds=n_folds,
         test_size=test_size,
         random_state=random_state,
+        target_transform=target_transform,
     )
     # The expansion is registered BEFORE fit: the datetime-derived component
     # columns are excluded from winsorization when the preprocessor is
@@ -347,6 +359,7 @@ def _compute_holdout_score(
             n_folds=prepared.resolved_n_folds,
             test_size=prepared.resolved_test_size,
             random_state=prepared.random_state,
+            target_transform=cfg.general.target_transform,
         )
         # The expansion is registered BEFORE fit: the datetime-derived
         # component columns are excluded from winsorization.
@@ -491,6 +504,7 @@ def persist_artifact(
                 test_size=prepared.resolved_test_size,
                 random_state=cfg.general.random_state,
                 datetime_expansion=prepared.datetime_expansion,
+                target_transform=cfg.general.target_transform,
             )
         _LOG.info("Model saved to %s", model_path.resolve())
     except Exception as e:

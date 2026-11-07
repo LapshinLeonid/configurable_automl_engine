@@ -26,6 +26,7 @@ from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import (
     ParallelStrategy,
     SerializationFormat,
+    TargetTransform,
     ValidationStrategy,
 )
 from configurable_automl_engine.common.metrics import (
@@ -122,6 +123,13 @@ class GeneralCfg(BaseModel):
             to every algorithm without its own per-algorithm block.
             Precedence per field: class preset < general block <
             per-algorithm block. None — no run-level default.
+        target_transform (TargetTransform): Transformation of the target
+            ``y`` inside the ``model`` step of every trial pipeline, the
+            final trainer and the hold-out trainer ('none' / 'log1p' /
+            'boxcox' / 'yeo-johnson'); applied identically everywhere so
+            the selected hyperparameters match the final model. GLM
+            algorithms with a restricted loss domain are validated against
+            the transformed target before HPO.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -463,6 +471,28 @@ class GeneralCfg(BaseModel):
             "with a WARNING naming them; true — they are removed. ID-like "
             "columns are typically uninformative for regression and can slow "
             "training down dramatically."
+        ),
+    )
+    target_transform: TargetTransform = Field(
+        default=TargetTransform.none,
+        description=(
+            "Transformation of the target y inside the 'model' step of the "
+            "pipeline, applied identically in the HPO trials, in the final "
+            "trainer and in the hold-out trainer: 'none' (default) — no "
+            "transformation; 'log1p' — log(1 + y) (requires min(y) > -1); "
+            "'boxcox' — the Box-Cox power transformation (requires "
+            "min(y) > 0); 'yeo-johnson' — the Yeo-Johnson power "
+            "transformation (any real y). The hyperparameters are optimized "
+            "for the model trained on the TRANSFORMED target, so the search "
+            "matches the final model. A domain violation (min(y) outside "
+            "the method's domain) fails once before the first trial, not "
+            "in every fold. GLM algorithms with a restricted loss domain "
+            "(gammaregressor, poissonregressor, tweedieregressor/glm) are "
+            "validated against the TRANSFORMED target by the target-domain "
+            "guard before HPO: gammaregressor with 'boxcox' / 'yeo-johnson' "
+            "may be disqualified when the transformed target becomes "
+            "non-positive. 'predict' returns values in the original scale "
+            "(the inverse transformation clips to the train range)."
         ),
     )
 

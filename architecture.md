@@ -57,6 +57,21 @@ scaler are used, is resolved once per algorithm by
 and the same resolution is shared by the HPO trial pipeline and the final
 trainer.
 
+The step order shared by the HPO trial pipeline
+(`hpo/trial_pipeline.py::assemble_estimator`) and the final `ModelTrainer`
+pipeline is
+`preprocessor → [isotonic_selector] → [feature_selector] → [sampler] →
+model`, where for a non-`none` target transformation
+(`HpoRequest.target_transform` / `general.target_transform`) the last
+`model` step is the regressor wrapped into a `TransformedTargetRegressor`
+(`wrap_with_target_transform`): the HPO trials, the final trainer and the
+hold-out trainer all fit on the transformed `y`, so the selected
+hyperparameters match the returned model. The target-domain guard of the
+GLM algorithms (`hpo/target_domain.py`, applied once before the first HPO
+phase) is checked against the transformed target when a transformation is
+configured; a domain violation of the transformation itself fails once
+before the first trial (`validate_target_for_transform`).
+
 # Project Structure
 
 ```

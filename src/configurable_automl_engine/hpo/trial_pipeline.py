@@ -5,7 +5,8 @@ uninformative-feature cleaning and the post-preprocessing feature counts used
 by the complexity guard), resolves the per-trial feature selection decision
 and assembles the trial estimator (``assemble_estimator``) in the order
 preprocessor → [isotonic adapter] → [feature selector] → [oversampler] →
-model, consistent with the final ``ModelTrainer``. Every function is pure: it
+model (wrapped with the target transformation), consistent with the final
+``ModelTrainer``. Every function is pure: it
 takes explicit inputs and returns its result. The module may import
 ``hpo.types``, ``hpo.plans`` and ``hpo.request`` only and must not import
 ``hpo.runner`` or ``configurable_automl_engine.tuner``.
@@ -21,6 +22,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import Trial
 from sklearn.base import clone
 
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
@@ -39,6 +41,7 @@ from configurable_automl_engine.preprocessing import (
     build_preprocessor,
     detect_feature_types,
     estimate_n_features_after_preprocessing,
+    wrap_with_target_transform,
 )
 from configurable_automl_engine.preprocessing_presets import (
     log_tree_class_scaling_ineffective,
@@ -395,6 +398,7 @@ def assemble_estimator(
     random_state: int | None,
     apply_fs: bool = False,
     feature_index: int | None = None,
+    target_transform: TargetTransform | str = TargetTransform.none,
 ) -> Any:
     """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
@@ -410,6 +414,13 @@ def assemble_estimator(
     preprocessed matrix to the single column selected via
     ``feature_index`` (0 by default).
 
+    The ``model`` step is wrapped with the target transformation
+    (``wrap_with_target_transform``): for a non-``none`` method the regressor
+    is placed inside a ``TransformedTargetRegressor``, so the trial is
+    trained on the transformed ``y`` — consistently with the final
+    ``ModelTrainer``. The default ``TargetTransform.none`` keeps the original
+    model object (the bare-model branch included).
+
     Args:
         model_impl: The base regressor.
         preprocessing: The preprocessing plan (the preprocessor and the
@@ -421,10 +432,12 @@ def assemble_estimator(
         apply_fs: Flag to enable the ``feature_selector`` step.
         feature_index: The ordinal feature index for the isotonic data
             adapter (``None`` — 0).
+        target_transform: The target transformation of the ``model`` step
+            (default ``TargetTransform.none`` — no wrapping).
 
     Returns:
-        Any: The trial pipeline (or the bare model when it has no other
-            step).
+        Any: The trial pipeline (or the wrapped/bare model when it has no
+            other step).
     """
     steps: list[tuple[str, Any]] = []
     if preprocessing.preprocessor is not None:
@@ -447,9 +460,9 @@ def assemble_estimator(
         )
     if oversampling.enable:
         steps.append(("sampler", DataOversampler(**oversampling.sampler_params())))
-    steps.append(("model", model_impl))
+    steps.append(("model", wrap_with_target_transform(model_impl, target_transform)))
     if len(steps) == 1:
-        return model_impl
+        return steps[0][1]
     return ImbPipeline(steps)
 
 

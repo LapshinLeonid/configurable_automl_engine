@@ -64,6 +64,8 @@ from configurable_automl_engine.preprocessing.quantile import (
 )
 from configurable_automl_engine.preprocessing.target_transform import (
     TargetTransformer,
+    fit_transform_target,
+    normalize_target_transform,
     validate_target_for_transform,
     wrap_with_target_transform,
 )
@@ -83,6 +85,8 @@ __all__ = [
     "build_preprocessor",
     "detect_feature_types",
     "estimate_n_features_after_preprocessing",
+    "fit_transform_target",
+    "normalize_target_transform",
     "validate_target_for_transform",
     "wrap_with_target_transform",
 ]

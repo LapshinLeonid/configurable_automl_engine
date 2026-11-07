@@ -153,9 +153,14 @@ def execute_phases(
     all_algorithms = _algorithms_as_dict(cfg.algorithms)
     # Target-domain guard (before any trial): GLMs whose loss domain does not
     # fit y are disqualified up front, a partly invalid Tweedie power range
-    # is clipped to its valid part.
+    # is clipped to its valid part. With a non-``none`` general.
+    # target_transform the domain is checked against the TRANSFORMED target
+    # (the HPO trials train on it).
     guard = _apply_target_domain_guard(
-        all_algorithms, prepared.y, ctx.disqualified_algorithms
+        all_algorithms,
+        prepared.y,
+        ctx.disqualified_algorithms,
+        target_transform=cfg.general.target_transform,
     )
     all_algorithms = guard.algorithms
     ctx.disqualified_algorithms.update(guard.disqualified)
@@ -477,6 +482,7 @@ def _build_phase_spec(
         inf_policy=cfg.general.inf_policy,
         datetime_policy=cfg.general.datetime_policy,
         drop_id_like_columns=cfg.general.drop_id_like_columns,
+        target_transform=cfg.general.target_transform,
         collect_oof=collect_oof,
         custom_metrics=dict(cfg.general.custom_metrics),
     )

@@ -23,6 +23,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.hpo.types import TrialStats
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -502,6 +503,10 @@ class _HpoPhaseSpec:
             validation.
         drop_id_like_columns (bool): ``general.drop_id_like_columns`` for the
             HPO data validation.
+        target_transform (TargetTransform): ``general.target_transform`` —
+            the transformation of the target ``y`` inside the ``model`` step
+            of every trial pipeline (``TargetTransform.none`` — no
+            transformation).
         collect_oof (bool): Whether the HPO run keeps the OOF predictions of
             every trial for the BBC-CV estimate.
     """
@@ -538,5 +543,6 @@ class _HpoPhaseSpec:
     inf_policy: str = "as_missing"
     datetime_policy: str = "expand"
     drop_id_like_columns: bool = False
+    target_transform: TargetTransform = TargetTransform.none
     collect_oof: bool = False
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)

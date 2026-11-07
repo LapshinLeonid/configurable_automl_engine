@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
+from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.metrics import (
     BBC_MAX_OOF_CELLS,
     direction_label,
@@ -44,7 +45,10 @@ from configurable_automl_engine.hpo.types import (
     OptimizeResult,
     TrialStats,
 )
-from configurable_automl_engine.preprocessing import EncodingStrategy
+from configurable_automl_engine.preprocessing import (
+    EncodingStrategy,
+    fit_transform_target,
+)
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -141,6 +145,7 @@ def _build_hpo_request(
         # ModelTrainer (year/month/day features are bounded by
         # construction).
         winsorizer_exclude=list(spec.winsorizer_exclude),
+        target_transform=spec.target_transform,
         feature_selection_cfg=spec.feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=spec.oversampling_enabled,
@@ -405,6 +410,7 @@ def _apply_target_domain_guard(
     all_algorithms: dict[str, AlgoCfg],
     y: pd.Series,
     disqualified: Collection[str] = (),
+    target_transform: TargetTransform = TargetTransform.none,
 ) -> TargetDomainOutcome:
     """Exclude or restrict GLMs whose loss domain does not fit the target.
 
@@ -415,7 +421,20 @@ def _apply_target_domain_guard(
     are returned for the circuit breaker with a reason and a single WARNING,
     and no trial is ever run for them. A Tweedie ``power`` range that is only
     partly invalid is clipped to its valid part instead (the algorithm stays
-    a candidate)."""
+    a candidate).
+
+    When ``target_transform`` is not ``none``, the HPO trials (and the final
+    trainer) train on the TRANSFORMED target: the domain is checked against
+    ``y_eff = fit_transform_target(y, target_transform)`` (a domain violation
+    of the transformation itself, e.g. ``boxcox`` on a non-positive ``y``,
+    is raised here as a ``ValueError`` before any trial). The disqualification
+    reason mentions that the domain was checked after the transformation."""
+    y_eff: pd.Series | np.ndarray = y
+    if target_transform is not TargetTransform.none:
+        # A domain violation of the transformation itself (e.g. ``boxcox`` on
+        # a target with zeros) fails here ONCE with the same message the
+        # runner and the trainer use — not in every fold of every trial.
+        y_eff = fit_transform_target(y, target_transform)
     guarded: dict[str, AlgoCfg] = {}
     new_disqualified: dict[str, str] = {}
     for name, a_cfg in all_algorithms.items():
@@ -427,14 +446,22 @@ def _apply_target_domain_guard(
             a_cfg.hyperparameters,
             limit=bool(a_cfg.limit_hyperparameters),
         )
-        check = check_target_domain(name, space, y)
+        check = check_target_domain(name, space, y_eff)
         if check.disqualify_reason is not None:
+            if target_transform is not TargetTransform.none:
+                reason = (
+                    f"{check.disqualify_reason} (the domain was checked "
+                    f"after the target_transform='{target_transform.value}' "
+                    f"transformation of y)"
+                )
+            else:
+                reason = check.disqualify_reason
             _LOG.warning(
                 "Algorithm %s disqualified before HPO: %s",
                 name,
-                check.disqualify_reason,
+                reason,
             )
-            new_disqualified[name] = check.disqualify_reason
+            new_disqualified[name] = reason
             guarded[name] = a_cfg
             continue
         if check.clipped_entries:

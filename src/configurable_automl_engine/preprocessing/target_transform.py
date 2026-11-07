@@ -54,6 +54,8 @@ _LOG = logging.getLogger(__name__)
 
 __all__ = [
     "TargetTransformer",
+    "fit_transform_target",
+    "normalize_target_transform",
     "validate_target_for_transform",
     "wrap_with_target_transform",
 ]
@@ -79,6 +81,37 @@ def _normalize_method(method: TargetTransform | str) -> str:
             f"Unknown target transform method: {method!r}. Expected one of "
             f"{[m.value for m in TargetTransform]}."
         ) from err
+
+
+def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
+    """Normalize a ``target_transform`` argument into the enum member.
+
+    The single normalization point shared by the public APIs
+    (``tuner.optimize``, the config schema) and the internal helpers: both
+    ``TargetTransform`` members and their value strings (any case) are
+    accepted.
+
+    Args:
+        value: A ``TargetTransform`` member or one of its value strings
+            (case-insensitive).
+
+    Returns:
+        TargetTransform: The normalized enum member.
+
+    Raises:
+        ValueError: If the value is not a valid transformation.
+    """
+    if isinstance(value, TargetTransform):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        for member in TargetTransform:
+            if normalized == member.value:
+                return member
+    raise ValueError(
+        f"Unknown target_transform: {value!r}. Expected one of "
+        f"{[m.value for m in TargetTransform]}."
+    )
 
 
 def validate_target_for_transform(y: Any, method: TargetTransform | str) -> None:
@@ -311,3 +344,29 @@ def wrap_with_target_transform(model: Any, method: TargetTransform | str) -> Any
         transformer=TargetTransformer(method=method_str),
         check_inverse=False,
     )
+
+
+def fit_transform_target(y: Any, method: TargetTransform | str) -> np.ndarray:
+    """Fit the transformation on ``y`` and return it in the model scale.
+
+    The single entry point for "train on the transformed ``y``" consumers
+    that need the transformed values directly (the pre-HPO GLM target-domain
+    guard): for ``none`` the input is returned unchanged (a 1-D float array),
+    otherwise the target is validated against the method's domain (the same
+    ``validate_target_for_transform`` contract as the runner and the trainer)
+    and transformed by ``TargetTransformer``.
+
+    Args:
+        y: The target vector (1-D, numeric).
+        method: The transformation method.
+
+    Returns:
+        The transformed target (1-D float array; the input object itself
+        for ``none`` when it already is one).
+    """
+    method_str = _normalize_method(method)
+    if method_str == TargetTransform.none.value:
+        return np.asarray(y, dtype=float).reshape(-1)
+    validate_target_for_transform(y, method_str)
+    transformer = TargetTransformer(method=method_str)
+    return transformer.fit_transform(np.asarray(y, dtype=float).reshape(-1)).reshape(-1)
