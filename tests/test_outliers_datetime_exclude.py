@@ -424,3 +424,76 @@ def test_trainer_save_load_reproduces_exclude_behaviour(tmp_path):
 def test_hpo_request_default_has_no_exclusion():
     """``HpoRequest.winsorizer_exclude`` defaults to ``None``."""
     assert HpoRequest(algo_name="ridge").winsorizer_exclude is None
+
+
+def _raw_datetime_frame(n: int = 60) -> tuple[pd.DataFrame, pd.Series]:
+    """A raw frame with a datetime column (expanded by ``optimize``)."""
+    rng = np.random.RandomState(1)
+    a = rng.lognormal(size=n)
+    df = pd.DataFrame(
+        {
+            "a": a,
+            "ts": pd.date_range("2019-01-01", periods=n, freq="7D"),
+        }
+    )
+    return df, pd.Series(a * 0.5 + rng.rand(n) * 0.1)
+
+
+def _capture_hpo_exclude(monkeypatch, **kwargs: Any) -> list[Any]:
+    """Run a 1-trial ``optimize`` and capture the trial ``winsorizer_exclude``."""
+    from configurable_automl_engine.hpo import runner
+    from configurable_automl_engine.tuner import optimize
+
+    captured: list[Any] = []
+    original = runner.plan_preprocessing
+
+    def _spy(X: Any, request: HpoRequest) -> Any:
+        captured.append(request.winsorizer_exclude)
+        return original(X, request)
+
+    monkeypatch.setattr(runner, "plan_preprocessing", _spy)
+    X, y = _raw_datetime_frame()
+    optimize(
+        "ridge",
+        X,
+        y,
+        n_trials=1,
+        val_method="k_fold",
+        n_folds=3,
+        fit_best_model=False,
+        preprocessing_override={"outliers": "iqr"},
+        **kwargs,
+    )
+    return captured
+
+
+def test_optimize_excludes_datetime_components_by_default(monkeypatch):
+    """A direct ``optimize`` call derives the exclusion like ModelTrainer."""
+    captured = _capture_hpo_exclude(monkeypatch)
+    assert len(captured) == 1
+    assert captured[0], "datetime components must be excluded by default"
+    assert all(name.startswith("ts_") for name in captured[0])
+    assert "a" not in captured[0]
+
+
+def test_optimize_explicit_empty_exclude_is_kept(monkeypatch):
+    """An explicit ``winsorizer_exclude=[]`` disables the automatic exclusion."""
+    captured = _capture_hpo_exclude(monkeypatch, winsorizer_exclude=[])
+    assert captured == [[]]
+
+
+def test_optimize_matches_model_trainer_exclusion(monkeypatch):
+    """The trial exclusion equals the one ModelTrainer derives for the same X."""
+    from configurable_automl_engine.common.datetime_features import (
+        datetime_expansion_columns,
+        datetime_expansion_map,
+    )
+    from configurable_automl_engine.common.validation_utils import (
+        validate_features,
+    )
+
+    captured = _capture_hpo_exclude(monkeypatch)
+    X, _ = _raw_datetime_frame()
+    _, generated = validate_features(X)
+    expected = datetime_expansion_columns(datetime_expansion_map(X, generated))
+    assert captured == [expected]

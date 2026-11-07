@@ -85,7 +85,9 @@ class HpoRequest:
             ``preprocessing_override``.
         winsorizer_exclude: The numerical columns excluded from winsorization
             (the datetime-derived component columns; see
-            ``datetime_expansion_map``). ``None`` — nothing is excluded.
+            ``datetime_expansion_map``). ``None`` — derived automatically from
+            the datetime expansion of ``X`` (as in ``ModelTrainer``); ``[]``
+            — nothing is excluded.
         target_transform: The target transformation of the ``model`` step
             (``TargetTransform.none`` — no transformation; ``log1p`` /
             ``boxcox`` / ``yeo-johnson`` wrap the regressor into a

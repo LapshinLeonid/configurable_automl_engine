@@ -12,6 +12,7 @@ module must not import :mod:`.validation_utils`.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -133,6 +134,30 @@ def datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
         The generated component column names (order of the mapping).
     """
     return [name for names in expansion.values() for name in names]
+
+
+def generated_datetime_columns(X_raw: Any, X_validated: Any) -> list[str]:
+    """Datetime-derived component columns of a validated feature matrix.
+
+    The default ``winsorizer_exclude`` of a direct ``tuner.optimize()``
+    call, derived exactly as in ``ModelTrainer``
+    (:func:`datetime_expansion_map` + :func:`datetime_expansion_columns`),
+    so the HPO trials and the final fit share the same preprocessing.
+
+    Args:
+        X_raw: The feature matrix BEFORE :func:`validate_features` (the
+            original datetime columns still present).
+        X_validated: The feature matrix after :func:`validate_features`.
+
+    Returns:
+        The generated component column names; empty when nothing was
+        expanded or either input is not a DataFrame.
+    """
+    if not isinstance(X_raw, pd.DataFrame) or not isinstance(X_validated, pd.DataFrame):
+        return []
+    raw_columns = set(X_raw.columns)
+    generated = [str(c) for c in X_validated.columns if c not in raw_columns]
+    return datetime_expansion_columns(datetime_expansion_map(X_raw, generated))
 
 
 def expand_datetime_columns(

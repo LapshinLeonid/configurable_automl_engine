@@ -256,6 +256,14 @@ remedies exist; they can be combined:
   learned from the training data per CV fold, so there is no leakage, and the
   step applies to every algorithm class including trees and isotonic
   regression. See [Composition of a preset](#composition-of-a-preset).
+  **On small data prefer `method: iqr`.** When `lower_quantile × rows < 1`
+  (with the default 1%/99% — a fold under ~100 rows) the quantile bound falls
+  between the minimum and the second smallest value, so every fold clips the
+  minimum and the maximum of every column whether they are outliers or not
+  (on 14 rows both extremes move by 13% of the gap to their neighbour). The
+  `iqr` bounds only clip values that are actually far from the bulk. A
+  WARNING is logged once per configuration when the quantile bounds are this
+  coarse.
 * **`robust` scaling** (`RobustScaler`) — center with the median and scale
   with the IQR instead of the mean and the standard deviation. Choose it for
   scale-sensitive models and GLMs when you want the features centered but do
@@ -267,16 +275,31 @@ remedies exist; they can be combined:
   distribution is so heavy-tailed (or so skewed) that neither winsorization
   nor `robust` scaling makes it model-friendly, e.g. for linear or
   distance-based models. On small folds `n_quantiles` is clipped to the fold
-  size, so cross-validation stays warning-free. The downside is that the
+  size, so cross-validation stays warning-free. With
+  `output_distribution: normal` the training extremes are mapped to
+  `±ppf(1 − 0.5/n)` (`n` — the effective number of quantiles; ±1.80 on 14
+  rows) rather than to sklearn's ±5.2 clipping bound, so the transform does
+  not itself create high-leverage points on small folds. The downside is that the
   transform is non-linear and loses the straightforward interpretation of
   the scaled values.
+
+**Clip errors, not signal.** Winsorization and quantile scaling help when the
+extremes are errors in the features (on a linear target with ×50 spikes in X
+and 30–220 rows, ridge with `iqr` or `quantile`/`normal` gets a 2–5× lower CV
+RMSE than `mean` + `standard`). When the extreme feature values are real and
+the target follows them, clipping removes signal and the error grows by orders
+of magnitude. Compare against the default preset on a hold-out set before
+keeping the override; the engine does not choose between presets for you.
 
 **Trees are insensitive to scaling but not to outliers.** A split-based model
 (DecisionTree, RandomForest, ExtraTrees, GradientBoosting, XGBoosting) is
 invariant to any monotone feature transform, so `standard`, `robust` and
 `quantile` scaling change nothing for it (the engine keeps `none` for the
-`trees` class). Extreme values, however, still move the split thresholds, so
-winsorization may improve a tree too — set `outliers` in the run-level
+`trees` class). The split thresholds depend only on the order of the values,
+so an extreme value affects only the split that separates that value itself;
+winsorization merely prevents the tree from separating the clipped extreme
+rows from each other. This is a weak regularization that can help or hurt —
+check it on a hold-out set. To try it, set `outliers` in the run-level
 `general.preprocessing` block and every algorithm, trees included, receives it.
 
 ```yaml
@@ -284,19 +307,20 @@ general:
   preprocessing:                 # run-level default for every algorithm
     imputation_strategy: median  # the mean is dragged by the tails
     outliers:
-      method: quantile           # clip outside the 2nd/98th percentile
-      lower_quantile: 0.02
-      upper_quantile: 0.98
+      method: iqr                # clip outside Q1 − 1.5·IQR … Q3 + 1.5·IQR;
+      iqr_multiplier: 1.5        # on large data {method: quantile,
+                                 # lower_quantile: 0.02, upper_quantile: 0.98}
 
 algorithms:
-  ridge:                         # scale-sensitive: transform away the tails
+  ridge:                         # scale-sensitive: transform away the tails;
+                                 # median + iqr outliers come from general
     enable: true
     preprocessing:
       scaling:
         type: quantile
         output_distribution: normal
   random_forest:                 # inherits the general block (median +
-    enable: true                 # quantile outliers, `none` scaling)
+    enable: true                 # iqr outliers, `none` scaling)
   isotonic_regression:           # univariate preset, untouched
     enable: true
 ```
@@ -357,7 +381,7 @@ A config has three top-level sections. Only `algorithms` is required:
 | `datetime_policy` | `"expand"` | Date/time columns: `"expand"` replaces each column with `year`, `month`, `day`, `dayofweek` (and `hour` when it is not always zero); `"drop"` removes them; `"error"` rejects the data. A WARNING lists the affected columns. |
 | `drop_id_like_columns` | `false` | ID-like columns (text columns where ≥ 95 % of values are unique, or unique monotonic integers) are only reported with a WARNING by default; `true` removes them. This is a heuristic: a monotonic counter such as a timestamp may be a useful feature. |
 | `target_transform` | `"none"` | Transformation of the target `y` inside the `model` step of the pipeline: `"none"` — no transformation; `"log1p"` — `log(1 + y)` (requires `min(y) > -1`); `"boxcox"` — the Box-Cox power transformation (requires `min(y) > 0`); `"yeo-johnson"` — the Yeo-Johnson power transformation (any real `y`). Applied identically in the HPO trials, the final trainer and the hold-out trainer, so the hyperparameters are optimized for the model that is actually returned. A domain violation (`min(y)` outside the method's domain) fails ONCE before the first HPO trial, not in every fold. GLM algorithms with a restricted loss domain (`gammaregressor`, `poissonregressor`, `tweedieregressor`/`glm`) are validated against the TRANSFORMED target by the target-domain guard before HPO: e.g. `gammaregressor` with `"boxcox"` / `"yeo-johnson"` (which can produce non-positive transformed values) may be disqualified with a reason naming the transformation. `predict` returns values in the original scale (the inverse transformation clips to the train range). |
-| `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm that has no `preprocessing` block of its own. Same fields as the per-algorithm block (`imputation_strategy`, `scaling`, `outliers`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
+| `preprocessing` | `null` | Run-level default override of the adaptive feature preprocessing preset, applied to every algorithm and merged per field with its own `preprocessing` block (a field the algorithm block leaves unset is taken from here). Same fields as the per-algorithm block (`imputation_strategy`, `scaling`, `outliers`); fields left unset keep the automatic selection. See [Selection and override rules](#selection-and-override-rules). |
 
 **Advanced blocks** (each has its own section below): `pruning`
 ([early stopping](#early-stopping-pruning)), `feature_selection`
@@ -1154,7 +1178,7 @@ The resolved preset is always stored in the object form (`StandardScaling` / `Ro
 For tree-class algorithms (the `trees` class) any non-`none` scaling has no effect on split-based models and is reported with an INFO log line.
 * `outliers` — optional winsorization (clipping) of numeric features, applied identically in HPO and in the final model. The clipping bounds are learned from the training data (per CV fold, so there is no leakage). Forms:
   * `none` (default) — no outlier handling; the step is absent from the pipeline (not added as a no-op).
-  * `quantile` — clips every value outside the training quantiles `[lower_quantile, upper_quantile]` (both in `[0, 1]`, `lower < upper`; defaults `0.01`/`0.99`). Example: `{method: quantile, lower_quantile: 0.02, upper_quantile: 0.98}`.
+  * `quantile` — clips every value outside the training quantiles `[lower_quantile, upper_quantile]` (both in `[0, 1]`, `lower < upper`; defaults `0.01`/`0.99`). Example: `{method: quantile, lower_quantile: 0.02, upper_quantile: 0.98}`. When `lower_quantile × rows < 1` (or `(1 − upper_quantile) × rows < 1`) the bound falls between the extreme value and its neighbour, so the extremes of every column are clipped on every fit; a WARNING is logged once per (algorithm, quantiles) and `iqr` is recommended for such small data.
   * `iqr` — clips values outside `Q1 − k·IQR … Q3 + k·IQR` (`iqr_multiplier: k > 0`, default `1.5`).
   * A degenerate column (constant or all-NaN on train) is never clipped; a WARNING naming the columns (prefixed with the algorithm name) is logged once per fit.
 
@@ -1167,7 +1191,7 @@ For tree-class algorithms (the `trees` class) any non-`none` scaling has no effe
 * The preset is resolved automatically from the algorithm name before training starts; the decision is made once, so there is no measurable overhead. Algorithm names are validated against the supported registry — unknown names raise `ValueError`.
 * The same preset is applied at every lifecycle stage — hyperparameter optimization (HPO), final training, and prediction — through the single resolution point used by both `tuner.optimize` and `ModelTrainer`.
 * Every preset field is resolved with the precedence order (later items win): **class preset < `general.preprocessing` < `algorithms.<name>.preprocessing`**. A field set at a higher level replaces the whole field from the lower level; a field left unset falls through to the lower level. Nested values are never merged (the override model only has flat scalar fields).
-* The run-level `general.preprocessing` block is the default override for every algorithm without its own `preprocessing` block; the per-algorithm block wins per field. The engine merges the two blocks (helper `merge_preprocessing_overrides`) and passes the result through the existing single `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize` — no new public argument is added.
+* The run-level `general.preprocessing` block is the default override for every algorithm; it is merged per field with the algorithm's own `preprocessing` block, which wins for every field it sets (fields it leaves unset come from the general block). The engine merges the two blocks (helper `merge_preprocessing_overrides`) and passes the result through the existing single `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize` — no new public argument is added.
 * Explicit user override (the `preprocessing` block in the algorithm config, or the `preprocessing_override` argument of `ModelTrainer`/`tuner.optimize`) takes priority over the automatic selection. Fields left unset keep the automatically chosen values.
 * The resolved preset is logged (INFO level) and stored on the trainer as `preprocessing_preset`, so the applied preprocessing can always be determined from logs.
 
@@ -1336,7 +1360,7 @@ Every parameter that has a counterpart in the `general` config section has the s
 | `initial_params` | `dict[str, Any]` or `None` | `None` | Hyperparameters from the previous HPO phase, enqueued as the first trial (`enqueue_trial`) — the "monotonicity anchor" between phases. |
 | `previous_trials` | `list[optuna.trial.FrozenTrial]` or `None` | `None` | Trials of the previous HPO phase to be transferred into the new study via `study.add_trials` (the TPE history warm-start). Transferred BEFORE `enqueue_trial`/`optimize`; they feed the TPE sampler but never count as the current phase's own trials. Empty list — no-op. Trials whose distributions are incompatible with the current search space raise `HPOHistoryError` (fail fast). |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial (`{"scaling": "none"}`, `{"scaling": {"type": "robust", "quantile_range": [10, 90]}}`, `{"outliers": "quantile"}`) or full overrides are supported; takes priority over automatic class-based selection. Supported fields: `imputation_strategy`, `scaling`, `outliers` (a string shorthand `"none"\|"quantile"\|"iqr"` or an object `{method: quantile, lower_quantile: ..., upper_quantile: ...}` / `{method: iqr, iqr_multiplier: ...}`). |
-| `winsorizer_exclude` | `list[str]` or `None` | `None` | Numerical columns that are never clipped when `outliers` winsorization is enabled (they get `(-inf, +inf)` bounds). `train_best_model` passes the datetime-derived component columns here automatically. Names that are not numerical features are ignored (DEBUG line); names missing from `X` raise `ValueError`. The excluded columns are named once in an INFO line; they never trigger the WARNING about constant/all-NaN columns. |
+| `winsorizer_exclude` | `list[str]` or `None` | `None` | Numerical columns that are never clipped when `outliers` winsorization is enabled (they get `(-inf, +inf)` bounds). `None` (default) — the datetime-derived component columns of `X` (from `datetime_policy: "expand"`) are excluded automatically, exactly as in `ModelTrainer`/`train_best_model`, so tuning and the final fit use the same preprocessing; `[]` — nothing is excluded. Names that are not numerical features are ignored (DEBUG line); names missing from `X` raise `ValueError`. The excluded columns are named once in an INFO line; they never trigger the WARNING about constant/all-NaN columns. |
 | `pruning` | `dict[str, Any]` or `None` | `None` | Early-stopping settings: `{"enable": bool, "strategy": "median"\|"hyperband", "min_steps": int, "n_startup_trials": int, "reduction_factor": int}`. When `None` or `enable: false`, trials run to completion (identical to previous behavior). |
 | `feature_selection_cfg` | `FeatureSelectionCfg`, `dict`, or `None` | `None` | Feature selection config (method, percentile, `min_features`, etc.). `None` means `FeatureSelectionCfg()` (`mode='disabled'`). In `'always'` mode every trial pipeline (and the final model) contains the `feature_selector` step; in `'disabled'` it never does; in `'auto'` Optuna decides per trial via the `use_feature_selection` categorical (recorded in `best_params`). For `isotonic_regression` the flag is forcibly turned off. |
 | `complexity_guard_cfg` | `ComplexityGuardConfig`, `dict`, or `None` | `None` | Settings of the adaptive complexity guard for tree/boosting search spaces (from `general.complexity_guard`). `None` — the defaults of `general.complexity_guard` (mode `apply`); `{"mode": "off"}` disables the guard. When enabled, the dict-based search spaces of trees/boostings are tightened depending on `n` (effective training-fold rows) and the feature counts: the size mode uses the original column count (`p_size`, a categorical column counts as 1), the `max_features`/`colsample_bytree` rules use `p` (features after preprocessing). |
