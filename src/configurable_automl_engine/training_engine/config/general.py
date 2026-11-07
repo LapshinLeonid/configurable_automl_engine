@@ -128,10 +128,17 @@ class GeneralCfg(BaseModel):
         target_transform (TargetTransform): Transformation of the target
             ``y`` inside the ``model`` step of every trial pipeline, the
             final trainer and the hold-out trainer ('none' / 'log1p' /
-            'boxcox' / 'yeo-johnson'); applied identically everywhere so
+            'boxcox' / 'yeo-johnson' / 'auto'); applied identically everywhere so
             the selected hyperparameters match the final model. GLM
             algorithms with a restricted loss domain are validated against
-            the transformed target before HPO.
+            the transformed target before HPO. The 'auto' mode is resolved
+            into a concrete method from the target skewness before the
+            HPO phases (see ``target_transform_skew_threshold``).
+        target_transform_skew_threshold (float): The ``|skew(y)|`` threshold
+            of the ``general.target_transform: 'auto'`` decision: a target
+            whose absolute Fisher skewness exceeds the threshold receives
+            ``log1p`` (``min(y) > -1``) or ``yeo-johnson``, a more symmetric
+            target keeps ``none``. Must be > 0.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -486,7 +493,13 @@ class GeneralCfg(BaseModel):
             "transformation; 'log1p' — log(1 + y) (requires min(y) > -1); "
             "'boxcox' — the Box-Cox power transformation (requires "
             "min(y) > 0); 'yeo-johnson' — the Yeo-Johnson power "
-            "transformation (any real y). The hyperparameters are optimized "
+            "transformation (any real y); 'auto' — the engine decides "
+            "before HPO from the target skewness: |skew(y)| > "
+            "target_transform_skew_threshold selects 'log1p' when "
+            "min(y) > -1, otherwise 'yeo-johnson'; a more symmetric target "
+            "keeps 'none'. The resolved concrete method (never 'auto') is "
+            "what the HPO, the final trainer, the artifact metadata and the "
+            "ExperimentResult see. The hyperparameters are optimized "
             "for the model trained on the TRANSFORMED target, so the search "
             "matches the final model. A domain violation (min(y) outside "
             "the method's domain) fails once before the first trial, not "
@@ -497,6 +510,17 @@ class GeneralCfg(BaseModel):
             "may be disqualified when the transformed target becomes "
             "non-positive. 'predict' returns values in the original scale "
             "(the inverse transformation clips to the train range)."
+        ),
+    )
+    target_transform_skew_threshold: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "The |skew(y)| threshold of the 'auto' mode of "
+            "general.target_transform: a target whose absolute Fisher "
+            "skewness exceeds the threshold receives a transformation "
+            "('log1p' when min(y) > -1, otherwise 'yeo-johnson'); a more "
+            "symmetric target keeps 'none'. Must be > 0."
         ),
     )
 

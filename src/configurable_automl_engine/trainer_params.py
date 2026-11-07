@@ -270,11 +270,24 @@ def _validate_target_transform(value: Any) -> TargetTransform:
     Both ``TargetTransform`` members and their value strings (including the
     aliases ``"none"``/``"log1p"``/``"boxcox"``/``"yeo-johnson"`` in any
     case) are accepted; anything else is rejected at initialization time.
+    The ``auto`` member is rejected too: it is a configuration-level
+    placeholder resolved by the engine (``prepare_dataset``) before the
+    trainers are built — the trainer settings carry only concrete methods.
     """
     if isinstance(value, TargetTransform):
+        if value is TargetTransform.auto:
+            raise TrainingError(
+                "target_transform='auto' must be resolved into a concrete "
+                "method by the training engine before the trainer is built."
+            )
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
+        if normalized == TargetTransform.auto.value:
+            raise TrainingError(
+                "target_transform='auto' must be resolved into a concrete "
+                "method by the training engine before the trainer is built."
+            )
         for member in TargetTransform:
             if normalized == member.value:
                 return member

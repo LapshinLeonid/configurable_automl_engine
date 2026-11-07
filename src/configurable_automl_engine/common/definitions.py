@@ -51,13 +51,21 @@ class TargetTransform(str, Enum):
     * ``boxcox`` — the Box-Cox power transformation; requires strictly
       positive ``y``: ``min(y) > 0`` (validated before training);
     * ``yeo-johnson`` — the Yeo-Johnson power transformation; any real
-      ``y`` (no domain restrictions).
+      ``y`` (no domain restrictions);
+    * ``auto`` — the engine decides before HPO from the target skewness
+      (``skew(y)``): a sufficiently skewed ``y`` selects ``log1p`` when
+      ``min(y) > -1``, otherwise ``yeo-johnson``; an (almost) symmetric
+      ``y`` keeps ``none``. The resolved method is what the rest of the
+      pipeline (HPO, the final trainer, the metadata, the
+      ``ExperimentResult``) sees — ``auto`` itself never reaches them
+      (see ``preprocessing.target_transform.resolve_target_transform``).
     """
 
     none = "none"
     log1p = "log1p"
     boxcox = "boxcox"
     yeo_johnson = "yeo-johnson"
+    auto = "auto"
 
 
 ALGO_PACKAGE_MAPPING: dict[str, str] = {

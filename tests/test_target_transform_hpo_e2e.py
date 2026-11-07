@@ -219,7 +219,7 @@ def test_config_schema_contains_target_transform_enum():
     field = general["properties"]["target_transform"]
     assert field["$ref"].startswith("#/$defs/")
     target = schema["$defs"][field["$ref"].rsplit("/", 1)[-1]]
-    assert set(target["enum"]) == {"none", "log1p", "boxcox", "yeo-johnson"}
+    assert set(target["enum"]) == {"none", "log1p", "boxcox", "yeo-johnson", "auto"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -34,6 +34,7 @@ from configurable_automl_engine.common.validation_utils import (
 from configurable_automl_engine.preprocessing import (
     _clean_uninformative_features,
     detect_feature_types,
+    resolve_target_transform,
 )
 from configurable_automl_engine.training_engine.config_parser import (
     AUTO_HOLDOUT_FRACTION,
@@ -161,11 +162,39 @@ def _resolve_holdout_fraction(
     return None
 
 
+def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
+    """Resolve ``general.target_transform: 'auto'`` into a concrete method.
+
+    Runs once, at the start of ``prepare_dataset`` — before the HPO phases
+    and before the pre-HPO GLM target-domain guard. The decision
+    (``resolve_target_transform``) reads the target skewness: ``|skew(y)| >``
+    ``general.target_transform_skew_threshold`` selects ``log1p`` when
+    ``min(y) > -1``, otherwise ``yeo-johnson``; a more symmetric target
+    keeps ``none``. The resolved method is written back into
+    ``cfg.general.target_transform``, so every later consumer of the config
+    (the HPO spec, the finalist trainers, the artifact trainer, the
+    ``ExperimentResult`` assembly) sees the concrete method and ``auto``
+    never leaks into the pipeline or the artifacts.
+
+    Args:
+        cfg: The configuration object (``cfg.general.target_transform`` is
+            always replaced with the resolved value; for a non-``auto``
+            configured method the resolved value is the method itself).
+        y: The raw target vector (the decision sample).
+    """
+    cfg.general.target_transform = resolve_target_transform(
+        y,
+        cfg.general.target_transform,
+        skew_threshold=cfg.general.target_transform_skew_threshold,
+    )
+
+
 def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedData:
     """Prepare the data and resolve the settings for the HPO phases.
 
     Pipeline step 2. Splits the DataFrame into X/y, resolves the validation
-    strategy ('auto' → a concrete method/folds/test_size), and detects column
+    strategy ('auto' → a concrete method/folds/test_size), resolves the
+    'auto' target transformation from the target skewness and detects column
     types exactly once — a guarantee of consistent preprocessing between HPO
     and the final training.
 
@@ -182,6 +211,17 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
 
     # Centralized splitting
     X, y = prepare_X_y(df, target_col)
+
+    # Target-transform resolution ('auto'): before the HPO budget is spent
+    # (and before the pre-HPO GLM target-domain guard, which must check the
+    # domains against the target the trials will actually train on). The
+    # resolved concrete method is written back into cfg.general, so every
+    # later consumer (the HPO spec, the finalists, the artifact trainer,
+    # the run-result assembly) reads the resolved value — 'auto' itself
+    # never reaches them. The raw target (the full vector, including the
+    # rows later reserved for the outer hold-out) is the decision sample:
+    # the skewness of the data the user configured on.
+    _resolve_auto_target_transform(cfg, y)
 
     # Centralized input-data diagnostics: duplicate columns, ±inf in numeric
     # features, datetime/timedelta columns and ID-like columns are detected

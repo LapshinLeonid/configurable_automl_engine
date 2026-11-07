@@ -9,13 +9,18 @@ trainer:
 * :func:`validate_target_for_transform` — domain validation of ``y``
   (``log1p`` requires ``min(y) > -1``, ``boxcox`` requires ``min(y) > 0``).
 
-The transformer supports three methods:
+The transformer supports these methods:
 
 * ``log1p`` — stateless ``log(1 + y)`` / ``expm1``;
 * ``boxcox`` — the Box-Cox power transformation via an internal
   ``PowerTransformer(method="box-cox", standardize=True)``;
 * ``yeo-johnson`` — the Yeo-Johnson power transformation via
   ``PowerTransformer(method="yeo-johnson", standardize=True)``.
+
+The ``auto`` mode of ``general.target_transform`` is resolved by
+:func:`resolve_target_transform` from the target skewness BEFORE the HPO
+phases (see the function docstring); every pipeline stage then sees the
+concrete resolved method — ``auto`` never reaches the trainers.
 
     After ``fit`` the transformer remembers the transformed train range
     (``t_min_`` / ``t_max_``): ``inverse_transform`` clips its input into
@@ -41,9 +46,11 @@ the shape ``TransformedTargetRegressor`` passes them.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 import numpy as np
+from scipy import stats
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.preprocessing import PowerTransformer
@@ -53,12 +60,20 @@ from configurable_automl_engine.common.definitions import TargetTransform
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD",
     "TargetTransformer",
     "fit_transform_target",
     "normalize_target_transform",
+    "resolve_target_transform",
     "validate_target_for_transform",
     "wrap_with_target_transform",
 ]
+
+#: The default |skew(y)| threshold of the ``auto`` target-transform mode
+#: (``general.target_transform_skew_threshold``). A target whose absolute
+#: Fisher skewness exceeds the threshold is considered skewed and receives
+#: a transformation; a (more symmetric) target keeps ``none``.
+DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD = 1.0
 
 
 def _normalize_method(method: TargetTransform | str) -> str:
@@ -72,15 +87,25 @@ def _normalize_method(method: TargetTransform | str) -> str:
         The value string of the method.
 
     Raises:
-        ValueError: If the method is not a valid transformation.
+        ValueError: If the method is not a valid transformation. The
+            ``auto`` member is rejected too: it is a configuration-level
+            placeholder, resolved by :func:`resolve_target_transform`
+            before the pipeline runs — it must never reach the transformer.
     """
     try:
-        return TargetTransform(method).value
+        value = TargetTransform(method).value
     except ValueError as err:
         raise ValueError(
             f"Unknown target transform method: {method!r}. Expected one of "
             f"{[m.value for m in TargetTransform]}."
         ) from err
+    if value == TargetTransform.auto.value:
+        raise ValueError(
+            "target_transform='auto' must be resolved into a concrete "
+            "method (resolve_target_transform) before training; the "
+            "transformer does not accept the 'auto' placeholder."
+        )
+    return value
 
 
 def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
@@ -99,12 +124,28 @@ def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
         TargetTransform: The normalized enum member.
 
     Raises:
-        ValueError: If the value is not a valid transformation.
+        ValueError: If the value is not a valid transformation. The
+            ``auto`` member (a configuration-level placeholder) is rejected:
+            it must be resolved by :func:`resolve_target_transform` before
+            training.
     """
     if isinstance(value, TargetTransform):
+        if value is TargetTransform.auto:
+            # 'auto' is a configuration-level placeholder: it must be
+            # resolved by resolve_target_transform before the pipeline
+            # runs and never reaches the consumers of a normalized method.
+            raise ValueError(
+                "target_transform='auto' must be resolved into a concrete "
+                "method (resolve_target_transform) before training."
+            )
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
+        if normalized == TargetTransform.auto.value:
+            raise ValueError(
+                "target_transform='auto' must be resolved into a concrete "
+                "method (resolve_target_transform) before training."
+            )
         for member in TargetTransform:
             if normalized == member.value:
                 return member
@@ -370,3 +411,99 @@ def fit_transform_target(y: Any, method: TargetTransform | str) -> np.ndarray:
     validate_target_for_transform(y, method_str)
     transformer = TargetTransformer(method=method_str)
     return transformer.fit_transform(np.asarray(y, dtype=float).reshape(-1)).reshape(-1)
+
+
+def resolve_target_transform(
+    y: Any,
+    method: TargetTransform | str,
+    skew_threshold: float = DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD,
+) -> TargetTransform:
+    """Resolve the ``auto`` target-transform mode from the target skewness.
+
+    The single decision point of ``general.target_transform: auto``: the
+    engine computes the Fisher skewness of ``y`` (``scipy.stats.skew``) and
+
+    * ``|skew(y)| > skew_threshold`` → ``log1p`` when ``min(y) > -1``
+      (the domain of ``log1p``), otherwise ``yeo-johnson`` (any real ``y``);
+    * ``|skew(y)| <= skew_threshold`` → ``none``.
+
+    The rule keys on the skewness MAGNITUDE, not its sign — a deliberate
+    simplification: ``log1p`` is optimal for the common right-skewed
+    target, and for a strongly LEFT-skewed target with ``min(y) > -1``
+    ``yeo-johnson`` would typically symmetrize better (a sign-aware
+    choice ``skew > +thr → log1p``, ``skew < -thr → yeo-johnson`` is a
+    possible future refinement). Users who need the sign-aware behavior
+    set an explicit method.
+
+    The decision is computed once, before the HPO phases; every downstream
+    consumer (the HPO trials, the final trainer, the hold-out trainer, the
+    artifact metadata, the ``ExperimentResult``) receives the resolved
+    concrete method — ``auto`` itself never reaches them. ``auto`` is the
+    only member that resolves: any explicit method is returned unchanged.
+    A non-finite skewness (a constant or otherwise degenerate ``y``, where
+    the sample skewness is undefined) resolves to ``none``: no skewness
+    evidence, no transformation (the engine rejects a constant target
+    before this point anyway).
+
+    Args:
+        y: The target vector (1-D, numeric). Ignored for a non-``auto``
+            method.
+        method: The configured method — a ``TargetTransform`` member or one
+            of its value strings (case-insensitive). ``auto`` triggers the
+            skewness decision; anything else is normalized and returned.
+        skew_threshold: The ``|skew(y)|`` threshold of the ``auto``
+            decision (``general.target_transform_skew_threshold``); must
+            be strictly positive.
+
+    Returns:
+        TargetTransform: The resolved concrete method (never ``auto``).
+
+    Raises:
+        ValueError: If ``skew_threshold`` is not strictly positive, the
+            method is not a valid transformation, or ``y`` is empty.
+    """
+    if skew_threshold <= 0:
+        raise ValueError(
+            f"target_transform_skew_threshold must be > 0, got {skew_threshold!r}."
+        )
+    if isinstance(method, str):
+        normalized = method.strip().lower()
+        try:
+            method = TargetTransform(normalized)
+        except ValueError as err:
+            raise ValueError(
+                f"Unknown target_transform: {method!r}. Expected one of "
+                f"{[m.value for m in TargetTransform]}."
+            ) from err
+    if method is not TargetTransform.auto:
+        return method
+    arr = np.asarray(y, dtype=float).reshape(-1)
+    if arr.size == 0:
+        raise ValueError("Cannot resolve target_transform='auto': y is empty.")
+    # A constant (or otherwise degenerate) y makes the sample skewness
+    # undefined: scipy returns NaN with RuntimeWarnings about precision
+    # loss. There is no skewness evidence to act on — resolve to 'none'
+    # deterministically (the engine's constant-target check rejects such
+    # data before this point anyway; this guard makes the PUBLIC function
+    # predictable on any input).
+    with warnings.catch_warnings():
+        # The precision-loss RuntimeWarnings of scipy are noise here: the
+        # NaN outcome is handled explicitly below.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        skew = float(stats.skew(arr, bias=False))
+    minimum = float(np.min(arr))
+    if np.isfinite(skew) and abs(skew) > skew_threshold:
+        resolved = (
+            TargetTransform.log1p if minimum > -1.0 else TargetTransform.yeo_johnson
+        )
+    else:
+        resolved = TargetTransform.none
+    _LOG.info(
+        "target_transform='auto': skew(y) = %.4f (threshold %.4f), "
+        "min(y) = %.6g → resolved target_transform='%s'.",
+        skew,
+        skew_threshold,
+        minimum,
+        resolved.value,
+    )
+    return resolved
