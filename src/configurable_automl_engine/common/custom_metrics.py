@@ -32,6 +32,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import make_scorer
 
+from configurable_automl_engine.common.sklearn_compat import (
+    scorer_raw_parts,
+    scorer_sign,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -101,8 +106,8 @@ def resolve_dotted_path(path: str) -> Any:
 
 
 def _is_sklearn_scorer(obj: Any) -> bool:
-    """Whether ``obj`` is a ``make_scorer`` object (it exposes the raw metric)."""
-    return all(hasattr(obj, a) for a in ("_score_func", "_sign", "_kwargs"))
+    """Whether ``obj`` exposes the raw metric of a ``make_scorer`` object."""
+    return scorer_raw_parts(obj)[0] is not None
 
 
 def _check_positional_arity(fn: Any, n_args: int, kwargs: dict[str, Any]) -> str | None:
@@ -229,7 +234,7 @@ class CustomMetricSpec(BaseModel):
     def _validate_scorer(self, obj: Any) -> None:
         """Check a ``kind="scorer"`` object: three positionals, direction, kwargs."""
         if _is_sklearn_scorer(obj):
-            scorer_gib = obj._sign > 0
+            scorer_gib = bool((scorer_sign(obj) or 1) > 0)
             if (
                 self.greater_is_better is not None
                 and self.greater_is_better != scorer_gib
@@ -276,7 +281,7 @@ class CustomMetricSpec(BaseModel):
             return self.greater_is_better
         obj = resolve_dotted_path(self.path)
         if _is_sklearn_scorer(obj):
-            return bool(obj._sign > 0)
+            return bool((scorer_sign(obj) or 1) > 0)
         return True
 
     @property
@@ -292,12 +297,13 @@ class CustomMetricSpec(BaseModel):
 
 
 class _CallableScorer:
-    """Adapter giving a plain callable scorer the ``_sign`` of a sklearn scorer.
+    """Adapter giving a plain callable scorer the sklearn scorer direction.
 
-    The engine maximizes the scorer output and reads ``_sign`` to recover the
-    natural value; a callable whose natural direction is "lower is better"
-    is therefore negated here. No ``_score_func`` is exposed: the value over
-    the pooled out-of-fold vector cannot be computed for such a scorer.
+    The engine maximizes the scorer output and reads the direction flag
+    (``common.sklearn_compat.scorer_sign``) to recover the natural value; a
+    callable whose natural direction is "lower is better" is therefore
+    negated here. No raw metric function is exposed: the value over the
+    pooled out-of-fold vector cannot be computed for such a scorer.
     """
 
     def __init__(self, func: Callable[..., Any], sign: int) -> None:
@@ -322,8 +328,9 @@ def _build_scorer_uncached(spec: CustomMetricSpec) -> Any:
     if _is_sklearn_scorer(obj):
         if not spec.kwargs:
             return obj
+        _, _, obj_kwargs = scorer_raw_parts(obj)
         merged = copy.copy(obj)
-        merged._kwargs = {**obj._kwargs, **spec.kwargs}
+        merged._kwargs = {**obj_kwargs, **spec.kwargs}
         return merged
     return _CallableScorer(obj, 1 if spec.natural_greater_is_better else -1)
 
@@ -334,14 +341,15 @@ def build_custom_scorer(spec: CustomMetricSpec) -> Any:
     A ``kind="metric"`` function is wrapped with ``make_scorer`` (so the
     pooled out-of-fold and BBC-CV evaluation can call the raw function); a
     ``make_scorer`` scorer is used as is (``kwargs`` merged into a copy); a
-    plain callable scorer is wrapped into an adapter exposing ``_sign``.
+    plain callable scorer is wrapped into an adapter exposing the scorer
+    direction flag (``common.sklearn_compat.scorer_sign``).
 
     Args:
         spec: The validated custom metric declaration.
 
     Returns:
         Any: A callable ``scorer(estimator, X, y) -> float`` (higher is
-            better), exposing ``_sign``.
+            better), exposing the direction flag (``_sign``).
 
     Raises:
         ImportError: If the callable cannot be imported in this process.

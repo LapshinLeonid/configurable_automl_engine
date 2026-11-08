@@ -29,6 +29,7 @@ from configurable_automl_engine.common.metrics import (
     pooled_scorer_value,
     warn_pooled_fallback_once,
 )
+from configurable_automl_engine.common.sklearn_compat import scorer_raw_parts
 from configurable_automl_engine.validation import iter_splits
 
 from .plans import TrialScore, ValidationPlan
@@ -497,7 +498,7 @@ def _evaluate_pooled_cv(
     # Whether the scorer exposes a raw metric function: if it does not, the
     # pooled value is impossible and the per-fold path is taken inside the
     # SAME loop (no double iteration of the splits).
-    poolable = getattr(scorer, "_score_func", None) is not None
+    poolable = scorer_raw_parts(scorer)[0] is not None
     # OOF rows are accumulated in pre-allocated full-size buffers (filled by
     # positional indices); the pooled value is computed over the buffers with
     # non-finite masking — no repeated array concatenation.
@@ -598,7 +599,7 @@ def _evaluate_pooled_cv(
         algo_name=algo_name or "unknown",
         phase_name=phase_name or "untitled_phase",
         reason="the scorer does not expose a raw metric function "
-        "(_score_func/_sign/_kwargs)",
+        "(the pooled-evaluation contract of common.sklearn_compat)",
     )
     return float(np.mean(fold_scores)) if fold_scores else float("nan")
 

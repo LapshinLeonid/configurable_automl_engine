@@ -25,12 +25,12 @@ from scipy.stats import norm
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import QuantileTransformer
 
-# Private sklearn API, but stable across the supported range
-# (scikit-learn>=1.8): it is also used by the Winsorizer
-# (preprocessing/outliers.py). Revisit the import on a major sklearn
-# upgrade; a fallback shim would silently change the validation semantics,
-# so a hard import error is preferable.
-from sklearn.utils.validation import _check_feature_names, check_is_fitted
+# The feature-name recording follows the sklearn fit convention through the
+# stable adapter (common/sklearn_compat.py): the only place in the package
+# that names sklearn's private validation internals.
+from sklearn.utils.validation import check_is_fitted
+
+from configurable_automl_engine.common.sklearn_compat import check_feature_names
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
             ValueError: If ``X`` is empty (no rows), or sklearn rejects the
                 parameters (e.g. ``subsample < n_quantiles``).
         """
-        _check_feature_names(self, X, reset=True)
+        check_feature_names(self, X)
         # X.shape[0] instead of np.asarray(X).shape[0]: both ndarray and
         # DataFrame expose .shape, and asarray could materialize a copy of a
         # mixed-dtype input just to read the row count.

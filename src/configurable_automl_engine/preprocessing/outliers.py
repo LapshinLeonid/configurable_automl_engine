@@ -21,10 +21,9 @@ from typing import Any, Literal
 import numpy as np
 from scipy import sparse as sp
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import (
-    _check_feature_names,
-    check_is_fitted,
-)
+from sklearn.utils.validation import check_is_fitted
+
+from configurable_automl_engine.common.sklearn_compat import check_feature_names
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +308,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):
                 entry does not match any input column.
         """
         self._validate_params()
-        _check_feature_names(self, X, reset=True)
+        check_feature_names(self, X)
         arr = self._to_2d_float(X)
         self.n_features_in_ = arr.shape[1]
         exclude_mask = self._exclude_mask()

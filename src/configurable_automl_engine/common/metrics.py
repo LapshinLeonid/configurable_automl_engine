@@ -48,6 +48,10 @@ from configurable_automl_engine.common.custom_metrics import (
     lookup_custom_metric,
     register_custom_metric,
 )
+from configurable_automl_engine.common.sklearn_compat import (
+    scorer_raw_parts,
+    scorer_sign,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +171,9 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
     values.
 
     Args:
-        scorer: A scikit-learn ``make_scorer`` object exposing
-            ``_score_func``, ``_sign`` and ``_kwargs``.
+        scorer: A scikit-learn ``make_scorer`` object (its raw metric parts
+            are read through the stable adapter
+            ``common.sklearn_compat.scorer_raw_parts``).
         y_true: True values aligned with ``y_pred`` by position.
         y_pred: Predictions aligned with ``y_true`` by position.
 
@@ -185,13 +190,11 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
     mask = np.isfinite(yt) & np.isfinite(yp)
     if not np.any(mask):
         raise ValueError("No valid (y_true, y_pred) pairs for the pooled metric.")
-    score_func = getattr(scorer, "_score_func", None)
+    score_func, sign, kwargs = scorer_raw_parts(scorer)
     if score_func is None:
         raise ValueError(
             "The scorer cannot be pooled: no raw metric function is exposed."
         )
-    sign = getattr(scorer, "_sign", 1)
-    kwargs = getattr(scorer, "_kwargs", None) or {}
     return float(sign * score_func(yt[mask], yp[mask], **kwargs))
 
 
@@ -420,11 +423,11 @@ def _sklearn_direction(name: str) -> bool:
     extended/changed by the user, so it is read without caching
     (see ``is_greater_better``).
 
-    The scorer object exposes a direction flag (``_sign``): +1 — "higher is
-    better", -1 — inverted error (neg_ prefix), which the optimizer still
-    maximizes."""
+    The scorer object exposes a direction flag (read through
+    ``common.sklearn_compat.scorer_sign``): +1 — "higher is better", -1 —
+    inverted error (neg_ prefix), which the optimizer still maximizes."""
     scorer = _resolve_scorer(name)
-    sign = getattr(scorer, "_sign", None)
+    sign = scorer_sign(scorer)
     if sign is not None:
         return bool(sign > 0) or name.startswith("neg_")
     return True
@@ -475,7 +478,8 @@ def is_greater_better(name: str) -> bool:
 def is_error_metric(name: str) -> bool:
     """Return whether a metric is an error in the user-facing representation.
 
-    Determined from the actual scorer object (the ``_sign`` attribute):
+    Determined from the actual scorer object (its direction flag, via
+    ``common.sklearn_compat.scorer_sign``):
     inverted error scorers (-RMSE, -MAE, all neg_ metrics) return a positive
     error value to the user → True; score metrics (R² and similar) are
     returned as is → False.
@@ -494,7 +498,7 @@ def is_error_metric(name: str) -> bool:
     if lname == "global_nrmse":
         return True
     scorer = _resolve_scorer(lname)
-    sign = getattr(scorer, "_sign", None)
+    sign = scorer_sign(scorer)
     return sign is not None and sign < 0
 
 
@@ -584,7 +588,7 @@ def to_user_value(name: str, raw_value: float) -> float:
         # Dynamic NRMSE scorer: an error, always returns -NRMSE.
         return -value
     scorer = _resolve_scorer(name)
-    sign = getattr(scorer, "_sign", None)
+    sign = scorer_sign(scorer)
     if sign is not None and sign < 0:
         return -value
     return value
@@ -781,8 +785,8 @@ def _columnwise_raw_values(
     valid pair yields NaN.
 
     Args:
-        scorer: A ``make_scorer`` object (``_score_func``/``_sign``/
-            ``_kwargs``).
+        scorer: A ``make_scorer`` object (its raw metric parts are read
+            through ``common.sklearn_compat.scorer_raw_parts``).
         y_true: The true values, shape ``(n_rows,)``.
         preds: The predictions, shape ``(n_rows, n_columns)``.
 
@@ -790,9 +794,8 @@ def _columnwise_raw_values(
     Returns:
         np.ndarray: The raw value of every column, shape ``(n_columns,)``.
     """
-    score_func = getattr(scorer, "_score_func", None)
-    sign = float(getattr(scorer, "_sign", 1))
-    kwargs = getattr(scorer, "_kwargs", None) or {}
+    score_func, raw_sign, kwargs = scorer_raw_parts(scorer)
+    sign = float(raw_sign)
     vectorized = {_rmse, _nrmse, mean_squared_error, mean_absolute_error, r2_score}
     if score_func in vectorized and not kwargs:
         valid = np.isfinite(preds) & np.isfinite(y_true)[:, None]
@@ -907,22 +910,21 @@ def bbc_cv_score(
     # (MSE / RMSE) and the normalization uses all usable rows. The selection
     # is unchanged: within one resample the normalizer is the same for every
     # configuration, so ranking by R² equals ranking by MSE (NRMSE by RMSE).
-    score_func = getattr(scorer, "_score_func", None)
-    kwargs = getattr(scorer, "_kwargs", None) or {}
+    score_func, sign, kwargs = scorer_raw_parts(scorer)
     if not kwargs and score_func is r2_score:
         y_var = float(np.var(y))
         if y_var > 0.0:
             mse = -_bbc_mean_oob(
                 _SCORER_OBJECTS["mse"][0], y, preds, n_bootstrap, random_state
             )
-            return float(getattr(scorer, "_sign", 1)) * (1.0 - mse / y_var)
+            return float(sign) * (1.0 - mse / y_var)
     if not kwargs and score_func is _nrmse:
         y_span = float(np.max(y) - np.min(y))
         if y_span >= 1e-6:
             rmse = -_bbc_mean_oob(
                 _SCORER_OBJECTS["rmse"][0], y, preds, n_bootstrap, random_state
             )
-            return float(getattr(scorer, "_sign", 1)) * (rmse / y_span)
+            return float(sign) * (rmse / y_span)
     return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
 
 
