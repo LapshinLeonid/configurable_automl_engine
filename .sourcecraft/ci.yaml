@@ -377,7 +377,7 @@ workflows:
                 # "Cannot uninstall blinker 1.4" during dependency setup
                 python3.11 -m pip install --ignore-installed blinker
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e ".[all,test]"
-                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov
+                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov import-linter==2.15
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
@@ -389,7 +389,16 @@ workflows:
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
-                echo "  2. TYPE CHECK (Mypy)"
+                echo "  2. IMPORT LAYERS CHECK (import-linter)"
+                echo "═══════════════════════════════════════════════════════════════"
+                # `lint-imports` is the console script of import-linter; call
+                # it via the 3.11 interpreter context (Scripts dir on PATH)
+                python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())"
+                echo "✅ Import layers: no violations found"
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  3. TYPE CHECK (Mypy)"
                 echo "═══════════════════════════════════════════════════════════════"
                 python3.11 -m mypy src --install-types --non-interactive
                 echo "✅ Mypy: no issues found"
@@ -399,6 +408,6 @@ workflows:
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
-                echo "  3. RUN TESTS AND COVERAGE (Pytest)"
+                echo "  4. RUN TESTS AND COVERAGE (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
                 python3.11 -m pytest --cov=src
