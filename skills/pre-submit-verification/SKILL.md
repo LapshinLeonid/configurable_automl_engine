@@ -30,13 +30,29 @@ passed — any new commit invalidates all previous verification.
 
 ### 1. Full local check suite in a clean environment
 
-From the repository root, with the environment matching the project's quality
-baseline (Python 3.11+, dependencies installed via `pip install -e ".[all,test]"`):
+"A clean environment" means: the same fresh-worktree recipe as in item 5, with
+its own virtual environment — not the current working directory, whose
+uncommitted leftovers, stale artifacts, and editable install may be silently
+compensating for problems in the branch.
+
+Create a fresh worktree of the branch and a fresh environment in it (full
+recipe in item 5):
 
 ```bash
-ruff format src/
-ruff check src/
+WORKTREE=$(mktemp -d /tmp/pr-verify-XXXXXX)
+git worktree add "$WORKTREE" HEAD
+python3.11 -m venv "$WORKTREE/.venv"
+. "$WORKTREE/.venv/bin/activate"
+SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
+python -c "import configurable_automl_engine; print(configurable_automl_engine.__file__)"
+# The printed path must be inside "$WORKTREE".
+```
+
+Then, from the worktree root with that environment activated:
+
+```bash
 ruff format --check src/
+ruff check src/
 lint-imports
 mypy src --install-types --non-interactive
 pytest --cov=src
@@ -46,6 +62,12 @@ All commands must exit successfully. A failure anywhere is a blocker: fix and
 restart the whole suite. Do not interpret, silence, or `xfail` a failing check
 to make the suite green — that is exactly the kind of unverified claim this
 skill exists to prevent.
+
+Never run bare `ruff format src/` (or any other tree-mutating command) during
+verification: if `ruff format --check` reports a diff, treat it as a failure —
+auto-format, commit, and restart the checklist. The checked tree must stay
+identical to the committed branch; auto-formatting belongs to the fix phase,
+not the verification phase.
 
 ### 2. Mutation check for every new test
 
@@ -62,8 +84,11 @@ rewrite it before submitting. The same applies to any claim of the form "this
 test guards against a regression" — the guard is proven by the mutation run,
 not by reading the test.
 
-If the project has a related skill for test design (for example,
-`meaningful-test-design`), follow it when writing and rewriting the test.
+Check first whether a test-design skill exists in `skills/` at the time of the
+run (for example, `meaningful-test-design`, which may not exist yet). If it
+exists, follow it when writing and rewriting the test; if it does not, apply
+the rule above — the mutation run is the only proof that the test guarantees
+anything.
 
 ### 3. Verify every claim in the PR description
 
@@ -102,13 +127,28 @@ A tolerance that holds only on the seeds it was tuned on is not verified.
 
 ### 5. Fresh checkout
 
-Re-run the check suite (item 1) and the tests relevant to the change on a
-**clean checkout of the PR branch** — the way the reviewer will — not in a
-working directory with uncommitted leftovers, stale artifacts, or local
-tweaks:
+Re-run the check suite (item 1) and the tests relevant to the change in the
+**fresh worktree of the PR branch** you created in item 1 — the way the
+reviewer will — not in a working directory with uncommitted leftovers, stale
+artifacts, or local tweaks. If you skipped the worktree setup in item 1,
+create it now using the recipe below:
 
 ```bash
-git worktree add /tmp/pr-verify-$(date +%s) HEAD
+WORKTREE=$(mktemp -d /tmp/pr-verify-XXXXXX)
+git worktree add "$WORKTREE" HEAD
+
+# Fresh environment: without this step pytest inside the worktree still
+# imports the package through the editable install of the ORIGINAL checkout,
+# which silently tests the wrong (possibly dirty) code — a false green.
+python3.11 -m venv "$WORKTREE/.venv"
+. "$WORKTREE/.venv/bin/activate"
+SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" pip install -e ".[all,test]"
+
+# Prove the interpreter actually resolves the package from the worktree:
+python -c "import configurable_automl_engine; print(configurable_automl_engine.__file__)"
+# The printed path must be inside "$WORKTREE". If it is not, stop and fix the
+# environment before running any checks — the results would be meaningless.
+
 # run the suite inside the fresh worktree, then:
 # git worktree remove <path>
 ```
@@ -119,9 +159,14 @@ branch self-contained.
 
 ### 6. Re-check the diff against the description
 
+Derive the base branch from the PR's target branch, not a hardcoded default
+(the PR may target a non-default branch):
+
 ```bash
-git diff main...HEAD --stat
-git diff main...HEAD
+# <target> is the target branch of this PR (for SourceCraft, "target_branch"
+# from `src pr get <number> --json`); for the common case it is `main`:
+git diff <target>...HEAD --stat
+git diff <target>...HEAD
 ```
 
 - Recalculate the diff and confirm every file/function it touches matches
@@ -142,8 +187,9 @@ and passed on the final commit of the branch**:
 - [ ] stochastic gates pass on multiple seed windows with a justified
       tolerance;
 - [ ] checks green on a fresh checkout of the branch;
-- [ ] `git diff main...HEAD` matches the PR description (`src pr edit` applied
-      if not).
+- [ ] `git diff <target>...HEAD` (where `<target>` is the PR's target branch)
+      matches the PR description (`src pr edit` applied if not); the diff
+      source of truth for an open SourceCraft PR is `src pr diff <number>`.
 
 Then — and only then — submit for review (`wait_review` / review request). If
 any item fails, fix, commit, and start this checklist over from item 1 on the
