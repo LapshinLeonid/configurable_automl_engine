@@ -211,7 +211,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         (:class:`_SMOTERGenerator`): the features AND the target are
         interpolated between a row and a same-bin neighbor, so the synthetic
         ``y`` values are honest (they lie between the two parents) instead of
-        collapsing onto bin midpoints.
+        collapsing onto bin midpoints. Categorical columns and binary
+        indicator columns (one-hot / hashing output, missing-value
+        indicators, raw 0/1 flags) are never interpolated: the synthetic
+        row keeps the first parent's value (the SMOTENC rule), so it always
+        carries a real category instead of a fractional blend of mutually
+        exclusive ones.
 
         Automatically switches to SMOTENC if non-numeric columns are detected.
         For ADASYN a transparent fallback to SMOTENC is implemented when categories are present,
@@ -292,10 +297,20 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             noise_nonzero_only = True
 
         X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
-        # Binary indicator columns (one-hot / missing indicators) are
-        # detected BEFORE resampling: SMOTE/ADASYN interpolate them into
-        # fractions, after which they would stop looking binary.
-        binary_cols = _binary_indicator_columns(X_df) if self.add_noise else []
+        # Binary indicator columns (one-hot / hashing output, missing
+        # indicators, raw 0/1 flags) are detected BEFORE resampling. Two
+        # uses: (1) Gaussian noise must never touch them; (2) on the SMOTER
+        # path (smote/adasyn) they must not be interpolated — a fractional
+        # blend (e.g. 0.5/0.5) of two one-hot levels is not a valid category
+        # and may combine mutually exclusive categories, so the generator
+        # copies the first parent's value instead (SMOTENC rule).
+        binary_cols = _binary_indicator_columns(X_df)
+        binary_idx: list[int] = []
+        for col in binary_cols:
+            loc = X_df.columns.get_loc(col)
+            # get_loc returns a positional index for a unique column label;
+            # slice/array results are impossible here (labels are unique).
+            binary_idx.append(int(loc))  # type: ignore[arg-type]
         cat_idx = self._categorical_indices(X_df, algo)
         cat_cols = [X_df.columns[i] for i in cat_idx]
         strategy = self._target_strategy(target, multiplier)
@@ -308,7 +323,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             )
         elif target.is_regression:
             X_res_raw, y_res, encoder = self._resample_smoter(
-                X_df, cat_idx, cat_cols, target, strategy, algo
+                X_df, cat_idx, cat_cols, target, strategy, algo, binary_idx
             )
         else:
             X_res_raw, y_res = self._resample_classification(
@@ -437,6 +452,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         target: _BinnedTarget,
         strategy: dict[Any, int],
         algo: str,
+        binary_idx: list[int] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, OrdinalEncoder | None]:
         """SMOTER-style generation for a binned regression target.
 
@@ -444,7 +460,13 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         pair; a singleton bin (or a bin that is entirely too small for the
         k-NN) passes through unchanged. The pseudo-class ``-1`` is already
         excluded from ``strategy`` and the active counts in the regression
-        mode, so the balanced and the proportional mode share this filter."""
+        mode, so the balanced and the proportional mode share this filter.
+
+        ``binary_idx`` carries the positions of the binary indicator columns
+        (one-hot / hashing output, missing-value indicators, raw 0/1 flags);
+        they are excluded from the interpolation exactly like the ordinal-
+        encoded categorical columns, so synthetic rows never mix mutually
+        exclusive categories (the first parent's value is kept)."""
         active_counts = self._active_counts(target)
         growth_eligible = {cls for cls, cnt in active_counts.items() if cnt >= 2}
         # Number of synthetic rows per bin = final - original count.
@@ -463,6 +485,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         generator = _SMOTERGenerator(
             random_state=self.random_state,
             categorical_features=cat_idx,
+            binary_indicator_features=binary_idx,
             density_weighted=(algo == "adasyn"),
         )
         X_synth, y_synth = generator.fit_resample(

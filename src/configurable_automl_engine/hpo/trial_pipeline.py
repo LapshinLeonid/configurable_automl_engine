@@ -403,10 +403,14 @@ def assemble_estimator(
     """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
     Oversampling receives already-encoded numerical features (one-hot), so
-    SMOTE/ADASYN always work with numerical data. Feature selection is
-    activated strictly between the preprocessor and the oversampler:
-    synthetic rows are generated only for informative features (the order
-    is consistent with ModelTrainer).
+    SMOTE/ADASYN always work with numerical data. Binary indicator columns
+    of that encoded space (one-hot / hashing dummies, missing-value
+    indicators) are never interpolated: the oversampler applies the SMOTENC
+    copy-from-first-parent rule to them, so a synthetic row keeps a real
+    observed category instead of a fractional blend of mutually exclusive
+    ones. Feature selection is activated strictly between the preprocessor
+    and the oversampler: synthetic rows are generated only for informative
+    features (the order is consistent with ModelTrainer).
 
     For ``isotonic_regression`` an ``IsotonicDataTransformer`` step is
     inserted right after the preprocessor (before selection/oversampling):

@@ -27,7 +27,13 @@ class _SMOTERGenerator:
 
     Categorical columns follow the SMOTENC rules: a category that differs
     between the two parents keeps the first parent's (row ``i``) value;
-    a shared category is kept as is.
+    a shared category is kept as is. The same rule is applied to the
+    binary indicator columns (one-hot / hashing output, missing-value
+    indicators, raw 0/1 flags): interpolating them would produce fractional
+    levels (e.g. ``0.5``) that are not a valid category and may yield
+    combinations of mutually exclusive categories, so an indicator column
+    always keeps the first parent's value — the synthetic row carries a
+    real category of one of its parents instead of an artificial blend.
 
     ``density_weighted=True`` switches the parent selection to the ADASYN
     scheme: the per-parent number of generated rows is proportional to its
@@ -42,6 +48,7 @@ class _SMOTERGenerator:
         *,
         random_state: int | None = None,
         categorical_features: list[int] | None = None,
+        binary_indicator_features: list[int] | None = None,
         density_weighted: bool = False,
     ):
         """Initialize the generator.
@@ -51,11 +58,18 @@ class _SMOTERGenerator:
             categorical_features: Indices of categorical
                 columns; they are never interpolated (SMOTENC
                 copy-from-first-parent rules apply instead).
+            binary_indicator_features: Indices of binary indicator columns
+                (one-hot / hashing output, missing-value indicators, raw
+                0/1 flags); they are never interpolated either — the copy-
+                from-first-parent rule of SMOTENC applies, so the synthetic
+                rows keep valid indicator levels instead of fractional
+                blends of mutually exclusive categories.
             density_weighted: Use ADASYN-style density weighting of
                 the parent selection instead of uniform random choice.
         """
         self.random_state = random_state
         self.categorical_features = set(categorical_features or [])
+        self.binary_indicator_features = set(binary_indicator_features or [])
         self.density_weighted = density_weighted
 
     def fit_resample(
@@ -68,7 +82,11 @@ class _SMOTERGenerator:
         """Generate ``n_to_generate[bin]`` synthetic rows per quantile bin.
 
         Args:
-            X: Numeric (already encoded) feature matrix.
+            X: Numeric (already encoded) feature matrix. Binary indicator
+                columns (one-hot / hashing output, missing-value indicators,
+                raw 0/1 flags) must be passed via
+                ``binary_indicator_features`` so they are copied from the
+                first parent instead of being interpolated.
             y: The real regression target values per row.
             y_binned: Quantile-bin code per row (``-1`` —
                 missing target, never used as a synthetic parent).
@@ -140,11 +158,16 @@ class _SMOTERGenerator:
             gaps = rng.uniform(0.0, 1.0, size=len(rows)).reshape(-1, 1)
             feat_diff = bin_X[neigh_chosen] - bin_X[rows]
             new_X = bin_X[rows] + gaps * feat_diff
-            # Categorical columns: SMOTENC rule — a category differing
-            # between the parents keeps the first parent's value.
-            if self.categorical_features:
+            # Categorical and binary indicator columns (one-hot / hashing
+            # output, missing-value indicators, raw 0/1 flags): the SMOTENC
+            # rule — a column differing between the parents keeps the first
+            # parent's value. Interpolating an indicator would create
+            # fractional levels ("0.5 red + 0.5 blue") that are not a valid
+            # category and may combine mutually exclusive categories.
+            copy_cols = self.categorical_features | self.binary_indicator_features
+            if copy_cols:
                 new_X = new_X.copy()
-                for col in self.categorical_features:
+                for col in copy_cols:
                     new_X[:, col] = bin_X[rows, col]
             new_y = bin_y[rows] + gaps.ravel() * (bin_y[neigh_chosen] - bin_y[rows])
             X_synth.append(new_X)

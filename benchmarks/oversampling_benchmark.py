@@ -86,24 +86,47 @@ def _make_count(n: int = 400, seed: int = 7) -> tuple[np.ndarray, np.ndarray]:
     return X, y
 
 
+def _make_onehot(n: int = 400, seed: int = 11) -> pd.DataFrame:
+    """Regression frame with a one-hot categorical feature.
+
+    Covers the semantics of synthetic rows under one-hot encoding: the
+    SMOTER generator must keep valid indicator levels (a real category of
+    one of the parents) instead of fractional blends of mutually exclusive
+    dummies, so the effect measured here reflects a realistic encoded
+    feature space. The returned frame (not ``X, y``) is used directly by
+    ``run_oversampling_case`` — the generator contract allows either form."""
+    rng = np.random.RandomState(seed)
+    cat = rng.choice(["red", "blue", "green"], n)
+    num = rng.randn(n)
+    y = 2.0 * num + 3.0 * (cat == "green") + 1.0 * (cat == "blue") + rng.randn(n) * 0.8
+    df = pd.DataFrame({"num": num})
+    df["color_red"] = (cat == "red").astype(float)
+    df["color_blue"] = (cat == "blue").astype(float)
+    df["color_green"] = (cat == "green").astype(float)
+    df["target"] = y
+    return df
+
+
 @dataclass(frozen=True)
 class OversamplingCase:
     """A dataset for the oversampling evidence benchmark.
 
     Attributes:
         name (str): Dataset name.
-        generator (Callable): Generator (X, y) with a fixed seed.
+        generator (Callable): Generator of either a ``(X, y)`` tuple or a
+            ready DataFrame with a ``target`` column, with a fixed seed.
         n_trials (int): HPO trials per algorithm (CI time limit).
     """
 
     name: str
-    generator: Callable[[], tuple[np.ndarray, np.ndarray]]
+    generator: Callable[..., Any]
     n_trials: int = 1
 
 
 OVERSAMPLING_CASES: list[OversamplingCase] = [
     OversamplingCase(name="continuous_r2_04", generator=_make_continuous),
     OversamplingCase(name="count_poisson", generator=_make_count),
+    OversamplingCase(name="onehot_category", generator=_make_onehot),
 ]
 
 ALL_OVERSAMPLING_CASES: list[OversamplingCase] = list(OVERSAMPLING_CASES)
@@ -141,7 +164,10 @@ class OversamplingVariantResult:
 
 def _df_from_case(case: OversamplingCase, seed: int = 0) -> pd.DataFrame:
     """Build a DataFrame from the case generator with the given seed."""
-    X, y = case.generator(seed=seed)
+    generated = case.generator(seed=seed)
+    if isinstance(generated, pd.DataFrame):
+        return generated
+    X, y = generated
     df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
     df["target"] = y
     return df

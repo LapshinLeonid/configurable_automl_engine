@@ -1914,3 +1914,161 @@ def test_preprocessed_flags_and_missing_indicators_not_noised(scaling, algorithm
     if algorithm == "random":
         for i in two_valued:
             assert set(np.unique(X_noisy[:, i])) == set(np.unique(Xt[:, i]))
+
+
+# ------------------------------------------------------------------ #
+#  Binary indicator columns (one-hot / hashing) are not interpolated  #
+# ------------------------------------------------------------------ #
+
+
+def _make_onehot_frame(n: int = 60, seed: int = 0) -> pd.DataFrame:
+    """A regression frame with a continuous column and a one-hot category."""
+    rng = np.random.RandomState(seed)
+    cat = rng.choice(["red", "blue", "green"], n)
+    df = pd.DataFrame(
+        {
+            "num": rng.randn(n),
+            "color_red": (cat == "red").astype(float),
+            "color_blue": (cat == "blue").astype(float),
+            "color_green": (cat == "green").astype(float),
+        }
+    )
+    df["target"] = 2.0 * df["num"] + 3.0 * df["color_green"] + rng.randn(n) * 0.1
+    return df
+
+
+ONEHOT_COLS = ["color_red", "color_blue", "color_green"]
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_smoter_onehot_levels_are_valid(algorithm, seed):
+    """Issue 185: SMOTE/ADASYN must not interpolate one-hot columns.
+
+    Every synthetic row keeps valid indicator levels (only 0.0/1.0), so the
+    interpolation can never produce a fractional category such as 0.5."""
+    df = _make_onehot_frame(seed=seed)
+    res = DataOversampler(
+        algorithm=algorithm, multiplier=1.5, random_state=seed
+    ).oversample(df, target="target")
+    synth = res.iloc[len(df):]
+    assert len(synth) > 0
+    assert set(np.unique(synth[ONEHOT_COLS].to_numpy())) <= {0.0, 1.0}
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_smoter_onehot_rows_are_mutually_exclusive(algorithm, seed):
+    """Issue 185: no combinations of mutually exclusive categories.
+
+    A one-hot block must still encode exactly one category per synthetic
+    row: exactly one dummy of the block equals 1."""
+    df = _make_onehot_frame(seed=seed)
+    res = DataOversampler(
+        algorithm=algorithm, multiplier=1.5, random_state=seed
+    ).oversample(df, target="target")
+    synth = res.iloc[len(df):]
+    assert len(synth) > 0
+    row_sums = synth[ONEHOT_COLS].sum(axis=1)
+    assert (row_sums == 1.0).all()
+    # The synthetic category matches a real observed category pattern.
+    real_patterns = set(map(tuple, df[ONEHOT_COLS].drop_duplicates().to_numpy()))
+    synth_patterns = set(map(tuple, synth[ONEHOT_COLS].drop_duplicates().to_numpy()))
+    assert synth_patterns <= real_patterns
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_smoter_binary_flag_levels_are_valid(algorithm):
+    """A raw 0/1 flag (a two-level numeric feature) is copied from the first
+    parent, never interpolated into a fractional level."""
+    rng = np.random.RandomState(3)
+    n = 60
+    df = pd.DataFrame(
+        {
+            "num": rng.randn(n),
+            "flag": rng.randint(0, 2, n).astype(float),
+        }
+    )
+    df["target"] = df["num"] + 2.0 * df["flag"] + rng.randn(n) * 0.1
+    res = DataOversampler(
+        algorithm=algorithm, multiplier=1.5, random_state=7
+    ).oversample(df, target="target")
+    synth = res.iloc[len(df):]
+    assert len(synth) > 0
+    assert set(np.unique(synth["flag"])) <= {0.0, 1.0}
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_smoter_indicators_come_from_parents(algorithm):
+    """Every synthetic row's one-hot block is a row that exists among the
+    parents' blocks (copy-from-first-parent, the SMOTENC rule)."""
+    df = _make_onehot_frame(n=80, seed=5)
+    res = DataOversampler(
+        algorithm=algorithm, multiplier=2.0, random_state=11
+    ).oversample(df, target="target")
+    synth = res.iloc[len(df):]
+    assert len(synth) > 0
+    merged = synth.merge(
+        df.drop(columns="target").drop_duplicates(),
+        on=ONEHOT_COLS,
+        how="left",
+        indicator=True,
+    )
+    assert (merged["_merge"] == "both").all()
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_smoter_after_scaler_indicator_levels_valid(algorithm):
+    """A one-hot block scaled by StandardScaler (two non-0/1 levels) is
+    still recognized as indicators and stays on the observed levels."""
+    from configurable_automl_engine.preprocessing import build_preprocessor
+
+    df = _make_onehot_frame(n=80, seed=9)
+    pre = build_preprocessor(
+        list(df.columns.drop("target")),
+        [],
+        ["num", *ONEHOT_COLS],
+        scaling="standard",
+    )
+    Xt = np.asarray(pre.fit_transform(df.drop(columns="target"), df["target"]), dtype=float)
+    y = df["target"].to_numpy()
+    X_res, _ = DataOversampler(
+        algorithm=algorithm, multiplier=1.5, target_bins=4, random_state=3
+    ).fit_resample(Xt, y)
+    X_res = np.asarray(X_res, dtype=float)
+    synth = X_res[len(df):]
+    assert len(synth) > 0
+    for i in range(1, Xt.shape[1]):
+        assert set(np.unique(synth[:, i])) <= set(np.unique(Xt[:, i]))
+
+
+@pytest.mark.parametrize("algorithm", ["smote", "adasyn"])
+def test_smoter_rare_segment_stays_in_segment(algorithm):
+    """Issue 185: rare data segments are not polluted by foreign categories.
+
+    A synthetic row generated from a rare-category parent keeps that parent's
+    one-hot block, so the rare segment grows only within its own category."""
+    rng = np.random.RandomState(4)
+    n_common, n_rare = 100, 6
+    cat = np.array(["blue"] * n_common + ["green"] * n_rare)
+    df = pd.DataFrame(
+        {
+            "num": rng.randn(n_common + n_rare),
+            "color_red": np.zeros(n_common + n_rare),
+            "color_blue": (cat == "blue").astype(float),
+            "color_green": (cat == "green").astype(float),
+        }
+    )
+    df["target"] = df["num"] + 5.0 * df["color_green"] + rng.randn(n_common + n_rare) * 0.1
+    res = DataOversampler(
+        algorithm=algorithm, multiplier=2.0, random_state=13
+    ).oversample(df, target="target")
+    synth = res.iloc[len(df):]
+    assert len(synth) > 0
+    # Rows synthesized from a green parent stay green: no synthetic row
+    # mixes a green flag with a blue flag (mutually exclusive segments).
+    both = (synth["color_green"] > 0) & (synth["color_blue"] > 0)
+    assert not both.any()
+    # The green segment's synthetic rows keep the green block exactly.
+    green_synth = synth[synth["color_green"] > 0]
+    assert (green_synth["color_red"] == 0.0).all()
