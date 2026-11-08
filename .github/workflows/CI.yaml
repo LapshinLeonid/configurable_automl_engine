@@ -57,6 +57,20 @@ jobs:
           PYTHONPATH: .
         run: python benchmarks/run_sanity_gate_benchmark.py
 
+      # Regression benchmark of the BBC-CV estimate after adaptive HPO — a
+      # mandatory gate. On synthetic datasets with a known quality ceiling
+      # (linear ridge cases + the signal-free case) it runs the full
+      # adaptive HPO (Optuna), computes bbc_cv_score over the trial OOF
+      # matrix, and compares it with a repeated external hold-out of the
+      # SELECTED configuration on fresh data. Blocks the run when the
+      # thresholds are violated: |median gap (BBC-CV − external)| > 0.025
+      # for the pooled per-case seed set, or a positive BBC-CV estimate on
+      # the signal-free case (pure selection bias).
+      - name: Run BBC-CV after-adaptive-HPO benchmark
+        env:
+          PYTHONPATH: .
+        run: python benchmarks/run_bbc_adaptive_hpo_benchmark.py --ci
+
       - name: Upload results to Codecov
         uses: codecov/codecov-action@v5
         with:
