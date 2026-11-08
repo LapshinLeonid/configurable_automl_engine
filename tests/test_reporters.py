@@ -722,3 +722,49 @@ class TestMarkdownExtra:
 
         assert "**disqualified**" in report
         assert "circuit breaker: 5 consecutive failures" in report
+
+
+# ────────────── stored explain() payload section (issue #181) ────────────── #
+
+
+class TestExplanationsSection:
+    """The Markdown reporter renders the stored explain() payload."""
+
+    def test_permutation_section_rendered(self) -> None:
+        result = _make_result(
+            _COMPLETED_RUNS,
+            explanations={
+                "method": "permutation",
+                "importances": [
+                    {"feature": "f1", "importance_mean": 0.25, "importance_std": 0.01},
+                    {"feature": "f2", "importance_mean": -0.02},
+                ],
+                "baseline_score": 0.774,
+                "metric_user": "rmse",
+                "n_rows": 40,
+                "n_features": 2,
+                "data_semantics": "train",
+            },
+        )
+        text = str(MarkdownReporter().report(result))
+        assert "## Feature importance (permutation)" in text
+        assert "| f1 " in text
+        assert "| f2 " in text
+        assert "Baseline:" in text
+
+    def test_shap_baseline_is_mean_prediction(self) -> None:
+        result = _make_result(
+            _COMPLETED_RUNS,
+            explanations={
+                "method": "shap",
+                "importances": [{"feature": "f1", "importance_mean": 0.1}],
+                "baseline_prediction": 3.21,
+            },
+        )
+        text = str(MarkdownReporter().report(result))
+        assert "## Feature importance (shap)" in text
+        assert "mean prediction" in text
+
+    def test_no_explanations_no_section(self) -> None:
+        text = str(MarkdownReporter().report(_make_result(_COMPLETED_RUNS)))
+        assert "Feature importance" not in text

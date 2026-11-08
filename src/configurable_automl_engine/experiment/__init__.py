@@ -26,6 +26,7 @@ from configurable_automl_engine.experiment.ensemble import (
     EnsembleModel,
     EnsembleModelError,
     compute_weights,
+    resolve_metric_direction,
     select_top_k,
 )
 from configurable_automl_engine.experiment.experiment import (
@@ -114,5 +115,6 @@ __all__ = [
     "explain_shap",
     "export_experiment",
     "render_importance_markdown",
+    "resolve_metric_direction",
     "select_top_k",
 ]

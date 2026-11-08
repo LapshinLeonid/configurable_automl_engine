@@ -120,7 +120,8 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
 
     The report structure (in order): the title (the run label), the run
     metadata block, the outcome (status, winner, honest-score
-    semantics), the leaderboard table, the per-run detail sections and
+    semantics), the leaderboard table, the stored explain() payload
+    (when the run recorded one), the per-run detail sections and
     the failure message for a failed run.
 
     Args:
@@ -147,6 +148,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
         self._render_honest_scores(lines, result)
         self._render_leaderboard(lines, result)
         self._render_ensemble(lines, result)
+        self._render_explanations(lines, result)
         self._render_run_details(lines, result)
         self._render_failure(lines, result)
         if self._include_config:
@@ -336,6 +338,54 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
             lines.append(
                 f"Ensemble artifact: {_escape_code_span(_escape_cell(artifact_path))}"
             )
+        lines.append("")
+
+    def _render_explanations(self, lines: list[str], result: ExperimentResult) -> None:
+        """Render the stored explain() payload section (when present).
+
+        The section renders the JSON-safe payload of the last
+        ``explain()`` call (``ExperimentResult.explanations``): the
+        method, the baseline (the metric score for the permutation
+        importance, the mean prediction for SHAP) and the importance
+        table (top rows, the rest summarized). It is skipped when the
+        run never invoked explain — no dangling heading.
+        """
+        payload = result.explanations
+        if not payload:
+            return
+        importances = payload.get("importances") or []
+        if not importances:
+            return
+        method = payload.get("method", "unknown")
+        lines.append(f"## Feature importance ({_escape_inline(str(method))})")
+        lines.append("")
+        baseline: str | None = None
+        if payload.get("baseline_score") is not None:
+            baseline = (
+                f"{payload['baseline_score']:.3f} ({payload.get('metric_user', '')} "
+                "in user semantics — positive RMSE/MAE, plain R²)"
+            )
+        elif payload.get("baseline_prediction") is not None:
+            baseline = f"{payload['baseline_prediction']:.3f} (mean prediction)"
+        if baseline is not None:
+            lines.append(f"Baseline: **{_escape_inline(baseline)}**.")
+            lines.append("")
+        max_rows = 20
+        lines.append("| # | Feature | Importance mean | Importance std |")
+        lines.append("|--:|:--------|----------------:|---------------:|")
+        for position, item in enumerate(importances[:max_rows], start=1):
+            if not isinstance(item, dict):
+                continue
+            std = item.get("importance_std")
+            std_cell = _EMPTY_CELL if std is None else f"{float(std):.6f}"
+            lines.append(
+                f"| {position} "
+                f"| {_escape_cell(item.get('feature'))} "
+                f"| {_format_score(item.get('importance_mean'))} "
+                f"| {std_cell} |"
+            )
+        if len(importances) > max_rows:
+            lines.append(f"_… and {len(importances) - max_rows} more features._")
         lines.append("")
 
     def _render_run_details(self, lines: list[str], result: ExperimentResult) -> None:

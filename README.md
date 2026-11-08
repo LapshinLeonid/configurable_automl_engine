@@ -90,17 +90,23 @@ Classification is not supported.
   `run()` is allowed (with a warning) and concurrent experiments share
   nothing. See
   [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#automlexperiment-объектный-api).
-* **Experiment Tracking** — every run is registered as a serializable
+ * **Experiment Tracking** — every run is registered as a serializable
   `ExperimentResult` in a thread-safe `ExperimentStore` (optional JSONL
   persist with a damaged-line-skip restore policy), ranked into a
   `Leaderboard`, rendered by `JSONReporter` / `MarkdownReporter` /
   `CompositeReporter` and the optional `MLflowReporter` extra, bundled to a
   directory by `export_experiment` and interpreted by `explain()` (permutation
   importance or SHAP). The experimental `general.ensemble` section adds a
-  weighted-average top-K ensemble next to the winner.
+  weighted-average top-K ensemble next to the winner. The export bundle is
+  self-contained: it carries the model copy, the ensemble artifact copy
+  (`<run_id>_ensemble.<ext>`), the stored explain payload
+  (`<run_id>_explain.json`), the leaderboard/report/result files and the run
+  metadata with the artifact source paths — so the ensemble and the feature
+  importances travel with the run.
   See [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimentstore-история-прогонов),
   [`Leaderboard`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#leaderboard--build_leaderboard),
-  [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#export_experiment)
+  [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#export_experiment),
+  [`explain()`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели)
   and [`general.ensemble`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimental-ensemble-generalensemble).
 
 # Dependencies

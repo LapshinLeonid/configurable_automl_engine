@@ -32,6 +32,29 @@ Covered scenarios (positive / negative / boundary):
   copy is byte-exact, the source keeps its content and path);
 - B6: a multi-suffix artifact name (e.g. ``model.tar.gz``) keeps the
   full suffix chain in the exported file name.
+
+T10 × T11 / T9 integration (issue #181):
+
+- P1e: a run with ``general.ensemble.enable=true`` → the bundle carries
+  ``<run_id>_ensemble.<ext>`` (a byte-exact copy), the metadata records
+  the original artifact path (``ensemble_source_path``) and the file
+  map; moving the bundle elsewhere, ``ensemble_model()`` loads by the
+  metadata (the bundle copy path is recorded only there) — the result
+  snapshot's ``artifact_path`` is never rewritten (the read-only
+  contract);
+- P2e: a run with a stored explain payload → the bundle carries
+  ``<run_id>_explain.json`` with the JSON-safe content;
+- N1e: the ensemble artifact recorded but missing on disk → a clear
+  ``ExportError`` and no partial bundle;
+- N2e: a legacy result without the new fields (``explanations``/
+  ``ensemble``) exports without errors;
+- B1e: the ensemble disabled → the bundle structure is identical to
+  the previous one (regression);
+- B2e: explain never invoked → no ``<run_id>_explain.json``;
+- B3e: a failed run with and without an ensemble section exports
+  correctly;
+- B4e: a mid-swap failure with the ensemble file in the bundle → the
+  previous bundle stays intact.
 """
 
 from __future__ import annotations
@@ -52,6 +75,8 @@ from configurable_automl_engine.common.definitions import (
 )
 from configurable_automl_engine.experiment.export import (
     ExportError,
+    ensemble_filename,
+    explain_json_filename,
     export_experiment,
     leaderboard_json_filename,
     leaderboard_md_filename,
@@ -890,3 +915,305 @@ def test_n6b_restore_copy_fallback_failure_is_raised(
         )
     # The backup source survived: the previous content is not destroyed.
     assert backup.read_text() == "old"
+
+
+# ────────────────── T10 × T11 / T9 integration (issue #181) ────────────────── #
+
+
+def _ensemble_section(artifact_path: str | None) -> dict[str, Any]:
+    """A minimal ensemble report section with the given artifact path."""
+    section: dict[str, Any] = {
+        "enabled": True,
+        "strategy": "weighted_average",
+        "weight_method": "score_weighted",
+        "k_requested": 2,
+        "k_used": 1,
+        "metric_user": "rmse",
+        "metric_direction": "minimize",
+        "members": [{"rank": 1, "algorithm": "ridge", "score": 0.5, "weight": 1.0}],
+    }
+    if artifact_path is not None:
+        section["artifact_path"] = artifact_path
+    return section
+
+
+def _explain_payload() -> dict[str, Any]:
+    """A minimal JSON-safe explain payload (the facade's storage shape)."""
+    return {
+        "method": "permutation",
+        "importances": [
+            {"feature": "f1", "importance_mean": 0.25, "importance_std": 0.01},
+            {"feature": "f2", "importance_mean": -0.02, "importance_std": 0.02},
+        ],
+        "baseline_score": 0.5,
+        "metric_user": "rmse",
+        "n_rows": 10,
+        "n_features": 2,
+        "data_semantics": "train",
+    }
+
+
+def test_p1e_ensemble_artifact_exported_and_restorable(
+    tmp_path: Path,
+) -> None:
+    """P1e: the ensemble artifact lands in the bundle (a byte-exact copy).
+
+    The metadata records the original source path and the file map; the
+    result snapshot's ``artifact_path`` is never rewritten (the export
+    is read-only with respect to the result).
+    """
+    ensemble_src = tmp_path / "artifacts" / "model_ensemble.pkl"
+    ensemble_src.parent.mkdir(parents=True)
+    payload = b"ENSEMBLE-ARTIFACT-BYTES"
+    ensemble_src.write_bytes(payload)
+    model_src = tmp_path / "artifacts" / "model.pkl"
+    model_src.write_bytes(b"MODEL-BYTES")
+    result = _completed_result(
+        model_path=str(model_src),
+        ensemble=_ensemble_section(str(ensemble_src)),
+    )
+    destination = tmp_path / "export"
+
+    export_experiment(result, destination)
+
+    assert ensemble_filename(result) == f"{RUN_ID}_ensemble.pkl"
+    expected = _expected_names(result) | {
+        model_filename(result),
+        ensemble_filename(result),
+    }
+    assert {p.name for p in destination.iterdir()} == expected
+
+    # The ensemble copy is byte-exact; the original is untouched.
+    ensemble_copy = destination / ensemble_filename(result)
+    assert ensemble_copy.read_bytes() == payload
+    assert ensemble_src.read_bytes() == payload
+
+    # The metadata records the source path and the role in the file map.
+    meta = json.loads(
+        (destination / metadata_filename(result)).read_text(encoding="utf-8")
+    )
+    assert meta["ensemble_source_path"] == str(ensemble_src)
+    assert meta["exported_files"][ensemble_filename(result)] == "ensemble"
+
+    # The result snapshot keeps the ORIGINAL artifact path (the export
+    # never mutates the result).
+    snapshot = json.loads(
+        (destination / result_json_filename(result)).read_text(encoding="utf-8")
+    )
+    assert snapshot["ensemble"]["artifact_path"] == str(ensemble_src)
+
+
+def test_p1e_ensemble_bundle_relocation_loads_by_metadata(
+    tmp_path: Path,
+) -> None:
+    """P1e (restoration): the bundle moved elsewhere carries the ensemble.
+
+    The bundle copy path is recorded in the metadata ``exported_files``
+    map only; a consumer relocating the bundle finds the ensemble file
+    next to the model copy (the same ``run_id`` prefix), so the ensemble
+    stays restorable from the export alone.
+    """
+    ensemble_src = tmp_path / "artifacts" / "model_ensemble.joblib"
+    ensemble_src.parent.mkdir(parents=True)
+    ensemble_src.write_bytes(b"ENSEMBLE-RELOCATED")
+    result = _completed_result(ensemble=_ensemble_section(str(ensemble_src)))
+    destination = tmp_path / "export"
+    export_experiment(result, destination)
+
+    relocated = tmp_path / "elsewhere"
+    shutil.copytree(destination, relocated)
+
+    meta = json.loads(
+        (relocated / metadata_filename(result)).read_text(encoding="utf-8")
+    )
+    bundle_ensemble = relocated / ensemble_filename(result)
+    assert bundle_ensemble.is_file()
+    assert meta["exported_files"][ensemble_filename(result)] == "ensemble"
+    assert bundle_ensemble.read_bytes() == b"ENSEMBLE-RELOCATED"
+    assert meta["ensemble_source_path"] == str(ensemble_src)
+
+
+def test_p2e_explain_payload_exported(tmp_path: Path) -> None:
+    """P2e: the stored explain payload → ``<run_id>_explain.json``."""
+    result = _completed_result(explanations=_explain_payload())
+    destination = tmp_path / "export"
+
+    export_experiment(result, destination)
+
+    expected = _expected_names(result) | {explain_json_filename(result)}
+    assert {p.name for p in destination.iterdir()} == expected
+    payload = json.loads(
+        (destination / explain_json_filename(result)).read_text(encoding="utf-8")
+    )
+    assert payload == _explain_payload()
+    # The file map lists the explain file with its role.
+    meta = json.loads(
+        (destination / metadata_filename(result)).read_text(encoding="utf-8")
+    )
+    assert meta["exported_files"][explain_json_filename(result)] == "explain_json"
+
+
+def test_n1e_missing_ensemble_artifact_clear_error(tmp_path: Path) -> None:
+    """N1e: a recorded but missing ensemble artifact → a clear error.
+
+    The ensemble section promises a loadable artifact (``ensemble_model()``
+    reads it), so a missing file is an ``ExportError`` — the same
+    contract as the model copy — and the destination keeps its previous
+    state (no partial bundle).
+    """
+    destination = tmp_path / "export"
+    previous = _completed_result(run_id=uuid.UUID(int=3))
+    export_experiment(previous, destination)
+    before = {p.name: p.read_bytes() for p in destination.iterdir()}
+
+    result = _completed_result(
+        ensemble=_ensemble_section(str(tmp_path / "gone_ensemble.pkl"))
+    )
+    with pytest.raises(ExportError, match="does not exist"):
+        export_experiment(result, destination)
+    # The previous bundle is intact, no leftovers.
+    assert {p.name: p.read_bytes() for p in destination.iterdir()} == before
+
+
+def test_n2e_legacy_result_without_new_fields_exports(tmp_path: Path) -> None:
+    """N2e: an old-format result (no explanations/ensemble) exports fine."""
+    result = _completed_result()
+    assert result.explanations is None
+    assert result.ensemble is None
+    destination = tmp_path / "export"
+    export_experiment(result, destination)
+    assert {p.name for p in destination.iterdir()} == _expected_names(result)
+    meta = json.loads(
+        (destination / metadata_filename(result)).read_text(encoding="utf-8")
+    )
+    assert meta["ensemble_source_path"] is None
+
+
+def test_b1e_ensemble_disabled_bundle_structure_unchanged(
+    tmp_path: Path,
+) -> None:
+    """B1e: no ensemble section → the bundle matches the legacy structure."""
+    result = _completed_result()
+    destination = tmp_path / "export"
+    export_experiment(result, destination)
+    assert {p.name for p in destination.iterdir()} == _expected_names(result)
+
+
+def test_b2e_no_explain_no_explain_file(tmp_path: Path) -> None:
+    """B2e: explain never invoked → no ``<run_id>_explain.json``."""
+    result = _completed_result()
+    destination = tmp_path / "export"
+    export_experiment(result, destination)
+    assert not (destination / explain_json_filename(result)).exists()
+
+
+def test_b3e_failed_run_with_and_without_ensemble_section(
+    tmp_path: Path,
+) -> None:
+    """B3e: a failed run exports correctly with and without the section.
+
+    The ensemble section is attached only after a successful artifact
+    save, so both states are legitimate export inputs.
+    """
+    # Without the section: the plain failed-run bundle.
+    failed = _failed_result()
+    d1 = tmp_path / "failed-plain"
+    export_experiment(failed, d1)
+    assert {p.name for p in d1.iterdir()} == _expected_names(failed)
+
+    # With the section (a run that failed AFTER the ensemble was saved):
+    # the artifact is exported, the metadata keeps the source path.
+    ensemble_src = tmp_path / "artifacts" / "failed_ensemble.pkl"
+    ensemble_src.parent.mkdir(parents=True)
+    ensemble_src.write_bytes(b"FAILED-RUN-ENSEMBLE")
+    failed_with = _failed_result(ensemble=_ensemble_section(str(ensemble_src)))
+    d2 = tmp_path / "failed-ensemble"
+    export_experiment(failed_with, d2)
+    expected = _expected_names(failed_with) | {ensemble_filename(failed_with)}
+    assert {p.name for p in d2.iterdir()} == expected
+    meta = json.loads((d2 / metadata_filename(failed_with)).read_text(encoding="utf-8"))
+    assert meta["status"] == "failed"
+    assert meta["ensemble_source_path"] == str(ensemble_src)
+
+
+def test_b4e_mid_swap_failure_with_ensemble_keeps_old_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4e: a mid-swap failure with the ensemble file → the old bundle intact.
+
+    An extension of the existing mid-swap scenario: the bundle now also
+    carries the ensemble artifact and the explain payload; the rollback
+    restores every previous file byte-exact and leaves no leftovers.
+    """
+    ensemble_src = tmp_path / "artifacts" / "model_ensemble.pkl"
+    ensemble_src.parent.mkdir(parents=True)
+    ensemble_src.write_bytes(b"OLD-ENSEMBLE")
+    result = _completed_result(
+        ensemble=_ensemble_section(str(ensemble_src)),
+        explanations=_explain_payload(),
+    )
+    destination = tmp_path / "export"
+    export_experiment(result, destination)
+    before = {p.name: p.read_bytes() for p in destination.iterdir()}
+    assert len(before) == 7  # the full bundle incl. ensemble + explain
+
+    real_replace = os.replace
+    swap_moves = 0
+
+    def _failing_move(src: Any, dst: Any, **kwargs: Any) -> None:
+        nonlocal swap_moves
+        if Path(dst).parent == destination:
+            swap_moves += 1
+            if swap_moves == 2:
+                swap_moves = -1000
+                raise OSError(5, "Input/output error")
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.experiment.export.os.replace",
+        _failing_move,
+    )
+    with pytest.raises(OSError, match="Input/output error"):
+        export_experiment(result, destination)
+    assert swap_moves < 0
+    # The previous bundle (including the ensemble copy) is fully restored.
+    assert {p.name: p.read_bytes() for p in destination.iterdir()} == before
+
+
+def test_ensemble_filename_suffix_rules() -> None:
+    """The ensemble file name follows the model suffix rules."""
+    result = _completed_result(ensemble=_ensemble_section("artifacts/ens.pkl"))
+    assert ensemble_filename(result) == f"{RUN_ID}_ensemble.pkl"
+    result = _completed_result(
+        ensemble=_ensemble_section("artifacts/model_ensemble.tar.gz")
+    )
+    assert ensemble_filename(result) == f"{RUN_ID}_ensemble.tar.gz"
+    # No section / no artifact path → no ensemble file name.
+    assert ensemble_filename(_completed_result()) is None
+    section = _ensemble_section("artifacts/ens.pkl")
+    del section["artifact_path"]
+    assert ensemble_filename(_completed_result(ensemble=section)) is None
+
+
+def test_facade_explain_stored_then_exported(tmp_path: Path) -> None:
+    """The facade explain→export chain (a lightweight integration check).
+
+    With a result injected (the same private attribute ``run()`` adopts)
+    carrying an explain payload, ``export()`` produces the bundle with
+    the ``<run_id>_explain.json`` file.
+    """
+    from configurable_automl_engine import AutoMLExperiment
+
+    experiment = AutoMLExperiment(
+        {"general": {"comparison_metric": "rmse"}}, _minimal_frame(), target="target"
+    )
+    result = _completed_result(explanations=_explain_payload())
+    experiment._result = result
+    destination = tmp_path / "bundle"
+    assert experiment.export(destination) == destination
+    expected = _expected_names(result) | {explain_json_filename(result)}
+    assert {p.name for p in destination.iterdir()} == expected
+    payload = json.loads(
+        (destination / explain_json_filename(result)).read_text(encoding="utf-8")
+    )
+    assert payload["method"] == "permutation"

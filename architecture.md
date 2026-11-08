@@ -106,17 +106,17 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters, object facade
-│       │   ├── ensemble.py                 # Experimental top-K ensemble core: select_top_k, compute_weights, EnsembleModel (save/load, report section)
-│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / ensemble_model / report / export / explain)
+│       │   ├── ensemble.py                 # Experimental top-K ensemble core: select_top_k, compute_weights, resolve_metric_direction (the shared public resolver), EnsembleModel (save/load, report section); EnsembleModelError is the module's base error
+│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / ensemble_model / report / export / explain); explain() stores its JSON-safe payload on the run result (the last call wins)
 │       │   ├── explain.py                  # Winner explainability: permutation importance, optional SHAP, Markdown rendering
-│       │   ├── export.py                   # export_experiment: the artifact bundle of a run into a directory (atomic two-phase swap, <run_id>_* names)
+│       │   ├── export.py                   # export_experiment: the artifact bundle of a run into a directory (atomic two-phase swap, <run_id>_* names; the model AND ensemble artifact copies, the stored explain payload, metadata with the artifact source paths)
 │       │   ├── leaderboard.py              # Leaderboard: the algorithm ranking table built from an ExperimentResult
 │       │   ├── reporting                   # Reporters: pure consumers of ExperimentResult (no engine, no mlflow imports)
 │       │   │   ├── base.py                # Reporter (generic ABC), CompositeReporter (several reporters in one call)
 │       │   │   ├── json_reporter.py       # JSONReporter: atomic full-snapshot JSON (model_dump, utf-8, overwrite)
-│       │   │   ├── markdown_reporter.py   # MarkdownReporter: metadata, outcome, honest scores, leaderboard, run details
+│       │   │   ├── markdown_reporter.py   # MarkdownReporter: metadata, outcome, honest scores, leaderboard, ensemble, stored explain payload, run details
 │       │   │   └── mlflow_reporter.py     # MLflowReporter (optional extra [mlflow]): the only component that knows about MLflow (lazy guarded import)
-│       │   ├── result.py                   # ExperimentResult / AlgorithmRun: the central serializable result model
+│       │   ├── result.py                   # ExperimentResult / AlgorithmRun: the central serializable result model (incl. the ensemble section and the stored explain payload)
 │       │   └── store.py                    # ExperimentStore: thread-safe run history, JSONL persist, damaged-line skip
 │       ├── training_engine                 # Layer 3: orchestration
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
@@ -132,7 +132,7 @@ before the first trial (`validate_target_for_transform`).
 │       │   │   └── sanity_gate.py         # general.sanity_gate (SanityGateCfg)
 │       │   ├── config_parser.py            # Façade: re-exports the config schema (the public import path)
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
-│       │   ├── ensemble_step.py            # The experimental top-K ensemble step: runs after the terminal select, never aborts the run
+│       │   ├── ensemble_step.py            # The experimental top-K ensemble step: runs after the terminal select, never aborts the run; reuses experiment.ensemble.resolve_metric_direction (the single shared direction resolver)
 │       │   ├── finalists.py                # Winner selection, finalists pool, training of the finalists
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
 │       │   ├── parallel_deadlines.py       # run_parallel: pure deadline policy (task timeout, queue budget)

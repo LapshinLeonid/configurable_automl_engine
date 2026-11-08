@@ -30,6 +30,7 @@ from configurable_automl_engine.experiment.ensemble import (
     EnsembleMember,
     EnsembleModel,
     compute_weights,
+    resolve_metric_direction,
     select_top_k,
 )
 
@@ -40,25 +41,6 @@ from .state import PhaseContext, PreparedData
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["build_ensemble_from_context", "top_k_from_leaderboard"]
-
-
-def _resolve_direction(
-    direction: MetricDirection | str,
-) -> MetricDirection:
-    """Resolve the comparison-metric direction (a local mirror).
-
-    ``experiment.ensemble`` keeps the single implementation; this mirror
-    avoids importing the private helper across the package boundary (the
-    ``ensemble`` module exports only its public API).
-    """
-    if isinstance(direction, MetricDirection):
-        return direction
-    text = str(direction).strip().lower()
-    if text == MetricDirection.minimize.value:
-        return MetricDirection.minimize
-    if text == MetricDirection.maximize.value:
-        return MetricDirection.maximize
-    return MetricDirection(user_direction(text))
 
 
 def top_k_from_leaderboard(
@@ -120,7 +102,7 @@ def top_k_from_leaderboard(
             selected = [ctx.winner_algo]
         else:
             winner_score = user_scores[ctx.winner_algo]
-            resolved = _resolve_direction(metric_user)
+            resolved = resolve_metric_direction(metric_user)
             if resolved is MetricDirection.maximize:
                 # Descending order: the first member with a strictly
                 # smaller score is the winner's insertion point.

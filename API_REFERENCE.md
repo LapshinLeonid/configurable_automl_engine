@@ -825,6 +825,26 @@ general:
 A failure of the ensemble step never aborts the run: the reason is logged
 and the result simply carries no `ensemble` section.
 
+**Artifacts and export.** The serialized ensemble is written next to the
+winner artifact (`<model_stem>_ensemble.<ext>`, the same serialization
+format as the model); the path is recorded in the `ensemble` section
+(`artifact_path`) and read by `AutoMLExperiment.ensemble_model()` — the
+single source of truth. `export_experiment` copies the ensemble artifact
+into the bundle as `<run_id>_ensemble.<ext>` (byte-exact, the original is
+never touched) and records the source path in the metadata
+(`ensemble_source_path`); the bundle-internal path lives ONLY in the
+metadata — the result snapshot's `artifact_path` is never rewritten, so
+after relocating the bundle the ensemble is restored by loading the copy
+under the same `run_id` prefix.
+
+**Implementation note.** The direction resolution (the enum / direction
+value / metric name → `MetricDirection`) lives in the public
+`experiment.ensemble.resolve_metric_direction` and is shared by the
+experiment core and the training-engine step — a single implementation,
+no semantics drift; the module's own usage errors (an invalid direction,
+a foreign or unsupported artifact on load) raise the base
+`EnsembleModelError`, the data-validation errors stay `ValueError`.
+
 ## Pipeline steps (`phases`)
 
 `general.phases` is a list of steps executed in order (see
@@ -1768,6 +1788,8 @@ with mlflow.start_run(run_name="my-experiment"):
 
 **Возврат.** Структурированный результат: `PermutationImportanceResult` (отсортированные по убыванию `importances` — `FeatureImportance(feature, importance_mean, importance_std)`, `baseline_score`, `metric_user`, `n_rows`, `n_features`, `data_semantics`) или `ShapFeatureImportance` (`importances`, `post_preprocessing`, `baseline_prediction` — среднее предсказание). С `markdown=True` (по умолчанию) — кортеж `(importance, str)` со второй координатой — готовая Markdown-секция (`## Feature importance (...)` с таблицей и строкой baseline) для встраивания в отчёт.
 
+**Сохранение результата на прогоне.** Каждый успешный вызов `explain()` сохраняет JSON-safe payload результата в `ExperimentResult.explanations` (метод, по-фичевые важности, baseline и метаданные вычисления) — последний вызов побеждает: повторные вызовы с разными `method` (`permutation`/`shap`) или другим бюджетом перезаписывают сохранённый payload. Значения — обычные числа (`float`, без numpy-типов), payload проходит JSON-roundtrip и попадает в отчёты (`MarkdownReporter` рендерит секцию важностей) и в экспорт-бандл (`<run_id>_explain.json`). Пока `explain()` не вызывался, поле равно `None`; сбой сохранения (например, на вручную модифицированном результате, отклонившем payload) логируется WARNING'ом и не маскирует исход вызова.
+
 ```python
 experiment = AutoMLExperiment(config, df, target="target")
 experiment.run()
@@ -1891,18 +1913,22 @@ with warnings.catch_warnings():
 | Файл | Содержимое |
 |------|-----------|
 | `<run_id>_model.<ext>` | Артефакт модели, **скопированный** с записанного пути (оригинал не трогается, копия байт-в-байт, расширение сохраняется как маркер формата сериализации). |
+| `<run_id>_ensemble.<ext>` | Артефакт экспериментального top-K ансамбля (см. [`general.ensemble`](#experimental-ensemble-generalensemble)), **скопированный** с пути `artifact_path` из секции `ensemble` результата — тот же байт-в-байт контракт, что и у копии модели. Файл появляется в бандле только когда прогон записал секцию с артефактом (фича выключена, best-effort деградация или несохранённый артефакт — бандл без ensemble-файла, без ошибок). |
+| `<run_id>_explain.json` | JSON-safe payload последнего вызова `explain()` (см. [`explain()`](#explain--интерпретируемость-лучшей-модели)): метод, важности признаков и метаданные вычисления. Отсутствует, если `explain()` на прогоне не вызывался. |
 | `<run_id>_leaderboard.json` | Рейтинговая таблица: отрендеренная таблица + структурированные записи. |
 | `<run_id>_leaderboard.md` | Таблица рейтинга plain-текстом. |
-| `<run_id>_report.md` | Полный Markdown-отчёт (`MarkdownReporter`). |
+| `<run_id>_report.md` | Полный Markdown-отчёт (`MarkdownReporter`); при наличии сохранённого payload `explain()` — секция важностей признаков. |
 | `<run_id>_result.json` | Полный JSON-снапшот результата (`JSONReporter`). |
-| `<run_id>_metadata.json` | Метаданные прогона: id, метка, статус (и причина отказа), тайминги, версия движка, победитель, исходный путь артефакта и карта экспортированных файлов. |
+| `<run_id>_metadata.json` | Метаданные прогона: id, метка, статус (и причина отказа), тайминги, версия движка, победитель, исходные пути артефактов модели и ансамбля (`model_source_path` / `ensemble_source_path`) и карта экспортированных файлов. |
+
+**Контракт read-only по отношению к результату.** Экспорт никогда не мутирует снапшот результата: путь копии ансамбля в бандле (`<run_id>_ensemble.<ext>`) записывается **только** в metadata-файл (карта `exported_files` + `ensemble_source_path`); поле `artifact_path` в секции `ensemble` внутри `<run_id>_result.json` продолжает указывать на исходное расположение. Оригинальные файлы (модель, ансамбль) не переименовываются и не перезаписываются; после переноса бандла на другую машину ансамбль восстанавливается загрузкой копии из бандла (файл с тем же префиксом `run_id`).
 
 **Политики:**
 
 * несуществующий каталог назначения создаётся рекурсивно; существующий бандл того же прогона перезаписывается (последний экспорт побеждает; посторонние файлы в каталоге не трогаются);
 * атомарность: бандл собирается во временном каталоге внутри назначения и переносится на место двухфазным swap'ом (сначала перезаписываемые файлы убираются в `.<name>.export-backup`, затем новые файлы переименовываются на освободившиеся имена — каждый перенос атомарный `os.replace`). Сбой в середине (ошибка сериализации, отсутствующий артефакт) никогда не оставляет частичный бандл: предыдущий бандл остаётся нетронутым (или на свежем экспорте не появляется вовсе), временные остатки всегда удаляются; восстановление после сбоя — best-effort и не прерывается на первой ошибке;
-* путь назначения существует, но не каталог → `ExportError`; записанный путь артефакта модели отсутствует на диске → `ExportError` с именем файла; нет прав на запись → `OSError` файловой системы до производства каких-либо артефактов;
-* путь артефакта может отсутствовать (провалившийся прогон) — файл модели просто не экспортируется; провалившийся эксперимент (`status: "failed"`) — легитимный вход: его статус и причина отказа попадают в metadata-файл. Экспорт до `run()` отклоняется фасадом с `ExperimentNotRunError`.
+* путь назначения существует, но не каталог → `ExportError`; записанный путь артефакта модели отсутствует на диске → `ExportError` с именем файла (тот же контракт для артефакта ансамбля, записанного в секции `ensemble`: секция обещает загружаемый артефакт, его отсутствие на диске — `ExportError`, а не тихая дыра в бандле); нет прав на запись → `OSError` файловой системы до производства каких-либо артефактов;
+* путь артефакта может отсутствовать (провалившийся прогон) — файл модели просто не экспортируется; провалившийся эксперимент (`status: "failed"`) — легитимный вход: его статус и причина отказа попадают в metadata-файл (ансамбль прикрепляется к результату только при успешном сохранении артефакта, поэтому провалившийся прогон может как иметь секцию `ensemble` с артефактом, так и не иметь её — оба состояния экспортируются корректно). Экспорт до `run()` отклоняется фасадом с `ExperimentNotRunError`; старый формат результата без полей `explanations`/`ensemble` экспортируется без ошибок.
 
 ```python
 experiment.run()

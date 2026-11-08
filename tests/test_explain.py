@@ -34,6 +34,8 @@ Covered scenarios (positive / negative / boundary):
 from __future__ import annotations
 
 import importlib.util
+import json
+import logging
 import sys
 import types
 from typing import Any
@@ -540,17 +542,13 @@ def test_b6_numpy_target_sampling_stays_aligned(tmp_path: Any) -> None:
     importance_series = explain_permutation_importance(
         trainer, X, pd.Series(y), result, n_repeats=2, max_rows=10
     )
-    assert importance_series.baseline_score == pytest.approx(
-        importance.baseline_score
-    )
+    assert importance_series.baseline_score == pytest.approx(importance.baseline_score)
 
     # A list target — the same alignment guarantee.
     importance_list = explain_permutation_importance(
         trainer, X, list(y), result, n_repeats=2, max_rows=10
     )
-    assert importance_list.baseline_score == pytest.approx(
-        importance.baseline_score
-    )
+    assert importance_list.baseline_score == pytest.approx(importance.baseline_score)
 
     # A non-Range frame index does not change the pairs either.
     X_labeled = X.copy()
@@ -558,9 +556,7 @@ def test_b6_numpy_target_sampling_stays_aligned(tmp_path: Any) -> None:
     importance_labeled = explain_permutation_importance(
         trainer, X_labeled, y, result, n_repeats=2, max_rows=10
     )
-    assert importance_labeled.baseline_score == pytest.approx(
-        importance.baseline_score
-    )
+    assert importance_labeled.baseline_score == pytest.approx(importance.baseline_score)
 
 
 def test_b7_oversampling_pipeline_transform_prefix() -> None:
@@ -839,9 +835,7 @@ def test_b7_dummy_shap_with_selector_model_width(tmp_path: Any) -> None:
 
         def __call__(self, data: Any) -> Any:
             seen["data_width"] = data.shape[1]
-            matrix = np.full(
-                (data.shape[0], data.shape[1]), 0.8, dtype=float
-            )
+            matrix = np.full((data.shape[0], data.shape[1]), 0.8, dtype=float)
             return types.SimpleNamespace(values=matrix)
 
     dummy_shap = types.ModuleType("shap")
@@ -941,3 +935,89 @@ def test_render_importance_markdown_empty_and_cap() -> None:
         max_rows=0,
     )
     assert "The table is omitted" in no_table
+
+
+# ─────────────── explain result storage on the run (issue #181) ─────────────── #
+
+
+def test_p5_explain_result_stored_on_run(tmp_path: Any) -> None:
+    """P5: explain() stores the JSON-safe payload on the run result."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+    importance, _section = experiment.explain(n_repeats=1)
+    result = experiment.result
+    assert result is not None
+    payload = result.explanations
+    assert payload is not None
+    assert payload["method"] == "permutation"
+    assert payload["metric_user"] == "rmse"
+    assert payload["data_semantics"] == "train"
+    assert payload["n_features"] == len(importance.importances)
+    features = [row["feature"] for row in payload["importances"]]
+    assert features == [item.feature for item in importance.importances]
+    means = [row["importance_mean"] for row in payload["importances"]]
+    assert means == [item.importance_mean for item in importance.importances]
+    # The payload survives the JSON round-trip (the export contract).
+    restored = ExperimentResult.from_json(result.to_json())
+    assert restored.explanations == payload
+
+
+def test_p5_explain_last_call_wins(tmp_path: Any) -> None:
+    """P5: a repeated explain() (the same method, different budget)
+    overwrites the stored payload — the last call wins."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+    first, _ = experiment.explain(n_repeats=1)
+    experiment.explain(n_repeats=2, markdown=False)
+    result = experiment.result
+    assert result is not None
+    payload = result.explanations
+    assert payload is not None
+    features = [row["feature"] for row in payload["importances"]]
+    assert features == [item.feature for item in first.importances]
+    means = [row["importance_mean"] for row in payload["importances"]]
+    assert means == [item.importance_mean for item in first.importances]
+
+
+def test_b10_no_explain_explanations_is_none(tmp_path: Any) -> None:
+    """B10: without explain() the run carries no explanations payload."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+    result = experiment.result
+    assert result is not None
+    assert result.explanations is None
+
+
+def test_b10_explanations_json_safe_no_numpy(tmp_path: Any) -> None:
+    """B10: the stored payload is plain JSON types (no numpy scalars)."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+    experiment.explain(n_repeats=1, markdown=False)
+    result = experiment.result
+    assert result is not None
+    payload = result.explanations
+    assert payload is not None
+    text = json.dumps(payload, allow_nan=False)  # must not raise
+    assert "numpy" not in text
+
+
+def test_p5_explain_storage_failure_does_not_mask_result(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """P5: a storage failure is logged as a warning and does not mask
+    the explain outcome (the importance is still returned)."""
+    from configurable_automl_engine.experiment import experiment as exp_module
+
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+
+    def _reject(value: Any) -> None:
+        raise ValueError("rejected by a hand-modified result validator")
+
+    monkeypatch.setattr(exp_module, "_explanations_payload", _reject)
+    with caplog.at_level(logging.WARNING, logger=exp_module._LOG.name):
+        importance, _section = experiment.explain(n_repeats=1)
+    assert importance.importances  # the outcome is not masked
+    assert "could not be stored" in caplog.text

@@ -52,7 +52,9 @@ from configurable_automl_engine.common.definitions import (
 from configurable_automl_engine.experiment.ensemble import (
     EnsembleMember,
     EnsembleModel,
+    EnsembleModelError,
     compute_weights,
+    resolve_metric_direction,
     select_top_k,
     validate_ensemble_score,
 )
@@ -503,13 +505,16 @@ def test_b3_serialization_round_trip(tmp_path: Any) -> None:
     restored = EnsembleModel.load(tmp_path / "ens.joblib")
     assert restored.predict(frame) == pytest.approx(ens.predict(frame))
 
-    # A foreign pickle (a plain dict) is rejected with a clear error.
+    # A foreign pickle (a plain dict) is rejected with a clear error
+    # (EnsembleModelError — the module's base error; it is NOT a
+    # ValueError anymore, so a broad ValueError catch cannot mistake a
+    # foreign artifact for a data-validation failure).
     foreign = tmp_path / "foreign.pkl"
     with open(foreign, "wb") as fh:
         import pickle
 
         pickle.dump({"not": "an ensemble"}, fh)
-    with pytest.raises(ValueError, match="not an ensemble artifact"):
+    with pytest.raises(EnsembleModelError, match="not an ensemble artifact"):
         EnsembleModel.load(foreign)
 
     # A missing file raises FileNotFoundError.
@@ -580,3 +585,76 @@ def test_b_disabled_ensemble_no_section_no_artifact(tmp_path: Any) -> None:
     assert result.ensemble is None
     with pytest.raises(RuntimeError, match="No ensemble available"):
         experiment.ensemble_model()
+
+
+# ────────────────── technical debt of issue #181 ────────────────── #
+
+
+def test_resolve_metric_direction_is_public_single_implementation() -> None:
+    """The public direction resolver is the single implementation.
+
+    The training-engine step and the experiment core share the same
+    helper (no private mirror); the semantics: an enum passes through,
+    a direction value and a metric name resolve, an unknown string is
+    an ``EnsembleModelError``.
+    """
+    from configurable_automl_engine.training_engine import ensemble_step
+
+    assert (
+        resolve_metric_direction(MetricDirection.minimize) is MetricDirection.minimize
+    )
+    assert resolve_metric_direction("maximize") is MetricDirection.maximize
+    assert resolve_metric_direction("rmse") is MetricDirection.minimize
+    assert resolve_metric_direction("r2") is MetricDirection.maximize
+    with pytest.raises(EnsembleModelError, match="Invalid ensemble metric direction"):
+        resolve_metric_direction("magic")
+    # The engine step module re-exports the same function object (no
+    # drift between the two call sites is possible).
+    assert ensemble_step.resolve_metric_direction is resolve_metric_direction
+
+
+def test_invalid_direction_was_value_error_is_ensemble_error() -> None:
+    """The invalid-direction error is the module's base error type."""
+    with pytest.raises(EnsembleModelError):
+        compute_weights({"a": 1.0}, "magic")
+    with pytest.raises(EnsembleModelError):
+        select_top_k({"a": 1.0}, 1, "magic")
+
+
+def test_b11_ensemble_bundle_relocation_predicts(tmp_path: Any) -> None:
+    """B11: the exported ensemble bundle restores a working model.
+
+    The full round-trip: a run with the ensemble → the export bundle
+    carries the ensemble artifact → moving the bundle elsewhere →
+    loading the ensemble FROM THE BUNDLE COPY predicts exactly like the
+    original model (the file map in the metadata points at the bundle
+    file name).
+    """
+    import json
+    import shutil as _shutil
+
+    from configurable_automl_engine import AutoMLExperiment
+    from configurable_automl_engine.experiment.export import (
+        ensemble_filename,
+        export_experiment,
+        metadata_filename,
+    )
+
+    experiment = AutoMLExperiment(
+        _engine_config(tmp_path, k=5), _small_df(), target="target"
+    )
+    result = experiment.run()
+    assert result.ensemble is not None
+    model = experiment.ensemble_model()
+
+    bundle = tmp_path / "bundle"
+    export_experiment(result, bundle)
+    assert (bundle / ensemble_filename(result)).is_file()
+    meta = json.loads((bundle / metadata_filename(result)).read_text(encoding="utf-8"))
+    assert meta["exported_files"][ensemble_filename(result)] == "ensemble"
+
+    relocated = tmp_path / "relocated"
+    _shutil.copytree(bundle, relocated)
+    restored = EnsembleModel.load(relocated / ensemble_filename(result))
+    frame = _small_df()[["f1", "f2"]]
+    assert restored.predict(frame) == pytest.approx(model.predict(frame))

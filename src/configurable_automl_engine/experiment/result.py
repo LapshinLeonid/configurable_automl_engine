@@ -290,6 +290,14 @@ class ExperimentResult(_ResultModel):
             weight), the effective size, the weight method and the
             ensemble artifact path (a JSON-serializable mapping; ``None``
             when the ensemble was not built).
+        explanations: The JSON-safe payload of the last ``explain()``
+            call of the run (the facade stores the result of every
+            invocation, the last call wins) or ``None`` when explain was
+            never invoked. The payload is a plain mapping produced by
+            the explain component (``method``, the per-feature
+            importances and the run metadata of the computation); numpy
+            values must be normalized before the assignment (the
+            facade does it).
         oof_score: The comparison metric on the final pipeline's pooled OOF
             predictions (optimistic, not an independent estimate).
         holdout_score: The honest out-of-sample estimate on the reserved
@@ -331,6 +339,7 @@ class ExperimentResult(_ResultModel):
     sanity_gate: dict[str, Any] | None = None
     complexity_guard: dict[str, Any] | None = None
     ensemble: dict[str, Any] | None = None
+    explanations: dict[str, Any] | None = None
     oof_score: ScoreValueOrNone = None
     holdout_score: ScoreValueOrNone = None
     bbc_score: ScoreValueOrNone = None
@@ -379,7 +388,7 @@ class ExperimentResult(_ResultModel):
         _check_json_safe(value, "winner_params")
         return value
 
-    @field_validator("sanity_gate", "complexity_guard", "ensemble")
+    @field_validator("sanity_gate", "complexity_guard", "ensemble", "explanations")
     @classmethod
     def _report_sections_json_safe(
         cls, value: dict[str, Any] | None

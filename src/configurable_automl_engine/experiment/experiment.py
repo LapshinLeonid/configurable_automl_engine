@@ -111,6 +111,56 @@ _LOG = logging.getLogger(__name__)
 DEFAULT_REPORT_JSON_NAME = "experiment_report.json"
 
 
+def _explanations_payload(
+    method: str,
+    importance: PermutationImportanceResult | ShapFeatureImportance,
+) -> dict[str, Any]:
+    """Serialize one explain result into the JSON-safe run payload.
+
+    The payload is the value of ``ExperimentResult.explanations``: a
+    plain mapping of scalars and lists (the importances as
+    ``feature → importance`` records), JSON-safe by construction
+    (``FeatureImportance`` values are rounded floats). The payload
+    records the method and the metadata of the computation, so the
+    exported ``<run_id>_explain.json`` file is self-describing without
+    importing the engine.
+
+    Returns:
+        dict[str, Any]: The JSON-serializable explain payload.
+    """
+    importances = [
+        {
+            "feature": item.feature,
+            "importance_mean": item.importance_mean,
+            **(
+                {"importance_std": item.importance_std}
+                if item.importance_std is not None
+                else {}
+            ),
+        }
+        for item in importance.importances
+    ]
+    payload: dict[str, Any] = {"method": method, "importances": importances}
+    if isinstance(importance, PermutationImportanceResult):
+        payload.update(
+            {
+                "baseline_score": importance.baseline_score,
+                "metric_user": importance.metric_user,
+                "n_rows": importance.n_rows,
+                "n_features": importance.n_features,
+                "data_semantics": importance.data_semantics,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "post_preprocessing": importance.post_preprocessing,
+                "baseline_prediction": importance.baseline_prediction,
+            }
+        )
+    return payload
+
+
 class ExperimentNotRunError(RuntimeError):
     """An experiment method was called before :meth:`AutoMLExperiment.run`.
 
@@ -480,15 +530,17 @@ class AutoMLExperiment:
 
         The export is delegated to
         :func:`configurable_automl_engine.experiment.export.export_experiment`
-        (the T11 component): the model artifact (a byte-exact copy; the
-        original file is never touched), the leaderboard (JSON and
-        Markdown), the full Markdown report, the JSON result snapshot
+        (the T11 component): the model artifact and (when the run built
+        one) the ensemble artifact — both byte-exact copies; the
+        originals are never touched — the leaderboard (JSON and
+        Markdown), the full Markdown report, the JSON result snapshot,
+        the explain payload (when ``explain()`` was invoked on the run)
         and the run metadata (identity, status, timings, engine
-        version, the exported-file map) — every file prefixed with the
-        ``run_id``. Missing destination directories are created
-        recursively; an existing bundle of the same run is overwritten;
-        the bundle is assembled atomically (a failure never leaves a
-        partial export).
+        version, the artifact source paths, the exported-file map) —
+        every file prefixed with the ``run_id``. Missing destination
+        directories are created recursively; an existing bundle of the
+        same run is overwritten; the bundle is assembled atomically (a
+        failure never leaves a partial export).
 
         Args:
             directory: Destination directory of the export bundle.
@@ -498,7 +550,8 @@ class AutoMLExperiment:
 
         Raises:
             ExportError: The destination exists but is not a directory,
-                or the recorded model artifact is missing on disk.
+                or a recorded model/ensemble artifact is missing on
+                disk.
             OSError: The destination is not writable.
             ExperimentNotRunError: The experiment has not been run yet.
         """
@@ -573,6 +626,14 @@ class AutoMLExperiment:
                 the permutation importance, the data is empty or has no
                 feature columns, an unknown ``method`` was passed, or
                 SHAP was requested without the ``[shap]`` extra.
+
+        The result of every successful call is stored on the run result
+        (``ExperimentResult.explanations``, JSON-safe; the last call
+        wins — repeated calls with different methods overwrite each
+        other), so the importances travel with the result into the
+        reports and the export bundle (``<run_id>_explain.json``). The
+        storage failure (a hand-modified result rejecting the payload)
+        is logged as a warning and never masks the explain outcome.
         """
         result = self._require_result()
         method_key = method.lower().strip()
@@ -606,6 +667,17 @@ class AutoMLExperiment:
                 result,
                 n_repeats=n_repeats,
                 max_rows=max_rows,
+            )
+        # Store the (JSON-safe) payload on the run result: the last call
+        # wins. A validation failure of a hand-modified result must not
+        # mask the explain outcome.
+        try:
+            result.explanations = _explanations_payload(method_key, importance)
+        except Exception as err:  # noqa: BLE001 — storage must not mask the result
+            _LOG.warning(
+                "The explain result of run %s could not be stored on the result: %s",
+                result.run_id,
+                err,
             )
         if not markdown:
             return importance

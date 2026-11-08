@@ -38,6 +38,11 @@ Documented contract and limitations:
   the documented memory cost of ensembling;
 * a missing predictor for a selected member is an error (``ValueError``):
   a silently degraded ensemble would report numbers it cannot produce.
+
+Error hierarchy: :class:`EnsembleModelError` is the module's base error
+for its own usage failures (an invalid metric direction, a foreign or
+unsupported artifact on load); the data-validation errors stay
+``ValueError`` so the engine callers can keep catching them.
 """
 
 from __future__ import annotations
@@ -71,6 +76,7 @@ __all__ = [
     "EnsembleModel",
     "EnsembleModelError",
     "compute_weights",
+    "resolve_metric_direction",
     "select_top_k",
     "validate_ensemble_score",
 ]
@@ -92,7 +98,13 @@ _MIN_SCORE_EPS = 1e-12
 
 
 class EnsembleModelError(Exception):
-    """Base error of the ensemble module."""
+    """Base error of the ensemble module.
+
+    The module raises this base class for its own usage errors (an
+    invalid metric direction, a foreign artifact on load, ...);
+    ``ValueError`` keeps the data-validation errors (an invalid member
+    score, weights, predictors) that the engine callers catch.
+    """
 
 
 def validate_ensemble_score(score: Any) -> float:
@@ -144,14 +156,24 @@ def _normalize(raw: Mapping[str, float]) -> dict[str, float]:
     return {name: weight / total for name, weight in raw.items()}
 
 
-def _resolve_direction(direction: MetricDirection | str) -> MetricDirection:
-    """Resolve a direction argument: an enum value, or a metric name.
+def resolve_metric_direction(direction: MetricDirection | str) -> MetricDirection:
+    """Resolve a metric-direction argument: an enum value, or a metric name.
 
+    The single, public direction-resolution helper of the ensemble
+    components (the experiment core and the training-engine step both
+    consume it, so the semantics cannot drift between the two copies).
     A plain string is accepted in two forms: the direction value itself
     (``"minimize"`` / ``"maximize"``) or the user-facing metric name
     (``"rmse"``, ``"r2"``, ...), resolved through
     ``common.metrics.user_direction`` — so the engine can pass
     ``prepared.metric_user`` without a pre-resolution step.
+
+    Args:
+        direction: A ``MetricDirection`` or a plain string (a direction
+            value or a user-facing metric name).
+
+    Returns:
+        MetricDirection: The resolved direction.
 
     Raises:
         ValueError: The string is neither a direction value nor a
@@ -167,10 +189,15 @@ def _resolve_direction(direction: MetricDirection | str) -> MetricDirection:
     try:
         return MetricDirection(user_direction(text))
     except ValueError:
-        raise ValueError(
+        raise EnsembleModelError(
             f"Invalid ensemble metric direction {direction!r}: expected "
             "'minimize'/'maximize' or a resolvable metric name"
         ) from None
+
+
+def _resolve_direction(direction: MetricDirection | str) -> MetricDirection:
+    """Backward-compatible alias of :func:`resolve_metric_direction`."""
+    return resolve_metric_direction(direction)
 
 
 def compute_weights(
@@ -542,22 +569,22 @@ class EnsembleModel:
     ) -> EnsembleModel:
         """Load a serialized ensemble (the :meth:`save` inverse).
 
-        The format is auto-detected from the file extension with a
-        joblib-then-pickle fallback (the same contract as the trainer
-        artifacts) unless ``fmt`` is given explicitly.
+            The format is auto-detected from the file extension with a
+            joblib-then-pickle fallback (the same contract as the trainer
+            artifacts) unless ``fmt`` is given explicitly.
 
-        Args:
-            path: The artifact path.
-            fmt: The explicit serialization format; ``None`` —
-                auto-detection.
+            Args:
+                path: The artifact path.
+                fmt: The explicit serialization format; ``None`` —
+                    auto-detection.
 
         Returns:
             EnsembleModel: The restored ensemble.
 
         Raises:
             FileNotFoundError: The artifact file does not exist.
-            ValueError: The file is not an ensemble artifact (the marker
-                key is missing) or its payload version is unsupported.
+            EnsembleModelError: The file is not an ensemble artifact (the
+                marker key is missing) or its payload version is unsupported.
         """
         resolved_path = Path(path)
         last_error: Exception | None = None
@@ -570,14 +597,14 @@ class EnsembleModel:
                 last_error = err
                 continue
             if not isinstance(payload, dict) or ENSEMBLE_ARTIFACT_KEY not in payload:
-                raise ValueError(
+                raise EnsembleModelError(
                     f"{resolved_path} is not an ensemble artifact: the "
                     f"payload does not carry the {ENSEMBLE_ARTIFACT_KEY!r} "
                     "marker (was it saved by EnsembleModel.save?)"
                 )
             version = payload.get("version")
             if version != ENSEMBLE_ARTIFACT_VERSION:
-                raise ValueError(
+                raise EnsembleModelError(
                     f"Unsupported ensemble artifact version {version!r} "
                     f"in {resolved_path} (expected {ENSEMBLE_ARTIFACT_VERSION})"
                 )
@@ -596,6 +623,6 @@ class EnsembleModel:
                 members=members,
                 predictors=payload["predictors"],
             )
-        raise ValueError(
+        raise EnsembleModelError(
             f"Could not load the ensemble artifact {resolved_path}: {last_error}"
         )

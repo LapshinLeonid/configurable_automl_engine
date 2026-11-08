@@ -19,6 +19,22 @@ one directory, and the repeated exports of one run):
   never touched, moved or renamed (it may be referenced by the recorded
   path), the copy is byte-exact and keeps the original extension (the
   serialization format marker);
+* ``<run_id>_ensemble.<ext>`` — the experimental top-K ensemble
+  artifact (the T10 component), **copied** from the path recorded in
+  the result's ``ensemble`` section (``artifact_path``), the same
+  byte-exact contract as the model copy; the original path is recorded
+  in the metadata (``ensemble_source_path``). The copy's bundle path is
+  recorded ONLY in the metadata file: the export never mutates the
+  result snapshot (``section['artifact_path']`` in
+  ``<run_id>_result.json`` keeps pointing at the original location —
+  the documented read-only contract of the exporter). The file is
+  exported only when the run recorded an ensemble with an artifact path
+  (the feature disabled, the best-effort degradation or a failed
+  ensemble save leave the bundle without it, without any error);
+* ``<run_id>_explain.json`` — the JSON-safe payload of the last
+  ``explain()`` call of the run (``ExperimentResult.explanations``:
+  the method, the per-feature importances, the computation metadata);
+  absent when explain was never invoked;
 * ``<run_id>_leaderboard.json`` — the algorithm ranking table (the T6
   component): the rendered table plus the structured entries;
 * ``<run_id>_leaderboard.md`` — the ranking table as plain text;
@@ -30,8 +46,8 @@ one directory, and the repeated exports of one run):
   the T7 component);
 * ``<run_id>_metadata.json`` — the run metadata: the run id, the label,
   the status (and the failure reason for a failed run), the timings,
-  the engine version, the winner, the source path of the model artifact
-  and the mapping of the exported files.
+  the engine version, the winner, the source paths of the model and
+  ensemble artifacts and the mapping of the exported files.
 
 Documented contract:
 
@@ -58,7 +74,11 @@ Documented contract:
   directory cannot even be created);
 * the model artifact path may be absent (a failed run) → the model file
   is simply not exported; a path recorded in the result but missing on
-  disk is an :class:`ExportError` naming the missing file;
+  disk is an :class:`ExportError` naming the missing file; the same
+  contract holds for the ensemble artifact recorded in the
+  ``ensemble`` section: the section promises a loadable artifact (the
+  facade's ``ensemble_model()`` reads it), so a missing ensemble file
+  is an :class:`ExportError` too;
 * the run label (and any other metadata text) never enters a file name
   directly: the names are built from the ``run_id`` only, so special
   characters in the label cannot break the export;
@@ -87,6 +107,8 @@ from configurable_automl_engine.experiment.result import ExperimentResult
 
 __all__ = [
     "ExportError",
+    "ensemble_filename",
+    "explain_json_filename",
     "export_experiment",
     "leaderboard_json_filename",
     "leaderboard_md_filename",
@@ -97,13 +119,17 @@ __all__ = [
 ]
 
 
-class ExportError(RuntimeError):
+class ExportError(Exception):
     """The export of the experiment bundle failed.
 
-    Raised when the destination exists but is not a directory, or the
-    model artifact recorded in the result is missing on disk. The
-    destination directory keeps its previous state on any failure: the
-    bundle is never left half-written.
+    Raised when the destination exists but is not a directory, or a
+    model/ensemble artifact recorded in the result is missing on disk.
+    The destination directory keeps its previous state on any failure:
+    the bundle is never left half-written.
+
+    The error is the package-level base error of the export module: it
+    is standalone (like ``ExperimentStoreError`` / ``MLflowReporterError``)
+    instead of being tied to the built-in exception hierarchy.
     """
 
 
@@ -126,6 +152,28 @@ def model_filename(result: ExperimentResult) -> str:
     """
     suffix = "".join(Path(result.model_path).suffixes) if result.model_path else ""
     return f"{_run_prefix(result)}_model{suffix or '.pkl'}"
+
+
+def ensemble_filename(result: ExperimentResult) -> str | None:
+    """The exported ensemble file name for ``result`` (``None`` without one).
+
+    The extension is inherited from the artifact path recorded in the
+    result's ``ensemble`` section (the serialization format marker),
+    following the same suffix rules as :func:`model_filename`. A run
+    without an ensemble section, without an ``artifact_path`` in it (the
+    feature disabled, the best-effort degradation) exports no ensemble
+    file.
+    """
+    artifact_path = (result.ensemble or {}).get("artifact_path")
+    if not artifact_path:
+        return None
+    suffix = "".join(Path(str(artifact_path)).suffixes)
+    return f"{_run_prefix(result)}_ensemble{suffix or '.pkl'}"
+
+
+def explain_json_filename(result: ExperimentResult) -> str:
+    """The exported explain payload (JSON) file name for ``result``."""
+    return f"{_run_prefix(result)}_explain.json"
 
 
 def leaderboard_json_filename(result: ExperimentResult) -> str:
@@ -193,7 +241,14 @@ def _leaderboard_payload(result: ExperimentResult) -> tuple[dict[str, Any], str]
 def _metadata_payload(
     result: ExperimentResult, exported_files: dict[str, str]
 ) -> dict[str, Any]:
-    """The run metadata payload: identity, status, timings, file map."""
+    """The run metadata payload: identity, status, timings, file map.
+
+    ``model_source_path`` / ``ensemble_source_path`` record the original
+    artifact locations outside the bundle (the export copies the files,
+    it never moves or rewrites them; the bundle-internal copies are
+    listed in ``exported_files``).
+    """
+    ensemble_artifact_path = (result.ensemble or {}).get("artifact_path")
     return {
         "run_id": str(result.run_id),
         "label": result.label,
@@ -207,6 +262,9 @@ def _metadata_payload(
         "winner": result.winner,
         "winner_score": result.winner_score,
         "model_source_path": result.model_path,
+        "ensemble_source_path": (
+            str(ensemble_artifact_path) if ensemble_artifact_path else None
+        ),
         "exported_files": exported_files,
     }
 
@@ -254,32 +312,74 @@ def _build_report_artifacts(
     return exported
 
 
-def _copy_model_artifact(result: ExperimentResult, bundle_dir: Path) -> str | None:
-    """Copy the recorded model artifact into ``bundle_dir``.
+def _copy_artifact(source: Path, bundle_dir: Path, name: str) -> str:
+    """Copy one recorded artifact into ``bundle_dir`` (byte-exact).
 
     The original artifact is never moved, renamed or otherwise touched:
     the export makes a byte-exact copy under the bundle file name.
 
+    Args:
+        source: The artifact path recorded in the result.
+        bundle_dir: The temporary bundle directory.
+        name: The bundle file name of the copy.
+
     Returns:
-        str | None: The exported file name, or ``None`` when the run
-            recorded no model path (a failed run without an artifact).
+        str: The exported file name (``name``).
 
     Raises:
         ExportError: The recorded artifact does not exist on disk (a
             clear error instead of a silent hole in the bundle).
         OSError: The copy failed (permissions, disk, ...).
     """
-    if not result.model_path:
-        return None
-    source = Path(result.model_path)
     if not source.is_file():
         raise ExportError(
-            "Cannot export the model artifact: the path recorded in the "
+            f"Cannot export the artifact {name}: the path recorded in the "
             f"result does not exist or is not a file: {source}"
         )
-    name = model_filename(result)
     shutil.copyfile(source, bundle_dir / name)
     return name
+
+
+def _copy_model_artifact(result: ExperimentResult, bundle_dir: Path) -> str | None:
+    """Copy the recorded model artifact into ``bundle_dir``.
+
+    See :func:`_copy_artifact` for the copy contract.
+
+    Returns:
+        str | None: The exported file name, or ``None`` when the run
+            recorded no model path (a failed run without an artifact).
+    """
+    if not result.model_path:
+        return None
+    return _copy_artifact(Path(result.model_path), bundle_dir, model_filename(result))
+
+
+def _copy_ensemble_artifact(result: ExperimentResult, bundle_dir: Path) -> str | None:
+    """Copy the recorded ensemble artifact into ``bundle_dir``.
+
+    The artifact path is read from the result's ``ensemble`` section
+    (``artifact_path``). The section in the result snapshot is never
+    mutated: the bundle path of the copy is recorded only in the
+    metadata file (the exporter is read-only with respect to the
+    result — the documented contract). A run without an ensemble
+    section or without an ``artifact_path`` (the feature disabled, the
+    best-effort degradation, a failed save before the section was
+    attached) exports no ensemble file.
+
+    Returns:
+        str | None: The exported file name, or ``None`` when the run
+            recorded no ensemble artifact.
+
+    Raises:
+        ExportError: The recorded artifact does not exist on disk.
+        OSError: The copy failed.
+    """
+    artifact_path = (result.ensemble or {}).get("artifact_path")
+    if not artifact_path:
+        return None
+    name = ensemble_filename(result)
+    assert name is not None  # narrow: artifact_path is non-empty here
+    return _copy_artifact(Path(str(artifact_path)), bundle_dir, name)
 
 
 def export_experiment(result: ExperimentResult, directory: str | Path) -> Path:
@@ -302,7 +402,7 @@ def export_experiment(result: ExperimentResult, directory: str | Path) -> Path:
 
     Raises:
         ExportError: The destination exists but is not a directory, or
-            the recorded model artifact is missing on disk.
+            a recorded model/ensemble artifact is missing on disk.
         OSError: The destination is not writable (the ``OSError`` of the
             filesystem propagates before any artifact is produced).
     """
@@ -319,11 +419,24 @@ def export_experiment(result: ExperimentResult, directory: str | Path) -> Path:
         # 1. The leaderboard / report artifacts (the in-memory payloads
         # first, so a serialization failure cannot leave partial files).
         exported = _build_report_artifacts(result, temp_dir)
-        # 2. The model copy (may raise ExportError for a missing source).
+        # 2. The explain payload (when the run recorded one).
+        if result.explanations:
+            explain_name = explain_json_filename(result)
+            (temp_dir / explain_name).write_text(
+                json.dumps(result.explanations, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            exported[explain_name] = "explain_json"
+        # 3. The model copy (may raise ExportError for a missing source).
         model_name = _copy_model_artifact(result, temp_dir)
         if model_name is not None:
             exported[model_name] = "model"
-        # 3. The metadata file closes the bundle (it records the final
+        # 4. The ensemble copy (may raise ExportError for a missing
+        # source — the section promises a loadable artifact).
+        ensemble_name = _copy_ensemble_artifact(result, temp_dir)
+        if ensemble_name is not None:
+            exported[ensemble_name] = "ensemble"
+        # 5. The metadata file closes the bundle (it records the final
         # exported-file map, including its own name).
         metadata_name = metadata_filename(result)
         exported[metadata_name] = "metadata"
@@ -333,7 +446,7 @@ def export_experiment(result: ExperimentResult, directory: str | Path) -> Path:
             ),
             encoding="utf-8",
         )
-        # 4. Move the finished bundle into place: every file swap is an
+        # 6. Move the finished bundle into place: every file swap is an
         # atomic rename; a failure in the middle is rolled back, so the
         # destination never keeps a half state.
         _swap_into_place(temp_dir, destination)
