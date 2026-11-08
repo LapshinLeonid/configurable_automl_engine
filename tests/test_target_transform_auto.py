@@ -352,8 +352,17 @@ def _holdout_row_index(df: pd.DataFrame, cfg: Config) -> list[int]:
     hold-out rows are exactly the row labels of ``prepared.holdout_y``.
     The caller must build ``cfg`` with the SAME ``general.random_state``
     it later passes to ``prepare_dataset``.
+
+    The probe runs on a DEEP COPY of ``cfg``: ``prepare_dataset`` resolves
+    ``target_transform: 'auto'`` by mutating ``cfg`` in place. The resolved
+    value does not change what the resolution itself computes (a concrete
+    method passes through unchanged), but keeping the caller's config
+    pristine makes the subsequent "poisoned" call a genuine ``auto``
+    resolution on its own decision sample — the tests assert on a real
+    end-to-end resolution, not on a value leaked from the probe.
     """
-    prepared = prepare_dataset(cfg, df.copy(), "target")
+    probe_cfg = cfg.model_copy(deep=True)
+    prepared = prepare_dataset(probe_cfg, df.copy(), "target")
     assert prepared.holdout_y is not None
     return [int(label) for label in prepared.holdout_y.index]
 
@@ -361,24 +370,35 @@ def _holdout_row_index(df: pd.DataFrame, cfg: Config) -> list[int]:
 def test_auto_decision_ignores_holdout_target_values() -> None:
     """The 'auto' decision is made on the TRAIN part of the outer split.
 
-    Extreme target values are placed into the rows that ``prepare_dataset``
-    reserves for the outer hold-out (the rows are located through the
-    public contract — the ``prepared.holdout_y`` labels of a probe call
-    with the same config): with ``target_transform: auto`` the resolved
-    method must stay ``none`` — the hold-out must not influence how the
-    pipeline is built (without the fix, the full-vector skewness would
-    exceed the threshold and ``log1p`` would be chosen).
+    The symmetric target is shifted positive first: the TRAIN part stays
+    symmetric (``|skew| < 1``) AND the whole vector keeps ``min(y) > -1``,
+    so a large positive poison in the hold-out rows makes the FULL vector
+    right-skewed (``|skew| > 1``) while remaining inside the ``log1p``
+    domain — under the pre-#143 regression (the auto decision on the FULL
+    vector) the resolved method would be ``log1p``, not ``none``, so the
+    assertion below really tracks the fix.
+
+    The hold-out rows are located through the public contract — the
+    ``prepared.holdout_y`` labels of a probe call with the same config
+    (the probe runs on a deep copy, see ``_holdout_row_index``). With
+    ``target_transform: auto`` the resolved method must stay ``none`` —
+    the hold-out must not influence how the pipeline is built.
     """
     df = _holdout_independence_df()
+    df["target"] = df["target"] + 10.0  # min(y) > -1: log1p stays in-domain
     cfg = Config.model_validate(
         _base_config(target_transform="auto", holdout_fraction=0.2)
     )
     holdout_idx = _holdout_row_index(df, cfg)
-    # Extreme values would flip the full-vector skewness decision to log1p.
+    # A large positive poison flips the full-vector skewness decision to
+    # log1p; the train part stays symmetric.
     df.loc[df.index[holdout_idx], "target"] = 1e6
 
+    train_part = df["target"].drop(df.index[holdout_idx])
+    assert float(sp_stats.skew(train_part, bias=False)) < 1.0
     full_skew = float(sp_stats.skew(df["target"], bias=False))
-    assert full_skew > 1.0  # the full vector IS skewed — the poison works
+    assert full_skew > 1.0  # the full vector IS right-skewed — the poison works
+    assert float(df["target"].min()) > -1.0  # log1p is a legal resolution
 
     prepare_dataset(cfg, df, "target")
     assert cfg.general.target_transform is TargetTransform.none

@@ -1016,7 +1016,12 @@ def test_p1e_ensemble_bundle_relocation_loads_by_metadata(
     ensemble_src = tmp_path / "artifacts" / "model_ensemble.joblib"
     ensemble_src.parent.mkdir(parents=True)
     ensemble_src.write_bytes(b"ENSEMBLE-RELOCATED")
-    result = _completed_result(ensemble=_ensemble_section(str(ensemble_src)))
+    model_src = tmp_path / "artifacts" / "model.pkl"
+    model_src.write_bytes(b"MODEL-BYTES")
+    result = _completed_result(
+        model_path=str(model_src),
+        ensemble=_ensemble_section(str(ensemble_src)),
+    )
     destination = tmp_path / "export"
     export_experiment(result, destination)
 
@@ -1066,8 +1071,12 @@ def test_n1e_missing_ensemble_artifact_clear_error(tmp_path: Path) -> None:
     export_experiment(previous, destination)
     before = {p.name: p.read_bytes() for p in destination.iterdir()}
 
+    model_src = tmp_path / "artifacts" / "model.pkl"
+    model_src.parent.mkdir(parents=True)
+    model_src.write_bytes(b"MODEL-BYTES")
     result = _completed_result(
-        ensemble=_ensemble_section(str(tmp_path / "gone_ensemble.pkl"))
+        model_path=str(model_src),
+        ensemble=_ensemble_section(str(tmp_path / "gone_ensemble.pkl")),
     )
     with pytest.raises(ExportError, match="does not exist"):
         export_experiment(result, destination)
@@ -1126,10 +1135,19 @@ def test_b3e_failed_run_with_and_without_ensemble_section(
     ensemble_src = tmp_path / "artifacts" / "failed_ensemble.pkl"
     ensemble_src.parent.mkdir(parents=True)
     ensemble_src.write_bytes(b"FAILED-RUN-ENSEMBLE")
-    failed_with = _failed_result(ensemble=_ensemble_section(str(ensemble_src)))
+    model_src = tmp_path / "artifacts" / "failed_model.pkl"
+    model_src.parent.mkdir(exist_ok=True)
+    model_src.write_bytes(b"FAILED-RUN-MODEL")
+    failed_with = _failed_result(
+        model_path=str(model_src),
+        ensemble=_ensemble_section(str(ensemble_src)),
+    )
     d2 = tmp_path / "failed-ensemble"
     export_experiment(failed_with, d2)
-    expected = _expected_names(failed_with) | {ensemble_filename(failed_with)}
+    expected = _expected_names(failed_with) | {
+        model_filename(failed_with),
+        ensemble_filename(failed_with),
+    }
     assert {p.name for p in d2.iterdir()} == expected
     meta = json.loads((d2 / metadata_filename(failed_with)).read_text(encoding="utf-8"))
     assert meta["status"] == "failed"
@@ -1148,14 +1166,17 @@ def test_b4e_mid_swap_failure_with_ensemble_keeps_old_bundle(
     ensemble_src = tmp_path / "artifacts" / "model_ensemble.pkl"
     ensemble_src.parent.mkdir(parents=True)
     ensemble_src.write_bytes(b"OLD-ENSEMBLE")
+    model_src = tmp_path / "artifacts" / "model.pkl"
+    model_src.write_bytes(b"MODEL-BYTES")
     result = _completed_result(
+        model_path=str(model_src),
         ensemble=_ensemble_section(str(ensemble_src)),
         explanations=_explain_payload(),
     )
     destination = tmp_path / "export"
     export_experiment(result, destination)
     before = {p.name: p.read_bytes() for p in destination.iterdir()}
-    assert len(before) == 7  # the full bundle incl. ensemble + explain
+    assert len(before) == 8  # the full bundle incl. model + ensemble + explain
 
     real_replace = os.replace
     swap_moves = 0
@@ -1182,17 +1203,25 @@ def test_b4e_mid_swap_failure_with_ensemble_keeps_old_bundle(
 
 def test_ensemble_filename_suffix_rules() -> None:
     """The ensemble file name follows the model suffix rules."""
-    result = _completed_result(ensemble=_ensemble_section("artifacts/ens.pkl"))
+    model_path = "artifacts/model.pkl"
+    result = _completed_result(
+        model_path=model_path,
+        ensemble=_ensemble_section("artifacts/ens.pkl"),
+    )
     assert ensemble_filename(result) == f"{RUN_ID}_ensemble.pkl"
     result = _completed_result(
-        ensemble=_ensemble_section("artifacts/model_ensemble.tar.gz")
+        model_path=model_path,
+        ensemble=_ensemble_section("artifacts/model_ensemble.tar.gz"),
     )
     assert ensemble_filename(result) == f"{RUN_ID}_ensemble.tar.gz"
     # No section / no artifact path → no ensemble file name.
     assert ensemble_filename(_completed_result()) is None
     section = _ensemble_section("artifacts/ens.pkl")
     del section["artifact_path"]
-    assert ensemble_filename(_completed_result(ensemble=section)) is None
+    assert (
+        ensemble_filename(_completed_result(model_path=model_path, ensemble=section))
+        is None
+    )
 
 
 def test_facade_explain_stored_then_exported(tmp_path: Path) -> None:

@@ -220,8 +220,8 @@ def _fallback_transform_for_full_y(
     non-finite or non-numeric ``full_y``: ``np.min`` of a vector with NaN
     returns NaN, so the comparison would silently report a violation and
     downgrade the method. To keep the helper predictable for any direct
-    caller, such input raises ``ValueError`` with a message reusing the
-    target-validation wording. In ``prepare_dataset`` this branch is
+    caller, such input raises ``ValueError`` describing the invalid full
+    target. In ``prepare_dataset`` this branch is
     unreachable — the target is validated before this point
     (``prepare_X_y`` → ``check_target_numeric``) — so the pipeline behavior
     is unchanged.
@@ -265,7 +265,8 @@ def _fallback_transform_for_full_y(
         return resolved
     _LOG.warning(
         "target_transform='%s' is violated by the FULL target "
-        "(min(y)=%s <= %s, an extreme value in the reserved outer hold-out): "
+        "(min(y)=%s <= %s, an extreme value outside the method domain, "
+        "in the train or the hold-out part): "
         "the final artifact is refit on all data, so the method is "
         "downgraded to 'yeo-johnson' (valid for any real y). The decision "
         "was made on the train part of the split only.",
