@@ -27,6 +27,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.datasets import make_regression
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils import Tags, TargetTags
 
 from configurable_automl_engine import tuner as hyperopt
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
@@ -1133,8 +1134,14 @@ class TestTunerObjective:
                 None,  # final best_model.fit(X, y)
             ]
             # The trial pipeline is cloned before fitting: the clone is the
-            # scripted mock itself.
+            # scripted mock itself. __sklearn_tags__ is required by
+            # sklearn's check_is_fitted (imblearn Pipeline.predict calls it
+            # on the final estimator) — the hold-out path predicts once to
+            # verify the finiteness of the predictions before scoring.
             mock_model.__sklearn_clone__ = lambda: mock_model
+            mock_model.__sklearn_tags__ = lambda: Tags(
+                estimator_type="regressor", target_tags=TargetTags(required=True)
+            )
             mock_create.return_value = mock_model
 
             # The scorer returns 0.85 on a successful call

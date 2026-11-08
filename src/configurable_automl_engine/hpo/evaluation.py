@@ -24,6 +24,7 @@ from sklearn.model_selection import (
 )
 from sklearn.utils import _safe_indexing
 
+from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     pooled_scorer_value,
@@ -116,6 +117,24 @@ def _warn_failed_fold(fold_idx: int, err: Exception, stage: str) -> None:
     )
 
 
+def _warn_invalid_fold_predictions(fold_idx: int, n_finite: int, n_rows: int) -> None:
+    """Log the penalty of a fold with non-finite predictions.
+
+    A fold that completed but returned NaN/Inf predictions is penalized like
+    a fold that raised: its rows cannot enter the pooled estimate, so the
+    trial's estimate becomes NaN — the ``cross_val_score(error_score=np.nan)``
+    contract (the worst possible outcome). The values are never replaced
+    with zeros: that would also distort the metrics."""
+    log.warning(
+        "Fold %d returned non-finite predictions (%d of %d rows are "
+        "NaN/Inf) — the fold is penalized: the trial estimate becomes NaN "
+        "(the worst outcome)",
+        fold_idx,
+        n_rows - n_finite,
+        n_rows,
+    )
+
+
 def _evaluate_with_intermediate_reports(
     trial: Trial,
     estimator: Any,
@@ -145,18 +164,18 @@ def _evaluate_with_intermediate_reports(
     computed over the predictions accumulated up to the current step (the
     pooled value over the covered rows), not the cumulative mean of per-fold
     values — each row enters the calculation exactly once, in the same way as
-    the final pooled estimate. Non-finite predictions of individual folds are
-    masked out of the pooled value (the same contract as
-    ``metrics.oof_rmse`` and the final ``ModelTrainer`` OOF channel): a model
-    that merely predicts NaN on some rows is NOT penalized — only its
-    non-finite rows are excluded from the estimate. A fold whose fit/predict
+    the final pooled estimate. A fold whose fit/predict
     raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
     ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
     its rows are
     marked with NaN (they cannot enter the pooled estimate) and a warning is
     logged — a failed fold becomes NaN, i.e. the worst possible outcome; it
     must not abort the trial, and a model that crashes on most folds must not
-    win over an honest one. Fatal exceptions (``MemoryError``,
+    win over an honest one. A fold that COMPLETES but returns non-finite
+    (NaN/Inf) predictions is penalized the same way (see
+    ``_fit_predict_fold``): the model was required to predict these rows, and
+    masking them out of the pooled value would reward a model that fails on
+    most of the validation rows. Fatal exceptions (``MemoryError``,
     ``RuntimeError``, ``InvalidDataError``) are NOT swallowed — they propagate
     to ``handle_failure`` so the circuit breaker stays active. If EVERY fold
     fails, a ``ValueError`` is raised — the "no valid result" contract. A
@@ -306,10 +325,29 @@ def _fit_predict_fold(
     reports of the surviving folds are still published, and a warning is
     logged (the ``cross_val_score(error_score=np.nan)`` contract: a failed
     fold became NaN — the worst possible outcome — and must not abort the
-    trial, but a model that crashes on most folds must not win over an honest
-    one). Fatal exception types (MemoryError / RuntimeError /
-    InvalidDataError) are NOT swallowed here — they propagate to
-    ``handle_failure`` and keep the circuit breaker active."""
+    trial, but a model that crashes on most folds must not win over an
+    honest one). A fold that COMPLETES but returns non-finite (NaN/Inf)
+    predictions is penalized the same way: the model was required to predict
+    these rows, and masking them out of the pooled estimate would let a
+    model that fails on most of the validation rows win with a good estimate
+    computed on the few rows it happened to predict (the values are never
+    replaced with zeros — that would also distort the metrics). Fatal
+    exception types (MemoryError / RuntimeError / InvalidDataError) are NOT
+    swallowed here — they propagate to ``handle_failure`` and keep the
+    circuit breaker active.
+
+    Args:
+        estimator: The estimator (possibly a pipeline) of the fold.
+        X_tr: The train features of the fold.
+        y_tr: The train target of the fold.
+        X_te: The test features of the fold.
+        fold_idx: The 1-based fold index (for the warning).
+
+    Returns:
+        tuple[Any, np.ndarray] | None: The fitted fold estimator and its
+            (finite) predictions, or ``None`` — the fold failed and is
+            penalized.
+    """
     try:
         fold_estimator = clone(estimator)
         fold_estimator.fit(X_tr, y_tr)
@@ -324,6 +362,16 @@ def _fit_predict_fold(
         raise
     except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
         _warn_failed_fold(fold_idx, err, "fit or predict")
+        return None
+    # The fold's test rows are rows the model was REQUIRED to predict: a
+    # non-finite prediction is a quality defect of the model (not a coverage
+    # gap), so the fold is penalized exactly like a fold that raised.
+    if not np.isfinite(fold_pred.astype(float, copy=False)).all():
+        _warn_invalid_fold_predictions(
+            fold_idx,
+            int(np.isfinite(fold_pred.astype(float, copy=False)).sum()),
+            len(fold_pred),
+        )
         return None
     return fold_estimator, fold_pred
 
@@ -437,12 +485,13 @@ def _evaluate_pooled_cv(
     explained_variance, max error, median absolute error): the pooled value
     differs from the average of per-fold values.
 
-    Non-finite predictions of individual folds are masked out of the pooled
-    value (the same contract as ``metrics.oof_rmse`` and the final
-    ``ModelTrainer`` OOF channel): a model that merely predicts NaN on some
-    rows is NOT penalized — only its non-finite rows are excluded from the
-    estimate (e.g. isotonic regression on a degenerate split does not abort
-    the trial). A fold whose fit/predict (or per-fold scoring, on the
+    The per-fold predictions must be finite: the fold's test rows are rows
+    the model was REQUIRED to predict, so a completed fold with non-finite
+    (NaN/Inf) predictions is a quality defect of the model, not a coverage
+    gap — it is PENALIZED exactly like a fold that raised (its rows stay NaN
+    in the pooled buffers, the trial's estimate becomes NaN; the values are
+    never replaced with zeros). A fold whose fit/predict (or per-fold scoring,
+    on the
     non-poolable path)
     raises a NON-FATAL exception (e.g. ``TypeError``, ``KeyError``,
     ``IndexError``, ``ValueError``/``numpy.linalg.LinAlgError``) is PENALIZED:
@@ -539,6 +588,19 @@ def _evaluate_pooled_cv(
         except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
             n_failed_folds += 1
             _warn_failed_fold(n_folds_total, err, "fit or predict")
+            continue
+        # The fold's test rows are rows the model was REQUIRED to predict:
+        # a completed fold with non-finite (NaN/Inf) predictions is a quality
+        # defect of the model (not a coverage gap), so it is penalized exactly
+        # like a fold that raised — its rows stay NaN in the pooled buffers
+        # and the trial estimate becomes NaN (never replaced with zeros).
+        if not np.isfinite(fold_pred.astype(float, copy=False)).all():
+            n_failed_folds += 1
+            _warn_invalid_fold_predictions(
+                n_folds_total,
+                int(np.isfinite(fold_pred.astype(float, copy=False)).sum()),
+                len(fold_pred),
+            )
             continue
         if oof_out is not None:
             oof_out[np.asarray(test_idx)] = fold_pred
@@ -645,7 +707,12 @@ def score_trial(
     estimator itself is not fitted (every split fits a clone). A non-finite
     result (+inf on an nrmse error or NaN) is replaced with
     ``HPO_WORST_SCORE`` — the "worst outcome" sentinel (the
-    ``train_test_split`` hold-out value is returned as is). Hyperparameter
+    ``train_test_split`` hold-out value is returned as is). A model that
+    returns non-finite (NaN/Inf) predictions on rows it was REQUIRED to
+    predict (the hold-out rows, or a CV fold's test rows) does not get a
+    masked estimate: a fold with such predictions is penalized to NaN (the
+    worst outcome) and the hold-out path raises ``InvalidPredictionError``
+    (a non-fatal ``ValueError`` — the trial is pruned). Hyperparameter
     generation and pipeline assembly happen in ``_objective`` BEFORE this
     function is invoked and outside try/except: errors from a user space
     function or the model constructor must propagate (trial FAIL) rather
@@ -750,8 +817,20 @@ def _score_holdout(
     (dataset-dependent) integer test size is used so that ``iter_splits``
     does not recompute the decision; otherwise — the fixed fraction.
 
+    The hold-out rows are rows the model was REQUIRED to predict: a
+    non-finite (NaN/Inf) prediction on any of them raises
+    ``InvalidPredictionError`` — a quality defect of the model that must not
+    be masked out of the estimate (a model that fails on most of the hold-out
+    rows must not get a good score from the few rows it predicted; the
+    values are never replaced with zeros). The error is a non-fatal
+    ``ValueError``: the trial is pruned by the caller's failure contract.
+
     Returns:
         float: The raw metric value on the hold-out rows.
+
+    Raises:
+        InvalidPredictionError: If the model returned a non-finite
+            prediction for at least one hold-out row.
     """
     model = clone(estimator)
     if oof_out is None:
@@ -765,6 +844,7 @@ def _score_holdout(
             )
         )
         model.fit(X_tr, y_tr)
+        _check_holdout_predictions_finite(model, X_te)
         return float(scorer(model, X_te, y_te))
     # OOF collection: the same split, with the test row positions.
     X_tr, X_te, y_tr, y_te, test_idx = next(
@@ -778,10 +858,27 @@ def _score_holdout(
         )
     )
     model.fit(X_tr, y_tr)
-    oof_out[np.asarray(test_idx)] = np.asarray(
-        model.predict(X_te), dtype=float
-    ).reshape(-1)
+    holdout_pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
+    # The hold-out rows are rows the model was REQUIRED to predict: a
+    # non-finite prediction is a quality defect (see the docstring).
+    if not np.isfinite(holdout_pred).all():
+        raise InvalidPredictionError(
+            "Model returned non-finite predictions for validation samples "
+            f"({int((~np.isfinite(holdout_pred)).sum())} of {len(holdout_pred)} "
+            "hold-out rows)"
+        )
+    oof_out[np.asarray(test_idx)] = holdout_pred
     return float(scorer(model, X_te, y_te))
+
+
+def _check_holdout_predictions_finite(model: Any, X_te: Any) -> None:
+    """Raise ``InvalidPredictionError`` on non-finite hold-out predictions."""
+    pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
+    if not np.isfinite(pred).all():
+        raise InvalidPredictionError(
+            "Model returned non-finite predictions for validation samples "
+            f"({int((~np.isfinite(pred)).sum())} of {len(pred)} hold-out rows)"
+        )
 
 
 def _score_fold_mean(
@@ -809,7 +906,12 @@ def _score_fold_mean(
         return float(np.mean(scores))
     # Additive metrics with OOF collection: the same fold scores as
     # ``cross_val_score`` (same cv object and scorer), with the fold
-    # estimators kept to predict their test rows.
+    # estimators kept to predict their test rows. The fold-average
+    # ``cross_validate`` scoring mirrors the ``cross_val_score`` contract: a
+    # fold whose predictions break the metric is set to NaN by sklearn, so a
+    # non-finite average already means the per-fold non-finite check below
+    # raised (a fold with NaN/Inf predictions cannot coexist with a finite
+    # average).
     cv_res = model_selection.cross_validate(
         estimator,
         X,
@@ -821,12 +923,21 @@ def _score_fold_mean(
         return_indices=True,
     )
     avg_score = float(np.mean(cv_res["test_score"]))
-    if not np.isfinite(avg_score):
-        return avg_score
     for fold_est, test_idx in zip(
         cv_res["estimator"], cv_res["indices"]["test"], strict=True
     ):
-        oof_out[test_idx] = np.asarray(
+        fold_pred = np.asarray(
             fold_est.predict(_safe_indexing(X, test_idx)), dtype=float
         ).reshape(-1)
+        # The fold's test rows are rows the model was REQUIRED to predict: a
+        # non-finite prediction is a quality defect (not a coverage gap) —
+        # the OOF vector must not carry it as a masked-out row (the value is
+        # never replaced with zeros).
+        if not np.isfinite(fold_pred).all():
+            raise InvalidPredictionError(
+                "Model returned non-finite predictions for validation samples "
+                f"({int((~np.isfinite(fold_pred)).sum())} of {len(fold_pred)} "
+                "rows in one fold)"
+            )
+        oof_out[test_idx] = fold_pred
     return avg_score

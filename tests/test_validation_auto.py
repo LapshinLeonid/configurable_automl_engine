@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.model_selection import KFold, LeaveOneOut
+from sklearn.utils import Tags, TargetTags
 
 from configurable_automl_engine.hpo import evaluation as hpo_evaluation
 from configurable_automl_engine.common.definitions import ValidationStrategy
@@ -356,8 +357,7 @@ def test_make_cv_auto_fixed_kfold_motivating_case():
         "k": 4,
         "average_test_size": 6,
         "warning": (
-            "Small dataset: fixed k-fold CV (3-4 folds) to prevent "
-            "LOO overfitting."
+            "Small dataset: fixed k-fold CV (3-4 folds) to prevent LOO overfitting."
         ),
     }
 
@@ -591,7 +591,7 @@ def test_get_effective_train_size_integer_test_size():
         120, ValidationStrategy.train_test_split, test_size=15
     )
     assert result == 105
-# auto → train_test_split: choose_validation_method returns an integer
+    # auto → train_test_split: choose_validation_method returns an integer
     # number of rows; get_effective_train_size must produce the same train_size.
     decision = choose_validation_method(50000, 5)
     assert decision["method"] == "train_test_split"
@@ -618,12 +618,18 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     captured_cv = {}
     captured_eff = {}
 
-    def fake_make_cv(n_samples, *, val_method, n_folds, random_state, test_size, n_features=None):
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
         captured_cv["n_features"] = n_features
         captured_cv["n_samples"] = n_samples
         # k_fold is always accompanied by a ready cv_obj (make_cv invariant),
         # from which the tuner takes the fold count for the pruning branch.
-        return "k_fold", KFold(n_splits=2, shuffle=True, random_state=random_state), None
+        return (
+            "k_fold",
+            KFold(n_splits=2, shuffle=True, random_state=random_state),
+            None,
+        )
 
     def fake_get_effective_train_size(
         n_total, strategy, n_folds=5, test_size=0.2, n_features=None
@@ -632,8 +638,12 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
         return 16
 
     monkeypatch.setattr(hpo_runner, "make_cv", fake_make_cv)
-    monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
-    monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
+    monkeypatch.setattr(
+        hpo_runner, "get_effective_train_size", fake_get_effective_train_size
+    )
+    monkeypatch.setattr(
+        hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5
+    )
     monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: MagicMock())
     monkeypatch.setattr(
         hpo_evaluation.model_selection, "cross_val_score", lambda *a, **k: [0.5, 0.5]
@@ -673,7 +683,9 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
 
     captured = {}
 
-    def fake_make_cv(n_samples, *, val_method, n_folds, random_state, test_size, n_features=None):
+    def fake_make_cv(
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+    ):
         # auto resolves to train_test_split; expose the resolved decision.
         return (
             "train_test_split",
@@ -701,13 +713,22 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
         )
 
     monkeypatch.setattr(hpo_runner, "make_cv", fake_make_cv)
-    monkeypatch.setattr(hpo_runner, "get_effective_train_size", fake_get_effective_train_size)
+    monkeypatch.setattr(
+        hpo_runner, "get_effective_train_size", fake_get_effective_train_size
+    )
     monkeypatch.setattr(hpo_evaluation, "iter_splits", fake_iter_splits)
-    monkeypatch.setattr(hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5)
+    monkeypatch.setattr(
+        hpo_evaluation, "get_scorer_object", lambda *a, **k: lambda *x: 0.5
+    )
     model = MagicMock()
     # The hold-out scorer fits a clone of the pipeline (the trial estimator
-    # stays unfitted): the mock model clones to itself.
+    # stays unfitted): the mock model clones to itself. __sklearn_tags__ is
+    # required by sklearn's check_is_fitted: the hold-out path predicts once
+    # to verify the finiteness of the predictions before scoring.
     model.__sklearn_clone__ = lambda: model
+    model.__sklearn_tags__ = lambda: Tags(
+        estimator_type="regressor", target_tags=TargetTags(required=True)
+    )
     monkeypatch.setattr(hpo_runner, "create_model", lambda *a, **k: model)
 
     tuner.optimize(

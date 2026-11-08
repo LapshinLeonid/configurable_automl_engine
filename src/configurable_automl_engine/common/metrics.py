@@ -16,7 +16,15 @@ Key features:
     3. Numeric Stability: Built-in division-by-zero protection
        when a constant target is encountered — returns `inf`
        instead of an error to keep the pipeline stable.
-    4. Smart Discovery: A single entry point `get_scorer_object`
+    4. Non-finite prediction policy: rows a model was REQUIRED to predict
+       (the validation rows of the split strategy) but returned NaN/Inf for
+       raise ``InvalidPredictionError`` — the trial/fold/candidate is then
+       invalidated by the caller's existing penalty policy, instead of being
+       silently masked out of the estimate. Rows that did not participate in
+       the validation by the split design (e.g. the train part of
+       ``train_test_split``) stay masked out (the ``expected`` mask of
+       ``oof_rmse``/``pooled_scorer_value``).
+    5. Smart Discovery: A single entry point `get_scorer_object`
        with an alias mechanism simplifying the invocation of custom metrics
        by short names (e.g. "rmse").
 """
@@ -48,6 +56,7 @@ from configurable_automl_engine.common.custom_metrics import (
     lookup_custom_metric,
     register_custom_metric,
 )
+from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.sklearn_compat import (
     scorer_raw_parts,
     scorer_sign,
@@ -68,33 +77,94 @@ def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
-def oof_rmse(y_true: Any, y_pred: Any) -> float:
+def _resolve_expected_valid_mask(
+    yt: np.ndarray, yp: np.ndarray, expected: np.ndarray | None
+) -> np.ndarray:
+    """Resolve the shared masking contract of ``oof_rmse``/``pooled_scorer_value``.
+
+    The two cases of the non-finite prediction policy:
+
+    - a row the split strategy did not require to predict (outside the
+      ``expected`` mask, e.g. the train part of ``train_test_split``) stays
+      masked out of the estimate even when its values are finite — a normal
+      coverage gap by design;
+    - a row the model WAS required to predict (inside ``expected``) must
+      carry a finite prediction: a model-returned NaN/Inf there is a quality
+      defect, not a coverage gap, and raises ``InvalidPredictionError``
+      instead of being silently masked (a model that fails on most
+      validation rows must not get a good estimate from the few rows it
+      predicted).
+
+    Args:
+        yt: The true values as a float array.
+        yp: The predictions as a float array.
+        expected: An optional boolean mask aligned with ``yp``: True where
+            the model was required to produce a finite prediction.
+            ``None`` — every row is expected (the legacy masking contract:
+            any non-finite pair is dropped).
+
+    Returns:
+        np.ndarray: The boolean mask of the rows entering the estimate.
+
+    Raises:
+        InvalidPredictionError: If any expected row has a non-finite
+            prediction (with ``expected`` given).
+    """
+    if expected is None:
+        return np.isfinite(yt) & np.isfinite(yp)
+    exp = np.asarray(expected, dtype=bool)
+    if not np.isfinite(yp[exp]).all():
+        raise InvalidPredictionError(
+            "Model returned non-finite predictions for validation samples "
+            f"({int((~np.isfinite(yp[exp])).sum())} of {int(exp.sum())} "
+            "expected rows)"
+        )
+    # Rows outside the expected set (e.g. the train part of a hold-out)
+    # are excluded from the estimate even when their values are finite.
+    return exp & np.isfinite(yt) & np.isfinite(yp)
+
+
+def oof_rmse(y_true: Any, y_pred: Any, *, expected: Any | None = None) -> float:
     """Compute RMSE over the whole aligned OOF vector.
 
     Unlike averaging by folds, the metric is computed over the entire
     out-of-fold prediction vector at once: each row enters the calculation
-    exactly once. Pairs where ``y_true`` or ``y_pred`` are not finite numbers
-    (NaN/None/inf — uncovered rows of ``train_test_split`` or failing
-    predictions of individual folds) are dropped so that the concatenation
-    of folds of different lengths does not "drift" across indices.
+    exactly once. Rows with a non-finite ``y_true`` (NaN/None/inf) and rows
+    the split strategy did not require to predict (e.g. the train part of
+    ``train_test_split``) are excluded from the estimate — a normal
+    coverage gap by design, provided via ``expected``.
+
+    A model-returned non-finite prediction on a row the model WAS required
+    to predict is a quality defect, not a coverage gap: with ``expected``
+    given, such a row raises ``InvalidPredictionError`` instead of being
+    silently masked (a model that fails on most validation rows must not
+    get a good estimate from the few rows it predicted). Without
+    ``expected`` the legacy masking contract holds: any non-finite pair is
+    dropped.
 
     Args:
         y_true: True values aligned with ``y_pred`` by position.
         y_pred: OOF predictions aligned with ``y_true`` by position.
+        expected: An optional boolean mask aligned with ``y_pred``: True
+            where the model was required to produce a finite prediction
+            (validation rows). ``None`` — every row is expected (the legacy
+            masking contract).
 
     Returns:
         float: RMSE over all valid pairs (lower is better).
 
     Raises:
-        ValueError: If no valid pair remains after dropping non-finite pairs
-            (an OOF estimate is impossible).
+        InvalidPredictionError: If any expected row has a non-finite
+            prediction (with ``expected`` given).
+        ValueError: If no valid pair remains after dropping non-expected
+            non-finite pairs (an OOF estimate is impossible).
     """
     yt = np.asarray(y_true, dtype=float)
     yp = np.asarray(y_pred, dtype=float)
-    mask = np.isfinite(yt) & np.isfinite(yp)
-    if not np.any(mask):
+    valid = _resolve_expected_valid_mask(yt, yp, expected)
+    if not np.any(valid):
         raise ValueError("No valid (y_true, y_pred) pairs for OOF RMSE.")
-    return _rmse(yt[mask], yp[mask])
+    return _rmse(yt[valid], yp[valid])
 
 
 # Metrics whose estimate cannot be obtained by averaging per-fold values:
@@ -161,7 +231,9 @@ def is_non_additive_metric(name: str) -> bool:
     return name.lower().strip() in _NON_ADDITIVE_METRICS
 
 
-def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
+def pooled_scorer_value(
+    scorer: Any, y_true: Any, y_pred: Any, *, expected: Any | None = None
+) -> float:
     """Compute a scorer value over the whole aligned vector at once.
 
     Applies the raw metric function (with the scorer's sign and kwargs) over
@@ -170,32 +242,47 @@ def pooled_scorer_value(scorer: Any, y_true: Any, y_pred: Any) -> float:
     MSE, R², nRMSE) over the pooled OOF vector instead of averaging per-fold
     values.
 
+    With ``expected`` the masking splits into the two fundamentally different
+    cases (the same contract as ``oof_rmse``): rows outside the expected set
+    (e.g. the train part of ``train_test_split``) stay masked out — a normal
+    coverage gap by design — while a non-finite prediction on an EXPECTED row
+    raises ``InvalidPredictionError``: the model was required to predict it,
+    and silently scoring only the rows it happened to predict would reward a
+    model that fails on most of the validation rows. Without ``expected``
+    the legacy masking contract holds: any non-finite pair is dropped.
+
     Args:
         scorer: A scikit-learn ``make_scorer`` object (its raw metric parts
             are read through the stable adapter
             ``common.sklearn_compat.scorer_raw_parts``).
         y_true: True values aligned with ``y_pred`` by position.
         y_pred: Predictions aligned with ``y_true`` by position.
+        expected: An optional boolean mask aligned with ``y_pred``: True
+            where the model was required to produce a finite prediction
+            (validation rows). ``None`` — every row is expected (the legacy
+            masking contract).
 
     Returns:
         float: The raw (sign-applied) metric value over all valid pairs.
 
     Raises:
+        InvalidPredictionError: If any expected row has a non-finite
+            prediction (with ``expected`` given).
         ValueError: If no valid pair remains after dropping non-finite pairs,
             or if the scorer does not expose a raw ``_score_func`` (it cannot
             be pooled).
     """
     yt = np.asarray(y_true, dtype=float)
     yp = np.asarray(y_pred, dtype=float)
-    mask = np.isfinite(yt) & np.isfinite(yp)
-    if not np.any(mask):
+    valid = _resolve_expected_valid_mask(yt, yp, expected)
+    if not np.any(valid):
         raise ValueError("No valid (y_true, y_pred) pairs for the pooled metric.")
     score_func, sign, kwargs = scorer_raw_parts(scorer)
     if score_func is None:
         raise ValueError(
             "The scorer cannot be pooled: no raw metric function is exposed."
         )
-    return float(sign * score_func(yt[mask], yp[mask], **kwargs))
+    return float(sign * score_func(yt[valid], yp[valid], **kwargs))
 
 
 # Fallback-warning deduplication: when a scorer cannot be pooled (no raw
@@ -763,212 +850,17 @@ def register_custom_metrics(
         register_custom_metric(name, spec)
 
 
-# --------------------------------------------------------------------------- #
-#  BBC-CV: bootstrap bias-corrected estimate of the selection procedure
-# --------------------------------------------------------------------------- #
-#: Number of bootstrap resamples of the BBC-CV estimate.
-BBC_N_BOOTSTRAP = 500
-#: Upper bound on the kept OOF values (trials x rows) for BBC-CV: about
-#: 32 MB of float64; the bootstrap cost scales with it as well.
-BBC_MAX_OOF_CELLS = 4_000_000
+# BBC-CV lives in a cohesive module of its own (split out of this file by the
+# module-size limit); the public names are re-exported here so the documented
+# import path (``configurable_automl_engine.common.metrics``) keeps working.
+from configurable_automl_engine.common.bbc_cv import (
+    BBC_MAX_OOF_CELLS,
+    BBC_N_BOOTSTRAP,
+    bbc_cv_score,
+)
 
-
-def _columnwise_raw_values(
-    scorer: Any, y_true: np.ndarray, preds: np.ndarray
-) -> np.ndarray:
-    """Compute the raw (sign-applied) scorer value for every prediction column.
-
-    The comparison metrics of the engine (RMSE, MSE, MAE, R², NRMSE) are
-    computed vectorized over all columns at once with the same non-finite
-    masking as ``pooled_scorer_value`` (per column); any other scorer falls
-    back to one ``pooled_scorer_value`` call per column. A column without a
-    valid pair yields NaN.
-
-    Args:
-        scorer: A ``make_scorer`` object (its raw metric parts are read
-            through ``common.sklearn_compat.scorer_raw_parts``).
-        y_true: The true values, shape ``(n_rows,)``.
-        preds: The predictions, shape ``(n_rows, n_columns)``.
-
-
-    Returns:
-        np.ndarray: The raw value of every column, shape ``(n_columns,)``.
-    """
-    score_func, raw_sign, kwargs = scorer_raw_parts(scorer)
-    sign = float(raw_sign)
-    vectorized = {_rmse, _nrmse, mean_squared_error, mean_absolute_error, r2_score}
-    if score_func in vectorized and not kwargs:
-        valid = np.isfinite(preds) & np.isfinite(y_true)[:, None]
-        n_valid = valid.sum(axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            err = np.where(valid, preds - y_true[:, None], 0.0)
-            if score_func is mean_absolute_error:
-                values = np.abs(err).sum(axis=0) / n_valid
-            else:
-                ss_res = (err**2).sum(axis=0)
-                if score_func is mean_squared_error:
-                    values = ss_res / n_valid
-                elif score_func is _rmse:
-                    values = np.sqrt(ss_res / n_valid)
-                elif score_func is _nrmse:
-                    y_max = np.where(valid, y_true[:, None], -np.inf).max(axis=0)
-                    y_min = np.where(valid, y_true[:, None], np.inf).min(axis=0)
-                    span = y_max - y_min
-                    values = np.where(
-                        span < 1e-6, np.inf, np.sqrt(ss_res / n_valid) / span
-                    )
-                else:  # r2_score, with sklearn's force_finite semantics
-                    y_col = np.where(valid, y_true[:, None], 0.0)
-                    y_mean = y_col.sum(axis=0) / n_valid
-                    ss_tot = np.where(valid, (y_true[:, None] - y_mean) ** 2, 0.0).sum(
-                        axis=0
-                    )
-                    values = np.where(
-                        ss_tot > 0.0,
-                        1.0 - ss_res / ss_tot,
-                        np.where(ss_res == 0.0, 1.0, 0.0),
-                    )
-        return np.where(n_valid > 0, sign * values, np.nan)
-    out = np.full(preds.shape[1], np.nan, dtype=float)
-    for col in range(preds.shape[1]):
-        try:
-            out[col] = pooled_scorer_value(scorer, y_true, preds[:, col])
-        except (ValueError, TypeError):
-            continue
-    return out
-
-
-def bbc_cv_score(
-    scorer: Any,
-    y_true: Any,
-    oof_matrix: Any,
-    *,
-    n_bootstrap: int = BBC_N_BOOTSTRAP,
-    random_state: int | None = None,
-) -> float:
-    """Estimate the out-of-sample score of the selection procedure (BBC-CV).
-
-    Bootstrap Bias Corrected CV (Tsamardinos, Greasidou, Borboudakis, 2018):
-    the best-trial CV score is optimistic because the winner is the maximum
-    over many configurations evaluated on the same folds. BBC-CV removes this
-    bias without any retraining, from the out-of-fold predictions of ALL
-    evaluated configurations: each bootstrap resample of the rows selects the
-    best configuration on the in-bag rows (the selection step) and scores it
-    on the out-of-bag rows (rows the selection did not see); the estimate is
-    the mean of the out-of-bag scores.
-
-    For R² and NRMSE the bootstrap runs on MSE / RMSE and the result is
-    normalized by the variance / range of the target over all usable rows:
-    the selection is identical, and the small out-of-bag subsets do not bias
-    the normalizer.
-
-    Rows with a non-finite target and rows no configuration predicted (e.g.
-    the train part of ``train_test_split``) are dropped. Non-finite
-    predictions of a configuration are masked per configuration (the
-    ``pooled_scorer_value`` contract). Identical configurations (duplicate
-    OOF vectors) are collapsed. Ties in the selection step go to the first
-    configuration.
-
-    Args:
-        scorer: A ``make_scorer`` object of the comparison metric.
-        y_true: The true target aligned with the OOF columns.
-        oof_matrix: The OOF predictions, shape
-            ``(n_configurations, n_rows)``.
-        n_bootstrap: The number of bootstrap resamples (>= 1).
-        random_state: The bootstrap seed; ``None`` — not
-            reproducible.
-
-    Returns:
-        float: The raw (sign-applied, higher is better) BBC-CV estimate.
-
-    Raises:
-        ValueError: If the shapes do not match, ``n_bootstrap < 1``, fewer
-            than 2 usable rows remain, or no resample produced a finite
-            out-of-bag score.
-    """
-    y = np.asarray(y_true, dtype=float).reshape(-1)
-    configs = np.asarray(oof_matrix, dtype=float)
-    if configs.ndim != 2 or configs.shape[1] != y.shape[0] or configs.shape[0] == 0:
-        raise ValueError(
-            f"BBC-CV needs an OOF matrix of shape (n_configurations, {y.shape[0]}); "
-            f"got {configs.shape}."
-        )
-    if n_bootstrap < 1:
-        raise ValueError(f"n_bootstrap must be >= 1; got {n_bootstrap}.")
-    preds = configs.T
-    rows = np.isfinite(y) & np.isfinite(preds).any(axis=1)
-    y = y[rows]
-    preds = preds[rows]
-    n_rows = y.shape[0]
-    if n_rows < 2:
-        raise ValueError(f"BBC-CV needs at least 2 usable rows; got {n_rows}.")
-    preds = np.unique(preds, axis=1)
-
-    # R² and NRMSE normalize by a statistic of y (variance / range). On a
-    # small out-of-bag subset that statistic is itself biased (R² is pulled
-    # down, NRMSE pushed up), so the bootstrap runs on the underlying error
-    # (MSE / RMSE) and the normalization uses all usable rows. The selection
-    # is unchanged: within one resample the normalizer is the same for every
-    # configuration, so ranking by R² equals ranking by MSE (NRMSE by RMSE).
-    score_func, sign, kwargs = scorer_raw_parts(scorer)
-    if not kwargs and score_func is r2_score:
-        y_var = float(np.var(y))
-        if y_var > 0.0:
-            mse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["mse"][0], y, preds, n_bootstrap, random_state
-            )
-            return float(sign) * (1.0 - mse / y_var)
-    if not kwargs and score_func is _nrmse:
-        y_span = float(np.max(y) - np.min(y))
-        if y_span >= 1e-6:
-            rmse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["rmse"][0], y, preds, n_bootstrap, random_state
-            )
-            return float(sign) * (rmse / y_span)
-    return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
-
-
-def _bbc_mean_oob(
-    scorer: Any,
-    y: np.ndarray,
-    preds: np.ndarray,
-    n_bootstrap: int,
-    random_state: int | None,
-) -> float:
-    """Run the BBC-CV bootstrap loop and return the mean out-of-bag score.
-
-    Args:
-        scorer: The scorer used for both selection and evaluation.
-        y: The usable target rows, shape ``(n_rows,)``.
-        preds: The OOF predictions, shape
-            ``(n_rows, n_configurations)``.
-        n_bootstrap: The number of bootstrap resamples.
-        random_state: The bootstrap seed.
-
-
-    Returns:
-        float: The mean raw (sign-applied) out-of-bag score.
-    """
-    n_rows = y.shape[0]
-    rng = np.random.default_rng(random_state)
-    oob_scores: list[float] = []
-    for _ in range(n_bootstrap):
-        in_bag = rng.integers(0, n_rows, size=n_rows)
-        oob_mask = np.ones(n_rows, dtype=bool)
-        oob_mask[in_bag] = False
-        if not oob_mask.any():
-            continue
-        in_bag_values = _columnwise_raw_values(scorer, y[in_bag], preds[in_bag])
-        if not np.isfinite(in_bag_values).any():
-            continue
-        best = int(
-            np.nanargmax(np.where(np.isfinite(in_bag_values), in_bag_values, np.nan))
-        )
-        oob_value = _columnwise_raw_values(
-            scorer, y[oob_mask], preds[oob_mask][:, [best]]
-        )[0]
-        if np.isfinite(oob_value):
-            oob_scores.append(float(oob_value))
-    if not oob_scores:
-        raise ValueError("BBC-CV: no bootstrap resample produced a finite score.")
-    return float(np.mean(oob_scores))
+__all__ = [
+    "BBC_MAX_OOF_CELLS",
+    "BBC_N_BOOTSTRAP",
+    "bbc_cv_score",
+]

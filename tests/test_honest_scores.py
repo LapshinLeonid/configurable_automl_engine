@@ -781,13 +781,17 @@ def test_persist_artifact_oof_unknown_metric_warns(caplog):
     assert "OOF score could not be computed" in caplog.text
 
 
-def test_holdout_fraction_zero_rows_nan(tmp_path):
-    """An empty hold-out set → holdout_score is NaN without crashing.
+def test_holdout_fraction_zero_rows_nan(tmp_path, caplog):
+    """A hold-out with non-finite predictions → holdout_score is NaN.
 
-    The edge case is guarded in prepare_dataset (the hold-out has at least
-    one row for a valid fraction), so this covers the defensive NaN path of
-    _compute_holdout_score via a hold-out with non-finite predictions.
+    The hold-out rows are rows the model was REQUIRED to predict, so a
+    non-finite prediction is a quality defect (not a coverage gap): it is
+    NOT masked out of the estimate — the estimate fails with
+    ``InvalidPredictionError``, which the outer handler converts into NaN
+    with the reason in the log (no crash).
     """
+    import logging
+
     from configurable_automl_engine.training_engine.artifact import (
         _compute_holdout_score,
     )
@@ -797,14 +801,20 @@ def test_holdout_fraction_zero_rows_nan(tmp_path):
     prepared = prepare_dataset(cfg, df, "target")
 
     # The trainer's predict on the hold-out returns all-NaN (a degenerate
-    # model), so no finite pair remains → NaN without a crash.
+    # model): the estimate is impossible and reported as NaN.
     class _NaNModel:
+        def fit(self, X, y):
+            return self
+
         def predict(self, X):
             return np.full(len(X), np.nan)
 
-    with patch(
-        "configurable_automl_engine.training_engine.artifact.ModelTrainer",
-        return_value=_NaNModel(),
+    with (
+        patch(
+            "configurable_automl_engine.training_engine.artifact.ModelTrainer",
+            return_value=_NaNModel(),
+        ),
+        caplog.at_level(logging.WARNING, logger="training_engine"),
     ):
         score = _compute_holdout_score(
             cfg=cfg,
@@ -814,6 +824,7 @@ def test_holdout_fraction_zero_rows_nan(tmp_path):
             final_params={},
         )
     assert np.isnan(score)
+    assert "non-finite predictions" in caplog.text
 
 
 def test_holdout_score_exception_returns_nan(caplog):

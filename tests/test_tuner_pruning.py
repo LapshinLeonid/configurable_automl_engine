@@ -274,62 +274,54 @@ def test_evaluate_pooled_cv_returns_pooled_value():
     assert pooled == pytest.approx(expected, rel=1e-6)
 
 
-def test_evaluate_pooled_cv_masks_non_finite_predictions():
-    """_evaluate_pooled_cv masks non-finite predictions of individual folds."""
+def test_evaluate_pooled_cv_penalizes_non_finite_predictions(caplog):
+    """_evaluate_pooled_cv PENALIZES a fold with non-finite predictions.
+
+    The fold's test rows are rows the model was REQUIRED to predict, so a
+    NaN-predicting fold is a quality defect of the model (not a coverage
+    gap): the fold is penalized exactly like a fold that raised — the trial
+    estimate becomes NaN (the worst outcome), it is not computed over the
+    surviving folds only.
+    """
     rng = np.random.RandomState(0)
     X = pd.DataFrame(rng.randn(40, 3))
     y = pd.Series(rng.randn(40))
 
     class NaNOnFirstFold(BaseEstimator, RegressorMixin):
-        # Class-level counter: it survives clone() (which rebuilds fresh
-        # instances per fold), so only the first fold's predictions are NaN.
-        _folds_done = 0
+        """NaN predictions on every fold whose test rows sit above the
+        fold's own train median (a clone-local decision, no shared state):
+        the pooled estimate degrades to NaN because some folds failed."""
 
         def __init__(self):
-            pass
+            self.tr_median = 0.0
 
         def fit(self, Xtr, ytr):
+            self.tr_median = float(np.median(np.asarray(Xtr, dtype=float)[:, 0]))
             return self
 
         def predict(self, Xte):
-            NaNOnFirstFold._folds_done += 1
-            if NaNOnFirstFold._folds_done == 1:
-                return np.full(len(Xte), np.nan)
-            return np.full(len(Xte), 0.0)
+            Xa = np.asarray(Xte, dtype=float)
+            if float(np.median(Xa[:, 0])) > self.tr_median:
+                return np.full(len(Xa), np.nan)
+            return np.full(len(Xa), 0.0)
 
     scorer = get_scorer_object("rmse")
-    pooled = _evaluate_pooled_cv(
-        NaNOnFirstFold(),
-        X,
-        y,
-        method="k_fold",
-        n_folds=4,
-        test_size=0.2,
-        random_state=42,
-        scorer=scorer,
-    )
-    # The first fold is masked out; the pooled RMSE is over the remaining rows.
-    assert np.isfinite(pooled)
-    # Recompute: the surviving rows are those whose fold prediction is 0.0.
-    # Re-run the splits to identify the first fold's rows.
-    first_fold_rows = set()
-    for i, (X_tr, X_te, y_tr, y_te, test_idx) in enumerate(
-        hpo_evaluation.iter_splits(
+    with caplog.at_level(logging.WARNING):
+        pooled = _evaluate_pooled_cv(
+            NaNOnFirstFold(),
             X,
             y,
             method="k_fold",
             n_folds=4,
             test_size=0.2,
             random_state=42,
-            include_indices=True,
+            scorer=scorer,
         )
-    ):
-        if i == 0:
-            first_fold_rows = set(np.asarray(test_idx))
-            break
-    valid = ~np.asarray([i in first_fold_rows for i in range(len(y))])
-    expected = -float(np.sqrt(np.mean(y.to_numpy()[valid] ** 2)))
-    assert pooled == pytest.approx(expected, rel=1e-6)
+    # The trial completes but with the NaN estimate (worst outcome): the
+    # caller turns it into HPO_WORST_SCORE. A warning about the penalized
+    # fold is logged.
+    assert np.isnan(pooled)
+    assert "non-finite predictions" in caplog.text
 
 
 def test_evaluate_pooled_cv_fallback_on_unpoolable_scorer():

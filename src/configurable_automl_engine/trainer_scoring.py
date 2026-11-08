@@ -20,7 +20,10 @@ import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline
 
-from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.errors import (
+    InvalidPredictionError,
+    TrainingError,
+)
 from configurable_automl_engine.common.metrics import (
     direction_label,
     get_scorer_object,
@@ -81,9 +84,14 @@ def score_on_validation_splits(
     WARNING + the metric is skipped; failure of all folds of the primary
     metric → ``TrainingError`` (fail-fast, before final training).
     Non-finite fold scores (e.g., inf for NRMSE on a constant target) are
-    returned as is. An OOF collection failure on a single fold does not
-    crash the validation scoring: it only reduces the coverage of the OOF
-    vector (WARNING).
+    returned as is. A fold whose predictions contain a non-finite value
+    (NaN/Inf) is not collected into the OOF channel — the validation rows are
+    rows the model was REQUIRED to predict, so such a prediction is a quality
+    defect of the model, not a coverage gap: the fold's rows cannot enter the
+    pooled estimate and the coverage is reduced (WARNING), the values are
+    never replaced with zeros. An OOF collection failure on a single fold
+    does not crash the validation scoring: it only reduces the coverage of
+    the OOF vector (WARNING).
 
     Note (strategy interface): building the OOF channel does not depend on
     a particular strategy — only the positional ``test_idx`` provided by
@@ -391,6 +399,19 @@ def _collect_fold_oof(
     been used in training (no leakage). A separate try: an OOF collection
     failure does not crash the fold scoring, it only reduces the OOF vector
     coverage (WARNING).
+
+    Non-finite (NaN/Inf) predictions of a fold are treated as a collection
+    failure: the fold's validation rows are rows the model was REQUIRED to
+    predict, and writing NaN into the buffer would mask them out of the
+    pooled estimate (the values are never replaced with zeros) — the buffer
+    keeps the previous values (NaN for uncovered rows) and the coverage is
+    reduced, so the pooled metrics stay consistent with the reported
+    coverage.
+
+    Raises:
+        InvalidPredictionError: When the fold returned at least one
+            non-finite prediction (raised inside the try and logged as a
+            collection failure by the caller of this helper).
     """
     try:
         preds = np.asarray(fold_pipe.predict(X_te)).reshape(-1)
@@ -399,6 +420,12 @@ def _collect_fold_oof(
             raise TrainingError(
                 "OOF prediction length mismatch: got "
                 f"{preds.shape[0]} predictions for {idx.shape[0]} rows"
+            )
+        if not np.isfinite(preds.astype(float, copy=False)).all():
+            raise InvalidPredictionError(
+                "Model returned non-finite predictions for validation samples "
+                f"({int((~np.isfinite(preds.astype(float, copy=False))).sum())} "
+                f"of {len(preds)} rows in the fold)"
             )
         if y_te is not None:
             oof_pred_buffer[idx] = preds
@@ -511,7 +538,10 @@ def _finalize_oof(
     # For train_test_split the uncovered rows are the train part; the
     # limitation was already documented by a separate WARNING above, so the
     # generic row-exclusion warning is logged only for non-finite
-    # predictions/targets.
+    # predictions/targets. With the non-finite-prediction policy (folds with
+    # NaN/Inf predictions are not collected at all, see
+    # ``_collect_fold_oof``) the remaining exclusions come from non-finite
+    # targets only.
     if dropped and method != "train_test_split":
         _LOG.warning(
             "%d row(s) excluded from RMSE_oof (non-finite prediction or "

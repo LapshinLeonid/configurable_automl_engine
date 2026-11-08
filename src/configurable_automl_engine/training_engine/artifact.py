@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import (
     bbc_cv_score,
     get_scorer_object,
@@ -251,8 +252,11 @@ def _oof_score_in_user_metric(
     the same values the trainer's OOF channel uses, expressed in the
     comparison metric semantics. The raw scorer value over the aligned
     vector is obtained via ``metrics.pooled_scorer_value`` (the same masking
-    contract as the trainer's OOF channel: non-finite pairs are dropped) and
-    converted to user semantics (``to_user_value``) — so error metrics are
+    contract as the trainer's OOF channel: rows a model was required to
+    predict but returned NaN/Inf for were already rejected at collection
+    time by the trainer's OOF channel, so the remaining masking covers only
+    the not-covered rows of ``train_test_split``) and converted to user
+    semantics (``to_user_value``) — so error metrics are
     reported positive and score metrics (R² and similar) keep their natural
     direction.
 
@@ -341,7 +345,9 @@ def _compute_holdout_score(
 
     Returns:
         float: The comparison metric value on the hold-out rows in user
-            semantics. ``float("nan")`` when the estimate cannot be computed.
+            semantics. ``float("nan")`` when the estimate cannot be computed
+            (including a model that returned non-finite predictions on the
+            hold-out rows — the failure is logged with its reason).
     """
     try:
         # The trainer is assembled through the same single point as the final
@@ -371,7 +377,19 @@ def _compute_holdout_score(
             holdout_trainer.predict(prepared.holdout_X), dtype=float
         ).reshape(-1)
         true = np.asarray(prepared.holdout_y, dtype=float).reshape(-1)
-        mask = np.isfinite(true) & np.isfinite(pred)
+        # The hold-out rows are rows the model was REQUIRED to predict: a
+        # non-finite (NaN/Inf) prediction is a quality defect of the model
+        # (not a coverage gap), so it is NOT masked out of the estimate —
+        # a model that fails on most of the hold-out rows must not get a
+        # good score from the few rows it happened to predict (the values
+        # are never replaced with zeros). The error is caught by the outer
+        # handler: the estimate becomes NaN and the failure is logged.
+        if not np.isfinite(pred).all():
+            raise InvalidPredictionError(
+                "Model returned non-finite predictions for validation samples "
+                f"({int((~np.isfinite(pred)).sum())} of {len(pred)} hold-out rows)"
+            )
+        mask = np.isfinite(true)
         if not np.any(mask):
             return float("nan")
         scorer = get_scorer_object(

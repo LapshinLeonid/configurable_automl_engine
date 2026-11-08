@@ -38,8 +38,8 @@ from configurable_automl_engine.training_engine.artifact import (
     _bbc_score_in_user_metric,
 )
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.common.bbc_cv import _columnwise_raw_values
 from configurable_automl_engine.common.metrics import (
-    _columnwise_raw_values,
     bbc_cv_score,
     get_scorer_object,
     pooled_scorer_value,

@@ -484,7 +484,15 @@ def test_oof_small_data_kfold_fallback_to_split(caplog):
 
 
 def test_oof_nan_predictions_reduced_coverage(caplog):
-    """NaN in fold predictions: the row is excluded; RMSE_oof over the rest."""
+    """NaN in fold predictions: the fold is not collected; coverage reduced.
+
+    The fold's validation rows are rows the model was REQUIRED to predict, so
+    a NaN prediction is a quality defect of the model (not a coverage gap):
+    the fold's rows are NOT written into the OOF buffer as masked-out rows —
+    the buffer keeps the previous values (NaN for uncovered rows), the
+    coverage is reduced and RMSE_oof is computed over the collected rows only
+    (the values are never replaced with zeros).
+    """
     rng = np.random.RandomState(4)
     X = pd.DataFrame(rng.randn(24, 2), columns=["f0", "f1"])
     y = pd.Series(X["f0"] * 2.0 + rng.randn(24) * 0.5)
@@ -507,13 +515,13 @@ def test_oof_nan_predictions_reduced_coverage(caplog):
     ):
         scores = score_with_trainer(trainer, X, y, preprocessor, model)
 
-    valid_mask = X["f0"] <= 0.5
-    expected = float(
-        np.sqrt(mean_squared_error(y[valid_mask], np.full(valid_mask.sum(), 1.5)))
-    )
-    assert scores.oof_coverage == pytest.approx(valid_mask.mean(), rel=1e-9)
-    assert scores.oof_score == pytest.approx(expected, rel=1e-9)
-    assert "excluded from RMSE_oof" in caplog.text
+    # A fold whose validation rows contain a NaN prediction is dropped from
+    # the OOF collection entirely: with the white-box NaN condition every
+    # fold contains such rows, so nothing is collected — the coverage is 0,
+    # RMSE_oof is impossible (None) and the reduction is reported.
+    assert scores.oof_coverage == 0.0
+    assert scores.oof_score is None
+    assert "non-finite predictions" in caplog.text
     assert scores.val_score == pytest.approx(0.5)
 
 
