@@ -456,7 +456,14 @@ class AutoMLExperiment:
         Returns:
             The artifact(s) produced by the reporter chain: a ``str`` for
             the default chain (the rendered Markdown), a ``Path`` for a
-            file reporter, a tuple for a composite.
+            file reporter, a tuple for a composite. The concrete type of
+            a custom reporter's artifact is defined by that reporter
+            (the base contract fixes only the shape family; see
+            ``experiment.reporting.base``): a reporter with a
+            documented degradation policy may return ``None`` — in
+            particular, ``MLflowReporter`` returns the MLflow run id
+            (``str``) or ``None`` when the tracking server failed (the
+            "reported-failed" policy).
 
         Raises:
             ExperimentNotRunError: The experiment has not been run yet.

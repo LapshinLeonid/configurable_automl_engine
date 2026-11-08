@@ -36,6 +36,7 @@ import ast
 import datetime as dt
 import importlib
 import json
+import logging
 import re
 import sys
 import types
@@ -56,6 +57,7 @@ from configurable_automl_engine.experiment import AlgorithmRun, ExperimentResult
 from configurable_automl_engine.experiment.reporting import (
     MLflowReporter,
     MLflowReporterError,
+    ReporterArtifact,
 )
 
 UTC = dt.UTC
@@ -494,6 +496,56 @@ class TestN2TrackingServerFailure:
 
         with pytest.raises(MLflowReporterError, match="no active MLflow run"):
             MLflowReporter().report(_make_result(_COMPLETED_RUNS))
+
+
+class TestBaseContractReportedFailedArtifact:
+    """The base-class contract of the reported-failed artifact.
+
+    The ``Reporter.report`` contract (``experiment.reporting.base``)
+    documents that a reporter with a degradation policy may return
+    ``None`` as its artifact instead of raising; the MLflow adapter is
+    the concrete implementation of that policy (a tracking-server
+    failure → the "reported-failed" ``None`` artifact + warning, the
+    experiment continues). These tests pin the contract as a
+    first-class agreement between ``base.py`` and
+    ``mlflow_reporter.py``.
+    """
+
+    def test_reported_failed_artifact_is_none_on_tracking_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The degradation policy yields the documented ``None`` artifact
+        and the run continues (no exception escapes ``report``)."""
+        fake = FakeMLflow(fail=ConnectionError("tracking server is down"))
+        _inject_mlflow(monkeypatch, fake)
+
+        with caplog.at_level("WARNING"):
+            artifact: ReporterArtifact | None = MLflowReporter(nested=True).report(
+                _make_result(_COMPLETED_RUNS)
+            )
+
+        # The documented artifact of the failure policy: explicitly
+        # ``None`` (the tracking server failed, the experiment did not).
+        assert artifact is None
+        assert any(
+            record.levelno == logging.WARNING
+            and "continues without MLflow tracking" in record.message
+            for record in caplog.records
+        )
+
+    def test_success_artifact_is_the_run_id_string(
+        self, fake_mlflow: FakeMLflow, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The success artifact matches the base shape family: a rendered
+        string — the MLflow run id."""
+        _inject_mlflow(monkeypatch, fake_mlflow)
+
+        artifact = MLflowReporter(nested=True).report(_make_result(_COMPLETED_RUNS))
+
+        assert isinstance(artifact, str)
+        assert artifact == "new-run"
 
 
 # ────────────────────────── boundary scenarios ────────────────────────── #

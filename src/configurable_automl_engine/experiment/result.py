@@ -510,6 +510,20 @@ class ExperimentResult(_ResultModel):
             )
         if (self.finished_at - self.started_at).total_seconds() < 0:
             raise ValueError("finished_at must not be earlier than started_at")
+        if self.ensemble is not None and not (self.model_path or "").strip():
+            # The ensemble artifact is saved next to the winner artifact
+            # and its section records that path: a section without a
+            # winner artifact path cannot come from the engine assembly
+            # (the ensemble step degrades to "no section" when the
+            # result carries no 'model_path'). Rejecting the section at
+            # the result boundary turns a silent degradation — an
+            # ensemble reported without a reloadable artifact — into an
+            # explicit construction error.
+            raise ValueError(
+                "An ensemble section without 'model_path' is not allowed: "
+                "the ensemble artifact is saved next to the winner artifact "
+                "and the result must record that path"
+            )
         expected_duration = (self.finished_at - self.started_at).total_seconds()
         # The duration and the timestamps may come from different clocks
         # (e.g. time.monotonic() vs datetime.now(UTC)); allow a small

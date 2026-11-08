@@ -43,7 +43,7 @@ from configurable_automl_engine.experiment.result import ExperimentResult
 __all__ = ["JSONReporter"]
 
 
-class JSONReporter(Reporter):
+class JSONReporter(Reporter[ReporterArtifact]):
     """Write the full experiment snapshot to a JSON file.
 
     Args:

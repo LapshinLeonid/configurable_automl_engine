@@ -115,7 +115,7 @@ def _format_params(params: dict[str, Any]) -> str:
     return _escape_code_span(_escape_cell(inner))
 
 
-class MarkdownReporter(Reporter):
+class MarkdownReporter(Reporter[ReporterArtifact]):
     """Render the experiment report as a Markdown document.
 
     The report structure (in order): the title (the run label), the run

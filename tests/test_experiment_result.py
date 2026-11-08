@@ -434,6 +434,52 @@ def test_n3_non_json_safe_config_is_rejected() -> None:
         ExperimentResult(**_result_kwargs(config="not a mapping"))
 
 
+def test_n3_ensemble_section_without_model_path_is_rejected() -> None:
+    """An ensemble section cannot exist without the winner artifact path.
+
+    The ensemble artifact is saved next to the winner artifact and the
+    section records that path; the engine degrades to "no section"
+    when the result carries no ``model_path``. A section on a result
+    without one therefore cannot come from the engine assembly — the
+    consistency check rejects it at the result boundary instead of
+    letting an ensemble without a reloadable artifact reach the
+    consumers (the facade ``ensemble_model()`` reads the artifact path
+    from the section).
+    """
+    ensemble_section = {
+        "members": [
+            {
+                "algorithm": "random_forest",
+                "score": 0.7,
+                "weight": 1.0,
+                "rank": 1,
+            }
+        ],
+        "k_requested": 3,
+        "effective_size": 1,
+        "weight_method": "score_weighted",
+        "artifact_path": "models/best_ensemble.pkl",
+    }
+    with pytest.raises(ValidationError, match="model_path"):
+        ExperimentResult(**_result_kwargs(model_path=None, ensemble=ensemble_section))
+    with pytest.raises(ValidationError, match="model_path"):
+        ExperimentResult(**_result_kwargs(model_path="", ensemble=ensemble_section))
+    # With the winner artifact recorded the section is accepted.
+    result = ExperimentResult(
+        **_result_kwargs(model_path="models/best.pkl", ensemble=ensemble_section)
+    )
+    assert result.ensemble is not None
+    assert result.ensemble["artifact_path"] == "models/best_ensemble.pkl"
+
+
+def test_n3_model_path_without_ensemble_section_is_accepted() -> None:
+    """The inverse direction is fine: a winner artifact without an
+    ensemble section is the default (the feature is off or the step
+    degraded to no section)."""
+    result = ExperimentResult(**_result_kwargs(model_path="models/best.pkl"))
+    assert result.ensemble is None
+
+
 # ────────────────────────── boundary scenarios ────────────────────────── #
 
 

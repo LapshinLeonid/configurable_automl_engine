@@ -262,13 +262,19 @@ def _flatten_params(params: dict[str, Any], prefix: str) -> dict[str, str]:
     return flat
 
 
-class MLflowReporter(Reporter):
+class MLflowReporter(Reporter[ReporterArtifact | None]):
     """Log the experiment result into the active MLflow run.
 
     The adapter is the single MLflow-aware component of the package:
     the ``mlflow`` package is imported lazily inside
     :meth:`MLflowReporter._mlflow`, so the package installs and imports
     without MLflow (the optional extra ``[mlflow]`` installs it).
+
+    The generic parameter expresses the documented degradation policy
+    in the type system: ``report`` returns the run id (``str``) on
+    success and the "reported-failed" ``None`` artifact when the
+    tracking server failed, so a typed ``Reporter[...]`` reference sees
+    both outcomes without a cast.
 
     Args:
         nested: The run policy. ``False`` (default) — log into the
@@ -327,7 +333,13 @@ class MLflowReporter(Reporter):
                 run the data was logged into, or ``None`` when the
                 tracking server failed — the failure is logged as a
                 warning and the experiment continues (the documented
-                failure policy).
+                failure policy). ``None`` here is the documented
+                "reported-failed" artifact of the degradation policy
+                allowed by the base contract
+                (:class:`~configurable_automl_engine.experiment.
+                reporting.base.Reporter`): a reporter may return
+                ``None`` instead of raising when it has a documented
+                degradation policy.
 
         Raises:
             MLflowReporterError: MLflow is not installed (the optional

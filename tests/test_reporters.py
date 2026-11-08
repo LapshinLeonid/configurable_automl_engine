@@ -51,6 +51,7 @@ from configurable_automl_engine.experiment.reporting import (
     JSONReporter,
     MarkdownReporter,
     Reporter,
+    ReporterArtifact,
 )
 
 UTC = dt.UTC
@@ -322,6 +323,42 @@ class TestP3Composite:
             composite.report(result)
 
         assert not spy.called
+
+    def test_composite_passes_through_the_reported_failed_none_artifact(self) -> None:
+        """The base-contract ``None`` artifact passes through the composite.
+
+        A reporter with a documented degradation policy may return
+        ``None`` instead of raising (see ``Reporter.report`` in
+        ``experiment.reporting.base``; the MLflow adapter implements
+        the concrete "reported-failed" policy: a tracking-server
+        failure → ``None`` + warning). The composite treats the
+        ``None`` artifact as a value, not as a failure: it stays in the
+        tuple in the reporter's position and the remaining reporters
+        still run.
+        """
+        result = _make_result([])
+
+        class _DegradedReporter(Reporter[ReporterArtifact | None]):
+            """The MLflow-policy stand-in: a ``None`` "reported-failed" artifact."""
+
+            def report(self, result: ExperimentResult) -> ReporterArtifact | None:
+                return None
+
+        class _SpyReporter(Reporter[str]):
+            def __init__(self) -> None:
+                self.called = False
+
+            def report(self, result: ExperimentResult) -> str:
+                self.called = True
+                return "ok"
+
+        spy = _SpyReporter()
+        composite = CompositeReporter([_DegradedReporter(), spy])
+
+        artifacts = composite.report(result)
+
+        assert artifacts == (None, "ok")
+        assert spy.called
 
 
 # ────────────────────────── negative scenarios ────────────────────────── #

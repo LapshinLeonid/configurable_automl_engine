@@ -306,6 +306,10 @@ def test_p5_section_reaches_result_report_and_json(tmp_path: Any) -> None:
         runs=[],
         winner="a",
         winner_score=1.0,
+        # The ensemble artifact lives next to the winner artifact: a
+        # section without the winner artifact path is rejected by the
+        # result consistency check.
+        model_path="/tmp/model.pkl",
         ensemble=section,
     )
     restored = ExperimentResult.model_validate_json(result.to_json())

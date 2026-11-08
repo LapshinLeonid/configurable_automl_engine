@@ -879,7 +879,10 @@ def _build_and_attach_ensemble(
     # missing key means an unexpected engine/result divergence, and an
     # ensemble placed next to a wrong path would be worse than no
     # ensemble: the step degrades to "no section" with an explicit
-    # warning naming the consequence for the facade.
+    # warning naming the consequence for the facade. The result model
+    # additionally rejects an ensemble section without a winner
+    # artifact path (``ExperimentResult`` consistency), so a section
+    # can never reach the consumers without its artifact path.
     model_path = result.get("model_path")
     if not model_path:
         _LOG.warning(

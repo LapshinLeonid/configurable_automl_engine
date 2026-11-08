@@ -19,6 +19,19 @@ Contract:
   :class:`CompositeReporter` is a ``Reporter[tuple[ReporterArtifact,
   ...]]`` — so a caller with a typed ``Reporter[...]`` reference knows
   exactly what ``report`` returns, without a cast;
+* the concrete artifact is defined by the reporter implementation: the
+  base class fixes only the *shape family* (a file path or a rendered
+  string), while each concrete reporter documents its own return value
+  in its ``report`` docstring. In particular, a reporter may
+  legitimately return ``None`` as its artifact when the reporter has a
+  documented degradation policy instead of raising: the optional
+  MLflow adapter (:class:`.mlflow_reporter.MLflowReporter`) returns
+  ``None`` when the tracking server failed — the failure is logged as
+  a warning and the experiment continues without MLflow tracking (the
+  "reported-failed" policy). Callers that must treat every reporter
+  uniformly should be prepared for a ``None`` artifact from such a
+  reporter; :class:`CompositeReporter` passes it through unchanged
+  (the tuple element is ``None`` for that reporter);
 * :class:`CompositeReporter` runs several reporters in one call (the
   single registration point of a run: register once, report to every
   sink). It returns the tuple of the individual artifacts; a reporter
@@ -41,8 +54,10 @@ __all__ = [
 ]
 
 #: The artifact a reporter returns: a file path (file reporters) or a
-#: rendered text (string reporters).
-ReporterArtifact: TypeAlias = "Path | str"
+#: rendered text (string reporters). A real union object (not a string
+#: alias) so generic parameterizations like
+#: ``Reporter[ReporterArtifact | None]`` compose at runtime on 3.11+.
+ReporterArtifact: TypeAlias = Path | str
 
 
 #: The artifact type produced by one ``report`` call. Covariant and
@@ -79,7 +94,13 @@ class Reporter(ABC, Generic[_ArtifactT_co]):
         Returns:
             The produced artifact: the written file path for a file
             reporter, the rendered text for a string reporter, the tuple
-            of the individual artifacts for a composite.
+            of the individual artifacts for a composite. The concrete
+            type is defined by the reporter implementation; a reporter
+            with a documented degradation policy may return ``None``
+            instead of raising (see :class:`.mlflow_reporter.
+            MLflowReporter` — the tracking-server failure policy), and
+            :class:`CompositeReporter` passes such a ``None`` through
+            as the reporter's tuple element.
 
         Raises:
             Exception: Whatever the reporter's sink raises (an
