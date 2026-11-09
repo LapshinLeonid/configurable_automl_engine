@@ -27,7 +27,7 @@ alike — and there are no import cycles:
 |---|---|
 | 3 — orchestration | `training_engine/` (config schema, phases, selection, artifact saving, `run_parallel`) |
 | 2 — engines | `hpo/`, `tuner.py`; `trainer.py`, `trainer_*.py`. HPO and the trainer modules do not import each other; `tuner.py` is the façade over `hpo` |
-| 1 — ML building blocks | `models`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic`, `experiment` |
+| 1 — ML building blocks | `models`, `outliers_presets`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic`, `experiment` |
 | 0 — shared utilities | `common/` (and the generated `_version`) |
 
 The package `__init__` is the public façade on top; it loads
@@ -81,6 +81,7 @@ before the first trial (`validate_target_for_transform`).
 ├── src                                     # Project source code root
 │   └── configurable_automl_engine          # Main AutoML engine package
 │       ├── common                          # Layer 0: shared utilities (imports nothing above common)
+│       │   ├── bbc_cv.py                   # BBC-CV: bootstrap bias-corrected estimate of the selection procedure (split out of common.metrics; common.metrics re-exports the public names so the documented import path keeps working)
 │       │   ├── custom_metrics.py           # CustomMetricSpec: user metrics/scorers by dotted path, scorer cache, process-local registry
 │       │   ├── datetime_features.py        # Datetime/timedelta input columns: the datetime policy, expansion at fit and predict time
 │       │   ├── definitions.py              # Constants, enums and literals (validation, encoding, serialization)
@@ -91,6 +92,7 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── serialization_utils.py      # Model/pipeline serialization logic
 │       │   ├── settings.py                 # Setting groups shared by HPO and the trainer (encoding, oversampling, input policies)
 │       │   ├── shared_frame.py             # SharedDataFrame: a DataFrame passed between processes through shared memory
+│       │   ├── sklearn_compat.py           # Stable adapter over the private scikit-learn details (scorer_raw_parts, scorer_sign, check_feature_names): the only place in the package that names the private attributes
 │       │   └── validation_utils.py         # Validation strategy choice, target checks, validate_features, effective train size
 │       ├── hpo                             # Layer 2: hyperparameter optimization engine behind tuner.optimize
 │       │   ├── complexity_guard.py         # Adaptive tightening of tree/boosting search spaces on small data
