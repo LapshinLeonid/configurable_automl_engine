@@ -99,6 +99,7 @@ def optimize(
     preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
     winsorizer_exclude: list[str] | None = None,
     target_transform: TargetTransform | str = TargetTransform.none,
+    target_transform_skew_threshold: float | None = None,
     pruning: dict[str, Any] | None = None,
     high_cardinality_threshold: int | None = 50,
     high_cardinality_encoding: EncodingStrategy | None = "frequency",
@@ -234,7 +235,19 @@ def optimize(
             trial. GLM algorithms with a restricted loss domain are
             validated against the TRANSFORMED target by the engine's
             target-domain guard (see ``general.target_transform``).
-            Consistent with ``ModelTrainer(target_transform=...)``.
+            Consistent with ``ModelTrainer(target_transform=...)``. The
+            ``'auto'`` value is reserved for the training engine's
+            no-hold-out mode (the concrete method is resolved inside every
+            fold, see ``preprocessing.target_transform``); a direct caller
+            passing ``'auto'`` gets pipelines that resolve the method
+            fold-locally, but for a standalone run an explicit method is
+            the recommended contract.
+        target_transform_skew_threshold: The ``|skew(y)|`` threshold of the
+            ``'auto'`` decision (``None`` (default) — the
+            ``AutoTargetTransformer`` module default; a value must be
+            strictly positive). Only used when ``target_transform`` is
+            ``'auto'``; mirrors ``general.target_transform_skew_threshold``
+            and ``ModelTrainer(target_transform_skew_threshold=...)``.
         pruning: Early stopping (pruning) settings.
             A dict with fields: ``enable`` (bool, False by default),
             ``strategy`` ('median' | 'hyperband', 'median' by default),
@@ -397,7 +410,19 @@ def optimize(
         winsorizer_exclude=(
             None if winsorizer_exclude is None else list(winsorizer_exclude)
         ),
-        target_transform=normalize_target_transform(target_transform),
+        target_transform=normalize_target_transform(
+            target_transform,
+            # The engine's no-hold-out mode passes the 'auto' placeholder
+            # deliberately: the concrete method is resolved inside every
+            # fold (AutoTargetTransformer). Direct callers keep the strict
+            # contract (an explicit method is required).
+            allow_auto=target_transform is TargetTransform.auto
+            or (
+                isinstance(target_transform, str)
+                and target_transform.strip().lower() == TargetTransform.auto.value
+            ),
+        ),
+        target_transform_skew_threshold=target_transform_skew_threshold,
         feature_selection_cfg=feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=data_oversampling,

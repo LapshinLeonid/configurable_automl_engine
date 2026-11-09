@@ -52,13 +52,17 @@ class TargetTransform(str, Enum):
       positive ``y``: ``min(y) > 0`` (validated before training);
     * ``yeo-johnson`` — the Yeo-Johnson power transformation; any real
       ``y`` (no domain restrictions);
-    * ``auto`` — the engine decides before HPO from the target skewness
+    * ``auto`` — the engine decides from the target skewness
       (``skew(y)``): a sufficiently skewed ``y`` selects ``log1p`` when
       ``min(y) > -1``, otherwise ``yeo-johnson``; an (almost) symmetric
-      ``y`` keeps ``none``. The resolved method is what the rest of the
-      pipeline (HPO, the final trainer, the metadata, the
-      ``ExperimentResult``) sees — ``auto`` itself never reaches them
-      (see ``preprocessing.target_transform.resolve_target_transform``).
+      ``y`` keeps ``none``. The decision point follows the estimation
+      design: with a reserved outer hold-out the resolved concrete method
+      — never ``auto`` itself — is what the rest of the pipeline (HPO,
+      the final trainer, the metadata, the ``ExperimentResult``) sees
+      (see ``preprocessing.target_transform.resolve_target_transform``);
+      without an outer hold-out the placeholder reaches the trainers and
+      every fold resolves its own method from its own ``y_train`` (see
+      ``preprocessing.target_transform.AutoTargetTransformer``).
     """
 
     none = "none"

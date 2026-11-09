@@ -68,9 +68,19 @@ model`, where for a non-`none` target transformation
 hold-out trainer all fit on the transformed `y`, so the selected
 hyperparameters match the returned model. The target-domain guard of the
 GLM algorithms (`hpo/target_domain.py`, applied once before the first HPO
-phase) is checked against the transformed target when a transformation is
-configured; a domain violation of the transformation itself fails once
-before the first trial (`validate_target_for_transform`).
+phase) is checked against the transformed target when a concrete
+transformation is configured; a domain violation of the transformation
+itself fails once before the first trial (`validate_target_for_transform`).
+
+The `auto` mode of the target transform has two decision points, by the
+estimation design: with a reserved outer hold-out the concrete method is
+decided once in `prepare_dataset` on the train part of the split (every
+stage sees the resolved method); without a hold-out the `auto` placeholder
+reaches the trainers and every CV fold (and the final full fit) resolves
+its own method from its own `y_train` via `AutoTargetTransformer`
+(`preprocessing/target_transform.py`) — the validation-fold target values
+never influence the transformation the folds are scored with (a leak the
+BBC-CV estimate would be especially exposed to).
 
 # Project Structure
 
@@ -168,7 +178,7 @@ before the first trial (`validate_target_for_transform`).
 │       │   ├── features.py                 # Feature type detection, uninformative columns, feature count estimate
 │       │   ├── outliers.py                 # Winsorizer: standalone winsorization transformer (must not import the other preprocessing modules; its classes are pickled inside saved models, so the module path is part of the artifact format)
 │       │   ├── quantile.py                 # _FoldSafeQuantileTransformer: QuantileTransformer with fold-size-aware n_quantiles clipping
-│       │   └── target_transform.py         # TargetTransformer (log1p / boxcox / yeo-johnson), wrap_with_target_transform, the 'auto' resolution from the target skewness
+│       │   └── target_transform.py         # TargetTransformer (log1p / boxcox / yeo-johnson), AutoTargetTransformer (fold-local 'auto'), wrap_with_target_transform, the 'auto' resolution from the target skewness
 │       ├── outliers_presets.py             # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
 │       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets (imputation, scaling, outliers; precedence: class preset < general < algorithm)
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model

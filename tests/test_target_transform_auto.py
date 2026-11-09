@@ -36,12 +36,16 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 from scipy import stats as sp_stats
+from sklearn.base import clone
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import LinearRegression
 
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.settings import OversamplingSettings
+from configurable_automl_engine.feature_selection import FeatureSelectionCfg
 from configurable_automl_engine.preprocessing.target_transform import (
     DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD,
+    AutoTargetTransformer,
     TargetTransformer,
     normalize_target_transform,
     resolve_target_transform,
@@ -298,9 +302,11 @@ def test_schema_contains_skew_threshold() -> None:
 
 
 def _e2e_config(model_path: str, **general: Any) -> dict:
+    # A reserved outer hold-out: the default 'auto' decision point of the
+    # regression tests below (the global resolution contract).
     return _base_config(
         comparison_metric="r2",
-        holdout_fraction=None,
+        holdout_fraction=general.pop("holdout_fraction", 0.2),
         target_transform="auto",
         path_to_model=model_path,
         **general,
@@ -315,13 +321,46 @@ def _e2e_df(rows: int = 300, seed: int = 7) -> pd.DataFrame:
 
 
 def test_prepare_dataset_resolves_auto_before_hpo(caplog) -> None:
-    """``prepare_dataset`` writes the resolved method back into the config."""
-    cfg = Config.model_validate(_base_config(target_transform="auto"))
+    """``prepare_dataset`` writes the resolved method back into the config.
+
+    With a RESERVED outer hold-out the decision is made once, on the train
+    part of the split, and every later consumer reads the concrete method."""
+    cfg = Config.model_validate(
+        _base_config(target_transform="auto", holdout_fraction=0.2)
+    )
     df = _e2e_df(rows=80)
     with caplog.at_level(logging.INFO):
         prepare_dataset(cfg, df, "target")
     assert cfg.general.target_transform is TargetTransform.log1p
     assert any("target_transform='auto'" in r.getMessage() for r in caplog.records)
+
+
+def test_prepare_dataset_keeps_auto_without_holdout(caplog) -> None:
+    """Without a reserved hold-out the ``auto`` placeholder stays in the
+    configuration: the concrete method is decided INSIDE every CV fold
+    (the fold-local resolution), not globally on the full target — the
+    validation-fold values must not influence the transformation they are
+    scored with."""
+    cfg = Config.model_validate(
+        _base_config(target_transform="auto", holdout_fraction=None)
+    )
+    df = _e2e_df(rows=80)
+    with caplog.at_level(logging.INFO):
+        prepare_dataset(cfg, df, "target")
+    assert cfg.general.target_transform is TargetTransform.auto
+    assert any(
+        "no outer hold-out is reserved" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_prepare_dataset_auto_default_small_data_keeps_placeholder() -> None:
+    """``holdout_fraction: 'auto'`` on data below AUTO_HOLDOUT_MIN_ROWS
+    reserves no hold-out, so the ``auto`` placeholder is kept for the
+    fold-local resolution (the same contract as an explicit null)."""
+    cfg = Config.model_validate(_base_config(target_transform="auto"))
+    df = _e2e_df(rows=80)
+    prepare_dataset(cfg, df, "target")
+    assert cfg.general.target_transform is TargetTransform.auto
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -404,14 +443,15 @@ def test_auto_decision_ignores_holdout_target_values() -> None:
     assert cfg.general.target_transform is TargetTransform.none
 
 
-def test_auto_decision_uses_full_target_without_holdout() -> None:
-    """Without a reserved hold-out the full vector is the decision sample.
+def test_auto_without_holdout_is_fold_local() -> None:
+    """Without a reserved hold-out the full target does NOT decide the
+    method: the ``auto`` placeholder stays in the config and reaches the
+    trainers, where each fold resolves its own method from its own
+    ``y_train`` (leak poisoning of the full vector must not change this).
 
-    The same poisoned data with ``holdout_fraction: null`` resolves to
-    ``log1p`` — the extreme values are part of the training data then
-    (the base target is shifted positive, so ``min(y) > -1`` keeps ``log1p``
-    inside its domain).
-    """
+    Under the pre-#198 behavior the poisoned full vector resolved to
+    ``log1p`` before the CV — the validation-fold values influenced the
+    choice they were later scored with."""
     df = _holdout_independence_df()
     df["target"] = df["target"] + 50.0  # min(y) > -1: log1p stays in-domain
     df.loc[df.index[-5:], "target"] = 1e6
@@ -423,7 +463,9 @@ def test_auto_decision_uses_full_target_without_holdout() -> None:
         _base_config(target_transform="auto", holdout_fraction=None)
     )
     prepare_dataset(cfg, df, "target")
-    assert cfg.general.target_transform is TargetTransform.log1p
+    # No global decision: the placeholder is kept for the fold-local
+    # resolution (every fold decides from its own y_train).
+    assert cfg.general.target_transform is TargetTransform.auto
 
 
 def test_auto_domain_fallback_when_holdout_breaks_log1p_domain(caplog) -> None:
@@ -522,7 +564,8 @@ def test_prepare_dataset_leaves_explicit_method_untouched() -> None:
 
 
 def test_e2e_auto_resolves_to_log1p_and_reaches_artifact(tmp_path: Path) -> None:
-    """E2E: a log-normal target with ``target_transform: auto``.
+    """E2E with a reserved hold-out: a log-normal target with
+    ``target_transform: auto``.
 
     The resolved ``log1p`` reaches the HPO trials, the final trainer, the
     artifact metadata and the ``ExperimentResult`` (the config snapshot
@@ -556,8 +599,9 @@ def test_e2e_auto_resolves_to_log1p_and_reaches_artifact(tmp_path: Path) -> None
 
 
 def test_e2e_auto_normal_target_resolves_to_none(tmp_path: Path) -> None:
-    """A symmetric target keeps ``none`` end-to-end: the saved model step is
-    the bare regressor (no ``TransformedTargetRegressor`` wrapper)."""
+    """A symmetric target with a reserved hold-out keeps ``none`` end-to-end:
+    the saved model step is the bare regressor (no
+    ``TransformedTargetRegressor`` wrapper)."""
     rng = np.random.default_rng(5)
     rows = 150
     df = pd.DataFrame({f"f{i}": rng.normal(size=rows) for i in range(3)})
@@ -579,7 +623,8 @@ def test_e2e_auto_normal_target_resolves_to_none(tmp_path: Path) -> None:
 
 
 def test_e2e_auto_negative_skewed_resolves_to_yeo_johnson(tmp_path: Path) -> None:
-    """A skewed target with negative values resolves to ``yeo-johnson``."""
+    """A skewed target with negative values (and a reserved hold-out)
+    resolves to ``yeo-johnson``."""
     rng = np.random.default_rng(6)
     rows = 300
     df = pd.DataFrame({f"f{i}": rng.normal(size=rows) for i in range(3)})
@@ -612,11 +657,239 @@ def test_trainer_rejects_auto_placeholder() -> None:
         ModelTrainer(algorithm="ridge", target_transform=TargetTransform.auto)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 4c. the no-hold-out mode: the fold-local 'auto' resolution
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _no_holdout_config(model_path: str) -> dict:
+    return _base_config(
+        comparison_metric="r2",
+        holdout_fraction=None,
+        target_transform="auto",
+        path_to_model=model_path,
+    )
+
+
+def test_e2e_no_holdout_auto_artifact_resolves_fold_locally(tmp_path: Path) -> None:
+    """E2E without a hold-out: the artifact's ``model`` step carries the
+    ``AutoTargetTransformer`` (the fold-local resolution wrapper), the
+    resolved method is recorded in the fitted state, the predictions are
+    finite, and the report/config carry the placeholder explicitly."""
+    model_path = tmp_path / "model.pkl"
+    result = train_best_model(
+        config=_no_holdout_config(str(model_path)),
+        df=_e2e_df(rows=120),
+        target="target",
+        model_path_override=model_path,
+    )
+    assert result["algorithm"] == "ridge"
+    assert "bbc_score" in result  # the honest no-hold-out estimate exists
+
+    assert component.last_experiment_result is not None
+    # The config snapshot reports the placeholder honestly (the resolution
+    # is per fold; there is no single global method to report).
+    assert component.last_experiment_result.config["general"]["target_transform"] == (
+        "auto"
+    )
+
+    trainer = joblib.load(model_path)
+    steps = dict(trainer.pipeline.steps)
+    assert isinstance(steps["model"], TransformedTargetRegressor)
+    fitted = getattr(steps["model"], "transformer_", steps["model"].transformer)
+    assert isinstance(fitted, AutoTargetTransformer)
+    # The final full fit resolved log1p from its own y (a log-normal target).
+    assert fitted.resolved_method_ is TargetTransform.log1p
+    # The inverse transformation works: predictions are finite and positive.
+    preds = trainer.predict(_e2e_df(rows=20).drop(columns=["target"]))
+    assert np.isfinite(preds).all()
+    assert (preds > 0).all()
+    assert trainer.settings.target_transform is TargetTransform.auto
+    assert trainer.artifact_metadata_["target_transform"] == "auto"
+
+
+def test_e2e_no_holdout_auto_symmetric_target_resolves_to_none(
+    tmp_path: Path,
+) -> None:
+    """Without a hold-out a symmetric target resolves to ``none`` in the
+    final full fit: the fitted ``AutoTargetTransformer`` carries the
+    identity method (its ``transform`` is a no-op pass-through)."""
+    rng = np.random.default_rng(5)
+    rows = 120
+    df = pd.DataFrame({f"f{i}": rng.normal(size=rows) for i in range(3)})
+    df["target"] = 2.0 * df["f0"] + rng.normal(scale=0.1, size=rows)
+
+    model_path = tmp_path / "model.pkl"
+    train_best_model(
+        config=_no_holdout_config(str(model_path)),
+        df=df,
+        target="target",
+        model_path_override=model_path,
+    )
+    trainer = joblib.load(model_path)
+    steps = dict(trainer.pipeline.steps)
+    assert isinstance(steps["model"], TransformedTargetRegressor)
+    fitted = getattr(steps["model"], "transformer_", steps["model"].transformer)
+    assert isinstance(fitted, AutoTargetTransformer)
+    assert fitted.resolved_method_ is TargetTransform.none
+    assert trainer.settings.target_transform is TargetTransform.auto
+
+
+def test_skew_threshold_propagates_to_fold_local_resolution(
+    tmp_path: Path,
+) -> None:
+    """``general.target_transform_skew_threshold`` reaches the fold-local
+    ``AutoTargetTransformer`` in the HPO trials AND in the final trainer:
+    a mildly skewed target resolves to ``none`` with the default threshold
+    and to ``log1p`` with a tiny one."""
+    rng = np.random.default_rng(9)
+    rows = 120
+    df = pd.DataFrame({f"f{i}": rng.normal(size=rows) for i in range(3)})
+    y = 2.0 * df["f0"] + rng.normal(scale=0.1, size=rows)
+    # Mild right skew, strictly positive (log1p stays in-domain).
+    df["target"] = np.expm1(y / y.std() * 0.2)
+    skew = float(sp_stats.skew(df["target"], bias=False))
+    assert 0.05 < skew < 1.0
+
+    def _config(threshold: float, model_path: str) -> dict:
+        return _base_config(
+            comparison_metric="r2",
+            holdout_fraction=None,
+            target_transform="auto",
+            target_transform_skew_threshold=threshold,
+            path_to_model=model_path,
+        )
+
+    for threshold, expected in (
+        (1.0, TargetTransform.none),
+        (0.05, TargetTransform.log1p),
+    ):
+        model_path = tmp_path / f"model_{threshold}.pkl"
+        train_best_model(
+            config=_config(threshold, str(model_path)),
+            df=df,
+            target="target",
+            model_path_override=model_path,
+        )
+        trainer = joblib.load(model_path)
+        steps = dict(trainer.pipeline.steps)
+        fitted = getattr(steps["model"], "transformer_", steps["model"].transformer)
+        assert isinstance(fitted, AutoTargetTransformer)
+        assert trainer.settings.target_transform_skew_threshold == threshold
+        assert fitted.skew_threshold == threshold
+        assert fitted.resolved_method_ is expected, threshold
+
+
+def test_fold_local_decision_ignores_validation_fold_values() -> None:
+    """Leak poisoning (the issue's core scenario): the target values of the
+    CV validation folds must not influence the transformation the folds are
+    scored with.
+
+    The fixture builds a target that is symmetric on the train folds and
+    right-skewed ONLY because of a few extreme validation rows. With the
+    fold-local resolution every fold's ``y_train`` stays symmetric → the
+    fold pipelines train untransformed; the poisoned rows can neither flip
+    the method (they never enter any fold's train part in full) nor leak
+    into the pre-CV decision — there is no pre-CV decision anymore.
+    """
+    from configurable_automl_engine.hpo.request import HpoRequest
+    from configurable_automl_engine.hpo.trial_pipeline import (
+        assemble_estimator,
+        plan_preprocessing,
+    )
+    from sklearn.linear_model import Ridge
+
+    rows = 60
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"f0": rng.normal(size=rows)})
+    y = pd.Series(2.0 * X["f0"] + rng.normal(scale=0.1, size=rows), name="y")
+    # Poison five rows into extreme values: the FULL vector becomes
+    # right-skewed (the pre-#198 global decision would choose log1p), but
+    # every individual fold's train part stays symmetric.
+    y.iloc[-5:] = 1e4
+    assert float(sp_stats.skew(y, bias=False)) > 1.0
+
+    request = HpoRequest(algo_name="ridge", target_transform=TargetTransform.auto)
+    preprocessing = plan_preprocessing(X, request)
+    estimator = assemble_estimator(
+        Ridge(),
+        preprocessing,
+        is_isotonic=False,
+        fs_cfg=FeatureSelectionCfg(),
+        oversampling=OversamplingSettings(),
+        random_state=0,
+        target_transform=TargetTransform.auto,
+    )
+    # The assembled trial pipeline wraps the model with the fold-local
+    # resolution wrapper.
+    wrapped = estimator.named_steps["model"]
+    assert isinstance(wrapped, TransformedTargetRegressor)
+    transformer = wrapped.transformer
+    assert isinstance(transformer, AutoTargetTransformer)
+
+    # Fit on fold-like splits: each fold's train part is symmetric, so each
+    # fit resolves 'none' — the extreme validation rows are ignored.
+    for train_end in (40, 45, 50):
+        fold_y = y.iloc[:train_end]
+        fold_transformer = clone(transformer)
+        fold_transformer.fit(fold_y.to_numpy().reshape(-1, 1))
+        assert fold_transformer.resolved_method_ is TargetTransform.none, train_end
+
+
+def test_fold_local_resolution_poisoned_train_fold_gets_yeo_johnson() -> None:
+    """A fold whose TRAIN part is right-skewed resolves log1p — from its
+    own values only: poisoning the validation rows of that fold does not
+    change the resolution."""
+    skew_train = _lognormal_y(n=60, seed=4)
+    transformer = AutoTargetTransformer()
+    transformer.fit(skew_train.to_numpy().reshape(-1, 1))
+    assert transformer.resolved_method_ is TargetTransform.log1p
+    # The transform/inverse round trip matches the resolved method.
+    t = transformer.transform(skew_train.to_numpy()[:5].reshape(-1, 1))
+    np.testing.assert_allclose(
+        transformer.inverse_transform(t),
+        skew_train.to_numpy()[:5].reshape(-1, 1),
+        rtol=1e-6,
+    )
+
+
+def test_auto_target_transformer_requires_fit_before_transform() -> None:
+    with pytest.raises(RuntimeError, match="not fitted"):
+        AutoTargetTransformer().transform(_lognormal_y().to_numpy().reshape(-1, 1))
+
+
+def test_auto_target_transformer_invalid_threshold_rejected() -> None:
+    with pytest.raises(ValueError, match="target_transform_skew_threshold"):
+        AutoTargetTransformer(skew_threshold=-1.0).fit(
+            _lognormal_y().to_numpy().reshape(-1, 1)
+        )
+
+
 def test_normalize_target_transform_rejects_auto() -> None:
     with pytest.raises(ValueError, match="must be resolved"):
         normalize_target_transform(TargetTransform.auto)
     with pytest.raises(ValueError, match="must be resolved"):
         normalize_target_transform("auto")
+
+
+def test_normalize_target_transform_accepts_auto_only_explicitly() -> None:
+    """The fold-local path opts in explicitly (``allow_auto=True``); the
+    strict default rejects the placeholder for every other consumer."""
+    assert normalize_target_transform("auto", allow_auto=True) is TargetTransform.auto
+    assert (
+        normalize_target_transform(TargetTransform.auto, allow_auto=True)
+        is TargetTransform.auto
+    )
+
+
+def test_wrapped_model_fold_local_accepts_auto() -> None:
+    """``wrap_with_target_transform`` accepts ``auto`` (the fold-local
+    resolution wrapper) — the placeholder guards of the plain transformer
+    are unchanged."""
+    wrapped = wrap_with_target_transform(LinearRegression(), TargetTransform.auto)
+    assert isinstance(wrapped, TransformedTargetRegressor)
+    assert isinstance(wrapped.transformer, AutoTargetTransformer)
+    assert wrap_with_target_transform(LinearRegression(), "auto") is not None
 
 
 def test_target_transformer_rejects_auto() -> None:
@@ -625,5 +898,7 @@ def test_target_transformer_rejects_auto() -> None:
 
 
 def test_wrapped_model_never_sees_auto() -> None:
+    """The plain ``TargetTransformer`` path still rejects ``auto``: only the
+    fold-local wrapper (``AutoTargetTransformer``) may receive it."""
     with pytest.raises(ValueError, match="auto"):
-        wrap_with_target_transform(LinearRegression(), TargetTransform.auto)
+        TargetTransformer(method="auto").fit(_lognormal_y().to_numpy().reshape(-1, 1))

@@ -451,16 +451,17 @@ class _OptimizeRunner:
             apply_fs=apply_fs,
             feature_index=feature_index,
             target_transform=self.request.target_transform,
+            target_transform_skew_threshold=(
+                self.request.target_transform_skew_threshold
+            ),
         )
 
     def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
         """Evaluate the assembled trial pipeline and return the target metric.
 
-        Delegates the evaluation to ``score_trial``. With ``collect_oof`` the
-        out-of-fold predictions of the trial are kept in ``trial_oof`` when
-        the trial produced a valid score (the worst-score sentinel — a failed
-        fold or a non-finite metric — is not a selectable candidate and is
-        not kept).
+        Delegates to ``score_trial``. With ``collect_oof`` the OOF
+        predictions of a valid-score trial are kept in ``trial_oof`` (the
+        worst-score sentinel is not selectable).
 
         Args:
             trial: The current Optuna trial object.
@@ -469,9 +470,9 @@ class _OptimizeRunner:
             float: The target metric value for the current parameter set.
         Raises:
             ValueError: Non-fatal evaluation error (the trial is pruned).
-            MemoryError, RuntimeError, InvalidDataError: Fatal failures —
-                counted in the ``handle_failure`` counter.
-            optuna.TrialPruned: Pruning by the early stopping pruner.
+            MemoryError, RuntimeError, InvalidDataError: Fatal failures
+                (counted in ``handle_failure``).
+            optuna.TrialPruned: Pruning by the pruner.
         """
         request = self.request
         result = score_trial(
@@ -839,10 +840,8 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
         X: The feature matrix.
         y: The target vector.
         request: The run settings.
-
     Returns:
         ValidationPlan: The repaired matrix and the resolved validation.
-
     Raises:
         InvalidDataError: If the data is invalid.
         InvalidAlgorithmError: If the algorithm is not available.
@@ -854,9 +853,10 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     # trial (a per-trial check would spend the whole HPO budget on a
     # domain violation — e.g. ``boxcox`` on a target with zeros — and
     # surface it only as every fold of every trial failing). The final
-    # ``ModelTrainer.fit`` validates the same way, so the error contract is
-    # shared.
-    validate_target_for_transform(y, request.target_transform)
+    # ``ModelTrainer.fit`` validates the same way (the contract is shared);
+    # 'auto' (no-hold-out mode) is a no-op — the fold-local resolution
+    # validates the resolved domain per fit.
+    validate_target_for_transform(y, request.target_transform, allow_auto=True)
     # _validate_data may return a repaired feature matrix (e.g. datetime
     # columns expanded); the None return is kept for backward compatibility
     # with callers/mocks that treat the helper as a pure validator.

@@ -399,6 +399,7 @@ def assemble_estimator(
     apply_fs: bool = False,
     feature_index: int | None = None,
     target_transform: TargetTransform | str = TargetTransform.none,
+    target_transform_skew_threshold: float | None = None,
 ) -> Any:
     """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
@@ -438,6 +439,10 @@ def assemble_estimator(
             adapter (``None`` — 0).
         target_transform: The target transformation of the ``model`` step
             (default ``TargetTransform.none`` — no wrapping).
+        target_transform_skew_threshold: The ``|skew(y)|`` threshold of the
+            fold-local ``auto`` resolution (``None`` — the module default of
+            ``preprocessing.target_transform``); only used when
+            ``target_transform`` is ``auto``.
 
     Returns:
         Any: The trial pipeline (or the wrapped/bare model when it has no
@@ -464,7 +469,16 @@ def assemble_estimator(
         )
     if oversampling.enable:
         steps.append(("sampler", DataOversampler(**oversampling.sampler_params())))
-    steps.append(("model", wrap_with_target_transform(model_impl, target_transform)))
+    steps.append(
+        (
+            "model",
+            wrap_with_target_transform(
+                model_impl,
+                target_transform,
+                skew_threshold=target_transform_skew_threshold,
+            ),
+        )
+    )
     if len(steps) == 1:
         return steps[0][1]
     return ImbPipeline(steps)

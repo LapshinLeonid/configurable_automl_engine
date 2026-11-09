@@ -120,6 +120,11 @@ train data, or out-of-fold data. Forbidden:
 - resolving an `auto` configuration placeholder (target transform, scaling
   mode, outlier preset) over the full target vector including the future
   holdout — resolve it after the outer split, on the training part only;
+  when no outer split exists (no hold-out reserved), resolve it per
+  cross-validation fold from the fold's own train part (the
+  `AutoTargetTransformer` pattern) instead of globally on the full data —
+  the validation-fold values must not influence the choice the same rows
+  are scored with;
 - fitting any statistic used by preprocessing (means, quantiles, skewness,
   category lists, feature-selection rankings) on validation, OOF or holdout
   rows;
@@ -238,9 +243,11 @@ Answer for the changed code, item by item; any "no" is a blocker:
       shared seeded splits) are not "audited" or realigned in passing.
 - [ ] Every data-driven **choice** on the path to the external estimate uses
       only train/OOF data; an `auto` placeholder is resolved after the outer
-      split on the training part. Any holdout-reading behavior is an
-      explicit, documented domain-safety guard for the final refit (the
-      `_fallback_transform_for_full_y` pattern).
+      split on the training part — or, when no outer split exists, per CV
+      fold from the fold's own train part (the `AutoTargetTransformer`
+      pattern of `preprocessing/target_transform.py`). Any holdout-reading
+      behavior is an explicit, documented domain-safety guard for the final
+      refit (the `_fallback_transform_for_full_y` pattern).
 - [ ] Any adaptivity-compensation claim is backed by reproducing the search
       (BBC-CV) or is explicitly disclaimed in the docstring.
 - [ ] Every new metric/mask/transform docstring states rows, NaN/Inf

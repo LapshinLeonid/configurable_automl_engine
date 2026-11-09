@@ -734,7 +734,11 @@ def assemble_pipeline_steps(
     steps.append(
         (
             "model",
-            wrap_with_target_transform(base_model, settings.target_transform),
+            wrap_with_target_transform(
+                base_model,
+                settings.target_transform,
+                skew_threshold=settings.target_transform_skew_threshold,
+            ),
         )
     )
     return steps

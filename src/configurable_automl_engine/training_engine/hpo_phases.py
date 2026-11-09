@@ -146,6 +146,7 @@ def _build_hpo_request(
         # construction).
         winsorizer_exclude=list(spec.winsorizer_exclude),
         target_transform=spec.target_transform,
+        target_transform_skew_threshold=spec.target_transform_skew_threshold,
         feature_selection_cfg=spec.feature_selection_cfg,
         oversampling=OversamplingSettings(
             enable=spec.oversampling_enabled,
@@ -423,14 +424,46 @@ def _apply_target_domain_guard(
     partly invalid is clipped to its valid part instead (the algorithm stays
     a candidate).
 
-    When ``target_transform`` is not ``none``, the HPO trials (and the final
-    trainer) train on the TRANSFORMED target: the domain is checked against
-    ``y_eff = fit_transform_target(y, target_transform)`` (a domain violation
-    of the transformation itself, e.g. ``boxcox`` on a non-positive ``y``,
-    is raised here as a ``ValueError`` before any trial). The disqualification
-    reason mentions that the domain was checked after the transformation."""
+    When ``target_transform`` is a concrete method other than ``none``, the
+    HPO trials (and the final trainer) train on the TRANSFORMED target: the
+    domain is checked against ``y_eff = fit_transform_target(y,
+    target_transform)`` (a domain violation of the transformation itself,
+    e.g. ``boxcox`` on a non-positive ``y``, is raised here as a
+    ``ValueError`` before any trial). The disqualification reason mentions
+    that the domain was checked after the transformation.
+
+    The ``auto`` placeholder (the engine's no-hold-out mode — the concrete
+    method is resolved inside every fold by ``AutoTargetTransformer``) is
+    checked against the UNTRANSFORMED ``y``: no concrete method has been
+    decided yet, so the check cannot assume one. The untransformed check is
+    the safe lower bound for the fold-local resolution: a fold that
+    resolves ``log1p``/``yeo-johnson`` trains on a target whose domain is a
+    permutation of the original values (``log1p``/``yeo-johnson`` are
+    monotone), so an algorithm whose loss domain rejects the original
+    ``y`` cannot be rescued by the transformation (``yeo-johnson`` with
+    ``standardize=True`` can span negative values — if a GLM survives the
+    untransformed check but fails on a transformed fold, the ordinary HPO
+    failure policy penalizes those folds; the guard's job is only to catch
+    the guaranteed pre-HPO disqualifications).
+
+    Args:
+        all_algorithms: The candidate algorithms (name → config).
+        y: The raw target vector (the TRAIN part of the outer split when a
+            hold-out is reserved, the full target otherwise).
+        disqualified: Algorithms already disqualified by the circuit
+            breaker (their configs pass through unchanged).
+        target_transform: The configured transformation (``auto`` — the
+            no-hold-out placeholder: the domain check runs on the
+            untransformed ``y``).
+
+    Returns:
+        TargetDomainOutcome: The guarded algorithms and the up-front
+            disqualifications.
+    """
     y_eff: pd.Series | np.ndarray = y
-    if target_transform is not TargetTransform.none:
+    if target_transform is not TargetTransform.auto and (
+        target_transform is not TargetTransform.none
+    ):
         # A domain violation of the transformation itself (e.g. ``boxcox`` on
         # a target with zeros) fails here ONCE with the same message the
         # runner and the trainer use — not in every fold of every trial.
@@ -448,7 +481,7 @@ def _apply_target_domain_guard(
         )
         check = check_target_domain(name, space, y_eff)
         if check.disqualify_reason is not None:
-            if target_transform is not TargetTransform.none:
+            if target_transform not in (TargetTransform.none, TargetTransform.auto):
                 reason = (
                     f"{check.disqualify_reason} (the domain was checked "
                     f"after the target_transform='{target_transform.value}' "

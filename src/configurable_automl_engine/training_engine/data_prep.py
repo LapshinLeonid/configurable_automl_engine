@@ -2,10 +2,12 @@
 
 Loads and validates the run configuration (``load_config``), splits the input
 into X/y, applies the input-data diagnostics, reserves the outer hold-out,
-resolves the ``auto`` target transformation (on the TRAIN part of the split,
-never on the hold-out), the validation strategy and the column types exactly
-once (``prepare_dataset``); it also registers the datetime expansion on a
-saved trainer. It may import ``state`` only and must not import the other
+resolves the ``auto`` target transformation (with a reserved hold-out — once,
+on the TRAIN part of the split, never on the hold-out; without a hold-out the
+``auto`` placeholder is kept and the decision moves inside every CV fold via
+``AutoTargetTransformer``), the validation strategy and the column types
+exactly once (``prepare_dataset``); it also registers the datetime expansion
+on a saved trainer. It may import ``state`` only and must not import the other
 pipeline step modules (``hpo_phases``, ``finalists``, ``select_steps``,
 ``artifact``, ``component``).
 """
@@ -164,7 +166,7 @@ def _resolve_holdout_fraction(
     return None
 
 
-def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
+def _resolve_auto_target_transform(cfg: Config, y: pd.Series, *, holdout: bool) -> bool:
     """Resolve ``general.target_transform: 'auto'`` into a concrete method.
 
     Runs once in ``prepare_dataset`` — after the outer hold-out is split off
@@ -180,19 +182,61 @@ def _resolve_auto_target_transform(cfg: Config, y: pd.Series) -> None:
     ``ExperimentResult`` assembly) sees the concrete method and ``auto``
     never leaks into the pipeline or the artifacts.
 
+    When ``holdout`` is ``False`` (no outer hold-out is reserved: an
+    explicit ``holdout_fraction: null`` or the ``'auto'`` decision on small
+    data) the resolution is NOT performed here: the full ``y`` is then the
+    union of the internal CV folds' train and validation parts, and an
+    ``auto`` decision on it would let the validation-fold target values
+    influence the choice of the transformation that the same rows are later
+    scored with (a leak; the BBC-CV honest estimate is especially exposed,
+    because it evaluates the whole collected trial pool on those folds).
+    Instead the ``auto`` placeholder stays in the configuration and reaches
+    the HPO trials, the finalists and the final trainer, where every fit
+    (every CV fold's train part included) resolves its own method from its
+    own ``y`` via ``AutoTargetTransformer`` — the fold-local resolution
+    contract of ``preprocessing.target_transform``.
+
     Args:
-        cfg: The configuration object (``cfg.general.target_transform`` is
-            always replaced with the resolved value; for a non-``auto``
-            configured method the resolved value is the method itself).
-        y: The raw target vector (the decision sample; the TRAIN part of the
-            outer split when a hold-out is reserved, the full target
-            otherwise).
+        cfg: The configuration object. With ``holdout=True``
+            ``cfg.general.target_transform`` is replaced with the resolved
+            value (for a non-``auto`` configured method — the method
+            itself); with ``holdout=False`` it is left unchanged.
+        y: The raw target vector. Used only with ``holdout=True`` (the
+            TRAIN part of the outer split); ignored otherwise.
+        holdout: Whether an outer hold-out was reserved for this run.
+
+    Returns:
+        bool: Whether the ``auto`` decision was made HERE (``True`` — the
+            resolved concrete method is in the configuration; ``False`` —
+            the ``auto`` placeholder was kept for the fold-local
+            resolution, or the configured method is explicit).
     """
+    if cfg.general.target_transform is not TargetTransform.auto:
+        # An explicitly configured method: written back unchanged (the
+        # normalization contract of the resolution point).
+        cfg.general.target_transform = resolve_target_transform(
+            y,
+            cfg.general.target_transform,
+            skew_threshold=cfg.general.target_transform_skew_threshold,
+        )
+        return False
+    if not holdout:
+        _LOG.info(
+            "target_transform='auto': no outer hold-out is reserved — the "
+            "decision moves INSIDE the cross-validation: every fold "
+            "(and the final full fit) resolves its own method from its "
+            "own y_train (target_transform_skew_threshold=%s), so the "
+            "validation-fold target values cannot influence the "
+            "transformation they are scored with.",
+            cfg.general.target_transform_skew_threshold,
+        )
+        return False
     cfg.general.target_transform = resolve_target_transform(
         y,
-        cfg.general.target_transform,
+        TargetTransform.auto,
         skew_threshold=cfg.general.target_transform_skew_threshold,
     )
+    return True
 
 
 def _fallback_transform_for_full_y(
@@ -215,6 +259,13 @@ def _fallback_transform_for_full_y(
     configured restricted method — the alternative is a guaranteed crash of
     the final fit, and the WARNING reports the override explicitly. ``none``
     and ``yeo-johnson`` accept any real ``y`` and are returned unchanged.
+
+    The ``auto`` placeholder (the no-hold-out mode, where the ``auto``
+    decision lives inside every fold) is returned unchanged: no concrete
+    domain decision has been made yet, and the fold-local resolution
+    (``AutoTargetTransformer``) picks the method per fit from its own
+    ``y_train`` — a fold whose train part violates a restricted domain
+    resolves to ``yeo-johnson`` on the spot instead of crashing.
 
     The ``log1p``/``boxcox`` domain bounds themselves are undefined for
     non-finite or non-numeric ``full_y``: ``np.min`` of a vector with NaN
@@ -240,6 +291,11 @@ def _fallback_transform_for_full_y(
             contains NaN/±inf — the domain decision is undefined for such
             data (``prepare_dataset`` rejects them earlier anyway).
     """
+    if resolved is TargetTransform.auto:
+        # The no-hold-out mode keeps the placeholder: the concrete method is
+        # resolved fold-locally (AutoTargetTransformer), nothing is decided
+        # here yet — and nothing can be downgraded here either.
+        return resolved
     if resolved not in (TargetTransform.log1p, TargetTransform.boxcox):
         return resolved
     try:
@@ -282,8 +338,10 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
 
     Pipeline step 2. Splits the DataFrame into X/y, reserves the outer
     hold-out, resolves the validation strategy ('auto' → a concrete
-    method/folds/test_size), resolves the 'auto' target transformation from
-    the TRAIN-part target skewness (never from the hold-out rows) and
+    method/folds/test_size), resolves the 'auto' target transformation —
+    with a reserved hold-out globally from the TRAIN-part target skewness
+    (never from the hold-out rows; without a hold-out the decision moves
+    inside every CV fold, see ``_resolve_auto_target_transform``) — and
     detects column types exactly once — a guarantee of consistent
     preprocessing between HPO and the final training.
 
@@ -396,25 +454,37 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # Target-transform resolution ('auto'): AFTER the outer hold-out is split
     # OFF and BEFORE the HPO budget is spent (and before the pre-HPO GLM
     # target-domain guard, which must check the domains against the target
-    # the trials will actually train on). The decision sample is the TRAIN
-    # part of the outer split (or the full target when no hold-out is
-    # reserved): the hold-out must model the unseen data, so its target
-    # values must not influence how the pipeline itself is built — including
-    # the choice of the target transformation (an extreme value that lands
-    # in the hold-out must not flip the skewness decision, e.g. to log1p,
-    # for the pipeline that is later evaluated on that hold-out). The
-    # resolved concrete method is written back into cfg.general, so every
+    # the trials will actually train on). With a reserved hold-out the
+    # decision sample is the TRAIN part of the outer split: the hold-out
+    # must model the unseen data, so its target values must not influence
+    # how the pipeline itself is built — including the choice of the target
+    # transformation (an extreme value that lands in the hold-out must not
+    # flip the skewness decision, e.g. to log1p, for the pipeline that is
+    # later evaluated on that hold-out).
+    #
+    # WITHOUT a reserved hold-out (an explicit holdout_fraction=None, or the
+    # 'auto' decision on small data) the global decision is deliberately NOT
+    # made here: the full y is then the union of the internal CV folds'
+    # train and validation parts, and deciding the transformation on it
+    # would let the validation-fold values influence the choice that the
+    # same rows are later scored with (a leak — the BBC-CV honest estimate
+    # evaluates the whole collected trial pool on those folds). The 'auto'
+    # placeholder stays in the configuration and reaches every trainer,
+    # where each fit (each CV fold's train part included) resolves its own
+    # method from its own y_train via AutoTargetTransformer. The resolved
+    # value (or the placeholder) is written back into cfg.general, so every
     # later consumer (the HPO spec, the finalists, the artifact trainer,
-    # the run-result assembly) reads the resolved value — 'auto' itself
-    # never reaches them, and the same single decision is reused for both
-    # the HPO trials and the final trainer.
-    _resolve_auto_target_transform(cfg, y)
+    # the run-result assembly) reads a consistent value — with a hold-out
+    # the concrete method, without one the documented 'auto' placeholder.
+    _resolve_auto_target_transform(cfg, y, holdout=holdout_fraction is not None)
     # Domain guard of the resolved method against the FULL target (train +
     # hold-out): the final artifact is refit on all data, so a restricted
     # method (log1p / boxcox) — whether auto-resolved or explicitly
     # configured — can be violated by an extreme hold-out value — that
     # would crash the fit AFTER the HPO budget was spent. Downgraded to
-    # yeo-johnson with a WARNING.
+    # yeo-johnson with a WARNING. The 'auto' placeholder passes through
+    # unchanged (nothing has been decided yet; the fold-local resolution
+    # picks a domain-safe method per fit).
     full_y = pd.concat([y, holdout_y], axis=0) if holdout_y is not None else y
     cfg.general.target_transform = _fallback_transform_for_full_y(
         cfg.general.target_transform, full_y

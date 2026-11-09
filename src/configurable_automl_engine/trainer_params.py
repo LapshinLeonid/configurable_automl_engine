@@ -264,18 +264,45 @@ def _validate_custom_metrics(
         raise TrainingError(f"Invalid custom_metrics: {err}") from err
 
 
-def _validate_target_transform(value: Any) -> TargetTransform:
+def _validate_skew_threshold(value: float | None) -> None:
+    """Validate the ``auto`` skewness threshold (a ``TrainingError`` on failure).
+
+    ``None`` — the ``AutoTargetTransformer`` module default; a value must be
+    strictly positive (the same contract as
+    ``general.target_transform_skew_threshold``).
+    """
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise TrainingError(
+            f"target_transform_skew_threshold must be a number, got {value!r}."
+        )
+    if not value > 0:
+        raise TrainingError(
+            f"target_transform_skew_threshold must be strictly positive, got {value!r}."
+        )
+
+
+def _validate_target_transform(
+    value: Any, *, allow_auto: bool = False
+) -> TargetTransform:
     """Validate the target transformation and normalize it to the enum.
 
     Both ``TargetTransform`` members and their value strings (including the
     aliases ``"none"``/``"log1p"``/``"boxcox"``/``"yeo-johnson"`` in any
     case) are accepted; anything else is rejected at initialization time.
-    The ``auto`` member is rejected too: it is a configuration-level
-    placeholder resolved by the engine (``prepare_dataset``) before the
-    trainers are built — the trainer settings carry only concrete methods.
+    The ``auto`` member is rejected unless ``allow_auto``: normally it is a
+    configuration-level placeholder resolved by the engine
+    (``prepare_dataset``) before the trainers are built — the trainer
+    settings carry only concrete methods. The exception is the engine's
+    no-hold-out mode, where the ``auto`` decision lives inside every CV
+    fold (the fold-local resolution contract of
+    ``preprocessing.target_transform``): the engine-built trainers then
+    receive the placeholder deliberately, and every fit resolves the
+    concrete method from its own training ``y`` (``AutoTargetTransformer``).
     """
     if isinstance(value, TargetTransform):
-        if value is TargetTransform.auto:
+        if value is TargetTransform.auto and not allow_auto:
             raise TrainingError(
                 "target_transform='auto' must be resolved into a concrete "
                 "method by the training engine before the trainer is built."
@@ -284,10 +311,12 @@ def _validate_target_transform(value: Any) -> TargetTransform:
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized == TargetTransform.auto.value:
-            raise TrainingError(
-                "target_transform='auto' must be resolved into a concrete "
-                "method by the training engine before the trainer is built."
-            )
+            if not allow_auto:
+                raise TrainingError(
+                    "target_transform='auto' must be resolved into a concrete "
+                    "method by the training engine before the trainer is built."
+                )
+            return TargetTransform.auto
         for member in TargetTransform:
             if normalized == member.value:
                 return member
@@ -324,12 +353,21 @@ def build_trainer_settings(
     policies: InputPolicies,
     warn_id_like: bool,
     target_transform: TargetTransform | str = TargetTransform.none,
+    target_transform_skew_threshold: float | None = None,
     custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
+    allow_auto_target_transform: bool = False,
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
 
     The helpers run in a fixed validation order, so the first invalid
     argument is reported. The arguments are not mutated.
+
+    Args:
+        allow_auto_target_transform: Engine-internal flag: accept the
+            ``target_transform='auto'`` placeholder in the trainer settings
+            (the engine's no-hold-out mode, where the concrete method is
+            resolved fold-locally inside every fit). Direct callers keep
+            the strict default (``auto`` rejected).
 
     Returns:
         TrainerSettings: The validated and normalized settings.
@@ -366,7 +404,10 @@ def build_trainer_settings(
         noise_level=oversampling.noise_level,
     )
     _validate_feature_lists(categorical_features, numerical_features)
-    target_transform_enum = _validate_target_transform(target_transform)
+    target_transform_enum = _validate_target_transform(
+        target_transform, allow_auto=allow_auto_target_transform
+    )
+    _validate_skew_threshold(target_transform_skew_threshold)
     return TrainerSettings(
         algorithm=algorithm,
         hyperparams=hyperparams,
@@ -402,4 +443,5 @@ def build_trainer_settings(
         oversampling=oversampling,
         custom_metrics=custom,
         target_transform=target_transform_enum,
+        target_transform_skew_threshold=target_transform_skew_threshold,
     )

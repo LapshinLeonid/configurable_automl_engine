@@ -113,6 +113,11 @@ class TrainerSettings:
     oversampling: OversamplingSettings
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
     target_transform: TargetTransform = TargetTransform.none
+    #: The ``|skew(y)|`` threshold of the fold-local ``target_transform:
+    #: 'auto'`` resolution (``general.target_transform_skew_threshold``).
+    #: ``None`` — the ``AutoTargetTransformer`` module default. Additive
+    #: field: legacy pickles restore the default via ``__setstate__``.
+    target_transform_skew_threshold: float | None = None
 
 
 # ``@dataclass(slots=True)`` rebuilds the class and (for frozen dataclasses)

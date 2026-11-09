@@ -93,7 +93,13 @@ class HpoRequest:
             ``boxcox`` / ``yeo-johnson`` wrap the regressor into a
             ``TransformedTargetRegressor`` so the trials and the final best
             model are trained on the transformed ``y`` — consistently with
-            the final ``ModelTrainer``).
+            the final ``ModelTrainer``; ``auto`` — the engine's no-hold-out
+            placeholder: the concrete method is resolved fold-locally by
+            ``AutoTargetTransformer``).
+        target_transform_skew_threshold: The ``|skew(y)|`` threshold of the
+            ``auto`` decision, forwarded into the fold-local
+            ``AutoTargetTransformer`` (``None`` — the module default of
+            ``preprocessing.target_transform``).
         feature_selection_cfg: The feature selection settings.
         oversampling: The oversampling settings.
         pruning: The early stopping (pruning) settings.
@@ -128,6 +134,7 @@ class HpoRequest:
     preprocessing_default: PreprocessingOverride | dict[str, Any] | None = None
     winsorizer_exclude: list[str] | None = None
     target_transform: TargetTransform = TargetTransform.none
+    target_transform_skew_threshold: float | None = None
     feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None
     oversampling: OversamplingSettings = field(default_factory=OversamplingSettings)
     pruning: dict[str, Any] | None = None

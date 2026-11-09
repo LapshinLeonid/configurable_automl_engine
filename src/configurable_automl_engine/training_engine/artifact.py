@@ -87,7 +87,11 @@ def _build_trainer(
         target_transform: The target transformation of the ``model`` step
             (``general.target_transform``): the same transformation the HPO
             trials trained on, so the final (and hold-out) model matches the
-            search. Default ``TargetTransform.none``.
+            search. Default ``TargetTransform.none``. The
+            ``general.target_transform_skew_threshold`` of the run is
+            forwarded into the trainer settings, so the fold-local ``auto``
+            resolution inside the trainer uses the same threshold as the
+            HPO trials.
 
 
     Raises:
@@ -159,6 +163,12 @@ def _build_trainer(
         drop_id_like_columns=general.drop_id_like_columns,
         warn_id_like=False,
         target_transform=target_transform,
+        target_transform_skew_threshold=(general.target_transform_skew_threshold),
+        # The engine's no-hold-out mode keeps the 'auto' placeholder in the
+        # settings: the concrete method is resolved fold-locally inside
+        # every fit (AutoTargetTransformer). The strict public contract
+        # ('auto' rejected) is preserved for direct callers.
+        _allow_auto_target_transform=target_transform is TargetTransform.auto,
     )
 
 

@@ -409,6 +409,47 @@ def test_guard_none_keeps_original_behavior():
     assert "target_transform" not in outcome.disqualified["gammaregressor"]
 
 
+def test_guard_auto_checks_untransformed_domain():
+    """The ``auto`` placeholder (the no-hold-out fold-local mode) checks the
+    GLM domains against the UNTRANSFORMED ``y``: no concrete method has been
+    decided yet, so the guard cannot assume one. A GLM whose loss domain
+    rejects the original ``y`` is still disqualified up front — the safe
+    lower bound of the fold-local resolution — and the reason carries no
+    transformation note (the transformation is per fold, not a global
+    decision)."""
+    from configurable_automl_engine.training_engine.hpo_phases import (
+        _apply_target_domain_guard,
+    )
+
+    # A target with negative values: gammaregressor (y > 0) and
+    # poissonregressor (y >= 0) fail on the raw domain regardless of the
+    # future fold-local resolution; glm (power=0, any real y) stays.
+    y = pd.Series(np.linspace(-5.0, 5.0, 50))
+    outcome = _apply_target_domain_guard(
+        _algorithms(), y, target_transform=TargetTransform.auto
+    )
+    assert set(outcome.disqualified) == {"gammaregressor", "poissonregressor"}
+    # No transformation note: the domain was checked UNTRANSFORMED.
+    assert "target_transform" not in outcome.disqualified["gammaregressor"]
+    assert "glm" not in outcome.disqualified
+
+
+def test_guard_auto_positive_target_disqualifies_nothing():
+    """With ``auto`` on a strictly positive target the GLM domains hold on
+    the untransformed check: nothing is disqualified up front (a GLM that
+    fails on a transformed fold is penalized by the ordinary HPO failure
+    policy, not by the guard)."""
+    from configurable_automl_engine.training_engine.hpo_phases import (
+        _apply_target_domain_guard,
+    )
+
+    y = pd.Series(np.linspace(0.1, 10.0, 50))
+    outcome = _apply_target_domain_guard(
+        _algorithms(), y, target_transform=TargetTransform.auto
+    )
+    assert outcome.disqualified == {}
+
+
 def test_guard_tweedie_power_clipped_in_transformed_domain():
     """A partly-invalid Tweedie ``power`` range is CLIPPED to its valid part
     against the TRANSFORMED target: with ``log1p`` on ``y >= 0`` the

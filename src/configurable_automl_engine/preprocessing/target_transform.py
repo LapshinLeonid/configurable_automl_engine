@@ -1,13 +1,15 @@
 """Target transformation for the model step of the trainer pipeline.
 
 Provides :class:`TargetTransformer` — a picklable scikit-learn-style
-transformer applied to the target ``y`` — and two helpers used by the
-trainer:
+transformer applied to the target ``y`` — a fold-local ``auto`` wrapper
+(:class:`AutoTargetTransformer`) and three helpers used by the trainer:
 
 * :func:`wrap_with_target_transform` — wraps a regressor into a
   ``TransformedTargetRegressor`` (identity for ``TargetTransform.none``);
 * :func:`validate_target_for_transform` — domain validation of ``y``
-  (``log1p`` requires ``min(y) > -1``, ``boxcox`` requires ``min(y) > 0``).
+  (``log1p`` requires ``min(y) > -1``, ``boxcox`` requires ``min(y) > 0``);
+* :func:`resolve_target_transform` — the single decision point of the
+  ``auto`` mode (the target-skewness rule).
 
 The transformer supports these methods:
 
@@ -18,9 +20,20 @@ The transformer supports these methods:
   ``PowerTransformer(method="yeo-johnson", standardize=True)``.
 
 The ``auto`` mode of ``general.target_transform`` is resolved by
-:func:`resolve_target_transform` from the target skewness BEFORE the HPO
-phases (see the function docstring); every pipeline stage then sees the
-concrete resolved method — ``auto`` never reaches the trainers.
+:func:`resolve_target_transform` from the target skewness. The decision
+point depends on the estimation design (see the engine's ``data_prep``):
+with a reserved outer hold-out the concrete method is decided once in
+``prepare_dataset`` on the TRAIN part of the split, and every pipeline
+stage sees the resolved method — ``auto`` never reaches the trainers.
+Without an outer hold-out (the honest estimate is the BBC-CV score) the
+decision would otherwise be made on the full target BEFORE the internal
+cross-validation: the validation-fold target values would then influence
+the choice of the transformation, and the same rows would later be used to
+score the pipeline that choice built (a leak). In that mode ``auto`` stays
+in the configuration and reaches the trainers, where every fold resolves
+its own method from its ``y_train`` via :class:`AutoTargetTransformer` —
+the values a fold is scored on never influence the method that fold trains
+with.
 
     After ``fit`` the transformer remembers the transformed train range
     (``t_min_`` / ``t_max_``): ``inverse_transform`` clips its input into
@@ -61,6 +74,7 @@ _LOG = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD",
+    "AutoTargetTransformer",
     "TargetTransformer",
     "fit_transform_target",
     "normalize_target_transform",
@@ -76,21 +90,27 @@ __all__ = [
 DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD = 1.0
 
 
-def _normalize_method(method: TargetTransform | str) -> str:
+def _normalize_method(
+    method: TargetTransform | str, *, allow_auto: bool = False
+) -> str:
     """Normalize a transformation method to the enum value string.
 
     Args:
         method: A ``TargetTransform`` member or one of its value strings
             (``"none"``, ``"log1p"``, ``"boxcox"``, ``"yeo-johnson"``).
+        allow_auto: Whether the ``auto`` placeholder is accepted (only the
+            consumers implementing the fold-local resolution contract pass
+            ``True``).
 
     Returns:
         The value string of the method.
 
     Raises:
         ValueError: If the method is not a valid transformation. The
-            ``auto`` member is rejected too: it is a configuration-level
-            placeholder, resolved by :func:`resolve_target_transform`
-            before the pipeline runs — it must never reach the transformer.
+            ``auto`` member is rejected too (unless ``allow_auto``): it is a
+            configuration-level placeholder, resolved by
+            :func:`resolve_target_transform` before the pipeline runs — it
+            must never reach the plain transformer.
     """
     try:
         value = TargetTransform(method).value
@@ -99,7 +119,7 @@ def _normalize_method(method: TargetTransform | str) -> str:
             f"Unknown target transform method: {method!r}. Expected one of "
             f"{[m.value for m in TargetTransform]}."
         ) from err
-    if value == TargetTransform.auto.value:
+    if value == TargetTransform.auto.value and not allow_auto:
         raise ValueError(
             "target_transform='auto' must be resolved into a concrete "
             "method (resolve_target_transform) before training; the "
@@ -108,7 +128,9 @@ def _normalize_method(method: TargetTransform | str) -> str:
     return value
 
 
-def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
+def normalize_target_transform(
+    value: TargetTransform | str, *, allow_auto: bool = False
+) -> TargetTransform:
     """Normalize a ``target_transform`` argument into the enum member.
 
     The single normalization point shared by the public APIs
@@ -116,24 +138,34 @@ def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
     ``TargetTransform`` members and their value strings (any case) are
     accepted.
 
+    The ``auto`` member is accepted ONLY through :func:`allow_auto`: it is a
+    configuration-level placeholder, and a consumer that cannot honor the
+    fold-local resolution contract must reject it.
+
     Args:
         value: A ``TargetTransform`` member or one of its value strings
             (case-insensitive).
+        allow_auto: Whether the ``auto`` placeholder is accepted (the
+            fold-local resolution path of the engine — the mode without an
+            outer hold-out — passes ``True``; every other consumer keeps the
+            strict default).
 
     Returns:
         TargetTransform: The normalized enum member.
 
     Raises:
-        ValueError: If the value is not a valid transformation. The
-            ``auto`` member (a configuration-level placeholder) is rejected:
-            it must be resolved by :func:`resolve_target_transform` before
-            training.
+        ValueError: If the value is not a valid transformation, or ``auto``
+            is passed with ``allow_auto=False``: it must be resolved by
+            :func:`resolve_target_transform` before training (with a
+            reserved outer hold-out the engine resolves it in
+            ``prepare_dataset``).
     """
     if isinstance(value, TargetTransform):
-        if value is TargetTransform.auto:
+        if value is TargetTransform.auto and not allow_auto:
             # 'auto' is a configuration-level placeholder: it must be
             # resolved by resolve_target_transform before the pipeline
-            # runs and never reaches the consumers of a normalized method.
+            # runs and never reaches the consumers of a normalized method
+            # (the fold-local resolution path is the only exception).
             raise ValueError(
                 "target_transform='auto' must be resolved into a concrete "
                 "method (resolve_target_transform) before training."
@@ -141,7 +173,7 @@ def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized == TargetTransform.auto.value:
+        if normalized == TargetTransform.auto.value and not allow_auto:
             raise ValueError(
                 "target_transform='auto' must be resolved into a concrete "
                 "method (resolve_target_transform) before training."
@@ -155,7 +187,9 @@ def normalize_target_transform(value: TargetTransform | str) -> TargetTransform:
     )
 
 
-def validate_target_for_transform(y: Any, method: TargetTransform | str) -> None:
+def validate_target_for_transform(
+    y: Any, method: TargetTransform | str, *, allow_auto: bool = False
+) -> None:
     """Validate that ``y`` lies in the domain of the transformation.
 
     Args:
@@ -163,13 +197,17 @@ def validate_target_for_transform(y: Any, method: TargetTransform | str) -> None
         method: The transformation method (``log1p`` requires
             ``min(y) > -1``, ``boxcox`` requires ``min(y) > 0``;
             ``none`` and ``yeo-johnson`` accept any real ``y``).
+        allow_auto: Whether the ``auto`` placeholder is a no-op here
+            (``True`` in the trainer's fit: the concrete method is not
+            decided yet in the fold-local resolution mode — the domain of
+            the resolved method is validated by the resolution itself).
 
     Raises:
         ValueError: If ``min(y)`` violates the domain of the method; the
             message names the method, the found minimum and suggests
             ``yeo-johnson`` (no domain restrictions).
     """
-    method_str = _normalize_method(method)
+    method_str = _normalize_method(method, allow_auto=allow_auto)
     if method_str not in ("log1p", "boxcox"):
         return
     arr = np.asarray(y, dtype=float).reshape(-1)
@@ -362,27 +400,150 @@ def _fit_power(y: np.ndarray, method: str) -> PowerTransformer:
     return power
 
 
-def wrap_with_target_transform(model: Any, method: TargetTransform | str) -> Any:
+class AutoTargetTransformer(TransformerMixin, BaseEstimator):
+    """Fold-local resolution of ``target_transform: 'auto'``.
+
+    A scikit-learn-style wrapper that resolves the ``auto`` placeholder at
+    ``fit`` time from the ``y`` it is fitted on (the FOLD's train target,
+    when used inside a cross-validated pipeline) and delegates everything
+    else to the resolved :class:`TargetTransformer`.
+
+    Honesty contract (why this class exists): in the engine's mode without
+    an outer hold-out the ``auto`` decision must not be made on the full
+    target before the internal cross-validation — the validation-fold
+    values would influence the choice of the transformation while the same
+    rows are later used to score the pipeline that choice built. This
+    wrapper guarantees the decision sample of every fitted instance is
+    exactly the ``y`` passed to its ``fit`` (a fold's ``y_train`` — never
+    the fold's validation rows).
+
+    Semantics:
+
+    * ``fit(y)`` runs :func:`resolve_target_transform` on ``y`` with the
+      configured ``skew_threshold`` and stores the resolved concrete
+      method in ``resolved_method_``; the resolution is announced at INFO
+      level (the same log line as the global ``auto`` resolution).
+    * ``transform`` / ``inverse_transform`` behave exactly like the
+      resolved ``TargetTransformer`` (including the inverse clipping to
+      the fitted train range). ``transform`` before ``fit`` raises.
+    * The resolved method is part of the fitted state: a pickled artifact
+      keeps the concrete method its training folds chose (per fold), and
+      ``transform`` always uses the method resolved at fit time — a later
+      refit re-resolves from its own data.
+
+    Attributes (after ``fit``):
+        resolved_method_ (TargetTransform): The concrete method the fit
+            resolved from its own ``y``.
+
+    Parameters:
+        skew_threshold: The ``|skew(y)|`` threshold of the ``auto``
+            decision (``general.target_transform_skew_threshold``); must
+            be strictly positive.
+
+    ``transform``/``inverse_transform`` expect and return ``(n, 1)`` arrays —
+    the shape ``TransformedTargetRegressor`` passes them.
+    """
+
+    def __init__(self, skew_threshold: float = DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD):
+        self.skew_threshold = skew_threshold
+
+    def fit(self, y: Any, X: Any = None) -> AutoTargetTransformer:
+        """Resolve the method from ``y`` and fit the inner transformer.
+
+        Args:
+            y: The target values the decision is made on (an array of shape
+                ``(n, 1)`` or ``(n,)``; the fold's train target inside a
+                cross-validated pipeline).
+            X: Ignored (scikit-learn API compatibility).
+
+        Returns:
+            ``self``.
+
+        Raises:
+            ValueError: If the resolution fails (an invalid threshold or an
+                empty target) or the inner ``TargetTransformer.fit`` fails
+                (a degenerate target, see ``_fit_power``).
+        """
+        resolved = resolve_target_transform(
+            y, TargetTransform.auto, skew_threshold=self.skew_threshold
+        )
+        self.resolved_method_: TargetTransform = resolved
+        # 'none' is the identity: no inner transformer (the plain
+        # TargetTransformer implements only the transforming methods).
+        self.transformer_: TargetTransformer | None = (
+            None
+            if resolved is TargetTransform.none
+            else TargetTransformer(method=resolved.value).fit(y)
+        )
+        return self
+
+    def transform(self, y: Any) -> np.ndarray:
+        """Transform ``y`` with the method resolved at fit time."""
+        inner = self._inner()
+        if inner is None:
+            return np.asarray(y, dtype=float).reshape(-1, 1)
+        return inner.transform(y)
+
+    def inverse_transform(self, t: Any) -> np.ndarray:
+        """Invert ``y`` with the method resolved at fit time (with clipping)."""
+        inner = self._inner()
+        if inner is None:
+            return np.asarray(t, dtype=float).reshape(-1, 1)
+        return inner.inverse_transform(t)
+
+    def _inner(self) -> TargetTransformer | None:
+        """The fitted inner transformer (``None`` — the identity, 'none')."""
+        if not hasattr(self, "transformer_"):
+            raise RuntimeError(
+                "This AutoTargetTransformer instance is not fitted yet: "
+                "call fit before transform/inverse_transform."
+            )
+        return self.transformer_
+
+
+def wrap_with_target_transform(
+    model: Any,
+    method: TargetTransform | str,
+    *,
+    skew_threshold: float | None = None,
+) -> Any:
     """Wrap a regressor into a target-transformed regressor.
 
     Args:
         model: The base regressor.
         method: ``TargetTransform.none`` → the same object is returned
-            (the pipeline keeps the original model type); any other method
-            → ``TransformedTargetRegressor(regressor=model,
+            (the pipeline keeps the original model type); ``auto`` → the
+            regressor is wrapped into a
+            ``TransformedTargetRegressor`` around an
+            :class:`AutoTargetTransformer`: every ``fit`` resolves the
+            concrete method from ITS OWN ``y`` (the fold-local resolution
+            of the engine's no-hold-out mode — see the module docstring);
+            any other method → ``TransformedTargetRegressor(regressor=model,
             transformer=TargetTransformer(method), check_inverse=False)``.
             ``check_inverse`` is disabled because the clipping makes the
             inverse transformation inexact outside the train range.
+        skew_threshold: The ``|skew(y)|`` threshold of the ``auto``
+            decision (``general.target_transform_skew_threshold``);
+            ``None`` — the :class:`AutoTargetTransformer` module default.
+            Ignored for the other methods.
 
     Returns:
         The wrapped regressor (or the input object for ``none``).
     """
-    method_str = _normalize_method(method)
+    method_str = _normalize_method(method, allow_auto=True)
     if method_str == TargetTransform.none.value:
         return model
+    if method_str == TargetTransform.auto.value:
+        transformer: TargetTransformer | AutoTargetTransformer = (
+            AutoTargetTransformer(skew_threshold=skew_threshold)
+            if skew_threshold is not None
+            else AutoTargetTransformer()
+        )
+    else:
+        transformer = TargetTransformer(method=method_str)
     return TransformedTargetRegressor(
         regressor=model,
-        transformer=TargetTransformer(method=method_str),
+        transformer=transformer,
         check_inverse=False,
     )
 
@@ -435,15 +596,20 @@ def resolve_target_transform(
     possible future refinement). Users who need the sign-aware behavior
     set an explicit method.
 
-    The decision is computed once, before the HPO phases; every downstream
+    The decision is computed at the decision point of the estimation design:
+    with a reserved outer hold-out the engine calls it once in
+    ``prepare_dataset`` on the train part of the split, and every downstream
     consumer (the HPO trials, the final trainer, the hold-out trainer, the
     artifact metadata, the ``ExperimentResult``) receives the resolved
-    concrete method — ``auto`` itself never reaches them. ``auto`` is the
-    only member that resolves: any explicit method is returned unchanged.
-    A non-finite skewness (a constant or otherwise degenerate ``y``, where
-    the sample skewness is undefined) resolves to ``none``: no skewness
-    evidence, no transformation (the engine rejects a constant target
-    before this point anyway).
+    concrete method — ``auto`` itself never reaches them. Without an outer
+    hold-out the decision moves INSIDE every cross-validation fold (via
+    :class:`AutoTargetTransformer`): the validation-fold values must not
+    influence the choice of the transformation they are later scored with.
+    ``auto`` is the only member that resolves: any explicit method is
+    returned unchanged. A non-finite skewness (a constant or otherwise
+    degenerate ``y``, where the sample skewness is undefined) resolves to
+    ``none``: no skewness evidence, no transformation (the engine rejects a
+    constant target before this point anyway).
 
     Args:
         y: The target vector (1-D, numeric). Ignored for a non-``auto``

@@ -131,9 +131,13 @@ class GeneralCfg(BaseModel):
             'boxcox' / 'yeo-johnson' / 'auto'); applied identically everywhere so
             the selected hyperparameters match the final model. GLM
             algorithms with a restricted loss domain are validated against
-            the transformed target before HPO. The 'auto' mode is resolved
-            into a concrete method from the target skewness before the
-            HPO phases (see ``target_transform_skew_threshold``).
+            the transformed target before HPO. The 'auto' mode decides the
+            concrete method from the target skewness (see
+            ``target_transform_skew_threshold``): with a reserved outer
+            hold-out — once, before the HPO phases, on the train part of
+            the split; without a hold-out — inside every cross-validation
+            fold (each fit resolves its own method from its own y_train,
+            so the validation-fold values cannot influence the choice).
         target_transform_skew_threshold (float): The ``|skew(y)|`` threshold
             of the ``general.target_transform: 'auto'`` decision: a target
             whose absolute Fisher skewness exceeds the threshold receives
@@ -494,22 +498,35 @@ class GeneralCfg(BaseModel):
             "'boxcox' — the Box-Cox power transformation (requires "
             "min(y) > 0); 'yeo-johnson' — the Yeo-Johnson power "
             "transformation (any real y); 'auto' — the engine decides "
-            "before HPO from the target skewness: |skew(y)| > "
+            "from the target skewness: |skew(y)| > "
             "target_transform_skew_threshold selects 'log1p' when "
             "min(y) > -1, otherwise 'yeo-johnson'; a more symmetric target "
-            "keeps 'none'. The resolved concrete method (never 'auto') is "
-            "what the HPO, the final trainer, the artifact metadata and the "
-            "ExperimentResult see. The hyperparameters are optimized "
-            "for the model trained on the TRANSFORMED target, so the search "
-            "matches the final model. A domain violation (min(y) outside "
-            "the method's domain) fails once before the first trial, not "
-            "in every fold. GLM algorithms with a restricted loss domain "
-            "(gammaregressor, poissonregressor, tweedieregressor/glm) are "
-            "validated against the TRANSFORMED target by the target-domain "
-            "guard before HPO: gammaregressor with 'boxcox' / 'yeo-johnson' "
-            "may be disqualified when the transformed target becomes "
-            "non-positive. 'predict' returns values in the original scale "
-            "(the inverse transformation clips to the train range)."
+            "keeps 'none'. The decision point follows the estimation "
+            "design: with a reserved outer hold-out the method is decided "
+            "once before HPO on the train part of the split (the resolved "
+            "concrete method — never 'auto' — is what the HPO, the final "
+            "trainer, the artifact metadata and the ExperimentResult see). "
+            "Without a reserved hold-out (holdout_fraction null, or 'auto' "
+            "on data below the auto-holdout threshold) the decision moves "
+            "INSIDE every cross-validation fold: each fold (and the final "
+            "full fit) resolves its own method from its own y_train, so "
+            "the validation-fold target values cannot influence the "
+            "transformation they are scored with; the config and the "
+            "artifact metadata then report the 'auto' placeholder, and the "
+            "fitted pipelines carry the resolved method per fit. The "
+            "hyperparameters are optimized for the model trained on the "
+            "TRANSFORMED target, so the search matches the final model. A "
+            "domain violation (min(y) outside the method's domain) fails "
+            "once before the first trial with a concrete method, and "
+            "per-fold with the fold-local resolution. GLM algorithms with "
+            "a restricted loss domain (gammaregressor, poissonregressor, "
+            "tweedieregressor/glm) are validated by the target-domain "
+            "guard: against the TRANSFORMED target with a concrete "
+            "method, and against the UNTRANSFORMED y with 'auto' (the "
+            "fold-local resolution cannot assume a method; a GLM that "
+            "fails on a transformed fold is penalized by the ordinary HPO "
+            "failure policy). 'predict' returns values in the original "
+            "scale (the inverse transformation clips to the train range)."
         ),
     )
     target_transform_skew_threshold: float = Field(

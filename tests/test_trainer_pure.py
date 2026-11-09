@@ -484,8 +484,10 @@ def test_trainer_settings_unpickle_legacy_state_without_target_transform() -> No
 
     settings = _settings()
     current = [getattr(settings, f.name) for f in fields(TrainerSettings)]
-    assert current[-1] == TargetTransform.none
-    legacy = current[:-1]  # the state list of the 20-slot pre-PR class
+    # The additive tail fields keep their defaults on a legacy restore.
+    assert current[-2] == TargetTransform.none
+    assert current[-1] is None
+    legacy = current[:-2]  # the state list of the 20-slot pre-PR class
 
     class _Legacy:
         def __reduce__(self):
@@ -494,6 +496,7 @@ def test_trainer_settings_unpickle_legacy_state_without_target_transform() -> No
     restored = pickle.loads(pickle.dumps(_Legacy()))
     assert restored.algorithm == "ridge"
     assert restored.target_transform == TargetTransform.none
+    assert restored.target_transform_skew_threshold is None
 
     # A state with an extra trailing value is tolerated too (zip truncates).
     class _Overlong:

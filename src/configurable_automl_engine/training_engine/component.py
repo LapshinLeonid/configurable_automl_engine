@@ -483,6 +483,7 @@ def _build_phase_spec(
         datetime_policy=cfg.general.datetime_policy,
         drop_id_like_columns=cfg.general.drop_id_like_columns,
         target_transform=cfg.general.target_transform,
+        target_transform_skew_threshold=(cfg.general.target_transform_skew_threshold),
         collect_oof=collect_oof,
         custom_metrics=dict(cfg.general.custom_metrics),
     )

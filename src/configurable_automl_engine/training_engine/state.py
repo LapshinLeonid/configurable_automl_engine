@@ -507,6 +507,10 @@ class _HpoPhaseSpec:
             the transformation of the target ``y`` inside the ``model`` step
             of every trial pipeline (``TargetTransform.none`` — no
             transformation).
+        target_transform_skew_threshold (float | None): The ``|skew(y)|``
+            threshold of the fold-local ``auto`` resolution
+            (``general.target_transform_skew_threshold``; ``None`` — the
+            ``AutoTargetTransformer`` module default).
         collect_oof (bool): Whether the HPO run keeps the OOF predictions of
             every trial for the BBC-CV estimate.
     """
@@ -544,5 +548,6 @@ class _HpoPhaseSpec:
     datetime_policy: str = "expand"
     drop_id_like_columns: bool = False
     target_transform: TargetTransform = TargetTransform.none
+    target_transform_skew_threshold: float | None = None
     collect_oof: bool = False
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
