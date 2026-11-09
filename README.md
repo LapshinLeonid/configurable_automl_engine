@@ -85,29 +85,22 @@ Classification is not supported.
   SMOTE or ADASYN (requires `imbalanced-learn`), applied only to the training
   part of each fold. See [Oversampling section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#oversampling-section)
 * **Object Experiment API** — `AutoMLExperiment` wraps one training run in an
-  object: `run()`, then `leaderboard()`, `best_model()`, `report()`,
-  `export()` and `explain()` serve the facets of the finished run; a repeated
-  `run()` is allowed (with a warning) and concurrent experiments share
-  nothing. See
-  [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#automlexperiment-объектный-api).
- * **Experiment Tracking** — every run is registered as a serializable
+  object: `run()` executes the training and registers the result, then
+  `leaderboard()`, `best_model()`, `report()`, `export()` and `explain()`
+  serve the facets of the finished run. See
+  [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#automlexperiment-объектный-api).
+* **Experiment Tracking** — every run is registered as a serializable
   `ExperimentResult` in a thread-safe `ExperimentStore` (optional JSONL
-  persist with a damaged-line-skip restore policy), ranked into a
-  `Leaderboard`, rendered by `JSONReporter` / `MarkdownReporter` /
-  `CompositeReporter` and the optional `MLflowReporter` extra, bundled to a
-  directory by `export_experiment` and interpreted by `explain()` (permutation
-  importance or SHAP). The experimental `general.ensemble` section adds a
-  weighted-average top-K ensemble next to the winner. The export bundle is
-  self-contained: it carries the model copy, the ensemble artifact copy
-  (`<run_id>_ensemble.<ext>`), the stored explain payload
-  (`<run_id>_explain.json`), the leaderboard/report/result files and the run
-  metadata with the artifact source paths — so the ensemble and the feature
-  importances travel with the run.
-  See [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimentstore-история-прогонов),
-  [`Leaderboard`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#leaderboard--build_leaderboard),
-  [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#export_experiment),
-  [`explain()`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели)
-  and [`general.ensemble`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#experimental-ensemble-generalensemble).
+  persist), ranked into a `Leaderboard` and rendered by
+  `JSONReporter` / `MarkdownReporter` / `CompositeReporter` (plus the optional
+  `MLflowReporter` extra). The experimental `general.ensemble` section adds a
+  weighted-average top-K ensemble next to the winner; `export_experiment`
+  bundles the model, ensemble and explain artifacts with the run reports into
+  a self-contained directory. See
+  [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#experimentstore-история-прогонов),
+  [`Leaderboard`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#leaderboard--build_leaderboard),
+  [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#export_experiment)
+  and [`explain()`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели).
 
 # Dependencies
 
@@ -196,37 +189,6 @@ What happens here:
   `holdout_score` is the winner's R² on these untouched rows.
 * The saved model in `diabetes_model.pkl` is trained on **all** rows.
 
-## Example: target transformation
-
-For skewed positive targets (counts, prices, durations) a transformation of
-`y` often helps linear models. Set `general.target_transform` and the engine
-applies the SAME transformation in the HPO trials, in the final model and in
-the hold-out trainer:
-
-```python
-config = {
-    "general": {
-        "comparison_metric": "r2",
-        "target_transform": "log1p",  # "none" (default) / "log1p" / "boxcox" / "yeo-johnson"
-        "path_to_model": "skewed_model.pkl",
-    },
-    "algorithms": {"ridge": {}, "random_forest": {}},
-}
-
-results = caml.train_best_model(config=config, df=df, target="target")
-```
-
-The hyperparameters are optimized for the model trained on the transformed
-`y` (the `model` step of every trial pipeline is a
-`TransformedTargetRegressor`), and `predict` returns values in the original
-scale. A domain violation (e.g. `"log1p"` on `min(y) <= -1`, `"boxcox"` on
-non-positive `y`) fails once before the first trial; `"yeo-johnson"` accepts
-any real `y`. GLM algorithms with a restricted loss domain
-(`gammaregressor`, `poissonregressor`, `tweedieregressor`) are validated
-against the transformed target before HPO and may be disqualified with a
-reason naming the transformation. See
-[Target transformation](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#target-transformation).
-
 📖 For detailed API documentation and configuration file structure, see [API Reference & Configuration Guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md).
 
 # Contributing
@@ -260,10 +222,6 @@ If you contribute, please ensure your code:
 * Has 0 errors when checked by the ruff linter and passes `ruff format --check`.
 * Has 0 errors when checked by the mypy static analyzer.
 * All docstrings written in English.
-
-# Architecture
-
-If you plan to change the code, read [architecture.md](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/architecture.md) first: it describes how the modules are layered, which imports are allowed and how this is checked in CI.
 
 # ⚠️ NeuroSlop Warning
 
