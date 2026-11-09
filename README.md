@@ -235,6 +235,25 @@ Small improvements, fixes, reporting issues, requesting features are always appr
 
 If you are considering larger contributions to the source code, please contact the author first.
 
+## Local development
+
+Set up an editable installation with the development dependencies (the `dev`
+extra combines `all` and `test`, including `import-linter`):
+
+    python -m pip install -e "configurable-automl-engine[dev]"
+
+Run the mandatory checks the same way CI does:
+
+```bash
+ruff format src/ && ruff check src/ && ruff format --check src/
+mypy src
+lint-imports
+pytest --cov=src
+```
+
+Import layers are enforced by import-linter contracts (see
+[architecture.md](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/architecture.md)).
+
 If you contribute, please ensure your code:
 
 * 100% covered by tests.
