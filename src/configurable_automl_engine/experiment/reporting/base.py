@@ -1,5 +1,4 @@
-"""Reporter abstraction and the composite of reporters (the T7
-foundation).
+"""Reporter abstraction and the composite of reporters.
 
 A reporter consumes one finished
 :class:`~configurable_automl_engine.experiment.result.ExperimentResult`

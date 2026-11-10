@@ -1,4 +1,4 @@
-"""Central data model of an experiment result (the T1 foundation).
+"""Central data model of an experiment result.
 
 ``ExperimentResult`` is the contract between the training engine, the
 experiment store and the reporters (including a future MLflow reporter):

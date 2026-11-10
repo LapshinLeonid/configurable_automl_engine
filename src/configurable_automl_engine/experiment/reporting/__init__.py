@@ -1,4 +1,4 @@
-"""Reporter framework of the experiment package (the T7 component).
+"""Reporter framework of the experiment package.
 
 The reporters consume one finished
 :class:`~configurable_automl_engine.experiment.result.ExperimentResult`

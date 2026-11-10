@@ -1,6 +1,6 @@
 """Config schema of the experimental ensemble (``general.ensemble``).
 
-Holds ``EnsembleCfg`` — the control section of the experimental T10
+Holds ``EnsembleCfg`` — the control section of the experimental
 ensembling branch. The section is a *behavioral* flag with defaults
 (ensemble building is off by default): the engine builds the weighted
 average ensemble of the top-K leaderboard models and adds the report

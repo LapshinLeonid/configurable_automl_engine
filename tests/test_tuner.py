@@ -3153,17 +3153,18 @@ def test_optimize_memoryerror_fold_disqualifies_algorithm(toy_data):
 #  Aggregated trial statistics (OptimizeResult.trial_stats)
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_trial_stats_zero_trials_returns_none(toy_data):
-    """B2: n_trials=0 → None без исключений (пустая статистика)."""
+    """B2: n_trials=0 → None without exceptions (empty statistics)."""
     X, y = toy_data
     res = hyperopt.optimize("ridge", X, y, n_trials=0)
     assert res is None
 
 
 def test_optimize_trial_stats_normalizes_numpy_int_counters():
-    """B3: счётчик, пришедший как np.int64 → нормализован в int.
+    """B3: a counter arriving as np.int64 → normalized to int.
 
-    TrialStats.__post_init__ приводит все счётчики к plain Python-числам,
-    поэтому значения переживают сериализацию между процессами без смены типа.
+    TrialStats.__post_init__ converts all counters to plain Python
+    numbers, so the values survive serialization between processes
+    without a type change.
     """
     from configurable_automl_engine.hpo.types import TrialStats
 
@@ -3179,7 +3180,7 @@ def test_optimize_trial_stats_normalizes_numpy_int_counters():
     assert type(stats.n_pruned) is int and stats.n_pruned == 1
     assert type(stats.n_failed) is int and stats.n_failed == 1
     assert type(stats.duration_seconds) is float and stats.duration_seconds == 1.5
-    # Дефолты: нулевые счётчики и неизмеренная длительность.
+    # Defaults: zero counters and an unmeasured duration.
     empty = TrialStats()
     assert empty.n_trials == 0 and empty.n_completed == 0
     assert empty.n_pruned == 0 and empty.n_failed == 0

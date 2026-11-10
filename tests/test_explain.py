@@ -937,7 +937,7 @@ def test_render_importance_markdown_empty_and_cap() -> None:
     assert "The table is omitted" in no_table
 
 
-# ─────────────── explain result storage on the run (issue #181) ─────────────── #
+# ─────────────── explain result storage on the run ─────────────── #
 
 
 def test_p5_explain_result_stored_on_run(tmp_path: Any) -> None:

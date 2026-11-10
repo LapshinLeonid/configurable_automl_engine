@@ -1,8 +1,7 @@
-"""Ensemble: weighted averaging of the top-K leaderboard models (the T10
-component).
+"""Ensemble: weighted averaging of the top-K leaderboard models.
 
 The module is the pure, engine-independent core of the experimental
-ensembling branch of the experiment epic:
+ensembling feature:
 
 * :func:`select_top_k` reuses the documented select-step top-K semantics
   (the best ``k`` candidates of the ranking, ties by configuration order)

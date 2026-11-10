@@ -1,5 +1,4 @@
-"""MLflowReporter: the optional MLflow tracking adapter (the T8
-component).
+"""MLflowReporter: the optional MLflow tracking adapter.
 
 The reporter is the *only* place in the package that knows about MLflow:
 the ``mlflow`` import lives inside :meth:`MLflowReporter._mlflow` (a
@@ -33,8 +32,7 @@ Logging policy (documented contract):
 * **failure policy** — a tracking-server failure (connection error,
   timeout, any MLflow API exception) does not kill the experiment: the
   error is logged as a WARNING and :meth:`~Reporter.report` returns
-  ``None`` (a "reported-failed" artifact, the separate status the epic
-  calls for). Errors raised *before* the MLflow API is touched (a
+  ``None`` (a "reported-failed" artifact). Errors raised *before* the MLflow API is touched (a
   missing active run with ``nested=False``) still raise — the caller
   misused the API and must learn it immediately. A failure mid-report
   leaves a *partial* run: ``_log_run`` logs tags → metrics → params →

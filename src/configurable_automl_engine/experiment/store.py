@@ -1,4 +1,4 @@
-"""Experiment store: the run history of the engine (the T4 component).
+"""Experiment store: the run history of the engine.
 
 ``ExperimentStore`` keeps the full ``ExperimentResult`` models produced by
 the engine and serves them to the consumers (the facade and the reporters)

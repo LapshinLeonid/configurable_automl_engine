@@ -2,10 +2,9 @@
 
 Covered scenarios (positive / negative / boundary):
 
-- P1: the table format matches the epic example (columns, order, ranks);
+- P1: the table format is correct (columns, order, ranks);
 - P2: the UX summary "Experiment completed … Winner: …" is rendered
-  correctly (both the statusless default and the ``status=True`` block
-  of the epic #37 UX-цель example);
+  correctly (both the statusless default and the ``status=True`` block);
 - P3: the per-run details (params, validation strategy, training time,
   failed trials) are available on the entries;
 - P4: a minimized metric (RMSE) ranks the smallest score first;
@@ -112,8 +111,8 @@ def _make_result(runs: list[dict[str, Any]], **overrides: Any) -> ExperimentResu
 # ────────────────────────── positive scenarios ────────────────────────── #
 
 
-def test_p1_table_matches_epic_example() -> None:
-    """P1: columns, order and ranks follow the epic example layout."""
+def test_p1_table_format() -> None:
+    """P1: columns, order and ranks follow the documented layout."""
     result = _make_result(
         [
             _run_kwargs(algorithm="Random Forest", score=0.842, score_raw=-0.842),
@@ -173,8 +172,8 @@ def test_p2_summary_winner_line() -> None:
     ] * 4
 
 
-def test_p2_summary_status_header_epic_block() -> None:
-    """P2: ``status=True`` renders the epic #37 UX-цель block verbatim."""
+def test_p2_summary_status_header_block() -> None:
+    """P2: ``status=True`` renders the status header block verbatim."""
     result = _make_result(
         [
             _run_kwargs(algorithm="Random Forest", score=0.842, score_raw=-0.842),

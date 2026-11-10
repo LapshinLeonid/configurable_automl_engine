@@ -1,7 +1,6 @@
-"""Tests of the experiment store — the run history (the T4 component).
+"""Tests of the experiment store — the run history.
 
-Covered scenarios (positive / negative / boundary), matching the issue
-checklist:
+Covered scenarios (positive / negative / boundary):
 
 - P1: add/get/list work with a full ``ExperimentResult``;
 - P2: JSONL persist and restore after the store is recreated;
@@ -505,7 +504,7 @@ def test_b3_concurrent_adds_to_jsonl_file(tmp_path) -> None:
 
 def test_b4_label_with_special_characters_and_unicode(tmp_path) -> None:
     """B4: a label with special characters/unicode survives the round-trip."""
-    tricky_label = 'запуск #1 — "квотирование" \\ | 🚀 100% ✓\n'
+    tricky_label = 'run #1 — "quoting" \\ | 🚀 100% ✓\n'
     path = tmp_path / "history.jsonl"
     result = _make_result(label=tricky_label)
 

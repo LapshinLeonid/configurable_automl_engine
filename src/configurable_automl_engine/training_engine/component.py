@@ -80,10 +80,10 @@ __all__ = ["execute_phases", "train_best_model"]
 _LOG = logging.getLogger(__name__)
 
 # The instrumented run result of the LAST ``train_best_model`` call in this
-# process (the T3 experiment-result plumbing): the public API still returns
+# process (the experiment-result plumbing): the public API still returns
 # the legacy dict (backward compatibility), and the ``ExperimentResult``
 # model assembled from the same sources is stored here for the consumers
-# (the facade and the experiment store, T5/T4). The global is NOT reset
+# (the facade and the experiment store). The global is NOT reset
 # between calls: a consumer that cannot pass its own ``run_token`` (the
 # owner stamp, see ``run_result.mark_result_owner``) must snapshot this
 # value before the call and verify it changed afterwards. The facade
@@ -735,7 +735,7 @@ def train_best_model(
         # Orchestration failure (a phase produced no valid scores, a select
         # received an empty working set, an invalid winner score): the
         # error propagates unchanged to the caller, and a failed
-        # ExperimentResult is assembled for the run history (T4) — the
+        # ExperimentResult is assembled for the run history — the
         # partial evidence of the completed phases is preserved.
         _LOG.error("Run failed: %s", err)
         _record_failed_run(
@@ -816,11 +816,11 @@ def _run_after_phases(
     # ensemble step never aborts the run (logged, no section).
     if cfg.general.ensemble.enable:
         _build_and_attach_ensemble(cfg=cfg, prepared=prepared, ctx=ctx, result=result)
-    # The instrumented run result (T3): assembled from the same sources as
+    # The instrumented run result: assembled from the same sources as
     # the dict (not from the dict itself), so the optional dict keys stay
     # untouched. The model is not returned by the public API (the dict
     # contract is unchanged) — it is stored on the function for the facade
-    # (T5) until the result-plumbing contract is finalized.
+    # until the result-plumbing contract is finalized.
     experiment_result = build_experiment_result(
         cfg=cfg,
         prepared=prepared,
@@ -921,7 +921,7 @@ def _record_failed_run(
     """Assemble and store the failed ``ExperimentResult`` of a failed run.
 
     The exception propagates to the caller unchanged; the failed result is
-    kept for the run history (the T4 store consumes it via the facade).
+    kept for the run history (the store consumes it via the facade).
     When ``run_token`` is given, the failed result is stamped with it (see
     ``run_result.mark_result_owner``).
     """

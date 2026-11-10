@@ -3272,13 +3272,13 @@ def test_train_best_model_reproducible_with_stochastic_models(tmp_path: Path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Aggregated trial statistics: проброс в training_engine
+#  Aggregated trial statistics: forwarding into the training engine
 # ──────────────────────────────────────────────────────────────────────────────
 class TestTrialStatsPropagation:
     """OptimizeResult.trial_stats travels into PhaseResult / _HPOWorkerResult."""
 
     def test_to_phase_result_propagates_trial_stats(self):
-        """_to_phase_result: trial_stats пробрасывается в PhaseResult как is."""
+        """_to_phase_result: trial_stats is forwarded to PhaseResult as is."""
         from configurable_automl_engine.hpo.types import TrialStats
 
         stats = TrialStats(n_trials=4, n_completed=2, n_pruned=2, n_failed=0)
@@ -3290,11 +3290,11 @@ class TestTrialStatsPropagation:
         assert phase.trial_stats is stats
 
     def test_to_phase_result_defaults_zero_stats_when_missing(self):
-        """Совместимость: сторонний OptimizeResult без статистики → нули.
+        """Compatibility: a foreign OptimizeResult without statistics → zeros.
 
-        Кастомные раннеры, вызывающие run_optimization/optimize и не
-        заполняющие trial_stats, дают дефолтную нулевую структуру вместо
-        падения."""
+        Custom runners that call run_optimization/optimize without
+        populating trial_stats get the default zero structure instead of
+        a failure."""
         result = _optimize_result({"param": 1}, 0.95)
         phase = hpo_phases_mod._to_phase_result(result, "ridge")
         assert phase is not None
@@ -3305,7 +3305,7 @@ class TestTrialStatsPropagation:
         assert phase.trial_stats.duration_seconds is None
 
     def test_hpo_phase_worker_propagates_trial_stats(self):
-        """_hpo_phase_worker: trial_stats попадает в _HPOWorkerResult."""
+        """_hpo_phase_worker: trial_stats lands in _HPOWorkerResult."""
         from configurable_automl_engine.hpo.types import TrialStats
 
         stats = TrialStats(n_trials=3, n_completed=3, n_pruned=0, n_failed=0)
@@ -3329,7 +3329,7 @@ class TestTrialStatsPropagation:
         assert worker_result.score == 0.9
 
     def test_consume_worker_results_propagates_trial_stats(self):
-        """_consume_worker_results: trial_stats доезжает до PhaseResult."""
+        """_consume_worker_results: trial_stats reaches PhaseResult."""
         from configurable_automl_engine.hpo.types import TrialStats
 
         stats = TrialStats(
@@ -3353,7 +3353,7 @@ class TestTrialStatsPropagation:
         assert outcome.results["ridge"].trial_stats.duration_seconds == 1.5
 
     def test_phase_result_trial_stats_end_to_end_through_worker(self):
-        """Полная цепочка: OptimizeResult.trial_stats → worker → PhaseResult."""
+        """The full chain: OptimizeResult.trial_stats → worker → PhaseResult."""
         from configurable_automl_engine.hpo.types import TrialStats
 
         stats = TrialStats(n_trials=2, n_completed=1, n_pruned=1, n_failed=0)

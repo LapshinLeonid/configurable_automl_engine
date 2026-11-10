@@ -793,7 +793,7 @@ completed algorithms are retrained on 100 % of the data (exactly once each)
 and their predictions are averaged with weights derived from the validation
 scores. When enabled, the run carries the dedicated `ensemble` section in the
 experiment result (members, scores, weights, the artifact path of the
-serialized ensemble — see [`AutoMLExperiment.ensemble_model`](#automlexperiment-объектный-api)) and the ensemble artifact file is written next
+serialized ensemble — see [`AutoMLExperiment.ensemble_model`](#automlexperiment-object-api)) and the ensemble artifact file is written next
 to the winner model.
 
 | Field | Default | Description |
@@ -1774,120 +1774,120 @@ with mlflow.start_run(run_name="my-experiment"):
 
 ---
 
-## `explain()` — интерпретируемость лучшей модели
+## `explain()` — interpretability of the best model
 
-`from configurable_automl_engine.experiment.explain import explain_permutation_importance, explain_shap, aggregate_to_original_features, render_importance_markdown`. Метод фасада: `AutoMLExperiment.explain(...)` после `run()`.
+`from configurable_automl_engine.experiment.explain import explain_permutation_importance, explain_shap, aggregate_to_original_features, render_importance_markdown`. Facade method: `AutoMLExperiment.explain(...)` after `run()`.
 
-Интерпретация winner-пайплайна. Два вычисления, по одному на вызов:
+Interpretation of the winner pipeline. Two computations, one per call:
 
-* **`method="permutation"`** (по умолчанию) — permutation importance (sklearn `permutation_importance`, без новых зависимостей): среднее изменение метрики эксперимента при перемешивании одного признака. Считается через `trainer.predict` на **сырых** (до-пайплайн) колонках — одна оценка на исходный столбец данных независимо от внутренней кодировки/отбора. Нужен `y` (метрике нужны истинные значения); по умолчанию берутся обучающие данные прогона.
-* **`method="shap"`** — средние абсолютные SHAP-вклады (опциональный extra `[shap]`, `pip install 'configurable-automl-engine[shap]'`; import-guard через `is_installed`, при отсутствии — `ExplainNotAvailableError` с именем extra, не голый `ModuleNotFoundError`). По умолчанию по-компонентные значения агрегируются к исходным колонкам (one-hot/хеш-компонент → источник по имени из `get_feature_names_out`); `post_preprocessing=True` возвращает их по именам колонок пайплайна. Цель не используется.
+* **`method="permutation"`** (default) — permutation importance (sklearn `permutation_importance`, no new dependencies): the mean change of the experiment metric when one feature is shuffled. Computed via `trainer.predict` on the **raw** (pre-pipeline) columns — one estimate per original data column regardless of the internal encoding/selection. Requires `y` (the metric needs the true values); the run's training data is used by default.
+* **`method="shap"`** — mean absolute SHAP contributions (optional extra `[shap]`, `pip install 'configurable-automl-engine[shap]'`; import-guard via `is_installed`, and when the package is missing an `ExplainNotAvailableError` naming the extra is raised, not a bare `ModuleNotFoundError`). By default the per-component values are aggregated to the original columns (one-hot/hash component → source by name from `get_feature_names_out`); `post_preprocessing=True` returns them under the pipeline column names instead. The target is not used.
 
-**Семантика имён фич.** Permutation importance: исходные колонки данных (включая колонки, расширенные из datetime как самостоятельные фичи; колонки, отброшенные пайплайном — неинформативные/ID-like — получают нулевую важность). SHAP (post_preprocessing=True): имена `get_feature_names_out` — `cat__<col>`/`num__<col>`/`remainder__<col>`, one-hot добавляет категорию (`cat__col_value`), hashing вкладывает второй разделитель (`cat__col__h0`); агрегированный вид — исходные колонки. Несопоставимые компоненты (fallback-имена `xN`) не атрибутируются (WARNING с их суммарной массой).
+**Feature-name semantics.** Permutation importance: the original data columns (columns expanded from datetime act as standalone features; columns dropped by the pipeline — uninformative/ID-like ones — get zero importance). SHAP (`post_preprocessing=True`): the `get_feature_names_out` names — `cat__<col>`/`num__<col>`/`remainder__<col>`, one-hot appends the category (`cat__col_value`), hashing inserts a second separator (`cat__col__h0`); the aggregated view is the original columns. Unmatchable components (fallback names `xN`) are not attributed (a WARNING reports their total mass).
 
-**Схема кадра и datetime.** Записанное на тренере datetime-расширение (`datetime_policy: 'expand'`) применяется к кадру объяснения **автоматически** — как на дефолтном пути фасада, так и на явном `X` (в обоих методах): сырой кадр с исходной datetime-колонкой — легитимный вход, компоненты (`ts_month` …) появляются сами. Кадр без источника и без компонент отклоняется с `ExplainNotAvailableError`, перечисляющим отсутствующие колонки. SHAP объясняет модель поверх **полной** пост-препроцессинговой матрицы: сэмплер (`DataOversampler`) и column-редьюсеры (`feature_selector`, `isotonic_selector`) исключены из трансформ-цепочки — редьюсеры применяются на стороне модели адаптером, поэтому компоненты именуются и атрибутируются исходным колонкам независимо от активного отбора. Выравнивание цели проверяется явно: Series — по индексу (отсутствующие метки → определённая ошибка), позиционная цель — по длине (несовпадение → определённая ошибка, без молчаливой обрезки); `n_features`/`n_rows` считаются по фактически оценённым фичам и строкам.
+**Frame schema and datetime.** The datetime expansion recorded on the trainer (`datetime_policy: 'expand'`) is applied to the explanation frame **automatically** — both on the facade default path and on an explicit `X` (in both methods): a raw frame with the original datetime column is a legitimate input, the components (`ts_month` …) appear on their own. A frame with neither the source nor the components is rejected with `ExplainNotAvailableError` listing the missing columns. SHAP explains the model over the **full** post-preprocessing matrix: the sampler (`DataOversampler`) and the column reducers (`feature_selector`, `isotonic_selector`) are excluded from the transform chain — the reducers are applied on the model side by an adapter, so components are named and attributed to the original columns regardless of the active selection. Target alignment is checked explicitly: a Series is aligned by index (missing labels → a definite error), a positional target by length (a mismatch → a definite error, no silent truncation); `n_features`/`n_rows` are counted over the features and rows actually evaluated.
 
-**Семантика данных.** Важность считается на строках обучающих данных прогона: финальный артефакт обучен на всех данных (в т.ч. строках зарезервированного hold-out — см. `general.holdout_fraction`), поэтому эти строки in-sample для него. Передайте `X`/`y` явно, чтобы объяснять на другой выборке (например, на удержанных строках). Базовая метрика (`baseline_score`) приводится к user-семантике (положительный RMSE/MAE, «чистый» R²); кастомные метрики должны быть зарегистрированы в процессе (тренер делает это в `fit()`).
+**Data semantics.** The importance is computed on the run's training rows: the final artifact is trained on all data (including the rows of a reserved hold-out — see `general.holdout_fraction`), so those rows are in-sample for it. Pass `X`/`y` explicitly to explain a different sample (for example, the held-out rows). The baseline metric (`baseline_score`) is converted to user semantics (positive RMSE/MAE, a "clean" R²); custom metrics must be registered in the process (the trainer does it in `fit()`).
 
-**Ресурсы.** `max_rows` (по умолчанию 5000) — бюджет строк: большие данные детерминированно семплируются (`random_state=0`), стоимость permutation — `n_repeats × n_features` предсказаний, SHAP растёт и по строкам, и по фичам. Нефинитные значения важности (NaN/±inf) заменяются на `0.0` с WARNING, сортировка и потребители не ломаются. Константные фичи корректно дают нулевую важность. Пустой кадр / нет фич / модель без пайплайна / несоответствие схемы / неизвестный `method` — `ExplainNotAvailableError`; до `run()` — `ExperimentNotRunError`.
+**Resources.** `max_rows` (default 5000) — the row budget: large data is deterministically sampled (`random_state=0`); the permutation cost is `n_repeats × n_features` predictions, SHAP grows with both rows and features. Non-finite importance values (NaN/±inf) are replaced with `0.0` with a WARNING, so sorting and consumers keep working. Constant features correctly produce zero importance. An empty frame / no features / a model without a pipeline / a schema mismatch / an unknown `method` — `ExplainNotAvailableError`; before `run()` — `ExperimentNotRunError`.
 
-**Разреженные данные.** Матрица после препроцессинга может быть sparse (one-hot/hashing) — permutation importance на сыром DataFrame работает через пайплайн и поддерживает оба представления; часть моделей (GPR/Isotonic/ARD) требует dense — их пайплайн строится с `force_dense_output` (см. `models.SPARSE_UNSUPPORTED_ALGORITHMS`).
+**Sparse data.** The matrix after preprocessing may be sparse (one-hot/hashing) — permutation importance on a raw DataFrame works through the pipeline and supports both representations; some models (GPR/Isotonic/ARD) require dense — their pipeline is built with `force_dense_output` (see `models.SPARSE_UNSUPPORTED_ALGORITHMS`).
 
-**Возврат.** Структурированный результат: `PermutationImportanceResult` (отсортированные по убыванию `importances` — `FeatureImportance(feature, importance_mean, importance_std)`, `baseline_score`, `metric_user`, `n_rows`, `n_features`, `data_semantics`) или `ShapFeatureImportance` (`importances`, `post_preprocessing`, `baseline_prediction` — среднее предсказание). С `markdown=True` (по умолчанию) — кортеж `(importance, str)` со второй координатой — готовая Markdown-секция (`## Feature importance (...)` с таблицей и строкой baseline) для встраивания в отчёт.
+**Return value.** A structured result: `PermutationImportanceResult` (importances sorted descending — `FeatureImportance(feature, importance_mean, importance_std)`, `baseline_score`, `metric_user`, `n_rows`, `n_features`, `data_semantics`) or `ShapFeatureImportance` (`importances`, `post_preprocessing`, `baseline_prediction` — the mean prediction). With `markdown=True` (default) — a tuple `(importance, str)` where the second element is a ready Markdown section (`## Feature importance (...)` with a table and the baseline line) for embedding into a report.
 
-**Сохранение результата на прогоне.** Каждый успешный вызов `explain()` сохраняет JSON-safe payload результата в `ExperimentResult.explanations` (метод, по-фичевые важности, baseline и метаданные вычисления) — последний вызов побеждает: повторные вызовы с разными `method` (`permutation`/`shap`) или другим бюджетом перезаписывают сохранённый payload. Значения — обычные числа (`float`, без numpy-типов), payload проходит JSON-roundtrip и попадает в отчёты (`MarkdownReporter` рендерит секцию важностей) и в экспорт-бандл (`<run_id>_explain.json`). Пока `explain()` не вызывался, поле равно `None`; сбой сохранения (например, на вручную модифицированном результате, отклонившем payload) логируется WARNING'ом и не маскирует исход вызова.
+**Storing the result on the run.** Every successful `explain()` call stores a JSON-safe payload of the result in `ExperimentResult.explanations` (the method, per-feature importances, the baseline and the computation metadata) — the last call wins: repeated calls with a different `method` (`permutation`/`shap`) or a different budget overwrite the stored payload. The values are plain numbers (`float`, no numpy types), the payload survives a JSON roundtrip and reaches the reports (`MarkdownReporter` renders the importance section) and the export bundle (`<run_id>_explain.json`). Until `explain()` has been called the field is `None`; a payload-storage failure (for example, on a manually modified result that rejects the payload) is logged as a WARNING and does not mask the call outcome.
 
 ```python
 experiment = AutoMLExperiment(config, df, target="target")
 experiment.run()
 importance, section = experiment.explain()                     # permutation + Markdown
-importance, section = experiment.explain(n_repeats=10)         # точнее, дороже
-per_component  = experiment.explain(method="shap",             # требует extra [shap]
+importance, section = experiment.explain(n_repeats=10)         # finer, costlier
+per_component  = experiment.explain(method="shap",             # requires extra [shap]
                                     post_preprocessing=True)
 ```
 
 ---
 
-## `AutoMLExperiment` (объектный API)
+## `AutoMLExperiment` (object API)
 
 `import configurable_automl_engine as caml; caml.AutoMLExperiment(...)`
 
-Объектный фасад над одним прогоном движка — центральная сущность эксперимента. Он связывает конфигурацию, данные и историю прогонов: `run()` выполняет полный цикл обучения и регистрирует результат в хранилище, остальные методы отдают грани завершённого прогона.
+An object facade over a single engine run — the central entity of an experiment. It binds the configuration, the data and the run history: `run()` performs the full training cycle and registers the result in the store, the other methods expose the facets of a completed run.
 
 ```python
 experiment = caml.AutoMLExperiment(config, df, target="target")
 experiment.run()
 experiment.leaderboard(print_table=True)
 experiment.best_model().predict(X_new)
-experiment.report()          # Markdown в stdout + JSON-снапшот рядом с моделью
-experiment.export("out/")    # бандл артефактов прогона
-experiment.explain()         # важность признаков winner-модели
+experiment.report()          # Markdown to stdout + a JSON snapshot next to the model
+experiment.export("out/")    # a bundle of the run artifacts
+experiment.explain()         # feature importance of the winner model
 ```
 
-**Конструктор:**
+**Constructor:**
 
-| Параметр | Тип | Default | Описание |
+| Parameter | Type | Default | Description |
 |----------|-----|---------|----------|
-| `config` | `str`, `Path`, `Config` или `dict` | — | Конфигурация: путь к YAML/JSON, `Config`-объект или словарь — те же формы, что принимает `train_best_model`. |
-| `data` | `pd.DataFrame` | — | Входной датасет. Валидируется и снапшотится в момент `run()` (см. «Снапшот данных» ниже). |
-| `target` | `str` или `None` | `None` | Имя целевой колонки (по умолчанию `"target"`). |
-| `store` | `ExperimentStore` или `None` | `None` | Хранилище истории прогонов; `None` создаёт приватное in-memory хранилище. |
-| `store_path` | `str`, `Path` или `None` | `None` | Путь JSONL-файла истории: результат каждого `run()` дописывается в файл, история восстанавливается при конструировании. Игнорируется, если передан явный `store`. |
-| `label` | `str` или `None` | `None` | Человекочитаемая метка прогона; прикрепляется к `ExperimentResult` и видна в отчётах. |
-| `model_path_override` | `str`, `Path` или `None` | `None` | Альтернативный путь сохранения модели (форвардится в движок; по умолчанию — настроенный `general.path_to_model`). |
+| `config` | `str`, `Path`, `Config` or `dict` | — | Configuration: a YAML/JSON path, a `Config` object or a dict — the same forms `train_best_model` accepts. |
+| `data` | `pd.DataFrame` | — | Input dataset. Validated and snapshotted at `run()` time (see "Data snapshot" below). |
+| `target` | `str` or `None` | `None` | Name of the target column (default `"target"`). |
+| `store` | `ExperimentStore` or `None` | `None` | Run-history store; `None` creates a private in-memory store. |
+| `store_path` | `str`, `Path` or `None` | `None` | Path of the JSONL history file: every `run()` result is appended to the file, the history is restored at construction. Ignored when an explicit `store` is passed. |
+| `label` | `str` or `None` | `None` | Human-readable run label; attached to the `ExperimentResult` and visible in the reports. |
+| `model_path_override` | `str`, `Path` or `None` | `None` | Alternative model save path (forwarded to the engine; the configured `general.path_to_model` is the default). |
 
-**Методы:**
+**Methods:**
 
-* `run() -> ExperimentResult` — выполняет полный цикл обучения (делегирует в инструментированный `train_best_model`), регистрирует результат в хранилище и возвращает его. Ошибки валидации конфига/данных движка (`TypeError`, pydantic `ValidationError`, `ValueError`) пробрасываются без изменений; `RuntimeError` — если оркестрация упала (провалившийся `ExperimentResult` всё равно попадает в хранилище).
-* `leaderboard(print_table=False) -> Leaderboard` — рейтинговая таблица алгоритмов последнего прогона (см. [`build_leaderboard`](#leaderboard--build_leaderboard)); `print_table=True` дополнительно печатает таблицу в stdout.
-* `best_model() -> ModelTrainer` — обученная модель победителя: загружается с пути артефакта из результата (формат сериализации определяется по расширению, с fallback joblib → pickle), поэтому всегда соответствует принятому результату.
-* `ensemble_model() -> EnsembleModel` — экспериментальный top-K ансамбль (см. [`general.ensemble`](#experimental-ensemble-generalensemble)): загружается с пути артефакта из секции `ensemble` результата. `RuntimeError`, если ансамбль не построен (фича выключена, прогон провалился или шаг пропущен).
-* `report(reporter=None)` — цепочка репортеров на последнем результате. По умолчанию: Markdown-отчёт в stdout и полный JSON-снапшот (`experiment_report.json`) рядом с артефактом модели (или в текущем каталоге). Явный `reporter` (или `CompositeReporter`) заменяет цепочку по умолчанию; возвращается артефакт(ы) репортера.
-* `export(directory) -> Path` — бандл артефактов прогона (см. [`export_experiment`](#export_experiment)).
-* `explain(method="permutation", X=None, y=None, ...)` — интерпретация победителя, см. [`explain()`](#explain--интерпретируемость-лучшей-модели).
+* `run() -> ExperimentResult` — performs the full training cycle (delegates to the instrumented `train_best_model`), registers the result in the store and returns it. Engine config/data validation errors (`TypeError`, pydantic `ValidationError`, `ValueError`) propagate unchanged; `RuntimeError` — when the orchestration failed (the failed `ExperimentResult` is still stored).
+* `leaderboard(print_table=False) -> Leaderboard` — the algorithm ranking table of the last run (see [`build_leaderboard`](#leaderboard--build_leaderboard)); `print_table=True` additionally prints the table to stdout.
+* `best_model() -> ModelTrainer` — the trained winner model: loaded from the artifact path of the result (the serialization format is determined by the extension, with a joblib → pickle fallback), so it always matches the accepted result.
+* `ensemble_model() -> EnsembleModel` — the experimental top-K ensemble (see [`general.ensemble`](#experimental-ensemble-generalensemble)): loaded from the artifact path of the result's `ensemble` section. `RuntimeError` when the ensemble was not built (the feature is off, the run failed or the step was skipped).
+* `report(reporter=None)` — the reporter chain over the last result. Default: a Markdown report to stdout and a full JSON snapshot (`experiment_report.json`) next to the model artifact (or in the current directory). An explicit `reporter` (or `CompositeReporter`) replaces the default chain; the reporter artifact(s) are returned.
+* `export(directory) -> Path` — the bundle of the run artifacts (see [`export_experiment`](#export_experiment)).
+* `explain(method="permutation", X=None, y=None, ...)` — interpretation of the winner, see [`explain()`](#explain--interpretability-of-the-best-model).
 
-**Свойства:** `result` — `ExperimentResult` последнего `run()` (`None` до него); `run_id` — идентификатор последнего прогона (`None` до него); `store` — хранилище истории.
+**Properties:** `result` — the `ExperimentResult` of the last `run()` (`None` before it); `run_id` — the identifier of the last run (`None` before it); `store` — the run-history store.
 
-**Политика повторного `run()`.** Повторный вызов разрешён: он обучает снова, получает новый `run_id` и заменяет `result`; результат предыдущего прогона остаётся в истории хранилища. Чтобы дублирование не было тихим, при повторе эмитится `RuntimeWarning`.
+**Repeated `run()` policy.** A repeated call is allowed: it trains again, gets a new `run_id` and replaces `result`; the previous run's result stays in the store history. To keep the duplication from being silent, a `RuntimeWarning` is emitted on a repeat.
 
-**Ошибки состояния.** Все потребители результата (`leaderboard`, `best_model`, `ensemble_model`, `report`, `export`, `explain`) до `run()` бросают `ExperimentNotRunError` (подкласс `RuntimeError`) с сообщением, называющим состояние и исправление. Отдельная форма ошибки: движок отработал, но не записал результат с owner-штампом эксперимента — это диагностируется как несоответствие версий движка и фасада.
+**State errors.** Every result consumer (`leaderboard`, `best_model`, `ensemble_model`, `report`, `export`, `explain`) raises `ExperimentNotRunError` (a subclass of `RuntimeError`) before `run()`, with a message naming the state and the fix. A separate error form: the engine ran but did not record a result stamped with the experiment's owner — diagnosed as an engine/facade version mismatch.
 
-**Owner-stamp.** Фасад не держит глобального состояния: два эксперимента в разных потоках ничего не разделяют и могут работать одновременно (движок поддерживает `general.parallel_mode: threads`). Результат прогона распознаётся как «свой» по приватному owner-штампу (`run_token`), передаваемому в движок: чужой конкурентный или последовательный прогон никогда не протекает в состояние эксперимента. Ошибка регистрации результата в хранилище логируется как WARNING и не маскирует исход прогона.
+**Owner stamp.** The facade keeps no global state: two experiments in different threads share nothing and may run concurrently (the engine supports `general.parallel_mode: threads`). A run's result is recognized as "its own" by a private owner stamp (`run_token`) passed to the engine: a foreign concurrent or sequential run never leaks into the experiment's state. A store-registration failure is logged as a WARNING and does not mask the run outcome.
 
-**Снапшот данных.** Данные снапшотятся в момент `run()` (поверхностная копия DataFrame): мутации кадра вызывающего кода после `run()` (добавление/удаление колонок, переприсваивание) не меняют обученные данные. Снапшот — копия объекта кадра, а не глубокая копия каждого блока: мутация значений колонок *на месте* (`df.loc[...] = ...`) по-прежнему записывается в обучающие данные, как и для любой pandas-копии; вместо этого присваивайте новый кадр.
+**Data snapshot.** The data is snapshotted at `run()` time (a shallow copy of the DataFrame): mutations of the caller's frame after `run()` (adding/removing columns, reassignment) do not change the trained data. The snapshot is a copy of the frame object, not a deep copy of every block: mutating column values *in place* (`df.loc[...] = ...`) still lands in the training data, as with any pandas copy; assign a new frame instead.
 
 ```python
 with warnings.catch_warnings():
-    warnings.simplefilter("always")   # повторный run() не тихий
-    experiment.run()                  # новый run_id, старый остаётся в store
+    warnings.simplefilter("always")   # a repeated run() is not silent
+    experiment.run()                  # a new run_id, the old one stays in the store
 ```
 
 ---
 
-## `ExperimentStore` (история прогонов)
+## `ExperimentStore` (run history)
 
 `from configurable_automl_engine.experiment import ExperimentStore, RunSummary, DuplicateRunError, ExperimentStoreError`
 
-Потокобезопасная история экспериментальных прогонов с опциональным JSONL-персистом. Хранилище держит полные `ExperimentResult`-модели в памяти (упорядоченное отображение `run_id` → результат) и при конструировании с `path` зеркалирует каждую регистрацию в JSONL-файл, восстанавливая историю из него при старте.
+A thread-safe history of experimental runs with optional JSONL persistence. The store keeps full `ExperimentResult` models in memory (an ordered mapping `run_id` → result) and, when constructed with `path`, mirrors every registration into a JSONL file, restoring the history from it at startup.
 
-**Конструктор:** `ExperimentStore(path=None, *, restore=True)`. `path` — путь JSONL-файла истории (недостающие родительские каталоги создаются при первой записи; `None` — только память). `restore=True` (по умолчанию) восстанавливает историю из файла при конструировании; `False` — файл только дописывается.
+**Constructor:** `ExperimentStore(path=None, *, restore=True)`. `path` — path of the JSONL history file (missing parent directories are created on the first write; `None` — memory only). `restore=True` (default) restores the history from the file at construction; `False` — the file is only appended to.
 
-**Политики:**
+**Policies:**
 
-* регистрация ключуется по `run_id`; дубликат бросает `DuplicateRunError`, если не передан `force=True` (форсированная регистрация заменяет сохранённый результат);
-* метка прогона берётся из `ExperimentResult.label` и **не** обязана быть уникальной: поиск по метке возвращает все совпавшие прогоны;
-* JSONL-персист: каждая регистрация дописывается в файл одной JSON-строкой; при восстановлении повреждённая строка (обрезанная запись, мусор, запись, не прошедшая валидацию модели после изменения схемы) пропускается с `RuntimeWarning` — никогда не крашит старт. Повторяющийся `run_id` в файле: побеждает последнее вхождение (файл — append-only лог);
-* потокобезопасность: один реентерабельный лок — движок может регистрировать результаты параллельных прогонов (`general.parallel_mode: threads`); ни одно обновление не теряется, JSONL-дописывания сериализуются.
+* registration is keyed by `run_id`; a duplicate raises `DuplicateRunError` unless `force=True` is passed (a forced registration replaces the stored result);
+* the run label is taken from `ExperimentResult.label` and does **not** have to be unique: a label search returns all matching runs;
+* JSONL persistence: every registration is appended to the file as one JSON line; on restore a damaged line (a truncated record, garbage, a record that fails the model validation after a schema change) is skipped with a `RuntimeWarning` — it never crashes the startup. A repeated `run_id` in the file: the last occurrence wins (the file is an append-only log);
+* thread safety: one reentrant lock — the engine may register results of parallel runs (`general.parallel_mode: threads`); no update is lost, JSONL appends are serialized.
 
-**Методы:**
+**Methods:**
 
-* `add(result, *, force=False) -> None` — регистрирует завершённый прогон; `DuplicateRunError` при дубликате `run_id` без `force`.
-* `get(run_id) -> ExperimentResult` — полный результат одного прогона (принимается `UUID` или его каноническая строка); `KeyError`, если прогон не зарегистрирован.
-* `find_by_label(label) -> list[ExperimentResult]` — все прогоны с меткой в порядке регистрации; неизвестная метка — пустой список.
-* `list_runs(*, status=None, label=None, order_by="started_at", descending=False) -> list[RunSummary]` — легковесные сводки вместо полных моделей (листинг большой истории остаётся дешёвым). `status` — фильтр по исходу (`'completed'`/`'failed'`, принимает строку), `label` — точная метка, `order_by` — `'started_at'` / `'finished_at'` / `'duration_seconds'` (сортировка стабильная), `descending` — по убыванию. Невалидный `status` — `ValueError`.
-* `__len__` — число зарегистрированных прогонов; `run_id in store` — проверка регистрации; `close()` — закрыть файловый дескриптор (идемпотент, no-op без `path`). Хранилище — контекстный менеджер.
+* `add(result, *, force=False) -> None` — registers a completed run; `DuplicateRunError` on a duplicate `run_id` without `force`.
+* `get(run_id) -> ExperimentResult` — the full result of one run (accepts a `UUID` or its canonical string); `KeyError` when the run is not registered.
+* `find_by_label(label) -> list[ExperimentResult]` — all runs with the label in registration order; an unknown label — an empty list.
+* `list_runs(*, status=None, label=None, order_by="started_at", descending=False) -> list[RunSummary]` — lightweight summaries instead of full models (listing a large history stays cheap). `status` — outcome filter (`'completed'`/`'failed'`, accepts a string), `label` — exact label, `order_by` — `'started_at'` / `'finished_at'` / `'duration_seconds'` (stable sort), `descending` — descending order. An invalid `status` — `ValueError`.
+* `__len__` — the number of registered runs; `run_id in store` — a registration check; `close()` — close the file descriptor (idempotent, a no-op without `path`). The store is a context manager.
 
-**`RunSummary`** — замороженная pydantic-модель метаданных одного прогона: `run_id`, `label`, `status`, `started_at`, `finished_at`, `duration_seconds`, `engine_version`.
+**`RunSummary`** — a frozen pydantic model of one run's metadata: `run_id`, `label`, `status`, `started_at`, `finished_at`, `duration_seconds`, `engine_version`.
 
 ---
 
@@ -1895,17 +1895,17 @@ with warnings.catch_warnings():
 
 `from configurable_automl_engine.experiment import Leaderboard, build_leaderboard`
 
-Рейтинговая таблица алгоритмов одного эксперимента — чистое представление над `ExperimentResult`. `build_leaderboard(result)` ранжирует алгоритмы по user-семантическим оценкам (`AlgorithmRun.score`: положительный RMSE/MAE, «чистый» R² — сырые значения оптимизатора, включая инверсию `neg_`-метрик, никогда не покидают модель результата).
+The algorithm ranking table of one experiment — a pure view over `ExperimentResult`. `build_leaderboard(result)` ranks the algorithms by user-semantic scores (`AlgorithmRun.score`: positive RMSE/MAE, a "clean" R² — raw optimizer values, including the inversion of `neg_` metrics, never leave the result model).
 
-**Правила ранжирования:**
+**Ranking rules:**
 
-* направление следует `ExperimentResult.metric_direction`: для `minimize`-метрик (RMSE, MAE и прочие ошибки) ранг 1 получает наименьший score, для `maximize` (R²) — наибольший; сравнение — по абсолютному порядку float, поэтому условие ничьей — точное равенство;
-* ничьи разрешаются детерминированно порядком конфигурации алгоритмов (тот же tie-break, что у `select_winner` и пула финалистов): при равных оценках лучший ранг получает алгоритм, объявленный в конфигурации раньше. Порядок восстанавливается из снапшота конфига (`config['general']['phases']` → секция `algorithms`); если восстановить его не удалось, ничьи сортируются по имени (имена уникальны, порядок остаётся детерминированным). Криворукоручно собранный снапшот никогда не крашит ранжирование;
-* в таблицу попадают только валидные записи: `completed`-записи с валидным score; `failed`/`disqualified`-записи и `completed` без валидного score отфильтровываются (причина исключения сохраняется в истории прогонов, но не в таблице);
-* колонка `Phase` называет фазу лучшего результата алгоритма (тот же выбор направления и tie-break, что у таблицы); `Trials` — число СОВЕРШЁННЫХ trials этой фазы (`n_trials_evaluated`), переданная между фазами история (`previous_trials`) не считается;
-* пустая таблица (провалившийся эксперимент, нет валидных записей) — не ошибка: `build_leaderboard` возвращает пустой `Leaderboard`, `to_table` рендерит заглушку `<no ranked algorithms>`, `to_summary` сообщает `Experiment failed`.
+* the direction follows `ExperimentResult.metric_direction`: for `minimize` metrics (RMSE, MAE and other errors) rank 1 is the smallest score, for `maximize` (R²) — the largest; the comparison uses the absolute float order, so the tie condition is exact equality;
+* ties are resolved deterministically by the configuration order of the algorithms (the same tie-break as `select_winner` and the finalists pool): with equal scores the better rank goes to the algorithm declared earlier in the configuration. The order is restored from the config snapshot (`config['general']['phases']` → the `algorithms` section); if it cannot be restored, ties are sorted by name (names are unique, the order stays deterministic). A badly assembled snapshot never crashes the ranking;
+* only valid records enter the table: `completed` records with a valid score; `failed`/`disqualified` records and `completed` ones without a valid score are filtered out (the exclusion reason is kept in the run history, not in the table);
+* the `Phase` column names the phase of the algorithm's best result (the same direction choice and tie-break as the table); `Trials` — the number of COMPLETED trials of that phase (`n_trials_evaluated`), the history transferred between phases (`previous_trials`) is not counted;
+* an empty table (a failed experiment, no valid records) is not an error: `build_leaderboard` returns an empty `Leaderboard`, `to_table` renders the `<no ranked algorithms>` placeholder, `to_summary` reports `Experiment failed`.
 
-**`Leaderboard`** — замороженная дата-класс-модель: `metric_user`, `metric_direction`, кортеж `entries` (`LeaderboardEntry`: `rank`, `algorithm`, `score`, `trials`, `phase`, `phase_action`, `params`, `validation_strategy`, `n_folds`, `training_time_seconds`, `n_trials_failed`). Потребители: `len(board)`, итерация, `board.winner` (ранг 1 или `None`), `board.to_table(max_cell_width=40)` — выровненная моноширинная сетка `Rank | Algorithm | Score | Trials | Phase` (длинные имена обрезаются с эллипсисом, ширина считается по визуальным ячейкам: CJK-символы занимают две), `board.to_summary()` — UX-сводка `N. Name  Score` со строкой `Winner: …`.
+**`Leaderboard`** — a frozen dataclass model: `metric_user`, `metric_direction`, a tuple of `entries` (`LeaderboardEntry`: `rank`, `algorithm`, `score`, `trials`, `phase`, `phase_action`, `params`, `validation_strategy`, `n_folds`, `training_time_seconds`, `n_trials_failed`). Consumers: `len(board)`, iteration, `board.winner` (rank 1 or `None`), `board.to_table(max_cell_width=40)` — an aligned monospace grid `Rank | Algorithm | Score | Trials | Phase` (long names are truncated with an ellipsis, the width is measured over visual cells: CJK characters take two), `board.to_summary()` — the UX summary `N. Name  Score` with a `Winner: …` line.
 
 ---
 
@@ -1913,33 +1913,33 @@ with warnings.catch_warnings():
 
 `from configurable_automl_engine.experiment import export_experiment`
 
-Экспорт бандла артефактов одного завершённого прогона в каталог (движок метода `AutoMLExperiment.export`). Всё, что производит экспорт, берётся из модели `ExperimentResult` и репортеров — экспортёр не заходит в training engine, поэтому работает в любом процессе-потребителе.
+Export of one completed run's artifact bundle into a directory (the engine of the `AutoMLExperiment.export` method). Everything the export produces is taken from the `ExperimentResult` model and the reporters — the exporter never enters the training engine, so it works in any consumer process.
 
-**Контракт имён файлов** (каждый файл префиксован `run_id`, чтобы экспорты разных прогонов — включая два same-label эксперимента в один каталог — не сталкивались; метка и любой другой текст метаданных никогда не попадают в имя файла напрямую):
+**File-name contract** (every file is prefixed with `run_id`, so the exports of different runs — including two same-label experiments into one directory — never collide; the label and any other metadata text never go into a file name directly):
 
-| Файл | Содержимое |
+| File | Content |
 |------|-----------|
-| `<run_id>_model.<ext>` | Артефакт модели, **скопированный** с записанного пути (оригинал не трогается, копия байт-в-байт, расширение сохраняется как маркер формата сериализации). |
-| `<run_id>_ensemble.<ext>` | Артефакт экспериментального top-K ансамбля (см. [`general.ensemble`](#experimental-ensemble-generalensemble)), **скопированный** с пути `artifact_path` из секции `ensemble` результата — тот же байт-в-байт контракт, что и у копии модели. Файл появляется в бандле только когда прогон записал секцию с артефактом (фича выключена, best-effort деградация или несохранённый артефакт — бандл без ensemble-файла, без ошибок). |
-| `<run_id>_explain.json` | JSON-safe payload последнего вызова `explain()` (см. [`explain()`](#explain--интерпретируемость-лучшей-модели)): метод, важности признаков и метаданные вычисления. Отсутствует, если `explain()` на прогоне не вызывался. |
-| `<run_id>_leaderboard.json` | Рейтинговая таблица: отрендеренная таблица + структурированные записи. |
-| `<run_id>_leaderboard.md` | Таблица рейтинга plain-текстом. |
-| `<run_id>_report.md` | Полный Markdown-отчёт (`MarkdownReporter`); при наличии сохранённого payload `explain()` — секция важностей признаков. |
-| `<run_id>_result.json` | Полный JSON-снапшот результата (`JSONReporter`). |
-| `<run_id>_metadata.json` | Метаданные прогона: id, метка, статус (и причина отказа), тайминги, версия движка, победитель, исходные пути артефактов модели и ансамбля (`model_source_path` / `ensemble_source_path`) и карта экспортированных файлов. |
+| `<run_id>_model.<ext>` | The model artifact, **copied** from the recorded path (the original is untouched, the copy is byte-exact, the extension is kept as the serialization-format marker). |
+| `<run_id>_ensemble.<ext>` | The experimental top-K ensemble artifact (see [`general.ensemble`](#experimental-ensemble-generalensemble)), **copied** from the `artifact_path` of the result's `ensemble` section — the same byte-exact contract as the model copy. The file appears in the bundle only when the run recorded a section with an artifact (the feature is off, a best-effort degradation or an unsaved artifact — a bundle without the ensemble file, without errors). |
+| `<run_id>_explain.json` | The JSON-safe payload of the last `explain()` call (see [`explain()`](#explain--interpretability-of-the-best-model)): the method, the feature importances and the computation metadata. Absent when `explain()` was not called on the run. |
+| `<run_id>_leaderboard.json` | The ranking table: the rendered table + the structured records. |
+| `<run_id>_leaderboard.md` | The ranking table as plain text. |
+| `<run_id>_report.md` | The full Markdown report (`MarkdownReporter`); with a stored `explain()` payload — the feature importance section. |
+| `<run_id>_result.json` | The full JSON snapshot of the result (`JSONReporter`). |
+| `<run_id>_metadata.json` | The run metadata: id, label, status (and the failure reason), timings, engine version, winner, the original artifact paths of the model and the ensemble (`model_source_path` / `ensemble_source_path`) and the map of exported files. |
 
-**Контракт read-only по отношению к результату.** Экспорт никогда не мутирует снапшот результата: путь копии ансамбля в бандле (`<run_id>_ensemble.<ext>`) записывается **только** в metadata-файл (карта `exported_files` + `ensemble_source_path`); поле `artifact_path` в секции `ensemble` внутри `<run_id>_result.json` продолжает указывать на исходное расположение. Оригинальные файлы (модель, ансамбль) не переименовываются и не перезаписываются; после переноса бандла на другую машину ансамбль восстанавливается загрузкой копии из бандла (файл с тем же префиксом `run_id`).
+**Read-only contract toward the result.** The export never mutates the result snapshot: the bundle path of the ensemble copy (`<run_id>_ensemble.<ext>`) is written **only** to the metadata file (the `exported_files` map + `ensemble_source_path`); the `artifact_path` field in the `ensemble` section inside `<run_id>_result.json` keeps pointing at the original location. The original files (model, ensemble) are never renamed or overwritten; after relocating the bundle to another machine the ensemble is restored by loading the copy from the bundle (the file with the same `run_id` prefix).
 
-**Политики:**
+**Policies:**
 
-* несуществующий каталог назначения создаётся рекурсивно; существующий бандл того же прогона перезаписывается (последний экспорт побеждает; посторонние файлы в каталоге не трогаются);
-* атомарность: бандл собирается во временном каталоге внутри назначения и переносится на место двухфазным swap'ом (сначала перезаписываемые файлы убираются в `.<name>.export-backup`, затем новые файлы переименовываются на освободившиеся имена — каждый перенос атомарный `os.replace`). Сбой в середине (ошибка сериализации, отсутствующий артефакт) никогда не оставляет частичный бандл: предыдущий бандл остаётся нетронутым (или на свежем экспорте не появляется вовсе), временные остатки всегда удаляются; восстановление после сбоя — best-effort и не прерывается на первой ошибке;
-* путь назначения существует, но не каталог → `ExportError`; записанный путь артефакта модели отсутствует на диске → `ExportError` с именем файла (тот же контракт для артефакта ансамбля, записанного в секции `ensemble`: секция обещает загружаемый артефакт, его отсутствие на диске — `ExportError`, а не тихая дыра в бандле); нет прав на запись → `OSError` файловой системы до производства каких-либо артефактов;
-* путь артефакта может отсутствовать (провалившийся прогон) — файл модели просто не экспортируется; провалившийся эксперимент (`status: "failed"`) — легитимный вход: его статус и причина отказа попадают в metadata-файл (ансамбль прикрепляется к результату только при успешном сохранении артефакта, поэтому провалившийся прогон может как иметь секцию `ensemble` с артефактом, так и не иметь её — оба состояния экспортируются корректно). Экспорт до `run()` отклоняется фасадом с `ExperimentNotRunError`; старый формат результата без полей `explanations`/`ensemble` экспортируется без ошибок.
+* a non-existent destination directory is created recursively; an existing bundle of the same run is overwritten (the last export wins; foreign files in the directory are untouched);
+* atomicity: the bundle is assembled in a temporary directory inside the destination and moved into place with a two-phase swap (first the files to be overwritten are moved aside to `.<name>.export-backup`, then the new files are renamed onto the freed names — every move is an atomic `os.replace`). A failure in the middle (a serialization error, a missing artifact) never leaves a partial bundle: the previous bundle stays untouched (or, on a fresh export, never appears), temporary leftovers are always removed; crash recovery is best-effort and does not stop at the first error;
+* the destination path exists but is not a directory → `ExportError`; the recorded model artifact path is missing on disk → `ExportError` naming the file (the same contract for the ensemble artifact recorded in the `ensemble` section: the section promises a loadable artifact, its absence on disk is an `ExportError`, not a silent hole in the bundle); no write permission → a filesystem `OSError` before any artifacts are produced;
+* the artifact path may be absent (a failed run) — the model file is simply not exported; a failed experiment (`status: "failed"`) is a legitimate input: its status and failure reason land in the metadata file (the ensemble attaches to the result only when the artifact was saved successfully, so a failed run may or may not carry an `ensemble` section with an artifact — both states are exported correctly). An export before `run()` is rejected by the facade with `ExperimentNotRunError`; an old result format without the `explanations`/`ensemble` fields is exported without errors.
 
 ```python
 experiment.run()
-experiment.export("artifacts/")   # возвращает Path каталога назначения
+experiment.export("artifacts/")   # returns the Path of the destination directory
 ```
 
 ---

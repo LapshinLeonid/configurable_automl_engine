@@ -1,4 +1,4 @@
-"""Export of the experiment artifact bundle into a directory (the T11
+"""Export of the experiment artifact bundle into a directory.
 component).
 
 :func:`export_experiment` (the engine behind
@@ -6,7 +6,7 @@ component).
 finished run into a destination directory under a fixed, documented
 layout. Everything the export produces comes from the
 :class:`~configurable_automl_engine.experiment.result.ExperimentResult`
-model plus the reporters of the T7 component — the exporter never
+model plus the reporters — the exporter never
 reaches into the training engine, so it works in any consumer process.
 
 The bundle (the file names are the documented contract; every file is
@@ -20,7 +20,7 @@ one directory, and the repeated exports of one run):
   path), the copy is byte-exact and keeps the original extension (the
   serialization format marker);
 * ``<run_id>_ensemble.<ext>`` — the experimental top-K ensemble
-  artifact (the T10 component), **copied** from the path recorded in
+  artifact, **copied** from the path recorded in
   the result's ``ensemble`` section (``artifact_path``), the same
   byte-exact contract as the model copy; the original path is recorded
   in the metadata (``ensemble_source_path``). The copy's bundle path is
@@ -35,15 +35,13 @@ one directory, and the repeated exports of one run):
   ``explain()`` call of the run (``ExperimentResult.explanations``:
   the method, the per-feature importances, the computation metadata);
   absent when explain was never invoked;
-* ``<run_id>_leaderboard.json`` — the algorithm ranking table (the T6
+* ``<run_id>_leaderboard.json`` — the algorithm ranking table
   component): the rendered table plus the structured entries;
 * ``<run_id>_leaderboard.md`` — the ranking table as plain text;
 * ``<run_id>_report.md`` — the full Markdown report
   (:class:`~configurable_automl_engine.experiment.reporting.MarkdownReporter`,
-  the T7 component);
 * ``<run_id>_result.json`` — the full JSON snapshot of the result
   (:class:`~configurable_automl_engine.experiment.reporting.JSONReporter`,
-  the T7 component);
 * ``<run_id>_metadata.json`` — the run metadata: the run id, the label,
   the status (and the failure reason for a failed run), the timings,
   the engine version, the winner, the source paths of the model and
@@ -83,7 +81,7 @@ Documented contract:
   directly: the names are built from the ``run_id`` only, so special
   characters in the label cannot break the export;
 * ``export()`` before ``run()`` is rejected by the facade with
-  ``ExperimentNotRunError`` (the T5 state contract), not here — a
+  ``ExperimentNotRunError`` (the facade state contract), not here — a
   failed experiment (``status='failed'``, no model artifact) is a
   legitimate export input: its status and failure reason land in the
   metadata file.

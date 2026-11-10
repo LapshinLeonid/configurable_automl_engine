@@ -1,10 +1,10 @@
-"""Assembly of the ``ExperimentResult`` from the pipeline sources (T3).
+"""Assembly of the ``ExperimentResult`` from the pipeline sources.
 
 ``build_experiment_result`` is the single assembly point of the
 instrumented run result: it converts the pipeline state
 (``PhaseContext`` — the working set, the circuit breaker, the winner,
 the phase timings) plus the prepared data and the resolved settings into
-the pure ``ExperimentResult`` model (the T1 contract). The assembly uses
+the pure ``ExperimentResult`` model. The assembly uses
 the SAME sources as the legacy dict result (``persist_artifact``), not the
 dict itself, so the optional dict keys stay backward-compatible.
 
@@ -14,7 +14,7 @@ Key semantics:
   record of each phase, ordered deterministically (phase name, then
   configuration order — independent of the parallel-worker completion);
   raw scores keep the optimizer semantics, the user scores are derived by
-  ``to_user_value``; trial statistics come from ``TrialStats`` (T2);
+  ``to_user_value``; trial statistics come from ``TrialStats``;
 * the winner of the terminal select step (``output: winner``) is taken
   from ``ctx.winner_algo``; ``winner_score`` is the user-semantic score of
   the same record the legacy ``result["score"]`` comes from, so the two
@@ -28,7 +28,7 @@ Key semantics:
   ``build_failed_experiment_result`` when the orchestration raises
   (a phase produced no valid scores, a select received an empty working
   set, an invalid winner score): the already-known run metadata and the
-  records of the completed phases are preserved so the run history (T4)
+  records of the completed phases are preserved so the run history
   keeps the partial evidence of the failure.
 """
 
@@ -76,7 +76,7 @@ def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
     it never reaches ``model_dump`` / ``to_json`` / the JSONL history and
     needs no model change.
 
-    The token lets an orchestrator (the ``AutoMLExperiment`` facade, T5)
+    The token lets an orchestrator (the ``AutoMLExperiment`` facade)
     recognize *its own* run result when reading the module-level
     ``component.last_experiment_result`` global: the global is the
     result of the last ``train_best_model`` call in the process and is
@@ -210,7 +210,7 @@ def build_failed_experiment_result(
     produced no valid scores, a select step received an empty working set,
     the winner's score failed the invariant). Everything already known —
     the resolved settings and the records of the completed phases — is
-    preserved so the run history (the T4 store) keeps the partial evidence
+    preserved so the run history store keeps the partial evidence
     of the failure.
 
     Args:

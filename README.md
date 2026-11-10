@@ -88,7 +88,7 @@ Classification is not supported.
   object: `run()` executes the training and registers the result, then
   `leaderboard()`, `best_model()`, `report()`, `export()` and `explain()`
   serve the facets of the finished run. See
-  [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#automlexperiment-объектный-api).
+  [`AutoMLExperiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#automlexperiment-object-api).
 * **Experiment Tracking** — every run is registered as a serializable
   `ExperimentResult` in a thread-safe `ExperimentStore` (optional JSONL
   persist), ranked into a `Leaderboard` and rendered by
@@ -97,10 +97,10 @@ Classification is not supported.
   weighted-average top-K ensemble next to the winner; `export_experiment`
   bundles the model, ensemble and explain artifacts with the run reports into
   a self-contained directory. See
-  [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#experimentstore-история-прогонов),
+  [`ExperimentStore`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#experimentstore-run-history),
   [`Leaderboard`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#leaderboard--build_leaderboard),
   [`export_experiment`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#export_experiment)
-  and [`explain()`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели).
+  and [`explain()`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.5.0/API_REFERENCE.md#explain--interpretability-of-the-best-model).
 
 # Dependencies
 
@@ -128,7 +128,7 @@ These distributions will not be installed automatically. You can install them us
 | `xgboost` | `xgboost>=3.1.3` | The `xgboosting` algorithm. Without it a config that enables `xgboosting` is rejected at validation. |
 | `logging` | `concurrent-log-handler>=0.9.25` | Process-safe rotating log files (`general.log_to_file`) when several processes write to the same log. Without it the standard `RotatingFileHandler` is used. |
 | `mlflow` | `mlflow>=2.0.0` | The `MLflowReporter` tracking adapter: logs the metrics, params, tags and artifacts of a finished run into an MLflow run (see [MLflowReporter](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#mlflowreporter-optional-extra-mlflow)). |
-| `shap` | `shap>=0.48.0` | SHAP feature importance of the winner model: `explain(method="shap")` of `AutoMLExperiment` (see [explain()](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#explain--интерпретируемость-лучшей-модели)). |
+| `shap` | `shap>=0.48.0` | SHAP feature importance of the winner model: `explain(method="shap")` of `AutoMLExperiment` (see [explain()](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#explain--interpretability-of-the-best-model)). |
 | `all` | `xgboost` + `logging` + `mlflow` + `shap` | All of the above. |
 
 # Installation

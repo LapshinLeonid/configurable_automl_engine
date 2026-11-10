@@ -1,7 +1,6 @@
 """MarkdownReporter: the human-readable report of an experiment.
 
-The report embeds the leaderboard (``build_leaderboard``, the T6
-component) as a Markdown table, adds the run metadata, the winner block
+The report embeds the leaderboard (``build_leaderboard``) as a Markdown table, adds the run metadata, the winner block
 and the per-run detail sections. Every value comes from the
 :class:`~configurable_automl_engine.experiment.result.ExperimentResult`
 model — the reporter never reaches into the engine and never imports

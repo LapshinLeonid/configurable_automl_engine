@@ -1,4 +1,4 @@
-"""Leaderboard: the algorithm ranking table of an experiment (the T6
+"""Leaderboard: the algorithm ranking table of an experiment.
 component).
 
 ``build_leaderboard`` ranks the algorithms of an
@@ -48,7 +48,8 @@ Documented contract:
 ``to_summary`` contract: the statusless rendering (the default) is the
 list plus the ``Winner: …`` line; with ``status=True`` the first line of
 the block is the experiment status (``Experiment completed`` /
-``Experiment failed``), matching the UX-цель example of the epic #37.
+``Experiment failed``), so a consumer can surface the run outcome above the
+ranking without parsing it.
 """
 
 from __future__ import annotations
@@ -85,14 +86,14 @@ __all__ = [
 EMPTY_LEADERBOARD_MESSAGE = "<no ranked algorithms>"
 
 #: The status header of a completed experiment (the first line of the
-#: UX summary, following the epic #37 example).
+#: UX summary).
 COMPLETED_SUMMARY_MESSAGE = "Experiment completed"
 
 #: The summary line of a failed experiment (no winner to congratulate).
 FAILED_SUMMARY_MESSAGE = "Experiment failed"
 
 #: The indent of the ``Winner: …`` line: it hangs under the list so the
-#: winner stands out without taking a rank number (the epic #37 layout).
+#: winner stands out without taking a rank number.
 SUMMARY_HEADER_INDENT = "   "
 
 #: The columns of the ranking table, in the render order.
@@ -169,7 +170,7 @@ def _truncate(text: str, max_width: int) -> str:
 
 
 def _format_score(score: float) -> str:
-    """Render one score cell: three decimal places, like the epic example."""
+    """Render one score cell: three decimal places."""
     return f"{score:.3f}"
 
 
@@ -383,10 +384,11 @@ class Leaderboard:
                 status keeps the ranking below it: some algorithms may
                 have valid records even when the run as a whole failed).
                 The statusless rendering (the default) keeps the
-                historical list + Winner layout unchanged; the status
-                line matches the UX-цель block of the epic #37 example.
+                compact list + Winner layout; the status line gives
+                the consumer a one-glance outcome header above the
+                ranking.
                 A statusless summary of an empty leaderboard is the
-                failure placeholder (unchanged); a failed status never
+                failure placeholder; a failed status never
                 prefixes an empty summary (the placeholder already says
                 ``Experiment failed``).
 
@@ -396,8 +398,7 @@ class Leaderboard:
 
                 * ``status=False``, entries exist: the ``N. Name Score``
                   list plus the final ``   Winner: …`` line (no status
-                  header — the documented deviation from the epic #37
-                  example);
+                  header — the compact layout);
                 * ``status=True``, entries exist: the status line
                   (``Experiment completed`` / ``Experiment failed``),
                   then the list, then the Winner line;

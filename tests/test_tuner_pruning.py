@@ -3001,11 +3001,13 @@ def test_optimize_model_failing_one_fold_gets_worst_score(toy_data, caplog):
 #  Aggregated trial statistics (OptimizeResult.trial_stats)
 # ──────────────────────────────────────────────────────────────────────────────
 def test_optimize_trial_stats_counts_mixed_states(toy_data, quality_patches):
-    """P1: смесь completed+pruned+failed → счётчики и скор/params корректны.
+    """P1: a mix of completed+pruned+failed trials → correct counters and
+    score/params.
 
-    Чётные триалы хорошие (0.9), нечётные заведомо плохие (0.05) и режутся
-    MedianPruner'ом: n_trials=4, n_completed=2, n_pruned=2, n_failed=0;
-    счётчики — plain int, а лучший скор/params берутся из COMPLETED-триалов.
+    Even trials are good (0.9), odd ones deliberately bad (0.05) and get
+    pruned by MedianPruner: n_trials=4, n_completed=2, n_pruned=2, n_failed=0;
+    the counters are plain ints, and the best score/params come from the
+    COMPLETED trials.
     """
     X, y = toy_data
     res = optimize(
@@ -3031,23 +3033,23 @@ def test_optimize_trial_stats_counts_mixed_states(toy_data, quality_patches):
     assert stats.n_completed == 2
     assert stats.n_pruned == 2
     assert stats.n_failed == 0
-    # Счётчики нормализованы в plain int (не optuna/np.int64).
+    # The counters are normalized to plain ints (not optuna/np.int64).
     assert type(stats.n_trials) is int
     assert type(stats.n_completed) is int
     assert type(stats.n_pruned) is int
     assert type(stats.n_failed) is int
-    # Лучший результат — из COMPLETED-триалов.
+    # The best result comes from the COMPLETED trials.
     assert res.score == pytest.approx(0.9)
     assert res.params is not None
-    # Согласованность с n_trials_evaluated (тот же знаменатель).
+    # Consistent with n_trials_evaluated (the same denominator).
     assert res.n_trials_evaluated == stats.n_completed
-    # Длительность фазы измерена (неотрицательный float).
+    # The phase duration is measured (a non-negative float).
     assert isinstance(stats.duration_seconds, float)
     assert stats.duration_seconds >= 0.0
 
 
 def test_optimize_trial_stats_pruning_disabled_all_completed(toy_data, quality_patches):
-    """Без pruning все триалы COMPLETED: n_completed == n_trials."""
+    """Without pruning every trial completes: n_completed == n_trials."""
     X, y = toy_data
     res = optimize(
         "ridge",
@@ -3071,11 +3073,12 @@ def test_optimize_trial_stats_pruning_disabled_all_completed(toy_data, quality_p
 def test_optimize_trial_stats_single_trial_pruned_logs_zero_completed(
     toy_data, quality_patches, caplog
 ):
-    """B1: n_trials=1, единственный триал pruned → None + счётчики в логе.
+    """B1: n_trials=1, the single trial pruned → None plus the counters in
+    the log.
 
-    ``None`` — сигнал «нет валидного результата» и статистики с собой не
-    несёт; наблюдаемость обеспечивают счётчики в логе состояния триалов
-    (completed=0, pruned=1, failed=0).
+    ``None`` is the "no valid result" signal and carries no statistics;
+    the trial-state log line (completed=0, pruned=1, failed=0) provides
+    the observability.
     """
     X, y = toy_data
     mocker_target = hpo_runner.optuna.trial.Trial
@@ -3106,7 +3109,7 @@ def test_optimize_trial_stats_single_trial_pruned_logs_zero_completed(
 def test_optimize_trial_stats_all_pruned_logs_zero_completed(
     toy_data, quality_patches, mocker, caplog
 ):
-    """N1: все PRUNED → None + n_completed=0 + лог со счётчиками."""
+    """N1: all PRUNED → None + n_completed=0 + a log line with the counters."""
     X, y = toy_data
     mocker.patch.object(
         hpo_runner.optuna.trial.Trial, "should_prune", return_value=True
@@ -3154,7 +3157,7 @@ def _patch_optimize_to_add_trials(study: optuna.Study, states: list):
 def test_optimize_trial_stats_all_failed_logs_zero_completed(
     toy_data, quality_patches, mocker, caplog
 ):
-    """N2: все FAILED → None + n_completed=0 + лог со счётчиками."""
+    """N2: all FAILED → None + n_completed=0 + a log line with the counters."""
     X, y = toy_data
     study = optuna.create_study(direction="maximize")
     mocker.patch.object(hpo_runner.optuna, "create_study", return_value=study)
@@ -3177,7 +3180,7 @@ def test_optimize_trial_stats_all_failed_logs_zero_completed(
 def test_optimize_trial_stats_pruned_failed_mix_logs_zero_completed(
     toy_data, quality_patches, mocker, caplog
 ):
-    """N3: mix PRUNED+FAILED без COMPLETED → None + n_completed=0 + лог."""
+    """N3: a PRUNED+FAILED mix without COMPLETED → None + n_completed=0 + log."""
     X, y = toy_data
     study = optuna.create_study(direction="maximize")
     mocker.patch.object(hpo_runner.optuna, "create_study", return_value=study)
@@ -3207,9 +3210,10 @@ def test_optimize_trial_stats_pruned_failed_mix_logs_zero_completed(
 def test_optimize_trial_stats_refine_with_initial_params_counts_enqueued_trial(
     toy_data, quality_patches
 ):
-    """P3: refine-фаза с initial_params (enqueue-триал) → статистика включает
-    enqueued-триал: n_trials фазы == запрошенному числу, enqueued-триал
-    выполняется первым и входит в счётчики."""
+    """P3: a refine phase with initial_params (an enqueued trial) → the
+    statistics include the enqueued trial: the phase n_trials equals the
+    requested number, the enqueued trial runs first and enters the
+    counters."""
     X, y = toy_data
     res = optimize(
         "ridge",
@@ -3232,8 +3236,9 @@ def test_optimize_trial_stats_refine_with_initial_params_counts_enqueued_trial(
 
 
 def test_optimize_trial_stats_previous_trials_not_counted(toy_data):
-    """P4: previous_trials перенесены из предыдущей фазы → счётчики агрегируют
-    только собственные триалы фазы (симметрично n_trials_evaluated)."""
+    """P4: previous_trials transferred from the previous phase → the counters
+    aggregate only the phase's own trials (symmetric with
+    n_trials_evaluated)."""
     X, y = toy_data
     first = optimize(
         "nearest_neighbors_regression",
@@ -3257,7 +3262,7 @@ def test_optimize_trial_stats_previous_trials_not_counted(toy_data):
         previous_trials=first.trials,
     )
     assert second is not None
-    # Только собственные триалы фазы: перенесённые (3) не учитываются.
+    # Only the phase's own trials: the transferred (3) are not counted.
     assert second.trial_stats.n_trials == 2
     assert second.trial_stats.n_completed == 2
     assert second.trial_stats.n_pruned == 0
@@ -3268,9 +3273,10 @@ def test_optimize_trial_stats_previous_trials_not_counted(toy_data):
 def test_optimize_trial_stats_nonfinite_scores_count_as_completed(
     toy_data, quality_patches
 ):
-    """N4 (регрессия test_optimize_pruning_nonfinite_score_uses_worst_score):
-    нефинитная метрика → COMPLETED со сентинелом → триал учитывается в
-    n_completed (результат дальше исключается фильтром valid_results)."""
+    """N4 (regression of test_optimize_pruning_nonfinite_score_uses_worst_score):
+    a non-finite metric → COMPLETED with the sentinel → the trial is
+    counted in n_completed (the result is excluded later by the
+    valid_results filter)."""
     X, y = toy_data
 
     def fake_evaluate(
@@ -3328,7 +3334,7 @@ def test_optimize_trial_stats_nonfinite_scores_count_as_completed(
         )
     assert res is not None
     assert res.score == HPO_WORST_SCORE
-    # Триалы завершились (пусть и с сентинелом) — они в n_completed.
+    # The trials completed (with the sentinel) — they are in n_completed.
     assert res.trial_stats.n_trials == 2
     assert res.trial_stats.n_completed == 2
     assert res.trial_stats.n_pruned == 0
@@ -3336,16 +3342,16 @@ def test_optimize_trial_stats_nonfinite_scores_count_as_completed(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Unit tests of _count_trial_states (RUNNING/WAITING не входят в счётчики)
+#  Unit tests of _count_trial_states (RUNNING/WAITING are not in the counters)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_count_trial_states_running_and_waiting_counted_only_in_n_trials():
-    """RUNNING/WAITING-триалы → в n_trials, но ни в один счётчик состояний.
+    """RUNNING/WAITING trials → counted in n_trials, in no state counter.
 
-    Задокументированное поведение _count_trial_states: счётчики состояний
-    не пересекаются, «зависшие» триалы (например, после краха воркера)
-    видны в n_trials, но не завышают completed/pruned/failed.
+    The documented _count_trial_states behavior: the state counters do
+    not overlap; stuck trials (for example, after a worker crash) show
+    up in n_trials but do not inflate completed/pruned/failed.
     """
     from optuna.trial import create_trial
 
@@ -3363,13 +3369,13 @@ def test_count_trial_states_running_and_waiting_counted_only_in_n_trials():
     assert stats.n_completed == 1
     assert stats.n_pruned == 1
     assert stats.n_failed == 1
-    # Счётчики не пересекаются: сумма состояний < n_trials из-за RUNNING/WAITING.
+    # The counters do not overlap: the state sum < n_trials due to RUNNING/WAITING.
     assert stats.n_completed + stats.n_pruned + stats.n_failed < stats.n_trials
     assert stats.duration_seconds == 1.5
 
 
 def test_count_trial_states_default_duration_is_none():
-    """duration_seconds=None (не измерена) → пробрасывается без изменений."""
+    """duration_seconds=None (not measured) → passed through unchanged."""
     from optuna.trial import create_trial
 
     from configurable_automl_engine.hpo.runner import _count_trial_states
@@ -3383,7 +3389,7 @@ def test_count_trial_states_default_duration_is_none():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Fallback-ветка select_best_trial: прямой вызов без run()
+#  The select_best_trial fallback branch: a direct call without run()
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -3444,12 +3450,13 @@ def _bare_runner(
 def test_select_best_trial_direct_call_without_run_fills_phase_trials(
     toy_data, quality_patches
 ):
-    """Регрессия: прямой вызов select_best_trial() без run() не бросает
-    ValueError по пустому self.phase_trials.
+    """Regression: a direct select_best_trial() call without run() does not
+    raise ValueError on an empty self.phase_trials.
 
-    Fallback-ветка пересчитывает own_trials из study; после фикса поле
-    phase_trials синхронизируется с own_trials, поэтому и проверка
-    «n_completed > 0», и выбор best_trial работают по одному списку.
+    The fallback branch recomputes own_trials from the study; the
+    phase_trials field is kept in sync with own_trials, so both the
+    "n_completed > 0" check and the best_trial selection work on the
+    same list.
     """
     X, y = toy_data
     runner = _bare_runner(X, y)
@@ -3462,10 +3469,10 @@ def test_select_best_trial_direct_call_without_run_fills_phase_trials(
         )
     )
 
-    # Fallback-сценарий: phase_trials НЕ заполнен (run() не вызывался).
+    # Fallback scenario: phase_trials is NOT populated (run() not called).
     runner.phase_trials = []
     assert runner.select_best_trial() is True
-    # Поле синхронизировано: best_trial выбирается по одному с счётчиками списку.
+    # The field is in sync: best_trial is selected over the same list the counters use.
     assert len(runner.phase_trials) == 1
     assert runner.best.score == pytest.approx(0.9)
     assert runner.trial_stats.n_trials == 1
@@ -3475,8 +3482,9 @@ def test_select_best_trial_direct_call_without_run_fills_phase_trials(
 def test_select_best_trial_direct_call_no_completed_returns_false(
     toy_data, quality_patches
 ):
-    """Прямой вызов select_best_trial() без run() и без COMPLETED-триалов:
-    False («no valid result»), без исключений; счётчики отражают fail."""
+    """A direct select_best_trial() call without run() and without COMPLETED
+    trials: False ("no valid result"), no exceptions; the counters reflect
+    the failure."""
     from optuna.trial import create_trial
 
     X, y = toy_data
@@ -3493,8 +3501,9 @@ def test_select_best_trial_direct_call_no_completed_returns_false(
 def test_optimize_trial_stats_runner_stats_available_on_none_path(
     toy_data, quality_patches
 ):
-    """B2-дополнение: на None-пути runner.trial_stats несёт счётчики
-    (n_completed=0), наблюдаемость «no valid result» не только в логах."""
+    """B2 addition: on the None path runner.trial_stats carries the counters
+    (n_completed=0), so the "no valid result" outcome is observable
+    outside the logs too."""
     X, y = toy_data
     mocker_target = hpo_runner.optuna.trial.Trial
     runner = _bare_runner(

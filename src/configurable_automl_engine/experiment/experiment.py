@@ -1,11 +1,11 @@
-"""``AutoMLExperiment`` — the object facade of the engine (the T5
+"""``AutoMLExperiment`` — the object facade of the engine.
 component).
 
-The facade is the central entity of the experiment epic: it wraps the
-instrumented training loop (``training_engine.train_best_model``, T3),
+The facade is the central entity of the experiment layer: it wraps the
+instrumented training loop (``training_engine.train_best_model``),
 registers the assembled :class:`~configurable_automl_engine.experiment.result.ExperimentResult`
 in an :class:`~configurable_automl_engine.experiment.store.ExperimentStore`
-(T4) and exposes the consumed artifacts:
+and exposes the consumed artifacts:
 
     experiment = AutoMLExperiment(config, data, target="target")
     experiment.run()
@@ -322,7 +322,7 @@ class AutoMLExperiment:
             )
         finally:
             # Both a completed and a failed run leave an ExperimentResult
-            # behind (the T3 plumbing records the failed result too); it
+            # behind (the plumbing records the failed result too); it
             # is recognized by this experiment's private owner stamp —
             # the global is the result of the LAST engine call in the
             # process and may belong to a concurrent stranger's run.
@@ -407,8 +407,7 @@ class AutoMLExperiment:
             print_table: Also print the rendered table to stdout.
             summary: Also print the UX summary block (the status line
                 ``Experiment completed`` / ``Experiment failed``, the
-                ranked list and the Winner line — the report layout of
-                the epic #37 UX goal) to stdout. ``print_table`` and
+                ranked list and the Winner line) to stdout. ``print_table`` and
                 ``summary`` are independent: both may be printed.
 
         Returns:
@@ -530,7 +529,7 @@ class AutoMLExperiment:
 
         The export is delegated to
         :func:`configurable_automl_engine.experiment.export.export_experiment`
-        (the T11 component): the model artifact and (when the run built
+        (the export step): the model artifact and (when the run built
         one) the ensemble artifact — both byte-exact copies; the
         originals are never touched — the leaderboard (JSON and
         Markdown), the full Markdown report, the JSON result snapshot,

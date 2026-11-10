@@ -680,8 +680,8 @@ def test_n3_builtin_metric_direction_is_still_cross_checked() -> None:
 
 def test_b4_unicode_and_special_characters_are_preserved() -> None:
     """B4: unicode/special characters in label and names survive the round-trip."""
-    label = 'эксперимент #1 ✓ <tag> & "quotes"'
-    algo = "méthod_α λ-регрессия"
+    label = 'experiment #1 ✓ <tag> & "quotes"'
+    algo = "méthod_α λ-regression"
     result = ExperimentResult(
         **_result_kwargs(
             label=label,

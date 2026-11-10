@@ -123,8 +123,8 @@ def test_render_and_summarize_include_all_datasets():
 
 
 def test_default_cases_cover_noisy_scenario():
-    """The important scenario of the issue: many noise features — the
-    default case set must include it."""
+    """A key scenario: many noise features — the default case set must
+    include it."""
     assert CASE_NOISY_NONLINEAR.n_features > CASE_NOISY_NONLINEAR.n_informative
     assert CASE_NOISY_NONLINEAR.n_trials >= CASE_LINEAR.n_trials
 

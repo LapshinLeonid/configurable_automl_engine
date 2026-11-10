@@ -238,7 +238,7 @@ class PhaseTiming:
 
     Collected by ``execute_phases`` around every phase (HPO or select) and
     consumed by the run-result assembly in ``component`` (the
-    ``ExperimentResult`` of the T3 instrumentation).
+    ``ExperimentResult`` of the instrumented run).
 
     Attributes:
         phase_name (str): The phase name (``HPOPhaseCfg.name``).

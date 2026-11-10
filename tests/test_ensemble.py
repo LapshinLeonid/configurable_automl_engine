@@ -1,4 +1,4 @@
-"""Tests of the experimental top-K ensemble (the T10 component).
+"""Tests of the experimental top-K ensemble.
 
 Covered modules: ``experiment.ensemble`` (the pure core: top-K selection,
 weight computation, ``EnsembleModel``), the config section
@@ -587,7 +587,7 @@ def test_b_disabled_ensemble_no_section_no_artifact(tmp_path: Any) -> None:
         experiment.ensemble_model()
 
 
-# ────────────────── technical debt of issue #181 ────────────────── #
+# ────────────────── direction resolver as a public helper ────────────────── #
 
 
 def test_resolve_metric_direction_is_public_single_implementation() -> None:

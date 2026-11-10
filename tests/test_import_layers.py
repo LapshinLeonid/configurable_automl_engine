@@ -41,7 +41,7 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 #: module).
 ALLOWED_FUNCTION_IMPORTS = {
     ("training_engine/__init__.py", f"{PACKAGE}.training_engine.component"),
-    # The object facade (the T5 component): the engine is imported lazily
+    # The object facade: the engine is imported lazily
     # inside run()/_adopt_result()/best_model() so the facade module stays
     # importable without it.
     ("experiment/experiment.py", f"{PACKAGE}.training_engine"),
@@ -69,7 +69,7 @@ ALLOWED_FUNCTION_IMPORTS = {
         "training_engine/component.py",
         f"{PACKAGE}.training_engine.ensemble_step",
     ),
-    # The export component (the T11 component) is a sibling of the
+    # The export component is a sibling of the
     # facade inside the experiment package: it is imported lazily
     # inside export() to keep the facade module import-light (the same
     # pattern as the lazy engine calls above).

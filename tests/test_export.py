@@ -1,4 +1,4 @@
-"""Tests of the experiment export (the T11 component).
+"""Tests of the experiment export.
 
 Covered scenarios (positive / negative / boundary):
 
@@ -33,7 +33,7 @@ Covered scenarios (positive / negative / boundary):
 - B6: a multi-suffix artifact name (e.g. ``model.tar.gz``) keeps the
   full suffix chain in the exported file name.
 
-T10 × T11 / T9 integration (issue #181):
+Cross-component integration:
 
 - P1e: a run with ``general.ensemble.enable=true`` → the bundle carries
   ``<run_id>_ensemble.<ext>`` (a byte-exact copy), the metadata records
@@ -917,7 +917,7 @@ def test_n6b_restore_copy_fallback_failure_is_raised(
     assert backup.read_text() == "old"
 
 
-# ────────────────── T10 × T11 / T9 integration (issue #181) ────────────────── #
+# ────────────────── cross-component integration ────────────────── #
 
 
 def _ensemble_section(artifact_path: str | None) -> dict[str, Any]:

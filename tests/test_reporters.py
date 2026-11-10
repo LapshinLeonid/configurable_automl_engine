@@ -724,7 +724,7 @@ class TestMarkdownExtra:
         assert "circuit breaker: 5 consecutive failures" in report
 
 
-# ────────────── stored explain() payload section (issue #181) ────────────── #
+# ────────────── stored explain() payload section ────────────── #
 
 
 class TestExplanationsSection:

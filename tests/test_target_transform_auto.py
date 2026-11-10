@@ -781,7 +781,7 @@ def test_skew_threshold_propagates_to_fold_local_resolution(
 
 
 def test_fold_local_decision_ignores_validation_fold_values() -> None:
-    """Leak poisoning (the issue's core scenario): the target values of the
+    """Leak poisoning (the core leak scenario): the target values of the
     CV validation folds must not influence the transformation the folds are
     scored with.
 

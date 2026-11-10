@@ -1,4 +1,4 @@
-"""Building the experimental top-K ensemble (Training Engine, T10).
+"""Building the experimental top-K ensemble (training engine step).
 
 The step runs after the terminal select step, when
 ``general.ensemble.enable`` is true: the top-K algorithms of the run's

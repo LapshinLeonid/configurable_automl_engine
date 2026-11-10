@@ -1,4 +1,4 @@
-"""Tests of the ``AutoMLExperiment`` object facade (the T5 component).
+"""Tests of the ``AutoMLExperiment`` object facade.
 
 Covered scenarios (positive / negative / boundary):
 
@@ -161,7 +161,7 @@ def test_p1_full_lifecycle_run_leaderboard_best_model_report(
 
     summarized = experiment.leaderboard(summary=True)
     summary_out = capsys.readouterr().out
-    # The UX summary block of the epic #37 example: the status header,
+    # The UX summary block: the status header,
     # the ranking and the Winner line reach the stdout through the
     # facade (one call, no manual to_summary() wiring).
     assert "Experiment completed" in summary_out
