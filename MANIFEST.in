@@ -7,3 +7,6 @@ prune .github
 prune .sourcecraft
 prune scripts
 prune tools
+prune skills
+prune docs
+prune benchmarks
