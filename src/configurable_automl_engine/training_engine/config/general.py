@@ -77,6 +77,11 @@ InfPolicy = Literal["as_missing", "error"]
 #: ValueError.
 DatetimePolicy = Literal["expand", "drop", "error"]
 
+#: Policy for combining the per-repeat scores of the multi-split (repeated)
+#: validation: ``"median"`` (default) — robust to a "lucky" split on a
+#: micro-sample; ``"mean"`` — the classic average.
+SplitAggregation = Literal["mean", "median"]
+
 
 class GeneralCfg(BaseModel):
     """General settings of the AutoML process, validation, and parallelism.
@@ -103,6 +108,11 @@ class GeneralCfg(BaseModel):
         validation_strategy (ValidationStrategy): Evaluation method
             ('train_test_split', 'k_fold', 'loo' or 'auto').
         n_folds (int): Number of splits for cross-validation.
+        n_repeats (int): Number of repeats of the validation strategy in the
+            multi-split (repeated) mode (1 — the classic single-split
+            behavior).
+        split_aggregation (SplitAggregation): How the per-repeat scores are
+            combined into a single estimate ('median' or 'mean').
         random_state (int | None): The engine seed driving data splits, model
             seeds and the TPE sampler base seed (``random_state +
             phase_ordinal``); recorded in the report. None — the run is not
@@ -222,6 +232,43 @@ class GeneralCfg(BaseModel):
         description=(
             "Number of blocks (folds) for cross-validation."
             "Used only when validation_strategy = 'k_fold'"
+        ),
+    )
+    n_repeats: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Number of repeats of the validation strategy in the multi-split "
+            "(repeated) validation mode. 1 (default) — the classic "
+            "single-split behavior: exactly one split per fold cycle, no "
+            "change of the existing estimates. R > 1 — the base strategy is "
+            "re-drawn R times with the deterministic seeds "
+            "random_state + r (r = 0..R-1), so two runs with the same "
+            "random_state produce identical sets of repeated splits; the "
+            "per-repeat scores are combined by split_aggregation. The 'loo' "
+            "strategy has deterministic folds: with 'loo' any n_repeats > 1 "
+            "is ignored with a WARNING (repeating it would only multiply the "
+            "computation by identical splits; the same guard applies when "
+            "'auto' resolves to 'loo'). Must be an integer. Every repeat "
+            "multiplies the validation cost of every trial; the "
+            "computational budget guard (the sum of the phase n_trials x "
+            "n_folds x n_repeats for the fold-based strategies; a hold-out "
+            "repeat is one split, so n_folds does not multiply it) rejects "
+            "a prohibitive combination at config validation — see "
+            "general_rules."
+        ),
+    )
+    split_aggregation: SplitAggregation = Field(
+        default="median",
+        description=(
+            "How the per-repeat (per-split) scores of the multi-split "
+            "(repeated) validation are combined into a single estimate: "
+            "'median' (default) — robust to a 'lucky' split on a "
+            "micro-sample (the winner, the Sanity Gate decision and the "
+            "ensemble selection stop depending on one specific split); "
+            "'mean' — the classic average of the per-repeat scores. Used "
+            "only when n_repeats > 1; with n_repeats = 1 the single split "
+            "score is returned unchanged regardless of this field."
         ),
     )
     random_state: int | None = Field(
@@ -576,6 +623,18 @@ class GeneralCfg(BaseModel):
         """Check the validation and serialization settings."""
         rules.check_n_folds(
             self.serialization_format, self.n_folds, self.validation_strategy
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _check_multi_split(self) -> GeneralCfg:
+        """Check the multi-split (repeated) validation settings."""
+        rules.check_multi_split(
+            self.n_repeats,
+            self.split_aggregation,
+            self.validation_strategy,
+            self.n_folds,
+            self.phases,
         )
         return self
 

@@ -503,7 +503,7 @@ def test_iter_splits_auto_train_test_split_dynamic_test_size(monkeypatch):
     }
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         return "train_test_split", None, fake_decision
 
@@ -619,7 +619,7 @@ def test_tuner_passes_n_features_for_auto(monkeypatch):
     captured_eff = {}
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         captured_cv["n_features"] = n_features
         captured_cv["n_samples"] = n_samples
@@ -684,7 +684,7 @@ def test_tuner_auto_train_test_split_uses_resolved_test_size(monkeypatch):
     captured = {}
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         # auto resolves to train_test_split; expose the resolved decision.
         return (

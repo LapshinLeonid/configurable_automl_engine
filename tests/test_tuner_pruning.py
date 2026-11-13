@@ -2038,7 +2038,7 @@ def test_optimize_auto_kfold_pruning_passes_resolved_k():
     captured = {}
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         # auto resolves to kfold with k=10 (the decision returned by make_cv).
         return (
@@ -2287,7 +2287,7 @@ def test_optimize_auto_kfold_low_confidence_k2():
     captured = {}
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         return (
             "k_fold",
@@ -2461,7 +2461,7 @@ def test_optimize_auto_train_test_split_pruning_not_applied(caplog):
     y = pd.Series(rng.random(1000))
 
     def fake_make_cv(
-        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None
+        n_samples, *, val_method, n_folds, random_state, test_size, n_features=None, n_repeats=None
     ):
         # The real heuristic would make this decision at N >= 50000.
         return (

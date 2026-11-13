@@ -32,6 +32,18 @@ from configurable_automl_engine.training_engine.config.phases import (
 
 logger = logging.getLogger(__name__)
 
+#: The computational budget guard of the multi-split validation: a total of
+#: ``sum(phase.n_trials) * n_folds * n_repeats`` fit evaluations above the
+#: WARN threshold is allowed with a WARNING, above the ERROR threshold the
+#: config is rejected (a prohibitive run is caught at validation, not after
+#: hours of computation).
+MULTI_SPLIT_BUDGET_WARN_THRESHOLD = 2000
+MULTI_SPLIT_BUDGET_ERROR_THRESHOLD = 10000
+
+#: The sanity limit of ``n_folds * n_repeats`` (splits per trial): beyond it
+#: the per-repeat folds cannot hold a meaningful number of validation rows.
+MULTI_SPLIT_SPLITS_PER_TRIAL_LIMIT = 50
+
 _MetricT = TypeVar("_MetricT", bound=str)
 
 
@@ -177,6 +189,124 @@ def check_n_folds(
     # Strict validation only for k-fold
     if validation_strategy == ValidationStrategy.k_fold and n_folds < 2:
         raise ValueError("n_folds must be ≥ 2 for k-fold validation")
+
+
+def check_multi_split(
+    n_repeats: int,
+    split_aggregation: str,
+    validation_strategy: ValidationStrategy,
+    n_folds: int,
+    phases: list[HPOPhaseCfg],
+) -> None:
+    """Check the multi-split (repeated) validation settings.
+
+    Validation logic:
+    1. ``n_repeats`` must be a positive integer (>= 1). The ``ge=1`` field
+       constraint rejects the broken values at parsing time; this rule
+       re-checks the invariants for direct model construction and reports a
+       config-validation (not runtime) error.
+    2. ``split_aggregation`` must be 'mean' or 'median' (the type constraint
+       rejects other values at parsing time; re-checked here for the same
+       reason).
+    3. ``n_repeats > 1`` with 'loo' is meaningless (deterministic folds) —
+       a WARNING, the repeats are ignored downstream.
+    4. The computational budget guard: a trial on 'k_fold'/'loo' runs
+       ``n_folds * n_repeats`` fit evaluations, a trial on
+       'train_test_split' — ``n_repeats`` (a repeat of the hold-out is ONE
+       split, the fold count does not multiply it). The HPO phases run
+       ``n_trials`` trials each. A total budget above the guard threshold
+       is a config error; a budget in the WARN zone is allowed with a
+       WARNING. With 'auto' the fold-counting variant of the strategy is
+       assumed (the pessimistic estimate: 'auto' may resolve to k-fold).
+    5. The sanity bound of ``n_folds * n_repeats`` (splits per trial for
+       the fold-based strategies) — beyond it the per-repeat fold cannot
+       hold a meaningful number of validation rows.
+    6. The ``n_samples`` check of issue-211 (``n_folds * n_repeats`` must
+       not exceed the number of samples) is a data-level check — the config
+       does not know ``n_samples``; it is enforced at runtime by
+       ``validation.iter_splits`` (a WARNING when a tiny sample cannot give
+       independent repeats).
+
+    Args:
+        n_repeats: ``general.n_repeats``.
+        split_aggregation: ``general.split_aggregation``.
+        validation_strategy: ``general.validation_strategy``.
+        n_folds: ``general.n_folds``.
+        phases: ``general.phases`` (the HPO trial counts for the budget
+            guard).
+
+    Raises:
+        ValueError: If ``n_repeats`` / ``split_aggregation`` are invalid, or
+            the estimated computational budget exceeds the guard threshold.
+    """
+    if not isinstance(n_repeats, int) or isinstance(n_repeats, bool) or n_repeats < 1:
+        raise ValueError(
+            f"n_repeats must be a positive integer (>= 1), got {n_repeats!r}"
+        )
+    if split_aggregation not in ("mean", "median"):
+        raise ValueError(
+            f"split_aggregation must be 'mean' or 'median', got {split_aggregation!r}"
+        )
+    if n_repeats == 1:
+        return
+    if validation_strategy == ValidationStrategy.loo:
+        logger.warning(
+            "general.n_repeats=%d with validation_strategy='loo': LOO has "
+            "deterministic folds, the repeats are meaningless — they will "
+            "be IGNORED (the effective n_repeats is 1).",
+            n_repeats,
+        )
+        return
+    # The computational budget guard: total fit evaluations of the HPO
+    # phases (trials x splits-per-trial). Only the HPO phases carry trials.
+    trials = sum(
+        phase.n_trials
+        for phase in phases
+        if phase.action in ("all_algorithms", "refine")
+    )
+    # A hold-out repeat is ONE split per trial: the fold count does not
+    # multiply it. For 'auto' the pessimistic (fold-based) estimate is used:
+    # 'auto' may resolve to k-fold on the actual data.
+    folds_per_trial = (
+        1 if validation_strategy == ValidationStrategy.train_test_split else n_folds
+    )
+    splits_per_trial = folds_per_trial * n_repeats
+    total_budget = trials * splits_per_trial
+    if total_budget > MULTI_SPLIT_BUDGET_ERROR_THRESHOLD:
+        raise ValueError(
+            f"the estimated multi-split validation budget is prohibitive: "
+            f"{trials} trials x "
+            + (
+                f"{n_folds} folds x {n_repeats} repeats = "
+                if folds_per_trial > 1
+                else f"{n_repeats} hold-out repeats = "
+            )
+            + f"{total_budget} fit evaluations (the guard threshold is "
+            f"{MULTI_SPLIT_BUDGET_ERROR_THRESHOLD}). Reduce general.n_repeats, "
+            "the phase n_trials, or general.n_folds."
+        )
+    if total_budget > MULTI_SPLIT_BUDGET_WARN_THRESHOLD:
+        logger.warning(
+            "the multi-split validation budget is high: %d trials x %s = "
+            "%d fit evaluations (WARN threshold %d). Every repeat "
+            "multiplies the validation cost of every trial.",
+            trials,
+            (
+                f"{n_folds} folds x {n_repeats} repeats"
+                if folds_per_trial > 1
+                else f"{n_repeats} hold-out repeats"
+            ),
+            total_budget,
+            MULTI_SPLIT_BUDGET_WARN_THRESHOLD,
+        )
+    if folds_per_trial > 1 and splits_per_trial > MULTI_SPLIT_SPLITS_PER_TRIAL_LIMIT:
+        raise ValueError(
+            f"n_folds ({n_folds}) x n_repeats ({n_repeats}) = "
+            f"{splits_per_trial} splits per trial exceeds the sanity limit "
+            f"{MULTI_SPLIT_SPLITS_PER_TRIAL_LIMIT}: the per-repeat fold "
+            "would hold fewer rows than a meaningful validation fold. "
+            "Decrease general.n_folds or general.n_repeats."
+        )
 
 
 def check_pruning_consistency(
