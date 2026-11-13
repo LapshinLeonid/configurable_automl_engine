@@ -85,8 +85,9 @@ class PhaseResult:
             trials, so a larger count implies a more optimistic score.
             Defaults to 0 when the count is unknown.
         oof_predictions (np.ndarray | None): The out-of-fold predictions of
-            the phase's completed trials, shape ``(n_trials, n_rows)`` (the
-            BBC-CV input); ``None`` when OOF collection is off.
+            the phase's completed trials, shape
+            ``(n_trials × n_repeats, n_rows)`` — one row per repeat of every
+            trial (the BBC-CV input); ``None`` when OOF collection is off.
         trial_stats (TrialStats): The aggregated statistics of the phase's
             own trials (state counters: requested / completed / pruned /
             failed, and the phase duration) — the input of the Trials and
@@ -292,9 +293,9 @@ class PhaseContext:
             "before → after" records of the adaptive complexity guard across
             all HPO phases (one per restricted parameter), for the report.
         oof_pool (list[np.ndarray]): The OOF prediction matrices of every
-            algorithm in every HPO phase (``(n_trials, n_rows)`` each) — all
-            configurations the selection chose from; the BBC-CV input. Empty
-            when OOF collection is off.
+            algorithm in every HPO phase (``(n_trials × n_repeats, n_rows)``
+            each) — all configurations the selection chose from; the BBC-CV
+            input. Empty when OOF collection is off.
         phase_timings (list[PhaseTiming]): The wall-clock timings of the
             completed phases, in pipeline order — the input of the run-level
             phase timing section of ``ExperimentResult``.
@@ -416,8 +417,8 @@ class _HPOWorkerResult:
             the phase (own COMPLETED trials; transferred history never
             counts); 0 when the count is unknown.
         oof_predictions (np.ndarray | None): The OOF predictions of the
-            phase's completed trials (``(n_trials, n_rows)``); ``None`` when
-            OOF collection is off.
+            phase's completed trials (``(n_trials × n_repeats, n_rows)``);
+            ``None`` when OOF collection is off.
         trial_stats (TrialStats): The aggregated statistics of the phase's
             own trials (state counters and the phase duration); defaults
             are used when the worker failed before any trial ran.
@@ -460,6 +461,10 @@ class _HpoPhaseSpec:
             strategy.
         resolved_n_folds (int): Number of folds for 'k_fold'.
         resolved_test_size (float | int): Size of the hold-out part.
+        n_repeats (int): Number of repeats of the multi-split (repeated)
+            validation (``general.n_repeats``).
+        split_aggregation (str): How the per-repeat trial scores are combined
+            (``general.split_aggregation``: ``'median'`` or ``'mean'``).
         categorical_features (list[str]): Detected categorical columns.
         numerical_features (list[str]): Detected numeric columns.
         oversampling_enabled (bool): Whether oversampling is enabled.
@@ -551,3 +556,5 @@ class _HpoPhaseSpec:
     target_transform_skew_threshold: float | None = None
     collect_oof: bool = False
     custom_metrics: dict[str, CustomMetricSpec] = field(default_factory=dict)
+    n_repeats: int = 1
+    split_aggregation: str = "median"

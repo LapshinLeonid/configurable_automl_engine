@@ -453,6 +453,8 @@ def _build_phase_spec(
         resolved_validation=prepared.resolved_validation,
         resolved_n_folds=prepared.resolved_n_folds,
         resolved_test_size=prepared.resolved_test_size,
+        n_repeats=cfg.general.n_repeats,
+        split_aggregation=cfg.general.split_aggregation,
         categorical_features=prepared.categorical_features,
         numerical_features=prepared.numerical_features,
         oversampling_enabled=ovr.enable,

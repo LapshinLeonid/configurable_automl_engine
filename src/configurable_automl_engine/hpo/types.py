@@ -136,12 +136,14 @@ class OptimizeResult:
             best score is expected to be. Defaults to 0 when the field is
             not computed.
         oof_predictions: The out-of-fold predictions of the phase's own
-            COMPLETED trials with a valid score, one row per trial (shape
-            ``(n_trials, n_rows)``, rows aligned to ``X`` by position; rows a
-            trial did not predict — e.g. the train part of
-            ``train_test_split`` — are NaN). Collected only when
+            COMPLETED trials with a valid score, one row per trial and repeat
+            (shape ``(n_trials × n_repeats, n_rows)``; with one repeat —
+            ``(n_trials, n_rows)``). Rows are aligned to ``X`` by position;
+            rows a trial did not predict — e.g. the train part of
+            ``train_test_split`` — are NaN. Collected only when
             ``collect_oof=True`` (the input of the BBC-CV estimate);
-            ``None`` otherwise or when no trial qualifies.
+            ``None`` otherwise, when no trial qualifies, or when the total
+            size exceeds ``BBC_MAX_OOF_CELLS``.
         trial_stats: The aggregated statistics of the current phase's own
             trials (state counters and the phase duration); see
             ``TrialStats``. Always present on a non-``None`` result.

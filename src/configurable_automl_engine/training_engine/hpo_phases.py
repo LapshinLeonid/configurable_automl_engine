@@ -34,6 +34,7 @@ from configurable_automl_engine.common.settings import (
 )
 from configurable_automl_engine.hpo.request import (
     HpoRequest,
+    SplitAggregation,
     as_complexity_guard_config,
 )
 from configurable_automl_engine.hpo.runner import run_optimization
@@ -52,6 +53,7 @@ from configurable_automl_engine.preprocessing import (
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
+    ValidationStrategy,
 )
 
 from .state import (
@@ -106,6 +108,8 @@ def _build_hpo_request(
         n_trials=spec.phase.n_trials,
         val_method=spec.resolved_validation,
         n_folds=spec.resolved_n_folds,
+        n_repeats=spec.n_repeats,
+        split_aggregation=cast(SplitAggregation, spec.split_aggregation),
         train_test_split_test_size=spec.resolved_test_size,
         # The data-split seed is the engine seed in every phase (the same
         # folds for every phase and the final fit); the TPE sampler seed
@@ -515,10 +519,10 @@ def _bbc_enabled(
     """Decide whether the OOF predictions of every trial are kept for BBC-CV.
 
     BBC-CV is the honest estimate when no outer hold-out is reserved. The
-    memory cost is known before HPO: ``n_rows`` floats per evaluated trial,
-    at most the sum of ``n_trials`` over the HPO phases times the number of
-    enabled algorithms. Above ``BBC_MAX_OOF_CELLS`` the estimate is skipped
-    with a WARNING.
+    memory cost is known before HPO: ``n_rows`` floats per evaluated trial and
+    repeat, at most the sum of ``n_trials`` over the HPO phases times the
+    number of enabled algorithms times the effective ``n_repeats``. Above
+    ``BBC_MAX_OOF_CELLS`` the estimate is skipped with a WARNING.
 
     Returns:
         bool: True when the OOF predictions must be collected.
@@ -527,13 +531,39 @@ def _bbc_enabled(
         return False
     n_algorithms = sum(1 for a in algorithms.values() if a.enable)
     n_trials = sum(p.n_trials for p in cfg.general.phases if p.action != "select")
-    cells = n_algorithms * n_trials * len(prepared.y)
+    # Every repeat keeps its own OOF vector, so the memory cost grows by the
+    # effective number of repeats. LOO repeats are resolved away (its folds
+    # are deterministic), so it always contributes one vector.
+    n_repeats = (
+        1
+        if prepared.resolved_validation == ValidationStrategy.loo
+        else cfg.general.n_repeats
+    )
+    if (
+        prepared.resolved_validation == ValidationStrategy.train_test_split
+        and n_repeats > 1
+    ):
+        # Every hold-out repeat predicts only its own (different) hold-out
+        # rows, so stacking the repeats as BBC-CV configurations would score
+        # the tiny intersection of their hold-out sets (or fail on it) — not
+        # an honest estimate. BBC-CV is computed only for the fold-based
+        # strategies; a repeated hold-out keeps its aggregated trial score.
+        _LOG.warning(
+            "BBC-CV estimate skipped: repeated hold-out validation "
+            "(n_repeats=%d) produces different hold-out rows per repeat; "
+            "its stacked OOF matrix is not a valid BBC-CV input.",
+            n_repeats,
+        )
+        return False
+    cells = n_algorithms * n_trials * n_repeats * len(prepared.y)
     if cells > BBC_MAX_OOF_CELLS:
         _LOG.warning(
             "BBC-CV estimate skipped: keeping the OOF predictions of up to %d "
-            "trials x %d rows exceeds the budget of %d values. Reserve an "
-            "outer hold-out (general.holdout_fraction) for an honest estimate.",
+            "trials x %d repeats x %d rows exceeds the budget of %d values. "
+            "Reserve an outer hold-out (general.holdout_fraction) for an "
+            "honest estimate.",
             n_algorithms * n_trials,
+            n_repeats,
             len(prepared.y),
             BBC_MAX_OOF_CELLS,
         )

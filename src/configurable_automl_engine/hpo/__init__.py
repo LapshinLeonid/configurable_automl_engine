@@ -3,7 +3,8 @@
 The implementation behind ``configurable_automl_engine.tuner.optimize``:
 ``types`` (exceptions, ``OptimizeResult``, sentinel constants), ``request``
 (``HpoRequest`` — the settings of one run), ``plans`` (the results of the
-pure setup steps), ``search_space``, ``evaluation``, ``pruning``,
+pure setup steps), ``search_space``, ``evaluation``, ``repeats`` (the
+multi-split repeat aggregation), ``trial_stats``, ``pruning``,
 ``trial_pipeline`` and ``runner`` (``_OptimizeRunner``), plus the search space
 building blocks ``default_spaces`` (the default search spaces, clipping and
 the range DSL), ``complexity_guard`` and ``target_domain``. The public entry

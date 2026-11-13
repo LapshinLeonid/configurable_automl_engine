@@ -15,7 +15,7 @@ lives in the ``hpo`` package.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from optuna.trial import FrozenTrial, Trial
 
@@ -40,7 +40,7 @@ from configurable_automl_engine.preprocessing_presets import (
 )
 
 from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
-from .hpo.request import HpoRequest, as_complexity_guard_config
+from .hpo.request import HpoRequest, SplitAggregation, as_complexity_guard_config
 from .hpo.runner import run_optimization
 from .hpo.types import (
     HPO_WORST_SCORE,
@@ -85,6 +85,8 @@ def optimize(
     # alias sent by training_engine.component
     validation_strategy: ValidationStrategy | str | None = None,
     n_folds: int = 5,
+    n_repeats: int = 1,
+    split_aggregation: str = "median",
     n_trials: int = 50,
     random_state: int | None = 42,
     sampler_seed: int | None = None,
@@ -156,6 +158,14 @@ def optimize(
         validation_strategy: Alias for
             ``val_method`` (takes precedence).
         n_folds: Number of cross-validation folds. Defaults to 5.
+        n_repeats: Number of repeats of the validation strategy in the
+            multi-split (repeated) mode. ``1`` (default) — the classic
+            single-split behavior; ``R > 1`` — the base strategy is re-drawn
+            ``R`` times with the deterministic seeds ``random_state + r`` and
+            the per-repeat trial scores are combined by
+            ``split_aggregation``. LOO repeats are ignored with a WARNING.
+        split_aggregation: How the per-repeat trial scores are combined:
+            ``'median'`` (default) or ``'mean'``.
         n_trials: Number of search iterations (trials). Defaults to 50.
         random_state: Randomness state for the data splits, the
             preprocessor and the model seeds (CV folds, train_test_split,
@@ -384,6 +394,8 @@ def optimize(
         if validation_strategy is not None
         else val_method,
         n_folds=n_folds,
+        n_repeats=n_repeats,
+        split_aggregation=cast(SplitAggregation, split_aggregation),
         train_test_split_test_size=train_test_split_test_size,
         random_state=random_state,
         sampler_seed=sampler_seed,

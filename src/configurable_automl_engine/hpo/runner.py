@@ -57,6 +57,7 @@ from .plans import (
     ValidationPlan,
 )
 from .pruning import plan_pruning
+from .repeats import plan_repeats
 from .request import HpoRequest
 from .search_space import (
     _canonical_distributions,
@@ -71,6 +72,7 @@ from .trial_pipeline import (
     assemble_estimator,
     plan_preprocessing,
 )
+from .trial_stats import count_trial_states as _count_trial_states
 from .types import (
     WORST_SCORE_THRESHOLD,
     HPOHistoryError,
@@ -491,6 +493,13 @@ class _OptimizeRunner:
         )
         if result.oof is not None and result.value > WORST_SCORE_THRESHOLD:
             self.trial_oof[trial.number] = result.oof
+        if result.repeat_scores:
+            # The per-repeat diagnostics travel with the frozen trial (the
+            # report / warm-start history) — the trial value itself is only
+            # the aggregate.
+            trial.set_user_attr("repeat_scores", list(result.repeat_scores))
+            trial.set_user_attr("repeat_mean", result.repeat_mean)
+            trial.set_user_attr("repeat_std", result.repeat_std)
         return result.value
 
     def _objective(self, trial: Trial) -> float:
@@ -902,6 +911,17 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
         test_size=request.train_test_split_test_size,
         n_features=n_features,
     )
+    # The multi-split (repeated) plan: the effective repeat count is resolved
+    # against the RESOLVED method (LOO repeats are ignored with a WARNING),
+    # and every repeat gets the deterministic seed ``random_state + r``. The
+    # seeds are part of the frozen plan, so every phase evaluates the same
+    # repeated splits.
+    n_repeats, repeat_seeds, split_aggregation = plan_repeats(
+        n_repeats=request.n_repeats,
+        split_aggregation=request.split_aggregation,
+        random_state=request.random_state,
+        method=method,
+    )
     # 'auto' is resolved exactly once (here, in make_cv). The resulting
     # decision is passed to iter_splits so that the test size is not
     # recomputed and cannot diverge between n_samples_eff and the actual
@@ -943,39 +963,9 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
         n_folds=n_folds,
         test_size=request.train_test_split_test_size,
         split_test_size=split_test_size,
-    )
-
-
-def _count_trial_states(
-    trials: list[FrozenTrial], duration_seconds: float | None = None
-) -> TrialStats:
-    """Aggregate the state counters of the CURRENT phase's own trials.
-
-    Args:
-        trials: The trials of the current phase ONLY (transferred
-            ``previous_trials`` must not be passed — they would inflate the
-            counters).
-        duration_seconds: The wall-clock duration of the optimization loop,
-            in seconds (``None`` — not measured).
-
-    Returns:
-        TrialStats: The counters normalized to plain Python ``int`` /
-        ``float`` (Optuna stores trial numbers and values as numpy scalars;
-        the aggregate must survive serialization boundaries without
-        changing its type).
-    """
-    states = [t.state for t in trials]
-    n_completed = sum(1 for s in states if s == optuna.trial.TrialState.COMPLETE)
-    n_pruned = sum(1 for s in states if s == optuna.trial.TrialState.PRUNED)
-    n_failed = sum(1 for s in states if s == optuna.trial.TrialState.FAIL)
-    # RUNNING/WAITING trials (a crashed worker left one behind) are counted in
-    # n_trials but in none of the state counters — the counters never overlap.
-    return TrialStats(
-        n_trials=len(trials),
-        n_completed=n_completed,
-        n_pruned=n_pruned,
-        n_failed=n_failed,
-        duration_seconds=duration_seconds,
+        n_repeats=n_repeats,
+        repeat_seeds=repeat_seeds,
+        split_aggregation=split_aggregation,
     )
 
 

@@ -14,7 +14,7 @@ must not import any other module of the ``hpo`` package. The setting groups
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.settings import (
@@ -23,6 +23,9 @@ from configurable_automl_engine.common.settings import (
     OversamplingSettings,
 )
 from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
+
+#: How the per-repeat scores of the multi-split validation are combined.
+SplitAggregation = Literal["mean", "median"]
 
 if TYPE_CHECKING:
     from optuna.trial import FrozenTrial
@@ -59,6 +62,11 @@ class HpoRequest:
             run; the ``validation_strategy`` alias of ``optimize()`` is
             already applied).
         n_folds: The number of folds of ``'k_fold'``.
+        n_repeats: The number of repeats of the validation strategy in the
+            multi-split (repeated) mode (``1`` — the classic single-split
+            behavior).
+        split_aggregation: How the per-repeat trial scores are combined
+            (``'median'`` by default, or ``'mean'``).
         train_test_split_test_size: The hold-out size of
             ``'train_test_split'`` (a fraction or a number of rows).
         random_state: The seed of the data splits, the preprocessor and the
@@ -115,6 +123,8 @@ class HpoRequest:
     n_trials: int = 50
     val_method: ValidationStrategy | str = "auto"
     n_folds: int = 5
+    n_repeats: int = 1
+    split_aggregation: SplitAggregation = "median"
     train_test_split_test_size: float = 0.2
     random_state: int | None = 42
     sampler_seed: int | None = None

@@ -347,6 +347,25 @@ def test_bbc_score_skipped_over_memory_budget(tmp_path, monkeypatch, caplog):
     assert any("BBC-CV estimate skipped" in r.getMessage() for r in caplog.records)
 
 
+def test_bbc_score_skipped_for_repeated_holdout(tmp_path, caplog):
+    """A repeated hold-out draws different hold-out rows per repeat.
+
+    Stacking those rows as BBC-CV configurations would score only their
+    intersection (or fail when it is smaller than 2 rows), so the estimate is
+    skipped for this mode instead of reporting a dishonest value.
+    """
+    cfg = _engine_cfg(tmp_path, holdout=None)
+    cfg["general"]["validation_strategy"] = "train_test_split"
+    cfg["general"]["n_repeats"] = 3
+    df = _noisy_df(60)
+
+    with caplog.at_level(logging.WARNING):
+        result = train_best_model(config=cfg, df=df, target="target")
+
+    assert "bbc_score" not in result
+    assert any("repeated hold-out" in record.getMessage() for record in caplog.records)
+
+
 @pytest.mark.parametrize("parallel", [False, True])
 def test_oof_pool_collects_every_algorithm(tmp_path, parallel):
     df = _noisy_df(60)

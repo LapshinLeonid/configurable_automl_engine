@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from statistics import fmean, pstdev
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -49,6 +50,13 @@ class ValidationPlan:
         split_test_size: The hold-out size of the ``train_test_split`` split
             (the integer row count of the ``'auto'`` decision when resolved
             from ``'auto'``, else ``test_size``).
+        n_repeats: The effective number of repeats of the validation strategy
+            (``1`` — the classic single-split behavior; LOO repeats are
+            resolved away to ``1``).
+        repeat_seeds: The deterministic seed of every repeat
+            (``random_state + r``, wrapped into the sklearn seed range).
+        split_aggregation: How the per-repeat trial scores are combined
+            (``'median'`` by default, or ``'mean'``).
     """
 
     X: Any = field(compare=False)
@@ -63,6 +71,9 @@ class ValidationPlan:
     n_folds: int
     test_size: float | int
     split_test_size: float | int
+    n_repeats: int = 1
+    repeat_seeds: tuple[int | None, ...] = ()
+    split_aggregation: str = "median"
 
     @property
     def fs_mode(self) -> FeatureSelectionMode:
@@ -145,11 +156,31 @@ class TrialScore:
         value: The target metric value (``HPO_WORST_SCORE`` for a non-finite
             result).
         oof: The out-of-fold predictions by row position (NaN where the
-            trial did not predict); ``None`` when not collected.
+            trial did not predict); ``None`` when not collected. With several
+            repeats the shape is ``(n_repeats, n_rows)`` — one OOF vector per
+            repeat; with one repeat the classic ``(n_rows,)`` vector is kept.
+        repeat_scores: The per-repeat scores of a multi-split trial (the
+            penalized worst-score sentinel for a failed/non-finite repeat);
+            empty with one repeat (the classic single-score behavior).
     """
 
     value: float
     oof: np.ndarray | None = field(default=None, compare=False)
+    repeat_scores: tuple[float, ...] = field(default=(), compare=False)
+
+    @property
+    def repeat_mean(self) -> float | None:
+        """The mean of the per-repeat scores (``None`` without repeats)."""
+        if not self.repeat_scores:
+            return None
+        return float(fmean(self.repeat_scores))
+
+    @property
+    def repeat_std(self) -> float | None:
+        """The standard deviation of the per-repeat scores."""
+        if not self.repeat_scores:
+            return None
+        return float(pstdev(self.repeat_scores))
 
 
 @dataclass(frozen=True, slots=True)

@@ -633,7 +633,7 @@ def _bbc_score_in_user_metric(
     Args:
         metric_user: The user-facing comparison metric name.
         oof_pool: The OOF prediction matrices of all
-            evaluated trials (``(n_trials, n_rows)`` each).
+            evaluated trials (``(n_trials × n_repeats, n_rows)`` each).
         y: The target vector the OOF rows are aligned to.
         random_state: The bootstrap seed (the engine seed).
     """
