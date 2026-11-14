@@ -777,11 +777,16 @@ errors, definitions, protocols
 
 - `configurable_automl_engine` (корень): `Config`, `AlgorithmRun`,
   `ExperimentResult`, `CustomMetricSpec`, `TrainingError`;
-- `configurable_automl_engine.common.definitions`;
-- `configurable_automl_engine.common.errors`;
+- `configurable_automl_engine.common.definitions` — контрактные enum-ы и
+  `WORST_SCORE_THRESHOLD`; `ALGO_PACKAGE_MAPPING` остаётся в движке;
+- `configurable_automl_engine.common.errors` — `TrainingError`,
+  `InvalidPredictionError`;
 - `configurable_automl_engine.training_engine.config_parser` — все имена из
   `__all__` и `noqa`-реэкспорты;
-- `configurable_automl_engine.feature_selection`;
+- `configurable_automl_engine.training_engine.config.*` — шимы для
+  контрактных имён и engine-only имён;
+- `configurable_automl_engine.feature_selection` — контрактные config-типы
+  реэкспортируются, `FeatureSelector` остаётся в движке;
 - `configurable_automl_engine.preprocessing_presets`;
 - `configurable_automl_engine.outliers_presets`;
 - `configurable_automl_engine.hpo.default_spaces` — distribution-модели;
@@ -791,7 +796,8 @@ errors, definitions, protocols
 - `configurable_automl_engine.common.metrics` — `AVAILABLE_METRICS`,
   `to_sklearn_name`, `ERR_CUSTOM_NAME_INVALID`;
 - `configurable_automl_engine.common.custom_metrics`;
-- `configurable_automl_engine.trainer` — `TrainingError`;
+- `configurable_automl_engine.trainer` и
+  `configurable_automl_engine.trainer_params` — `TrainingError`;
 - `configurable_automl_engine.tuner` — `WORST_SCORE_THRESHOLD`;
 - `configurable_automl_engine.preprocessing` — `EncodingStrategy`.
 
@@ -1240,9 +1246,10 @@ read-only: движок и потребители не должны их мут�
 
 ## 21. Финальный список переносимых символов
 
-Список соответствует `CONTRACTS.md` §§4.1–4.9. Символы с решением
-`move`/`move + re-export` перечислены ниже; символы с решением `internal`
-остаются в движке и в контракт не входят. Решения по строкам
+Список соответствует `CONTRACTS.md` §§4.1–4.9. Публичные символы с решением
+`move`/`move + re-export` перечислены ниже; внутренние символы, которые
+переносятся как `internal`, — в разделе 21.1; символы с решением `internal`,
+которые остаются в движке, — в списке после таблиц. Решения по строкам
 `needs-decision` зафиксированы в этом ADR: `InvalidPredictionError` — public
 beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 `CustomMetricSpec` — структура в контракте, runtime-проверка в движке.
@@ -1266,6 +1273,21 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 | `automl_contracts.config.ensemble` | `EnsembleCfg`, `EnsembleWeightMethod` |
 | `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` |
 
+### 21.1. Внутренние символы, переносимые в контракт
+
+Эти символы не входят в публичный API и не попадают в корневой `__all__`, но
+их определения должны жить в контракте, чтобы у моделей был один источник
+истины.
+
+| Модуль контракта | Внутренние символы |
+|---|---|
+| `automl_contracts.config.general_rules` | `check_custom_metric_names`, `check_metric_references`, `deduplicate_additional_metrics`, `exclude_comparison_from_additional`, `check_multi_split`, `check_pruning_consistency`, `validate_phase_pipeline`, `check_high_cardinality_encoding`, структурная часть `check_n_folds`, константы `MULTI_SPLIT_*` |
+| `automl_contracts.config.phases` | `_default_phases` |
+| `automl_contracts.config.algorithms` | `AlgorithmsConfigType` |
+| `automl_contracts.preprocessing` | `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers` |
+| `automl_contracts.result` | `ScoreValue`, `ScoreValueOrNone` |
+| `automl_contracts.metrics` | `to_sklearn_name` |
+
 В контракт **не переносятся**:
 
 - `read_config` — остаётся в движке из-за `PyYAML`;
@@ -1274,10 +1296,10 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
   `ALGO_HYPERPARAMETER_REGISTRY`, `DATA_DEPENDENT_CONSTRAINTS`;
 - runtime-функции и константы HPO, препроцессинга, oversampling, отчётов и
   store;
+- runtime-часть `check_n_folds` (проверка `joblib`), `check_start_method`,
+  `check_threads_timeouts`;
 - `to_sklearn_name` как публичное имя верхнего уровня (только внутренний helper
   контракта и старый engine-путь);
-- `ScoreValue`, `ScoreValueOrNone`, `AlgorithmsConfigType`, `_default_phases`,
-  внутренние cross-field helpers;
 - `ERR_CUSTOM_NAME_COLLISION` и остальные runtime-коды custom metrics.
 
 Если C3 обнаружит расхождение с этой таблицей, сначала обновляется
