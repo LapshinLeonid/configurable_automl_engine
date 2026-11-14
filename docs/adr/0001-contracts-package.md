@@ -847,7 +847,7 @@ errors, definitions, protocols
 Через реэкспорт сохраняются как минимум:
 
 - `configurable_automl_engine` (корень): `Config`, `AlgorithmRun`,
-  `ExperimentResult`, `CustomMetricSpec`, `TrainingError`;
+  `ExperimentResult`, `CustomMetricSpec`;
 - `configurable_automl_engine.common.definitions` — контрактные enum-ы и
   `WORST_SCORE_THRESHOLD`; `ALGO_PACKAGE_MAPPING` остаётся в движке;
 - `configurable_automl_engine.common.errors` — `TrainingError`,
