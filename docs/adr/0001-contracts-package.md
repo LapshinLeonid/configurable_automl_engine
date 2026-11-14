@@ -414,7 +414,7 @@ JSON Schema лежит внутри пакета, а не только в кор
 
 | Подмодуль | Публичные символы | Стабильность |
 |---|---|---|
-| `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD`, `AVAILABLE_ALGORITHMS` | stable, кроме `AVAILABLE_ALGORITHMS` и `WORST_SCORE_THRESHOLD` — beta |
+| `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD` (литерал `-3.4028234663852886e+38`, без `numpy`), `AVAILABLE_ALGORITHMS` | stable, кроме `AVAILABLE_ALGORITHMS` и `WORST_SCORE_THRESHOLD` — beta |
 | `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` | `TrainingError` — stable, `InvalidPredictionError` — beta |
 | `automl_contracts.metrics` | `AVAILABLE_METRICS` | beta |
 | `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` | `CustomMetricKind` — beta; `CustomMetricSpec` — beta; `ERR_CUSTOM_NAME_INVALID` — stable |
@@ -737,8 +737,8 @@ errors, definitions, protocols
      приходит с выполненными runtime-проверками; меняется только тип их
      исключений (§10.3, §11.3). Это единственный владелец runtime-валидации
      для файлового ввода;
-   - сохраняет `SanityGateMode`, `REMOVED_ALGORITHM_KEYS` и другие
-     engine-имена.
+   - сохраняет `SanityGateMode` и другие engine-only имена; контрактные имена,
+     включая `REMOVED_ALGORITHM_KEYS`, реэкспортируются из `automl_contracts`.
 3. `configurable_automl_engine.training_engine.config_runtime` (новый
    внутренний модуль) содержит `validate_runtime_config(cfg)` и runtime-помощники,
    включая бывшие методы `AlgoCfg.get_required_package` и
@@ -921,8 +921,10 @@ errors, definitions, protocols
     `ERR_DIRECTION_CONFLICT`; `kwargs` у plain callable —
     `ERR_KWARGS_UNSUPPORTED`; сигнатура `(estimator, X, y)` — `ERR_BAD_SIGNATURE`;
     предупреждение о plain callable без `additive`;
-  - коллизия имени со встроенными/sklearn-метриками —
-    `ERR_CUSTOM_NAME_COLLISION`.
+  - имя: формат `^[a-z][a-z0-9_]*$` — `ERR_CUSTOM_NAME_INVALID`; коллизия со
+    встроенными/sklearn-метриками — `ERR_CUSTOM_NAME_COLLISION`. Формат
+    проверяется и на входе `optimize`/`ModelTrainer`, которые принимают сырые
+    mapping-и и обходят `GeneralCfg`.
 
   C3/C5 добавляют тест на каждый код ошибки и на предупреждение. Проверка
   выполняется и для `dict`, и для готовых `CustomMetricSpec`, во всех entry
@@ -996,8 +998,9 @@ errors, definitions, protocols
   остаётся только для структурной валидации контрактных моделей. Изменение
   принимается осознанно (сохранение `ValidationError` потребовало бы
   искусственной сборки ошибок без реального контекста Pydantic-валидации):
-  `API_REFERENCE.md` (разделы `read_config`, `train_best_model`, `run`)
-  обновляется в C6, а `tests/test_config_validation.py` в C3 переводится на
+  `API_REFERENCE.md` (разделы `train_best_model` и `AutoMLExperiment.run`,
+  а также справочник конфигурации) обновляется в C6, а
+  `tests/test_config_validation.py` в C3 переводится на
   `ValueError`/`PydanticCustomError` для runtime-проверок. C5 добавляет тест
   типа исключения для каждой формы ввода.
 - Меняется только место runtime-проверок `Config`: три бывших
@@ -1009,9 +1012,20 @@ errors, definitions, protocols
   `read_config` по-прежнему выполняют runtime-проверки — ровно один раз на
   конфигурацию, по правилу §10.3; это фиксируется в `CHANGELOG.md` и в
   docstring `automl_contracts.config.Config`.
+- `WORST_SCORE_THRESHOLD` переносится в `automl_contracts.definitions` без
+  `numpy`: сегодня это `float(np.finfo(np.float32).min)`, в контракте
+  значение фиксируется литералом `-3.4028234663852886e+38` (точное значение
+  границы float32) с комментарием о sentinel-семантике. Движок
+  реэкспортирует константу и продолжает сравнивать с тем же значением; C5
+  проверяет равенство значения и типа прежнему и отсутствие импорта
+  `numpy` в контрактном модуле.
 - `SanityGateMode`, `ALGO_PACKAGE_MAPPING`, `DEFAULT_SPACES`,
-  `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING`, `REMOVED_ALGORITHM_KEYS` и
-  runtime-помощники остаются в движке.
+  `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING` и runtime-помощники остаются в
+  движке. `REMOVED_ALGORITHM_KEYS` переносится в контракт как internal-символ
+  (`automl_contracts.config.algorithms`, §21.1) и реэкспортируется из старого
+  пути: контрактные `AlgoCfg`/`AlgorithmsConfig` используют его в
+  `_reject_removed_plugin_keys` для `ERR_REMOVED_PLUGIN_KEY`, поэтому
+  engine-only статус оставил бы модели без этой миграционной ошибки.
 
 Это единственные запланированные семантические изменения. Если C3 обнаружит
 ещё одно, оно оформляется отдельным решением до реализации.
@@ -1200,9 +1214,9 @@ dependencies = [
   такие декларации до обучения (см. §11.3). Отдельные тесты покрывают каждый
   runtime-код (`ERR_IMPORT`, `ERR_NOT_CALLABLE`, `ERR_DIRECTION_REQUIRED`,
   `ERR_DIRECTION_CONFLICT`, `ERR_KWARGS_UNSUPPORTED`, `ERR_BAD_SIGNATURE`,
-  `ERR_CUSTOM_NAME_COLLISION`), предупреждение о plain callable и тип
-  исключения (`ValueError`/`PydanticCustomError` вместо `ValidationError`) для
-  `read_config` и `load_config` на всех формах ввода.
+  `ERR_CUSTOM_NAME_INVALID`, `ERR_CUSTOM_NAME_COLLISION`), предупреждение о
+  plain callable и тип исключения (`ValueError`/`PydanticCustomError` вместо
+  `ValidationError`) для `read_config` и `load_config` на всех формах ввода.
 - Общие фикстуры движка не используются контрактными тестами.
 - Тесты контракта покрывают:
   - импорт и `__all__`;
@@ -1466,7 +1480,7 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 
 | Модуль контракта | Переносимые символы |
 |---|---|
-| `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD`, `AVAILABLE_ALGORITHMS` |
+| `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD` (литерал `-3.4028234663852886e+38`, без `numpy`), `AVAILABLE_ALGORITHMS` |
 | `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` |
 | `automl_contracts.metrics` | `AVAILABLE_METRICS` |
 | `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec` (поля `path`, `kind`, `greater_is_better`, `additive`, `kwargs` и свойство `cache_key`), `ERR_CUSTOM_NAME_INVALID` |
@@ -1493,7 +1507,7 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 |---|---|
 | `automl_contracts.config.general_rules` | `check_custom_metric_names` (только формат имени; проверка коллизий — движок), `check_metric_references`, `deduplicate_additional_metrics`, `exclude_comparison_from_additional`, `check_multi_split`, `check_pruning_consistency`, `validate_phase_pipeline`, `check_high_cardinality_encoding`, структурная часть `check_n_folds`, константы `MULTI_SPLIT_*` |
 | `automl_contracts.config.phases` | `_default_phases` |
-| `automl_contracts.config.algorithms` | `AlgorithmsConfigType` |
+| `automl_contracts.config.algorithms` | `AlgorithmsConfigType`, `REMOVED_ALGORITHM_KEYS` |
 | `automl_contracts.preprocessing` | `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers` |
 | `automl_contracts.result` | `ScoreValue`, `ScoreValueOrNone` |
 | `automl_contracts.metrics` | `to_sklearn_name`, `BUILTIN_METRIC_DIRECTIONS` |
@@ -1508,7 +1522,7 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 В контракт **не переносятся**:
 
 - `read_config` — остаётся в движке из-за `PyYAML`;
-- `ALGO_PACKAGE_MAPPING`, `SanityGateMode`, `REMOVED_ALGORITHM_KEYS`;
+- `ALGO_PACKAGE_MAPPING`, `SanityGateMode`;
 - `DEFAULT_SPACES`, `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING`, `GLM_COMMON`,
   `ALGO_HYPERPARAMETER_REGISTRY`, `DATA_DEPENDENT_CONSTRAINTS`;
 - runtime-функции и константы HPO, препроцессинга, oversampling, отчётов и

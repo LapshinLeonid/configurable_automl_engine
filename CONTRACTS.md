@@ -144,7 +144,7 @@ runtime-зависимость «нижнего» модуля.
 | Символ | Тип | Известные потребители | Текущий путь | Новый путь | Статус | Решение | Стабильность |
 |---|---|---|---|---|---|---|---|
 | `TrainingError` | exception | `ModelTrainer`, `trainer_params`, `trainer_feature_selection`, API_REFERENCE, tests | `...common.errors.TrainingError`, реэкспорт `...trainer.TrainingError` | `automl_contracts.errors.TrainingError` | public | move + re-export из `common.errors`, `trainer`, `trainer_params` | stable |
-| `InvalidPredictionError` | exception | внутренние проверки метрик, `tests/test_non_finite_predictions.py` | `...common.errors.InvalidPredictionError` | `automl_contracts.errors.InvalidPredictionError` (рекомендуется) | needs-decision; рекомендация — public beta | move + re-export после решения C2/C6 | beta |
+| `InvalidPredictionError` | exception | внутренние проверки метрик, `tests/test_non_finite_predictions.py` | `...common.errors.InvalidPredictionError` | `automl_contracts.errors.InvalidPredictionError` | public | move + re-export (решение C2) | beta |
 
 `TrainingError` — документированный публичный тип: `ModelTrainer` и
 `train_model` обещают его в API_REFERENCE. Его нужно перенести в контракт и
@@ -154,10 +154,9 @@ automl_contracts.errors.TrainingError`).
 `InvalidPredictionError` наследуется от `TrainingError` и `ValueError`, но не
 входит в `__all__` и не имеет документированного пути импорта. При этом он
 наблюдаем снаружи: его может поймать потребитель, вызвавший `ModelTrainer.fit`/
-`predict`. Рекомендуется сделать его публичным beta и перенести вместе с
-`TrainingError`; окончательное решение — за C2/C6. Если он останется internal,
-C3 не должен обещать его стабильность, но реэкспорт из `common.errors` следует
-сохранить.
+`predict`. Решение C2: `InvalidPredictionError` — public beta, переносится в
+контракт вместе с `TrainingError` и реэкспортируется из `common.errors`;
+стабильность beta сохраняется.
 
 `NRMSEZeroRangeError` и прочие исключения из `common.metrics` — runtime-
 исключения метрик, не контракт.
@@ -286,14 +285,14 @@ guard-а, которое остаётся в движке.
 | `AlgorithmsConfig` | динамическая Pydantic-модель | `Config.algorithms`, `config_parser` | `...config.algorithms.AlgorithmsConfig` | `automl_contracts.config.algorithms.AlgorithmsConfig` | public | move после фиксации списка алгоритмов в контракте | beta |
 | `AlgorithmsConfigType` | `TypeAlias` | статическая типизация | `...config.algorithms.AlgorithmsConfigType` | внутренний тип контрактного модуля | internal | move как internal | internal |
 | `ERR_REMOVED_PLUGIN_KEY` | `str` (код ошибки) | `config_parser`, тесты; migration hint | `...config.algorithms.ERR_REMOVED_PLUGIN_KEY` | `automl_contracts.config.algorithms.ERR_REMOVED_PLUGIN_KEY` | public | move + re-export | stable |
-| `REMOVED_ALGORITHM_KEYS` | `tuple[str, ...]` | внутренняя валидация | `...config.algorithms.REMOVED_ALGORITHM_KEYS` | остаётся в движке или internal-модуле контракта | internal | internal | internal |
+| `REMOVED_ALGORITHM_KEYS` | `tuple[str, ...]` | внутренняя валидация | `...config.algorithms.REMOVED_ALGORITHM_KEYS` | `automl_contracts.config.algorithms.REMOVED_ALGORITHM_KEYS` (internal) | internal | move как internal + re-export старого пути (решение C2) | internal |
 
 `AlgoCfg.get_required_package` и `get_unknown_hyperparameters` — runtime-методы:
 они обращаются к `ALGO_PACKAGE_MAPPING` и `models.get_allowed_hyperparameters`.
 В контрактной модели остаются только поля и структурные валидаторы
-(`limit_hyperparameters` без `hyperparameters` и т.п.). Runtime-методы нужно
-либо вынести в функцию движка, либо сохранить в движке через отдельный
-подкласс/миксин, не создавая второго определения `AlgoCfg`.
+(`limit_hyperparameters` без `hyperparameters` и т.п.). Решение C2: методы
+выносятся в функции `training_engine.config_runtime`; второй подкласс/миксин
+`AlgoCfg` в движке не создаётся.
 
 `AlgorithmsConfig` создаётся через `create_model` по списку
 `AVAILABLE_ALGORITHMS` из `models.py`. Чтобы контракт не импортировал
@@ -433,9 +432,9 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 ключи `algorithms` и используется тестами/скриптами. Его надо определить в
 контракте независимо, без импорта `models` (иначе контракт потянет sklearn).
 Движок должен импортировать этот список из контракта, а не дублировать.
-Тип (`list` или `tuple`) и вопрос мутабельности нужно решить в C2; для
-совместимости на первом этапе рекомендуется оставить `list`, но не давать
-потребителям менять его как источник истины.
+Решение C2: тип — `list` для совместимости, документируется как read-only;
+потребители не должны мутировать его как источник истины. Переход на `tuple`
+возможен только отдельным решением с повышением версии.
 
 ### 4.8. `common/metrics.py`, `common/custom_metrics.py`
 
@@ -459,10 +458,11 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 
 `nrmse`, `rmse`, `neg_root_mean_squared_error`, `mae`, `mse`, `r2`.
 
-`global_nrmse` поддерживается движком как специальный динамический scorer, но
-не входит в `AVAILABLE_METRICS`; это нужно явно зафиксировать в C2/C6 и не
-делать вид, что множество встроенных метрик автоматически совпадает с
-`sklearn.metrics.get_scorer_names()`.
+`global_nrmse` поддерживается движком как специальный динамический scorer и не
+входит в `AVAILABLE_METRICS` (решение C2; не совпадает с
+`sklearn.metrics.get_scorer_names()`). В контрактной таблице направлений
+`BUILTIN_METRIC_DIRECTIONS` он присутствует как `minimize`, чтобы
+`ExperimentResult` продолжал проверять `metric_direction`.
 
 `CustomMetricSpec` — публичная декларация (корневой экспорт). В контракте
 остаются поля `path`, `kind`, `greater_is_better`, `additive`, `kwargs`,
@@ -481,7 +481,9 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 Движковый валидатор проверяет и `dict`, и готовые `CustomMetricSpec` и
 воспроизводит прежние коды `ERR_IMPORT`, `ERR_NOT_CALLABLE`,
 `ERR_DIRECTION_REQUIRED`, `ERR_DIRECTION_CONFLICT`, `ERR_KWARGS_UNSUPPORTED`,
-`ERR_BAD_SIGNATURE` и `ERR_CUSTOM_NAME_COLLISION`.
+`ERR_BAD_SIGNATURE`, `ERR_CUSTOM_NAME_INVALID` и `ERR_CUSTOM_NAME_COLLISION`:
+`optimize` и `ModelTrainer` принимают сырые mapping-и и обходят `GeneralCfg`,
+поэтому формат имени проверяется и на их входе.
 
 ### 4.9. DTO результатов
 
@@ -759,18 +761,18 @@ C3 должен либо сохранить их через тонкие реэ�
 
 | Кандидат | Предлагаемый контракт | Почему публичный и устойчивый | Зависимости | Решение |
 |---|---|---|---|---|
-| `ReporterProtocol` | `report(result: ExperimentResult) -> ReporterArtifact` | Reporter — документированная точка расширения: пользователь пишет свой sink и передаёт его в `CompositeReporter`/`AutoMLExperiment.report` | `ExperimentResult`, `ReporterArtifact`; без sklearn | needs-decision: определить в контракте или оставить в `experiment.reporting` |
+| `ReporterProtocol` | `report(result: ExperimentResult) -> ReporterArtifact` | Reporter — документированная точка расширения: пользователь пишет свой sink и передаёт его в `CompositeReporter`/`AutoMLExperiment.report` | `ExperimentResult`, `ReporterArtifact`; без sklearn | engine-only (решение C2); существующий `Reporter` ABC не заменяется |
 | `MetricFunction` | `(y_true, y_pred, **kwargs) -> float` | `general.custom_metrics` — публичный способ добавить метрику; сигнатура уже документирована | только stdlib/`Any`; без numpy/sklearn | move в контракт как public beta |
 | `ScorerCallable` | `(estimator: Any, X: Any, y: Any) -> float` | `kind="scorer"` в `custom_metrics` — публичная альтернатива функции метрики | только `Any`; без sklearn | move в контракт как public beta |
-| `SearchSpaceCallable` | `(trial: Any) -> dict[str, Any]` | `optimize(space_overrides=...)` документирует callable `space_fn(trial)` | Optuna `Trial` — runtime; в контракте можно заменить на `Any`, но это менее полезно | needs-decision; скорее engine-only Protocol |
+| `SearchSpaceCallable` | `(trial: Any) -> dict[str, Any]` | `optimize(space_overrides=...)` документирует callable `space_fn(trial)` | Optuna `Trial` — runtime; в контракте можно заменить на `Any`, но это менее полезно | engine-only (решение C2) |
 | `PredictorProtocol` | `fit`/`predict` | `ModelTrainer` работает с sklearn-совместимыми моделями, но это runtime-интерфейс | sklearn | internal; не в контракт |
 | `ExperimentStoreProtocol` | `register/get/find_by_label` | store — engine API, не контракт данных | `ExperimentResult` | internal; не в контракт |
 
-Рекомендация: в C3 добавить в контракт `MetricFunction` и `ScorerCallable`
-(они не тянут runtime-зависимости), а `ReporterProtocol` и
-`SearchSpaceCallable` вынести в C2/C6 как отдельное решение. Существующий
-`Reporter` ABC нельзя молча заменять на `Protocol`: это сломает наследников;
-`ReporterProtocol` должен быть дополнительным структурным интерфейсом.
+Решение C2: в контракт входят `MetricFunction` и `ScorerCallable` (они не
+тянут runtime-зависимости), `ReporterProtocol` и `SearchSpaceCallable` остаются
+engine-only. Существующий `Reporter` ABC нельзя молча заменять на `Protocol`:
+это сломает наследников; если `ReporterProtocol` появится позже, он будет
+дополнительным структурным интерфейсом.
 
 ## 8. Судьба наборов значений `Literal[...]` и enum
 
@@ -818,20 +820,13 @@ C3 должен либо сохранить их через тонкие реэ�
 | `SearchSpaceEntry` discriminator | `hpo/default_spaces.py` | `categorical`, `int`, `float`, `float_log` | да, beta | новое значение — MINOR/MAJOR | отклонять |
 
 Отдельно про `Literal[*AVAILABLE_METRICS]`: в текущем коде такого типа **нет**;
-`ComparisonMetric = str`, а `AVAILABLE_METRICS` — вычисляемый список. В контракте
-нельзя делать `Literal[*AVAILABLE_METRICS]` с импортом из движка. Если C2 решит
-ввести более строгий тип, он должен:
-
-1. определить значения независимо в контракте;
-2. либо оставить `str`/`TypeAlias` с отдельным набором `BUILTIN_METRIC_NAMES`;
-3. явно решить, допускаются ли custom-имена и произвольные sklearn-scorer-имена;
-4. зафиксировать, что расширение закрытого `Literal` — потенциально ломающее
-   изменение.
-
-Рекомендация C1: оставить `ComparisonMetric = str` (потому что custom names
-являются частью публичного контракта), а `AVAILABLE_METRICS` определить как
-независимый стабильный список в контракте. Не превращать его в закрытый
-`Literal` без отдельного ADR.
+`ComparisonMetric = str`, а `AVAILABLE_METRICS` — вычисляемый список. Решение C2:
+`ComparisonMetric` остаётся `str` (custom-имена и произвольные
+sklearn-scorer-имена — часть публичного контракта), а `AVAILABLE_METRICS` —
+независимый стабильный список в контракте. Закрытый `Literal` потребовал бы
+независимого набора значений в контракте, и его расширение было бы потенциально
+ломающим изменением; такое решение принимается только отдельным ADR с
+повышением версии.
 
 ## 9. Проблемные зависимости и циклы
 
@@ -937,15 +932,15 @@ preprocessing-пакет. После этого цикл устраняется,
 * никаких `scikit-learn`, `pandas`, `numpy`, `optuna`, `PyYAML`, `scipy`,
   `joblib`, `imbalanced-learn`, `pyarrow`, `mlflow`, `shap`.
 
-Дополнительно требуется решение C2 по `pydantic_core`:
+Решение C2 по `pydantic_core`:
 
-* сейчас код использует `from pydantic_core import PydanticCustomError` для
-  стабильных кодов ошибок;
+* контракт использует `from pydantic_core import PydanticCustomError` для
+  стабильных кодов ошибок и сохраняет их в `error['type']`;
 * `pydantic_core` — транзитивная зависимость `pydantic`, но формально это
-  отдельный пакет;
-* C2 должен либо включить `pydantic-core` в разрешённый runtime-набор
-  контракта (как часть pydantic), либо заменить прямые импорты на публичный
-  API pydantic/`ValueError` без потери стабильных `error['type']`.
+  отдельный пакет; он явно разрешён в runtime-наборе контракта как исключение
+  с контролем версии и тестами кодов ошибок;
+* замена на публичный API pydantic/`ValueError` не делается: она потеряла бы
+  стабильные коды.
 
 `read_config` использует `PyYAML` и поэтому остаётся в движке. Если контракту
 понадобится чтение YAML, это будет отдельное обоснование в ADR.
@@ -981,34 +976,39 @@ preprocessing-пакет. После этого цикл устраняется,
 
 ## 13. Открытые вопросы для C2/C6
 
-1. **`InvalidPredictionError`**: публичный beta или internal? Рекомендация —
-   public beta с реэкспортом из `common.errors`.
-2. **`read_config`**: подтвердить, что остаётся только в движке из-за PyYAML.
-3. **`ExperimentResult`**: как именно контрактная модель проверяет
-   `metric_direction` без sklearn; нужен ли статический реестр встроенных
-   метрик и как обрабатывать произвольные sklearn-имена.
-4. **`pydantic_core`**: разрешённая зависимость контракта или замена
-   `PydanticCustomError`.
-5. **Тип `AVAILABLE_ALGORITHMS` / `AVAILABLE_METRICS`**: `list` или `tuple`;
-   кто владеет каноническим значением; нужна ли проверка идентичности.
-6. **`ReporterProtocol`**: контракт или engine-only; как совместить с текущим
-   `Reporter` ABC.
-7. **Прямые импорты `training_engine.config.*`**: сохранять шимы или обновить
-   тесты и объявить пути internal.
-8. **`DEFAULT_SPACES`, `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING`**: оставить
-   engine API или сделать публичными данными контракта. Рекомендация C1 —
-   оставить в движке.
-9. **Схема**: один файл в контракте или синхронизируемая копия в корне;
-   как публиковать `config.schema.json` в wheel.
+Вопросы 1–9 и 11 закрыты решениями C2 (ADR
+`docs/adr/0001-contracts-package.md`); вопрос 10 отложен до C6.
+
+1. **`InvalidPredictionError`** — решено: public beta, move + re-export из
+   `common.errors` (ADR §21).
+2. **`read_config`** — решено: остаётся только в движке из-за `PyYAML`
+   (ADR §10.3); контракт предоставляет `Config.model_validate`.
+3. **`ExperimentResult`** — решено: статическая таблица
+   `BUILTIN_METRIC_DIRECTIONS` в `automl_contracts.metrics` (включая
+   `global_nrmse`), для custom-метрик направление берётся из payload,
+   произвольные sklearn-имена не разрешаются (ADR §11.3/§21.1).
+4. **`pydantic_core`** — решено: разрешён как явное исключение с контролем
+   версии и тестами кодов ошибок; замена на публичный API pydantic не
+   делается (ADR §8.1).
+5. **`AVAILABLE_ALGORITHMS` / `AVAILABLE_METRICS`** — решено: тип `list`,
+   read-only, канонические значения в контракте, движок реэкспортирует и
+   проверяет равенство значений (ADR §17.1).
+6. **`ReporterProtocol`** — решено: engine-only, существующий `Reporter` ABC
+   не заменяется (ADR §10.4/§21).
+7. **Прямые импорты `training_engine.config.*`** — решено: сохраняются через
+   шимы и помечаются internal/deprecated (ADR §11.4).
+8. **`DEFAULT_SPACES`, `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING`** — решено:
+   остаются engine-only (ADR §21).
+9. **Схема** — решено: канонический файл в контракте, корневая копия — зеркало;
+   публикуется в wheel контракта (ADR §12).
 10. **Пограничные DTO** (`RunSummary`, `LeaderboardEntry`, `FeatureImportance`,
-    `EnsembleMember`, `ReporterArtifact`): включать ли в контракт в C3 или
-    отложить до C6.
-11. **`CustomMetricSpec`** — решено в C2 (ADR `docs/adr/0001-contracts-package.md`
-    §10.3/§11.3): идентичность класса сохраняется (`is`), прямой конструктор
-    выполняет только структурные проверки, импорт callable/сигнатура и
-    коллизии имён проверяются движком на входе в `train_best_model`,
-    `AutoMLExperiment`, `optimize` и `ModelTrainer`. Смена поведения прямого
-    конструктора согласована и проверяется в C5.
+    `EnsembleMember`, `ReporterArtifact`) — отложено до C6; в C3 не входят.
+11. **`CustomMetricSpec`** — решено в C2 (ADR §10.3/§11.3): идентичность класса
+    сохраняется (`is`), прямой конструктор выполняет только структурные
+    проверки, импорт callable/сигнатура и коллизии имён проверяются движком на
+    входе в `train_best_model`, `AutoMLExperiment`, `optimize` и
+    `ModelTrainer`. Смена поведения прямого конструктора согласована и
+    проверяется в C5.
 
 ## 14. Проверочный список приёмки C1
 
