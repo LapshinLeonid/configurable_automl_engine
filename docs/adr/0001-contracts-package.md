@@ -605,8 +605,9 @@ __all__ = [
   возможности v2.
 - Нельзя заявлять поддержку нескольких major-версий Pydantic без тестирования
   сериализации, валидации и генерации JSON Schema на каждой версии.
-- CI проверяет минимальную (`2.12.5`) и последнюю доступную версию Pydantic v2;
-  при изменении нижней границы матрица обновляется в том же PR.
+- CI проверяет минимальную (`2.12.5`) и последнюю доступную версию Pydantic v2
+  джобом `contracts-pydantic-matrix` (§15.2); при изменении нижней границы
+  матрица обновляется в том же PR.
 
 ## 9. Направление зависимостей и правила слоёв
 
@@ -651,7 +652,13 @@ errors, definitions, protocols
 - В `automl-contracts/pyproject.toml` добавляется `import-linter`-контракт с
   `root_package = "automl_contracts"` и запретом
   `configurable_automl_engine`; `exclude_type_checking_imports = false`.
-- В CI контракта `lint-imports` запускается до тестов.
+- В CI контракта `lint-imports` запускается до тестов и обязательно с
+  конфигурацией контракта: шаг выполняется с `working-directory:
+  automl-contracts` (эквивалент `lint-imports --config
+  automl-contracts/pyproject.toml` из корня репозитория). Голый
+  `lint-imports` из корня читает корневой `pyproject.toml`, применяет только
+  layer-контракты движка и не проверяет запрет импорта
+  `configurable_automl_engine` — такой запуск не считается проверкой.
 - Отдельный тест сканирует AST контрактных модулей и падает при любом импорте
   `configurable_automl_engine` или запрещённой библиотеки, включая
   `TYPE_CHECKING`-блоки.
@@ -716,10 +723,13 @@ errors, definitions, protocols
 2. `configurable_automl_engine.training_engine.config_parser` остаётся
    документированной публичной точкой импорта. Он:
    - импортирует и реэкспортирует контрактные модели;
-   - сохраняет `read_config` на `PyYAML`;
+   - сохраняет `read_config` на `PyYAML`: YAML-разбор → структурная
+     валидация контрактной `Config` → `validate_runtime_config` из
+     `config_runtime`. Публичное поведение `read_config` не меняется — он
+     по-прежнему возвращает конфигурацию с выполненными runtime-проверками.
+     Это единственный владелец runtime-валидации для файлового ввода;
    - сохраняет `SanityGateMode`, `REMOVED_ALGORITHM_KEYS` и другие
-     engine-имена;
-   - вызывает runtime-валидацию после разбора конфигурации.
+     engine-имена.
 3. `configurable_automl_engine.training_engine.config_runtime` (новый
    внутренний модуль) содержит `validate_runtime_config(cfg)` и runtime-помощники,
    включая бывшие методы `AlgoCfg.get_required_package` и
@@ -730,14 +740,23 @@ errors, definitions, protocols
    моделей нет.
 5. `train_best_model` и `AutoMLExperiment` — публичные entry point, которые
    принимают `str | Path | Config | dict` и проходят через шаг `load_config`
-   (`read_config`/`Config.model_validate`). Runtime-валидация вызывается в
-   `load_config` после приведения конфигурации к `Config`, до обучения, поэтому
-   она одинаково применяется к файлу, словарю и уже собранному `Config`.
+   (`read_config`/`Config.model_validate`). Runtime-валидация применяется к
+   каждой конфигурации ровно один раз, у каждого вида ввода свой владелец:
+
+   - `str`/`Path` — `read_config` (YAML-разбор, структурная валидация,
+     `validate_runtime_config`); `load_config` полученный `Config` повторно не
+     валидирует;
+   - `dict` — `load_config`: `Config.model_validate` (структурная проверка),
+     затем `validate_runtime_config`;
+   - готовый `Config` — `load_config`: `validate_runtime_config` перед
+     обучением, потому что контрактная `Config` runtime-проверок не содержит.
+
    `optimize` и `ModelTrainer` не принимают `Config`: у них runtime-проверки
    выполняются в собственной валидации аргументов, а
    `validate_runtime_config(cfg)` к ним не применяется. Структурные ошибки
-   возникают при создании контрактной модели, runtime-ошибки конфигурации — при
-   запуске `train_best_model`/`AutoMLExperiment`.
+   возникают при создании контрактной модели, runtime-ошибки конфигурации — в
+   `read_config` для файла или при запуске `train_best_model`/`AutoMLExperiment`
+   для остальных форм.
 
 Прямые импорты из `training_engine.config.general` и аналогичных модулей,
 используемые тестами, сохраняются через шимы на переходный период и помечаются
@@ -830,7 +849,20 @@ errors, definitions, protocols
   `config_runtime`; это изменение класса `AlgoCfg` относится к 0.x MINOR и
   документируется.
 - `read_config` остаётся в движке из-за `PyYAML`; контракт предоставляет
-  `Config.model_validate`.
+  `Config.model_validate`. Публичное поведение `read_config` не меняется: он
+  выполняет YAML-разбор, структурную валидацию контрактной `Config` и
+  runtime-валидацию через `validate_runtime_config`, то есть по-прежнему
+  возвращает конфигурацию с проверенными зависимостями алгоритмов,
+  совместимостью гиперпараметров и нормализованными типами диапазонов.
+- Меняется только место runtime-проверок: три бывших `model_validator`-а
+  контрактной `Config` (`_check_algorithm_dependencies`,
+  `_check_hyperparameter_compatibility`, `_normalize_hyperparameter_types`)
+  в контракт не переносятся. Прямой вызов `Config.model_validate(dict)` или
+  конструктора контрактного класса выполняет только структурную валидацию.
+  Публичные entry point движка (`train_best_model`, `AutoMLExperiment`) и
+  `read_config` по-прежнему выполняют runtime-проверки — ровно один раз на
+  конфигурацию, по правилу §10.3; это фиксируется в `CHANGELOG.md` и в
+  docstring `automl_contracts.config.Config`.
 - `SanityGateMode`, `ALGO_PACKAGE_MAPPING`, `DEFAULT_SPACES`,
   `PRESET_BY_CLASS`, `ALGORITHM_CLASS_MAPPING`, `REMOVED_ALGORITHM_KEYS` и
   runtime-помощники остаются в движке.
@@ -995,7 +1027,8 @@ dependencies = [
 
 - CI движка проверяет нижнюю (`0.1.0`) и последнюю доступную версию из
   разрешённого диапазона (`0.1.*`);
-- CI контракта проверяет минимальную и последнюю версию Pydantic v2;
+- CI контракта проверяет минимальную и последнюю версию Pydantic v2
+  (`contracts-pydantic-matrix`, §15.2);
 - после `1.0.0` контракта диапазон движка становится `>=1.0.0,<2.0.0`, а
   матрица покрывает все поддерживаемые minor-версии контракта;
 - сочетания вне объявленного диапазона не считаются поддерживаемыми, даже если
@@ -1029,19 +1062,32 @@ dependencies = [
 
 Для `automl-contracts`:
 
-1. `contracts-lint-type-test`: установка контракта без движка, `ruff`, `mypy`,
-   `pytest tests/contracts`, `lint-imports`.
-2. `contracts-build`: `python -m build automl-contracts`, проверка wheel/sdist,
+1. `contracts-lint-type-test`: из корня репозитория установка контракта без
+   движка (`pip install -e automl-contracts`), `ruff` и `mypy` по
+   `automl-contracts/src` и `tests/contracts`, `pytest tests/contracts` из
+   корня репозитория (путь `tests/contracts` задан относительно корня), затем
+   `lint-imports` с `working-directory: automl-contracts`, чтобы применялась
+   конфигурация контракта, а не корневая (см. §9.3).
+2. `contracts-pydantic-matrix`: та же установка контракта без движка и
+   `pytest tests/contracts` из корня репозитория, но в матрице по Pydantic:
+   `2.12.5` (нижняя граница) и последняя версия из диапазона
+   `>=2.12.5,<3` (резолвится `pip install "pydantic<3"`). Джоб также повторно
+   генерирует JSON Schema и сравнивает с каноническим файлом на обеих
+   версиях, чтобы поддержка диапазона была доказана, а не только заявлена.
+   При изменении нижней границы (§8.3) матрица обновляется в том же PR.
+3. `contracts-build`: `python -m build automl-contracts`, проверка wheel/sdist,
    наличия `py.typed` и `schemas/config.schema.json`.
-3. `contracts-schema`: генерация схемы и сравнение с каноническим файлом.
-4. `contracts-isolated-install`: установка wheel в чистый venv без движка,
+4. `contracts-schema`: генерация схемы и сравнение с каноническим файлом.
+5. `contracts-isolated-install`: установка wheel в чистый venv без движка,
    проверка импорта, метаданных и отсутствия тяжёлых зависимостей.
-5. `contracts-publish`: запускается только по тегу `contracts-v*`.
+6. `contracts-publish`: запускается только по тегу `contracts-v*`.
 
 Для `configurable-automl-engine`:
 
-1. `engine-lint-type-test`: установка контракта из исходников, затем движка;
-   `ruff`, `mypy`, `pytest tests/engine`, `lint-imports`.
+1. `engine-lint-type-test`: из корня репозитория установка контракта из
+   исходников, затем движка; `ruff`, `mypy`, `pytest tests/engine`,
+   `lint-imports` с корневой конфигурацией движка (без смены
+   `working-directory`).
 2. `engine-build`: сборка wheel/sdist движка, установка с контрактом, smoke-тест
    публичного API.
 3. `engine-backward-compat`: старые пути импорта и проверки идентичности
