@@ -733,9 +733,10 @@ errors, definitions, protocols
    - импортирует и реэкспортирует контрактные модели;
    - сохраняет `read_config` на `PyYAML`: YAML-разбор → структурная
      валидация контрактной `Config` → `validate_runtime_config` из
-     `config_runtime`. Публичное поведение `read_config` не меняется — он
-     по-прежнему возвращает конфигурацию с выполненными runtime-проверками.
-     Это единственный владелец runtime-валидации для файлового ввода;
+     `config_runtime`. Возвращаемая конфигурация не меняется — она по-прежнему
+     приходит с выполненными runtime-проверками; меняется только тип их
+     исключений (§10.3, §11.3). Это единственный владелец runtime-валидации
+     для файлового ввода;
    - сохраняет `SanityGateMode`, `REMOVED_ALGORITHM_KEYS` и другие
      engine-имена.
 3. `configurable_automl_engine.training_engine.config_runtime` (новый
@@ -749,8 +750,9 @@ errors, definitions, protocols
    - совместимость и нормализацию типов гиперпараметров
      (`_check_hyperparameter_compatibility`,
      `_normalize_hyperparameter_types`);
-   - импорт callable, проверку сигнатуры и коллизию имён для
-     `cfg.general.custom_metrics` (расширенный `validate_custom_metrics`);
+   - импорт callable, проверку сигнатуры, направление и коллизию имён для
+     `cfg.general.custom_metrics` (расширенный `validate_custom_metrics`,
+     полный список проверок — §11.3);
    - `check_start_method(cfg.general.start_method, cfg.general.parallel_mode)`,
      включая доступность метода на платформе;
    - `check_threads_timeouts(...)` — запрет таймаутов в `parallel_mode="threads"`;
@@ -761,6 +763,19 @@ errors, definitions, protocols
    выполняются при прямом создании контрактных моделей, поэтому
    `validate_runtime_config(cfg)` обязан вызывать их все для каждой
    конфигурации, проходящей через публичные entry point.
+
+   `validate_runtime_config(cfg)` мутирует переданный `Config` на месте
+   (нормализация типов гиперпараметров обновляет `hyperparameters`) и
+   возвращает тот же объект; `read_config`/`load_config` возвращают именно его,
+   поэтому нормализованные значения видны вызывающему коду.
+
+   Runtime-проверки больше не являются Pydantic-валидаторами, поэтому их
+   ошибки не оборачиваются в `pydantic.ValidationError`: `validate_runtime_config`
+   поднимает `ValueError` (для custom metrics — `pydantic_core.PydanticCustomError`
+   с прежними кодами `ERR_*`). Это осознанное изменение публичного контракта
+   исключений `read_config`, `load_config`, `train_best_model` и
+   `AutoMLExperiment`; оно перечислено в §11.3 вместе с миграцией
+   `API_REFERENCE.md` и тестов.
 4. `configurable_automl_engine.training_engine.config/*` становится набором
    тонких модулей-шимов: контрактные имена реэкспортируются из
    `automl_contracts`, engine-only имена остаются в движке. Вторых определений
@@ -885,13 +900,44 @@ errors, definitions, protocols
   §4.8, §4.11, §5.1 и открытый вопрос §13):
   старый путь остаётся тем же классом (`is`) и даёт только структурную
   валидацию. C5 добавляет тест: прямое конструирование с некорректным callable
-  проходит, а `train_best_model`/`optimize`/`ModelTrainer` отвергают его до
-  обучения; `is`-идентичность при этом сохраняется. Проверка коллизии имён с
-  встроенными и sklearn-метриками (`ERR_CUSTOM_NAME_COLLISION`,
+  проходит, а `train_best_model`/`AutoMLExperiment`/`optimize`/`ModelTrainer`
+  отвергают его до обучения; `is`-идентичность при этом сохраняется. Проверка
+  коллизии имён с встроенными и sklearn-метриками (`ERR_CUSTOM_NAME_COLLISION`,
   `reserved_metric_names()`) остаётся в движке: контрактная
   `check_custom_metric_names` проверяет только формат имени
   (`ERR_CUSTOM_NAME_INVALID`), а коллизия проверяется в
   `validate_runtime_config(cfg)`/`validate_custom_metrics`.
+
+  Движковый валидатор (`validate_custom_metrics` и его helper
+  `validate_custom_metric_spec`) воспроизводит полный набор прежних проверок
+  `CustomMetricSpec._validate_callable` для каждой декларации, включая уже
+  собранные `CustomMetricSpec` (они не возвращаются из
+  `validate_custom_metrics` без проверки):
+
+  - импорт объекта по `path` — `ERR_IMPORT` и `ERR_NOT_CALLABLE`;
+  - `kind="metric"`: обязательный `greater_is_better` — `ERR_DIRECTION_REQUIRED`;
+    сигнатура `(y_true, y_pred, **kwargs)` — `ERR_BAD_SIGNATURE`;
+  - sklearn-scorer: конфликт объявленного направления с `scorer_sign` —
+    `ERR_DIRECTION_CONFLICT`; `kwargs` у plain callable —
+    `ERR_KWARGS_UNSUPPORTED`; сигнатура `(estimator, X, y)` — `ERR_BAD_SIGNATURE`;
+    предупреждение о plain callable без `additive`;
+  - коллизия имени со встроенными/sklearn-метриками —
+    `ERR_CUSTOM_NAME_COLLISION`.
+
+  C3/C5 добавляют тест на каждый код ошибки и на предупреждение. Проверка
+  выполняется и для `dict`, и для готовых `CustomMetricSpec`, во всех entry
+  point: `train_best_model`/`AutoMLExperiment` — через
+  `validate_runtime_config(cfg)`, `optimize`/`ModelTrainer` — через
+  `validate_custom_metrics`.
+- Разделение `check_custom_metric_names` меняет и прямое конструирование:
+  `GeneralCfg.model_validate(...)`, `Config.model_validate(...)` и
+  реэкспортированные старые пути больше не отклоняют `custom_metrics` с
+  зарезервированными именами (`rmse`, `accuracy`, `global_nrmse`) — в контракте
+  проверяется только формат, а коллизия — на entry point движка
+  (`validate_runtime_config`/`validate_custom_metrics`). Это осознанное
+  изменение публичного поведения прямого конструктора; фиксируется в
+  `CHANGELOG.md` и docstring контрактной `GeneralCfg`, а C5 проверяет оба
+  сценария: прямое конструирование проходит, entry point отклоняет.
 - `CustomMetricSpec.natural_greater_is_better` в контракт не переносится: это
   свойство импортирует callable по `path` и разрешает направление
   sklearn-scorer-а (`resolve_dotted_path`, `scorer_sign`), то есть требует
@@ -921,24 +967,39 @@ errors, definitions, protocols
   `_consistency` перестаёт использовать `reserved_metric_names()` и
   `user_direction()` (оба остаются в движке) и берёт направление встроенных
   метрик из статической таблицы `BUILTIN_METRIC_DIRECTIONS` в
-  `automl_contracts.metrics` (§21.1), а для custom-метрик — из payload
-  (`metric_direction`), не обращаясь к process-local registry. Как и в C1
-  (`CONTRACTS.md` §4.9), проверка `metric_direction` в контракте выполняется
-  только для имён из статической таблицы; для прочих имён, включая
-  sklearn-имена вне её состава, направление считается пришедшим в payload и не
-  перепроверяется. Проверки `reserved_metric_names()`/`user_direction()` и
-  коллизий имён для произвольных sklearn-имён остаются в движке; C5 проверяет
-  round-trip `to_json()`/`from_json()` и идентичность полей.
+  `automl_contracts.metrics` (§21.1; включает `global_nrmse` — `minimize`), а
+  для custom-метрик — из payload (`metric_direction`), не обращаясь к
+  process-local registry. Как и в C1 (`CONTRACTS.md` §4.9), проверка
+  `metric_direction` в контракте выполняется только для имён из статической
+  таблицы; для прочих имён, включая произвольные sklearn-имена вне её состава,
+  направление считается пришедшим в payload и не перепроверяется. Проверки
+  `reserved_metric_names()`/`user_direction()` и коллизий имён для
+  произвольных sklearn-имён остаются в движке; C5 проверяет round-trip
+  `to_json()`/`from_json()` и идентичность полей.
 - `AlgoCfg.get_required_package` и `AlgoCfg.get_unknown_hyperparameters` —
   runtime-методы, а не часть контракта. Их заменяют функции
   `config_runtime`; это изменение класса `AlgoCfg` относится к 0.x MINOR и
   документируется.
 - `read_config` остаётся в движке из-за `PyYAML`; контракт предоставляет
-  `Config.model_validate`. Публичное поведение `read_config` не меняется: он
+  `Config.model_validate`. Возвращаемое значение не меняется: `read_config`
   выполняет YAML-разбор, структурную валидацию контрактной `Config` и
   runtime-валидацию через `validate_runtime_config`, то есть по-прежнему
-  возвращает конфигурацию с проверенными зависимостями алгоритмов,
-  совместимостью гиперпараметров и нормализованными типами диапазонов.
+  возвращает ту же конфигурацию с проверенными зависимостями алгоритмов,
+  совместимостью гиперпараметров и нормализованными типами диапазонов
+  (`validate_runtime_config` мутирует `Config` на месте и возвращает его же).
+- Ошибки runtime-проверок больше не приходят как `pydantic.ValidationError`.
+  Сегодня они возникают внутри `model_validator`-ов и оборачиваются Pydantic;
+  после C3 `validate_runtime_config` поднимает `ValueError` (для custom
+  metrics — `pydantic_core.PydanticCustomError` с прежними кодами `ERR_*`).
+  Это меняет публичный контракт исключений `read_config`, `load_config` для
+  `dict`/`Config`, `train_best_model` и `AutoMLExperiment`; `ValidationError`
+  остаётся только для структурной валидации контрактных моделей. Изменение
+  принимается осознанно (сохранение `ValidationError` потребовало бы
+  искусственной сборки ошибок без реального контекста Pydantic-валидации):
+  `API_REFERENCE.md` (разделы `read_config`, `train_best_model`, `run`)
+  обновляется в C6, а `tests/test_config_validation.py` в C3 переводится на
+  `ValueError`/`PydanticCustomError` для runtime-проверок. C5 добавляет тест
+  типа исключения для каждой формы ввода.
 - Меняется только место runtime-проверок `Config`: три бывших
   `model_validator`-а контрактной `Config` (`_check_algorithm_dependencies`,
   `_check_hyperparameter_compatibility`, `_normalize_hyperparameter_types`)
@@ -1132,10 +1193,16 @@ dependencies = [
   `configurable_automl_engine`, `numpy`, `pandas`, `sklearn`, `optuna`,
   `yaml` и другие тяжёлые пакеты.
 - `tests/engine/` — существующие тесты движка и тесты обратной совместимости.
-  Они могут импортировать оба пакета. Среди них — тест `CustomMetricSpec`:
+  Они могут импортировать оба пакета. Среди них — тесты `CustomMetricSpec`:
   старый путь `is` контрактному классу, прямой конструктор с некорректным
-  callable проходит структурную валидацию, а `train_best_model`/`optimize`/
-  `ModelTrainer` отвергают его до обучения (см. §11.3).
+  callable и с зарезервированным именем проходит структурную валидацию, а
+  `train_best_model`/`AutoMLExperiment`/`optimize`/`ModelTrainer` отвергают
+  такие декларации до обучения (см. §11.3). Отдельные тесты покрывают каждый
+  runtime-код (`ERR_IMPORT`, `ERR_NOT_CALLABLE`, `ERR_DIRECTION_REQUIRED`,
+  `ERR_DIRECTION_CONFLICT`, `ERR_KWARGS_UNSUPPORTED`, `ERR_BAD_SIGNATURE`,
+  `ERR_CUSTOM_NAME_COLLISION`), предупреждение о plain callable и тип
+  исключения (`ValueError`/`PydanticCustomError` вместо `ValidationError`) для
+  `read_config` и `load_config` на всех формах ввода.
 - Общие фикстуры движка не используются контрактными тестами.
 - Тесты контракта покрывают:
   - импорт и `__all__`;
@@ -1433,9 +1500,10 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 
 `BUILTIN_METRIC_DIRECTIONS` — статическая таблица `имя → MetricDirection` для
 встроенных метрик из статического `AVAILABLE_METRICS` (`nrmse`, `rmse`,
-`neg_root_mean_squared_error`, `mae`, `mse` — `minimize`; `r2` — `maximize`).
-Она заменяет `reserved_metric_names()`/`user_direction()` в
-`ExperimentResult._consistency` (§11.3) и не требует sklearn.
+`neg_root_mean_squared_error`, `mae`, `mse` — `minimize`; `r2` — `maximize`) и
+фиксированного имени движка `global_nrmse` (`minimize`). Она заменяет
+`reserved_metric_names()`/`user_direction()` в `ExperimentResult._consistency`
+(§11.3) и не требует sklearn.
 
 В контракт **не переносятся**:
 

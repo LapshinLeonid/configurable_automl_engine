@@ -478,6 +478,10 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 `validate_runtime_config`), `optimize` и `ModelTrainer` — в
 `validate_custom_metrics`. Свойство `natural_greater_is_better` в контракт не
 переносится; движок предоставляет функцию `natural_greater_is_better(spec)`.
+Движковый валидатор проверяет и `dict`, и готовые `CustomMetricSpec` и
+воспроизводит прежние коды `ERR_IMPORT`, `ERR_NOT_CALLABLE`,
+`ERR_DIRECTION_REQUIRED`, `ERR_DIRECTION_CONFLICT`, `ERR_KWARGS_UNSUPPORTED`,
+`ERR_BAD_SIGNATURE` и `ERR_CUSTOM_NAME_COLLISION`.
 
 ### 4.9. DTO результатов
 
@@ -495,8 +499,9 @@ store. Сейчас модуль импортирует `numpy` и `common.metri
 1. убрать `numpy` из валидаторов, принимая только стандартные числа;
    нормализацию numpy-скаляров выполнять в движке на границе;
 2. заменить `reserved_metric_names()`/`user_direction()` на статическую
-   контрактную таблицу направлений для встроенных метрик и не пытаться
-   разрешать произвольные sklearn-имена в контракте;
+   контрактную таблицу направлений для встроенных метрик (включая
+   `global_nrmse` — `minimize`) и не пытаться разрешать произвольные
+   sklearn-имена в контракте;
 3. для custom metrics не обращаться к process-local registry — направление
    уже приходит в payload (`metric_direction`), как и описано в docstring.
 
@@ -583,6 +588,9 @@ DTO/enum-ы и на старые пути из таблицы 5.1.
 `optimize`/`ModelTrainer`); это согласованное изменение поведения конструктора,
 зафиксированное в ADR §11.3 и проверяемое в C5. Отдельный engine-класс с
 немедленной проверкой не создаётся: он нарушил бы `is`-идентичность.
+Разделение `check_custom_metric_names` означает, что и прямое конструирование
+`GeneralCfg`/`Config` проверяет только формат имени; коллизия с встроенными и
+sklearn-именами отклоняется на entry point движка (C5 проверяет оба сценария).
 
 ## 5. Матрица обратной совместимости путей импорта
 
