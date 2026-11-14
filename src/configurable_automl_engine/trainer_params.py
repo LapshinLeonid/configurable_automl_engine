@@ -20,6 +20,7 @@ from configurable_automl_engine.common.metrics import validate_custom_metrics
 from configurable_automl_engine.preprocessing import EncodingStrategy
 from configurable_automl_engine.preprocessing_presets import PreprocessingOverride
 from configurable_automl_engine.validation import (
+    SUPPORTED_SPLIT_AGGREGATIONS,
     SUPPORTED_VALIDATION_METHODS,
     norm_val_method,
 )
@@ -204,6 +205,23 @@ def _validate_validation_strategy(
     return normalized_strategy
 
 
+def _validate_n_repeats(n_repeats: Any) -> int:
+    """Validate the number of repeated validation splits."""
+    if isinstance(n_repeats, bool) or not isinstance(n_repeats, int) or n_repeats < 1:
+        raise TrainingError(f"n_repeats must be a positive integer, got {n_repeats!r}")
+    return n_repeats
+
+
+def _validate_split_aggregation(split_aggregation: Any) -> str:
+    """Validate the per-repeat score aggregation policy."""
+    if split_aggregation not in SUPPORTED_SPLIT_AGGREGATIONS:
+        raise TrainingError(
+            "split_aggregation must be one of "
+            f"{SUPPORTED_SPLIT_AGGREGATIONS}, got {split_aggregation!r}"
+        )
+    return cast(str, split_aggregation)
+
+
 def _validate_test_size(test_size: Any) -> Any:
     """Validate the hold-out size.
 
@@ -356,6 +374,8 @@ def build_trainer_settings(
     target_transform_skew_threshold: float | None = None,
     custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
     allow_auto_target_transform: bool = False,
+    n_repeats: int = 1,
+    split_aggregation: str = "median",
 ) -> TrainerSettings:
     """Validate the ``ModelTrainer`` constructor arguments into settings.
 
@@ -397,6 +417,8 @@ def build_trainer_settings(
     fs_active = _validate_feature_selection_active(feature_selection_active)
     strategy = _validate_validation_strategy(validation_strategy, n_folds)
     test_size = _validate_test_size(test_size)
+    n_repeats = _validate_n_repeats(n_repeats)
+    split_aggregation = _validate_split_aggregation(split_aggregation)
     _validate_oversampling(
         multiplier=oversampling.multiplier,
         algorithm=oversampling.algorithm,
@@ -444,4 +466,6 @@ def build_trainer_settings(
         custom_metrics=custom,
         target_transform=target_transform_enum,
         target_transform_skew_threshold=target_transform_skew_threshold,
+        n_repeats=n_repeats,
+        split_aggregation=split_aggregation,
     )

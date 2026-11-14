@@ -521,8 +521,9 @@ def _to_candidate(
     """Assemble a ``FinalistCandidate`` from a trained ``ModelTrainer``.
 
     Computes the derived quantities (``y_pred_full``, ``rmse_full``) exactly
-    once from the already-trained trainer; the OOF vector and ``RMSE_oof`` come
-    from the trainer's attributes."""
+    once from the already-trained trainer; the OOF vector and the aggregated
+    ``RMSE_oof`` (with its per-repeat standard deviation) come from the
+    trainer's attributes."""
     y_pred_full = np.asarray(trainer.predict(X), dtype=float).reshape(-1)
     rmse_full: float | None = None
     try:
@@ -539,6 +540,7 @@ def _to_candidate(
         y_pred_full=y_pred_full,
         rmse_full=rmse_full,
         trainer=trainer,
+        rmse_oof_std=getattr(trainer, "oof_score_std_", None),
     )
 
 

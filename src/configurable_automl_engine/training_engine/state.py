@@ -120,8 +120,13 @@ class FinalistCandidate:
             (``phase_results[algo_name].params``).
         cv_score (float): The raw score from the HPO phase (optimizer
             semantics); used by the ``cv_best`` select step and the report.
-        rmse_oof (float | None): The finalist's ``RMSE_oof``
-            (``trainer.oof_score_``); ``None`` if an OOF estimate is impossible.
+        rmse_oof (float | None): The finalist's aggregated ``RMSE_oof``
+            (median or mean of the per-repeat values, as configured by
+            ``split_aggregation``; ``trainer.oof_score_``); ``None`` if an
+            OOF estimate is impossible.
+        rmse_oof_std (float | None): The standard deviation of the per-repeat
+            ``RMSE_oof`` values (``None`` when ``n_repeats = 1`` or no repeat
+            is valid).
         y_pred_oof (Any): The OOF prediction vector
             (``trainer.oof_predictions_``), aligned to the rows of X.
         y_pred_full (Any): The full-fit model's predictions on the same rows
@@ -143,6 +148,7 @@ class FinalistCandidate:
     y_pred_full: Any
     rmse_full: float | None = None
     trainer: Any | None = None
+    rmse_oof_std: float | None = None
 
 
 @dataclass(frozen=True)

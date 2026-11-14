@@ -127,6 +127,8 @@ def _collect_artifact_metadata(settings: TrainerSettings) -> dict[str, Any]:
             "validation_strategy": settings.validation_strategy,
             "n_folds": settings.n_folds,
             "test_size": settings.test_size,
+            "n_repeats": getattr(settings, "n_repeats", 1),
+            "split_aggregation": getattr(settings, "split_aggregation", "median"),
             "encoding_strategy": settings.encoding.encoding,
         },
         default=str,

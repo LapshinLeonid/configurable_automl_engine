@@ -57,4 +57,6 @@ def score_with_trainer(
         test_size=settings.test_size,
         random_state=settings.random_state,
         algorithm=settings.algorithm,
+        n_repeats=settings.n_repeats,
+        split_aggregation=settings.split_aggregation,
     )

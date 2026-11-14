@@ -483,11 +483,14 @@ def test_trainer_settings_unpickle_legacy_state_without_target_transform() -> No
     from configurable_automl_engine.trainer_state import TrainerSettings
 
     settings = _settings()
-    current = [getattr(settings, f.name) for f in fields(TrainerSettings)]
-    # The additive tail fields keep their defaults on a legacy restore.
-    assert current[-2] == TargetTransform.none
-    assert current[-1] is None
-    legacy = current[:-2]  # the state list of the 20-slot pre-PR class
+    field_names = [f.name for f in fields(TrainerSettings)]
+    current = [getattr(settings, name) for name in field_names]
+    # The additive fields after ``target_transform`` keep their defaults on
+    # a legacy restore.
+    target_index = field_names.index("target_transform")
+    assert current[target_index] == TargetTransform.none
+    assert current[field_names.index("target_transform_skew_threshold")] is None
+    legacy = current[:target_index]  # the state list before those fields
 
     class _Legacy:
         def __reduce__(self):
@@ -497,6 +500,8 @@ def test_trainer_settings_unpickle_legacy_state_without_target_transform() -> No
     assert restored.algorithm == "ridge"
     assert restored.target_transform == TargetTransform.none
     assert restored.target_transform_skew_threshold is None
+    assert restored.n_repeats == 1
+    assert restored.split_aggregation == "median"
 
     # A state with an extra trailing value is tolerated too (zip truncates).
     class _Overlong:

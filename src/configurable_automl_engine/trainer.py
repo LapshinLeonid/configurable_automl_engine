@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-import pandas as pd
 from imblearn.pipeline import Pipeline
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
@@ -94,13 +93,14 @@ from .trainer_scoring import StepsFactory, score_on_validation_splits
 from .trainer_state import (
     FeatureSelectionResult,
     PreparedFeatures,
+    TrainerViewMixin,
     ValidationScores,
 )
 
 __all__ = ["ModelTrainer", "TrainingError", "train_model"]
 
 
-class ModelTrainer:
+class ModelTrainer(TrainerViewMixin):
     """Orchestrator of the training and validation process for regression models.
 
     Automates the construction of a pipeline that includes feature preprocessing
@@ -158,14 +158,16 @@ class ModelTrainer:
         oof_score_ (float | None): ``RMSE_oof`` — an out-of-fold estimate on
             all rows: predictions from validation folds are concatenated into
             a single vector and the metric is computed on the whole vector at
-            once (rather than averaged over small folds). Every row is
-            predicted by a fold-model that has not been trained on it, but the
-            splits are the same as in HPO (``validation.iter_splits`` with
-            the same seed): when the hyperparameters were selected on these
-            splits, the estimate inherits the selection bias and is NOT an
-            independent estimate of generalization (for RMSE it equals the
-            best-trial ``val_score``). ``None`` if an OOF estimate is
-            impossible; the ``val_score`` of HPO phases is not affected.
+            once (rather than averaged over small folds). With
+            ``n_repeats > 1`` it is the median (or mean) of the per-repeat
+            values. Every row is predicted by a fold-model that has not been
+            trained on it, but the splits are the same as in HPO
+            (``validation.iter_splits`` with the same seed): when the
+            hyperparameters were selected on these splits, the estimate
+            inherits the selection bias and is NOT an independent estimate of
+            generalization (for RMSE it equals the best-trial ``val_score``).
+            ``None`` if an OOF estimate is impossible; the ``val_score`` of
+            HPO phases is not affected.
         oof_predictions_ (pd.Series | np.ndarray | None): The ``y_pred_oof``
             vector, aligned to the original row order (``pd.Series`` with the
             preserved pandas index for data with a unique index, including
@@ -173,9 +175,12 @@ class ModelTrainer:
             with duplicated indexes). Uncovered rows (e.g., the train part of
             ``train_test_split``) and non-finite predictions are NaN;
             ``None`` until the first ``fit()``.
-        oof_coverage_ (float | None): Fraction of the original data rows covered
-            by OOF predictions (1.0 for ``k_fold``/``loo``; < 1.0 for
-            ``train_test_split`` — the limitation is documented in the log).
+        oof_coverage_ (float | None): Fraction of OOF cells covered over the
+            concatenation of all repeats (1.0 for ``k_fold``/``loo``; < 1.0
+            for ``train_test_split`` — the limitation is documented in the
+            log). Per-repeat scores and their spread are exposed by
+            ``repeat_scores_``/``score_mean``/``score_median``/``score_std``
+            and ``oof_repeat_scores_``/``oof_score_std_``.
         additional_scores (dict[str, float]): Values of the additional metrics
             computed using the same validation method as the primary metric
             (fold mean for additive metrics, the pooled OOF value for
@@ -258,6 +263,8 @@ class ModelTrainer:
         warn_id_like: bool = True,
         target_transform: TargetTransform | str = TargetTransform.none,
         target_transform_skew_threshold: float | None = None,
+        n_repeats: int = 1,
+        split_aggregation: str = "median",
         _allow_auto_target_transform: bool = False,
     ):
         """Initialize the trainer with model parameters and preprocessing
@@ -306,6 +313,14 @@ class ModelTrainer:
             target_transform_skew_threshold: The ``|skew(y)|`` threshold of
                 the ``'auto'`` decision (``None`` — the module default;
                 must be strictly positive). Only used with ``'auto'``.
+            n_repeats: Number of repeated validation splits (>= 1). With
+                ``n_repeats > 1`` the base validation strategy is re-drawn
+                with the deterministic seeds ``random_state + r`` and the
+                per-repeat estimates are combined by ``split_aggregation``;
+                ``1`` (default) keeps the classic single-split behavior.
+            split_aggregation: How the per-repeat estimates are combined:
+                ``'median'`` (default, robust to one degenerate repeat) or
+                ``'mean'``. Used only when ``n_repeats > 1``.
             _allow_auto_target_transform: Engine-internal: enables the
                 ``'auto'`` placeholder above (direct callers keep the strict
                 contract).
@@ -354,6 +369,8 @@ class ModelTrainer:
             warn_id_like=warn_id_like,
             target_transform=target_transform,
             target_transform_skew_threshold=target_transform_skew_threshold,
+            n_repeats=n_repeats,
+            split_aggregation=split_aggregation,
             allow_auto_target_transform=_allow_auto_target_transform,
         )
         register_custom_metrics(self.settings.custom_metrics)
@@ -474,31 +491,6 @@ class ModelTrainer:
     def dropped_features_(self) -> list[str]:
         """The columns removed as uninformative in the last fit()."""
         return [] if self._features is None else self._features.dropped_features
-
-    @property
-    def val_score(self) -> float | None:
-        """The primary metric on held-out data (``None`` before fit())."""
-        return None if self._scores is None else self._scores.val_score
-
-    @property
-    def additional_scores(self) -> dict[str, float]:
-        """The additional metrics on held-out data (empty before fit())."""
-        return {} if self._scores is None else self._scores.additional_scores
-
-    @property
-    def oof_predictions_(self) -> pd.Series | np.ndarray | None:
-        """The out-of-fold prediction vector (``None`` before fit())."""
-        return None if self._scores is None else self._scores.oof_predictions
-
-    @property
-    def oof_score_(self) -> float | None:
-        """``RMSE_oof`` over the OOF vector (``None`` when impossible)."""
-        return None if self._scores is None else self._scores.oof_score
-
-    @property
-    def oof_coverage_(self) -> float | None:
-        """The fraction of rows covered by OOF predictions."""
-        return None if self._scores is None else self._scores.oof_coverage
 
     @property
     def feature_selection_active_(self) -> bool:
@@ -760,6 +752,8 @@ class ModelTrainer:
                 test_size=settings.test_size,
                 random_state=settings.random_state,
                 algorithm=settings.algorithm,
+                n_repeats=settings.n_repeats,
+                split_aggregation=settings.split_aggregation,
             )
 
             # Final training on the full data (the artifact): the

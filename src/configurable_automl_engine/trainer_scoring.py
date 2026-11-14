@@ -1,19 +1,17 @@
 """Validation scoring of the single-model trainer.
 
-``score_on_validation_splits`` scores the trainer pipeline on the same
-splits HPO uses (``validation.iter_splits``), aggregates the primary and the
-additional metrics (fold mean or pooled OOF value), and builds the
-out-of-fold prediction vector with ``RMSE_oof`` (``_finalize_oof`` /
-``_align_oof_vector``). The functions are pure: the fold pipelines come from
-a ``make_steps`` callable passed in, and the result is returned as
-``ValidationScores``. The module must not import
-``configurable_automl_engine.trainer``.
+``score_on_validation_splits`` uses the same splits as HPO, aggregates the
+metrics, builds the OOF vector and combines repeated splits by the configured
+policy. Pure functions take pipelines from ``make_steps`` and return
+``ValidationScores``; the module must not import the trainer.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from itertools import chain, groupby
 from typing import Any, cast
 
 import numpy as np
@@ -33,7 +31,12 @@ from configurable_automl_engine.common.metrics import (
     to_user_value,
     warn_pooled_fallback_once,
 )
-from configurable_automl_engine.validation import iter_splits, make_cv
+from configurable_automl_engine.validation import (
+    aggregate_split_scores,
+    iter_splits,
+    make_cv,
+    repeat_index_of,
+)
 
 from .trainer_state import ValidationScores
 
@@ -42,6 +45,26 @@ from .trainer_state import ValidationScores
 StepsFactory = Callable[[bool, Any], list[tuple[str, Any]]]
 
 _LOG = logging.getLogger(__name__)
+
+
+#: The worst possible ``RMSE_oof`` of a repeat. A repeat whose OOF channel
+#: contains non-finite predictions is excluded from the aggregate by the
+#: finite-value filter of ``aggregate_split_scores`` (an RMSE is a "lower is
+#: better" error, so +inf is its worst outcome).
+_WORST_OOF_SCORE = float("inf")
+
+
+@dataclass(frozen=True)
+class _RepeatScoring:
+    """The fold metrics and OOF buffers of one repeated validation split."""
+
+    fold_raw: list[float]
+    add_raw: dict[str, list[float]]
+    oof_pred: np.ndarray
+    oof_y: np.ndarray
+    fold_errors: list[str]
+    oof_failed: bool
+    repeat_index: int
 
 
 def score_on_validation_splits(
@@ -57,41 +80,51 @@ def score_on_validation_splits(
     test_size: float,
     random_state: int | None,
     algorithm: str,
+    n_repeats: int | None = None,
+    split_aggregation: str = "median",
 ) -> ValidationScores:
     """Evaluate model quality on held-out data.
 
     A single mechanism shared with HPO: splits are built via
     ``validation.iter_splits`` (the same factory used by ``tuner.optimize``),
     so ``val_score``/``additional_scores`` match the estimate used to
-    compare models, up to sign correction.
+    compare models, up to sign correction. With ``n_repeats = R > 1`` the
+    base strategy is re-drawn R times with the deterministic repeat seeds;
+    the per-repeat estimates are combined by ``split_aggregation`` (median
+    by default, mean on request).
 
     How it works:
     1. On each fold a fresh pipeline is assembled by ``make_steps`` and
        trained on the fold's train part.
     2. Raw values of the primary metric and all additional metrics are
        computed on the fold's validation part.
-    3. ``val_score = to_user_value(metric, mean(raw))`` —
-       ``additional_scores[m] = to_user_value(m, mean(raw_m))`` — for
-       additive metrics; for non-additive metrics the value is the pooled
-       estimate over the OOF vector (each row enters the calculation
-       exactly once).
+    3. ``val_score = to_user_value(metric, aggregate(raw))`` —
+       ``additional_scores[m]`` is aggregated the same way. Additive metrics
+       use the fold mean; non-additive metrics use the pooled estimate over
+       the repeat's OOF vector (each row enters the calculation exactly
+       once). The per-repeat values are then combined by
+       ``split_aggregation``.
     4. In parallel, an OOF channel is collected: predictions from the
        validation parts of the folds are accumulated into a single
        ``y_pred_oof`` vector aligned to the original row order (see
-       ``_finalize_oof``).
+       ``_finalize_oof``). ``oof_score`` is the median (or mean) of the
+       per-repeat ``RMSE_oof`` values.
 
     A failure of a single additional metric (scorer error/None on a fold) →
     WARNING + the metric is skipped; failure of all folds of the primary
-    metric → ``TrainingError`` (fail-fast, before final training).
-    Non-finite fold scores (e.g., inf for NRMSE on a constant target) are
-    returned as is. A fold whose predictions contain a non-finite value
-    (NaN/Inf) is not collected into the OOF channel — the validation rows are
-    rows the model was REQUIRED to predict, so such a prediction is a quality
-    defect of the model, not a coverage gap: the fold's rows cannot enter the
-    pooled estimate and the coverage is reduced (WARNING), the values are
-    never replaced with zeros. An OOF collection failure on a single fold
-    does not crash the validation scoring: it only reduces the coverage of
-    the OOF vector (WARNING).
+    metric in every repeat → ``TrainingError`` (fail-fast, before final
+    training). Non-finite fold scores (e.g., inf for NRMSE on a constant
+    target) are returned as is for a single repeat. A fold whose predictions
+    contain a non-finite value (NaN/Inf) is not collected into the OOF
+    channel — the validation rows are rows the model was REQUIRED to
+    predict, so such a prediction is a quality defect of the model, not a
+    coverage gap: the fold's rows cannot enter the pooled estimate and the
+    coverage is reduced (WARNING), the values are never replaced with zeros.
+    With ``n_repeats > 1`` such a repeat is excluded from all aggregates
+    (primary NaN, ``RMSE_oof`` inf); the remaining repeats still contribute.
+    An OOF collection failure on a single fold does not crash the validation
+    scoring: it invalidates the whole repeat and reduces the concatenated
+    coverage (WARNING).
 
     Note (strategy interface): building the OOF channel does not depend on
     a particular strategy — only the positional ``test_idx`` provided by
@@ -112,16 +145,24 @@ def score_on_validation_splits(
         n_folds: The number of folds of ``k_fold``.
         test_size: The hold-out size of ``train_test_split``.
         random_state: The seed of the splits (``None`` — the fixed fallback
-            seed 42).
+            seed 42). Repeat r uses ``random_state + r``.
         algorithm: The algorithm name (fallback WARNING deduplication).
+        n_repeats: The number of repeated validation splits (``None`` → 1).
+            The effective count is resolved by ``iter_splits`` (LOO repeats
+            are ignored with a WARNING).
+        split_aggregation: How the per-repeat values are combined: 'median'
+            (default) or 'mean'. Used only when more than one repeat is
+            produced.
 
     Returns:
         ValidationScores: ``val_score``, the additional scores and the OOF
-            channel.
+            channel. With more than one repeat, also the per-repeat vectors
+            and the mean/median/std summary.
 
     Raises:
         TrainingError: If no fold produced a valid score for the primary
-            metric, or on a critical split-initialization error.
+            metric in any repeat, or on a critical split-initialization
+            error.
     """
     # Deterministic splits: with random_state=None (non-fixed main
     # training) the validation splits must still be reproducible (a fixed
@@ -131,24 +172,23 @@ def score_on_validation_splits(
 
     scorer, add_scorers = _build_validation_scorers(metric, additional_metrics, y)
 
-    # Materialize the splits before the fold loop: validation initialization
-    # errors (insufficient data, unknown method, etc.) must abort training
-    # immediately rather than being masked as a "failed fold".
-    # include_indices=True: the splits additionally provide positional
-    # indices of the validation rows for building an OOF vector aligned to
-    # the original order.
+    # Pull the first split eagerly so validation initialization errors
+    # (insufficient data, unknown method, etc.) abort training immediately
+    # instead of being masked as a "failed fold". The remaining groups are
+    # streamed one repeat at a time. include_indices=True provides the
+    # positional validation-row indices for the aligned OOF vector.
     try:
-        splits = list(
-            iter_splits(
-                X,
-                y,
-                method=method,
-                n_folds=n_folds,
-                test_size=test_size,
-                random_state=splits_seed,
-                include_indices=True,
-            )
+        split_iterator = iter_splits(
+            X,
+            y,
+            method=method,
+            n_folds=n_folds,
+            test_size=test_size,
+            random_state=splits_seed,
+            include_indices=True,
+            n_repeats=n_repeats,
         )
+        first_split = next(split_iterator, None)
     except Exception as err:  # noqa: BLE001
         raise TrainingError(f"Error calculating metrics on validation: {err}")
 
@@ -162,6 +202,89 @@ def score_on_validation_splits(
         random_state=splits_seed,
     )
 
+    pool_primary = is_non_additive_metric(metric)
+    pool_additive = {mname: is_non_additive_metric(mname) for mname in add_scorers}
+
+    outcomes: list[_RepeatScoring] = []
+    if first_split is not None:
+        try:
+            repeat_groups = groupby(
+                chain((first_split,), split_iterator), key=repeat_index_of
+            )
+            for repeat_index, repeat_splits in repeat_groups:
+                outcomes.append(
+                    _score_repeat(
+                        list(repeat_splits),
+                        repeat_index,
+                        n_samples,
+                        make_steps,
+                        feature_selection_active=feature_selection_active,
+                        scorer=scorer,
+                        add_scorers=add_scorers,
+                        pool_primary=pool_primary,
+                        pool_additive=pool_additive,
+                    )
+                )
+        except TrainingError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            raise TrainingError(f"Error calculating metrics on validation: {err}")
+
+    if len(outcomes) <= 1:
+        outcome = outcomes[0] if outcomes else _empty_repeat_outcome(n_samples)
+        return _single_repeat_scores(
+            outcome,
+            X,
+            n_samples,
+            method=effective_method,
+            metric=metric,
+            scorer=scorer,
+            add_scorers=add_scorers,
+            pool_primary=pool_primary,
+            pool_additive=pool_additive,
+            algorithm=algorithm,
+        )
+    return _multi_repeat_scores(
+        outcomes,
+        X,
+        n_samples,
+        method=effective_method,
+        metric=metric,
+        scorer=scorer,
+        add_scorers=add_scorers,
+        pool_primary=pool_primary,
+        pool_additive=pool_additive,
+        algorithm=algorithm,
+        split_aggregation=split_aggregation,
+    )
+
+
+def _empty_repeat_outcome(n_samples: int) -> _RepeatScoring:
+    """Build an empty outcome for a split generator that produced nothing."""
+    return _RepeatScoring(
+        fold_raw=[],
+        add_raw={},
+        oof_pred=np.full(n_samples, np.nan, dtype=float),
+        oof_y=np.full(n_samples, np.nan, dtype=float),
+        fold_errors=[],
+        oof_failed=False,
+        repeat_index=0,
+    )
+
+
+def _score_repeat(
+    splits: list[Any],
+    repeat_index: int,
+    n_samples: int,
+    make_steps: StepsFactory,
+    *,
+    feature_selection_active: bool,
+    scorer: Callable[..., Any],
+    add_scorers: dict[str, Callable[..., Any]],
+    pool_primary: bool,
+    pool_additive: dict[str, bool],
+) -> _RepeatScoring:
+    """Score all folds of one repeated split (a pure collection step)."""
     fold_raw: list[float] = []
     add_raw: dict[str, list[float]] = {m: [] for m in add_scorers}
     fold_errors: list[str] = []
@@ -171,12 +294,7 @@ def score_on_validation_splits(
     # metrics, val_score/additional_scores).
     oof_pred_buffer = np.full(n_samples, np.nan, dtype=float)
     oof_y_buffer = np.full(n_samples, np.nan, dtype=float)
-    # Whether the primary/additional metric is non-additive and therefore
-    # must be computed over the pooled OOF vector rather than averaged by
-    # folds (RMSE, MSE, R², nRMSE). MAE and similar per-sample means stay
-    # on the fold-average path (their fold mean equals the pooled value).
-    pool_primary = is_non_additive_metric(metric)
-    pool_additive = {mname: is_non_additive_metric(mname) for mname in add_scorers}
+    oof_failed = False
     for X_tr, X_te, y_tr, y_te, test_idx in splits:
         try:
             # A fresh pipeline per fold: clones of preprocessor/base_model
@@ -207,15 +325,45 @@ def score_on_validation_splits(
             _score_additional_metrics_on_fold(
                 fold_pipe, X_te, y_te, add_scorers, pool_additive, add_raw
             )
-            _collect_fold_oof(
+            if not _collect_fold_oof(
                 fold_pipe, X_te, y_te, test_idx, oof_pred_buffer, oof_y_buffer
-            )
+            ):
+                oof_failed = True
         except Exception as err:  # noqa: BLE001
             fold_errors.append(str(err))
+    return _RepeatScoring(
+        fold_raw=fold_raw,
+        add_raw=add_raw,
+        oof_pred=oof_pred_buffer,
+        oof_y=oof_y_buffer,
+        fold_errors=fold_errors,
+        oof_failed=oof_failed,
+        repeat_index=repeat_index,
+    )
 
-    if not fold_raw:
-        detail = "; ".join(dict.fromkeys(fold_errors)) or "unknown failure"
-        raise TrainingError(f"Validation scoring failed for all folds: {detail}")
+
+def _raise_all_folds_failed(outcome: _RepeatScoring) -> None:
+    """Raise the primary-metric failure with the unique fold errors."""
+    detail = "; ".join(dict.fromkeys(outcome.fold_errors)) or "unknown failure"
+    raise TrainingError(f"Validation scoring failed for all folds: {detail}")
+
+
+def _single_repeat_scores(
+    outcome: _RepeatScoring,
+    X: Any,
+    n_samples: int,
+    *,
+    method: str,
+    metric: str,
+    scorer: Callable[..., Any],
+    add_scorers: dict[str, Callable[..., Any]],
+    pool_primary: bool,
+    pool_additive: dict[str, bool],
+    algorithm: str,
+) -> ValidationScores:
+    """Build the single-split result (exactly the classic behavior)."""
+    if not outcome.fold_raw:
+        _raise_all_folds_failed(outcome)
 
     # Non-additive metrics (RMSE, MSE, R², nRMSE, RMSLE, D²,
     # explained_variance, max error, median absolute error) are computed
@@ -232,10 +380,10 @@ def score_on_validation_splits(
     # check above (no fold produced a valid score).
     raw_mean = _aggregate_raw_values(
         scorer,
-        fold_raw,
+        outcome.fold_raw,
         pooled=pool_primary,
-        oof_y=oof_y_buffer,
-        oof_pred=oof_pred_buffer,
+        oof_y=outcome.oof_y,
+        oof_pred=outcome.oof_pred,
         algorithm=algorithm,
         phase_name=f"final_fit:{metric}",
         failure_reason="the pooled value over the OOF buffer cannot be "
@@ -255,7 +403,7 @@ def score_on_validation_splits(
     )
 
     additional_scores: dict[str, float] = {}
-    for mname, raw_values in add_raw.items():
+    for mname, raw_values in outcome.add_raw.items():
         if not raw_values:
             # All folds failed for this metric — it was already skipped with a WARNING.
             continue
@@ -263,8 +411,8 @@ def score_on_validation_splits(
             add_scorers[mname],
             raw_values,
             pooled=pool_additive[mname],
-            oof_y=oof_y_buffer,
-            oof_pred=oof_pred_buffer,
+            oof_y=outcome.oof_y,
+            oof_pred=outcome.oof_pred,
             algorithm=algorithm,
             phase_name=f"final_fit:{mname}",
             failure_reason=f"the pooled value for additional metric "
@@ -279,11 +427,11 @@ def score_on_validation_splits(
     # OOF channel: RMSE_oof on the whole vector, warnings about
     # coverage/small N, and alignment of y_pred_oof to the original row order.
     oof_predictions, oof_score, oof_coverage = _finalize_oof(
-        oof_pred_buffer,
-        oof_y_buffer,
+        outcome.oof_pred,
+        outcome.oof_y,
         X,
         n_samples,
-        method=effective_method,
+        method=method,
     )
     return ValidationScores(
         val_score=val_score,
@@ -291,6 +439,242 @@ def score_on_validation_splits(
         oof_predictions=oof_predictions,
         oof_score=oof_score,
         oof_coverage=oof_coverage,
+    )
+
+
+def _multi_repeat_scores(
+    outcomes: list[_RepeatScoring],
+    X: Any,
+    n_samples: int,
+    *,
+    method: str,
+    metric: str,
+    scorer: Callable[..., Any],
+    add_scorers: dict[str, Callable[..., Any]],
+    pool_primary: bool,
+    pool_additive: dict[str, bool],
+    algorithm: str,
+    split_aggregation: str,
+) -> ValidationScores:
+    """Aggregate the per-repeat estimates and OOF vectors."""
+    if not any(outcome.fold_raw for outcome in outcomes):
+        detail = (
+            "; ".join(
+                dict.fromkeys(
+                    error for outcome in outcomes for error in outcome.fold_errors
+                )
+            )
+            or "unknown failure"
+        )
+        raise TrainingError(f"Validation scoring failed for all folds: {detail}")
+
+    repeat_scores: list[float] = []
+    add_repeat: dict[str, list[float]] = {m: [] for m in add_scorers}
+    oof_repeat_scores: list[float] = []
+    oof_vectors: list[pd.Series | np.ndarray] = []
+    n_valid_pairs = 0
+
+    for outcome in outcomes:
+        if not outcome.fold_raw:
+            _LOG.warning(
+                "Repeat %d failed: no fold produced a valid score for the "
+                "primary metric; the repeat is excluded from the aggregate.",
+                outcome.repeat_index,
+            )
+        elif outcome.oof_failed:
+            _LOG.warning(
+                "Repeat %d has non-finite OOF predictions on a fold: the "
+                "whole repeat gets the worst score and is excluded from the "
+                "primary, additional and OOF aggregates.",
+                outcome.repeat_index,
+            )
+        if not outcome.fold_raw or outcome.oof_failed:
+            repeat_scores.append(float("nan"))
+            for mname in add_scorers:
+                add_repeat[mname].append(float("nan"))
+            oof_repeat_scores.append(_WORST_OOF_SCORE)
+            oof_vectors.append(_align_oof_vector(outcome.oof_pred, X))
+            n_valid_pairs += int(
+                (np.isfinite(outcome.oof_pred) & np.isfinite(outcome.oof_y)).sum()
+            )
+            continue
+
+        raw_mean = _aggregate_raw_values(
+            scorer,
+            outcome.fold_raw,
+            pooled=pool_primary,
+            oof_y=outcome.oof_y,
+            oof_pred=outcome.oof_pred,
+            algorithm=algorithm,
+            phase_name=f"final_fit:{metric}",
+            failure_reason="the pooled value over the OOF buffer cannot be "
+            "computed (no raw scorer metric function or no valid "
+            "pairs)",
+            empty_reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
+        )
+        repeat_scores.append(to_user_value(metric, raw_mean))
+
+        for mname, raw_values in outcome.add_raw.items():
+            if not raw_values:
+                add_repeat[mname].append(float("nan"))
+                continue
+            raw_values_agg = _aggregate_raw_values(
+                add_scorers[mname],
+                raw_values,
+                pooled=pool_additive[mname],
+                oof_y=outcome.oof_y,
+                oof_pred=outcome.oof_pred,
+                algorithm=algorithm,
+                phase_name=f"final_fit:{mname}",
+                failure_reason=f"the pooled value for additional metric "
+                f"'{mname}' cannot be computed (no raw scorer metric "
+                f"function or no valid pairs)",
+                empty_reason=f"the OOF buffer contains no finite "
+                f"(y_true, y_pred) pairs for additional metric "
+                f"'{mname}'",
+            )
+            add_repeat[mname].append(to_user_value(mname, raw_values_agg))
+
+        vector, repeat_oof_score, _coverage = _finalize_oof(
+            outcome.oof_pred,
+            outcome.oof_y,
+            X,
+            n_samples,
+            method=method,
+            emit_warnings=False,
+        )
+        oof_vectors.append(vector)
+        n_valid_pairs += int(
+            (np.isfinite(outcome.oof_pred) & np.isfinite(outcome.oof_y)).sum()
+        )
+        if repeat_oof_score is None:
+            _LOG.warning(
+                "Repeat %d produced no computable RMSE_oof; it is excluded "
+                "from the aggregate.",
+                outcome.repeat_index,
+            )
+            oof_repeat_scores.append(_WORST_OOF_SCORE)
+        else:
+            oof_repeat_scores.append(float(repeat_oof_score))
+
+    val_score = aggregate_split_scores(repeat_scores, split_aggregation)
+    finite_repeat_scores = [s for s in repeat_scores if np.isfinite(s)]
+    if finite_repeat_scores:
+        score_mean = float(np.mean(finite_repeat_scores))
+        score_median = float(np.median(finite_repeat_scores))
+        score_std = float(np.std(finite_repeat_scores))
+    else:
+        score_mean = None
+        score_median = None
+        score_std = None
+
+    finite_oof_scores = [s for s in oof_repeat_scores if np.isfinite(s)]
+    if finite_oof_scores:
+        oof_score: float | None = float(
+            aggregate_split_scores(finite_oof_scores, split_aggregation)
+        )
+        oof_score_std: float | None = float(np.std(finite_oof_scores))
+    else:
+        oof_score = None
+        oof_score_std = None
+    finite_indices = [
+        i for i, value in enumerate(oof_repeat_scores) if np.isfinite(value)
+    ]
+    primary_vector_index = (
+        min(finite_indices, key=lambda i: abs(oof_repeat_scores[i] - oof_score))
+        if oof_score is not None
+        else 0
+    )
+
+    additional_scores: dict[str, float] = {}
+    for mname, values in add_repeat.items():
+        finite_values = [v for v in values if np.isfinite(v)]
+        if not finite_values:
+            continue
+        additional_scores[mname] = float(
+            aggregate_split_scores(values, split_aggregation)
+        )
+
+    total_cells = n_samples * len(outcomes)
+    oof_coverage = float(n_valid_pairs / total_cells) if total_cells > 0 else 0.0
+    _log_multi_repeat_oof(
+        n_valid_pairs,
+        n_samples,
+        len(outcomes),
+        method=method,
+        coverage=oof_coverage,
+        oof_score=oof_score,
+        split_aggregation=split_aggregation,
+    )
+    return ValidationScores(
+        val_score=float(val_score),
+        additional_scores=additional_scores,
+        oof_predictions=oof_vectors[primary_vector_index],
+        oof_score=oof_score,
+        oof_coverage=oof_coverage,
+        repeat_scores=repeat_scores,
+        score_mean=score_mean,
+        score_median=score_median,
+        score_std=score_std,
+        oof_repeat_scores=oof_repeat_scores,
+        oof_score_std=oof_score_std,
+        oof_predictions_by_repeat=oof_vectors,
+    )
+
+
+def _log_multi_repeat_oof(
+    n_valid_pairs: int,
+    n_samples: int,
+    n_repeats: int,
+    *,
+    method: str,
+    coverage: float,
+    oof_score: float | None,
+    split_aggregation: str,
+) -> None:
+    """Emit the aggregated OOF warnings and the summary log line."""
+    total_cells = n_samples * n_repeats
+    if method == "train_test_split":
+        _LOG.warning(
+            "OOF evaluation with 'train_test_split' across %d repeats covers "
+            "only the validation part (%d/%d cells, %.0f%%): rows from the "
+            "training part have no honest out-of-fold prediction, so "
+            "RMSE_oof is estimated on the covered subset only.",
+            n_repeats,
+            n_valid_pairs,
+            total_cells,
+            coverage * 100.0,
+        )
+    if n_samples <= 5:
+        _LOG.warning(
+            "OOF evaluation on very small data (N=%d, repeats=%d): the OOF "
+            "vectors are short and RMSE_oof has high variance.",
+            n_samples,
+            n_repeats,
+        )
+    if n_valid_pairs == 0:
+        _LOG.warning(
+            "RMSE_oof could not be computed: no valid out-of-fold "
+            "prediction/target pairs in any repeat."
+        )
+        return
+    dropped = total_cells - n_valid_pairs
+    if dropped and method != "train_test_split":
+        _LOG.warning(
+            "%d OOF cell(s) excluded from RMSE_oof (non-finite prediction "
+            "or target, or a failed repeat); coverage=%.3f.",
+            dropped,
+            coverage,
+        )
+    _LOG.info(
+        "OOF evaluation across %d repeats: RMSE_oof(%s)=%.4f (min better) "
+        "on %d/%d cells (coverage=%.3f).",
+        n_repeats,
+        split_aggregation,
+        oof_score if oof_score is not None else float("nan"),
+        n_valid_pairs,
+        total_cells,
+        coverage,
     )
 
 
@@ -391,7 +775,7 @@ def _collect_fold_oof(
     test_idx: Any,
     oof_pred_buffer: np.ndarray,
     oof_y_buffer: np.ndarray,
-) -> None:
+) -> bool:
     """Collect the out-of-fold predictions of a validation fold.
 
     OOF channel: a prediction on the validation part of the fold — the model
@@ -408,10 +792,15 @@ def _collect_fold_oof(
     reduced, so the pooled metrics stay consistent with the reported
     coverage.
 
+    Returns:
+        bool: True when the fold was collected (or has no target to collect),
+            False when the OOF channel could not be extended (the caller
+            invalidates the repeat's ``RMSE_oof``).
+
     Raises:
         InvalidPredictionError: When the fold returned at least one
-            non-finite prediction (raised inside the try and logged as a
-            collection failure by the caller of this helper).
+            non-finite prediction (raised inside the try and turned into a
+            ``False`` result by this helper).
     """
     try:
         preds = np.asarray(fold_pipe.predict(X_te)).reshape(-1)
@@ -436,6 +825,8 @@ def _collect_fold_oof(
             "validation fold: %s. RMSE_oof coverage reduced.",
             err,
         )
+        return False
+    return True
 
 
 def _aggregate_raw_values(
@@ -480,6 +871,7 @@ def _finalize_oof(
     n_samples: int,
     *,
     method: str,
+    emit_warnings: bool = True,
 ) -> tuple[pd.Series | np.ndarray, float | None, float]:
     """Finalize the OOF evaluation channel.
 
@@ -500,6 +892,8 @@ def _finalize_oof(
         method: The validation method actually applied (after a possible
             fallback ``k_fold`` → ``train_test_split``), which drives the
             coverage warnings.
+        emit_warnings: Whether to log the coverage/small-N warnings (the
+            multi-repeat path emits them once for the aggregated coverage).
     """
     oof_vector = _align_oof_vector(oof_pred, X)
     valid = np.isfinite(oof_pred) & np.isfinite(oof_y)
@@ -508,7 +902,7 @@ def _finalize_oof(
 
     # train_test_split limitation: OOF covers only the validation part.
     # Explicitly documented in the log.
-    if method == "train_test_split":
+    if emit_warnings and method == "train_test_split":
         _LOG.warning(
             "OOF evaluation with 'train_test_split' covers only the "
             "validation part (%d/%d rows, %.0f%%): rows from the training "
@@ -520,7 +914,7 @@ def _finalize_oof(
         )
 
     # Very small N: the OOF vector is short and the estimate has high variance.
-    if n_samples <= 5:
+    if emit_warnings and n_samples <= 5:
         _LOG.warning(
             "OOF evaluation on very small data (N=%d): the OOF vector is "
             "short and RMSE_oof has high variance.",
@@ -528,10 +922,11 @@ def _finalize_oof(
         )
 
     if n_valid == 0:
-        _LOG.warning(
-            "RMSE_oof could not be computed: no valid out-of-fold "
-            "prediction/target pairs."
-        )
+        if emit_warnings:
+            _LOG.warning(
+                "RMSE_oof could not be computed: no valid out-of-fold "
+                "prediction/target pairs."
+            )
         return oof_vector, None, coverage
 
     dropped = n_samples - n_valid
@@ -542,7 +937,7 @@ def _finalize_oof(
     # NaN/Inf predictions are not collected at all, see
     # ``_collect_fold_oof``) the remaining exclusions come from non-finite
     # targets only.
-    if dropped and method != "train_test_split":
+    if emit_warnings and dropped and method != "train_test_split":
         _LOG.warning(
             "%d row(s) excluded from RMSE_oof (non-finite prediction or "
             "target); coverage=%.3f.",
@@ -555,16 +950,18 @@ def _finalize_oof(
         oof_score = oof_rmse(oof_y, oof_pred)
     except ValueError as err:
         oof_score = None
-        _LOG.warning("RMSE_oof could not be computed: %s", err)
+        if emit_warnings:
+            _LOG.warning("RMSE_oof could not be computed: %s", err)
     # RMSE_oof is a user-facing error value ("min better"): the direction
     # is stated explicitly, and the optimizer flag is not applied.
-    _LOG.info(
-        "OOF evaluation: RMSE_oof=%.4f (min better) on %d/%d rows (coverage=%.3f).",
-        oof_score if oof_score is not None else float("nan"),
-        n_valid,
-        n_samples,
-        coverage,
-    )
+    if emit_warnings:
+        _LOG.info(
+            "OOF evaluation: RMSE_oof=%.4f (min better) on %d/%d rows (coverage=%.3f).",
+            oof_score if oof_score is not None else float("nan"),
+            n_valid,
+            n_samples,
+            coverage,
+        )
     return oof_vector, oof_score, coverage
 
 

@@ -1344,8 +1344,10 @@ the N), and on small data the bias can be large. `oof_score` is computed on
 the **same** folds that were used to choose the algorithm and its parameters,
 so it carries the same bias: on `k_fold`/`loo` without a hold-out it equals
 `score` for pooled metrics (RMSE, R², …) and differs only slightly for
-additive ones (MAE). Use it as a diagnostic (for example residual analysis on
-`oof_predictions_`), not as a quality estimate. With `train_test_split` only
+additive ones (MAE). With `n_repeats > 1` it uses the configured
+`split_aggregation` over the per-repeat OOF values. Use it as a diagnostic
+(for example residual analysis on `oof_predictions_`), not as a quality
+estimate. With `train_test_split` only
 the validation rows have OOF predictions. The honest estimate is
 `holdout_score` or, without a hold-out, `bbc_score`.
 
@@ -1543,6 +1545,8 @@ Constructor parameters that have a counterpart in the `general` config section h
 | `validation_strategy` | `str` or `ValidationStrategy` | `"auto"` | Validation strategy for the final model quality estimate, same default as `general.validation_strategy`: `"auto"`, `"train_test_split"` (one hold-out split), `"k_fold"` (CV fold mean) or `"loo"`. The engine path always passes the already-resolved strategy. |
 | `n_folds` | `int` | `5` | Number of folds for `"k_fold"` (`>= 2`). |
 | `test_size` | `float` or `int` | `0.2` | Hold-out size: a fraction in `(0, 1)` or an integer number of rows (like sklearn `train_test_split`). |
+| `n_repeats` | `int` | `1` | Number of repeated validation splits (`>= 1`), same as `general.n_repeats`: with `R > 1` the base strategy is re-drawn with the deterministic seeds `random_state + r`; `1` keeps the classic single-split estimate. |
+| `split_aggregation` | `str` | `"median"` | How the per-repeat estimates are combined: `"median"` (robust to one degenerate repeat) or `"mean"`. Used only when `n_repeats > 1`. |
 | `preprocessing_override` | `dict` or `PreprocessingOverride` or `None` | `None` | Explicit override of the preprocessing preset. Partial or full overrides are supported; takes priority over the automatic class-based selection. Supported fields: `imputation_strategy`, `scaling`, `outliers` (a string shorthand or an object, same forms as in the config `preprocessing` block). |
 | `high_cardinality_threshold` | `int` or `None` | `50` | Cardinality threshold for the automatic high-cardinality mode (`>= 0`). Columns with more unique values than the threshold are encoded with `high_cardinality_encoding` (default `"frequency"`); the rest use `encoding_strategy`. The mode is on by default, as in the engine config; set both parameters to `None` to disable it. |
 | `high_cardinality_encoding` | `str` or `None` | `"frequency"` | Encoding strategy for high-cardinality columns (`"one_hot"`, `"ordinal"`, `"target"`, `"frequency"` or `"hashing"`). Must be set together with `high_cardinality_threshold`. |
@@ -1573,8 +1577,11 @@ Constructor parameters that have a counterpart in the `general` config section h
 **Attributes after `fit()`:**
 
 * `datetime_expansion_` — `dict[str, list[str]]`: source datetime/timedelta column → generated component columns; re-applied by `predict` (empty when nothing was expanded).
-* `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE and their `neg_` aliases). It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
-* `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set).
+* `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE and their `neg_` aliases). With `n_repeats > 1` the per-repeat estimates are combined by `split_aggregation`. It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
+* `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set); with `n_repeats > 1` they are aggregated by the same policy.
+* `oof_score_` / `oof_predictions_` / `oof_coverage_` — the out-of-fold channel: with `n_repeats > 1` `oof_score_` is the median (or mean) of the per-repeat `RMSE_oof`, `oof_coverage_` is computed over the concatenation of all repeat vectors, `oof_predictions_` is the vector of the repeat whose `RMSE_oof` is closest to the aggregate (the representative repeat for the Sanity Gate), and `oof_predictions_by_repeat_` holds every repeat's vector in memory as a diagnostic (peak memory therefore grows as O(R × N) while the vectors are retained; they are not persisted in the artifact, which keeps the scalar per-repeat statistics).
+* `repeat_scores_` / `score_mean` / `score_median` / `score_std` — the per-repeat primary-metric values and their summary (`None` when `n_repeats = 1`).
+* `oof_repeat_scores_` / `oof_score_std_` — the per-repeat `RMSE_oof` values and their standard deviation (`None` when `n_repeats = 1`). A repeat with non-finite predictions on a fold is invalidated as a whole: its primary/additional per-repeat values are NaN and its `RMSE_oof` is the worst-score sentinel `inf`, so the repeat is excluded from every aggregate.
 
 ### Categorical encoding
 

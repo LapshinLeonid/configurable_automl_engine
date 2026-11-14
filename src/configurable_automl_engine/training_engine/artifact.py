@@ -37,6 +37,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     Config,
     ValidationStrategy,
 )
+from configurable_automl_engine.validation import aggregate_split_scores
 
 from .data_prep import _register_datetime_expansion
 from .hpo_phases import _algorithms_as_dict
@@ -60,6 +61,7 @@ def _build_trainer(
     test_size: float = 0.2,
     random_state: int | None = None,
     target_transform: TargetTransform = TargetTransform.none,
+    repeat_scoring: bool = True,
 ) -> ModelTrainer:
     """Construct a ``ModelTrainer`` for an algorithm from its configuration.
 
@@ -92,7 +94,9 @@ def _build_trainer(
             forwarded into the trainer settings, so the fold-local ``auto``
             resolution inside the trainer uses the same threshold as the
             HPO trials.
-
+        repeat_scoring: Whether to run the repeated validation scoring of
+            ``general.n_repeats``. The hold-out trainer discards its
+            validation scores, so it passes ``False`` and uses one split.
 
     Raises:
         ValueError: If ``best_params`` is ``None`` (a signal of a complete HPO
@@ -119,6 +123,8 @@ def _build_trainer(
     trainer_params.pop("isotonic_feature", None)
 
     general = cfg.general
+    n_repeats = general.n_repeats if repeat_scoring else 1
+    split_aggregation = general.split_aggregation if repeat_scoring else "median"
     oversampling = cfg.oversampling
     return ModelTrainer(
         algorithm=algo_name,
@@ -154,6 +160,8 @@ def _build_trainer(
         validation_strategy=validation_strategy,
         n_folds=n_folds,
         test_size=test_size,
+        n_repeats=n_repeats,
+        split_aggregation=split_aggregation,
         # The final fit treats the data exactly as the pipeline entry
         # point: prepare_dataset has already applied the policies, so
         # re-validation is a no-op; the ID-like WARNING is suppressed
@@ -243,86 +251,108 @@ def _fit_and_save(
     return trainer
 
 
+def _pooled_raw_oof_metric(
+    scorer: Any, oof_true: np.ndarray, oof_pred: Any
+) -> float | None:
+    """Return the pooled raw scorer value on one OOF vector, if possible."""
+    try:
+        oof_pred_arr = np.asarray(oof_pred, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if oof_true.shape != oof_pred_arr.shape:
+        return None
+    mask = np.isfinite(oof_true) & np.isfinite(oof_pred_arr)
+    if not np.any(mask):
+        return None
+    try:
+        return float(pooled_scorer_value(scorer, oof_true[mask], oof_pred_arr[mask]))
+    except (ValueError, TypeError):
+        return None
+
+
 def _oof_score_in_user_metric(
     metric_user: str,
     trainer: Any,
     y: pd.Series,
 ) -> float | None:
-    """Compute the comparison metric on the final pipeline's OOF vector.
+    """Compute the comparison metric on the final pipeline's OOF channel.
 
-    The OOF vector is built on the same splits that HPO used to select the
+    The OOF channel is built on the same splits that HPO used to select the
     winner and its hyperparameters, so the value carries the same best-of-N
     selection bias as ``result["score"]`` (on ``k_fold``/``loo`` without an
     outer hold-out it equals the best-trial score for pooled metrics). It is
     a diagnostic, not an independent estimate of generalization: the honest
     estimate is ``result["holdout_score"]``.
 
-    The comparison metric is recomputed on the final pipeline's pooled OOF
-    predictions (``trainer.oof_predictions_``) against the true target —
-    the same values the trainer's OOF channel uses, expressed in the
-    comparison metric semantics. The raw scorer value over the aligned
-    vector is obtained via ``metrics.pooled_scorer_value`` (the same masking
-    contract as the trainer's OOF channel: rows a model was required to
-    predict but returned NaN/Inf for were already rejected at collection
-    time by the trainer's OOF channel, so the remaining masking covers only
-    the not-covered rows of ``train_test_split``) and converted to user
-    semantics (``to_user_value``) — so error metrics are
-    reported positive and score metrics (R² and similar) keep their natural
-    direction.
+    For the RMSE family the trainer already stores the aggregate over
+    repeats (median or mean by ``split_aggregation``), so it is used
+    directly. Other metrics are recomputed on every per-repeat OOF vector and
+    combined by the same policy. A trainer without per-repeat vectors (for
+    example an older saved artifact) falls back to its representative
+    ``oof_predictions_`` vector.
 
     Args:
         metric_user: The user-facing comparison metric name.
         trainer: The trained ``ModelTrainer`` (OOF attributes populated).
         y: The full target vector (for the OOF rows alignment).
     """
-    oof_pred = getattr(trainer, "oof_predictions_", None)
-    if oof_pred is None:
+    is_rmse = to_sklearn_name(metric_user) == "neg_root_mean_squared_error"
+    oof_aggregate = getattr(trainer, "oof_score_", None)
+    if is_rmse:
+        if oof_aggregate is None or not np.isfinite(oof_aggregate):
+            return None
+        return to_user_value(metric_user, -float(oof_aggregate))
+
+    oof_repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
+    if isinstance(oof_repeat_scores, (list, tuple)) and not any(
+        np.isfinite(value) for value in oof_repeat_scores
+    ):
         return None
+    repeat_vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
+    if isinstance(repeat_vectors, (list, tuple)) and len(repeat_vectors) > 1:
+        vectors: list[Any] = list(repeat_vectors)
+        if isinstance(oof_repeat_scores, (list, tuple)) and len(
+            oof_repeat_scores
+        ) == len(vectors):
+            vectors = [
+                vector
+                for vector, repeat_score in zip(vectors, oof_repeat_scores, strict=True)
+                if np.isfinite(repeat_score)
+            ]
+    else:
+        single_vector = getattr(trainer, "oof_predictions_", None)
+        if single_vector is None:
+            return None
+        vectors = [single_vector]
+
     try:
         oof_true = np.asarray(y, dtype=float).reshape(-1)
-        oof_pred_arr = np.asarray(oof_pred, dtype=float).reshape(-1)
-    except (TypeError, ValueError):
-        # The OOF vector is not array-convertible (e.g. a mocked trainer
-        # without a real fit): the estimate is unavailable.
-        return None
-    if oof_true.shape != oof_pred_arr.shape:
-        # A shape mismatch (e.g. a mocked vector) means no aligned pairs.
-        return None
-    mask = np.isfinite(oof_true) & np.isfinite(oof_pred_arr)
-    if not np.any(mask):
-        return None
-    try:
         scorer = get_scorer_object(
             metric_user, global_y=np.asarray(y, dtype=float).reshape(-1)
         )
-    except Exception as err:  # noqa: BLE001 — an unknown metric must not crash the report
+    except Exception as err:  # noqa: BLE001 — a bad metric must not crash the report
         _LOG.warning(
             "OOF score could not be computed for metric '%s': %s", metric_user, err
         )
         return None
-    try:
-        raw = pooled_scorer_value(scorer, oof_true[mask], oof_pred_arr[mask])
-    except (ValueError, TypeError):
-        # The pooled value is impossible (the scorer exposes no raw metric
-        # function): fall back to the RMSE_oof value already computed by the
-        # trainer. The fallback is exact ONLY when the comparison metric IS
-        # RMSE (the trainer's OOF channel always computes RMSE_oof); for any
-        # other error metric (MAE, MSE, NRMSE, ...) RMSE_oof is a DIFFERENT
-        # metric, so silently substituting it would mislabel the report — the
-        # key is omitted instead. For score metrics (R² and similar) RMSE_oof
-        # is not an estimate of the score metric either — omitted as well.
-        if metric_user.lower().strip().startswith("neg_"):
-            metric_base = metric_user.lower().strip()[4:]
-        else:
-            metric_base = metric_user.lower().strip()
-        if metric_base != "rmse":
-            return None
-        oof_score = getattr(trainer, "oof_score_", None)
-        if oof_score is None:
-            return None
-        return to_user_value(metric_user, -float(oof_score))
-    if not np.isfinite(raw):
+
+    raw_scores: list[float] = []
+    for vector in vectors:
+        raw = _pooled_raw_oof_metric(scorer, oof_true, vector)
+        if raw is not None and np.isfinite(raw):
+            raw_scores.append(raw)
+    if not raw_scores:
         return None
+    if len(vectors) > 1:
+        raw = float(
+            aggregate_split_scores(
+                raw_scores, getattr(trainer, "split_aggregation", "median")
+            )
+        )
+        if not np.isfinite(raw):
+            return None
+    else:
+        raw = raw_scores[0]
     return to_user_value(metric_user, raw)
 
 
@@ -376,6 +406,7 @@ def _compute_holdout_score(
             test_size=prepared.resolved_test_size,
             random_state=prepared.random_state,
             target_transform=cfg.general.target_transform,
+            repeat_scoring=False,
         )
         # The expansion is registered BEFORE fit: the datetime-derived
         # component columns are excluded from winsorization.
