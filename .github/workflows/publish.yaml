@@ -5,30 +5,178 @@ on:
   release:
     types: [published]
 
-jobs:
-  publish:
-    name: Build and Publish Python Package
-    runs-on: ubuntu-latest
-    
-    # Permissions for secure OIDC authentication (Trusted Publishers)
-    permissions:
-      id-token: write
-      contents: read
+# Publishing the same tag twice must not run concurrently: the second run
+# would upload the same files to PyPI.
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
+jobs:
+  # A release is published only after CI proved the released commit works.
+  # Every CI workflow run registered for the commit must have completed
+  # successfully; a failed, cancelled or skipped run blocks publication.
+  verify-ci:
+    name: Verify CI for the released commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Checkout code
+      - name: Require a green CI workflow on the released commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # CI may be registered for the tag push a moment after the release
+          # event; wait for it. Once registered, the full suite gets an hour.
+          discovery_timeout=300
+          completion_timeout=3600
+          started_at=$SECONDS
+          first_seen_at=""
+
+          while true; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/CI.yaml/runs?head_sha=${COMMIT_SHA}" \
+              --jq '.workflow_runs[] | [.id, .status, (.conclusion // "-"), .html_url] | @tsv')
+
+            if [[ -z "$runs" ]]; then
+              if (( SECONDS - started_at >= discovery_timeout )); then
+                echo "::error::No CI workflow ran for commit ${COMMIT_SHA}; refusing to publish."
+                exit 1
+              fi
+              echo "CI for ${COMMIT_SHA} is not registered yet; waiting..."
+              sleep 15
+              continue
+            fi
+
+            if [[ -z "$first_seen_at" ]]; then
+              first_seen_at=$SECONDS
+            fi
+
+            pending=0
+            failed=0
+            succeeded=0
+            while IFS=$'\t' read -r run_id status conclusion url; do
+              if [[ -z "$run_id" ]]; then
+                continue
+              fi
+              echo "CI run ${run_id}: status=${status} conclusion=${conclusion} ${url}"
+              if [[ "$status" != "completed" ]]; then
+                pending=$((pending + 1))
+              elif [[ "$conclusion" == "success" ]]; then
+                succeeded=$((succeeded + 1))
+              else
+                failed=$((failed + 1))
+              fi
+            done <<< "$runs"
+
+            if (( failed > 0 )); then
+              echo "::error::A CI run for commit ${COMMIT_SHA} did not succeed; refusing to publish."
+              exit 1
+            fi
+
+            if (( pending == 0 )); then
+              if (( succeeded == 0 )); then
+                echo "::error::No successful CI run found for commit ${COMMIT_SHA}; refusing to publish."
+                exit 1
+              fi
+              echo "::notice::CI is green for commit ${COMMIT_SHA} (${succeeded} successful run(s))."
+              exit 0
+            fi
+
+            if (( SECONDS - first_seen_at >= completion_timeout )); then
+              echo "::error::Timed out waiting for CI on commit ${COMMIT_SHA}."
+              exit 1
+            fi
+            echo "${pending} CI run(s) still in progress; waiting..."
+            sleep 20
+          done
+
+  # Build the exact release tag, install the wheel into a clean environment
+  # and exercise the public API. Publishing consumes this tested artifact.
+  build:
+    name: Build and smoke-test the distribution
+    runs-on: ubuntu-latest
+    needs: verify-ci
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          # setuptools-scm derives the version from the tag, so the full
+          # history and tags must be present.
+          fetch-depth: 0
+
+      - name: Confirm the checkout is the released commit
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11"
 
-      - name: Install build tools
-        run: python -m pip install --upgrade build
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          python -m build
+          ls -l dist/
 
-      - name: Build package
-        run: python -m build
+      - name: Smoke-test the installed wheel
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          VENV: ${{ runner.temp }}/wheel-smoke-venv
+          SMOKE_DIR: ${{ runner.temp }}/wheel-smoke
+        run: |
+          set -euo pipefail
+
+          python -m venv "$VENV"
+          "$VENV/bin/python" -m pip install --upgrade pip
+          "$VENV/bin/python" -m pip install dist/*.whl
+          "$VENV/bin/python" -m pip check
+
+          # Run outside the repository so the import resolves to the wheel.
+          mkdir -p "$SMOKE_DIR"
+          cd "$SMOKE_DIR"
+          "$VENV/bin/python" "$GITHUB_WORKSPACE/scripts/smoke_test_wheel.py" \
+            --expected-version "$RELEASE_TAG" \
+            --forbid-source-root "$GITHUB_WORKSPACE"
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish Python Package to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download the tested distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
