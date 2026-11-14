@@ -143,7 +143,8 @@ C1 зафиксировал в `CONTRACTS.md` матрицу публичног�
 
 - движок остаётся на текущем месте;
 - контракт получает отдельный корень `automl-contracts/`;
-- тесты разделяются, но переносятся постепенно;
+- тесты разделяются на `tests/contracts/` и `tests/engine/` механическим
+  переносом в C3 (§5.1);
 - общие файлы (`CONTRACTS.md`, `docs/`, корневой `pyproject.toml`) остаются в
   корне.
 
@@ -741,10 +742,25 @@ errors, definitions, protocols
    внутренний модуль) содержит `validate_runtime_config(cfg)` и runtime-помощники,
    включая бывшие методы `AlgoCfg.get_required_package` и
    `AlgoCfg.get_unknown_hyperparameters`. `validate_runtime_config(cfg)`
-   выполняет полный набор runtime-проверок `Config`: зависимости алгоритмов,
-   совместимость и типы гиперпараметров, а также импорт callable и проверку
-   сигнатуры для `cfg.general.custom_metrics` (через расширенный
-   `validate_custom_metrics` из `common.metrics`).
+   выполняет полный набор runtime-проверок `Config`, которые сегодня живут в
+   `model_validator`-ах контрактных моделей:
+
+   - зависимости алгоритмов (`_check_algorithm_dependencies`);
+   - совместимость и нормализацию типов гиперпараметров
+     (`_check_hyperparameter_compatibility`,
+     `_normalize_hyperparameter_types`);
+   - импорт callable, проверку сигнатуры и коллизию имён для
+     `cfg.general.custom_metrics` (расширенный `validate_custom_metrics`);
+   - `check_start_method(cfg.general.start_method, cfg.general.parallel_mode)`,
+     включая доступность метода на платформе;
+   - `check_threads_timeouts(...)` — запрет таймаутов в `parallel_mode="threads"`;
+   - `joblib`-часть `check_n_folds`: `serialization_format="joblib"` требует
+     установленного `joblib`.
+
+   Эти проверки остаются в движке по `CONTRACTS.md` §4.3.7 и после C3 не
+   выполняются при прямом создании контрактных моделей, поэтому
+   `validate_runtime_config(cfg)` обязан вызывать их все для каждой
+   конфигурации, проходящей через публичные entry point.
 4. `configurable_automl_engine.training_engine.config/*` становится набором
    тонких модулей-шимов: контрактные имена реэкспортируются из
    `automl_contracts`, engine-only имена остаются в движке. Вторых определений
@@ -859,7 +875,30 @@ errors, definitions, protocols
   и `ModelTrainer`, которые не принимают `Config`, — собственными валидаторами
   аргументов (`validate_custom_metrics`). Прямой конструктор контрактного
   класса может принять некорректный callable, но публичные entry point движка
-  по-прежнему отвергают его до обучения.
+  по-прежнему отвергают его до обучения. Проверка коллизии имён с встроенными
+  и sklearn-метриками (`ERR_CUSTOM_NAME_COLLISION`, `reserved_metric_names()`)
+  остаётся в движке: контрактная `check_custom_metric_names` проверяет только
+  формат имени (`ERR_CUSTOM_NAME_INVALID`), а коллизия проверяется в
+  `validate_runtime_config(cfg)`/`validate_custom_metrics`.
+- `CustomMetricSpec.natural_greater_is_better` в контракт не переносится: это
+  свойство импортирует callable по `path` и разрешает направление
+  sklearn-scorer-а (`resolve_dotted_path`, `scorer_sign`), то есть требует
+  runtime-зависимостей. Вместо него движок предоставляет функцию
+  `natural_greater_is_better(spec)` в `common.custom_metrics` с прежней
+  семантикой: явный `greater_is_better`, иначе знак sklearn-scorer-а, иначе
+  `True`. Поведение движка (`build_custom_scorer`, `is_greater_better`) не
+  меняется; внешний код, читавший свойство у контрактного класса, получает
+  `AttributeError` — изменение относится к 0.x MINOR, фиксируется в
+  `CHANGELOG.md` контракта, а `tests/test_custom_metrics.py` в C3 переводится
+  на функцию.
+- Проверки `check_start_method`, `check_threads_timeouts` и `joblib`-часть
+  `check_n_folds` по `CONTRACTS.md` §4.3.7 остаются в движке. Сегодня они
+  являются `model_validator`-ами `GeneralCfg`, после C3 их вызывает
+  `validate_runtime_config(cfg)`; для `str`/`Path`, `dict` и готового `Config`
+  они выполняются на границе движка ровно один раз. Прямой конструктор
+  контрактной `GeneralCfg` (например, `GeneralCfg.model_validate(dict)`) этих
+  проверок не выполняет — это осознанное изменение, фиксируется в
+  `CHANGELOG.md` и docstring контрактной `GeneralCfg`.
 - `AlgorithmRun` и `ExperimentResult` принимают стандартные числа
   (`int`/`float`, без numpy-скаляров). Нормализация numpy-скаляров выполняется
   движком на границе; прямой конструктор с numpy-скаляром может изменить
@@ -886,8 +925,8 @@ errors, definitions, protocols
   runtime-валидацию через `validate_runtime_config`, то есть по-прежнему
   возвращает конфигурацию с проверенными зависимостями алгоритмов,
   совместимостью гиперпараметров и нормализованными типами диапазонов.
-- Меняется только место runtime-проверок: три бывших `model_validator`-а
-  контрактной `Config` (`_check_algorithm_dependencies`,
+- Меняется только место runtime-проверок `Config`: три бывших
+  `model_validator`-а контрактной `Config` (`_check_algorithm_dependencies`,
   `_check_hyperparameter_compatibility`, `_normalize_hyperparameter_types`)
   в контракт не переносятся. Прямой вызов `Config.model_validate(dict)` или
   конструктора контрактного класса выполняет только структурную валидацию.
@@ -1366,7 +1405,7 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 
 | Модуль контракта | Внутренние символы |
 |---|---|
-| `automl_contracts.config.general_rules` | `check_custom_metric_names`, `check_metric_references`, `deduplicate_additional_metrics`, `exclude_comparison_from_additional`, `check_multi_split`, `check_pruning_consistency`, `validate_phase_pipeline`, `check_high_cardinality_encoding`, структурная часть `check_n_folds`, константы `MULTI_SPLIT_*` |
+| `automl_contracts.config.general_rules` | `check_custom_metric_names` (только формат имени; проверка коллизий — движок), `check_metric_references`, `deduplicate_additional_metrics`, `exclude_comparison_from_additional`, `check_multi_split`, `check_pruning_consistency`, `validate_phase_pipeline`, `check_high_cardinality_encoding`, структурная часть `check_n_folds`, константы `MULTI_SPLIT_*` |
 | `automl_contracts.config.phases` | `_default_phases` |
 | `automl_contracts.config.algorithms` | `AlgorithmsConfigType` |
 | `automl_contracts.preprocessing` | `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers` |
@@ -1389,9 +1428,13 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
   store;
 - runtime-часть `check_n_folds` (проверка `joblib`), `check_start_method`,
   `check_threads_timeouts`;
+- свойство `CustomMetricSpec.natural_greater_is_better` (движок использует
+  функцию `natural_greater_is_better(spec)` из `common.custom_metrics`);
 - `to_sklearn_name` как публичное имя верхнего уровня (только внутренний helper
   контракта и старый engine-путь);
-- `ERR_CUSTOM_NAME_COLLISION` и остальные runtime-коды custom metrics.
+- `ERR_CUSTOM_NAME_COLLISION`, `reserved_metric_names()` и остальные runtime-коды
+  custom metrics; в контрактной `check_custom_metric_names` остаётся только
+  проверка формата имени.
 
 Если C3 обнаружит расхождение с этой таблицей, сначала обновляется
 `CONTRACTS.md` и это ADR, затем реализация. Молчаливое добавление или удаление
