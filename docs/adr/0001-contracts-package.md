@@ -664,9 +664,16 @@ errors, definitions, protocols
   `TYPE_CHECKING`-блоки.
 - Изолированная установка wheel контракта в venv без движка и тяжёлых
   зависимостей доказывает отсутствие скрытых runtime-импортов.
-- В движке `import-linter` дополняется проверкой, что новые engine-модули не
-  импортируют контракт в обратном направлении и не создают второй определения
-  контрактных классов.
+- В движке `lint-imports` продолжает проверять только собственные слои движка
+  из `architecture.md`; правило «контракт не импортирует движок» на стороне
+  движка не дублируется — его обеспечивают конфигурация контракта и AST-тест
+  выше. Импорт `automl_contracts` из engine-модулей разрешён: это целевое
+  направление `engine → contracts` (§9.1).
+- Дубли определений контрактных классов `import-linter` не обнаруживает. Их
+  запрещает §9.4, а проверяют тесты `tests/engine` (идентичность `is` и
+  равенство значений для каждого реэкспорта) и AST-тест движка: engine-модуль
+  не должен объявлять `class`/`Enum`/исключение с именем из контрактного
+  `__all__` вместо реэкспорта.
 
 ### 9.4. Реэкспорты и запрет дублирования
 
@@ -733,7 +740,11 @@ errors, definitions, protocols
 3. `configurable_automl_engine.training_engine.config_runtime` (новый
    внутренний модуль) содержит `validate_runtime_config(cfg)` и runtime-помощники,
    включая бывшие методы `AlgoCfg.get_required_package` и
-   `AlgoCfg.get_unknown_hyperparameters`.
+   `AlgoCfg.get_unknown_hyperparameters`. `validate_runtime_config(cfg)`
+   выполняет полный набор runtime-проверок `Config`: зависимости алгоритмов,
+   совместимость и типы гиперпараметров, а также импорт callable и проверку
+   сигнатуры для `cfg.general.custom_metrics` (через расширенный
+   `validate_custom_metrics` из `common.metrics`).
 4. `configurable_automl_engine.training_engine.config/*` становится набором
    тонких модулей-шимов: контрактные имена реэкспортируются из
    `automl_contracts`, engine-only имена остаются в движке. Вторых определений
@@ -752,11 +763,15 @@ errors, definitions, protocols
      обучением, потому что контрактная `Config` runtime-проверок не содержит.
 
    `optimize` и `ModelTrainer` не принимают `Config`: у них runtime-проверки
-   выполняются в собственной валидации аргументов, а
+   выполняются в собственной валидации аргументов (включая
+   `validate_custom_metrics` для переданных деклараций), а
    `validate_runtime_config(cfg)` к ним не применяется. Структурные ошибки
    возникают при создании контрактной модели, runtime-ошибки конфигурации — в
    `read_config` для файла или при запуске `train_best_model`/`AutoMLExperiment`
-   для остальных форм.
+   для остальных форм. Для `train_best_model`/`AutoMLExperiment` отдельного
+   аргумента custom-метрик нет: их callable проверяется только по
+   `cfg.general.custom_metrics` внутри `validate_runtime_config(cfg)`, поэтому
+   эта проверка обязательна в конфигурационном пути.
 
 Прямые импорты из `training_engine.config.general` и аналогичных модулей,
 используемые тестами, сохраняются через шимы на переходный период и помечаются
@@ -836,14 +851,31 @@ errors, definitions, protocols
 
 - `CustomMetricSpec` в контракте валидирует структуру полей (`path`, `kind`,
   `greater_is_better`, `additive`, `kwargs`), но не импортирует callable и не
-  проверяет его сигнатуру. Runtime-проверка выполняется движком на входе в
-  `train_best_model`, `optimize` и `ModelTrainer` через их собственные
-  валидаторы аргументов, а не через `validate_runtime_config(cfg)`. Прямой
-  конструктор контрактного класса может принять некорректный callable, но
-  публичные entry point движка по-прежнему отвергают его до обучения.
-- `ExperimentResult` принимает стандартные числа. Нормализация numpy-скаляров
-  выполняется движком на границе; прямой конструктор с numpy-скаляром может
-  изменить поведение.
+  проверяет его сигнатуру. Runtime-проверка остаётся в движке, но владельцы
+  разные: у `train_best_model`/`AutoMLExperiment` нет отдельного аргумента
+  custom-метрик — их callable проверяется в конфигурационном пути
+  (`read_config` для файла, `load_config` для `dict`/`Config`) внутри
+  `validate_runtime_config(cfg)` по `cfg.general.custom_metrics`; у `optimize`
+  и `ModelTrainer`, которые не принимают `Config`, — собственными валидаторами
+  аргументов (`validate_custom_metrics`). Прямой конструктор контрактного
+  класса может принять некорректный callable, но публичные entry point движка
+  по-прежнему отвергают его до обучения.
+- `AlgorithmRun` и `ExperimentResult` принимают стандартные числа
+  (`int`/`float`, без numpy-скаляров). Нормализация numpy-скаляров выполняется
+  движком на границе; прямой конструктор с numpy-скаляром может изменить
+  поведение.
+- `ExperimentResult` больше не разрешает направление метрики через sklearn.
+  `_consistency` перестаёт использовать `reserved_metric_names()` и
+  `user_direction()` (оба остаются в движке) и берёт направление встроенных
+  метрик из статической таблицы `BUILTIN_METRIC_DIRECTIONS` в
+  `automl_contracts.metrics` (§21.1), а для custom-метрик — из payload
+  (`metric_direction`), не обращаясь к process-local registry. Как и в C1
+  (`CONTRACTS.md` §4.9), проверка `metric_direction` в контракте выполняется
+  только для имён из статической таблицы; для прочих имён, включая
+  sklearn-имена вне её состава, направление считается пришедшим в payload и не
+  перепроверяется. Проверки `reserved_metric_names()`/`user_direction()` и
+  коллизий имён для произвольных sklearn-имён остаются в движке; C5 проверяет
+  round-trip `to_json()`/`from_json()` и идентичность полей.
 - `AlgoCfg.get_required_package` и `AlgoCfg.get_unknown_hyperparameters` —
   runtime-методы, а не часть контракта. Их заменяют функции
   `config_runtime`; это изменение класса `AlgoCfg` относится к 0.x MINOR и
@@ -1339,7 +1371,13 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 | `automl_contracts.config.algorithms` | `AlgorithmsConfigType` |
 | `automl_contracts.preprocessing` | `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers` |
 | `automl_contracts.result` | `ScoreValue`, `ScoreValueOrNone` |
-| `automl_contracts.metrics` | `to_sklearn_name` |
+| `automl_contracts.metrics` | `to_sklearn_name`, `BUILTIN_METRIC_DIRECTIONS` |
+
+`BUILTIN_METRIC_DIRECTIONS` — статическая таблица `имя → MetricDirection` для
+встроенных метрик из статического `AVAILABLE_METRICS` (`nrmse`, `rmse`,
+`neg_root_mean_squared_error`, `mae`, `mse` — `minimize`; `r2` — `maximize`).
+Она заменяет `reserved_metric_names()`/`user_direction()` в
+`ExperimentResult._consistency` (§11.3) и не требует sklearn.
 
 В контракт **не переносятся**:
 
