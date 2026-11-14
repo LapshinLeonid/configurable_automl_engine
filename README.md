@@ -36,6 +36,9 @@ Classification is not supported.
 * **Flexible Validation Strategies** — KFold, Leave-One-Out, Train-Test Split,
   plus an `auto` strategy that picks between them based on dataset size and
   dimensionality. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#modeltrainer).
+* **Multi-Split (Repeated) Validation** — validation is repeated on several
+  deterministic splits. See
+  [Validation options](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#general-section).
 * **Custom Metrics and Scorers** — plug in your own metric function or
   sklearn scorer by import path (`general.custom_metrics`, e.g.
   `path: "my_project.metrics:mape"`) and use it as `comparison_metric` or in
