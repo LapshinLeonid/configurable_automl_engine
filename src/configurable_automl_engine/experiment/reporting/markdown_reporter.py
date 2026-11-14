@@ -331,6 +331,33 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
                 f"| {_format_score(member.get('score'))} "
                 f"| {_format_score(member.get('weight'))} |"
             )
+        comparison = section.get("comparison")
+        if isinstance(comparison, dict):
+            winner_rmse = comparison.get("winner_rmse")
+            ensemble_rmse = comparison.get("ensemble_rmse")
+            if isinstance(winner_rmse, (int, float)) and isinstance(
+                ensemble_rmse, (int, float)
+            ):
+                better = comparison.get("better")
+                verdict = (
+                    "tie" if better == "tie" else f"{_escape_inline(better)} is better"
+                )
+                metric = _escape_inline(str(comparison.get("metric", "rmse")))
+                n_repeats = comparison.get("n_repeats")
+                n_repeats_used = comparison.get("n_repeats_used", n_repeats)
+                policy = _escape_inline(
+                    str(comparison.get("split_aggregation", "median"))
+                )
+                lines.append("")
+                lines.append("**Winner vs ensemble (aggregated OOF).**")
+                lines.append(
+                    f"- {metric.upper()}: winner "
+                    f"{_format_score(float(winner_rmse))}, ensemble "
+                    f"{_format_score(float(ensemble_rmse))} — {verdict}."
+                )
+                lines.append(
+                    f"- Repeats: {n_repeats_used}/{n_repeats}; aggregation: {policy}."
+                )
         artifact_path = section.get("artifact_path")
         if artifact_path:
             lines.append("")

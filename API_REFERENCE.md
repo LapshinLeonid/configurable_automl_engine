@@ -827,6 +827,21 @@ general:
 A failure of the ensemble step never aborts the run: the reason is logged
 and the result simply carries no `ensemble` section.
 
+**Multi-split selection and comparison.** With `general.n_repeats > 1` the
+leaderboard score already consumed by the ensemble is the per-repeat
+aggregate produced by the HPO scoring with `general.split_aggregation`
+(median by default), so the top-K members and their weights are ranked by
+the multi-split estimate without a second re-aggregation. When the OOF
+prediction vectors of the members and the winner are available, the
+`ensemble` section also carries a `comparison` payload: the aggregated RMSE
+of the winner and of the weighted ensemble, computed on the same repeats and
+the same finite OOF rows (`winner_rmse`, `ensemble_rmse`, `delta_rmse`,
+`better`/`winner_better`, `n_repeats`/`n_repeats_used`,
+`split_aggregation` and the per-repeat RMSE lists). The Markdown report
+renders the same comparison under the members table. With
+`general.n_repeats = 1` the member selection and the weights are exactly the
+classic single-split result.
+
 **Artifacts and export.** The serialized ensemble is written next to the
 winner artifact (`<model_stem>_ensemble.<ext>`, the same serialization
 format as the model); the path is recorded in the `ensemble` section

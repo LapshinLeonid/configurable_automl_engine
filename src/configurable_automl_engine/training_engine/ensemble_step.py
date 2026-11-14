@@ -22,6 +22,7 @@ simply carries no ``ensemble`` section.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from configurable_automl_engine.common.definitions import MetricDirection
@@ -32,7 +33,9 @@ from configurable_automl_engine.experiment.ensemble import (
     compute_weights,
     resolve_metric_direction,
     select_top_k,
+    winner_vs_ensemble_comparison,
 )
+from configurable_automl_engine.validation import resolved_n_repeats
 
 from .finalists import _fit_finalist
 from .hpo_phases import _algorithms_as_dict
@@ -125,6 +128,83 @@ def top_k_from_leaderboard(
     return selected, user_scores
 
 
+def _trainer_oof_by_repeat(trainer: Any, n_repeats: int) -> list[Any] | None:
+    """Return one OOF prediction vector per repeat (or ``None``).
+
+    With one repeat the representative ``oof_predictions_`` vector is
+    wrapped into a one-element list — the same value the single-split
+    behavior has always used. With several repeats the per-repeat vectors
+    are required: a representative vector alone cannot produce the
+    "same repeats" comparison.
+    """
+    if n_repeats > 1:
+        vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
+        if isinstance(vectors, (list, tuple)) and len(vectors) == n_repeats:
+            return list(vectors)
+        return None
+    vector = getattr(trainer, "oof_predictions_", None)
+    return None if vector is None else [vector]
+
+
+def _build_winner_comparison(
+    *,
+    prepared: PreparedData,
+    selected: list[str],
+    predictors: Mapping[str, Any],
+    weights: Mapping[str, float],
+    winner_algo: str | None,
+    winner_trainer: Any | None,
+    n_repeats: int,
+    split_aggregation: str,
+) -> dict[str, Any] | None:
+    """Build the winner-vs-ensemble comparison from the member OOF vectors.
+
+    The ensemble prediction of every repeat is the weighted average of the
+    member OOF vectors of that repeat; both the ensemble and the winner are
+    scored by RMSE on the same rows of the same repeat, and the per-repeat
+    values are aggregated by ``split_aggregation``. Any missing OOF vector
+    or uncovered repeat makes the comparison unavailable (``None``) — the
+    ensemble itself is still reported; the failure never aborts the step.
+    """
+    if winner_algo is None:
+        _LOG.info("Ensemble comparison skipped: the run has no terminal winner")
+        return None
+    member_predictions_by_repeat: list[dict[str, Any]] = [{} for _ in range(n_repeats)]
+    for name in selected:
+        vectors = _trainer_oof_by_repeat(predictors[name], n_repeats)
+        if vectors is None:
+            _LOG.info(
+                "Ensemble comparison skipped: member %s has no per-repeat "
+                "OOF predictions",
+                name,
+            )
+            return None
+        for repeat_index, vector in enumerate(vectors):
+            member_predictions_by_repeat[repeat_index][name] = vector
+
+    winner_vectors: list[Any] | None = None
+    for trainer in (winner_trainer, predictors.get(winner_algo)):
+        if trainer is None:
+            continue
+        vectors = _trainer_oof_by_repeat(trainer, n_repeats)
+        if vectors is not None:
+            winner_vectors = vectors
+            break
+    if winner_vectors is None:
+        _LOG.info(
+            "Ensemble comparison skipped: the winner has no per-repeat OOF predictions"
+        )
+        return None
+    return winner_vs_ensemble_comparison(
+        y_true=prepared.y,
+        member_predictions_by_repeat=member_predictions_by_repeat,
+        winner_predictions_by_repeat=winner_vectors,
+        weights=weights,
+        winner_algorithm=winner_algo,
+        split_aggregation=split_aggregation,
+    )
+
+
 def build_ensemble_from_context(
     *,
     cfg: Any,
@@ -155,6 +235,9 @@ def build_ensemble_from_context(
     """
     ensemble_cfg = cfg.general.ensemble
     try:
+        n_repeats = resolved_n_repeats(
+            cfg.general.n_repeats, prepared.resolved_validation
+        )
         selected, user_scores = top_k_from_leaderboard(
             ctx, prepared.metric_user, ensemble_cfg.k
         )
@@ -242,8 +325,24 @@ def build_ensemble_from_context(
     except (ValueError, TypeError) as err:
         _LOG.warning("Ensemble step skipped: %s", err)
         return None
+    try:
+        comparison = _build_winner_comparison(
+            prepared=prepared,
+            selected=selected,
+            predictors=predictors,
+            weights=weights,
+            winner_algo=ctx.winner_algo,
+            winner_trainer=ctx.pre_trained_trainer,
+            n_repeats=n_repeats,
+            split_aggregation=cfg.general.split_aggregation,
+        )
+    except Exception as err:  # noqa: BLE001 — the comparison is best-effort
+        _LOG.warning("The winner-vs-ensemble comparison could not be computed: %s", err)
+        comparison = None
     section = ensemble.report_section(
-        k_requested=ensemble_cfg.k, weight_method=ensemble_cfg.weight_method
+        k_requested=ensemble_cfg.k,
+        weight_method=ensemble_cfg.weight_method,
+        comparison=comparison,
     )
     _LOG.info(
         "Ensemble built: %d member(s), weights %s",

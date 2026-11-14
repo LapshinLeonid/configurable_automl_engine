@@ -15,7 +15,11 @@ ensembling feature:
 * :class:`EnsembleModel` averages the predictions of the top-K members
   with the computed weights, saves/loads itself through
   ``common.serialization_utils`` (pickle/joblib round-trip) and renders
-  the JSON-safe report section consumed by ``ExperimentResult.ensemble``.
+  the JSON-safe report section consumed by ``ExperimentResult.ensemble``;
+* :func:`winner_vs_ensemble_comparison` is the pure OOF comparison used by
+  the training-engine step: the aggregated RMSE of the weighted ensemble
+  and of the winner on the SAME repeats (one RMSE per repeat on the common
+  finite rows, combined by ``general.split_aggregation``).
 
 Documented contract and limitations:
 
@@ -67,6 +71,7 @@ from configurable_automl_engine.common.serialization_utils import (
     resolve_load_formats,
     save_artifact,
 )
+from configurable_automl_engine.validation import aggregate_split_scores
 
 __all__ = [
     "ENSEMBLE_ARTIFACT_KEY",
@@ -78,6 +83,7 @@ __all__ = [
     "resolve_metric_direction",
     "select_top_k",
     "validate_ensemble_score",
+    "winner_vs_ensemble_comparison",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -330,6 +336,188 @@ def select_top_k(
     return ranked[: min(k, n)]
 
 
+def _finite_vector(value: Any) -> np.ndarray | None:
+    """Convert an OOF prediction vector to a flat float array (or ``None``)."""
+    if value is None:
+        return None
+    try:
+        return np.asarray(value, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _finite_or_none(value: float) -> float | None:
+    """Return a JSON-safe value: the float itself or ``None`` when non-finite."""
+    return float(value) if math.isfinite(value) else None
+
+
+def _comparison_repeat_rmse(
+    *,
+    y: np.ndarray,
+    names: list[str],
+    normalized_weights: Mapping[str, float],
+    repeat_predictions: Mapping[str, Any],
+    winner_vector: Any,
+) -> tuple[float, float] | None:
+    """One repeat's ensemble and winner RMSE on the same finite rows.
+
+    Returns ``(nan, nan)`` when the repeat covers no common finite row;
+    ``None`` signals a structural problem (a missing member or a shape
+    mismatch) that makes the whole comparison unavailable.
+    """
+    if any(name not in repeat_predictions for name in names):
+        return None
+    member_vectors: list[np.ndarray] = []
+    for name in names:
+        vector = _finite_vector(repeat_predictions[name])
+        if vector is None or vector.shape != y.shape:
+            return None
+        member_vectors.append(vector)
+    winner_array = _finite_vector(winner_vector)
+    if winner_array is None or winner_array.shape != y.shape:
+        return None
+
+    # The same rows for both estimates: a row without a finite true value,
+    # without every member prediction or without the winner prediction
+    # cannot contribute to either RMSE (the OOF vectors may leave the train
+    # part / failed folds uncovered).
+    mask = np.isfinite(y)
+    for vector in member_vectors:
+        mask &= np.isfinite(vector)
+    mask &= np.isfinite(winner_array)
+    if not np.any(mask):
+        return float("nan"), float("nan")
+    y_valid = y[mask]
+    ensemble_prediction = np.zeros_like(y_valid)
+    for name, vector in zip(names, member_vectors):
+        ensemble_prediction += normalized_weights[name] * vector[mask]
+    ensemble_rmse = float(np.sqrt(np.mean((y_valid - ensemble_prediction) ** 2)))
+    winner_rmse = float(np.sqrt(np.mean((y_valid - winner_array[mask]) ** 2)))
+    return ensemble_rmse, winner_rmse
+
+
+def winner_vs_ensemble_comparison(
+    *,
+    y_true: Any,
+    member_predictions_by_repeat: Sequence[Mapping[str, Any]],
+    winner_predictions_by_repeat: Sequence[Any],
+    weights: Mapping[str, float],
+    winner_algorithm: str,
+    split_aggregation: str = "median",
+) -> dict[str, Any] | None:
+    """Compare the weighted ensemble against the winner on identical OOF rows.
+
+    The comparison is a pure function of the OOF prediction vectors: every
+    repeat ``r`` contributes one RMSE for the weighted-average ensemble
+    prediction and one for the winner prediction, computed on the SAME rows
+    (the common finite mask of the true target, every member vector and the
+    winner vector). The per-repeat values are then combined with
+    ``split_aggregation`` (``general.split_aggregation``).
+
+    The function never invents a comparison: a missing repeat, a member
+    without an OOF vector, a shape mismatch or an aggregate without a finite
+    repeat returns ``None``. The caller treats that as "comparison not
+    available" (the ensemble itself is still reported).
+
+    The payload reports ``n_repeats`` (the number of input repeats) and
+    ``n_repeats_used`` (the repeats that produced a finite RMSE and actually
+    entered the aggregate); ``better`` is ``"winner"``, ``"ensemble"`` or
+    ``"tie"``, and ``winner_better`` is true only for a strictly smaller
+    winner RMSE (a tie is reported by ``better`` alone).
+
+    Args:
+        y_true: The true target vector aligned with the OOF prediction rows.
+        member_predictions_by_repeat: One mapping per repeat
+            ("member name → OOF prediction vector").
+        winner_predictions_by_repeat: The winner's OOF prediction vector per
+            repeat (same repeats and row order as the members).
+        weights: The member weights (positive; normalized internally).
+        winner_algorithm: The reported winner name.
+        split_aggregation: ``'median'`` or ``'mean'`` — how the per-repeat
+            RMSE values are combined.
+
+    Returns:
+        dict[str, Any] | None: The JSON-safe comparison payload, or ``None``
+            when the comparison cannot be computed. The payload carries the
+            metric name, the input/used repeat counts, the aggregation
+            policy, the winner name, both aggregated RMSE values, their
+            delta, the verdict, and the per-repeat RMSE lists (``None`` for
+            a repeat without a finite estimate).
+    """
+    if not member_predictions_by_repeat or not weights:
+        return None
+    if len(winner_predictions_by_repeat) != len(member_predictions_by_repeat):
+        return None
+    names = list(weights)
+    try:
+        weight_values = [float(weights[name]) for name in names]
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) or value <= 0.0 for value in weight_values):
+        return None
+    total_weight = sum(weight_values)
+    if not math.isfinite(total_weight) or total_weight <= 0.0:
+        return None
+    normalized = {
+        name: weight / total_weight for name, weight in zip(names, weight_values)
+    }
+
+    y = _finite_vector(y_true)
+    if y is None:
+        return None
+
+    ensemble_repeat_rmse: list[float] = []
+    winner_repeat_rmse: list[float] = []
+    for repeat_index, repeat_predictions in enumerate(member_predictions_by_repeat):
+        repeat_scores = _comparison_repeat_rmse(
+            y=y,
+            names=names,
+            normalized_weights=normalized,
+            repeat_predictions=repeat_predictions,
+            winner_vector=winner_predictions_by_repeat[repeat_index],
+        )
+        if repeat_scores is None:
+            return None
+        ensemble_repeat_rmse.append(repeat_scores[0])
+        winner_repeat_rmse.append(repeat_scores[1])
+
+    ensemble_rmse = float(
+        aggregate_split_scores(ensemble_repeat_rmse, split_aggregation)
+    )
+    winner_rmse = float(aggregate_split_scores(winner_repeat_rmse, split_aggregation))
+    if not math.isfinite(ensemble_rmse) or not math.isfinite(winner_rmse):
+        return None
+    if winner_rmse < ensemble_rmse:
+        better = "winner"
+    elif ensemble_rmse < winner_rmse:
+        better = "ensemble"
+    else:
+        better = "tie"
+    n_repeats_used = sum(
+        1
+        for ensemble_value, winner_value in zip(
+            ensemble_repeat_rmse, winner_repeat_rmse
+        )
+        if math.isfinite(ensemble_value) and math.isfinite(winner_value)
+    )
+    return {
+        "metric": "rmse",
+        "n_repeats": len(member_predictions_by_repeat),
+        "n_repeats_used": n_repeats_used,
+        "split_aggregation": split_aggregation,
+        "winner_algorithm": winner_algorithm,
+        "winner_rmse": winner_rmse,
+        "ensemble_rmse": ensemble_rmse,
+        "delta_rmse": ensemble_rmse - winner_rmse,
+        "better": better,
+        "winner_better": winner_rmse < ensemble_rmse,
+        "winner_repeat_rmse": [_finite_or_none(value) for value in winner_repeat_rmse],
+        "ensemble_repeat_rmse": [
+            _finite_or_none(value) for value in ensemble_repeat_rmse
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class EnsembleMember:
     """One member of an ensemble.
@@ -480,6 +668,7 @@ class EnsembleModel:
         artifact_path: str | Path | None = None,
         k_requested: int | None = None,
         weight_method: str | None = None,
+        comparison: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the JSON-safe report section of the ensemble.
 
@@ -495,6 +684,10 @@ class EnsembleModel:
                 ``len(self.members)``).
             weight_method: The weight conversion method used
                 (``"score_weighted"`` / ``"equal"``).
+            comparison: The optional winner-vs-ensemble comparison payload
+                (aggregated RMSE on identical repeats, see
+                :func:`winner_vs_ensemble_comparison`); ``None`` — the
+                comparison is not available for this run.
 
         Returns:
             dict[str, Any]: The JSON-serializable report section.
@@ -519,6 +712,8 @@ class EnsembleModel:
         }
         if artifact_path is not None:
             section["artifact_path"] = str(artifact_path)
+        if comparison is not None:
+            section["comparison"] = dict(comparison)
         return section
 
     def save(

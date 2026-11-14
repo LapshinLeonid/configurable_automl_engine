@@ -28,6 +28,7 @@ from configurable_automl_engine.experiment.ensemble import (
     compute_weights,
     resolve_metric_direction,
     select_top_k,
+    winner_vs_ensemble_comparison,
 )
 from configurable_automl_engine.experiment.experiment import (
     AutoMLExperiment,
@@ -117,4 +118,5 @@ __all__ = [
     "render_importance_markdown",
     "resolve_metric_direction",
     "select_top_k",
+    "winner_vs_ensemble_comparison",
 ]

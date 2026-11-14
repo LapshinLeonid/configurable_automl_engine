@@ -287,9 +287,12 @@ class ExperimentResult(_ResultModel):
             complexity guard (a JSON-serializable mapping).
         ensemble: The report section of the experimental top-K ensemble
             (``general.ensemble``): the members (rank, algorithm, score,
-            weight), the effective size, the weight method and the
-            ensemble artifact path (a JSON-serializable mapping; ``None``
-            when the ensemble was not built).
+            weight), the effective size, the weight method, the ensemble
+            artifact path and — when the OOF vectors of the members and the
+            winner are available — the ``comparison`` payload with the
+            aggregated RMSE of the winner and the ensemble on identical
+            repeats (a JSON-serializable mapping; ``None`` when the ensemble
+            was not built).
         explanations: The JSON-safe payload of the last ``explain()``
             call of the run (the facade stores the result of every
             invocation, the last call wins) or ``None`` when explain was
