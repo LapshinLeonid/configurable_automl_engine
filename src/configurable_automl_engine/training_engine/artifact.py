@@ -19,7 +19,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.definitions import (
+    WORST_SCORE_THRESHOLD,
+    TargetTransform,
+)
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import (
     bbc_cv_score,
@@ -251,6 +254,77 @@ def _fit_and_save(
     return trainer
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    """Normalize an optional numeric trainer statistic to a finite float."""
+    if isinstance(value, bool) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        return None
+    normalized = float(value)
+    return normalized if np.isfinite(normalized) else None
+
+
+def _effective_repeat_count(trainer: Any) -> int:
+    """Return the number of repeats the final trainer actually scored.
+
+    ``repeat_scores_`` is ``None`` for the classic single-split run (and for
+    an older artifact); its length is the effective repeat count. Reading the
+    trainer state instead of the config keeps a strategy whose repeats were
+    ignored (``loo``) reported as one split.
+    """
+    repeat_scores = getattr(trainer, "repeat_scores_", None)
+    if isinstance(repeat_scores, (list, tuple)) and repeat_scores:
+        return len(repeat_scores)
+    return 1
+
+
+def _add_repeat_statistics(
+    result: dict[str, Any],
+    trainer: Any,
+    winner_repeat_scores: tuple[float, ...] | None = None,
+    oof_score_std: float | None = None,
+) -> None:
+    """Attach the multi-split spread to the legacy result dict.
+
+    The aggregate values (``score`` / ``oof_score``) keep their existing
+    keys, so a single-split run is byte-for-byte the classic report. With
+    more than one repeat the dict additionally carries ``n_repeats`` and the
+    finite spreads of the winner and OOF estimates. The keys are omitted for
+    a single split and for non-finite/absent statistics, which keeps the
+    legacy serialization backward compatible.
+
+    ``score_std`` must describe the same estimate as ``result["score"]``.
+    With a reserved outer hold-out the artifact trainer is refit on all rows,
+    so its repeat scores are not the HPO selection scores; the caller passes
+    the winner trial's ``repeat_scores`` to keep the pair consistent.
+    ``oof_score_std`` is computed by ``_oof_score_with_std_in_user_metric``
+    from the same per-repeat comparison-metric values as ``oof_score``.
+    """
+    if winner_repeat_scores is not None:
+        n_repeats = len(winner_repeat_scores)
+        finite_winner_scores = [
+            float(value)
+            for value in winner_repeat_scores
+            if np.isfinite(value) and float(value) > WORST_SCORE_THRESHOLD
+        ]
+        score_std = (
+            float(np.std(finite_winner_scores))
+            if len(finite_winner_scores) > 1
+            else None
+        )
+    else:
+        n_repeats = _effective_repeat_count(trainer)
+        score_std = _finite_float_or_none(getattr(trainer, "score_std", None))
+    if n_repeats <= 1:
+        return
+    result["n_repeats"] = n_repeats
+    if score_std is not None:
+        result["score_std"] = score_std
+    normalized_oof_std = _finite_float_or_none(oof_score_std)
+    if normalized_oof_std is not None:
+        result["oof_score_std"] = normalized_oof_std
+
+
 def _pooled_raw_oof_metric(
     scorer: Any, oof_true: np.ndarray, oof_pred: Any
 ) -> float | None:
@@ -275,7 +349,16 @@ def _oof_score_in_user_metric(
     trainer: Any,
     y: pd.Series,
 ) -> float | None:
-    """Compute the comparison metric on the final pipeline's OOF channel.
+    """Compute the comparison metric on the final pipeline's OOF channel."""
+    return _oof_score_with_std_in_user_metric(metric_user, trainer, y)[0]
+
+
+def _oof_score_with_std_in_user_metric(
+    metric_user: str,
+    trainer: Any,
+    y: pd.Series,
+) -> tuple[float | None, float | None]:
+    """Compute the OOF aggregate and its per-repeat spread.
 
     The OOF channel is built on the same splits that HPO used to select the
     winner and its hyperparameters, so the value carries the same best-of-N
@@ -287,27 +370,42 @@ def _oof_score_in_user_metric(
     For the RMSE family the trainer already stores the aggregate over
     repeats (median or mean by ``split_aggregation``), so it is used
     directly. Other metrics are recomputed on every per-repeat OOF vector and
-    combined by the same policy. A trainer without per-repeat vectors (for
-    example an older saved artifact) falls back to its representative
-    ``oof_predictions_`` vector.
+    combined by the same policy. The spread is computed in the same
+    comparison metric (never from the trainer's ``RMSE_oof`` diagnostics) so
+    the report always pairs ``oof_score`` with the matching std. A trainer
+    without per-repeat vectors (for example an older saved artifact) falls
+    back to its representative ``oof_predictions_`` vector and no spread.
 
     Args:
         metric_user: The user-facing comparison metric name.
         trainer: The trained ``ModelTrainer`` (OOF attributes populated).
         y: The full target vector (for the OOF rows alignment).
+
+    Returns:
+        ``(aggregate in user semantics, per-repeat std or None)``.
     """
     is_rmse = to_sklearn_name(metric_user) == "neg_root_mean_squared_error"
     oof_aggregate = getattr(trainer, "oof_score_", None)
+    oof_repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
     if is_rmse:
         if oof_aggregate is None or not np.isfinite(oof_aggregate):
-            return None
-        return to_user_value(metric_user, -float(oof_aggregate))
+            return None, None
+        user_repeats = (
+            [
+                float(to_user_value(metric_user, -float(value)))
+                for value in oof_repeat_scores
+                if np.isfinite(value) and float(value) > WORST_SCORE_THRESHOLD
+            ]
+            if isinstance(oof_repeat_scores, (list, tuple))
+            else []
+        )
+        std = float(np.std(user_repeats)) if len(user_repeats) > 1 else None
+        return to_user_value(metric_user, -float(oof_aggregate)), std
 
-    oof_repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
     if isinstance(oof_repeat_scores, (list, tuple)) and not any(
         np.isfinite(value) for value in oof_repeat_scores
     ):
-        return None
+        return None, None
     repeat_vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
     if isinstance(repeat_vectors, (list, tuple)) and len(repeat_vectors) > 1:
         vectors: list[Any] = list(repeat_vectors)
@@ -322,7 +420,7 @@ def _oof_score_in_user_metric(
     else:
         single_vector = getattr(trainer, "oof_predictions_", None)
         if single_vector is None:
-            return None
+            return None, None
         vectors = [single_vector]
 
     try:
@@ -334,7 +432,7 @@ def _oof_score_in_user_metric(
         _LOG.warning(
             "OOF score could not be computed for metric '%s': %s", metric_user, err
         )
-        return None
+        return None, None
 
     raw_scores: list[float] = []
     for vector in vectors:
@@ -342,7 +440,8 @@ def _oof_score_in_user_metric(
         if raw is not None and np.isfinite(raw):
             raw_scores.append(raw)
     if not raw_scores:
-        return None
+        return None, None
+    user_scores = [float(to_user_value(metric_user, raw)) for raw in raw_scores]
     if len(vectors) > 1:
         raw = float(
             aggregate_split_scores(
@@ -350,10 +449,11 @@ def _oof_score_in_user_metric(
             )
         )
         if not np.isfinite(raw):
-            return None
+            return None, None
     else:
         raw = raw_scores[0]
-    return to_user_value(metric_user, raw)
+    std = float(np.std(user_scores)) if len(user_scores) > 1 else None
+    return to_user_value(metric_user, raw), std
 
 
 def _compute_holdout_score(
@@ -464,6 +564,7 @@ def persist_artifact(
     complexity_guard_sections: dict[str, Any] | None = None,
     n_trials_evaluated: int | None = None,
     oof_pool: list[np.ndarray] | None = None,
+    winner_repeat_scores: tuple[float, ...] | None = None,
 ) -> dict[str, Any]:
     """Final training of the winner, artifact persistence, and report assembly.
 
@@ -509,6 +610,10 @@ def persist_artifact(
         oof_pool: The OOF prediction matrices of
             all evaluated trials (``PhaseContext.oof_pool``); empty or
             ``None`` — ``bbc_score`` is not reported.
+        winner_repeat_scores: The per-repeat scores of the HPO trial behind
+            ``final_score`` (``None`` for a single split or an unavailable
+            record). They provide ``score_std`` for the same estimate as the
+            reported winner score.
 
     Returns:
         Dict[str, Any]: A dict with the training results.
@@ -593,7 +698,9 @@ def persist_artifact(
     # ``holdout_score``. Omitted when no valid OOF pair exists. With a
     # reserved outer hold-out the OOF vector is aligned to the FULL data
     # (train + hold-out), so the target is the concatenated vector.
-    oof_score = _oof_score_in_user_metric(prepared.metric_user, trainer, full_y)
+    oof_score, oof_score_std = _oof_score_with_std_in_user_metric(
+        prepared.metric_user, trainer, full_y
+    )
     if oof_score is not None:
         result["oof_score"] = oof_score
     # Honest evaluation count of the winner's HPO phase: reported next to the
@@ -625,6 +732,12 @@ def persist_artifact(
     # main comparison metric).
     if cfg.general.additional_metrics:
         result["additional_metrics"] = dict(trainer.additional_scores)
+    # Repeated-validation statistics: the aggregate keys above stay scalar
+    # (their existing meaning), the spread travels next to them only when the
+    # run actually scored more than one split.
+    _add_repeat_statistics(
+        result, trainer, winner_repeat_scores, oof_score_std=oof_score_std
+    )
     # Reserved outer hold-out (general.holdout_fraction): the honest estimate
     # of the WINNER on the rows that were split off before HPO and never
     # participated in model selection. The hold-out model is trained with the

@@ -25,6 +25,7 @@ Every cell is escaped before it enters a table row.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from configurable_automl_engine.common.definitions import RunStatus, RunStepStatus
@@ -50,6 +51,9 @@ _EMPTY_CELL = "—"
 _EMPTY_LEADERBOARD_ROW = (
     "_No ranked algorithms (no completed records with valid scores)._"
 )
+
+#: The placeholder of an absent or non-finite multi-split statistic.
+_NA = "н/д"
 
 
 def _escape_cell(value: object) -> str:
@@ -101,9 +105,205 @@ def _format_score(score: float | None) -> str:
     return _EMPTY_CELL if score is None else f"{score:.3f}"
 
 
-def _format_seconds(seconds: float | None) -> str:
+def _format_number(value: Any) -> str:
+    """Render a number, or ``н/д`` for a missing/non-finite value.
+
+    Report sections are JSON-safe mappings assembled by the engine; a
+    circuit that could not be computed is serialized as ``None`` and a
+    legacy section may still carry a raw NaN. Neither may crash the report,
+    so both render as the explicit not-available marker.
+    """
+    if value is None:
+        return _NA
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return _NA
+    if not math.isfinite(numeric):
+        return _NA
+    return f"{numeric:.3f}"
+
+
+def _repeat_count(result: ExperimentResult) -> int:
+    """The effective number of repeats recorded in the result (>= 1)."""
+    if result.n_repeats is None:
+        return 1
+    return max(int(result.n_repeats), 1)
+
+
+def _aggregation_label(result: ExperimentResult) -> str:
+    """The per-repeat aggregation policy from the config snapshot."""
+    config = result.config if isinstance(result.config, dict) else {}
+    general = config.get("general")
+    if isinstance(general, dict):
+        aggregation = general.get("split_aggregation")
+        if aggregation in ("median", "mean"):
+            return str(aggregation)
+    return "median"
+
+
+def _repeat_note(result: ExperimentResult) -> str | None:
+    """Render the repeat count/aggregation note, or ``None`` for one split."""
+    n_repeats = _repeat_count(result)
+    if n_repeats <= 1:
+        return None
+    return f"{_aggregation_label(result)} of {n_repeats} repeats"
+
+
+def _format_spread(value: Any, std: Any, result: ExperimentResult) -> str:
+    """Render an aggregate with its spread for a repeated-validation run.
+
+    A single split keeps the classic scalar rendering exactly. For several
+    repeats the value is shown as ``aggregate ± std``; an absent/non-finite
+    spread renders as ``н/д`` instead of failing the whole report.
+    """
+    if _repeat_count(result) <= 1:
+        return _format_score(value if value is None else float(value))
+    return f"{_format_number(value)} ± {_format_number(std)}"
+
+
+def _format_value_with_std(value: Any, std: Any) -> str:
+    """Render a section metric with an optional spread."""
+    if std is None:
+        return _format_number(value)
+    return f"{_format_number(value)} ± {_format_number(std)}"
+
+
+def _pick(mapping: dict[str, Any], *keys: str) -> Any:
+    """Return the first present value among the alternative section keys."""
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _has_repeat_markers(value: Any) -> bool:
+    """True when a report section carries multi-split aggregate markers.
+
+    A section with a per-repeat spread (``*_std``), an explicit median key or
+    a nested repeat count is a multi-split section even when the result-level
+    ``n_repeats`` was not recorded (a legacy/serialized producer). Such a
+    section is rendered instead of being silently dropped.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and key == "n_repeats":
+                try:
+                    if int(item) > 1:
+                        return True
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            elif (
+                isinstance(key, str)
+                and key.endswith(("_std", "_median", "_mean"))
+                and item is not None
+            ):
+                return True
+            if _has_repeat_markers(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_has_repeat_markers(item) for item in value)
+    return False
+
+
+def _has_aggregated_audit(value: Any) -> bool:
+    """True when a gate section actually records aggregated audit values.
+
+    The section-level ``n_repeats`` alone does not prove aggregation: M4
+    records it on every section, including the single-split one. The audit
+    values are aggregated when a candidate carries ``n_repeats > 1`` or an
+    explicit per-repeat spread/median key. Only then may the report state
+    that the circuits use the concatenated OOF / median gap.
+    """
+    if isinstance(value, dict):
+        audit = value.get("audit")
+        if isinstance(audit, dict):
+            for item in audit.values():
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    if int(item.get("n_repeats", 1)) > 1:
+                        return True
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                for key, field_value in item.items():
+                    if (
+                        isinstance(key, str)
+                        and key.endswith(("_std", "_median", "_mean"))
+                        and field_value is not None
+                    ):
+                        return True
+        return any(_has_aggregated_audit(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_aggregated_audit(item) for item in value)
+    return False
+
+
+def _has_rmse_spread(value: dict[str, Any]) -> bool:
+    """True when a gate section records an ``RMSE_oof`` per-repeat spread."""
+    if value.get("winner_rmse_oof_std") is not None:
+        return True
+    rmse_std = value.get("rmse_oof_std")
+    return isinstance(rmse_std, dict) and any(
+        spread is not None for spread in rmse_std.values()
+    )
+
+
+def _format_count(value: Any) -> str:
+    """Render an integer count, or ``н/д`` for a missing value."""
+    if value is None:
+        return _NA
+    try:
+        return str(int(value))
+    except (TypeError, ValueError, OverflowError):
+        return _NA
+
+
+def _text_items(value: Any) -> list[str]:
+    """Normalize a report list-or-string value to a list of plain strings.
+
+    A legacy/hand-written section may carry ``reasons`` as a single string
+    instead of a list; iterating that string would split it into characters.
+    Both shapes are rendered correctly.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
+def _format_gap(value: Any, std: Any, infinite: Any) -> str:
+    """Render the generalization gap, honoring the explicit infinity flag.
+
+    The engine serializes a non-finite gap as ``null`` plus
+    ``generalization_gap_infinite: true``. The flag is authoritative: the
+    report must show an infinite gap instead of the generic ``н/д`` marker.
+    """
+    if infinite:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = None
+        if numeric is None or not math.isfinite(numeric):
+            return "∞ (infinite)"
+    return _format_value_with_std(value, std)
+
+
+def _format_seconds(seconds: Any) -> str:
     """Render one duration cell in seconds (two decimal places)."""
-    return _EMPTY_CELL if seconds is None else f"{seconds:.2f}s"
+    if seconds is None:
+        return _EMPTY_CELL
+    try:
+        numeric = float(seconds)
+    except (TypeError, ValueError):
+        return _NA
+    if not math.isfinite(numeric):
+        return _NA
+    return f"{numeric:.2f}s"
 
 
 def _format_params(params: dict[str, Any]) -> str:
@@ -146,6 +346,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
         self._render_outcome(lines, result)
         self._render_honest_scores(lines, result)
         self._render_leaderboard(lines, result)
+        self._render_sanity_gate(lines, result)
         self._render_ensemble(lines, result)
         self._render_explanations(lines, result)
         self._render_run_details(lines, result)
@@ -206,10 +407,13 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
         else:
             lines.append("No winner (the experiment failed).")
         if result.winner_score is not None:
+            repeat_note = _repeat_note(result)
+            suffix = f"; {repeat_note}" if repeat_note else ""
             lines.append(
-                f"- Winner score: {_format_score(result.winner_score)} "
+                f"- Winner score: "
+                f"{_format_spread(result.winner_score, result.score_std, result)} "
                 f"({_escape_inline(result.metric_user)} in user semantics — "
-                f"{_escape_inline(result.metric_direction.value)})"
+                f"{_escape_inline(result.metric_direction.value)}{suffix})"
             )
         if result.winner_params:
             lines.append(f"- Winner params: {_format_params(result.winner_params)}")
@@ -222,35 +426,52 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
         lines.append("")
 
     def _render_honest_scores(self, lines: list[str], result: ExperimentResult) -> None:
-        honest: list[tuple[str, float | None, str]] = [
+        # The last flag tells whether the estimate itself is repeated. The
+        # hold-out and BBC estimates stay single-split even in a repeated run,
+        # so they keep the classic scalar rendering (no "± н/д").
+        honest: list[tuple[str, float | None, float | None, str, bool]] = [
             (
                 "Hold-out score",
                 result.holdout_score,
+                None,
                 "honest out-of-sample estimate on the reserved outer hold-out",
+                False,
             ),
             (
                 "BBC score",
                 result.bbc_score,
+                None,
                 "bias-corrected (BBC-CV) estimate of the selection procedure",
+                False,
             ),
             (
                 "OOF score",
                 result.oof_score,
+                result.oof_score_std,
                 "pooled out-of-fold predictions (optimistic, not independent)",
+                True,
             ),
         ]
-        if all(score is None for _, score, _ in honest):
+        if all(score is None for _, score, _, _, _ in honest):
             return
-        lines.append("### Honest score estimates")
+        repeat_note = _repeat_note(result)
+        heading = "### Honest score estimates"
+        if repeat_note is not None:
+            heading += f" ({_escape_inline(repeat_note)})"
+        lines.append(heading)
         lines.append("")
-        for name, score, semantics in honest:
+        for name, score, std, semantics, repeated in honest:
             if score is None:
                 continue
-            lines.append(f"- {name}: **{_format_score(score)}** — {semantics}")
+            rendered = (
+                _format_spread(score, std, result) if repeated else _format_score(score)
+            )
+            lines.append(f"- {name}: **{rendered}** — {semantics}")
         if result.winner_score is not None:
             lines.append(
                 "- Reference — winner (selection) score: "
-                f"{_format_score(result.winner_score)} (optimistic)"
+                f"{_format_spread(result.winner_score, result.score_std, result)} "
+                "(optimistic)"
             )
         lines.append("")
 
@@ -273,6 +494,188 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
                 f"| {_escape_cell(entry.phase)} |"
             )
         lines.append("")
+
+    def _render_sanity_gate(self, lines: list[str], result: ExperimentResult) -> None:
+        """Render the Sanity Gate report sections of a repeated run.
+
+        The new table is rendered only when the section itself records
+        multi-split data (a candidate ``n_repeats > 1``, an explicit spread or
+        a median/mean key); a classic one-repeat section keeps the previous
+        report unchanged, regardless of the result-level repeat count. When
+        the audit carries aggregates, the caption says so and uses their
+        medians; otherwise the circuits are explicitly labelled as values of
+        one representative repeat. A section-level ``RMSE_oof`` spread is
+        described separately because it does not aggregate the circuits. A
+        missing/non-finite circuit statistic (a disabled or non-computable
+        circuit) renders as ``н/д`` and never fails the report.
+
+        The renderer is a pure function of the result: it only reads the
+        JSON-safe ``sanity_gate`` mapping and never reaches into the engine.
+        """
+        sections = result.sanity_gate
+        if not sections or not _has_repeat_markers(sections):
+            return
+        lines.append("## Sanity Gate")
+        lines.append("")
+        for phase_name, raw_section in sections.items():
+            if not isinstance(raw_section, dict):
+                continue
+            if _has_aggregated_audit(raw_section):
+                lines.append(
+                    "Circuit values are aggregated over the repeated splits: "
+                    "the diversity/unique ratios and the generalization gap "
+                    "are medians of the per-repeat values. A spread is shown "
+                    "when the audit recorded one."
+                )
+            else:
+                lines.append(
+                    "Circuit values are taken from one representative OOF "
+                    "repeat and are not aggregated over repeats."
+                )
+            if _has_rmse_spread(raw_section):
+                lines.append(
+                    "The winner's `RMSE_oof` is aggregated over the repeats; "
+                    "its spread is shown where recorded."
+                )
+            lines.append("")
+            lines.append(f"### Phase {_escape_inline(phase_name)}")
+            lines.append("")
+            pool = raw_section.get("pool")
+            if isinstance(pool, (list, tuple)):
+                rendered_pool = ", ".join(_escape_inline(name) for name in pool)
+                lines.append(f"- Pool: {rendered_pool}")
+            winner_rmse = raw_section.get("winner_rmse_oof")
+            winner_std = raw_section.get("winner_rmse_oof_std")
+            if winner_rmse is not None or winner_std is not None:
+                lines.append(
+                    "- Winner RMSE_oof: "
+                    f"**{_format_value_with_std(winner_rmse, winner_std)}**"
+                )
+            if "fallback_used" in raw_section:
+                fallback = bool(raw_section.get("fallback_used"))
+                lines.append(f"- Fallback used: {'yes' if fallback else 'no'}")
+            overhead = raw_section.get("overhead_seconds")
+            if overhead is not None:
+                lines.append(f"- Overhead: {_format_seconds(overhead)}")
+            section_aggregates = (
+                (
+                    "Diversity ratio",
+                    _pick(
+                        raw_section,
+                        "diversity_ratio",
+                        "diversity_ratio_median",
+                        "diversity_ratio_mean",
+                    ),
+                    _pick(raw_section, "diversity_ratio_std", "diversity_std"),
+                ),
+                (
+                    "Unique ratio",
+                    _pick(
+                        raw_section,
+                        "unique_ratio",
+                        "unique_ratio_median",
+                        "unique_ratio_mean",
+                    ),
+                    _pick(raw_section, "unique_ratio_std", "unique_std"),
+                ),
+                (
+                    "Generalization gap (median)",
+                    _pick(
+                        raw_section,
+                        "generalization_gap",
+                        "generalization_gap_median",
+                        "gap_median",
+                    ),
+                    _pick(raw_section, "generalization_gap_std", "gap_std"),
+                ),
+            )
+            for aggregate_name, aggregate_value, aggregate_std in section_aggregates:
+                if aggregate_value is None and aggregate_std is None:
+                    continue
+                if aggregate_name.startswith("Generalization gap"):
+                    rendered_aggregate = _format_gap(
+                        aggregate_value,
+                        aggregate_std,
+                        raw_section.get("generalization_gap_infinite"),
+                    )
+                else:
+                    rendered_aggregate = _format_value_with_std(
+                        aggregate_value, aggregate_std
+                    )
+                lines.append(f"- {aggregate_name}: **{rendered_aggregate}**")
+            audit = raw_section.get("audit")
+            if isinstance(audit, dict) and audit:
+                self._render_gate_audit(lines, audit)
+            lines.append("")
+
+    def _render_gate_audit(self, lines: list[str], audit: dict[str, Any]) -> None:
+        """Render the per-candidate audit table of one gate section."""
+        lines.append("")
+        lines.append(
+            "| Candidate | Valid | Diversity ratio | Unique ratio "
+            "| Dead features | Generalization gap | Reasons |"
+        )
+        lines.append(
+            "|:----------|:------|----------------:|------------:"
+            "|--------------:|-------------------:|:--------|"
+        )
+        for candidate, raw_audit in audit.items():
+            if not isinstance(raw_audit, dict):
+                continue
+            valid = raw_audit.get("is_valid")
+            valid_cell = "yes" if valid else "no" if valid is False else _NA
+            diversity = _pick(
+                raw_audit,
+                "diversity_ratio",
+                "diversity_ratio_median",
+                "diversity_ratio_mean",
+            )
+            diversity_std = _pick(
+                raw_audit,
+                "diversity_ratio_std",
+                "diversity_std",
+            )
+            unique = _pick(
+                raw_audit,
+                "unique_ratio",
+                "unique_ratio_median",
+                "unique_ratio_mean",
+            )
+            unique_std = _pick(
+                raw_audit,
+                "unique_ratio_std",
+                "unique_std",
+            )
+            gap = _pick(
+                raw_audit,
+                "generalization_gap",
+                "generalization_gap_median",
+                "gap_median",
+            )
+            gap_std = _pick(
+                raw_audit,
+                "generalization_gap_std",
+                "gap_std",
+            )
+            gap_cell = _format_gap(
+                gap,
+                gap_std,
+                raw_audit.get("generalization_gap_infinite"),
+            )
+            dead = _pick(raw_audit, "dead_features_count", "dead_features")
+            reason_parts = _text_items(raw_audit.get("reasons")) + _text_items(
+                raw_audit.get("soft_warnings")
+            )
+            reason_text = "; ".join(dict.fromkeys(reason_parts)) or _EMPTY_CELL
+            lines.append(
+                f"| {_escape_cell(candidate)} "
+                f"| {valid_cell} "
+                f"| {_format_value_with_std(diversity, diversity_std)} "
+                f"| {_format_value_with_std(unique, unique_std)} "
+                f"| {_format_count(dead)} "
+                f"| {gap_cell} "
+                f"| {_escape_cell(reason_text)} |"
+            )
 
     def _render_ensemble(self, lines: list[str], result: ExperimentResult) -> None:
         """Render the experimental ensemble section (when present).

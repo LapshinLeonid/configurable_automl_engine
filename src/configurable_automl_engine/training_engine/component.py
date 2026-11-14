@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from optuna.trial import TrialState
 
 from configurable_automl_engine.common.datetime_features import (
     datetime_expansion_columns,
@@ -752,6 +754,41 @@ def train_best_model(
     return result
 
 
+def _winner_repeat_scores(record: PhaseResult) -> tuple[float, ...] | None:
+    """Per-repeat scores of the HPO trial that produced ``record.score``.
+
+    ``result["score"]`` is the winner's HPO score. The final artifact trainer
+    can be refit on a different row set (when an outer hold-out is reserved),
+    so its repeat scores cannot be paired with that score. The best trial
+    keeps the per-repeat values as Optuna user attributes (M2); they are the
+    source of ``score_std``. ``None`` for a single split or an older/mocked
+    record without the attribute.
+    """
+    best_value = float("-inf")
+    best_scores: tuple[float, ...] | None = None
+    for trial in record.trials:
+        # A pruned trial keeps its last intermediate value in ``value``; it
+        # must never outrank the best completed trial or become the source of
+        # the reported repeat statistics.
+        if trial.state != TrialState.COMPLETE:
+            continue
+        value = trial.value
+        if value is None or not math.isfinite(float(value)):
+            continue
+        if float(value) <= best_value:
+            continue
+        best_value = float(value)
+        raw_scores = trial.user_attrs.get("repeat_scores")
+        if isinstance(raw_scores, (list, tuple)) and raw_scores:
+            try:
+                best_scores = tuple(float(score) for score in raw_scores)
+            except (TypeError, ValueError):
+                best_scores = None
+        else:
+            best_scores = None
+    return best_scores
+
+
 def _run_after_phases(
     *,
     cfg: Config,
@@ -809,6 +846,7 @@ def _run_after_phases(
         ),
         n_trials_evaluated=n_trials_evaluated,
         oof_pool=ctx.oof_pool,
+        winner_repeat_scores=_winner_repeat_scores(winner_record),
     )
     # Experimental top-K ensemble (general.ensemble.enable): an additional
     # output NEXT TO the winner — the winner, the winner artifact and the

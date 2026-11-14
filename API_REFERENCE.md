@@ -1110,6 +1110,8 @@ is absent.
 | `generalization_gap_mode` | `str` | The check D mode used: `"warn"` or `"reject"`. |
 | `pool` | `list[str]` | Finalists, best first. |
 | `audit` | `dict[str, dict]` | Per finalist: `is_valid`, `reasons` (rejections), `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (`null` when disabled or not computable), `generalization_gap_infinite`, `generalization_gap_mode`, `severity`. |
+| `rmse_oof_std` | `dict[str, float]` | Per-finalist standard deviation of the per-repeat `RMSE_oof` values; present only when at least one finalist has a recorded spread (`n_repeats > 1`). |
+| `winner_rmse_oof_std` | `float` | Standard deviation of the winner's per-repeat `RMSE_oof`; present only when available. |
 | `disqualified` | `dict[str, list[str]]` | Rejected finalists and their reasons (also copied to `result["disqualified_algorithms"]`). Warnings are not listed here. |
 | `fallback_used` | `bool` | `true` when every finalist was rejected and the "least bad" one won. |
 | `winner_rmse_oof` | `float \| null` | `RMSE_oof` of the winner. |
@@ -1327,6 +1329,10 @@ Gaussian noise injection is **not a separate algorithm** — it is enabled with 
     "random_state": 42,            # seed of the run (None = not reproducible)
     "oof_score": 0.123,            # diagnostic, optimistic like "score" (see below)
     "n_trials_evaluated": 47,      # trials behind "score"
+    # with n_repeats > 1 (multi-split validation):
+    "n_repeats": 3,                # effective number of repeated splits
+    "score_std": 0.0067,           # spread of the winner's per-repeat scores
+    "oof_score_std": 0.0102,       # spread of the per-repeat OOF comparison metric
     # present only in some runs:
     "additional_metrics": {"r2": 0.98, "mae": 0.07},   # general.additional_metrics
     "holdout_score": 0.141,        # HONEST estimate on the reserved rows (>= 100 rows by default)
@@ -1344,9 +1350,12 @@ Gaussian noise injection is **not a separate algorithm** — it is enabled with 
 | `metric` | always | The metric name from `general.comparison_metric`. |
 | `model_path` | always | Path of the saved model. |
 | `random_state` | always | Seed of the run; `None` for a non-reproducible run. |
-| `oof_score` | when OOF predictions exist | The same metric on the final pipeline's out-of-fold predictions. A diagnostic, **not** an honest estimate — see below. |
+| `oof_score` | when OOF predictions exist | The same metric on the final pipeline's out-of-fold predictions. A diagnostic, **not** an honest estimate — see below. With `n_repeats > 1` it is the aggregate (median/mean) over the per-repeat OOF estimates. |
+| `score_std` | `n_repeats > 1` | Population standard deviation of the winner's per-repeat validation scores. |
+| `oof_score_std` | `n_repeats > 1` | Population standard deviation of the per-repeat `oof_score` values (the configured comparison metric, not the trainer-internal `RMSE_oof`). |
+| `n_repeats` | `n_repeats > 1` | The effective number of repeated validation splits (the classic single-split result omits the key). |
 | `n_trials_evaluated` | when known | Completed trials of the winner in the step that produced `score`. |
-| `additional_metrics` | `general.additional_metrics` is non-empty | `{metric: value}` for the final model, same form as `score`. |
+| `additional_metrics` | `general.additional_metrics` is non-empty | `{metric: value}` for the final model, same form as `score`; with repeated validation the values are aggregated by the same policy as `score`. |
 | `holdout_score` | a hold-out is reserved (by default — data with ≥ 100 rows) | **Honest estimate**: the winner's metric on the rows reserved before tuning. |
 | `bbc_score` | no hold-out is reserved (by default — data with < 100 rows, or `holdout_fraction: null`) | **Honest estimate** without a hold-out: BBC-CV over all evaluated trials, see below. Absent only when keeping the out-of-fold predictions would exceed the memory budget (a WARNING is logged). |
 | `sanity_gate` | at least one Sanity Gate select step | Per-step report, see [Sanity Gate report](#sanity-gate-report). |
@@ -1747,7 +1756,7 @@ The reporter framework: pure consumers of the `ExperimentResult` model (see [Tra
 
 **`JSONReporter(path, *, indent=None)`** — writes the full experiment snapshot (config, per-run records, winner, honest scores) to a JSON file. The payload is produced by the model itself (`model_dump(mode="json")`), so numpy scalars, `Path`, enums and datetimes arrive already normalized to JSON types. Policies: the write is atomic (a temp file in the destination directory is renamed into place — a failure never leaves a partial file and never corrupts an existing report); missing parent directories are created; an existing file is overwritten (the last report wins); the file is UTF-8 with `ensure_ascii=False` (unicode labels stay readable) and gets the ordinary file-creation permissions (umask-based, not the private mode of the temp file). A value smuggled past the model validation raises `TypeError` naming the offending fields, with the destination untouched. The JSON parses back into a dict equivalent to `result.model_dump(mode="json")`, and `ExperimentResult.from_json()` restores an equal model.
 
-**`MarkdownReporter(*, include_config=True)`** — renders a human-readable Markdown document: the run metadata (run id, status, metric with its direction, validation, hold-out size), the outcome (winner, its user-semantic score, the best params), the honest score estimates (`holdout_score` / `bbc_score` / `oof_score` labeled with their semantics, next to the optimistic selection score), the leaderboard (the `build_leaderboard` ranking table), the per-run details (status, score, best params, trials, the failure/disqualification reason) and the failure message. The configuration snapshot is embedded as a collapsed `<details>` JSON block (`include_config=False` omits it). Table cells escape `|` and line breaks, so arbitrary names and parameters cannot break the table.
+**`MarkdownReporter(*, include_config=True)`** — renders a human-readable Markdown document: the run metadata (run id, status, metric with its direction, validation, hold-out size), the outcome (winner, its user-semantic score, the best params), the honest score estimates (`holdout_score` / `bbc_score` / `oof_score` labeled with their semantics, next to the optimistic selection score), the leaderboard (the `build_leaderboard` ranking table), the per-run details (status, score, best params, trials, the failure/disqualification reason) and the failure message. With `n_repeats > 1` the winner score and the OOF estimate are rendered as `aggregate ± std` with the repeat count/aggregation policy. The Sanity Gate section reports the winner's `RMSE_oof` spread and, when the gate records per-repeat circuit aggregates, labels the diversity/unique ratios and generalization gap as medians of the per-repeat values; otherwise it states that the circuit values come from one representative OOF repeat. A missing/non-finite statistic renders as `н/д` instead of failing the report. With `n_repeats = 1` the report keeps the classic scalar view. The configuration snapshot is embedded as a collapsed `<details>` JSON block (`include_config=False` omits it). Table cells escape `|` and line breaks, so arbitrary names and parameters cannot break the table.
 
 **`CompositeReporter(reporters)`** — runs several reporters in one call (the single registration point of a run): the reporters run in registration order, the call returns the tuple of their artifacts (empty for no reporters). The first reporter failure propagates (fail fast); the artifacts of the already-run reporters stay produced.
 

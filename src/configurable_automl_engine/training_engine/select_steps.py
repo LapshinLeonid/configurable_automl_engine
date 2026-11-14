@@ -297,19 +297,26 @@ def _sanity_gate_section(
     result: RobustWinnerResult,
     generalization_gap_mode: str,
     overhead_seconds: float,
+    *,
+    candidates: Mapping[str, FinalistCandidate] | None = None,
 ) -> dict[str, Any]:
     """Build the report section of a ``sanity_gate`` select step.
 
     The applied circuit D mode is included in the report together with the
     audit so that the reader sees that a Circuit D warning did not disqualify
-    the model.
+    the model. The per-repeat spread of ``RMSE_oof`` is carried when it is
+    available; a single split keeps exactly the classic section shape. The
+    repeated-audit metadata (``n_repeats``/``split_aggregation``) is owned by
+    the M4 gate work and is not added here.
 
     Args:
         result: The result of ``select_robust_winner``.
         generalization_gap_mode: The applied circuit D mode.
         overhead_seconds: The wall time of the training and audit.
+        candidates: The trained finalists (the source of the per-repeat
+            ``RMSE_oof`` spread).
     """
-    return {
+    section: dict[str, Any] = {
         "strategy": "sanity_gate",
         "generalization_gap_mode": generalization_gap_mode,
         "pool": list(result.pool),
@@ -324,6 +331,18 @@ def _sanity_gate_section(
         "winner_rmse_oof": result.winner_rmse_oof,
         "overhead_seconds": overhead_seconds,
     }
+    if candidates:
+        spread = {
+            name: cand.rmse_oof_std
+            for name, cand in candidates.items()
+            if cand.rmse_oof_std is not None
+        }
+        if spread:
+            section["rmse_oof_std"] = spread
+            winner = candidates.get(result.winner_algo)
+            if winner is not None and winner.rmse_oof_std is not None:
+                section["winner_rmse_oof_std"] = winner.rmse_oof_std
+    return section
 
 
 def _select_sanity_gate(
@@ -418,7 +437,10 @@ def _select_sanity_gate(
         _fmt_audit_value(winner_audit.generalization_gap),
     )
     section = _sanity_gate_section(
-        result, cfg.general.sanity_gate.generalization_gap_mode, overhead_seconds
+        result,
+        cfg.general.sanity_gate.generalization_gap_mode,
+        overhead_seconds,
+        candidates=candidates,
     )
 
     # Output form: replace the working set.

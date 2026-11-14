@@ -33,11 +33,13 @@ from typing import Annotated, Any
 import numpy as np
 from pydantic import (
     AfterValidator,
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
     StrictFloat,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -90,6 +92,15 @@ def _check_score_value(value: float) -> float:
 #: np.int64) but rejects strings and bool.
 ScoreValue = Annotated[StrictFloat, AfterValidator(_check_score_value)]
 ScoreValueOrNone = ScoreValue | None
+
+#: The optional multi-split statistics. They are omitted from the serialized
+#: form when unset, so a classic single-split result keeps exactly its
+#: previous JSON shape (an old payload also restores them as defaults).
+_REPEAT_STATISTIC_FIELDS = (
+    "score_std",
+    "oof_score_std",
+    "n_repeats",
+)
 
 #: The allowed skew between ``duration_seconds`` and
 #: ``finished_at - started_at``: the two may be computed by different
@@ -273,13 +284,20 @@ class ExperimentResult(_ResultModel):
             determined (e.g. the final artifact save crashed) — in that
             case the winner is still reported, together with its score and
             the failure message in ``error``.
-        winner_score: The final score of the winner in user semantics.
+        winner_score: The final score of the winner in user semantics. With
+            repeated validation it is the aggregate (median or mean) of the
+            per-repeat winner score.
+        score_std: The population standard deviation of the winner's
+            per-repeat validation scores (``None`` for a single split). The
+            accepted input alias ``winner_score_std`` is provided for
+            callers that name the field after the score it describes.
         winner_params: The winner's best hyperparameters (a
             JSON-serializable mapping; tuples become lists after a JSON
             round-trip).
         model_path: The path of the saved model artifact.
         additional_metrics: The informational metrics of the final model
-            (name → value in the metric's own user semantics).
+            (name → value in the metric's own user semantics), aggregated
+            over repeats by the same policy as the winner score.
         disqualified_algorithms: The circuit-breaker map (name → reason).
         sanity_gate: The report sections of the ``sanity_gate`` select steps
             (a JSON-serializable mapping).
@@ -302,11 +320,20 @@ class ExperimentResult(_ResultModel):
             values must be normalized before the assignment (the
             facade does it).
         oof_score: The comparison metric on the final pipeline's pooled OOF
-            predictions (optimistic, not an independent estimate).
+            predictions (optimistic, not an independent estimate). With
+            repeated validation it is the aggregate over the per-repeat OOF
+            estimates.
+        oof_score_std: The population standard deviation of the per-repeat
+            OOF estimates (``None`` for a single split or when no repeat
+            produced a finite estimate).
         holdout_score: The honest out-of-sample estimate on the reserved
             outer hold-out.
         bbc_score: The bias-corrected (BBC-CV) estimate of the selection
             procedure.
+        n_repeats: The effective number of repeated validation splits
+            (``None``/1 — the classic single-split behavior). Optional for
+            backward compatibility: an old serialized result restores it as
+            ``None``.
         n_trials_evaluated: The number of trials actually evaluated by the
             winner's HPO phase.
         error: The failure message for ``status='failed'``.
@@ -335,6 +362,10 @@ class ExperimentResult(_ResultModel):
 
     winner: str | None = None
     winner_score: ScoreValueOrNone = None
+    score_std: ScoreValueOrNone = Field(
+        default=None,
+        validation_alias=AliasChoices("score_std", "winner_score_std"),
+    )
     winner_params: dict[str, Any] = Field(default_factory=dict)
     model_path: str | None = None
     additional_metrics: dict[str, float] = Field(default_factory=dict)
@@ -344,10 +375,45 @@ class ExperimentResult(_ResultModel):
     ensemble: dict[str, Any] | None = None
     explanations: dict[str, Any] | None = None
     oof_score: ScoreValueOrNone = None
+    oof_score_std: ScoreValueOrNone = None
     holdout_score: ScoreValueOrNone = None
     bbc_score: ScoreValueOrNone = None
+    n_repeats: int | None = Field(default=None, ge=1)
     n_trials_evaluated: int | None = Field(default=None, ge=0)
     error: str | None = None
+
+    @property
+    def winner_score_std(self) -> float | None:
+        """Alias of :attr:`score_std` (the winner-score spread)."""
+        return self.score_std
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_repeat_statistics(self, handler: Any) -> Any:
+        """Keep the classic JSON shape when no repeat statistics are set.
+
+        The multi-split fields are additive and optional. ``n_repeats = 1``
+        is normalized to ``None`` and omitted together with the other unset
+        fields, so a single split serializes exactly like the previous result
+        model. A run with several repeats keeps the new fields and
+        round-trips them.
+        """
+        data = handler(self)
+        if isinstance(data, dict):
+            for field_name in _REPEAT_STATISTIC_FIELDS:
+                if data.get(field_name) is None:
+                    data.pop(field_name, None)
+        return data
+
+    @field_validator("n_repeats", mode="before")
+    @classmethod
+    def _normalize_single_repeat(cls, value: Any) -> Any:
+        """Represent the classic single split as ``None``."""
+        if value is None:
+            return None
+        try:
+            return None if int(value) == 1 else value
+        except (TypeError, ValueError, OverflowError):
+            return value
 
     @field_validator("run_id")
     @classmethod

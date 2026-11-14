@@ -164,6 +164,7 @@ def build_experiment_result(
             if winner_score_raw is not None
             else None
         ),
+        score_std=_opt_float(result.get("score_std")),
         winner_params=result.get("params", {}),
         model_path=result.get("model_path"),
         additional_metrics=dict(result.get("additional_metrics", {})),
@@ -184,8 +185,12 @@ def build_experiment_result(
             else None
         ),
         oof_score=_opt_float(result.get("oof_score")),
+        oof_score_std=_opt_float(result.get("oof_score_std")),
         holdout_score=_opt_float(result.get("holdout_score")),
         bbc_score=_opt_float(result.get("bbc_score")),
+        n_repeats=(
+            int(result["n_repeats"]) if result.get("n_repeats") is not None else None
+        ),
         n_trials_evaluated=(
             int(result["n_trials_evaluated"])
             if result.get("n_trials_evaluated")
