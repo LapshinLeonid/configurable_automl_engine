@@ -416,19 +416,19 @@ JSON Schema лежит внутри пакета, а не только в кор
 | `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD`, `AVAILABLE_ALGORITHMS` | stable, кроме `AVAILABLE_ALGORITHMS` и `WORST_SCORE_THRESHOLD` — beta |
 | `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` | `TrainingError` — stable, `InvalidPredictionError` — beta |
 | `automl_contracts.metrics` | `AVAILABLE_METRICS` | beta |
-| `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` | beta |
+| `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` | `CustomMetricKind` — beta; `CustomMetricSpec` — beta; `ERR_CUSTOM_NAME_INVALID` — stable |
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` | beta |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` | `SearchSpaceEntry` — stable, distribution-модели — beta |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` | stable |
-| `automl_contracts.preprocessing` | `ImputationStrategy`, `ScalingType`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ObjectScalingSpec`, `StringScaling`, `ScalingSpec`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` | stable/beta; `ScalingType` — deprecated alias |
+| `automl_contracts.preprocessing` | `ImputationStrategy`, `ScalingType`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ObjectScalingSpec`, `StringScaling`, `ScalingSpec`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` | `ImputationStrategy`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers` — stable; `ObjectScalingSpec`, `StringScaling`, `ScalingSpec`, `merge_preprocessing_overrides`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` — beta; `ScalingType` — deprecated alias |
 | `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult` | stable |
-| `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` | stable/beta |
-| `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation` | stable/beta |
-| `automl_contracts.config.phases` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningCfg`, `PruningStrategy`, `HPOPhaseCfg`, `DEFAULT_PHASE_N_TRIALS`, `ERR_REMOVED_REFINE_WINNER` | stable/beta |
-| `automl_contracts.config.sanity_gate` | `SanityGateCfg`, `CorridorMode`, `GeneralizationGapMode`, `ERR_REMOVED_SANITY_GATE_MODE` | stable/beta |
+| `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `AlgoCfg`, `OversamplingCfg` — stable; `EnsembleCfg`, `AlgorithmsConfig` — beta |
+| `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation` | `GeneralCfg`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation` — stable; `ComparisonMetric`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS` — beta |
+| `automl_contracts.config.phases` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningCfg`, `PruningStrategy`, `HPOPhaseCfg`, `DEFAULT_PHASE_N_TRIALS`, `ERR_REMOVED_REFINE_WINNER` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningStrategy`, `HPOPhaseCfg`, `ERR_REMOVED_REFINE_WINNER` — stable; `PruningCfg`, `DEFAULT_PHASE_N_TRIALS` — beta |
+| `automl_contracts.config.sanity_gate` | `SanityGateCfg`, `CorridorMode`, `GeneralizationGapMode`, `ERR_REMOVED_SANITY_GATE_MODE` | `SanityGateCfg`, `CorridorMode`, `ERR_REMOVED_SANITY_GATE_MODE` — stable; `GeneralizationGapMode` — beta |
 | `automl_contracts.config.complexity_guard` | `ComplexityGuardCfg`, `ComplexityGuardMode`, `ComplexityGuardUserRangePolicy`, `ComplexityGuardSizeBasis` | stable |
 | `automl_contracts.config.ensemble` | `EnsembleCfg`, `EnsembleWeightMethod` | beta |
-| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` | stable/beta |
+| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `ERR_REMOVED_PLUGIN_KEY` — stable; `AlgorithmsConfig` — beta |
 
 `automl_contracts.config.root` и `automl_contracts.config.general_rules`
 являются внутренними модулями реализации. `Schema`-файл
@@ -728,10 +728,16 @@ errors, definitions, protocols
    тонких модулей-шимов: контрактные имена реэкспортируются из
    `automl_contracts`, engine-only имена остаются в движке. Вторых определений
    моделей нет.
-5. `train_best_model`, `optimize` и `ModelTrainer` вызывают
-   `validate_runtime_config` сразу после `read_config`/`model_validate`, до
-   обучения. Структурные ошибки возникают при создании контрактной модели,
-   runtime-ошибки — при запуске движка.
+5. `train_best_model` и `AutoMLExperiment` — публичные entry point, которые
+   принимают `str | Path | Config | dict` и проходят через шаг `load_config`
+   (`read_config`/`Config.model_validate`). Runtime-валидация вызывается в
+   `load_config` после приведения конфигурации к `Config`, до обучения, поэтому
+   она одинаково применяется к файлу, словарю и уже собранному `Config`.
+   `optimize` и `ModelTrainer` не принимают `Config`: у них runtime-проверки
+   выполняются в собственной валидации аргументов, а
+   `validate_runtime_config(cfg)` к ним не применяется. Структурные ошибки
+   возникают при создании контрактной модели, runtime-ошибки конфигурации — при
+   запуске `train_best_model`/`AutoMLExperiment`.
 
 Прямые импорты из `training_engine.config.general` и аналогичных модулей,
 используемые тестами, сохраняются через шимы на переходный период и помечаются
@@ -812,9 +818,10 @@ errors, definitions, protocols
 - `CustomMetricSpec` в контракте валидирует структуру полей (`path`, `kind`,
   `greater_is_better`, `additive`, `kwargs`), но не импортирует callable и не
   проверяет его сигнатуру. Runtime-проверка выполняется движком на входе в
-  `train_best_model`, `optimize` и `ModelTrainer`. Прямой конструктор
-  контрактного класса может принять некорректный callable, но публичные
-  entry point движка по-прежнему отвергают его до обучения.
+  `train_best_model`, `optimize` и `ModelTrainer` через их собственные
+  валидаторы аргументов, а не через `validate_runtime_config(cfg)`. Прямой
+  конструктор контрактного класса может принять некорректный callable, но
+  публичные entry point движка по-прежнему отвергают его до обучения.
 - `ExperimentResult` принимает стандартные числа. Нормализация numpy-скаляров
   выполняется движком на границе; прямой конструктор с numpy-скаляром может
   изменить поведение.
@@ -1258,13 +1265,13 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 |---|---|
 | `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD`, `AVAILABLE_ALGORITHMS` |
 | `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` |
-| `automl_contracts.metrics` | `AVAILABLE_METRICS`; внутренний helper `to_sklearn_name` (не публичный API верхнего уровня) |
+| `automl_contracts.metrics` | `AVAILABLE_METRICS` |
 | `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` |
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
 | `automl_contracts.preprocessing` | `ImputationStrategy`, `ScalingType` (deprecated), `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ObjectScalingSpec`, `StringScaling`, `ScalingSpec`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` |
-| `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult`; внутренние `ScoreValue`, `ScoreValueOrNone` |
+| `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult` |
 | `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` |
 | `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation` |
 | `automl_contracts.config.phases` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningCfg`, `PruningStrategy`, `HPOPhaseCfg`, `DEFAULT_PHASE_N_TRIALS`, `ERR_REMOVED_REFINE_WINNER` |
